@@ -14,6 +14,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { listAgentProcesses, listAgentTasks, type ListedNode } from '../../../lib/agentDefinitionLists.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
+import { NOT_INHERITED_ROLE } from '../../../lib/effectiveSystemMemory.js';
 import { isAgentInstalled } from '../../../lib/appAgent.js';
 import {
   type Context,
@@ -36,14 +37,20 @@ import {
  * #1892 — the full Node rows behind a list's entries, in list order, each
  * stamped `inheritedFrom` where the list marked it, so the inherited-node
  * projection (resolvers.inheritedNode.ts) applies to every Node field.
+ * The rows are re-read, so an entry whose node was deleted since the list
+ * was built, or an inherited one that has since become a boot prompt, is
+ * dropped rather than served (#1891's version-served rule).
  */
-async function listedNodeRows(ctx: Context, nodes: ListedNode[]) {
-  const rows = await ctx.db.node.findMany({ where: { id: { in: nodes.map((n) => n.id) } } });
+async function listedEntries<E extends { node: ListedNode }>(ctx: Context, entries: E[]) {
+  const rows = await ctx.db.node.findMany({ where: { id: { in: entries.map((e) => e.node.id) }, deletedAt: null } });
   await decryptNodesBatch(ctx.db, rows);
   const byId = new Map(rows.map((r) => [r.id, r]));
-  return nodes.map((n) => {
-    const row = byId.get(n.id)!;
-    return n.inheritedFrom ? Object.assign(row, { inheritedFrom: n.inheritedFrom }) : row;
+  const notInherited = (role: string | null) => role === NOT_INHERITED_ROLE || role?.startsWith(`${NOT_INHERITED_ROLE}.`) === true;
+  return entries.flatMap((e) => {
+    const row = byId.get(e.node.id);
+    if (!row) return [];
+    if (!e.node.inheritedFrom) return [{ ...e, node: row }];
+    return notInherited(row.role) ? [] : [{ ...e, node: Object.assign(row, { inheritedFrom: e.node.inheritedFrom }) }];
   });
 }
 
@@ -56,9 +63,7 @@ export const agentQueries = {
      */
     agentTaskList: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       const { id } = await resolveAgentRef(ctx.db, ref);
-      const entries = await listAgentTasks(ctx.db, ctx, id, ref);
-      const rows = await listedNodeRows(ctx, entries.map((e) => e.node));
-      return entries.map((e, i) => ({ trigger: e.trigger, node: rows[i] }));
+      return listedEntries(ctx, await listAgentTasks(ctx.db, ctx, id, ref));
     },
 
     /**
@@ -69,9 +74,7 @@ export const agentQueries = {
      */
     agentProcessList: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       const { id } = await resolveAgentRef(ctx.db, ref);
-      const entries = await listAgentProcesses(ctx.db, ctx, id, ref);
-      const rows = await listedNodeRows(ctx, entries.map((e) => e.node));
-      return entries.map((e, i) => ({ kind: e.kind, trigger: e.trigger, node: rows[i] }));
+      return listedEntries(ctx, await listAgentProcesses(ctx.db, ctx, id, ref));
     },
 
     // #473 — the uniform single-agent read; the first top-level Agent query

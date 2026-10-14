@@ -51,6 +51,8 @@ import { AgentNotFoundError } from './entityRef/errors.js';
 import {
   effectiveScope,
   findEffectiveNodeIdByLoc,
+  retainEffective,
+  stillInherited,
   systemMemoryChain,
   type InheritedFrom,
 } from './effectiveSystemMemory.js';
@@ -131,7 +133,11 @@ async function agentContext(db: Db, agent: GatedAgent) {
     const hit = await findEffectiveNodeIdByLoc(db, agent.systemMemoryId, node.loc);
     if (!hit) return null;
     const row = await db.node.findFirst({ where: { id: hit.id, deletedAt: null }, select: LIST_NODE_SELECT });
-    return row ? { ...pick(row), inheritedFrom: hit.inheritedFrom } : null;
+    if (!row) return null;
+    // #1891's re-check on the version read: an inherited node that became a
+    // boot prompt, or was overridden, since the lookup is not passed down.
+    if (hit.inheritedFrom && !(await stillInherited(db, hit.inheritedFrom, row))) return null;
+    return { ...pick(row), inheritedFrom: hit.inheritedFrom };
   };
 
   return { links, chainMemoryIds, scope, effectiveAt };
@@ -220,7 +226,9 @@ async function tasksOf(
   const listed = await resolveIndexSources(db, auth, ctx, await indexEdgeSources(db, indexIds));
 
   // S5 — every runnable node in the effective memory is a task, edge or not.
-  const runnable = await db.node.findMany({
+  // The scope's exclusions are a snapshot, so the rows read are re-checked
+  // against the chain as it is now (#1891's retainEffective).
+  const runnable = await retainEffective(db, await db.node.findMany({
     where: {
       memoryId: { in: ctx.scope.memoryIds },
       isRunnable: true,
@@ -228,7 +236,7 @@ async function tasksOf(
       ...(ctx.scope.excludeNodeIds.length > 0 ? { id: { notIn: ctx.scope.excludeNodeIds } } : {}),
     },
     select: LIST_NODE_SELECT,
-  });
+  }), ctx.scope);
   const out = new Map<string, AgentTaskEntry>(listed);
   for (const row of runnable) {
     if (out.has(row.id)) continue;
