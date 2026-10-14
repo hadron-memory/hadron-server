@@ -281,6 +281,30 @@ export async function stillInherited(
   return effective?.id === row.id && effective.inheritedFrom !== null;
 }
 
+/**
+ * Is the endpoint row `resolveInheritedEdges` is about to serve, AS READ, still
+ * the node `via`'s effective memory selects at `loc`? (Diego's P2 on #1899.)
+ * The selection and the read are separate queries, so a concurrent write can
+ * land between them in either order: a selected override turned boot prompt,
+ * moved, or replaced before it is hydrated; or an endpoint the edge query
+ * preloaded as a boot prompt that stopped being one before the selection.
+ * So the version actually read must sit at the selected memory and loc, and
+ * a fresh lookup must still resolve the loc to it, not as a boot prompt when
+ * inherited. Anything else drops the edge; it is never served under the
+ * selection's stale stamp.
+ */
+async function servedEndpointInEffect(
+  db: Db,
+  via: string,
+  loc: string,
+  selected: { id: string; memoryId: string; inheritedFrom: InheritedFrom | null },
+  row: { id: string; memoryId: string; loc: string; role?: string | null; deletedAt?: Date | null },
+): Promise<boolean> {
+  if (row.deletedAt || row.id !== selected.id || row.memoryId !== selected.memoryId || row.loc !== loc) return false;
+  if (selected.inheritedFrom) return stillInherited(db, selected.inheritedFrom, row);
+  return (await findEffectiveNodeIdByLoc(db, via, loc))?.id === row.id;
+}
+
 /** An edge of an inherited node, resolved through its child (#1893). */
 export type ResolvedInheritedEdge<E, N> = { edge: E; endpoint: N & { inheritedFrom?: InheritedFrom } };
 
@@ -331,7 +355,7 @@ export async function resolveInheritedEdges(
     const effective = await findEffectiveNodeIdByLoc(db as Db, args.via, endpoint.loc);
     if (!effective) continue;
     const row = effective.id === endpoint.id ? endpoint : await db.node.findUnique({ where: { id: effective.id } });
-    if (!row || row.deletedAt) continue;
+    if (!row || !(await servedEndpointInEffect(db as Db, args.via, endpoint.loc, effective, row))) continue;
     out.push({ edge, endpoint: effective.inheritedFrom ? { ...row, inheritedFrom: effective.inheritedFrom } : row });
   }
   return out;
