@@ -1831,6 +1831,28 @@ async function queryWorkerActivity(
   scope: Prisma.Sql,
   now: Date,
 ): Promise<Map<string, WorkerActivity>> {
+  const rows = await ctx.db.$queryRaw<
+    { workerId: string; live: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null }[]
+  >(workerActivitySql(scope, now));
+  return new Map<string, WorkerActivity>(
+    rows.map((row) => [
+      row.workerId,
+      {
+        hasLiveSession: row.live,
+        lastActiveAt: row.lastActiveAt,
+        bound: row.bound,
+        bindingFamily: row.bindingFamily ?? null,
+      },
+    ]),
+  );
+}
+
+/**
+ * The SQL of `queryWorkerActivity`, exported so its PLAN can be pinned
+ * (#1903): its per-session activity probe took production down when it ran
+ * as a backward walk of usage_events_created_at_idx.
+ */
+export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
   // AGGREGATED IN THE DATABASE, one row per worker (PR #1086 review, Codex
   // P2). This SQL is a SECOND implementation of `lib/sessionActivity.ts`, and
   // that is deliberate: one derivation aggregates unbounded history inside
@@ -1868,9 +1890,7 @@ async function queryWorkerActivity(
                          WHEN 'AUTOMATION' THEN ${toNaiveUtc(cut.AUTOMATION)}::timestamp
                          WHEN 'EDGE'       THEN ${toNaiveUtc(cut.EDGE)}::timestamp
                        END))`;
-  const rows = await ctx.db.$queryRaw<
-    { workerId: string; live: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null }[]
-  >`
+  return Prisma.sql`
     SELECT s.worker_id AS "workerId",
            bool_or(${sessionLive}) AS "live",
            -- #1707: the BINDING is any open session, live or quiet; its family
@@ -1897,22 +1917,14 @@ async function queryWorkerActivity(
       SELECT max(e.created_at) AS max_created
       FROM usage_events e
       -- #1653 / DY-2: only events written while the session was live count.
+      -- #1903: served by the partial usage_events_session_activity_idx
+      -- (post-push.sql). Without it the planner walked created_at backwards
+      -- over the whole table for a session with no activity rows.
       WHERE e.session_id = s.id AND e.counts_as_activity
     ) ue ON true
     WHERE ${scope} AND s.deleted_at IS NULL
     GROUP BY s.worker_id
   `;
-  return new Map<string, WorkerActivity>(
-    rows.map((row) => [
-      row.workerId,
-      {
-        hasLiveSession: row.live,
-        lastActiveAt: row.lastActiveAt,
-        bound: row.bound,
-        bindingFamily: row.bindingFamily ?? null,
-      },
-    ]),
-  );
 }
 
 /** One aggregate query for the bounded #1344 page, never one per App/worker. */
