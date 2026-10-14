@@ -302,6 +302,19 @@ describe('#1941: an inherited INVOLVED process, on the version served', () => {
     expect(await mcpProcesses()).not.toContain('processes:release');
   });
 
+  it('Andi P2: the child\'s override, moved to an unreadable memory between the loc lookup and the read, is never served', async () => {
+    await node('backOwnRelease', backend.mem, 'processes:release', { role: 'process' });
+    const moveAway = async () => { await db.node.update({ where: { id: ids.backOwnRelease }, data: { memoryId: privateMem.id } }); };
+    expect(await involved()).toEqual([ids.backOwnRelease]); // control: the override counts, as the child's
+    hooks.afterLoc = { loc: 'processes:release', run: moveAway };
+    expect(await involved()).not.toContain(ids.backOwnRelease);
+    await db.node.update({ where: { id: ids.backOwnRelease }, data: { memoryId: backend.mem } });
+    hooks.afterLoc = { loc: 'processes:release', run: moveAway };
+    const text = await mcpProcesses();
+    expect(text).not.toContain('backOwnRelease');
+    expect(text).not.toContain(ids.backOwnRelease);
+  });
+
   it('overridden by the child after the list is built: GraphQL drops the base\'s row', async () => {
     hooks.afterList = async () => { await node('backNote', backend.mem, 'processes:release'); };
     expect(await involved()).toEqual([]);
