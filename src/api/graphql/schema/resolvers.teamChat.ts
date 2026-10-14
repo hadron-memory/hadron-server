@@ -439,7 +439,7 @@ async function resolveSessionAuthor(
 ): Promise<{ workerId: string; name: string; sessionId: string; workerAppId: string; crossApp: boolean; resume: boolean }> {
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
-    select: { id: true, appId: true, userId: true, workerId: true, endedAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true },
+    select: { id: true, appId: true, userId: true, workerId: true, endedAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true },
   });
   if (!session) {
     throw new GraphQLError(`Session "${sessionRef}" not found.`, {
@@ -447,7 +447,7 @@ async function resolveSessionAuthor(
     });
   }
   try {
-    requireSessionWriteAccess(ctx, session);
+    await requireSessionWriteAccess(ctx, session);
   } catch {
     throw new GraphQLError('You cannot post as a session you are not attributed to.', {
       extensions: { code: 'FORBIDDEN' },

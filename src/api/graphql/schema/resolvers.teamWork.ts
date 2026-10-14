@@ -464,7 +464,7 @@ async function resolveWorkSession(
 ): Promise<{ sessionId: string; workerName: string; workerId: string | null; llmModel: string | null }> {
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
-    select: { id: true, appId: true, userId: true, workerId: true, deletedAt: true, llmModel: true },
+    select: { id: true, appId: true, userId: true, workerId: true, deletedAt: true, llmModel: true, launchOperationId: true },
   });
   if (!session || session.deletedAt) {
     throw new GraphQLError(`Session "${sessionRef}" not found.`, {
@@ -472,7 +472,7 @@ async function resolveWorkSession(
     });
   }
   try {
-    requireSessionWriteAccess(ctx, session);
+    await requireSessionWriteAccess(ctx, session);
   } catch {
     throw new GraphQLError('You cannot record work against a session you are not attributed to.', {
       extensions: { code: 'FORBIDDEN' },

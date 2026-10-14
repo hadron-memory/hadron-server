@@ -44,7 +44,7 @@ import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/au
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { generateId } from '../../../lib/id.js';
-import { keyHostId, recordHostKeyUse, type HostKey } from '../../../lib/hostOperations/hostKey.js';
+import { keyEverHeldHostOperate, keyHostId, recordHostKeyUse, type HostKey } from '../../../lib/hostOperations/hostKey.js';
 import {
   HOST_FAILURE_REASON_MAX,
   HostOperationArgsError,
@@ -637,12 +637,7 @@ export const hostOperationQueries = {
  */
 async function wasEverHostKey(c: Context): Promise<boolean> {
   const key = appKeyCaller(c);
-  if (!key) return false;
-  const row = await c.db.appKeyScope.findFirst({
-    where: { appKeyId: key.appKeyId, scope: 'host:operate' },
-    select: { id: true },
-  });
-  return row !== null;
+  return key ? keyEverHeldHostOperate(c.db, key.appKeyId) : false;
 }
 
 export const hostOperationFieldResolvers = {
