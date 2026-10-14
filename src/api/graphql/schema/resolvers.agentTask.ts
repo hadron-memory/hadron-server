@@ -71,7 +71,7 @@
 // APP_NOT_FOUND (#1713 review, Rook P3-1; the resolvePilotApp posture).
 
 import { GraphQLError } from 'graphql';
-import { Prisma } from '../../../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { type Context, isAppParticipant, clampListTake, withoutRequestCaches } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -85,6 +85,7 @@ import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { appKeyCaller, refuseSessionBound } from '../../../lib/appKeyScopes/scopes.js';
+import { launchForAssignment } from '../../../lib/hostOperations/launch.js';
 import { requestSessionEnd } from '../../../lib/hostOperations/sessionEnd.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import {
@@ -930,7 +931,10 @@ export const agentTaskMutations = {
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
     // committed; the returned task shows the assignee when one was free.
     if (made.queued) await matchAfterChange(ctx.db, app.id);
-    return ctx.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
+    const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
+    // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
+    await launchAssignee(ctx.db, created);
+    return created;
   },
 
   /**
@@ -946,7 +950,7 @@ export const agentTaskMutations = {
     ctx: Context,
   ) => {
     let party: TaskParty | null = null;
-    return mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+    const assigned = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, assigns it.", { taskId });
       }
@@ -987,6 +991,9 @@ export const agentTaskMutations = {
         event: { type: 'task.assigned', assignee: party, closeSessionWhenDone: close },
       });
     });
+    // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no live session through its host.
+    await launchAssignee(ctx.db, assigned);
+    return assigned;
   },
 
   /**
@@ -1070,7 +1077,7 @@ export const agentTaskMutations = {
     ctx: Context,
   ) => {
     let party: TaskParty | null = null;
-    return mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+    const reassigned = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, reassigns it.", { taskId });
       }
@@ -1093,6 +1100,8 @@ export const agentTaskMutations = {
         event: { type: 'task.reassigned', from, to: party, closeSessionWhenDone: close },
       });
     });
+    await launchAssignee(ctx.db, reassigned);
+    return reassigned;
   },
 
   /**
@@ -1200,6 +1209,16 @@ export const agentTaskMutations = {
     return cancelled;
   },
 };
+
+/**
+ * #1709 (cor:agt:070:08; Holger via Vera #10773 (6): assignment by hand launches too, not only matching). After the
+ * assignment committed: if its assignee is a worker, ask the platform to start it through its host. Never fails the
+ * assignment; a worker it cannot start leaves the task waiting.
+ */
+async function launchAssignee(db: Context['db'], t: TaskRow): Promise<void> {
+  if (!t.assigneeWorkerId || !['pending', 'started'].includes(t.status)) return;
+  await launchForAssignment(db as PrismaClient, { appId: t.appId, taskId: t.id, workerId: t.assigneeWorkerId });
+}
 
 // ── Queries ───────────────────────────────────────────────────────────────
 

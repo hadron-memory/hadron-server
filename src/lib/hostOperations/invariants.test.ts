@@ -59,7 +59,8 @@ describe('the invariants file', () => {
 describe('cor:agt:070:03 — the closed set, with exactly its typed arguments', () => {
   it('each of the five types with its own arguments is accepted', async () => {
     await expect(op()).resolves.toBeTruthy();
-    await expect(op({ type: 'worker.start', args: { workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude', taskId: 't1' } })).resolves.toBeTruthy();
+    // #1883: a start records the hold that authorized it (prisma/host-launch-invariants.sql).
+    await expect(op({ type: 'worker.start', args: { workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude', taskId: 't1' }, holdUserId: user.id })).resolves.toBeTruthy();
     await expect(op({ type: 'worker.deliver', args: { workerId: kit.id, sessionId: 's1', eventId: 'e1' } })).resolves.toBeTruthy();
     await expect(op({ type: 'worker.end', args: { workerId: kit.id, sessionId: 's1' } })).resolves.toBeTruthy();
     await expect(op({ type: 'worktree.remove', args: { workerId: kit.id, worktree: 'hadron-server/kit' } })).resolves.toBeTruthy();
@@ -75,7 +76,7 @@ describe('cor:agt:070:03 — the closed set, with exactly its typed arguments', 
       await expectCheck(op({ args: { workerId: kit.id, repo: bad, baseBranch: 'main', branchName: 'b', label: 'l' } }));
     }
     await expectCheck(op({ args: { workerId: zed.id, repo: 'r', baseBranch: 'main', branchName: 'b', label: 'l' } }));
-    await expectCheck(op({ type: 'worker.start', args: { workerId: kit.id, worktree: 'w', family: 'Claude' } }));
+    await expectCheck(op({ type: 'worker.start', args: { workerId: kit.id, worktree: 'w', family: 'Claude' }, holdUserId: user.id }));
     await expectCheck(op({ args: ['not', 'an', 'object'] }));
     expect(await db.hostOperation.count()).toBe(0);
   });

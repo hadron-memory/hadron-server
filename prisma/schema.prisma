@@ -1705,6 +1705,15 @@ model Session {
   /// could not be classified. A worker's family is its live bound session's.
   /// A matching input only, never an authorization input: it is self-declared.
   family          String?
+  /// #1709 (cor:agt:070:08; Holger via Vera #10773) — a host-launched session:
+  /// the host that started it, the `worker.start` operation, the task it was
+  /// launched for (none for a manager's start without one), and who issued the
+  /// start (`platform` | `manager`). Bound on the holder's own token; the hold
+  /// is unchanged. All four null for a session a person started by hand.
+  launchHostId      String?   @map("launch_host_id")
+  launchOperationId String?   @unique @map("launch_operation_id")
+  launchTaskId      String?   @map("launch_task_id")
+  launchIssuedBy    String?   @map("launch_issued_by")
   /// Total prompt tokens across the session.
   inputTokens     Int?        @map("input_tokens")
   /// Total completion tokens across the session.
@@ -1971,6 +1980,13 @@ model Agent {
   /// A dedicated column so roster/casting queries can filter without
   /// parsing the prompt.
   personaRole          String?         @map("persona_role")
+  /// #1885 (cor:dmo:050:14) — the one base Agent this Agent extends, or null.
+  /// The child inherits its base chain's system-memory nodes (except boot
+  /// prompts). One base, no cycles, at most 4 Agents in a chain counting this
+  /// one: enforced by `src/lib/agentBase.ts`, the only writer, and backstopped
+  /// by `agent_base_guard` (prisma/agent-base-invariants.sql). `Restrict`, as
+  /// for an imported Agent: a live child keeps its base from being removed.
+  extendsAgentId       String?         @map("extends_agent_id")
   createdAt            DateTime        @default(now()) @map("created_at")
   createdBy            String?         @map("created_by")
   updatedAt            DateTime?       @updatedAt @map("updated_at")
@@ -2010,8 +2026,13 @@ model Agent {
   readStates           ChannelReadState[] @relation("ReadStateAgent")
   /// #974 — the named castings of this agent into Apps (cor:dmo:050:11).
   workers           Worker[]
+  /// #1885 (cor:dmo:050:14) — the base this Agent extends, and the Agents
+  /// that extend it. Never called a parent: that word belongs to imports.
+  extendsAgent      Agent?              @relation("AgentBase", fields: [extendsAgentId], references: [id], onDelete: Restrict)
+  extendedBy        Agent[]             @relation("AgentBase")
 
   @@index([ownerUserId])
+  @@index([extendsAgentId])
   @@index([legacyUrn])
   @@map("agents")
 }
@@ -3198,6 +3219,7 @@ model App {
   /// #1707 — hosts that registered which workers they can launch (cor:agt:070:01).
   hostRegistrations       HostRegistration[]
   hostOperations          HostOperation[]
+  launchGrants            LaunchGrant[]
   sessionEndRequests      TaskSessionEndRequest[]
   mcpSessionStates McpSessionState[]
   scopes           Scope[]
@@ -5395,6 +5417,13 @@ model HostOperation {
   result           Json?
   /// Why it failed, as the host said it; failures only.
   failureReason    String?   @map("failure_reason")
+  /// #1709 slice 2 (#1883 review, Diego P2-1) — `worker.start` only: the hold
+  /// that authorized the start, as (holder, held-at) when it was issued. A
+  /// grant is minted, and a bind made, only while the worker's hold is still
+  /// exactly this one: a release and re-hold changes `heldAt`, a move or an
+  /// account merge changes the holder (Holger via Vera #10775).
+  holdUserId       String?   @map("hold_user_id")
+  holdAt           DateTime? @map("hold_at")
 
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
@@ -5402,6 +5431,36 @@ model HostOperation {
   @@index([appId, hostId, status])
   @@index([workerId])
   @@map("host_operations")
+}
+
+/// #1709 (T6 slice 2; Holger's ruling A, Vera #10761) — a single-use launch
+/// grant: the proof a host passes to the agent it starts, which the agent
+/// redeems at `startSession` for an ordinary worker session. Minted when the
+/// host COLLECTS a `worker.start` (so no secret is stored in the operation),
+/// bound to (worker, host, task, holder), short-lived, stored only as a hash.
+/// Redeemable only by the holder, judged by the caller's token, never by the
+/// grant; consumed atomically. A re-collection revokes the unconsumed grant
+/// before minting a new one. Never a credential: it authorizes nothing the
+/// holder's own token does not.
+model LaunchGrant {
+  id           String    @id
+  appId        String    @map("app_id")
+  operationId  String    @map("operation_id")
+  workerId     String    @map("worker_id")
+  hostId       String    @map("host_id")
+  taskId       String?   @map("task_id")
+  holderUserId String    @map("holder_user_id")
+  tokenHash    String    @unique @map("token_hash")
+  issuedAt     DateTime  @default(now()) @map("issued_at")
+  expiresAt    DateTime  @map("expires_at")
+  consumedAt   DateTime? @map("consumed_at")
+  sessionId    String?   @map("session_id")
+  revokedAt    DateTime? @map("revoked_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([operationId])
+  @@map("launch_grants")
 }
 
 /// #1709 (cor:agt:050:10) — a task's request that its assignee end its worker

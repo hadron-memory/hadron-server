@@ -656,12 +656,22 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- whose host_operation_token_ok it uses.
 \ir host-operation-invariants.sql
 
+-- #1709 slice 2: launch grants and host-launched sessions. One source, shared
+-- verbatim with migration 20261014030000_host_launch (pinned by
+-- src/lib/hostOperations/launch.test.ts).
+\ir host-launch-invariants.sql
+
 -- #1631: shared passkey registry invariant guards.
 \ir passkey-invariants.sql
 
 -- #1632: signing requests, append-only signature records, the content-change
 -- marker. One source, shared verbatim with migration 20261013160000_signing_requests.
 \ir signing-invariants.sql
+
+-- #1885: an Agent extends at most one base Agent; no cycles, at most 4 in a
+-- chain. One source, shared verbatim with migration 20261014120000_agent_base
+-- (pinned by src/api/graphql/schema/resolvers.agentBase1885.test.ts).
+\ir agent-base-invariants.sql
 
 -- #1903: session liveness's activity probe, max(created_at) over a session's
 -- counts_as_activity events. Partial, so Prisma's schema language can't model
