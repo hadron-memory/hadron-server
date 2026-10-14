@@ -168,9 +168,23 @@ export interface RunResult {
 }
 export type Runner = (argv: string[]) => RunResult;
 
+/**
+ * Hard per-call timeout. The only LEGITIMATELY long call is the busy-wait
+ * (`orca terminal wait`, busyWaitMs = 60s by design); everything else is
+ * seconds. The old 300_000 backstop is how a slow/502ing gateway wedged the
+ * single-threaded loop: ~180 calls per cycle × a few multi-minute hangs =
+ * 45+ minute cycles while mentions sat undelivered (2026-10-14, three
+ * incidents: 16:38 and 17:35 deploy windows plus the sustained slow window
+ * after). 90s bounds a hung backend to ONE cycle-slot's worth of loss, and
+ * must stay ≥ busyWaitMs + margin — a timed-out call reads as code 1 with
+ * empty output, which every consumer already treats fail-closed.
+ */
+export const CALL_TIMEOUT_MS = 90_000;
+export const MIN_CALL_TIMEOUT_MS = 75_000;
+
 /** Run a CLI and capture its output; never throws on a non-zero exit. */
 export const runCommand: Runner = (argv) => {
-  const proc = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 300_000 });
+  const proc = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: CALL_TIMEOUT_MS });
   return { code: proc.status ?? 1, stdout: proc.stdout ?? '', stderr: proc.stderr ?? String(proc.error ?? '') };
 };
 

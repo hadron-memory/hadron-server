@@ -8,7 +8,8 @@ import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
 import { nudgeText,
   type Config, type Runner, type RunResult, type Terminal, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce,
-  promptLineIsEmpty, resolveTerminal, screenAgentFamily, status,
+  promptLineIsEmpty, resolveTerminal, runCommand, screenAgentFamily, status,
+  CALL_TIMEOUT_MS, MIN_CALL_TIMEOUT_MS,
 } from './router.js';
 
 /** Rendered screens as Orca returned them on 2026-10-01 (idle, nobody typing). */
@@ -2051,5 +2052,22 @@ describe('#1845 — the terminal pin: a roster row may name its MAIN terminal', 
     expect(out.nudged).toEqual(['Eli']);
     const [, , via] = resolveTerminal(c.roster[0]!, fake.terminals as unknown as Terminal[], c, fake.run);
     expect(via).toBe('identity');
+  });
+});
+
+describe('per-call hard timeout (2026-10-14 wedged-cycle incidents)', () => {
+  it('bounds every child call at 90s — ≥ busyWaitMs + margin, never the old 300s', () => {
+    // The 300_000 backstop let a slow/502ing gateway hang each call for five
+    // minutes; ~180 calls/cycle × a few hangs = 45+ minute cycles. 90s covers
+    // the one legitimately long call (the 60s busy-wait) with margin.
+    expect(CALL_TIMEOUT_MS).toBe(90_000);
+    expect(CALL_TIMEOUT_MS).toBeLessThan(300_000);
+    expect(CALL_TIMEOUT_MS).toBeGreaterThanOrEqual(MIN_CALL_TIMEOUT_MS);
+    expect(60_000).toBeLessThanOrEqual(CALL_TIMEOUT_MS - 15_000); // busyWaitMs's default (loadConfig: raw.busyWaitMs ?? 60_000)
+  });
+  it('a killed/timed-out child reads as code 1 with empty output — the fail-closed shape every consumer already handles', () => {
+    expect(runCommand(['false']).code).not.toBe(0);
+    expect(runCommand(['/nonexistent/binary']).code).not.toBe(0);
+    expect(runCommand(['/nonexistent/binary']).stdout).toBe('');
   });
 });
