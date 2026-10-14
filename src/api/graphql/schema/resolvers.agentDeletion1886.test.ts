@@ -45,6 +45,58 @@ async function refusedDelete(target: { id: string; systemMemoryId: string }) {
   expect(await snapshot(target.id, target.systemMemoryId)).toEqual(before);
 }
 
+/** Demote after the resolver's request-context check, before its transaction. */
+function demotedAdminContext(): Context {
+  const wrapped = new Proxy(db, { get(target, property) {
+    if (property !== '$transaction') return Reflect.get(target, property);
+    return async (callback: (tx: any) => Promise<unknown>, options: any) => {
+      await db.user.update({ where: { id: userId }, data: { roles: ['READER'] } });
+      return target.$transaction(callback, options);
+    };
+  } });
+  return { db: wrapped, userId, roles: ['ADMIN'] };
+}
+
+describe('#1890 P3 fresh-role authorization pins', () => {
+  it('delete refuses a demoted platform admin without changing Agent or memory', async () => {
+    const target = await makeAgent('Stale delete admin');
+    await db.orgMember.deleteMany({ where: { userId } });
+    await db.user.update({ where: { id: userId }, data: { roles: ['ADMIN'] } });
+    const before = await snapshot(target.id, target.systemMemoryId);
+
+    await expect(M.deleteAgent(null, { ref: target.id }, demotedAdminContext()))
+      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await snapshot(target.id, target.systemMemoryId)).toEqual(before);
+
+    // A real, still-current ADMIN grant permits the otherwise identical delete.
+    await db.user.update({ where: { id: userId }, data: { roles: ['ADMIN'] } });
+    expect(await M.deleteAgent(null, { ref: target.id }, { ...ctx(), roles: ['ADMIN'] })).toBe(true);
+  });
+
+  it('import refuses a demoted platform admin without creating an edge or changing either Agent', async () => {
+    const target = await makeAgent('Stale import target');
+    const parent = await makeAgent('Stale import parent', alpha);
+    await M.createAgentOrgGrant(null, { agentRef: target.id, orgRef: alpha.id }, ctx());
+    const input = { parentAgentRef: parent.id, importedAgentRef: target.id, position: 100 };
+    const beforeTarget = await snapshot(target.id, target.systemMemoryId);
+    const beforeParent = await snapshot(parent.id, parent.systemMemoryId);
+    const beforeGrants = await db.agentOrgGrant.findMany();
+    await db.orgMember.deleteMany({ where: { userId } });
+    await db.user.update({ where: { id: userId }, data: { roles: ['ADMIN'] } });
+
+    await expect(M.publishAgentImport(null, input, demotedAdminContext()))
+      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await db.agentImport.findMany()).toEqual([]);
+    expect(await snapshot(target.id, target.systemMemoryId)).toEqual(beforeTarget);
+    expect(await snapshot(parent.id, parent.systemMemoryId)).toEqual(beforeParent);
+    expect(await db.agentOrgGrant.findMany()).toEqual(beforeGrants);
+
+    await db.user.update({ where: { id: userId }, data: { roles: ['ADMIN'] } });
+    expect(await M.publishAgentImport(null, input, { ...ctx(), roles: ['ADMIN'] }))
+      .toMatchObject({ parentAgentId: parent.id, importedAgentId: target.id });
+  });
+});
+
 describe('#1886 Agent retirement dependencies', () => {
   it('a real live App installation refuses retirement and preserves install, Agent and memory', async () => {
     const target = await makeAgent('Installed');
