@@ -1,0 +1,356 @@
+[
+  {
+    "workerId": "01a009180fe872c3bf9914738a9da361",
+    "family": "claude",
+    "worktreeSlug": "ada",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:ada"
+  },
+  {
+    "workerId": "01a0ef267ec17e9d972f6765e7fa4825",
+    "family": "claude",
+    "worktreeSlug": "bindi",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:bindi"
+  },
+  {
+    "workerId": "01a0e19cf59b71e7ac987221727a0db0",
+    "family": "claude",
+    "worktreeSlug": "bob",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:bob"
+  },
+  {
+    "workerId": "01a111e7d8de7c718157cb7c2a105e21",
+    "family": "claude",
+    "worktreeSlug": "celine",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:celine"
+  },
+  {
+    "workerId": "01a0e3966ffe7434b97ce3daa02e75ac",
+    "family": "claude",
+    "worktreeSlug": "charles",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:charles"
+  },
+  {
+    "workerId": "01a0e1a29a6179878ea7369a10382996",
+    "family": "claude",
+    "worktreeSlug": "dan-t1",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:dan"
+  },
+  {
+    "workerId": "01a123e73d8c76dd9833461af12d8b04",
+    "family": "claude",
+    "worktreeSlug": "eden",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:eden"
+  },
+  {
+    "workerId": "01a13b5ea46e747da745acb088c5cf76",
+    "family": "claude",
+    "worktreeSlug": "elena",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:elena"
+  },
+  {
+    "workerId": "01a0e0141aff706ab71515bcf77d0968",
+    "family": "claude",
+    "worktreeSlug": "ella",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:ella"
+  },
+  {
+    "workerId": "01a12dc7ceb674578972bd6467d5be13",
+    "family": "claude",
+    "worktreeSlug": "emerson",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:emerson"
+  },
+  {
+    "workerId": "01a1177383d77f76b68fde5ed6b20f3e",
+    "family": "claude",
+    "worktreeSlug": "fiona",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:fiona"
+  },
+  {
+    "workerId": "01a1271aa8987d93a9b0e3d4632d092b",
+    "family": "claude",
+    "worktreeSlug": "gaby",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:gaby"
+  },
+  {
+    "workerId": "01a11a5043bc78449cd5ff5fd08527e5",
+    "family": "claude",
+    "worktreeSlug": "gaia",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:gaia"
+  },
+  {
+    "workerId": "01a0091812cb7675b12f2a2b1c518836",
+    "family": "claude",
+    "worktreeSlug": "gil",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:gil"
+  },
+  {
+    "workerId": "01a12421c5fb7cb4b5f01d86b055a99e",
+    "family": "claude",
+    "worktreeSlug": "jack",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:jack"
+  },
+  {
+    "workerId": "01a00918141f76bbbf4acaaa5c028c3c",
+    "family": "claude",
+    "worktreeSlug": "jonas-2",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:jonas"
+  },
+  {
+    "workerId": "01a13b5bc067750b884761f25cf41611",
+    "family": "claude",
+    "worktreeSlug": "joshua",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:joshua"
+  },
+  {
+    "workerId": "01a0dbba283d70a2b3c278316ff71f1d",
+    "family": "claude",
+    "worktreeSlug": "liam",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:liam"
+  },
+  {
+    "workerId": "01a11e1beb6178a9a76aa624f6dd136d",
+    "family": "claude",
+    "worktreeSlug": "marco",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:marco"
+  },
+  {
+    "workerId": "01a12bf617e870f4a908e5f8bd71660c",
+    "family": "claude",
+    "worktreeSlug": "ralion",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:ralion"
+  },
+  {
+    "workerId": "01a108fa3f5774a3bdcc062b606f3f0f",
+    "family": "claude",
+    "worktreeSlug": "rook-t1",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:rook"
+  },
+  {
+    "workerId": "01a12dc7d2e67763a5e3ea946d8e3b3e",
+    "family": "claude",
+    "worktreeSlug": "taylor",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:taylor"
+  },
+  {
+    "workerId": "01a108fa3d147179851a1f368d8e81c9",
+    "family": "claude",
+    "worktreeSlug": "uma",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:uma"
+  },
+  {
+    "workerId": "01a05c15c093725fa2f8eae781a2e65c",
+    "family": "claude",
+    "worktreeSlug": "vera",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:vera"
+  },
+  {
+    "workerId": "01a13180c7c8766ea6c849c2b3a06c50",
+    "family": "claude",
+    "worktreeSlug": "victor",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:victor"
+  },
+  {
+    "workerId": "01a111e7de727e62b5a2f359b352bc4e",
+    "family": "claude",
+    "worktreeSlug": "cedar",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:cedar"
+  },
+  {
+    "workerId": "01a111e7e10870f0b4aa792a7a0d044b",
+    "family": "claude",
+    "worktreeSlug": "clark",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:clark"
+  },
+  {
+    "workerId": "01a111e7dba5734faf05ba771641e7de",
+    "family": "claude",
+    "worktreeSlug": "coco",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:coco"
+  },
+  {
+    "workerId": "01a11a4dbb5e7c2a8e7d6931e2a3cc2c",
+    "family": "claude",
+    "worktreeSlug": "gemma",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:gemma"
+  },
+  {
+    "workerId": "01a00918185471e284193e9bc6cbb918",
+    "family": "claude",
+    "worktreeSlug": "tove",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:tove"
+  },
+  {
+    "workerId": "01a12db984ed717ba1c5b6fab908cc1d",
+    "family": "glm",
+    "worktreeSlug": "axel",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:axel"
+  },
+  {
+    "workerId": "01a12db987da7744b17171026db23b41",
+    "family": "glm",
+    "worktreeSlug": "basil",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:basil"
+  },
+  {
+    "workerId": "01a1244620c17b0a814d2deef65bcd40",
+    "family": "glm",
+    "worktreeSlug": "calvin",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:calvin"
+  },
+  {
+    "workerId": "01a12841ca2074eca54d4cb6b19a1741",
+    "family": "glm",
+    "worktreeSlug": "cameron",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:cameron"
+  },
+  {
+    "workerId": "01a0f0d517e0724fb4049377f497d411",
+    "family": "glm",
+    "worktreeSlug": "cloe",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:cloe"
+  },
+  {
+    "workerId": "01a0f0c9e856762caa939b3a94de631b",
+    "family": "glm",
+    "worktreeSlug": "cody",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:cody"
+  },
+  {
+    "workerId": "01a12446c3e97312a410a93fdffe1436",
+    "family": "glm",
+    "worktreeSlug": "colette",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:colette"
+  },
+  {
+    "workerId": "01a12db98a7c715399086399b1035782",
+    "family": "glm",
+    "worktreeSlug": "gino",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:gino"
+  },
+  {
+    "workerId": "01a12db98d1975b5ab27fd618b2375ed",
+    "family": "glm",
+    "worktreeSlug": "greta",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:greta"
+  },
+  {
+    "workerId": "01a108fa331a7626a1d7a805517a2c62",
+    "family": "glm",
+    "worktreeSlug": "hugo-2",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:hugo"
+  },
+  {
+    "workerId": "01a12db9928b7edc8cbfbbd51e18c2ff",
+    "family": "glm",
+    "worktreeSlug": "joost",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:joost"
+  },
+  {
+    "workerId": "01a12db98fe47d9abab14c45d684b4d0",
+    "family": "glm",
+    "worktreeSlug": "joran",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:joran"
+  },
+  {
+    "workerId": "01a108fa2b5874f0ba8f45c8b1ea33e7",
+    "family": "glm",
+    "worktreeSlug": "xan",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:xan"
+  },
+  {
+    "workerId": "01a128f9506c7bf6a00bd42854626bcb",
+    "family": "glm",
+    "worktreeSlug": "xylon",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:xylon"
+  },
+  {
+    "workerId": "01a108fa303f76f4b69d5091a315063a",
+    "family": "glm",
+    "worktreeSlug": "yuri",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:yuri"
+  },
+  {
+    "workerId": "01a0e942bbf275ab8fe8f72b0c8552e9",
+    "family": "codex",
+    "worktreeSlug": "atilla",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:atilla"
+  },
+  {
+    "workerId": "01a0d936b5bb7b99b8132e55ed9399e6",
+    "family": "codex",
+    "worktreeSlug": "chip-t1",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:chip"
+  },
+  {
+    "workerId": "01a12438e3ef7b258821340190115a11",
+    "family": "codex",
+    "worktreeSlug": "colin",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:colin"
+  },
+  {
+    "workerId": "01a0d0a5245777df837bed606707d2d5",
+    "family": "codex",
+    "worktreeSlug": "jane-2",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:jane"
+  },
+  {
+    "workerId": "01a12bf3b17277f4a35a5d7121f0e492",
+    "family": "codex",
+    "worktreeSlug": "xavier",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:xavier"
+  },
+  {
+    "workerId": "01a0d91d62727f5885f0f54834081b94",
+    "family": "codex",
+    "worktreeSlug": "andi",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:andi"
+  },
+  {
+    "workerId": "01a0dfc713c471ad9650952cac71b682",
+    "family": "codex",
+    "worktreeSlug": "anne",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:anne"
+  },
+  {
+    "workerId": "01a0e93ca2447c9a87ddcea9583e8c25",
+    "family": "codex",
+    "worktreeSlug": "baloo",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:baloo"
+  },
+  {
+    "workerId": "01a0ef40baf07dac8ce23c6b330d93c3",
+    "family": "codex",
+    "worktreeSlug": "diego",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:diego"
+  },
+  {
+    "workerId": "01a0e920edc77ee1b3bf16a790668309",
+    "family": "codex",
+    "worktreeSlug": "gene",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:gene"
+  },
+  {
+    "workerId": "01a1243751cf7e2e8b5e89580c2c7059",
+    "family": "codex",
+    "worktreeSlug": "george",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:george"
+  },
+  {
+    "workerId": "01a1271bf10f769394bc0dc9e44c44ca",
+    "family": "codex",
+    "worktreeSlug": "juliet",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:juliet"
+  },
+  {
+    "workerId": "01a10fe6b3c8777cb7f4888cf2f309c9",
+    "family": "codex",
+    "worktreeSlug": "riana",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:riana"
+  },
+  {
+    "workerId": "01a1131259cb710395f6bc03eb633f2f",
+    "family": "codex",
+    "worktreeSlug": "ruin",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:ruin"
+  }
+]

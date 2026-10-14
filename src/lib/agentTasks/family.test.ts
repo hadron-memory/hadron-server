@@ -5,6 +5,7 @@
  * the binding — set while a session is live, gone once it ends.
  */
 
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../integrations/db/client.js';
@@ -159,6 +160,27 @@ describe('startSession family, and Worker.family following the binding', () => {
     expect(await backfillSessionFamilies(db, [{ workerId: worker.id, family: 'claude' }], true)).toEqual([]);
     await M.endSession({}, { id: s.id }, ctx(mia.id));
     expect(await backfillSessionFamilies(db, mapping, true)).toEqual([]);
+  });
+
+  it('the pinned operator inventory backfills disposable bindings without inferring tool families (#1931)', async () => {
+    const mapping = JSON.parse(readFileSync(new URL('../../../scripts/backfill-session-families-1931.json', import.meta.url), 'utf8'));
+    const template = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    const snapshots = new Map<string, any>();
+    for (const row of mapping) {
+      await db.worker.create({ data: { id: row.workerId, appId: app.id, agentId: template.agentId, name: row.worktreeSlug, slug: row.worktreeSlug } });
+      const session = await db.session.create({ data: { id: generateId(), workerId: row.workerId, appId: app.id, userId: mia.id, tool: 'claude-code', family: null } });
+      snapshots.set(session.id, session);
+    }
+    expect(await backfillSessionFamilies(db, mapping)).toHaveLength(mapping.length);
+    for (const [id, before] of snapshots) expect(await db.session.findUniqueOrThrow({ where: { id } })).toEqual(before);
+    const changed = await backfillSessionFamilies(db, mapping, true);
+    expect(changed).toHaveLength(mapping.length);
+    for (const row of changed) {
+      const before = snapshots.get(row.sessionId);
+      expect(await db.session.findUniqueOrThrow({ where: { id: row.sessionId } })).toEqual({ ...before, family: row.family });
+    }
+    expect(await backfillSessionFamilies(db, mapping, true)).toEqual([]);
+    for (const slug of ['hugo-2', 'xan', 'xylon']) expect(mapping.find((r: any) => r.worktreeSlug === slug).family).toBe('glm');
   });
 
   it('the database refuses a family in no token shape (chk_sessions_family)', async () => {
