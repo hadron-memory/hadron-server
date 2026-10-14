@@ -142,6 +142,26 @@ describe('nodeBatch over a prefix of the child', () => {
   });
 });
 
+describe('P2-3 (Diego, #1891) — nodeBatch explicit refs read through the child like node(ref:)', () => {
+  it('a child URN reads the inherited node, marked; the base URN and base PK stay refused; a boot prompt is unavailable', async () => {
+    const r = await Q.nodeBatch(null, {
+      refs: [
+        `hrn:node:${backend.memUrn}:processes:release`,
+        `hrn:node:${backend.memUrn}:tasks:open-pr`,
+        `hrn:node:${backend.memUrn}:prompts:boot`,
+        `hrn:node:${engineer.memUrn}:tasks:ship`,
+        ids.engOpenPr,
+      ],
+    }, ctx(reader));
+    expect(r.nodes.map((x: any) => x.id)).toEqual([ids.engRelease, ids.backOpenPr]);
+    expect(N.inheritedFrom(r.nodes[0])?.agentId).toBe(engineer.id);
+    expect(N.inheritedFrom(r.nodes[1])).toBeNull();
+    expect(r.unavailable).toEqual(expect.arrayContaining([
+      `hrn:node:${backend.memUrn}:prompts:boot`, `hrn:node:${engineer.memUrn}:tasks:ship`, ids.engOpenPr,
+    ]));
+  });
+});
+
 describe('a full node URN in the child\'s memory', () => {
   it('reads through to the inherited node in the same order MCP does: own, then moved, then inherited', async () => {
     const got = await Q.node({}, { ref: `hrn:node:${backend.memUrn}:processes:release` }, ctx(reader));

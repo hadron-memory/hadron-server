@@ -150,3 +150,24 @@ describe('ruling 6 — a write at an inherited loc through the child never write
     expect(out).not.toContain('Inherited from');
   });
 });
+
+describe('P2-2 (Diego, #1891) — an inherited node\'s validation shows state only', () => {
+  it('never names the base\'s validator or its record, even a validator the reader can read', async () => {
+    const release = await db.node.findFirstOrThrow({ where: { memoryId: engineer.mem, loc: 'processes:release' } });
+    // A validator the reader CAN read on its own: the child's own runnable task.
+    const validator = await db.node.findFirstOrThrow({ where: { memoryId: backend.mem, loc: 'tasks:open-pr' } });
+    await db.nodeContentValidationReport.create({
+      data: { nodeId: release.id, memoryId: engineer.mem, nodeRevSeq: release.revSeq, validationTaskId: validator.id, validationTaskRevSeq: validator.revSeq, outcome: 'PASS' },
+    });
+    for (const out of [
+      await call('hadron_get_node', { urn: childUrn('processes:release') }),
+      await call('hadron_get_nodes', { refs: [childUrn('processes:release')] }),
+      await call('hadron_get_nodes', { memoryUrn: `hrn:mem:${backend.memUrn}`, locPrefix: 'processes:' }),
+    ]) {
+      expect(out).toContain('EngRelease body');
+      expect(out).toMatch(/Validation: \w+/);
+      expect(out).not.toContain('validator');
+      expect(out).not.toContain(childUrn('tasks:open-pr'));
+    }
+  });
+});
