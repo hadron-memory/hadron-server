@@ -397,6 +397,48 @@ describe('#1883 review (Diego): the start is fenced from issue to bind', () => {
   });
 });
 
+describe('#1883 review (Diego delta P2): the holder\'s standing is re-read live at the bind', () => {
+  it('a holder admitted only by a platform role, demoted while the bind waits: refused, the start fails, no session', async () => {
+    // Kit's holder is a platform ADMIN with no App or org membership: participation rests on the role alone.
+    const padmin = await db.user.create({ data: { githubId: 77_000_000 + Math.floor(Math.random() * 1e6), githubUsername: `la-padmin-${generateId()}`, roles: ['ADMIN'] }, select: { id: true } });
+    await db.worker.update({ where: { id: kit.id }, data: { heldByUserId: padmin.id, heldAt: new Date() } });
+    const { opId, grant } = await collectedStart();
+    // updateUserRoles' shape: the user's authority anchor exclusively, then the role change, held open.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let ready!: () => void;
+    const locked = new Promise<void>((r) => { ready = r; });
+    const demote = db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'authorization:user'}), hashtext(${padmin.id}))`;
+      await tx.user.update({ where: { id: padmin.id }, data: { roles: ['READER'] } });
+      ready();
+      await gate;
+    });
+    await locked;
+    let settled = false;
+    // The request's context still carries the role it authenticated with.
+    const bind = M.startSession({}, { input: { id: generateId(), tool: 'vitest', launchGrant: grant } }, { db, userId: padmin.id, roles: ['ADMIN'] } as Context)
+      .then(() => null, (e: GraphQLError) => e)
+      .finally(() => { settled = true; });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(settled).toBe(false);
+    release();
+    await demote;
+    const err = await bind;
+    expect(err?.extensions).toMatchObject({ code: 'LAUNCH_REFUSED', reason: 'FORBIDDEN' });
+    expect(await opOf(opId)).toMatchObject({ status: 'failed' });
+    expect(await db.session.count({ where: { launchOperationId: opId } })).toBe(0);
+  });
+
+  it('control: the same platform-admin holder, not demoted, binds', async () => {
+    const padmin = await db.user.create({ data: { githubId: 78_000_000 + Math.floor(Math.random() * 1e6), githubUsername: `la-padmin2-${generateId()}`, roles: ['ADMIN'] }, select: { id: true } });
+    await db.worker.update({ where: { id: kit.id }, data: { heldByUserId: padmin.id, heldAt: new Date() } });
+    const { opId, grant } = await collectedStart();
+    const s = await M.startSession({}, { input: { id: generateId(), tool: 'vitest', launchGrant: grant } }, { db, userId: padmin.id, roles: ['ADMIN'] } as Context);
+    expect(s.launchOperationId).toBe(opId);
+  });
+});
+
 describe('the platform starts an assigned worker with no live session (cor:agt:070:08; #10773 (6): by hand too)', () => {
   const task = (assigneeWorkerId: string | null = null) =>
     db.agentTask.create({ data: { appId: app.id, title: 'Do it', ownerUserId: manager.id, assigneeWorkerId, closeSessionWhenDone: false }, select: { id: true } });

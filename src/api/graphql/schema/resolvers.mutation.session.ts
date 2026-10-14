@@ -88,7 +88,8 @@ import {
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
 import { consumeGrant, failOperation, loadLiveGrant, sameHold, type LoadedGrant } from '../../../lib/hostOperations/launch.js';
-import { withAuthorizedTx } from './authorizedTx.js';
+import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
+import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 
 /**
@@ -1034,7 +1035,21 @@ export const sessionMutations = {
       // are evicted only after the transaction commits, as endSessionFirstWins
       // does for an explicit end.
       let supersededIds: string[] = [];
+      // #1883 review (Diego delta P2): a launch's re-check of the holder's standing runs under the authority anchors
+      // its revokers take exclusively (removeAppMember and org-role changes: the App, its org and owner; updateUserRoles:
+      // the user), read before the transaction so they can be taken first, before any row.
+      const launchAnchors: AuthorityAnchor[] = [];
+      if (launch && appId && ctx.userId) {
+        const anchorApp = await ctx.db.app.findUnique({ where: { id: appId }, select: { organizationId: true, ownerUserId: true } });
+        launchAnchors.push(
+          { kind: 'app', id: appId },
+          ...(anchorApp?.organizationId ? [{ kind: 'org' as const, id: anchorApp.organizationId }] : []),
+          ...(anchorApp?.ownerUserId ? [{ kind: 'user' as const, id: anchorApp.ownerUserId }] : []),
+          { kind: 'user', id: ctx.userId },
+        );
+      }
       const bound = await ctx.db.$transaction(async (tx) => {
+        if (launchAnchors.length) await lockAuthorityAnchors(tx, launchAnchors, 'shared');
         // #1001: appId may have come only from an App key or an MCP active-App
         // selection, so neither the appRef nor Worker branches necessarily
         // checked lifecycle. Recheck the settled App in the transaction before
@@ -1114,9 +1129,15 @@ export const sessionMutations = {
           if (launch && appId) {
             // Diego P2-3: the holder must still be able to hold this worker, judged on the transaction's view under
             // the rows held above: a participant, and on a user-owned App its owner or whoever manages it (#1764).
-            const txCtx = { ...ctx, db: tx as unknown as Context['db'] };
+            // Diego delta P2: a LIVE context, not a copy of the request's: caches dropped and platform roles re-read
+            // from the user row under the user anchor held above (the #1859 pattern), so a demotion that committed
+            // while this bind waited is seen; a deleted user or revoked key reads as not permitted.
+            const txCtx = await liveTxContext(ctx, tx).catch((e: unknown) => {
+              if (e instanceof Error && e.message === 'Forbidden') return null;
+              throw e;
+            });
             const bindApp = await tx.app.findUnique({ where: { id: appId }, select: { id: true, organizationId: true, ownerUserId: true } });
-            const may = !!bindApp && (await isAppParticipant(txCtx, bindApp)) &&
+            const may = !!txCtx && !!bindApp && (await isAppParticipant(txCtx, bindApp)) &&
               (bindApp.ownerUserId === null || ctx.userId === bindApp.ownerUserId || (await managesApp(txCtx, bindApp)));
             if (!may) {
               throw new GraphQLError('The holder may no longer hold this worker.', { extensions: { code: 'FORBIDDEN' } });
