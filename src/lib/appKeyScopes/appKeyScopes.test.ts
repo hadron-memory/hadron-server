@@ -132,6 +132,7 @@ describe('the scope primitive', () => {
   });
 
   it('an unknown scope is refused, and so is a revoked or foreign key', async () => {
+    // #1709: host:operate exists now, but only for a named host.
     expect(await code(M.grantAppKeyScope({}, { id: key.id, scope: 'host:operate' }, userCtx(manager.id)))).toBe('BAD_USER_INPUT');
     expect(await code(M.grantAppKeyScope({}, { id: key.id, scope: '*' }, userCtx(manager.id)))).toBe('BAD_USER_INPUT');
     expect(await db.appKeyScope.count()).toBe(0);
@@ -193,7 +194,8 @@ describe('the scope primitive', () => {
 describe('the invariants file', () => {
   it('the migration carries a byte-identical copy and post-push includes it', () => {
     const source = readFileSync(new URL('../../../prisma/app-key-scope-invariants.sql', import.meta.url), 'utf8');
-    const migration = readFileSync(new URL('../../../prisma/migrations/20261011190000_app_key_scopes/migration.sql', import.meta.url), 'utf8');
+    // #1709: the newest migration that carries the file (host:operate added to the closed list).
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261014010100_host_operate_scope/migration.sql', import.meta.url), 'utf8');
     // Exactly the file, set off from the generated DDL above it by one blank line: nothing else may sit between.
     expect(migration.endsWith(`\n${source}`)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir app-key-scope-invariants.sql');
@@ -222,7 +224,15 @@ describe('the invariants file', () => {
   it('a key holds a scope at most once while it is live, and only from the closed list', async () => {
     await grant(key);
     await expect(grant(key)).rejects.toThrow(/Unique constraint|app_key_scopes_live_uniq/);
-    await expect(grant(await mkKey(app.id, 'b'), 'host:operate')).rejects.toThrow(/chk_app_key_scopes_shape/);
+    await expect(grant(await mkKey(app.id, 'b'), 'shell')).rejects.toThrow(/chk_app_key_scopes_shape/);
+    // #1709: host:operate is bound to exactly one host, and no other scope names one.
+    await expect(grant(await mkKey(app.id, 'c'), 'host:operate')).rejects.toThrow(/chk_app_key_scopes_shape/);
+    const hostKey = await mkKey(app.id, 'd');
+    await expect(db.appKeyScope.create({ data: { id: generateId(), appKeyId: hostKey.id, scope: 'host:operate', grantedByUserId: manager.id, hostId: 'orca1' } })).resolves.toBeTruthy();
+    await expect(db.appKeyScope.create({ data: { id: generateId(), appKeyId: (await mkKey(app.id, 'e')).id, scope: 'attention:deliver', grantedByUserId: manager.id, hostId: 'orca1' } }))
+      .rejects.toThrow(/chk_app_key_scopes_shape/);
+    await expect(db.appKeyScope.create({ data: { id: generateId(), appKeyId: (await mkKey(app.id, 'f')).id, scope: 'host:operate', grantedByUserId: manager.id, hostId: '-rf' } }))
+      .rejects.toThrow(/chk_app_key_scopes_shape/);
     await expect(db.appKeyScope.updateMany({ data: { revokedAt: new Date() } })).rejects.toThrow(/chk_app_key_scopes_shape/);
   });
 });

@@ -3110,13 +3110,30 @@ export const typeDefs = `#graphql
     revokedAt: DateTime
     "#1749 — the scopes this key holds now (hrn:node:hadronmemory.com:specs:cor:aut:010:03). Whoever manages the App only."
     scopes: [AppKeyScope!]!
+    "#1709 — what this key did as a host, newest first (hrn:node:hadronmemory.com:specs:cor:agt:070:07: every use is recorded). Whoever manages the App only."
+    hostUses(first: Int): [HostKeyUse!]!
   }
 
-  "#1749 — a scope an App key holds. A closed list; today only attention:deliver."
+  "#1749 — a scope an App key holds. A closed list: attention:deliver, and (#1709) host:operate."
   type AppKeyScope {
     scope: String!
     grantedAt: DateTime!
     grantedBy: ID!
+    "#1709 — the one host a host:operate scope is bound to (hrn:node:hadronmemory.com:specs:cor:agt:070:04); null for every other scope."
+    hostId: String
+  }
+
+  "#1709 — one use of a host key (hrn:node:hadronmemory.com:specs:cor:agt:070:07)."
+  type HostKeyUse {
+    id: ID!
+    hostId: String!
+    "register, collect, report or availability."
+    action: String!
+    "The operation a report was about."
+    operationId: ID
+    "How many operations a collection returned, or workers a registration listed."
+    count: Int
+    usedAt: DateTime!
   }
 
   """
@@ -6757,6 +6774,11 @@ export const typeDefs = `#graphql
     "#1748 — the wakes due now (hrn:node:hadronmemory.com:specs:cor:agt:080:08). Counts and seq ranges only; reads nothing it does not return."
     dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String): DueWakePage!
 
+    "#1709 — the App's host registrations, liveness derived now (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Whoever reads the App's tasks and events, the App's own key included."
+    hostRegistrations(appRef: String!): [HostRegistration!]!
+    "#1709 — the App's host operations, newest first (hrn:node:hadronmemory.com:specs:cor:agt:070:02). Whoever reads the App's tasks and events. A host key (one ever granted host:operate) sees only its own host's operations (hrn:node:hadronmemory.com:specs:cor:agt:070:04, Holger 2026-10-13): another hostId returns nothing. after: the endCursor of the previous page."
+    hostOperations(appRef: String!, hostId: String, status: HostOperationStatus, worker: String, first: Int, after: String): HostOperationPage!
+
     """
     #1705 — a team App's agent tasks, newest first. Filters combine with AND;
     owner / assignee name a party of the App (a ref naming nobody matches
@@ -8517,6 +8539,43 @@ export const typeDefs = `#graphql
     "#1748 — record that wakes were delivered (hrn:node:hadronmemory.com:specs:cor:agt:080:16). Never moves a read position."
     acknowledgeWakes(proofs: [String!]!): AcknowledgeWakesResult!
 
+    """
+    #1709 — a host registers, or refreshes, which of its App's workers it can launch, as which model family, and in
+    which existing worktrees (hrn:node:hadronmemory.com:specs:cor:agt:070:01). A host key only: an App key holding
+    host:operate, which names the host; the request names none (hrn:node:hadronmemory.com:specs:cor:agt:070:04). Refreshing within the App's lapse count
+    of poll intervals keeps it live. Refused HOST_KEY_REQUIRED for anyone else, APP_KEY_SCOPE_REQUIRED without the
+    scope, APP_KEY_SESSION_BOUND with a session, BAD_HOST_REGISTRATION for a bad shape or a worker not of the App.
+    """
+    registerHost(input: RegisterHostInput!): HostRegistration!
+    """
+    #1709 — a host collects its own operations, oldest first: those still ISSUED (now marked COLLECTED) and those it
+    collected and has not reported. Only its own host's, in its own App (hrn:node:hadronmemory.com:specs:cor:agt:070:04).
+    first: at most 200, default 50.
+    """
+    collectHostOperations(appRef: String!, first: Int): [HostOperation!]!
+    """
+    #1709 — a host reports an operation's final outcome: SUCCEEDED, or FAILED with a reason
+    (hrn:node:hadronmemory.com:specs:cor:agt:070:03). Only after collecting it, and only its own host's (another's is
+    HOST_OPERATION_NOT_FOUND). The same outcome again answers the operation as it is; a different one is
+    HOST_OPERATION_ALREADY_REPORTED. Writes host.operation.succeeded or host.operation.failed.
+    """
+    reportHostOperation(input: ReportHostOperationInput!): HostOperation!
+    """
+    #1709 — a host marks a worker it registers UNAVAILABLE, only as OUT_OF_TOKENS or HOST_DOWN, or clears a mark it set
+    itself (hrn:node:hadronmemory.com:specs:cor:agt:060:08). It never replaces or clears anyone else's mark, a stall
+    among them: AVAILABILITY_NOT_PERMITTED.
+    """
+    setHostWorkerAvailability(input: SetHostWorkerAvailabilityInput!): WorkerAvailability!
+    """
+    #1709 — issue an operation to one of the App's registered hosts (hrn:node:hadronmemory.com:specs:cor:agt:070:05).
+    A type outside the closed set is HOST_OPERATION_TYPE_UNKNOWN (hrn:node:hadronmemory.com:specs:cor:agt:070:03), a
+    missing, extra or malformed argument BAD_HOST_OPERATION_ARGS. Issued today: worktree.create and worktree.remove, by
+    the worker's holder, the worker it reports to, or whoever manages the App (else HOST_OPERATION_NOT_PERMITTED).
+    worker.start and worker.end ship with #1709's next slices, and worker.deliver with a host delivery path:
+    HOST_OPERATION_NOT_ISSUABLE until then. An unregistered host is HOST_NOT_FOUND.
+    """
+    issueHostOperation(input: IssueHostOperationInput!): HostOperation!
+
     "#1747 — give a worker a named App grant (hrn:node:hadronmemory.com:specs:cor:agt:080:24). Whoever manages the App only. Idempotent."
     grantApp(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
 
@@ -9761,7 +9820,11 @@ export const typeDefs = `#graphql
     updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, registerDefaults: RegisterDefaultsInput): Agent!
 
     """
-    Soft-delete an Agent.
+    Soft-delete an Agent and its owned system memory. Refuses while a live
+    App install or live parent Agent import references it. AgentMemoryItem
+    attachments do not block deletion.
+
+    See hrn:node:hadronmemory.com:specs:cor:dmo:050:14.
 
     Accepts the entity's ID or URN.
     """
@@ -11376,8 +11439,11 @@ export const typeDefs = `#graphql
     #1749 — give an App key a scope (hrn:node:hadronmemory.com:specs:cor:aut:010:04). Only whoever manages the App, as
     themselves: never an App key, a worker's session or an impersonation. Granting a scope the key holds changes nothing.
     A new key, and a rotated one, holds none. Unknown scope: BAD_USER_INPUT.
+    #1709: host:operate is granted for ONE host, named by hostId (hrn:node:hadronmemory.com:specs:cor:agt:070:04), and
+    hostId is refused for any other scope. A key already operating as another host is refused
+    APP_KEY_SCOPE_HOST_CONFLICT: revoke host:operate first.
     """
-    grantAppKeyScope(id: ID!, scope: String!): AppKey!
+    grantAppKeyScope(id: ID!, scope: String!, hostId: String): AppKey!
     "#1749 — take a scope back. The key's next call is refused. Revoking a scope it does not hold changes nothing."
     revokeAppKeyScope(id: ID!, scope: String!): AppKey!
 
@@ -11931,7 +11997,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled; the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable; availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled; the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable; availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
     type: String!
     taskId: ID
     "Who acted: the Worker when the request was bound to a worker session, else the person."
@@ -12022,6 +12088,8 @@ export const typeDefs = `#graphql
     until: DateTime
     setAt: DateTime!
     setBy: AvailabilitySetter!
+    "#1709 — the host that set it, when setBy is HOST."
+    setByHostId: String
     "Who acted, when a worker or a person set it; null when the stall rule or a lapse did."
     setByParty: AgentTaskParty
     """
@@ -12030,6 +12098,134 @@ export const typeDefs = `#graphql
     (hrn:node:hadronmemory.com:specs:cor:agt:060:07).
     """
     inEffect: Boolean!
+  }
+
+  "#1709 — a host's registration (hrn:node:hadronmemory.com:specs:cor:agt:070:01)."
+  type HostRegistration {
+    "The host's id within its App: the one its key's host:operate scope names."
+    hostId: String!
+    label: String!
+    pollIntervalSeconds: Int!
+    registeredAt: DateTime!
+    refreshedAt: DateTime!
+    "Refreshed within the App's lapse count of its poll intervals, now."
+    live: Boolean!
+    workers: [HostRegistrationWorker!]!
+  }
+
+  "#1709 — a worker a host can launch: the family it would run as, and its existing worktrees there."
+  type HostRegistrationWorker {
+    workerId: ID!
+    worker: Worker
+    family: String!
+    worktrees: [String!]!
+  }
+
+  "#1709 — a host operation's status (hrn:node:hadronmemory.com:specs:cor:agt:070:02; COLLECTED is #1709's, Proposed)."
+  enum HostOperationStatus {
+    ISSUED
+    COLLECTED
+    SUCCEEDED
+    FAILED
+  }
+
+  "#1709 — who issued a host operation."
+  enum HostOperationIssuer {
+    USER
+    WORKER
+    PLATFORM
+  }
+
+  "#1709 — a host's report: done, or failed with a reason."
+  enum HostOperationOutcome {
+    SUCCEEDED
+    FAILED
+  }
+
+  """
+  #1709 — one typed operation issued to one host (hrn:node:hadronmemory.com:specs:cor:agt:070:02, :03). type is one of
+  worktree.create, worker.start, worker.deliver, worker.end, worktree.remove; args are its typed arguments (ids and name
+  tokens only, never a command): worktree.create {workerId, repo, baseBranch, branchName, label}; worker.start
+  {workerId, worktree, family, taskId?}; worker.deliver {workerId, sessionId, eventId}; worker.end {workerId,
+  sessionId}; worktree.remove {workerId, worktree}. The per-type arguments are #1709's design, Proposed.
+  """
+  type HostOperation {
+    id: ID!
+    appId: ID!
+    hostId: String!
+    type: String!
+    args: JSON!
+    workerId: ID!
+    worker: Worker
+    status: HostOperationStatus!
+    issuedBy: HostOperationIssuer!
+    issuedByUserId: ID
+    issuedByWorkerId: ID
+    issuedAt: DateTime!
+    collectedAt: DateTime
+    finishedAt: DateTime
+    "A success's typed result: {worktree} for worktree.create."
+    result: JSON
+    "Why it failed, as the host said it."
+    failureReason: String
+  }
+
+  type HostOperationPage {
+    items: [HostOperation!]!
+    hasNextPage: Boolean!
+    "Pass as after for the next page."
+    endCursor: String
+  }
+
+  input RegisterHostWorkerInput {
+    "The worker: its id, URN or name within the App."
+    worker: String!
+    "The model family it would run as here, e.g. claude or codex."
+    family: String!
+    "Its existing worktrees on this host, as the host names them (at most 32 name tokens)."
+    worktrees: [String!]
+  }
+
+  input RegisterHostInput {
+    appRef: String!
+    label: String!
+    "How often the host checks in; it lapses after the App's count of these without one."
+    pollIntervalSeconds: Int!
+    "The whole list: it replaces the last registration's."
+    workers: [RegisterHostWorkerInput!]
+  }
+
+  input ReportHostOperationInput {
+    appRef: String!
+    id: ID!
+    outcome: HostOperationOutcome!
+    "worktree.create's success only: the worktree it created."
+    worktree: String
+    "FAILED only: why, 1 to 2000 characters."
+    failureReason: String
+  }
+
+  input SetHostWorkerAvailabilityInput {
+    appRef: String!
+    "A worker this host registers: its id, URN or name within the App."
+    worker: String!
+    state: AvailabilityState!
+    "UNAVAILABLE only: OUT_OF_TOKENS or HOST_DOWN."
+    reason: AvailabilityReason
+    "Optional, UNAVAILABLE only, in the future."
+    until: DateTime
+  }
+
+  input IssueHostOperationInput {
+    appRef: String!
+    "The registered host to run it."
+    hostId: String!
+    "The worker it is for: its id, URN or name within the App."
+    worker: String!
+    "One of the closed set; see HostOperation."
+    type: String!
+    "The type's arguments, without workerId (taken from worker)."
+    args: JSON
   }
 
   "#1706 — one model family's availability for work in one App (hrn:node:hadronmemory.com:specs:cor:agt:060:03). A family with no record is available."

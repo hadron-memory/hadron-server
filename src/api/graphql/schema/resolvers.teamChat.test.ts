@@ -27,6 +27,9 @@ import {
 } from './resolvers.teamChat.js';
 import { workerSlugBase } from '../../../lib/workerSlug.js';
 import { writeSessionHandoff } from './resolvers.mutation.session.js';
+import { generateDataKey } from '../../../lib/crypto.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { decryptNodeFieldsWithKey, encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -1466,5 +1469,118 @@ describe('#1317 review (@codex P1): no fallible work after the message commits',
       spy.mockRestore();
     }
     expect(await messages()).toBe(before);
+  });
+});
+
+describe('#1874 — the reply fold on an ENCRYPTED team chat (cor:agt:020:04 has no encrypted exception)', () => {
+  const envOf = async (nodeId: string) =>
+    ((await db.node.findUnique({ where: { id: nodeId }, select: { data: true } }))!.data) as Record<string, unknown>;
+
+  /** The legacy encrypted-channel shape from Chip's #1874 reproduction: mark
+   * the chat memory encrypted, cache a session key, and re-write every
+   * existing message's fields as genuine ciphertext. */
+  async function encryptChannelMemory(): Promise<void> {
+    const root = await db.node.findFirst({
+      // loc-scope-ok: scoped to the fixture App via the memory relation
+      where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
+    });
+    const key = generateDataKey();
+    sessionKeyCache.set('tc-1874', root!.memoryId, key);
+    await db.memory.update({ where: { id: root!.memoryId }, data: { isEncrypted: true } });
+    const messages = await db.node.findMany({
+      where: { memoryId: root!.memoryId, nodeType: 'chat-message' },
+    });
+    for (const m of messages) {
+      const enc = encryptNodeFieldsWithKey(
+        { content: m.content ?? null, data: (m.data ?? null) as unknown },
+        key,
+      );
+      await db.node.update({
+        where: { id: m.id },
+        data: { content: enc.content ?? null, data: enc.data as never },
+      });
+    }
+  }
+
+  it('a tagless reply on an encrypted channel folds the replied-to worker (the #1874 red on main)', async () => {
+    const iris = await workerSession(appMember.id, 'Iris');
+    const target = await post(ctx(appMember.id), { body: 'the blocking question', sessionRef: iris.sessionId });
+    await encryptChannelMemory();
+    const reply = await post(ctx(admin.id), { body: 'ruling: A', replyToSeq: target.seq });
+    // The stored envelope of the REPLY is itself ciphertext now; read it back
+    // through the same key the post used.
+    const root = await db.node.findFirst({
+      // loc-scope-ok: scoped to the fixture App via the memory relation
+      where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
+    });
+    const key = sessionKeyCache.getByMemoryId(root!.memoryId)!;
+    const sealed = await db.node.findUnique({ where: { id: reply.nodeId }, select: { data: true } });
+    const env = decryptNodeFieldsWithKey({ data: sealed!.data as unknown }, key).data as Record<string, unknown>;
+    expect(env.mentions).toEqual(['iris']);
+  });
+
+  it('an explicit @mention body on an encrypted channel still stores the mention (control, unchanged)', async () => {
+    const iris = await workerSession(appMember.id, 'Iris');
+    const target = await post(ctx(appMember.id), { body: 'q', sessionRef: iris.sessionId });
+    await encryptChannelMemory();
+    const reply = await post(ctx(admin.id), { body: '@iris explicit', replyToSeq: target.seq });
+    const root = await db.node.findFirst({
+      // loc-scope-ok: scoped to the fixture App via the memory relation
+      where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
+    });
+    const key = sessionKeyCache.getByMemoryId(root!.memoryId)!;
+    const sealed = await db.node.findUnique({ where: { id: reply.nodeId }, select: { data: true } });
+    const env = decryptNodeFieldsWithKey({ data: sealed!.data as unknown }, key).data as Record<string, unknown>;
+    expect(env.mentions).toEqual(['iris']);
+  });
+
+  it('a decrypt failure skips the fold and never refuses the reply (corrupt target envelope)', async () => {
+    const iris = await workerSession(appMember.id, 'Iris');
+    const target = await post(ctx(appMember.id), { body: 'q', sessionRef: iris.sessionId });
+    await encryptChannelMemory();
+    // Corrupt the TARGET's stored envelope into undecryptable garbage. The
+    // reply must still post; only the fold is skipped.
+    await db.node.update({ where: { id: target.nodeId }, data: { data: 'garbage-not-an-envelope' as never } });
+    const reply = await post(ctx(admin.id), { body: 'still posts', replyToSeq: target.seq });
+    expect(reply.nodeId).toBeTruthy();
+    const root = await db.node.findFirst({
+      // loc-scope-ok: scoped to the fixture App via the memory relation
+      where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
+    });
+    const key = sessionKeyCache.getByMemoryId(root!.memoryId)!;
+    const sealed = await db.node.findUnique({ where: { id: reply.nodeId }, select: { data: true } });
+    const env = decryptNodeFieldsWithKey({ data: sealed!.data as unknown }, key).data as Record<string, unknown>;
+    expect(env.mentions).toBeUndefined();
+  });
+
+  it('the broadcast-name exception holds on the encrypted path — a worker named All is never fold-notified', async () => {
+    const allWorker = await workerSession(appMember.id, 'All');
+    const target = await post(ctx(appMember.id), { body: 'q', sessionRef: allWorker.sessionId });
+    await encryptChannelMemory();
+    const reply = await post(ctx(admin.id), { body: 'answer', replyToSeq: target.seq });
+    const root = await db.node.findFirst({
+      // loc-scope-ok: scoped to the fixture App via the memory relation
+      where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
+    });
+    const key = sessionKeyCache.getByMemoryId(root!.memoryId)!;
+    const sealed = await db.node.findUnique({ where: { id: reply.nodeId }, select: { data: true } });
+    const env = decryptNodeFieldsWithKey({ data: sealed!.data as unknown }, key).data as Record<string, unknown>;
+    expect(env.mentions).toBeUndefined();
+    expect(env.broadcastWakes).toBeUndefined();
+  });
+
+  it('no self-notification on the encrypted path — a worker replying to its own message folds nothing', async () => {
+    const iris = await workerSession(appMember.id, 'Iris');
+    const first = await post(ctx(appMember.id), { body: 'note', sessionRef: iris.sessionId });
+    await encryptChannelMemory();
+    const reply = await post(ctx(appMember.id), { body: 'update', replyToSeq: first.seq, sessionRef: iris.sessionId });
+    const root = await db.node.findFirst({
+      // loc-scope-ok: scoped to the fixture App via the memory relation
+      where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
+    });
+    const key = sessionKeyCache.getByMemoryId(root!.memoryId)!;
+    const sealed = await db.node.findUnique({ where: { id: reply.nodeId }, select: { data: true } });
+    const env = decryptNodeFieldsWithKey({ data: sealed!.data as unknown }, key).data as Record<string, unknown>;
+    expect(env.mentions).toBeUndefined();
   });
 });
