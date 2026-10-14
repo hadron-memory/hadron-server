@@ -9445,8 +9445,9 @@ export const typeDefs = `#graphql
     preserves; an empty update is a valid liveness touch (bumps updatedAt,
     which liveness counts — #1114). id-only - sessions have no URN.
     Gate: platform admin, the session's App, or the attributed user (not via
-    impersonation). No App key updates a host-launched session, and a key ever
-    granted host:operate updates none (#1934, hrn:node:hadronmemory.com:specs:cor:agt:070:04).
+    impersonation). An App key updates only user-less sessions (never one a
+    person is behind), never a host-launched one, and a key ever granted
+    host:operate updates none (#1934, hrn:node:hadronmemory.com:specs:cor:agt:070:04).
     Updates on an ended session stay allowed (late PR-merge attribution).
     """
     updateSession(id: ID!, prNumber: Int, branch: String): Session!
@@ -9469,8 +9470,9 @@ export const typeDefs = `#graphql
     untouched.
 
     Gate (#931): platform admin, the session's App, or the attributed user
-    (not via impersonation). No App key ends a host-launched session, and a key
-    ever granted host:operate ends none (#1934, hrn:node:hadronmemory.com:specs:cor:agt:070:04);
+    (not via impersonation). An App key ends only user-less sessions (never one
+    a person is behind), never a host-launched one, and a key ever granted
+    host:operate ends none (#1934, hrn:node:hadronmemory.com:specs:cor:agt:070:04);
     a host ends a launched session only by reporting its worker.end.
 
     \`handoff\` is agent-composed prose: what landed, what is open, what is

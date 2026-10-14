@@ -2247,8 +2247,9 @@ export async function requireSessionWriteAccess(
   // another member's session (and free their persona). GraphQL App-key
   // contexts carry no userId, so this is a no-op for them; it exists so a
   // Context built from MCP auth (userId + selected appId) can't widen.
-  // #1934 (cor:agt:070:04): no App key writes a host-launched session, and a
-  // key that ever held host:operate writes none — the shared predicate MCP's
+  // #1934 (cor:agt:070:04): an App key writes only user-less sessions
+  // (Holger's ruling A, #11860), never a host-launched one, and a key that
+  // ever held host:operate writes none — the shared predicate MCP's
   // hadron_end_session uses too.
   if (!ctx.userId) {
     if (await appPrincipalMayWriteSession(ctx.db, ctx, session)) return;

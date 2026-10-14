@@ -8964,8 +8964,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // fills auth.appId from the user's active-App SELECTION, and that must
       // not let co-members of an App end each other's sessions.
       // #1934 (cor:agt:070:04): the App branch is the SHARED predicate the
-      // GraphQL gate uses — no App key ends a host-launched session, and a key
-      // that ever held host:operate ends none — so the two cannot drift again.
+      // GraphQL gate uses — an App key ends only user-less sessions (#11860),
+      // never a host-launched one, and a key that ever held host:operate ends
+      // none — so the two cannot drift again.
       const mayEnd = auth.userId
         ? session.userId === auth.userId
         : await appPrincipalMayWriteSession(db, auth, session);
