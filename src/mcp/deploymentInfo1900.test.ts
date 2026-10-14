@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildSchema, graphql } from 'graphql';
 import { getDeploymentInfo } from './deploymentInfo.js';
 import { createTestableMcpServer } from './server.js';
-import { deploymentSchema } from '../api/graphql/schema/deploymentSchema.js';
+import { capabilityFields, deploymentSchema } from '../api/graphql/schema/deploymentSchema.js';
 
 afterEach(() => vi.unstubAllEnvs());
 const matrix: Array<[string | undefined, string | undefined, boolean, boolean]> = [
@@ -15,6 +15,19 @@ const matrix: Array<[string | undefined, string | undefined, boolean, boolean]> 
 ];
 
 describe('#1900 on-state-only disclosure', () => {
+  it('the visitor consumes the exported field map rather than an inline copy', () => {
+    vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
+    vi.stubEnv('PASSKEY_REGISTRATION_ENABLED', 'false');
+    const map = capabilityFields.ServerInfo as Record<string, 'signing' | 'registration'>;
+    const previous = map.passkeyRegistration;
+    try {
+      map.passkeyRegistration = 'signing';
+      const fields = (buildSchema(deploymentSchema().typeDefs).getType('ServerInfo') as any).getFields();
+      expect(fields).toHaveProperty('passkeyRegistration');
+    } finally {
+      map.passkeyRegistration = previous;
+    }
+  });
   it.each(matrix)('signing=%s registration=%s yields %s/%s in both surfaces', async (general, registration, signingOn, registrationOn) => {
     vi.stubEnv('PASSKEY_SIGNING_ENABLED', undefined);
     vi.stubEnv('PASSKEY_REGISTRATION_ENABLED', undefined);
@@ -35,6 +48,9 @@ describe('#1900 on-state-only disclosure', () => {
     }
     const schema = buildSchema(deploymentSchema().typeDefs);
     const fields = (schema.getType('ServerInfo') as any).getFields();
+    for (const [field, flag] of Object.entries(capabilityFields.ServerInfo)) {
+      expect(field in fields).toBe(flag === 'signing' ? signingOn : registrationOn);
+    }
     expect('signing' in fields).toBe(signingOn);
     expect('passkeyRegistration' in fields).toBe(registrationOn);
     const selected = `version baseUrl ${signingOn ? 'signing' : ''} ${registrationOn ? 'passkeyRegistration' : ''}`;

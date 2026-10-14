@@ -8,6 +8,11 @@ const signingTypes = new Set([
   'SigningRequest', 'NodeSignature', 'NodeSignatureStatus',
 ]);
 
+/** #1918: public-reference generators consume the same per-flag field data. */
+export const capabilityFields: Readonly<Record<string, Readonly<Record<string, 'signing' | 'registration'>>>> = {
+  ServerInfo: { signing: 'signing', passkeyRegistration: 'registration' },
+};
+
 /** #1895: Apollo execution, introspection and SDL discovery share this schema.
  * Remove the feature before validation, rather than inventing an off-state
  * error that differs from an absent field. Deployment switches require restart.
@@ -23,8 +28,9 @@ export function deploymentSchema() {
       let type = node.type;
       while (type.kind !== Kind.NAMED_TYPE) type = type.type;
       const owner = [...ancestors, parent].reverse().find(item => item && !Array.isArray(item) && 'kind' in item && item.kind === Kind.OBJECT_TYPE_DEFINITION);
-      const capabilityOff = owner && !Array.isArray(owner) && 'name' in owner && owner.name?.value === 'ServerInfo' &&
-        ((node.name.value === 'signing' && !policy.signing) || (node.name.value === 'passkeyRegistration' && !policy.registration));
+      const capabilityFlag = owner && !Array.isArray(owner) && 'name' in owner && owner.name
+        ? capabilityFields[owner.name.value]?.[node.name.value] : undefined;
+      const capabilityOff = capabilityFlag !== undefined && !policy[capabilityFlag];
       if (!capabilityOff && (policy.signing || !signingTypes.has(type.name.value))) return;
       if (owner && !Array.isArray(owner) && 'name' in owner && owner.name) {
         const fields = removedFields.get(owner.name.value) ?? new Set<string>();
