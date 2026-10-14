@@ -131,3 +131,22 @@ describe('hadron_list_nodes and hadron_find_nodes over the child', () => {
     expect(out).not.toContain('EngOpenPr');
   });
 });
+
+describe('ruling 6 — a write at an inherited loc through the child never writes the base', () => {
+  it('creating the loc in the child makes the child\'s own node, which then overrides; the base is untouched', async () => {
+    const before = await db.node.findFirstOrThrow({ where: { memoryId: engineer.mem, loc: 'processes:release' } });
+    // A writer of the child's system memory (a platform admin here).
+    const adminId = (await db.user.create({ data: { handle: `effmcp-admin-${n}`, roles: ['ADMIN'] } })).id;
+    const admin = createTestableMcpServer({ userId: adminId, roles: ['ADMIN'], clientId: `user:${adminId}` });
+    // An update through the child names no node of the child's own: nothing to update, and never the base.
+    expect(await admin.callToolText('hadron_update_node', { urn: childUrn('processes:release'), content: 'CHILD EDIT' })).toMatch(/not found/i);
+    // Creating the loc in the child writes the child's own node.
+    expect(await admin.callToolText('hadron_create_node', { urn: childUrn('processes:release'), name: 'BackRelease', content: 'BackRelease body' })).toMatch(/saved|created/i);
+    const after = await db.node.findFirstOrThrow({ where: { id: before.id } });
+    expect(after.content).toBe(before.content);
+    expect(after.revSeq).toBe(before.revSeq);
+    const out = await call('hadron_get_node', { urn: childUrn('processes:release') });
+    expect(out).toContain('BackRelease body');
+    expect(out).not.toContain('Inherited from');
+  });
+});
