@@ -43,7 +43,7 @@ import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentO
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { writeAgentBase } from '../../../lib/agentBase.js';
-import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AgentNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -62,6 +62,7 @@ import {
   requireOrgRole,
   requireAgentAccess,
   resolveReadableAgentRef,
+  requireReadableAgent,
   requireOwnerOrOrgRole,
   aiConfigOwnerOf,
   toGqlAiServiceConfig,
@@ -364,6 +365,33 @@ export async function syncSystemMemoryName(
       data: { name: `${current.name} System`, updatedBy: args.actor },
     });
   });
+}
+
+/**
+ * #1946 — an imported Agent the parent's manager may learn about: one they can
+ * read, or one the parent's org holds any AgentOrgGrant row for (the licence
+ * the import flow itself is built on, active or not). Anything else throws
+ * `AgentNotFoundError(ref)`, exactly as an absent Agent, so the import's own
+ * refusals (MultiLevelImportError, MissingGrantError) never reach a caller
+ * who couldn't otherwise know the Agent exists.
+ */
+async function requireKnownImportedAgent(
+  ctx: Context,
+  parent: { organizationId: string | null },
+  importedAgentId: string,
+  ref: string,
+): Promise<void> {
+  const imported = await ctx.db.agent.findUnique({ where: { id: importedAgentId } });
+  try {
+    await requireReadableAgent(ctx, imported, ref);
+  } catch (e) {
+    if (!(e instanceof AgentNotFoundError) || !imported || imported.deletedAt || !parent.organizationId) throw e;
+    const licensed = await ctx.db.agentOrgGrant.findUnique({
+      where: { orgId_agentId: { orgId: parent.organizationId, agentId: importedAgentId } },
+      select: { orgId: true },
+    });
+    if (!licensed) throw e;
+  }
 }
 
 export const agentMutations = {
@@ -1016,11 +1044,14 @@ export const agentMutations = {
       { agentRef, orgRef }: { agentRef: string; orgRef: string },
       ctx: Context,
     ) => {
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
+      // #1946: the org gate runs BEFORE the Agent is resolved, so an outsider
+      // is refused on the org whatever the ref names. An Agent the org's ADMIN
+      // can't read answers exactly as an absent one (no AGENT_NOT_PUBLIC, no
+      // agentId); AGENT_NOT_PUBLIC stays for one they can read.
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
-
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
+      const resolvedAgentId = agent.id;
       if (agent.organizationId === resolvedOrgId) {
         throw new GraphQLError(
           'Owner organization has implicit authority for its own Agent and cannot subscribe.',
@@ -1079,9 +1110,30 @@ export const agentMutations = {
       { agentRef, orgRef }: { agentRef: string; orgRef: string },
       ctx: Context,
     ) => {
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
+      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1946: an Agent the caller can't read is known to exactly one
+      // legitimate revoker, the subscriber org's ADMIN holding a grant row for
+      // it (which already names the Agent). Anyone else, or that ADMIN with no
+      // grant row, gets the absent answer: no FORBIDDEN, no
+      // AGENT_ORG_GRANT_NOT_FOUND, no agentId.
+      try {
+        await requireReadableAgent(ctx, agent, agentRef);
+      } catch (e) {
+        if (!(e instanceof AgentNotFoundError)) throw e;
+        try {
+          await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
+        } catch (gate) {
+          if (gate instanceof GraphQLError && gate.extensions?.code === 'FORBIDDEN') throw e;
+          throw gate;
+        }
+        const held = await ctx.db.agentOrgGrant.findUnique({
+          where: { orgId_agentId: { orgId: resolvedOrgId, agentId: resolvedAgentId } },
+          select: { orgId: true },
+        });
+        if (!held) throw e;
+      }
 
       await requireAgentOrgGrantRevokeRole(ctx, resolvedOrgId, agent);
 
@@ -1148,9 +1200,15 @@ export const agentMutations = {
       // reaches the imported ref's lookup.
       const parent = await resolveReadableAgentRef(ctx, parentAgentRef);
       const resolvedParentId = parent.id;
-      const { id: resolvedImportedId } = await resolveAgentRef(ctx.db, importedAgentRef);
       // Authorization: ADMIN/OWNER of the parent Agent's owning org.
       await requireAgentAccess(ctx, parent, 'ADMIN');
+      // #1946: the imported ref only after the parent's gate, and bounded by
+      // the import flow's own authority: an imported Agent the parent's manager
+      // can neither read nor holds any grant row for (as the parent's org)
+      // answers exactly as an absent one, before MultiLevelImportError or
+      // MissingGrantError could tell them apart.
+      const { id: resolvedImportedId } = await resolveAgentRef(ctx.db, importedAgentRef);
+      await requireKnownImportedAgent(ctx, parent, resolvedImportedId, importedAgentRef);
 
       try {
         return await publishAgentImport(ctx.db, {
@@ -1183,8 +1241,18 @@ export const agentMutations = {
       // #1944: the parent through the read gate FIRST, as publishAgentImport.
       const parent = await resolveReadableAgentRef(ctx, parentAgentRef);
       const resolvedParentId = parent.id;
-      const { id: resolvedImportedId } = await resolveAgentRef(ctx.db, importedAgentRef);
       await requireAgentAccess(ctx, parent, 'ADMIN');
+      // #1946: idempotent for an imported Agent the manager knows (readable,
+      // or already an import edge of this parent); any other answers exactly
+      // as an absent one.
+      const { id: resolvedImportedId } = await resolveAgentRef(ctx.db, importedAgentRef);
+      const edge = await ctx.db.agentImport.findUnique({
+        where: { parentAgentId_importedAgentId: { parentAgentId: resolvedParentId, importedAgentId: resolvedImportedId } },
+        select: { parentAgentId: true },
+      });
+      if (!edge) {
+        await requireReadableAgent(ctx, await ctx.db.agent.findUnique({ where: { id: resolvedImportedId } }), importedAgentRef);
+      }
       await removeAgentImport(ctx.db, resolvedParentId, resolvedImportedId);
       return true;
     },

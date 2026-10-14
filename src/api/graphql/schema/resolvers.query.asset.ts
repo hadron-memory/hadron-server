@@ -1,6 +1,7 @@
 // assetQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { listMemoryAssets } from '../../../controller/operations/listMemoryAssets.js';
 import { listAgentAssets } from '../../../controller/operations/listAgentAssets.js';
+import { AssetUploadError } from '../../../controller/operations/beginAssetUpload.js';
 import { mintAssetDownloadUrl } from '../../../controller/operations/mintAssetDownloadUrl.js';
 import {
   listAssets,
@@ -9,6 +10,7 @@ import {
 import {
   type Context,
   resolveAssetTargetMemoryId,
+  requireReadableAgentForAssetOp,
 } from './resolvers.helpers.js';
 
 export const assetQueries = {
@@ -29,6 +31,8 @@ export const assetQueries = {
       // then filters `uploadedBy: caller.userId`, so every row is by
       // construction identity-scoped to the target.
       if (ctx.impersonation) throw new Error('Forbidden');
+      // #1946: an Agent the caller can't read answers the op's own "agent not found".
+      await requireReadableAgentForAssetOp(ctx, input.agentUrn, () => new AssetUploadError('NOT_FOUND', 'agent not found'));
       const result = await listAgentAssets(
         ctx.db,
         { userId: ctx.userId, appId: ctx.appId },
