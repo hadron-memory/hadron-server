@@ -2278,11 +2278,13 @@ describe('#1050 — worker name holding', () => {
       where: { appId_userId: { appId: membership.appId, userId: membership.userId } },
     });
 
+    // #1937: a revoked member reads the App's staff no more than anyone else does, so the
+    // answer is the absent ref's, not a FORBIDDEN that says the worker exists.
     await expectCode(
       M.startSession(
         {}, { input: { id: generateId(), workerRef: w.id } }, ctx(gone.id, app.id),
       ),
-      'FORBIDDEN',
+      'WORKER_NOT_FOUND',
     );
     expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
   });
