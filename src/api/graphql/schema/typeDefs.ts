@@ -9447,8 +9447,10 @@ export const typeDefs = `#graphql
     Gate: platform admin, the session's App, or the attributed user (not via
     impersonation). Updates on an ended session stay allowed (late PR-merge
     attribution).
+    #1931 — llmModel refreshes the model-family derivation; an explicit family wins.
+    Null or omitted family metadata preserves the existing family. Unclassified models do not clear it.
     """
-    updateSession(id: ID!, prNumber: Int, branch: String): Session!
+    updateSession(id: ID!, prNumber: Int, branch: String, llmModel: String, family: String): Session!
 
     """
     End a session, and — for a worker-bound one — write its closing handoff

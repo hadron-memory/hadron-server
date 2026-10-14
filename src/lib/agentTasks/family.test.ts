@@ -12,6 +12,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { deriveFamily, normalizeFamily } from './family.js';
+import { backfillSessionFamilies } from './familyBackfill.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -120,6 +121,44 @@ describe('startSession family, and Worker.family following the binding', () => {
     await start({ family: 'claude' });
     await start({ family: 'codex', force: true });
     expect(await familyOf()).toBe('codex');
+  });
+
+  it('updateSession refreshes the bound model family without rebind or tool aliasing (#1931)', async () => {
+    const s = await start({ tool: 'claude-code' });
+    const updated = await M.updateSession({}, { id: s.id, llmModel: 'glm-4.6' }, ctx(mia.id));
+    expect(updated.id).toBe(s.id);
+    expect(updated.tool).toBe('claude-code');
+    expect(updated.llmModel).toBe('glm-4.6');
+    expect(updated.family).toBe('glm');
+    expect(await familyOf()).toBe('glm');
+    await M.updateSession({}, { id: s.id, branch: 'recovered' }, ctx(mia.id));
+    expect(await familyOf()).toBe('glm');
+  });
+
+  it('an explicit refresh wins over the model, normalizes, and invalid input writes nothing (#1931)', async () => {
+    const s = await start({ family: 'codex' });
+    const updated = await M.updateSession({}, { id: s.id, family: ' GLM ', llmModel: 'claude-opus-5-5' }, ctx(mia.id));
+    expect(updated.family).toBe('glm');
+    const before = await db.session.findUniqueOrThrow({ where: { id: s.id } });
+    await expect(M.updateSession({}, { id: s.id, family: 'not a family' }, ctx(mia.id))).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await db.session.findUniqueOrThrow({ where: { id: s.id } })).toEqual(before);
+  });
+
+  it('operator backfill changes only the newest open null binding, previews without writing and preserves heartbeat (#1931)', async () => {
+    const s = await start({ tool: 'claude-code' });
+    const old = new Date('2026-01-01T00:00:00Z');
+    await db.$executeRaw`UPDATE sessions SET updated_at = ${old} WHERE id = ${s.id}`;
+    const before = await db.session.findUniqueOrThrow({ where: { id: s.id } });
+    const mapping = [{ workerId: worker.id, family: 'GLM' }];
+    expect(await backfillSessionFamilies(db, mapping)).toEqual([{ workerId: worker.id, sessionId: s.id, family: 'glm' }]);
+    expect(await db.session.findUniqueOrThrow({ where: { id: s.id } })).toEqual(before);
+    await expect(backfillSessionFamilies(db, [...mapping, { workerId: 'other', family: 'invalid family' }], true)).rejects.toThrow('valid model-family');
+    expect(await db.session.findUniqueOrThrow({ where: { id: s.id } })).toEqual(before);
+    await backfillSessionFamilies(db, mapping, true);
+    expect(await db.session.findUniqueOrThrow({ where: { id: s.id } })).toMatchObject({ family: 'glm', tool: 'claude-code', updatedAt: before.updatedAt });
+    expect(await backfillSessionFamilies(db, [{ workerId: worker.id, family: 'claude' }], true)).toEqual([]);
+    await M.endSession({}, { id: s.id }, ctx(mia.id));
+    expect(await backfillSessionFamilies(db, mapping, true)).toEqual([]);
   });
 
   it('the database refuses a family in no token shape (chk_sessions_family)', async () => {
