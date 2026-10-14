@@ -32,7 +32,7 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { resolveWorkerIdByNameGated, provisionWorkerMemory, resolveReportsToTarget } from './resolvers.worker.js';
+import { resolveWorkerIdByNameGated, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -51,7 +51,6 @@ import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
 import { compileTemplate } from '../../../lib/template.js';
-import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { NodeNotFoundError, AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -76,6 +75,7 @@ import {
   requireRole,
   requireOrgRole,
   requireAgentAccess,
+  resolveReadableAgentRef,
   requireOwnerOrOrgRole,
   requireSessionWriteAccess,
   resolveReadableNodeByLoc,
@@ -87,7 +87,9 @@ import {
 } from './resolvers.helpers.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
-import { withAuthorizedTx } from './authorizedTx.js';
+import { consumeGrant, failOperation, loadLiveGrant, sameHold, type LoadedGrant } from '../../../lib/hostOperations/launch.js';
+import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
+import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 
 /**
@@ -167,6 +169,85 @@ async function lockSessionAppActive(tx: Prisma.TransactionClient, appId: string)
  * proof this call did the ending — and the receipt is decided from the row as
  * it stands afterwards, never from the row as it was before.
  */
+// ── #1709: redeeming a launch grant ────────────────────────────────────────
+
+type LaunchCtx = { grant: LoadedGrant; issuedBy: 'platform' | 'manager'; hold: { holdUserId: string | null; holdAt: Date | null } };
+
+const launchGrantInvalid = () =>
+  new GraphQLError('This launch grant is not valid: unknown, expired, already used, or not yours.', { extensions: { code: 'LAUNCH_GRANT_INVALID' } });
+
+/** startSession's answer for a worker ref that names nothing the caller may see: one envelope for absent and unreadable alike. */
+const workerRefNotFound = (workerRef: string) =>
+  new GraphQLError(`Worker not found: ${workerRef}`, { extensions: { code: 'WORKER_NOT_FOUND' } });
+
+/**
+ * #1937 — the worker read gate for an id/URN ref, collapsed: a caller who may not read the worker's App's staff
+ * gets `workerRefNotFound`, byte-identical to an absent ref, as do a missing and a soft-deleted App. NARROW catch
+ * (#1019, review:narrow-catch-blocks): only the gate's own FORBIDDEN collapses; anything else, a database failure
+ * inside the participation lookup included, propagates, since reporting an outage as a missing worker is the one
+ * thing this collapse must never hide.
+ */
+async function requireWorkerVisibleOrNotFound(ctx: Context, appId: string, workerRef: string): Promise<void> {
+  const app = await ctx.db.app.findUnique({
+    where: { id: appId },
+    select: { id: true, name: true, urn: true, organizationId: true, ownerUserId: true, uninstalledAt: true, deletedAt: true },
+  });
+  if (!app) throw workerRefNotFound(workerRef);
+  try {
+    await requireWorkerReadAccess(ctx, app);
+  } catch (e) {
+    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+    throw workerRefNotFound(workerRef);
+  }
+}
+
+/** The bind refusals that mean something changed since the start was issued: they fail the start (Holger via Vera #10775). */
+const LAUNCH_STATE_REFUSALS: Record<string, string> = {
+  LAUNCH_REFUSED: 'The hold changed after this start was issued.',
+  WORKER_HELD: 'The hold changed after this start was issued.',
+  WORKER_TAKEN: 'The worker already has a live session.',
+  FORBIDDEN: 'The holder may no longer hold this worker.',
+  WORKER_RETIRED: 'The worker was retired.',
+  APP_UNINSTALLED: 'The App was uninstalled.',
+};
+
+/**
+ * cor:agt:070:08 / Holger's ruling A (Vera #10761): a host-launched agent binds with its HOLDER's own token and the
+ * grant its host was given. The grant is checked against the caller, never trusted for identity: only the holder it
+ * was minted for redeems it, a pure App key (a host's among them) never does, and the takeover override cannot force
+ * a launch. A bind refused because something changed since the start was issued (#10775) fails that start with the
+ * reason and spends the grant; a grant that is unknown, expired, used or someone else's reads as one refusal and
+ * changes nothing (no oracle, and no way to fail another's start).
+ */
+async function withLaunch<T>(given: SessionInput, ctx: Context, run: (input: SessionInput, launch: LaunchCtx | null) => Promise<T>): Promise<T> {
+  if (given.launchGrant == null) return run(given, null);
+  if (!ctx.userId || ctx.impersonation) throw launchGrantInvalid();
+  if (given.force) {
+    throw new GraphQLError('A launch cannot be forced: a worker with a live session is not started again.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  const now = new Date();
+  const grant = await loadLiveGrant(ctx.db, given.launchGrant, now);
+  if (!grant || grant.holderUserId !== ctx.userId) throw launchGrantInvalid();
+  const op = await ctx.db.hostOperation.findUniqueOrThrow({ where: { id: grant.operationId }, select: { issuedBy: true, holdUserId: true, holdAt: true } });
+  const launch: LaunchCtx = {
+    grant, issuedBy: op.issuedBy === 'platform' ? 'platform' : 'manager', hold: { holdUserId: op.holdUserId, holdAt: op.holdAt },
+  };
+  try {
+    return await run({ ...given, workerRef: given.workerRef ?? grant.workerId }, launch);
+  } catch (e) {
+    const code = e instanceof GraphQLError ? String(e.extensions?.code ?? '') : '';
+    const reason = LAUNCH_STATE_REFUSALS[code];
+    if (!reason) throw e;
+    // A concurrent redemption of the same grant that WON bound the session this one now finds live: that is a spent
+    // grant, not a changed world, and must not fail the start that succeeded.
+    if (await ctx.db.session.findUnique({ where: { launchOperationId: grant.operationId }, select: { id: true } })) throw launchGrantInvalid();
+    await ctx.db.$transaction((tx) => failOperation(tx, grant.operationId, new Date(), reason));
+    throw new GraphQLError(`This launch is refused: ${reason} The start has failed with that reason.`, {
+      extensions: { code: 'LAUNCH_REFUSED', reason: code, operationId: grant.operationId },
+    });
+  }
+}
+
 export async function endSessionFirstWins(
   db: Context['db'],
   id: string,
@@ -372,7 +453,7 @@ export async function writeSessionHandoff(
 }
 
 export const sessionMutations = {
-    startSession: async (_: unknown, { input }: { input: SessionInput }, ctx: Context) => {
+    startSession: async (_: unknown, { input: given }: { input: SessionInput }, ctx: Context) => withLaunch(given, ctx, async (input, launch) => {
       // #928: optional persona link. `agentRef` (PK or URN, cor:api:140)
       // resolves to Session.agentId. Gate mirrors Query.agent's read gate —
       // a PUBLIC agent attaches for any caller, otherwise owner / org member
@@ -384,9 +465,10 @@ export const sessionMutations = {
       // absent, not as a malformed URN (#929 review).
       const agentRef = input.agentRef?.trim();
       if (agentRef) {
-        let resolvedAgentId: string;
         try {
-          ({ id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef));
+          // #1944: Query.agent's read gate, shared, with a denial answered
+          // exactly like an absent (or retired) Agent.
+          agentId = (await resolveReadableAgentRef(ctx, agentRef)).id;
         } catch (e) {
           // A mutation input error surfaces loudly (contrast Query.agent,
           // which masks not-found to null); malformed URNs propagate their
@@ -396,14 +478,6 @@ export const sessionMutations = {
           }
           throw e;
         }
-        const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-        if (agent.deletedAt) {
-          throw new GraphQLError(`Agent not found: ${agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
-        }
-        if (agent.visibility !== 'PUBLIC') {
-          await requireAgentAccess(ctx, agent, 'READER');
-        }
-        agentId = resolvedAgentId;
       }
 
       // #943: optional App pivot. Before this, `Session.appId` was stamped
@@ -556,9 +630,7 @@ export const sessionMutations = {
           try {
             ({ id: resolvedWorkerId } = await resolveWorkerRefId(ctx.db, workerRef));
           } catch {
-            throw new GraphQLError(`Worker not found: ${workerRef}`, {
-              extensions: { code: 'WORKER_NOT_FOUND' },
-            });
+            throw workerRefNotFound(workerRef);
           }
         } else {
           // NAME (#990). A name is unique only WITHIN an App, so this form
@@ -610,11 +682,7 @@ export const sessionMutations = {
           // must be self-sufficient rather than relying on an ordering above it
           // that a later change could reshuffle.
           const byName = await resolveWorkerIdByNameGated(ctx, appId, workerRef);
-          if (!byName) {
-            throw new GraphQLError(`Worker not found: ${workerRef}`, {
-              extensions: { code: 'WORKER_NOT_FOUND' },
-            });
-          }
+          if (!byName) throw workerRefNotFound(workerRef);
           resolvedWorkerId = byName;
         }
         const worker = await ctx.db.worker.findUnique({
@@ -624,11 +692,18 @@ export const sessionMutations = {
             name: true, heldByUserId: true, heldAt: true,
           },
         });
-        if (!worker) {
-          throw new GraphQLError(`Worker not found: ${workerRef}`, {
-            extensions: { code: 'WORKER_NOT_FOUND' },
-          });
-        }
+        if (!worker) throw workerRefNotFound(workerRef);
+        // #1937 (cor:agt:020:03, the #1742 oracle class): an id or URN names a worker in ANY App, so before any
+        // refusal below can answer differently for a worker that exists, the caller must be able to read that
+        // App's workers. Every downstream refusal (the grant mismatch, WORKER_RETIRED with its id,
+        // SESSION_WORKER_NOT_IN_APP with both Apps' ids, the participant FORBIDDEN) is therefore reachable only
+        // by a reader; anyone else gets exactly the absent ref's envelope. One exception: the worker a launch
+        // grant names, whose holder the grant has already told it exists. A holder who has since lost the App
+        // must still reach the FORBIDDEN that fails the start (#10775), not a not-found that leaves it hanging.
+        if (!(launch && worker.id === launch.grant.workerId)) await requireWorkerVisibleOrNotFound(ctx, worker.appId, workerRef);
+        // #1709: a grant starts the worker it names, and no other; checked before any gate whose refusal would
+        // fail the start, so a mismatched ref is the caller's mistake, never a change in the world.
+        if (launch && worker.id !== launch.grant.workerId) throw launchGrantInvalid();
         if (worker.retiredAt) {
           throw new GraphQLError(
             'This worker is retired — its name stays reserved, but it takes no new sessions.',
@@ -694,11 +769,7 @@ export const sessionMutations = {
             where: { id: worker.appId },
             select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
           });
-          if (app.deletedAt) {
-            throw new GraphQLError(`Worker not found: ${workerRef}`, {
-              extensions: { code: 'WORKER_NOT_FOUND' },
-            });
-          }
+          if (app.deletedAt) throw workerRefNotFound(workerRef);
           if (app.uninstalledAt) {
             throw new GraphQLError('Cannot start a session in an uninstalled App.', {
               extensions: { code: 'APP_UNINSTALLED', appId: worker.appId },
@@ -976,7 +1047,21 @@ export const sessionMutations = {
       // are evicted only after the transaction commits, as endSessionFirstWins
       // does for an explicit end.
       let supersededIds: string[] = [];
+      // #1883 review (Diego delta P2): a launch's re-check of the holder's standing runs under the authority anchors
+      // its revokers take exclusively (removeAppMember and org-role changes: the App, its org and owner; updateUserRoles:
+      // the user), read before the transaction so they can be taken first, before any row.
+      const launchAnchors: AuthorityAnchor[] = [];
+      if (launch && appId && ctx.userId) {
+        const anchorApp = await ctx.db.app.findUnique({ where: { id: appId }, select: { organizationId: true, ownerUserId: true } });
+        launchAnchors.push(
+          { kind: 'app', id: appId },
+          ...(anchorApp?.organizationId ? [{ kind: 'org' as const, id: anchorApp.organizationId }] : []),
+          ...(anchorApp?.ownerUserId ? [{ kind: 'user' as const, id: anchorApp.ownerUserId }] : []),
+          { kind: 'user', id: ctx.userId },
+        );
+      }
       const bound = await ctx.db.$transaction(async (tx) => {
+        if (launchAnchors.length) await lockAuthorityAnchors(tx, launchAnchors, 'shared');
         // #1001: appId may have come only from an App key or an MCP active-App
         // selection, so neither the appRef nor Worker branches necessarily
         // checked lifecycle. Recheck the settled App in the transaction before
@@ -1008,9 +1093,29 @@ export const sessionMutations = {
         // sessions — WORKER_TAKEN and the superseded set — is re-read below,
         // after it, so two binds, or a bind and a resume, of one worker
         // serialize instead of each deciding on a stale view.
+        // #1883 review (Diego P2-3): a launch binds on the holder's behalf, so the holder's standing in the App is
+        // held for the bind like a reportsTo writer's (#1726 protocol): their user row and membership rows FOR SHARE,
+        // BEFORE the worker row. A removal or demotion committed first and is seen by the re-check below, or waits.
+        if (launch && appId && ctx.userId && !reportsToId) {
+          await tx.$queryRaw`SELECT 1 FROM users WHERE id = ${ctx.userId} FOR SHARE`;
+          await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${appId} AND user_id = ${ctx.userId} FOR SHARE`;
+          await tx.$queryRaw`
+            SELECT 1 FROM org_members m JOIN apps a ON a.organization_id = m.organization_id
+            WHERE a.id = ${appId} AND m.user_id = ${ctx.userId} FOR SHARE OF m`;
+        }
+        // #1883 review (Riana P2): the bind and the host's report of the same start serialize on the OPERATION row,
+        // taken before the worker row (collection's order: operation, then worker). A report that marked the start
+        // failed first is seen here and the grant is spent; a report that comes later waits for this bind, then finds
+        // its session and records the start as succeeded. Without it both could commit: a failed start beside its
+        // launched session.
+        if (launch) {
+          const [op] = await tx.$queryRaw<Array<{ status: string }>>`
+            SELECT status FROM host_operations WHERE id = ${launch.grant.operationId} FOR SHARE`;
+          if (op?.status !== 'collected') throw launchGrantInvalid();
+        }
         if (workerId) {
-          const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; retired_at: Date | null }>>`
-            SELECT name, held_by_user_id, retired_at FROM workers WHERE id = ${workerId} FOR UPDATE`;
+          const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; held_at: Date | null; retired_at: Date | null }>>`
+            SELECT name, held_by_user_id, held_at, retired_at FROM workers WHERE id = ${workerId} FOR UPDATE`;
           // #1625 review (Baloo, residual P2): the HOLD and retirement are
           // re-validated under the lock for EVERY bind, force included. The
           // checks far above read a snapshot; a release, a claim by someone
@@ -1033,6 +1138,32 @@ export const sessionMutations = {
                 'This cannot be forced — cast your own worker instead.',
               { extensions: { code: 'WORKER_HELD', workerId, heldBy: locked.held_by_user_id, heldByName: who } },
             );
+          }
+          // #1709 (Holger via Vera #10775): a launch binds only a worker its
+          // holder still holds. A hold released or moved since the start was
+          // issued refuses the bind (never a claim), and nothing forces it.
+          if (launch && (locked.held_by_user_id !== ctx.userId ||
+              !sameHold(launch.hold, { userId: locked.held_by_user_id, at: locked.held_at }))) {
+            // Diego P2-1: not only the holder, the very hold the start was issued under (a release and re-hold, or
+            // a move and back, is a changed hold).
+            throw new GraphQLError('The hold changed after this start was issued.', { extensions: { code: 'LAUNCH_REFUSED', reason: 'hold-changed' } });
+          }
+          if (launch && appId) {
+            // Diego P2-3: the holder must still be able to hold this worker, judged on the transaction's view under
+            // the rows held above: a participant, and on a user-owned App its owner or whoever manages it (#1764).
+            // Diego delta P2: a LIVE context, not a copy of the request's: caches dropped and platform roles re-read
+            // from the user row under the user anchor held above (the #1859 pattern), so a demotion that committed
+            // while this bind waited is seen; a deleted user or revoked key reads as not permitted.
+            const txCtx = await liveTxContext(ctx, tx).catch((e: unknown) => {
+              if (e instanceof Error && e.message === 'Forbidden') return null;
+              throw e;
+            });
+            const bindApp = await tx.app.findUnique({ where: { id: appId }, select: { id: true, organizationId: true, ownerUserId: true } });
+            const may = !!txCtx && !!bindApp && (await isAppParticipant(txCtx, bindApp)) &&
+              (bindApp.ownerUserId === null || ctx.userId === bindApp.ownerUserId || (await managesApp(txCtx, bindApp)));
+            if (!may) {
+              throw new GraphQLError('The holder may no longer hold this worker.', { extensions: { code: 'FORBIDDEN' } });
+            }
           }
           // Released during the wait: an unheld name is claimed by this bind,
           // through the same compare-and-set path as a never-held one.
@@ -1196,9 +1327,19 @@ export const sessionMutations = {
           host: input.host,
           tool: input.tool,
           family,
+          // #1709 (cor:agt:070:08): the launch, recorded on the session; the hold is unchanged.
+          ...(launch ? {
+            launchHostId: launch.grant.hostId,
+            launchOperationId: launch.grant.operationId,
+            launchTaskId: launch.grant.taskId,
+            launchIssuedBy: launch.issuedBy,
+          } : {}),
         },
         include: SESSION_INCLUDE,
         });
+        // #1709: the grant is spent by THIS bind, atomically: of two concurrent redemptions one loses here, and its
+        // whole bind rolls back.
+        if (launch && !(await consumeGrant(tx, launch.grant.id, created.id, new Date()))) throw launchGrantInvalid();
         // #1726: set who the worker reports to, in one step with the bind (a
         // spawn brief). Only onto a worker that reports to nobody, or to the
         // same worker (nothing to do): naming a different one would move a
@@ -1244,7 +1385,7 @@ export const sessionMutations = {
       });
       for (const id of supersededIds) sessionKeyCache.evict(id);
       return bound;
-    },
+    }),
 
     // #931: set a live session's mutable provenance fields mid-session — a PR
     // usually gets opened AFTER startSession already ran, so prNumber needs a
@@ -1369,7 +1510,7 @@ export const sessionMutations = {
           await tx.$queryRaw`SELECT id FROM sessions WHERE id = ${event.sessionId} FOR SHARE`;
           const session = await tx.session.findUnique({
             where: { id: event.sessionId },
-            select: { userId: true, appId: true, deletedAt: true },
+            select: { userId: true, appId: true, deletedAt: true, launchOperationId: true },
           });
           if (session && !session.deletedAt && ownsSession(ctx, session)) sessionId = event.sessionId;
         }
@@ -1673,8 +1814,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
@@ -1750,8 +1892,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
@@ -1785,8 +1928,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
@@ -1968,8 +2112,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
 
       const now = new Date();
@@ -1997,8 +2142,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
 
       await ctx.db.agent.update({

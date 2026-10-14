@@ -106,7 +106,9 @@ describe('#1522 nested Agent read parity', () => {
     );
     expect(direct.body.kind).toBe('single');
     if (direct.body.kind !== 'single') return;
-    expect(direct.body.singleResult.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+    // #1944: a foreign non-public Agent reads as absent: null, no error.
+    expect(direct.body.singleResult.errors).toBeUndefined();
+    expect(direct.body.singleResult.data?.agent).toBeNull();
 
     const nested = await server.executeOperation(
       {

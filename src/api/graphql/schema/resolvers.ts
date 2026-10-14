@@ -11,6 +11,7 @@ import { automationPinQueries, automationPinMutations } from './resolvers.automa
 // This file only imports those slices and spreads them into the resolver map.
 // `Context` is re-exported so existing importers (mcp/server.ts + the resolver
 // test suite, ~80 files) keep importing it from './resolvers.js' unchanged.
+import { withInheritedNodeProjection } from './resolvers.inheritedNode.js';
 import { type Context } from './resolvers.helpers.js';
 export type { Context };
 
@@ -125,7 +126,9 @@ export const resolvers = {
   Memory: { ...typeResolvers.Memory, ...memoryConfigFieldResolvers.Memory },
   // #1591: approval status joins the existing Node block; #1610 the
   // Worker / Agent attribution with it.
-  Node: { ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node, ...signingFieldResolvers.Node },
+  // #1885: an inherited node shows its content and nothing of the base
+  // tenant's records (resolvers.inheritedNode.ts).
+  Node: withInheritedNodeProjection({ ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node, ...signingFieldResolvers.Node }),
   // #1632: signing requests and signatures.
   SigningRequest: signingFieldResolvers.SigningRequest,
   NodeSignature: signingFieldResolvers.NodeSignature,

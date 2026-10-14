@@ -1,3 +1,5 @@
+import { signingSurfacePolicy } from '../lib/signing/surface.js';
+
 /**
  * Server-identity / deployment-info surface — answers "which hadron-server
  * am I talking to?".
@@ -210,6 +212,9 @@ export const MCP_SURFACE_CAPABILITIES = [
 export interface DeploymentInfo {
   baseUrl: string;
   version: string;
+  /** On-only rollout disclosure; missing never means a grant to sign. */
+  signing?: true;
+  passkeyRegistration?: true;
 }
 
 export function getDeploymentInfo(): DeploymentInfo {
@@ -229,5 +234,10 @@ export function getDeploymentInfo(): DeploymentInfo {
     raw && raw !== '/'
       ? raw
       : `http://localhost:${process.env.PORT || 4000}`;
-  return { baseUrl, version: HADRON_SERVER_VERSION };
+  const policy = signingSurfacePolicy();
+  return {
+    baseUrl, version: HADRON_SERVER_VERSION,
+    ...(policy.signing ? { signing: true as const } : {}),
+    ...(policy.registration ? { passkeyRegistration: true as const } : {}),
+  };
 }

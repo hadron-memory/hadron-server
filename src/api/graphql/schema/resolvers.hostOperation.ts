@@ -62,6 +62,7 @@ import {
 import { appendAvailabilityEvent, appendHostOperationEvent, eventActor, PLATFORM_ACTOR } from '../../../lib/agentTasks/events.js';
 import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import { fenceHostDecision, insertWorkerStart, LaunchRefusal, liveRegistrationsFor, lockStartableWorker, mintLaunchGrants } from '../../../lib/hostOperations/launch.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { handoffSessionId, newestHandoff } from '../../../lib/workerHandoff.js';
 import { normalizeAvailability, type AvailabilityInput } from './resolvers.agentTaskAlarms.js';
@@ -193,13 +194,18 @@ export const hostOperationMutations = {
         LIMIT ${first}
         FOR UPDATE`;
       const ids = rows.map((r) => r.id);
+      const now = new Date();
       if (ids.length) {
-        await tx.hostOperation.updateMany({ where: { id: { in: ids }, status: 'issued' }, data: { status: 'collected', collectedAt: new Date() } });
+        await tx.hostOperation.updateMany({ where: { id: { in: ids }, status: 'issued' }, data: { status: 'collected', collectedAt: now } });
       }
-      await recordHostKeyUse(tx, host, 'collect', { count: ids.length });
-      const ops = ids.length ? await tx.hostOperation.findMany({ where: { id: { in: ids } } }) : [];
+      // #1709 slice 2: each worker.start collected gets a fresh single-use launch grant, shown in this answer only.
+      // One whose worker is no longer held fails here instead, and is left out.
+      const starts = ids.length ? await tx.hostOperation.findMany({ where: { id: { in: ids }, type: 'worker.start' } }) : [];
+      const grants = await mintLaunchGrants(tx, starts, now);
+      const ops = ids.length ? await tx.hostOperation.findMany({ where: { id: { in: ids }, status: 'collected' } }) : [];
+      await recordHostKeyUse(tx, host, 'collect', { count: ops.length });
       const byId = new Map(ops.map((o) => [o.id, o]));
-      return ids.map((id) => byId.get(id)!);
+      return ids.filter((id) => byId.has(id)).map((id) => ({ ...byId.get(id)!, launchGrant: grants.get(id) ?? null }));
     });
   },
 
@@ -241,6 +247,18 @@ export const hostOperationMutations = {
       let result = status === 'succeeded' ? successResult(op.type as HostOperationType, input.worktree) : null;
       const now = new Date();
       let outcome = status;
+      if (op.type === 'worker.start') {
+        // #1709 slice 2: done means an agent runs in that worktree AND its worker session is bound (#1709's table: a
+        // started terminal without a binding is not success). The server knows which: the session its grant bound.
+        const bound = await tx.session.findUnique({ where: { launchOperationId: op.id }, select: { id: true } });
+        if (status === 'succeeded' && !bound) {
+          throw taskError('HOST_OPERATION_NOT_DONE', 'No worker session was bound with this start\'s grant yet; report SUCCEEDED once it is.', { id: op.id });
+        }
+        if (bound) {
+          outcome = 'succeeded';
+          result = { sessionId: bound.id };
+        }
+      }
       if (op.type === 'worker.end') {
         // cor:agt:020:10 / #1709: worker.end FAILS ONLY IF THE SESSION DID NOT END. A success ends the session if the
         // worker had not (a host-ended stint, recorded without a handoff); a reported failure on a session that did
@@ -267,6 +285,9 @@ export const hostOperationMutations = {
           failureReason: outcome === 'failed' ? reason : null,
         },
       });
+      if (outcome === 'failed') {
+        await tx.launchGrant.updateMany({ where: { operationId: op.id, consumedAt: null, revokedAt: null }, data: { revokedAt: now } });
+      }
       await appendHostOperationEvent(tx, {
         appId: app.id,
         type: outcome === 'succeeded' ? 'host.operation.succeeded' : 'host.operation.failed',
@@ -376,12 +397,10 @@ export const hostOperationMutations = {
       if (e instanceof HostOperationArgsError) throw taskError(e.code, e.message);
       throw e;
     }
-    if (validated.type === 'worker.start' || validated.type === 'worker.deliver') {
+    if (validated.type === 'worker.deliver') {
       throw taskError(
         'HOST_OPERATION_NOT_ISSUABLE',
-        validated.type === 'worker.deliver'
-          ? 'worker.deliver is not issued until a host has a delivery path for it (hadron-cli#829).'
-          : 'worker.start is not issued yet: it ships with the launch grant (#1709).',
+        'worker.deliver is not issued until a host has a delivery path for it (hadron-cli#829).',
       );
     }
     const hostId = (input.hostId ?? '').trim();
@@ -392,6 +411,7 @@ export const hostOperationMutations = {
     const workerNotFound = () => taskError('WORKER_NOT_FOUND', 'Worker not found.', { worker: input.worker });
     if (!workerId) throw workerNotFound();
     const args: Record<string, string> = { ...validated.args, workerId };
+    if (validated.type === 'worker.start') return issueWorkerStart(ctx, app, actor, hostId, workerId, args, input.appRef);
     const id = generateId();
     await inTaskWriteTx(ctx, app, actor, () => appNotFound(input.appRef), async (tx, txCtx, freshApp) => {
       // The worker under a lock (a release, a retire or a reportsTo change either committed first or waits; the
@@ -447,6 +467,51 @@ export const hostOperationMutations = {
     return ctx.db.hostOperation.findUniqueOrThrow({ where: { id } });
   },
 };
+
+/**
+ * cor:agt:070:05 — start a worker: whoever manages the App, with a task or without (Holger via Vera #10774: a manager
+ * assembles a team before committing to a mission). Worktree authority alone does not start a worker. The worker must
+ * be held, with no live session and no start in flight; the host must be live and list it with that worktree and family.
+ */
+async function issueWorkerStart(
+  ctx: Context, app: TaskApp, actor: TaskActor, hostId: string, workerId: string, args: Record<string, string>, appRef: string,
+) {
+  let id = '';
+  try {
+    await inTaskWriteTx(ctx, app, actor, () => appNotFound(appRef), async (tx, txCtx, freshApp) => {
+      if (!(await actorManagesApp(txCtx, freshApp, actor))) {
+        throw taskError('HOST_OPERATION_NOT_PERMITTED', 'Only whoever manages the App starts a worker through its host.');
+      }
+      const now = new Date();
+      const hold = await lockStartableWorker(tx, freshApp.id, workerId, now);
+      // Diego P2-2: the registration, its worktree and the lapse count hold still through the insert.
+      await fenceHostDecision(tx, freshApp.id);
+      const [reg] = await liveRegistrationsFor(tx, freshApp.id, workerId, now, hostId);
+      if (!reg) throw taskError('HOST_NOT_FOUND', 'No live host with that id registers this worker.', { hostId });
+      if (!reg.worktrees.includes(args.worktree!)) {
+        throw taskError('BAD_HOST_OPERATION_ARGS', 'A worker starts only in a worktree that host registers for it (cor:agt:070:06).');
+      }
+      if (reg.family !== args.family) {
+        throw taskError('BAD_HOST_OPERATION_ARGS', `That host launches this worker as ${reg.family}.`);
+      }
+      if (args.taskId) {
+        const task = await tx.agentTask.findUnique({ where: { id: args.taskId }, select: { appId: true, assigneeWorkerId: true, status: true } });
+        if (!task || task.appId !== freshApp.id || task.assigneeWorkerId !== workerId || !['pending', 'started'].includes(task.status)) {
+          throw taskError('BAD_HOST_OPERATION_ARGS', "taskId names an open task of this App assigned to this worker.");
+        }
+      }
+      const e = issuer(ctx, actor);
+      id = await insertWorkerStart(tx, {
+        appId: freshApp.id, hostId, workerId, worktree: args.worktree!, family: args.family!, taskId: args.taskId ?? null,
+        issuer: { issuedBy: 'user', issuedByUserId: e.issuedByUserId!, issuedByAgentId: e.issuedByAgentId }, hold,
+      });
+    });
+  } catch (e) {
+    if (e instanceof LaunchRefusal) throw taskError(e.code, e.message, { workerId });
+    throw e;
+  }
+  return ctx.db.hostOperation.findUniqueOrThrow({ where: { id } });
+}
 
 /** cor:agt:070:05 — create or remove a worktree: the holder, the worker it reports to, or whoever manages the App. */
 async function mayIssueWorktreeOp(
@@ -525,17 +590,17 @@ export const hostOperationQueries = {
     ctx: Context,
   ) =>
     withReadableApp(ctx, a.appRef, async (c, app) => {
+      // Ruling 0 (Holger via Vera #10955; cor:agt:070:04 S5): a host key does not read the App-wide listing; it sees
+      // its own host's operations only by collecting them. Refused before any argument is read, so the answer is the
+      // same whatever hostId, status, worker or cursor it passes: no oracle for another host's operations.
+      if (await wasEverHostKey(c)) {
+        throw taskError('FORBIDDEN', "A host key reads its own host's operations by collecting them, not from the App's listing.");
+      }
       const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
       const status = a.status ? a.status.toLowerCase() : null;
       if (status && !['issued', 'collected', 'succeeded', 'failed'].includes(status)) {
         throw badInput('status is ISSUED, COLLECTED, SUCCEEDED or FAILED.');
       }
-      // Holger via Vera #10805 (cor:agt:070:04): a host key sees only its OWN host's operations; the App-wide listing is
-      // for the App's participants and its other keys. A key that has ever been granted host:operate is a host key
-      // here, held to the host of its latest grant even once revoked, so revoking the scope never widens its read.
-      const ownHost = await hostOfKey(c);
-      const hostFilter = ownHost ?? a.hostId ?? null;
-      if (ownHost && a.hostId && a.hostId !== ownHost) return { items: [], hasNextPage: false, endCursor: null };
       let workerId: string | null = null;
       if (a.worker) {
         workerId = await resolveTaskWorkerId(c, app.id, a.worker);
@@ -543,9 +608,8 @@ export const hostOperationQueries = {
       }
       let cursor: { issuedAt: Date; id: string } | null = null;
       if (a.after) {
-        // Scoped like the list, so a cursor naming another host's operation reads as no cursor at all (no oracle).
         const at = await c.db.hostOperation.findFirst({
-          where: { id: a.after, appId: app.id, ...(ownHost ? { hostId: ownHost } : {}) },
+          where: { id: a.after, appId: app.id },
           select: { issuedAt: true, id: true },
         });
         if (!at) throw badInput('after is not a cursor of this list.');
@@ -554,7 +618,7 @@ export const hostOperationQueries = {
       const rows: HostOperationRow[] = await c.db.hostOperation.findMany({
         where: {
           appId: app.id,
-          ...(hostFilter ? { hostId: hostFilter } : {}),
+          ...(a.hostId ? { hostId: a.hostId } : {}),
           ...(status ? { status } : {}),
           ...(workerId ? { workerId } : {}),
           ...(cursor ? { OR: [{ issuedAt: { lt: cursor.issuedAt } }, { issuedAt: cursor.issuedAt, id: { lt: cursor.id } }] } : {}),
@@ -568,18 +632,17 @@ export const hostOperationQueries = {
 };
 
 /**
- * The host a calling App key is bound to for reads, or null for a person or a key that was never a host's: the host
- * of the key's latest host:operate grant, live or revoked (#10805).
+ * Is the caller an App key that has ever been granted host:operate, live or revoked? Such a key is a host key for the
+ * listing's refusal, so revoking the scope never opens the App-wide read (#1894; it replaces #1884's host binding).
  */
-async function hostOfKey(c: Context): Promise<string | null> {
+async function wasEverHostKey(c: Context): Promise<boolean> {
   const key = appKeyCaller(c);
-  if (!key) return null;
+  if (!key) return false;
   const row = await c.db.appKeyScope.findFirst({
     where: { appKeyId: key.appKeyId, scope: 'host:operate' },
-    orderBy: [{ grantedAt: 'desc' }, { id: 'desc' }],
-    select: { hostId: true },
+    select: { id: true },
   });
-  return row?.hostId ?? null;
+  return row !== null;
 }
 
 export const hostOperationFieldResolvers = {

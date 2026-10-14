@@ -34,6 +34,7 @@ import {
   requireOrgRole,
   requireAgentAccess,
   requireOwnerOrOrgRole,
+  resolveReadableAgentRef,
 } from '../api/graphql/schema/resolvers.helpers.js';
 import { resolveAgentRef } from './entityRef/agentRef.js';
 import { resolveAppRef } from './entityRef/appRef.js';
@@ -107,14 +108,11 @@ export async function resolveScopeOwnerForWrite(
     return { organizationId: id, agentId: null, appId: null };
   }
   if (input.agentRef) {
-    const { id } = await resolveAgentRef(ctx.db, input.agentRef.trim());
-    const agent = await ctx.db.agent.findFirst({
-      where: { id, deletedAt: null },
-      select: { organizationId: true, ownerUserId: true },
-    });
-    if (!agent) throw new Error('Forbidden');
+    // #1944: through the read gate, so an Agent the caller can't read answers
+    // as absent (as a retired one does); the write gate below decides the rest.
+    const agent = await resolveReadableAgentRef(ctx, input.agentRef.trim());
     await requireAgentAccess(ctx, agent, 'ADMIN');
-    return { organizationId: null, agentId: id, appId: null };
+    return { organizationId: null, agentId: agent.id, appId: null };
   }
   const { id } = await resolveAppRef(ctx.db, input.appRef!.trim());
   // Live AND installed: an uninstalled App must not keep supplying its owner

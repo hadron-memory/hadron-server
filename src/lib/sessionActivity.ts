@@ -422,11 +422,12 @@ export async function usageEventCountsAsActivity(
       where: { id: sessionId },
       select: {
         userId: true, appId: true, type: true, startedAt: true, updatedAt: true,
-        autoExpiredAt: true, endedAt: true, deletedAt: true, expiresAt: true,
+        autoExpiredAt: true, endedAt: true, deletedAt: true, expiresAt: true, launchOperationId: true,
       },
     })) as {
       userId: string | null; appId: string | null; type: SessionType; startedAt: Date; updatedAt: Date | null;
       autoExpiredAt: Date | null; endedAt: Date | null; deletedAt: Date | null; expiresAt: Date | null;
+      launchOperationId: string | null;
     } | null;
     if (!s || s.deletedAt || s.endedAt) return false;
     if (s.expiresAt && s.expiresAt.getTime() <= now.getTime()) return false;
