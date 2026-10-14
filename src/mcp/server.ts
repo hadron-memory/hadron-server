@@ -61,6 +61,7 @@ import {
 import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { userUrn } from '../lib/userHandle.js';
 import { registerCommentTools } from './commentTools.js';
+import { signingSurfacePolicy } from '../lib/signing/surface.js';
 import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
 import { registerTickerTools } from './tickerTools.js';
@@ -1754,7 +1755,7 @@ async function renderNodeReadProjection(
 
   // #1632 (cor:dmo:130:06): the signatures line, beside Approval. An encrypted
   // node loads nothing (no hash-dependent work there).
-  const signatureLine = opts.encryptedMemory
+  const signatureLine = !signingSurfacePolicy().signing ? '' : opts.encryptedMemory
     ? 'Signatures: not applicable (encrypted memory)'
     : renderSignatureLine(
       opts.batch?.signatures?.get(node.id) ?? (await loadSignatureStatuses(db, [node.id])).get(node.id)!,
@@ -5020,7 +5021,9 @@ export function createMcpServerInstance(
       const memoryUrnOf = memoizedMemoryUrnLookup();
       // #1632: signatures for the batch in one load; their signers join the
       // one human-name lookup.
-      const signatures = await loadSignatureStatuses(db, visible.map((n) => n.id));
+      const signatures = signingSurfacePolicy().signing
+        ? await loadSignatureStatuses(db, visible.map((n) => n.id))
+        : new Map<string, NodeSignatureStatusView>();
       const signerIds = [...signatures.values()].flatMap((st) => st.signatures.map((sig) => sig.signerId));
       const [taskRefs, humanNames, feedback] = await Promise.all([
         batchReadableTaskRefs(visible, reports, auth, memoryUrnOf),
