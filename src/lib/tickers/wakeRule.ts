@@ -46,7 +46,7 @@ export type TaskWakeReason = {
   taskId: string;
   eventId: string;
   chainIndex: number;
-  event: 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'ALARM';
+  event: 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'ALARM' | 'END_SESSION';
   title: string;
 };
 
