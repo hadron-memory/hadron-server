@@ -662,3 +662,13 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1632: signing requests, append-only signature records, the content-change
 -- marker. One source, shared verbatim with migration 20261013160000_signing_requests.
 \ir signing-invariants.sql
+
+-- #1903: session liveness's activity probe, max(created_at) over a session's
+-- counts_as_activity events. Partial, so Prisma's schema language can't model
+-- it; `db push` and `migrate diff` leave it alone (verified on Prisma 6.19), so
+-- this file is what builds it on push-managed DBs. Same definition as migration
+-- 20261014040000_usage_events_session_activity_idx, which builds it
+-- CONCURRENTLY for production; production went down for an hour without it
+-- (ops:alpha:incident-2026-10-14-pool-exhaustion-liveness-query).
+CREATE INDEX IF NOT EXISTS usage_events_session_activity_idx
+  ON usage_events (session_id, created_at) WHERE counts_as_activity;
