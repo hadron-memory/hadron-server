@@ -144,6 +144,14 @@ export async function renderTask(t: TaskRow, ctx: Context): Promise<string> {
   ].filter(Boolean);
   lines.push(`  created ${t.createdAt.toISOString()}${times.length ? ` · ${times.join(' · ')}` : ''}`);
   lines.push(`  closeSessionWhenDone: ${t.closeSessionWhenDone ? 'yes' : 'no'}`);
+  // #1709 (cor:agt:050:10): the ask, in the words the asked worker acts on.
+  const end = (await T.sessionEndRequest(t as never, {}, ctx)) as { sessionId: string; dueAt: Date; resolution: string | null } | null;
+  if (end) {
+    lines.push(end.resolution
+      ? `  session end: ${end.resolution.toLowerCase().replace(/_/g, '-')} (session ${end.sessionId})`
+      : `  session end requested: end session ${end.sessionId} with your handoff (hadron_end_session) before ${end.dueAt.toISOString()}; ` +
+        'if it is still open then, the platform ends it through its host.');
+  }
   if (t.status === 'finished') {
     lines.push(`  result: ${t.resultOutcome}${t.resultEvidence ? ` · evidence ${t.resultEvidence}` : ''}`);
     if (t.resultSummary) lines.push(...String(t.resultSummary).split('\n').map((l) => `    ${l}`));
