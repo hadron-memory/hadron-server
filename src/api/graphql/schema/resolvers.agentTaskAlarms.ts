@@ -68,6 +68,11 @@ import {
   HOST_LAPSE_CHECK_INS_MIN,
   lockAppHostLapse,
 } from '../../../lib/agentTasks/hosts.js';
+import {
+  SESSION_END_GRACE_DEFAULT_MINUTES,
+  SESSION_END_GRACE_MAX_MINUTES,
+  SESSION_END_GRACE_MIN_MINUTES,
+} from '../../../lib/hostOperations/sessionEnd.js';
 
 // ── Errors and parsing ────────────────────────────────────────────────────
 
@@ -344,16 +349,18 @@ export const agentTaskAlarmMutations = {
   /**
    * #1706 — an App's stall windows, in minutes (cor:agt:050:14–:17 "What Can
    * Change"), and (#1763) its host-registration lapse in check-ins
-   * (cor:agt:070:01, 2 to 10): whoever manages the App. An omitted field keeps
-   * its value; null returns it to the platform default.
+   * (cor:agt:070:01, 2 to 10), and (#1709) the grace before the platform ends
+   * a finished task's session (cor:agt:050:10, 1 to 1440 minutes): whoever
+   * manages the App. An omitted field keeps its value; null returns it to the
+   * platform default.
    */
   setAgentTaskStallSchedule: async (
     _: unknown,
-    { appRef, input }: { appRef: string; input: Partial<Record<keyof StallWindows | 'hostLapseCheckIns', number | null>> },
+    { appRef, input }: { appRef: string; input: Partial<Record<keyof StallWindows | 'hostLapseCheckIns' | 'sessionEndGraceMinutes', number | null>> },
     ctx: Context,
   ) => {
     if (!input) throw badInput('input is required.');
-    const data: Partial<Record<keyof StallWindows | 'hostLapseCheckIns', number | null>> = {};
+    const data: Partial<Record<keyof StallWindows | 'hostLapseCheckIns' | 'sessionEndGraceMinutes', number | null>> = {};
     for (const key of Object.keys(STALL_WINDOW_DEFAULTS) as (keyof StallWindows)[]) {
       if (!(key in input)) continue;
       const v = input[key];
@@ -372,6 +379,17 @@ export const agentTaskAlarmMutations = {
         );
       }
       data.hostLapseCheckIns = v ?? null;
+    }
+    // cor:agt:050:10 (#1709): the session-end grace, in minutes.
+    if ('sessionEndGraceMinutes' in input) {
+      const v = input.sessionEndGraceMinutes;
+      if (v != null && (!Number.isInteger(v) || v < SESSION_END_GRACE_MIN_MINUTES || v > SESSION_END_GRACE_MAX_MINUTES)) {
+        throw badInput(
+          `sessionEndGraceMinutes is a whole number of minutes from ${SESSION_END_GRACE_MIN_MINUTES} to ${SESSION_END_GRACE_MAX_MINUTES}, ` +
+            `or null for the default (${SESSION_END_GRACE_DEFAULT_MINUTES}).`,
+        );
+      }
+      data.sessionEndGraceMinutes = v ?? null;
     }
     const { app, actor } = await resolveParticipatedApp(ctx, appRef);
     requireWritable(ctx, app);
@@ -397,6 +415,7 @@ async function stallWindowsView(ctx: Context, appId: string) {
     appId,
     ...effectiveWindows(row),
     hostLapseCheckIns: row?.hostLapseCheckIns ?? HOST_LAPSE_CHECK_INS_DEFAULT,
+    sessionEndGraceMinutes: row?.sessionEndGraceMinutes ?? SESSION_END_GRACE_DEFAULT_MINUTES,
     updatedAt: row?.updatedAt ?? null,
   };
 }

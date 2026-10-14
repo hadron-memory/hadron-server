@@ -9,6 +9,9 @@
  *   3. write down that a stalled worker acted again (cor:agt:060:07);
  *   4. (#1708) record, once, each task wake whose subject is dormant and so
  *      cannot be delivered (cor:agt:080:11). It launches nothing (T6).
+ *   5. (#1709) resolve each session-end request whose grace has passed
+ *      (cor:agt:050:10): the session ended, or the platform issues
+ *      `worker.end` for it to a live host, or there is no live host.
  *
  * No claim race, unlike the scheduler: every write is idempotent on its own
  * key (the episode's unique index, a conditional wake stamp, a conditional
@@ -24,12 +27,13 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 import { evaluateStalls, wakeDueOwners } from '../lib/agentTasks/stall.js';
 import { clearStalledMarks } from '../lib/agentTasks/availability.js';
 import { recordUndeliverableTaskWakes } from '../lib/agentTasks/taskWakes.js';
+import { sweepSessionEndRequests } from '../lib/hostOperations/sessionEnd.js';
 
-export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number };
+export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number; sessionEnds: number };
 
 /** One pass at `now`. Each step runs even when an earlier one failed. */
 export async function taskStallTick(db: PrismaClient, now = new Date()): Promise<TaskStallTickResult> {
-  const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0 };
+  const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0 };
   try {
     result.raised = (await evaluateStalls(db, now)).length;
   } catch (err) {
@@ -49,6 +53,11 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
     result.undeliverable = await recordUndeliverableTaskWakes(db, now);
   } catch (err) {
     console.error('[task-stall] recording undeliverable task wakes failed:', err);
+  }
+  try {
+    result.sessionEnds = await sweepSessionEndRequests(db, now);
+  } catch (err) {
+    console.error('[task-stall] resolving session-end requests failed:', err);
   }
   return result;
 }

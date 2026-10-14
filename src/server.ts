@@ -55,10 +55,9 @@ import {
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
-import { resolvers } from './api/graphql/schema/resolvers.js';
 import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
 import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
-import { typeDefs } from './api/graphql/schema/typeDefs.js';
+import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
 import {
   formatGraphQLError,
   isExpectedClientError,
@@ -1124,9 +1123,10 @@ export async function createServer(): Promise<Express> {
   // GraphQL
   // ---------------------------------------------------------------------------
 
+  const { typeDefs, resolvers: deploymentResolvers } = deploymentSchema();
   const apollo = new ApolloServer({
     typeDefs,
-    resolvers,
+    resolvers: deploymentResolvers,
     plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin],
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.

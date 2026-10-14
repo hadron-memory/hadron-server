@@ -54,12 +54,15 @@ ALTER TABLE model_family_availability ADD CONSTRAINT chk_model_family_availabili
 -- cor:agt:050:14–:17 "What Can Change" — a window is a positive number of
 -- minutes, at most a week; NULL means the platform default. cor:agt:070:01
 -- (#1763; Holger, team chat #10405): the host-registration lapse is a whole
--- number of check-ins from 2 to 10; NULL means the default, 3.
+-- number of check-ins from 2 to 10; NULL means the default, 3. cor:agt:050:10
+-- (#1709): the grace before the platform ends a finished task's session is 1
+-- to 1440 minutes; NULL means the default, 10.
 ALTER TABLE agent_task_stall_schedule DROP CONSTRAINT IF EXISTS chk_agent_task_stall_schedule_range;
 ALTER TABLE agent_task_stall_schedule ADD CONSTRAINT chk_agent_task_stall_schedule_range CHECK (
   (not_started_minutes IS NULL OR not_started_minutes BETWEEN 1 AND 10080) AND
   (no_progress_minutes IS NULL OR no_progress_minutes BETWEEN 1 AND 10080) AND
   (owner_reaction_minutes IS NULL OR owner_reaction_minutes BETWEEN 1 AND 10080) AND
   (assignment_minutes IS NULL OR assignment_minutes BETWEEN 1 AND 10080) AND
-  (host_lapse_check_ins IS NULL OR host_lapse_check_ins BETWEEN 2 AND 10)
+  (host_lapse_check_ins IS NULL OR host_lapse_check_ins BETWEEN 2 AND 10) AND
+  (session_end_grace_minutes IS NULL OR session_end_grace_minutes BETWEEN 1 AND 1440)
 );

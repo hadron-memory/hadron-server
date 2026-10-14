@@ -1,0 +1,16 @@
+[Unit]
+Description=Temporary synthetic Hadron passkey AL
+After=network.target
+[Service]
+Type=simple
+User=passkey-al
+WorkingDirectory=/opt/hadron-passkey-al/scripts/passkey-spike
+EnvironmentFile=/etc/hadron-passkey-al.env
+ExecStart=/usr/bin/node preview.mjs
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+Restart=no
+[Install]
+WantedBy=multi-user.target
