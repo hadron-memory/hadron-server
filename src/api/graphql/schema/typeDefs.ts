@@ -8474,6 +8474,10 @@ export const typeDefs = `#graphql
   Identity of the running hadron-server (see Query.serverInfo).
   """
   type ServerInfo {
+    "Present and true only when this deployment offers node signing. Discovery never grants access to sign."
+    signing: Boolean!
+    "Present and true only when passkey registration is enabled separately from node signing."
+    passkeyRegistration: Boolean!
     """
     HADRON_SERVER_VERSION — the MCP/API-surface contract version.
     """
