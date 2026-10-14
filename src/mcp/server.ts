@@ -3017,6 +3017,8 @@ export function createMcpServerInstance(
         `version: ${dep.version}`,
         `capabilities: ${[
           ...MCP_SURFACE_CAPABILITIES,
+          ...(dep.signing ? ['node-signing'] : []),
+          ...(dep.passkeyRegistration ? ['passkey-registration'] : []),
           // Probed exactly as the tools will admit the call: allowlists, a
           // live App and current participation (#1362 review).
           ...(auth.appId && (await teamAttentionAvailable(chatCtx(), auth.appId))
