@@ -662,3 +662,8 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1632: signing requests, append-only signature records, the content-change
 -- marker. One source, shared verbatim with migration 20261013160000_signing_requests.
 \ir signing-invariants.sql
+
+-- #1885: an Agent extends at most one base Agent; no cycles, at most 4 in a
+-- chain. One source, shared verbatim with migration 20261014120000_agent_base
+-- (pinned by src/api/graphql/schema/resolvers.agentBase1885.test.ts).
+\ir agent-base-invariants.sql

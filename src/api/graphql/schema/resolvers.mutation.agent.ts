@@ -42,6 +42,7 @@ import {
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { writeAgentBase } from '../../../lib/agentBase.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
@@ -841,6 +842,32 @@ export const agentMutations = {
         }
       });
       return true;
+    },
+
+    /**
+     * #1885 (cor:dmo:050:14) — set, change or clear the one base Agent `ref`
+     * extends. Whoever manages the child decides (cor:dmo:050:13, ruling 5);
+     * `writeAgentBase` decides whether the change is well-formed: the grant,
+     * no cycle, the chain cap for the child and every Agent extending it.
+     * Managing the base isn't needed, and never conferred: the child's
+     * managers change the child, never the base.
+     */
+    setAgentBase: async (_: unknown, { ref, baseRef }: { ref: string; baseRef?: string | null }, ctx: Context) => {
+      // #789 / cor:api:140 — resolution is not authorization.
+      const { id } = await resolveAgentRef(ctx.db, ref);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+      await requireAgentAccess(ctx, agent, 'ADMIN');
+      const baseId = baseRef ? (await resolveAgentRef(ctx.db, baseRef)).id : null;
+      await ctx.db.$transaction((tx) =>
+        writeAgentBase(tx, {
+          childId: id,
+          childRef: ref,
+          baseId,
+          baseRef: baseRef ?? null,
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
+        }),
+      );
+      return ctx.db.agent.findUniqueOrThrow({ where: { id }, include: AGENT_INCLUDE });
     },
 
     /**

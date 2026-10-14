@@ -1967,6 +1967,13 @@ model Agent {
   /// A dedicated column so roster/casting queries can filter without
   /// parsing the prompt.
   personaRole          String?         @map("persona_role")
+  /// #1885 (cor:dmo:050:14) — the one base Agent this Agent extends, or null.
+  /// The child inherits its base chain's system-memory nodes (except boot
+  /// prompts). One base, no cycles, at most 4 Agents in a chain counting this
+  /// one: enforced by `src/lib/agentBase.ts`, the only writer, and backstopped
+  /// by `agent_base_guard` (prisma/agent-base-invariants.sql). `Restrict`, as
+  /// for an imported Agent: a live child keeps its base from being removed.
+  extendsAgentId       String?         @map("extends_agent_id")
   createdAt            DateTime        @default(now()) @map("created_at")
   createdBy            String?         @map("created_by")
   updatedAt            DateTime?       @updatedAt @map("updated_at")
@@ -2006,8 +2013,13 @@ model Agent {
   readStates           ChannelReadState[] @relation("ReadStateAgent")
   /// #974 — the named castings of this agent into Apps (cor:dmo:050:11).
   workers           Worker[]
+  /// #1885 (cor:dmo:050:14) — the base this Agent extends, and the Agents
+  /// that extend it. Never called a parent: that word belongs to imports.
+  extendsAgent      Agent?              @relation("AgentBase", fields: [extendsAgentId], references: [id], onDelete: Restrict)
+  extendedBy        Agent[]             @relation("AgentBase")
 
   @@index([ownerUserId])
+  @@index([extendsAgentId])
   @@index([legacyUrn])
   @@map("agents")
 }
