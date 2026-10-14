@@ -1411,6 +1411,25 @@ export async function resolveReadableAgentRef(ctx: Context, ref: string): Promis
 }
 
 /**
+ * #1944 — {@link resolveReadableAgentRef} for the `agentRef`/`agentId` arg
+ * pair `resolveRefArg` takes: an Agent the caller can't read answers with
+ * that helper's own not-found envelope (`refArgNotFoundError`), exactly as an
+ * absent one does there.
+ */
+export async function resolveReadableAgentRefArg(
+  ctx: Context,
+  a: { ref?: string | null; id?: string | null },
+): Promise<Agent> {
+  const id = await resolveAgentRefArg(ctx.db, a);
+  try {
+    return await resolveReadableAgentRef(ctx, id);
+  } catch (e) {
+    if (!(e instanceof AgentNotFoundError)) throw e;
+    throw refArgNotFoundError('agent', chosenRefArg(a)!);
+  }
+}
+
+/**
  * Manage a Memory's settings and operational controls. Personal/private
  * memories have a strict owner in `userId` (cor:acl:010:02), independent of
  * the tenant owner in `ownerUserId`; every other class uses the tenant gate.
@@ -1771,8 +1790,10 @@ export async function requireAiConfigOwnerAdmin(
       return { ownerWhere: { appId: id }, resolvedOwnerId: id };
     }
     case 'AGENT': {
-      const { id } = await resolveAgentRef(ctx.db, ownerId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+      // #1944: through the read gate first, so an Agent the caller can't read
+      // answers as absent; the tenant gate below still decides the rest.
+      const agent = await resolveReadableAgentRef(ctx, ownerId);
+      const { id } = agent;
       // #1787 review (Rook P2-1): the config registry stays on the TENANT gate —
       // update/test can send the stored key to a caller-chosen endpoint, so for a
       // user-owned Agent these are owner-only (manage yes, move the key no);

@@ -68,7 +68,7 @@ import {
   requireAiConfigOwnerAdmin,
   rethrowAiConfigTyped,
   resolveUserRefArg,
-  resolveAgentRefArg,
+  resolveReadableAgentRefArg,
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
@@ -1180,11 +1180,10 @@ export const agentMutations = {
       { parentAgentRef, importedAgentRef }: { parentAgentRef: string; importedAgentRef: string },
       ctx: Context,
     ) => {
-      const { id: resolvedParentId } = await resolveAgentRef(ctx.db, parentAgentRef);
+      // #1944: the parent through the read gate FIRST, as publishAgentImport.
+      const parent = await resolveReadableAgentRef(ctx, parentAgentRef);
+      const resolvedParentId = parent.id;
       const { id: resolvedImportedId } = await resolveAgentRef(ctx.db, importedAgentRef);
-      const parent = await ctx.db.agent.findUniqueOrThrow({
-        where: { id: resolvedParentId },
-      });
       await requireAgentAccess(ctx, parent, 'ADMIN');
       await removeAgentImport(ctx.db, resolvedParentId, resolvedImportedId);
       return true;
@@ -1207,8 +1206,9 @@ export const agentMutations = {
     ) => {
       // #764: agentRef/userRef accept id / URN / (user) handle / email. Resolve
       // the agent + owner-gate FIRST, then resolve the user.
-      const resolvedAgentId = await resolveAgentRefArg(ctx.db, { ref: agentRef, id: agentId });
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: an Agent the caller can't read answers as absent.
+      const agent = await resolveReadableAgentRefArg(ctx, { ref: agentRef, id: agentId });
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
 

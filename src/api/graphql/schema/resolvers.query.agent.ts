@@ -364,9 +364,19 @@ export const agentQueries = {
           await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
         }
         if (agentRef) {
-          const { id } = await resolveAgentRef(ctx.db, agentRef);
+          // #1944: with no App named, the Agent goes through the read gate, so
+          // one the caller can't read answers as absent; the owner/org gates
+          // below still apply. With an App named, the App ADMIN gate above and
+          // the installation check below are the authority: an App's admin
+          // resolves an Agent installed from another org they can't read
+          // directly (the Juno pattern), so the read gate must not run there.
+          // (Whether an App admin may tell absent from not-installed is
+          // #1946's open question.)
+          const agent = resolvedAppId
+            ? await ctx.db.agent.findUniqueOrThrow({ where: { id: (await resolveAgentRef(ctx.db, agentRef)).id } })
+            : await resolveReadableAgentRef(ctx, agentRef);
+          const { id } = agent;
           resolvedAgentId = id;
-          const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
           agentOwner = agent;
           userOwnedAgent = agent.ownerUserId !== null;
           personalAgentOwnerId = agent.ownerUserId;
