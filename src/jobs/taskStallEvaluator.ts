@@ -28,12 +28,13 @@ import { evaluateStalls, wakeDueOwners } from '../lib/agentTasks/stall.js';
 import { clearStalledMarks } from '../lib/agentTasks/availability.js';
 import { recordUndeliverableTaskWakes } from '../lib/agentTasks/taskWakes.js';
 import { sweepSessionEndRequests } from '../lib/hostOperations/sessionEnd.js';
+import { sweepUnreportedHostOperations } from '../lib/hostOperations/settle.js';
 
-export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number; sessionEnds: number };
+export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number; sessionEnds: number; hostOperationsSettled: number };
 
 /** One pass at `now`. Each step runs even when an earlier one failed. */
 export async function taskStallTick(db: PrismaClient, now = new Date()): Promise<TaskStallTickResult> {
-  const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0 };
+  const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0 };
   try {
     result.raised = (await evaluateStalls(db, now)).length;
   } catch (err) {
@@ -58,6 +59,12 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
     result.sessionEnds = await sweepSessionEndRequests(db, now);
   } catch (err) {
     console.error('[task-stall] resolving session-end requests failed:', err);
+  }
+  try {
+    // #1881 (cor:agt:070:02): nothing stays in flight forever.
+    result.hostOperationsSettled = await sweepUnreportedHostOperations(db, now);
+  } catch (err) {
+    console.error('[task-stall] settling unreported host operations failed:', err);
   }
   return result;
 }

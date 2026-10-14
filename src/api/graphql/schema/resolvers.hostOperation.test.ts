@@ -141,7 +141,13 @@ describe('registerHost: the host identity comes from the key (cor:agt:070:01, :0
     expect(await code(M.registerHost({}, { input: { appRef: app.id, label: 'x', pollIntervalSeconds: 60 } }, keyCtx(foreignKey, otherApp.id)))).toBe('APP_NOT_FOUND');
     expect(await code(M.registerHost({}, { input: { appRef: app.id, label: 'x', pollIntervalSeconds: 60 } }, keyCtx(orca1, app.id, { sessionId: 's1' } as any)))).toBe('APP_KEY_SESSION_BOUND');
     expect(await db.hostRegistration.count()).toBe(0);
-    expect(await db.hostKeyUse.count()).toBe(0);
+    // #1881 (070:07): every refused call of a HOST key is recorded with its code, under the key's own App (the other
+    // App's host key included); the person and the key never granted host:operate are not host keys.
+    const uses = await db.hostKeyUse.findMany({ orderBy: { usedAt: 'asc' } });
+    expect(uses.map((u) => [u.appKeyId, u.appId, u.action, u.hostId, u.refusedCode])).toEqual([
+      [foreignKey.id, otherApp.id, 'register', 'orca1', 'APP_NOT_FOUND'],
+      [orca1.id, app.id, 'register', 'orca1', 'APP_KEY_SESSION_BOUND'],
+    ]);
   });
 
   it('refuses another App\'s worker and a worktree that is not a name token', async () => {
@@ -264,7 +270,7 @@ describe('collect and report: a key reaches only its own host (cor:agt:070:04)',
       ['host.operation.succeeded', kit.id, { operationId: op1.id, hostId: 'orca1', operationType: 'worktree.create' }],
     ]);
     // The idempotent second report is a use too (Diego P2-2); one outcome event either way.
-    const reports = await db.hostKeyUse.findMany({ where: { action: 'report' } });
+    const reports = await db.hostKeyUse.findMany({ where: { action: 'report', refusedCode: null } });
     expect(reports.map((u) => u.operationId)).toEqual([op1.id, op1.id]);
   });
 
@@ -277,7 +283,7 @@ describe('collect and report: a key reaches only its own host (cor:agt:070:04)',
     expect(JSON.stringify(e!.payload)).not.toMatch(/already exists|kit\/1709/);
     // A repeated failure: a second use row, still one outcome event, the first reason kept.
     expect(await report(orca1, { id: op1.id, outcome: 'FAILED', failureReason: 'retry' })).toMatchObject({ failureReason: 'branch kit/1709-x already exists' });
-    expect(await db.hostKeyUse.count({ where: { action: 'report', operationId: op1.id } })).toBe(2);
+    expect(await db.hostKeyUse.count({ where: { action: 'report', operationId: op1.id, refusedCode: null } })).toBe(2);
     expect(await db.agentTeamEvent.count({ where: { type: 'host.operation.failed' } })).toBe(1);
   });
 
@@ -301,7 +307,9 @@ describe('collect and report: a key reaches only its own host (cor:agt:070:04)',
     await revoker;
     expect(await waiting).toBe('APP_KEY_SCOPE_REQUIRED');
     expect((await db.hostOperation.findUniqueOrThrow({ where: { id: op1.id } })).status).toBe('issued');
-    expect(await db.hostKeyUse.count({ where: { action: 'collect' } })).toBe(0);
+    expect(await db.hostKeyUse.count({ where: { action: 'collect', refusedCode: null } })).toBe(0);
+    // #1881: the refused collect is recorded apart, under the revoked grant's host, so its rollback kept it.
+    expect((await db.hostKeyUse.findMany({ where: { action: 'collect' } })).map((u) => [u.hostId, u.refusedCode])).toEqual([['orca1', 'APP_KEY_SCOPE_REQUIRED']]);
   });
 });
 
@@ -323,7 +331,8 @@ describe('the host arm of cor:agt:060:08: out of tokens or host down, its own ma
     expect(await code(setAs(orca2, { state: 'AVAILABLE' }))).toBe('AVAILABILITY_NOT_PERMITTED');
     expect(await code(setAs(orca2, { state: 'UNAVAILABLE', reason: 'HOST_DOWN' }))).toBe('AVAILABILITY_NOT_PERMITTED');
     expect((await setAs(orca1, { state: 'AVAILABLE' })).state).toBe('available');
-    expect(await db.hostKeyUse.count({ where: { action: 'availability', appKeyId: orca1.id } })).toBe(2);
+    expect(await db.hostKeyUse.count({ where: { action: 'availability', appKeyId: orca1.id, refusedCode: null } })).toBe(2);
+    expect(await db.hostKeyUse.count({ where: { action: 'availability', appKeyId: orca2.id, refusedCode: 'AVAILABILITY_NOT_PERMITTED' } })).toBe(2);
   });
 
   it('S2: a host never sets another reason, and never clears or replaces a mark it did not set (a stall among them)', async () => {
@@ -362,7 +371,7 @@ describe('the host arm of cor:agt:060:08: out of tokens or host down, its own ma
     expect(await b).toBe('AVAILABILITY_NOT_PERMITTED');
     expect(await db.workerAvailability.findUniqueOrThrow({ where: { workerId: kit.id } })).toMatchObject({ reason: 'host-down', setByHostId: 'orca1' });
     expect(await db.agentTeamEvent.count({ where: { type: 'availability.changed' } })).toBe(0);
-    expect(await db.hostKeyUse.count({ where: { action: 'availability' } })).toBe(0);
+    expect(await db.hostKeyUse.count({ where: { action: 'availability', refusedCode: null } })).toBe(0);
   });
 
   it('Riana P2 (#10733): a refresh dropping the worker, in flight, fences the mark: it waits, then is refused', async () => {
@@ -388,7 +397,7 @@ describe('the host arm of cor:agt:060:08: out of tokens or host down, its own ma
     expect(await mark).toBe('WORKER_NOT_FOUND');
     expect(await db.workerAvailability.count()).toBe(0);
     expect(await db.agentTeamEvent.count({ where: { type: 'availability.changed' } })).toBe(0);
-    expect(await db.hostKeyUse.count({ where: { action: 'availability' } })).toBe(0);
+    expect(await db.hostKeyUse.count({ where: { action: 'availability', refusedCode: null } })).toBe(0);
   });
 
   it('the real refresh to no workers, then a mark: refused, and no deadlock with a refresh that lists the worker', async () => {
