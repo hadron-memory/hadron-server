@@ -970,10 +970,10 @@ describe('legacy surface shims (US3)', () => {
     expect(cfg?.model).toBe('claude-haiku-4-5-20251001');
     expect(cfg?.apiKey).toBe('sk-legacy');
 
-    // Auth: outsider denied (same gate as before).
+    // Auth: outsider denied; #1944: an Agent they can't read answers as absent.
     await expect(
       resolvers.Query.agentAIConfig({}, { agentRef: agent.id }, ctxFor(outsider.id)),
-    ).rejects.toThrow(/Forbidden/);
+    ).rejects.toThrow(/AGENT_NOT_FOUND/);
   });
 
   it('clearAgentAIConfig deletes the default registry row', async () => {
