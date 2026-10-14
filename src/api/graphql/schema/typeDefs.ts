@@ -3913,6 +3913,11 @@ export const typeDefs = `#graphql
     # field here. Pure metadata: no server behavior forks on these fields.
     "Persona role - free string with conventions ('backend-engineer')."
     personaRole: String
+    """
+    #1885 (hrn:node:hadronmemory.com:specs:cor:dmo:050:14) - the id of the one base Agent this Agent extends,
+    or null. Set, change or clear it with setAgentBase.
+    """
+    extendsAgentId: ID
     # 036-ai-service-config: the four AI fields below are registry-backed
     # reads of the Agent's config named 'default' (legacy columns dropped).
     aiProvider: String
@@ -9833,6 +9838,23 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     deleteAgent(ref: ID!): Boolean!
+
+    """
+    #1885 (hrn:node:hadronmemory.com:specs:cor:dmo:050:14) - set, change or clear the one base Agent this
+    Agent extends. The Agent then inherits its base chain's system-memory
+    nodes, except boot prompts. A null baseRef clears the base.
+
+    Whoever manages this Agent may call it. Extending another organization's
+    Agent needs the organization's active AgentOrgGrant for it (a same-org base
+    provisions one, never reactivating a revoked grant); a user-owned Agent
+    extending someone else's needs its owner's active AgentSubscription.
+    Refused, changing nothing, with AGENT_BASE_CYCLE when the base is this
+    Agent or extends it, and AGENT_BASE_CHAIN_TOO_LONG when a chain through
+    this Agent, its own or any Agent's that extends it, would hold more than 4.
+
+    Accepts each Agent's ID or URN.
+    """
+    setAgentBase(ref: ID!, baseRef: ID): Agent!
 
     """
     #949 — re-own an Agent's class=system memory to the Agent's own owner
