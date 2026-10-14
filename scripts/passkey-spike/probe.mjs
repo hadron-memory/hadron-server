@@ -1,6 +1,7 @@
 /** Synthetic protocol evidence only: no real human presence, sync or production leg. */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 const failures=[];
 const pin=(name,run)=>{try {run();} catch(e){failures.push(name+': '+e.message);}};
 import { chromium } from 'playwright';
@@ -8,6 +9,16 @@ import { startSpike } from './preview.mjs';
 
 const primary = await startSpike({basePath:'/__passkey-al/'});
 const otherOrigin = await startSpike();
+let releaseRegistration, firstEnteredResolve, secondEnteredResolve;
+let registrationCalls=0;
+const gate=new Promise(resolve=>{releaseRegistration=resolve;});
+const firstEntered=new Promise(resolve=>{firstEnteredResolve=resolve;});
+const secondEntered=new Promise(resolve=>{secondEnteredResolve=resolve;});
+const registrationRace=await startSpike({beforeRegistrationVerify:async()=>{
+  registrationCalls++;
+  if(registrationCalls===1)firstEnteredResolve();else secondEnteredResolve();
+  await gate;
+}});
 let browser;
 try {
   browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}) });
@@ -36,6 +47,9 @@ try {
 
   const cookie = (await context.cookies()).find(c => c.name === 'spike_sid');
   const regOptions = firstOptions;
+  pin('per-session picker name',()=>assert.match(firstOptions.options.user.name,/^synthetic-retention-user-[A-Za-z0-9_-]+$/));
+  const compose = readFileSync(new URL('./al.compose.yml',import.meta.url),'utf8');
+  pin('configured router path',()=>{assert.ok(compose.includes('PathPrefix(`${AL_BASE_PATH:?'));assert.ok(compose.includes('PASSKEY_SPIKE_BASE_PATH: ${AL_BASE_PATH:?'));});
   const secondRegistration = await page.evaluate(() => window.spike.post('/registration/options', {}));
   pin('second registration options refused',()=>{assert.equal(secondRegistration.status,400);assert.equal(secondRegistration.body.code,'ALREADY_REGISTERED');});
   assert.notEqual(Buffer.from(regOptions.options.user.id, 'base64url').toString(), cookie.value,
@@ -142,6 +156,30 @@ try {
   const replacementResponse = await page.evaluate(options=>window.SimpleWebAuthnBrowser.startRegistration({optionsJSON:options}),preissuedReplacement.options);
   const replacement = await page.evaluate(body=>window.spike.post('/registration/verify',body),{id:preissuedReplacement.id,response:replacementResponse});
   pin('preissued second registration verify refused',()=>{assert.equal(replacement.status,400);assert.equal(replacement.body.code,'ALREADY_REGISTERED');});
+  const raceContext=await browser.newContext();
+  const racePage=await raceContext.newPage();
+  const raceCdp=await raceContext.newCDPSession(racePage);
+  await raceCdp.send('WebAuthn.enable');
+  await raceCdp.send('WebAuthn.addVirtualAuthenticator',{options:{protocol:'ctap2',transport:'internal',hasResidentKey:true,hasUserVerification:true,isUserVerified:true,automaticPresenceSimulation:true}});
+  await racePage.goto(registrationRace.url);
+  await racePage.waitForFunction(()=>window.spike?.ready);
+  const raceOptions=await racePage.evaluate(async()=>[await window.spike.request('/registration/options',{}),await window.spike.request('/registration/options',{})]);
+  pin('different sessions have different names',()=>assert.notEqual(raceOptions[0].options.user.name,firstOptions.options.user.name));
+  const raceResponses=[];
+  for(const o of raceOptions)raceResponses.push(await racePage.evaluate(options=>window.SimpleWebAuthnBrowser.startRegistration({optionsJSON:options}),o.options));
+  const firstCompletion=racePage.evaluate(body=>window.spike.post('/registration/verify',body),{id:raceOptions[0].id,response:raceResponses[0]});
+  await firstEntered;
+  const secondCompletion=racePage.evaluate(body=>window.spike.post('/registration/verify',body),{id:raceOptions[1].id,response:raceResponses[1]});
+  // A working reservation refuses immediately; the removed-reservation mutant enters the barrier.
+  await Promise.race([secondCompletion,secondEntered]);
+  releaseRegistration();
+  const raceResults=await Promise.all([firstCompletion,secondCompletion]);
+  pin('in-flight registration reservation',()=>{
+    assert.equal(registrationCalls,1);
+    assert.deepEqual(raceResults.map(r=>r.status),[200,400]);
+    assert.equal(raceResults[1].body.code,'ALREADY_REGISTERED');
+  });
+  await raceContext.close();
   if(failures.length) throw new Error(failures.join('\n'));
   console.log(JSON.stringify({ localLeg: 'PASS', browser: await browser.version(), rpID: 'localhost',
     origin: primary.origin, fixture: 'spec-retention-example', discoverable: true,
@@ -151,6 +189,7 @@ try {
     refusals: ['UV=false', 'wrong origin', 'spent ceremony replay', 'new ceremony stored assertion replay (canonical and encoding alias)', 'wrong RP control', 'wrong challenge control'],
     limits: ['synthetic authenticator', 'no production/device/sync/hybrid proof', 'deterministic payload replay contract is outside this spike'] }, null, 2));
 } finally {
+  releaseRegistration();
   await browser?.close();
-  await Promise.all([primary.close(), otherOrigin.close()]);
+  await Promise.all([primary.close(), otherOrigin.close(),registrationRace.close()]);
 }

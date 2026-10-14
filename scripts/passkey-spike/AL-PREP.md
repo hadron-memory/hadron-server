@@ -1,10 +1,10 @@
 # Temporary AL session — preparation, no deployment authorization
 
-Two prepared alternatives, both serving only `/__passkey-al/` on the **exact HTTPS ceremony origin Holger chooses**, RP `hadronmemory.com`. `ops:alpha` currently records the server API origin as `srv.hadronmemory.com`; the spec's apex URL is an example. Confirm the chosen host and its existing HTTPS route before deploying. Neither option uses the portal, auth tokens, Postgres, or any production enrollment/signing record. The fixture is synthetic v1/S0, not production v3. A browser may retain the throwaway passkey; remove it from the provider afterwards.
+Two prepared alternatives, both serving only the chosen `AL_BASE_PATH` (a slash-delimited path ending in `/`, for example `/__passkey-al-RANDOM/`) on the **exact HTTPS ceremony origin Holger chooses**, RP `hadronmemory.com`. `ops:alpha` currently records the server API origin as `srv.hadronmemory.com`; the spec's apex URL is an example. Confirm the chosen host and its existing HTTPS route before deploying. Neither option uses the portal, auth tokens, Postgres, or any production enrollment/signing record. The fixture is synthetic v1/S0, not production v3. A browser may retain the throwaway passkey; remove it from the provider afterwards.
 
 ## A — separate temporary container behind the existing Traefik origin (recommended)
 
-Prepared: `Dockerfile`, its build-context ignore file, and `al.compose.yml`. Run from this checkout after Holger's pick. Set AL_ORIGIN, AL_HOST, AL_ENTRYPOINT and AL_PROXY_NETWORK to his origin and the existing Traefik settings. `docker compose -f scripts/passkey-spike/al.compose.yml up -d --build` builds Node 22 plus the exact approved SDK pair, creates one read-only non-root container on the proxy network, and adds a higher-priority Host+path router. No host port is published, no volume or DB is mounted, and the rest of the host's routing stays with its existing service. No server deployment/restart or migration is needed.
+Prepared: `Dockerfile`, its build-context ignore file, and `al.compose.yml`. Run from this checkout after Holger's pick. Set AL_ORIGIN, AL_HOST, AL_BASE_PATH, AL_ENTRYPOINT and AL_PROXY_NETWORK to his origin and the existing Traefik settings. `docker compose -f scripts/passkey-spike/al.compose.yml up -d --build` builds Node 22 plus the exact approved SDK pair, creates one read-only non-root container on the proxy network, and adds a higher-priority Host+path router. No host port is published, no volume or DB is mounted, and the rest of the host's routing stays with its existing service. No server deployment/restart or migration is needed.
 
 Touches alpha: temporary image, container and Docker router labels/network membership only. Existing TLS termination stays in place; the origin must already route to alpha, otherwise DNS/routing is an additional choice and this is not a minutes-only deployment. Trade-off: isolated process and easy removal, but needs Docker build capacity and verified proxy entrypoint/network. Docker is unavailable in the prep workstation, so the image has not been built here; the locked Node application itself was tested locally. Do not claim an image/deployment smoke test until it runs.
 
@@ -62,3 +62,29 @@ claim a real-device session has run. Rook's hosting conditions remain: dedicated
 subdomain without production-session cookies, random base path or allowlist,
 proxy-network confirmation, and delete each throwaway credential from Apple
 Passwords/iCloud and 1Password on both devices after capture.
+
+
+## Rescheduled-session setup hygiene
+
+The Compose router PathPrefix and application cookie/routing base path use the
+same required AL_BASE_PATH. Holger's random-path choice is configuration, with
+no new image or source head; use a fresh unpredictable path, ending in `/`.
+For an allowlist choice use the approved path and install/verify the allowlist
+before exposing the router. A random path mitigates casual cap exhaustion; it
+is not authentication and must not be published in public evidence before use.
+The host-process template's PASSKEY_SPIKE_BASE_PATH and proxy snippet PathPrefix
+must likewise be set to the same chosen value.
+
+Each synthetic session has a distinct `synthetic-retention-user-TAG` picker name
+unrelated to its cookie or WebAuthn user handle. Capture that name beside the
+credentialIdHash. Before starting the next leg, delete the just-tested TAG from
+Apple Passwords/iCloud Keychain on Mac/iPhone and from 1Password where used;
+verify it no longer appears in the picker (sync may take time). If an older TAG
+is offered, cancel and choose the current one; don't report that setup mistake
+as the device leg's verification failure. After the last leg remove every AL
+TAG and close the temporary browser session.
+
+The concurrent registration pin uses an in-process wait before mandatory SDK
+verification, never an HTTP bypass: a second completion must refuse while the
+first verifier is paused. Removing the registering check makes that pin fail;
+the real verifier still runs and verifies the winning credential.

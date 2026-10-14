@@ -16,7 +16,7 @@ async function bodyOf(req) {
   return JSON.parse(data);
 }
 
-export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost', basePath = '/', bind = '127.0.0.1' } = {}) {
+export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost', basePath = '/', bind = '127.0.0.1', beforeRegistrationVerify } = {}) {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid PASSKEY_SPIKE_PORT');
   if (!/^\/(?:[a-zA-Z0-9_-]+\/)*$/.test(basePath)) throw new Error('Invalid base path');
   if (expectedOrigin) {
@@ -61,7 +61,7 @@ export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost',
     if (!session) {
       if (url.pathname !== '/registration/options' || sessions.size >= 32) return json(res, 400, { code: 'SESSION_REQUIRED' });
       sid = randomBytes(24).toString('base64url');
-      session = { expiresAt: Date.now() + 300000, userHandle: randomBytes(32), pending: new Map(), usedAssertions: new Set(), credential: null };
+      session = { expiresAt: Date.now() + 300000, pickerTag: randomBytes(6).toString('base64url'), userHandle: randomBytes(32), pending: new Map(), usedAssertions: new Set(), credential: null };
       sessions.set(sid, session);
       res.setHeader('Set-Cookie', `spike_sid=${sid}; HttpOnly; SameSite=Strict; Path=${basePath}; Max-Age=300${expectedOrigin ? '; Secure' : ''}`);
     }
@@ -80,7 +80,7 @@ export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost',
         if (registration && (session.credential || session.registering)) return json(res,400,{code:'ALREADY_REGISTERED'});
         if (!registration && !session.credential) return json(res, 400, { code: 'REGISTER_FIRST' });
         const options = registration
-          ? await generateRegistrationOptions({ rpName: 'Hadron synthetic AL spike', rpID, userName: 'synthetic-retention-user',
+          ? await generateRegistrationOptions({ rpName: 'Hadron synthetic AL spike', rpID, userName: `synthetic-retention-user-${session.pickerTag}`, userDisplayName: `AL ${session.pickerTag}`,
             userID: session.userHandle, attestationType: 'none', timeout: 20000,
             authenticatorSelection: { residentKey: 'required', userVerification: 'required' } })
           : await generateAuthenticationOptions({ rpID, challenge: Buffer.from(example.challengeHex, 'hex'), timeout: 20000,
@@ -98,6 +98,8 @@ export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost',
         if (session.credential || session.registering) return json(res,400,{code:'ALREADY_REGISTERED'});
         session.registering = true;
         try {
+        // In-process probe barrier only; verification remains mandatory, never an HTTP option.
+        await beforeRegistrationVerify?.();
         const result = await verifyRegistrationResponse({ response: body.response, expectedChallenge: pending.challenge,
           expectedOrigin: origin, expectedRPID: rpID, requireUserVerification: true });
         if (!result.verified) throw new Error('Refused');

@@ -1,8 +1,8 @@
-# File-provider snippet: replace CHOSEN_HOST and PRIVATE_HOST_GATEWAY after approval.
+# File-provider snippet: replace CHOSEN_HOST, CHOSEN_BASE_PATH and PRIVATE_HOST_GATEWAY after approval.
 http:
   routers:
     passkey-al:
-      rule: "Host(`CHOSEN_HOST`) && PathPrefix(`/__passkey-al/`)"
+      rule: "Host(`CHOSEN_HOST`) && PathPrefix(`CHOSEN_BASE_PATH`)"
       priority: 10000
       entryPoints: [EXISTING_HTTPS_ENTRYPOINT]
       tls: {}
