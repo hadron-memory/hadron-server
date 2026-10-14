@@ -74,6 +74,7 @@ import { GraphQLError } from 'graphql';
 import { isLifecycleActive, type LifecycleLike } from '@hadron-memory/access-control';
 import {
   Prisma,
+  type Agent,
   type PrismaClient,
 } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
@@ -1368,6 +1369,45 @@ export async function requireAgentAccess(
 ): Promise<void> {
   if (agent.ownerUserId !== null && !ctx.impersonation && isPlatformAdmin(ctx)) return;
   return requireOwnerOrOrgRole(ctx, agent, required);
+}
+
+/**
+ * #1944 — resolve an Agent ref AND gate the Agent for reading, with a denial
+ * answered exactly like an absent Agent: the same `AgentNotFoundError(ref)`,
+ * so the same code, message and extensions on the wire. The Agent-side
+ * sibling of #1939's `resolveReadableWorkerRef`.
+ *
+ * Resolving first and gating second is safe only if the two refusals are
+ * indistinguishable. Before this, each Agent surface gated the resolved row
+ * on its own and refused FORBIDDEN, so an outsider could guess
+ * `hrn:agent:<org>:<slug>` and read existence off the code (Cameron's repro).
+ *
+ * The read gate is `Query.agent`'s: a PUBLIC Agent is readable by anyone
+ * (#551, its existence is marketplace-public), otherwise READER on the Agent.
+ * What a caller gets past it, a surface may refuse however it likes: a reader
+ * already knows the Agent exists, so a management FORBIDDEN tells them
+ * nothing new. `Query.agent` keeps answering an absent Agent with null, and
+ * so answers a denied one with null too.
+ *
+ * NARROW catch, the #1019 convention: only the gate's expected FORBIDDEN
+ * collapses. A database failure inside the membership lookup propagates,
+ * because reporting an outage as a missing Agent misleads exactly the caller
+ * who needs the truth. An under-qualified ref still throws URN_NOT_QUALIFIED
+ * from the resolve: that is the caller's input, not a fact about the Agent.
+ */
+export async function resolveReadableAgentRef(ctx: Context, ref: string): Promise<Agent> {
+  const { id } = await resolveAgentRef(ctx.db, ref);
+  const agent = await ctx.db.agent.findUnique({ where: { id } });
+  if (!agent || agent.deletedAt) throw new AgentNotFoundError(ref);
+  if (agent.visibility !== 'PUBLIC') {
+    try {
+      await requireAgentAccess(ctx, agent, 'READER');
+    } catch (e) {
+      if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+      throw new AgentNotFoundError(ref);
+    }
+  }
+  return agent;
 }
 
 /**

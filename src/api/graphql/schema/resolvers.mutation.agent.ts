@@ -61,6 +61,7 @@ import {
   type Context,
   requireOrgRole,
   requireAgentAccess,
+  resolveReadableAgentRef,
   requireOwnerOrOrgRole,
   aiConfigOwnerOf,
   toGqlAiServiceConfig,
@@ -437,11 +438,12 @@ export const agentMutations = {
       // #929 review: normalize persona dressing (blank-after-trim clears).
       const personaRoleNorm = normalizePersonaField(personaRole);
       // #789 / cor:api:140 — was a PK-only findUniqueOrThrow, so a caller
-      // holding a URN or handle had to pre-resolve it. resolveAgentRef is a
-      // pure lookup and does NOT authorize (#554): the resource-scoped
-      // requireOwnerOrOrgRole below still runs on the RESOLVED agent.
-      const { id } = await resolveAgentRef(ctx.db, ref);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+      // holding a URN or handle had to pre-resolve it. Resolution is not
+      // authorization (#554): the resource-scoped gate below still runs on the
+      // RESOLVED agent. #1944: resolved through the read gate, so a caller who
+      // can't read the Agent is answered as if it were absent.
+      const agent = await resolveReadableAgentRef(ctx, ref);
+      const { id } = agent;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       // spec 047 (codex review, #682): a user-owned agent is owner-only in v1 —
       // it must NEVER become non-PERSONAL. The create-time guard alone is
@@ -819,8 +821,9 @@ export const agentMutations = {
 
     deleteAgent: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       // #789 / cor:api:140 — see updateAgent: resolution is not authorization.
-      const { id } = await resolveAgentRef(ctx.db, ref);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+      // #1944: an Agent the caller can't read answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, ref);
+      const { id } = agent;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       // Soft-delete the agent and its owned system memory (if any) in the
       // same pass. System memories are owned by the agent and cannot be
@@ -879,9 +882,11 @@ export const agentMutations = {
      * managers change the child, never the base.
      */
     setAgentBase: async (_: unknown, { ref, baseRef }: { ref: string; baseRef?: string | null }, ctx: Context) => {
-      // #789 / cor:api:140 — resolution is not authorization.
-      const { id } = await resolveAgentRef(ctx.db, ref);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+      // #789 / cor:api:140 — resolution is not authorization. #1944: an
+      // Agent the caller can't read answers as absent (the base ref already
+      // conceals, in writeAgentBase).
+      const agent = await resolveReadableAgentRef(ctx, ref);
+      const { id } = agent;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const baseId = baseRef ? (await resolveAgentRef(ctx.db, baseRef)).id : null;
       await ctx.db.$transaction((tx) =>
@@ -911,10 +916,10 @@ export const agentMutations = {
       args: { ref: string; tasksIndexRef?: string | null; processesIndexRef?: string | null },
       ctx: Context,
     ) => {
-      // #789 / cor:api:140 — resolution is not authorization.
-      const { id } = await resolveAgentRef(ctx.db, args.ref);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
-      if (agent.deletedAt) throw new AgentNotFoundError(args.ref);
+      // #789 / cor:api:140 — resolution is not authorization. #1944: an
+      // Agent the caller can't read answers as absent, as a retired one does.
+      const agent = await resolveReadableAgentRef(ctx, args.ref);
+      const { id } = agent;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       // Resolve each target to its node and memory; the gates run again below,
       // inside the transaction, on what is current there.

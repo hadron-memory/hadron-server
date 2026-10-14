@@ -21,6 +21,7 @@ import {
   clampListTake,
   requireOrgRole,
   requireAgentAccess,
+  resolveReadableAgentRef,
   requireOwnerOrOrgRole,
   resolveOrgScope,
   isPlatformAdmin,
@@ -91,7 +92,11 @@ export const agentQueries = {
     agent: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       let resolvedId: string;
       try {
-        ({ id: resolvedId } = await resolveAgentRef(ctx.db, ref));
+        // #551: PUBLIC visibility widens the READ gate to everyone (mirrors the
+        // memories PUBLIC carve-out, #362); non-public needs READER. #1944: the
+        // shared read gate answers a denied Agent exactly like an absent one,
+        // so both come back null here, never FORBIDDEN.
+        ({ id: resolvedId } = await resolveReadableAgentRef(ctx, ref));
       } catch (e) {
         // Genuine miss (AgentNotFoundError) → null. A malformed /
         // under-qualified URN throws UrnNotQualifiedError from
@@ -105,12 +110,6 @@ export const agentQueries = {
         include: AGENT_INCLUDE,
       });
       if (!agent || agent.deletedAt) return null;
-      // #551: PUBLIC visibility widens the READ gate to everyone (mirrors the
-      // memories PUBLIC carve-out, #362). Non-public falls through to the
-      // membership gate.
-      if (agent.visibility !== 'PUBLIC') {
-        await requireAgentAccess(ctx, agent, 'READER');
-      }
       return agent;
     },
 
