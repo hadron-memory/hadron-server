@@ -377,6 +377,13 @@ export const agentQueries = {
             : await resolveReadableAgentRef(ctx, agentRef);
           const { id } = agent;
           resolvedAgentId = id;
+          // #1946 (Atilla's P2 on #1955): with an App named, "not installed
+          // here" is decided BEFORE any Agent-specific denial below (the
+          // personal-Agent owner gate), so a foreign Agent answers exactly as
+          // an absent one (ruling A).
+          if (resolvedAppId && !(await isAgentInstalled(ctx.db, resolvedAppId, id))) {
+            throw new AgentNotFoundError(agentRef);
+          }
           agentOwner = agent;
           userOwnedAgent = agent.ownerUserId !== null;
           personalAgentOwnerId = agent.ownerUserId;
@@ -389,8 +396,10 @@ export const agentQueries = {
             effectiveOrgId = agent.organizationId;
           }
         }
+        // #1946 (ruling A): with an App named, an Agent not installed in it
+        // answers exactly as an absent one — one answer, no id.
         if (resolvedAppId && resolvedAgentId && !(await isAgentInstalled(ctx.db, resolvedAppId, resolvedAgentId))) {
-          throw new Error('Forbidden');
+          throw new AgentNotFoundError(agentRef!);
         }
         // A user-owned App's config is eligible only when it belongs to the
         // same owner as the named personal Agent. Otherwise naming another
@@ -479,10 +488,19 @@ export const agentQueries = {
         // 007-entity-id-or-urn: appRef/agentRef may be ID or URN. A ref that
         // doesn't resolve to a row simply contributes nothing to the walk.
         const resolvedAppId = appRef ? (await resolveAppRef(ctx.db, appRef)).id : null;
-        const resolvedAgentId = agentRef ? (await resolveAgentRef(ctx.db, agentRef)).id : null;
         // Masked picker: ALL App members may list the configs their chat
         // context can resolve (not just org admins — no key material leaves).
-        await requireAiConfigPickerAccess(ctx, resolvedAppId, resolvedAgentId);
+        // #1946: the App gate runs BEFORE the Agent is resolved, and for an App
+        // member "not installed in this App" answers exactly as "no such Agent"
+        // (Holger's ruling A, team chat #11863): one answer, no id.
+        await requireAiConfigPickerAccess(ctx, resolvedAppId, null);
+        let resolvedAgentId: string | null = null;
+        if (agentRef) {
+          resolvedAgentId = (await resolveAgentRef(ctx.db, agentRef)).id;
+          if (!isPlatformAdmin(ctx) && !(await isAgentInstalled(ctx.db, resolvedAppId!, resolvedAgentId))) {
+            throw new AgentNotFoundError(agentRef);
+          }
+        }
         const resolved = await resolveAiConfigs(ctx.db, {
           appId: resolvedAppId,
           agentId: resolvedAgentId,

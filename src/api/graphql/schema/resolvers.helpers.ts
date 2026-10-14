@@ -47,6 +47,7 @@ import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { boundSessionPrivacyFilter } from '../../../lib/auth/sessionPrivacy.js';
 import {
   formatCanonicalUrn,
+  UrnNotQualifiedError,
   type CanonicalUrnType,
 } from '../../../lib/urn.js';
 import { safeEntityUrnV2 } from '../../../lib/urnEmit.js';
@@ -66,6 +67,7 @@ import {
   OrganizationNotFoundError,
   AppNotFoundError,
   AgentNotFoundError,
+  AmbiguousLegacyUrnError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
@@ -1423,6 +1425,36 @@ export async function requireReadableAgent(
   } catch (e) {
     if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
     throw new AgentNotFoundError(ref);
+  }
+}
+
+/**
+ * #1946 — for the agentUrn-addressed asset operations (beginAssetUpload,
+ * agentAssets, setAgentAssetUploadEnabled): run the shared Agent read gate
+ * BEFORE the operation, which otherwise refuses on things derived from the
+ * Agent (its App, its tool gate, its org's admins) and so tells an existing
+ * Agent from an absent one. An Agent the caller can't read throws
+ * `notFound()`, the operation's OWN absent-Agent error, so both read the
+ * same. A ref that doesn't resolve is left to the operation, which already
+ * answers it (or surfaces a malformed one) its own way.
+ */
+export async function requireReadableAgentForAssetOp(ctx: Context, agentRef: string, notFound: () => Error): Promise<void> {
+  let id: string;
+  try {
+    ({ id } = await resolveAgentRef(ctx.db, agentRef));
+  } catch (e) {
+    // NARROW (Atilla's P2 on #1955, the #1019 convention): only a ref that
+    // names nothing, or a malformed one, is left to the op, which answers it
+    // its own way. Anything else (an outage) propagates, so the op never runs
+    // with this gate skipped.
+    if (e instanceof AgentNotFoundError || e instanceof UrnNotQualifiedError || e instanceof AmbiguousLegacyUrnError) return;
+    throw e;
+  }
+  try {
+    await requireReadableAgent(ctx, await ctx.db.agent.findUnique({ where: { id } }), agentRef);
+  } catch (e) {
+    if (e instanceof AgentNotFoundError) throw notFound();
+    throw e;
   }
 }
 
@@ -2988,7 +3020,6 @@ export async function installAgentIntoAppCore(
   // 007-entity-id-or-urn: appId + agentId may each be ID, bare URN, or
   // prefixed URN.
   const { id: resolvedAppId } = await resolveAppRef(ctx.db, args.appRef);
-  const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, args.agentRef);
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
   // `resolveAppRef` already filters `deletedAt`. The `uninstalledAt`
   // case (spec 021 FR-026 — soft-uninstall) is a separate lifecycle
@@ -3020,6 +3051,10 @@ export async function installAgentIntoAppCore(
   // needs a deliberate call on that exposure, not an inference from the
   // roster-composition use case.
   await requireOwnerOrOrgRole(ctx, app, 'CONTRIBUTOR');
+  // #1946: the Agent is resolved only AFTER the App gate, so an outsider is
+  // refused on the App whatever the ref names; resolving first answered a
+  // real Agent and a guessed one differently.
+  const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, args.agentRef);
   const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
   // #756: an org-owned App and a user-owned App have DIFFERENT accessibility
   // rules, and the org comparison alone cannot express the second one. Both
@@ -3034,6 +3069,9 @@ export async function installAgentIntoAppCore(
     // never another user's or another org's private agent.
     const isOwnAgent = agent.ownerUserId !== null && agent.ownerUserId === app.ownerUserId;
     if (agent.visibility !== 'PUBLIC' && !isOwnAgent) {
+      // #1946: ORGANIZATION_MISMATCH (and its agentId) only for an Agent the
+      // caller can read; one they can't answers exactly as an absent one.
+      await requireReadableAgent(ctx, agent, args.agentRef);
       throw new GraphQLError('A personal App may only install a PUBLIC agent or your own personal agent.', {
         extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
       });
@@ -3079,6 +3117,7 @@ export async function installAgentIntoAppCore(
       const ownAgent = currentAgent.ownerUserId !== null && currentAgent.ownerUserId === currentApp.ownerUserId;
       if (currentApp.organizationId === null) {
         if (currentAgent.visibility !== 'PUBLIC' && !ownAgent) {
+          await requireReadableAgent(txCtx, currentAgent, args.agentRef); // #1946, as above
           throw new GraphQLError('A personal App may only install a PUBLIC agent or your own personal agent.', {
             extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
           });
@@ -3139,11 +3178,22 @@ export async function uninstallAgentFromAppCore(
   args: { appRef: string; agentRef: string },
 ): Promise<{ appId: string; agentId: string }> {
   const { id: resolvedAppId } = await resolveAppRef(ctx.db, args.appRef);
-  const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, args.agentRef);
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
   // #551: symmetric with install — a CONTRIBUTOR+ member of the App's org can
   // uninstall an Agent (was ADMIN-only).
   await requireOwnerOrOrgRole(ctx, app, 'CONTRIBUTOR');
+  // #1946: the Agent only after the App gate. The delete stays idempotent for
+  // an Agent the caller can read; one they can't that isn't installed here
+  // answers exactly as an absent one (an installed one is on the roster the
+  // caller already sees).
+  const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, args.agentRef);
+  const installedHere = await ctx.db.appAgent.findUnique({
+    where: { appId_agentId: { appId: resolvedAppId, agentId: resolvedAgentId } },
+    select: { agentId: true },
+  });
+  if (!installedHere) {
+    await requireReadableAgent(ctx, await ctx.db.agent.findUnique({ where: { id: resolvedAgentId } }), args.agentRef);
+  }
   // Idempotent delete — `deleteMany` returns a count, never throws on
   // absent rows. The (App, Agent, *) memories persist as orphans per
   // spec 023 FR-005.

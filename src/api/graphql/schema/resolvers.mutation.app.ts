@@ -37,7 +37,7 @@ import {
   SelfJoinNotAllowedError,
   AppUninstalledError,
 } from '../../../controller/operations/joinApp.js';
-import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { leaveApp } from '../../../controller/operations/leaveApp.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -59,6 +59,7 @@ import {
   APP_INCLUDE,
   installAgentIntoAppCore,
   uninstallAgentFromAppCore,
+  requireReadableAgent,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 // Spec 049 Phase 4 — the App's default Channel, created with the App.
@@ -356,9 +357,15 @@ export const appMutations = {
           orderBy: { position: 'asc' },
           select: { importedAgentId: true, required: true },
         });
+        // #1946: an optional ref must name one of the parent's imports. One
+        // that resolves to any other Agent used to be dropped silently, so the
+        // App got created: a successful probe of the ref. It now refuses
+        // exactly as an absent ref does, and nothing is created either way.
+        const importIds = new Set(imports.map((imp) => imp.importedAgentId));
         const optionalIds = new Set<string>();
         for (const ref of installOptional ?? []) {
           const { id } = await resolveAgentRef(ctx.db, ref);
+          if (!importIds.has(id)) throw new AgentNotFoundError(ref);
           optionalIds.add(id);
         }
         selectedImports = imports.filter((imp) => imp.required || optionalIds.has(imp.importedAgentId));
@@ -381,10 +388,13 @@ export const appMutations = {
         // accessibility gate for the org-less case.
         const installAgent = await ctx.db.agent.findUniqueOrThrow({
           where: { id: resolvedAgentId },
-          select: { visibility: true, ownerUserId: true },
+          select: { visibility: true, ownerUserId: true, organizationId: true, deletedAt: true },
         });
         const isOwnAgent = installAgent.ownerUserId !== null && installAgent.ownerUserId === ctx.userId;
         if (installAgent.visibility !== 'PUBLIC' && !isOwnAgent) {
+          // #1946: ORGANIZATION_MISMATCH (and its agentId) only for an Agent
+          // the caller can read; one they can't answers as an absent one.
+          await requireReadableAgent(ctx, installAgent, agentRef);
           throw new GraphQLError('A personal App may only install a PUBLIC agent or your own personal agent.', {
             extensions: { code: 'ORGANIZATION_MISMATCH', agentId: resolvedAgentId },
           });
