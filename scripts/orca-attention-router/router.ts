@@ -829,37 +829,45 @@ export function isIdle(cfg: Config, handle: string, timeoutMs: number, run: Runn
  * [verdict, why]: whether the terminal may be typed into, with THREE outcomes
  * where tui-idle alone gave two (#7398 incident class).
  *
- * A tui-idle timeout means "busy" only when Orca is TRACKING the terminal's
- * output (lastOutputAt set). Orca loses tracking fleet-wide on a serve restart
- * and degrades it in smaller sets mid-life (observed 2026-10-07: 28/40 null
- * from ~03:10Z with the serve continuously up); an untracked terminal can
- * NEVER satisfy tui-idle, so reading the timeout as "busy" pins every idle
- * untracked worker forever — exactly the workers awaiting nudges. For an
- * untracked terminal the timeout is UNKNOWN, and the rendered screen is the
- * fallback proof: the idle-prompt shape (bare box + the agent's empty-input
- * marker, no draft) is the same live evidence the empty-prompt gate trusts.
+ * A tui-idle timeout is UNKNOWN, never busy-by-default, whichever side of
+ * tracking the terminal sits on. Orca loses tracking fleet-wide on a serve
+ * restart and degrades it in smaller sets mid-life (observed 2026-10-07:
+ * 28/40 null from ~03:10Z with the serve continuously up); an untracked
+ * terminal can NEVER satisfy tui-idle, so reading the timeout as "busy" pins
+ * every idle untracked worker forever. And #1845 (2026-10-14) proved the
+ * tracked side fails the same way from the other direction: a terminal at a
+ * COMPLETED turn — "Worked for Xm • time" / "✻ … · done" above an empty
+ * composer — can sit for hours with tui-idle unsatisfiable while tracking
+ * lives (Atilla held 2,442 min, Chip 877, at idle screens the whole time),
+ * because the tracked path read the timeout as busy without ever consulting
+ * a screen that positively proved idle. So the rendered screen decides in
+ * BOTH cases: an empty composer plus positive quiet (no running-turn
+ * indicator above the prompt, @codex P2 #1700) proves idle; a live
+ * indicator vetoes; anything else is missing evidence and holds.
  */
 export function provesIdle(
   cfg: Config, handle: string, agent: string, lastOutputAt: number | null | undefined,
   timeoutMs: number, run: Runner,
 ): [boolean, string] {
   if (isIdle(cfg, handle, timeoutMs, run)) return [true, ''];
-  if (lastOutputAt === null || lastOutputAt === undefined) {
-    const term = readScreen(cfg, handle, run);
-    const [empty, why] = promptIsEmptyFromTerm(term, agent);
-    if (!empty) return [false, `unknown idle state — no output tracking, screen shows ${why}`];
-    // An empty composer proves nobody has TYPED; it does not prove the agent
-    // is not WORKING — both agents render an empty prompt box mid-turn (the
-    // #1490 steering hazard; live evidence 2026-10-09/10: '✽ Bunning… (5m 55s
-    // · ↓ 15.6k tokens)' above an empty Claude box, '• Working (6s • esc to
-    // interrupt)' above the Codex placeholder). The fallback requires positive
-    // quiet: no running-turn indicator above the prompt (@codex P2, #1700).
-    const proof = term ? idleProofAbovePrompt(term.tail as string[], agent) : (['unknown', 'screen unreadable'] as const);
-    if (proof[0] === 'busy') return [false, 'unknown idle state — no output tracking, a running turn is drawn above the prompt'];
-    if (proof[0] === 'unknown') return [false, `unknown idle state — no output tracking, ${proof[1]}`];
-    return [true, 'untracked terminal, screen proves idle (empty prompt, positive idle chrome)'];
-  }
-  return [false, `busy for ${Math.round(timeoutMs / 1000)}s`];
+  const term = readScreen(cfg, handle, run);
+  const [empty, why] = promptIsEmptyFromTerm(term, agent);
+  if (!empty) return [false, `unknown idle state — screen shows ${why}`];
+  // An empty composer proves nobody has TYPED; it does not prove the agent
+  // is not WORKING — both agents render an empty prompt box mid-turn (the
+  // #1490 steering hazard; live evidence 2026-10-09/10: '✽ Bunning… (5m 55s
+  // · ↓ 15.6k tokens)' above an empty Claude box, '• Working (6s • esc to
+  // interrupt)' above the Codex placeholder). The fallback requires positive
+  // quiet: no running-turn indicator above the prompt (@codex P2, #1700).
+  const proof = term ? idleProofAbovePrompt(term.tail as string[], agent) : (['unknown', 'screen unreadable'] as const);
+  if (proof[0] === 'busy') return [false, 'a running turn is drawn above the prompt'];
+  if (proof[0] === 'unknown') return [false, `unknown idle state — ${proof[1]}`];
+  return [
+    true,
+    lastOutputAt == null
+      ? 'untracked terminal, screen proves idle (empty prompt, positive idle chrome)'
+      : 'screen proves idle (completed turn, empty composer)',
+  ];
 }
 
 /**
@@ -975,7 +983,7 @@ const spinnerTimer = (s: string): boolean => /[（(]\d/.test(s) && /\d\s*[mh]?\s
  */
 const IDLE_MARKERS: readonly RegExp[] = [
   /· done/, /^⏺ Done/, /^Done\./, /^✻ \w+ for \d+[ms]/, /^✻ Compacted while idle/,
-  /\/clear to save/, /recap:/, /Share Claude Code/,
+  /\/clear to save/, /^new task\? \/clear/, /recap:/, /Share Claude Code/,
   /Claude Code v\d/, /glm-[\d.]/,
   /OpenAI Codex \(v/, /Update available!/, /Worked for /,
   /Update installed/,
@@ -1645,6 +1653,20 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       Object.assign(ledger.reported, outcome.held);
       // Long-hold visibility (#6736): a worker pinned with mentions pending for
       // 30+ minutes says so in the log, at most once every 30 minutes.
+      // #1845 — the clock measures ONE incident: a worker that left the held
+      // set (delivered, or read its mentions itself, or covered) gets its
+      // heldSince pruned here, so the next episode starts a fresh count.
+      // Without the prune, a worker held yesterday and re-held today reports
+      // yesterday's epoch ("held 2442 min" on a 5-minute-old stall), which
+      // reads as an incident that never happened.
+      const heldWorkers = new Set(held.map(([n]) => cfg.roster.find((e) => e.name === n)?.worker ?? n));
+      for (const w of Object.keys(ledger.heldSince ?? {})) {
+        if (!heldWorkers.has(w)) {
+          delete ledger.heldSince[w];
+          delete (ledger.heldLoggedAt ?? {})[w];
+          delete ledger.reported[w];
+        }
+      }
       const longHolds: string[] = [];
       for (const [n] of held) {
         const w = cfg.roster.find((e) => e.name === n)?.worker ?? n;

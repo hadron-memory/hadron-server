@@ -211,6 +211,28 @@ describe('the grant (Holger\'s ruling A, Rook #10734)', () => {
     expect((await redeem(holder.id, grant)).workerId).toBe(kit.id);
   });
 
+  it('#1937: a grant holder naming a worker of an App they cannot read learns nothing: the absent envelope, and the start stands', async () => {
+    const { opId, grant } = await collectedStart();
+    const elsewhereOrg = await db.organization.create({ data: { name: 'Elsewhere', urn: `${org.urn}-else` }, select: { id: true } });
+    const elsewhere = await db.app.create({ data: { organizationId: elsewhereOrg.id, name: 'Else', urn: `${org.urn}-else:else` }, select: { id: true } });
+    const foreign = await db.worker.create({ data: { appId: elsewhere.id, agentId, name: 'Zed', slug: 'zed' }, select: { id: true } });
+    const env = async (ref: string) => {
+      try {
+        await redeem(holder.id, grant, { workerRef: ref });
+      } catch (e) {
+        return JSON.stringify({ m: (e as GraphQLError).message, x: (e as GraphQLError).extensions });
+      }
+      throw new Error('expected a refusal');
+    };
+    const real = await env(foreign.id);
+    expect(real).toBe(JSON.stringify({ m: `Worker not found: ${foreign.id}`, x: { code: 'WORKER_NOT_FOUND' } }));
+    await db.worker.delete({ where: { id: foreign.id } });
+    expect(await env(foreign.id)).toBe(real);
+    // A caller's mistake fails nothing: the start stands and the holder still binds the grant's worker.
+    expect((await opOf(opId)).status).toBe('collected');
+    expect((await redeem(holder.id, grant)).workerId).toBe(kit.id);
+  });
+
   it('#1928: a re-collection while the grant is live leaves the start out, and the grant stays redeemable', async () => {
     const { opId, grant } = await collectedStart();
     const other = await M.issueHostOperation({}, { input: { appRef: app.id, hostId: 'orca1', worker: kit.id, type: 'worktree.create', args: { repo: 'hadron-server', baseBranch: 'main', branchName: 'kit-2', label: 'kit-2' } } }, ctx(manager.id));
