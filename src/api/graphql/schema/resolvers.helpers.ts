@@ -1398,16 +1398,32 @@ export async function requireAgentAccess(
 export async function resolveReadableAgentRef(ctx: Context, ref: string): Promise<Agent> {
   const { id } = await resolveAgentRef(ctx.db, ref);
   const agent = await ctx.db.agent.findUnique({ where: { id } });
+  await requireReadableAgent(ctx, agent, ref);
+  return agent!;
+}
+
+/**
+ * The gate half of {@link resolveReadableAgentRef}, on a row the caller has
+ * already read: a missing or retired row, or one the caller can't read (not
+ * PUBLIC and no READER), throws `AgentNotFoundError(ref)`, by the same narrow
+ * catch. For a surface that must serve a row read with its own shape (e.g.
+ * `Query.agent`'s includes): gate THAT row, the one actually returned, never
+ * an earlier read of it (Atilla's P2 on #1950: a visibility flip between two
+ * reads would otherwise serve a row nobody authorized).
+ */
+export async function requireReadableAgent(
+  ctx: Context,
+  agent: Pick<Agent, 'visibility' | 'deletedAt' | 'organizationId' | 'ownerUserId'> | null,
+  ref: string,
+): Promise<void> {
   if (!agent || agent.deletedAt) throw new AgentNotFoundError(ref);
-  if (agent.visibility !== 'PUBLIC') {
-    try {
-      await requireAgentAccess(ctx, agent, 'READER');
-    } catch (e) {
-      if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
-      throw new AgentNotFoundError(ref);
-    }
+  if (agent.visibility === 'PUBLIC') return;
+  try {
+    await requireAgentAccess(ctx, agent, 'READER');
+  } catch (e) {
+    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+    throw new AgentNotFoundError(ref);
   }
-  return agent;
 }
 
 /**

@@ -22,6 +22,7 @@ import {
   requireOrgRole,
   requireAgentAccess,
   resolveReadableAgentRef,
+  requireReadableAgent,
   requireOwnerOrOrgRole,
   resolveOrgScope,
   isPlatformAdmin,
@@ -90,13 +91,18 @@ export const agentQueries = {
     // appCount / orgGrants / importedBy) are scoped to the caller's own access
     // and come back empty for an outsider (#552, #757).
     agent: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
-      let resolvedId: string;
       try {
+        const { id } = await resolveAgentRef(ctx.db, ref);
+        // ONE read, with the includes it serves, and the gate runs on THAT row
+        // (Atilla's P2 on #1950: gating an earlier read and serving a later one
+        // let a PUBLIC→ORGANIZATION flip between them reach a foreign reader).
+        const agent = await ctx.db.agent.findUnique({ where: { id }, include: AGENT_INCLUDE });
         // #551: PUBLIC visibility widens the READ gate to everyone (mirrors the
         // memories PUBLIC carve-out, #362); non-public needs READER. #1944: the
         // shared read gate answers a denied Agent exactly like an absent one,
         // so both come back null here, never FORBIDDEN.
-        ({ id: resolvedId } = await resolveReadableAgentRef(ctx, ref));
+        await requireReadableAgent(ctx, agent, ref);
+        return agent;
       } catch (e) {
         // Genuine miss (AgentNotFoundError) → null. A malformed /
         // under-qualified URN throws UrnNotQualifiedError from
@@ -105,12 +111,6 @@ export const agentQueries = {
         if (!(e instanceof AgentNotFoundError)) throw e;
         return null;
       }
-      const agent = await ctx.db.agent.findUnique({
-        where: { id: resolvedId },
-        include: AGENT_INCLUDE,
-      });
-      if (!agent || agent.deletedAt) return null;
-      return agent;
     },
 
     // #551 — the public-agent marketplace slice: ALL live PUBLIC agents,
