@@ -1270,8 +1270,9 @@ export const agentMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       // #1787 review (Rook P2-1): updating config can keep the stored key under a
       // changed endpoint/provider — same exfil shape as the registry gate — so on a
       // user-owned Agent this stays owner-only (clearAgentAIConfig keeps the arm).
@@ -1366,8 +1367,9 @@ export const agentMutations = {
 
     clearAgentAIConfig: async (_: unknown, { agentId }: { agentId: string }, ctx: Context) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       // 036-ai-service-config: clearing deletes the 'default' registry
       // config (idempotent).
