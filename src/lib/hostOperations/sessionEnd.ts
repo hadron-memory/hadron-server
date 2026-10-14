@@ -23,7 +23,8 @@ import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import type { EventActor } from '../agentTasks/events.js';
-import { HOST_LAPSE_CHECK_INS_DEFAULT } from '../agentTasks/hosts.js';
+import { HOST_LAPSE_CHECK_INS_DEFAULT, lockAppHostLapse } from '../agentTasks/hosts.js';
+import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 
 /** cor:agt:050:10 — the default grace, in minutes, when the App has not set one. */
 export const SESSION_END_GRACE_DEFAULT_MINUTES = 10;
@@ -125,9 +126,34 @@ export async function sweepSessionEndRequests(db: PrismaClient, now = new Date()
   return resolved;
 }
 
-/** Resolve one due request; false when it was already resolved, or is not yet due. */
+/**
+ * Resolve one due request; null when it was already resolved, or is not yet due.
+ *
+ * FENCED THROUGH THE INSERT (#1877 review, Colin P2-1; Greta P3): everything the
+ * decision reads is held until the platform's `worker.end` is written, in the
+ * host-registration lock order (registerHost, recordHostLost): the App's
+ * authority anchor SHARED (an uninstall or delete committed first and is seen,
+ * or waits), the App's host-lapse lock SHARED with its count (a count change
+ * waits), the request FOR UPDATE, the session FOR SHARE, then every registration
+ * of the App FOR SHARE (a refresh that would drop the worker waits) BEFORE a
+ * fresh read of which of them list the worker and are live. A row lock taken in
+ * the same statement as that read could hand back a membership the refresh was
+ * replacing; a separate statement after the lock cannot.
+ */
 export async function resolveSessionEndRequest(db: PrismaClient, requestId: string, now: Date): Promise<SessionEndResolution | null> {
+  const head = await db.taskSessionEndRequest.findUnique({ where: { id: requestId }, select: { appId: true } });
+  if (!head) return null;
+  const owner = await db.app.findUnique({ where: { id: head.appId }, select: { organizationId: true, ownerUserId: true } });
   return db.$transaction(async (tx) => {
+    await lockAuthorityAnchors(tx, [
+      { kind: 'app', id: head.appId },
+      ...(owner?.organizationId ? [{ kind: 'org' as const, id: owner.organizationId }] : []),
+      ...(owner?.ownerUserId ? [{ kind: 'user' as const, id: owner.ownerUserId }] : []),
+    ], 'shared');
+    await lockAppHostLapse(tx, head.appId, 'shared');
+    const [schedule] = await tx.$queryRaw<{ checkIns: number | null }[]>`
+      SELECT host_lapse_check_ins AS "checkIns" FROM agent_task_stall_schedule WHERE app_id = ${head.appId} FOR SHARE`;
+    const checkIns = schedule?.checkIns ?? HOST_LAPSE_CHECK_INS_DEFAULT;
     const [req] = await tx.$queryRaw<{ id: string; appId: string; workerId: string; sessionId: string; dueAt: Date; resolvedAt: Date | null }[]>`
       SELECT id, app_id AS "appId", worker_id AS "workerId", session_id AS "sessionId", due_at AS "dueAt", resolved_at AS "resolvedAt"
       FROM task_session_end_requests WHERE id = ${requestId} FOR UPDATE`;
@@ -141,9 +167,11 @@ export async function resolveSessionEndRequest(db: PrismaClient, requestId: stri
       await finish('ended');
       return 'ended';
     }
-    // The App must still be live to issue anything to its hosts.
+    // The App, read under its anchor: live, or nothing is issued to its hosts.
     const app = await tx.app.findUnique({ where: { id: req.appId }, select: { deletedAt: true, uninstalledAt: true } });
-    const hostId = app && !app.deletedAt && !app.uninstalledAt ? await pickLiveHost(tx, req.appId, req.workerId, session.host, now) : null;
+    const hostId = app && !app.deletedAt && !app.uninstalledAt
+      ? await pickLiveHost(tx, req.appId, req.workerId, session.host, now, checkIns)
+      : null;
     if (!hostId) {
       await finish('no-live-host');
       return 'no-live-host';
@@ -168,25 +196,35 @@ export async function resolveSessionEndRequest(db: PrismaClient, requestId: stri
 /**
  * A live host registering the worker, to end its session through. Proposed
  * (#1709): the host the session itself names when one of them matches, else
- * the first by host id; a worker is normally registered by one host.
+ * the first by host id; a worker is normally registered by one host. Locks the
+ * App's registrations FOR SHARE first, then reads membership and liveness in a
+ * separate statement, under the lapse count the caller holds.
  */
-async function pickLiveHost(tx: Prisma.TransactionClient, appId: string, workerId: string, sessionHost: string | null, now: Date): Promise<string | null> {
+async function pickLiveHost(
+  tx: Prisma.TransactionClient, appId: string, workerId: string, sessionHost: string | null, now: Date, checkIns: number,
+): Promise<string | null> {
+  await tx.$queryRaw`SELECT id FROM host_registrations WHERE app_id = ${appId} ORDER BY id FOR SHARE`;
   const rows = await tx.$queryRaw<{ hostId: string }[]>`
     SELECT r.host_id AS "hostId"
     FROM host_registrations r
     JOIN host_registration_workers w ON w.registration_id = r.id AND w.worker_id = ${workerId}
-    LEFT JOIN agent_task_stall_schedule s ON s.app_id = r.app_id
     WHERE r.app_id = ${appId}
-      AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * COALESCE(s.host_lapse_check_ins, ${HOST_LAPSE_CHECK_INS_DEFAULT})) >= ${toNaiveUtc(now)}::timestamp
+      AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * ${checkIns}) >= ${toNaiveUtc(now)}::timestamp
     ORDER BY r.host_id`;
   if (rows.length === 0) return null;
   return rows.find((r) => r.hostId === sessionHost)?.hostId ?? rows[0]!.hostId;
 }
 
-/** Is a worker waiting on a session end, so the matcher should not hand it new work yet? (#1709, Proposed.) */
+/**
+ * Is a worker waiting on a session end, so the matcher should not hand it new work yet? (#1709, Proposed.) An open
+ * request whose session is still open, or an outstanding `worker.end` whose session is still open: once the named
+ * session has ended, a replacement session is free to take work even while the host has not reported yet (#1877
+ * review, Colin P3).
+ */
 export const PENDING_SESSION_END_SQL = (workerColumn: Prisma.Sql) => Prisma.sql`(
   EXISTS (SELECT 1 FROM task_session_end_requests q
           JOIN sessions s ON s.id = q.session_id AND s.ended_at IS NULL
           WHERE q.worker_id = ${workerColumn} AND q.resolved_at IS NULL)
   OR EXISTS (SELECT 1 FROM host_operations o
+             JOIN sessions so ON so.id = o.args ->> 'sessionId' AND so.ended_at IS NULL
              WHERE o.worker_id = ${workerColumn} AND o.type = 'worker.end' AND o.status IN ('issued', 'collected')))`;

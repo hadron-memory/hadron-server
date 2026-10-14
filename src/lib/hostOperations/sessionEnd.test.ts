@@ -203,6 +203,87 @@ describe('the fallback after the grace (cor:agt:050:10 S4, cor:agt:070:05)', () 
   });
 });
 
+describe('the fallback is fenced through the insert (#1877 review, Colin P2-1, Greta P3)', () => {
+  /** Run `work` in a transaction held open until released; resolves `locked` once `work` is done. */
+  function holdOpen(work: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<void>) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let ready!: () => void;
+    const locked = new Promise<void>((r) => { ready = r; });
+    const done = db.$transaction(async (tx) => { await work(tx); ready(); await gate; });
+    return { locked, release, done };
+  }
+  async function dueRequest() {
+    const t = await startedTask();
+    await finish(t.id);
+    return (await requestOf(t.id))!;
+  }
+  async function resolveAgainst(hold: ReturnType<typeof holdOpen>, r: { id: string; dueAt: Date }) {
+    await hold.locked;
+    let settled = false;
+    const p = resolveSessionEndRequest(db, r.id, r.dueAt).finally(() => { settled = true; });
+    await new Promise((res) => setTimeout(res, 400));
+    expect(settled).toBe(false);
+    hold.release();
+    await hold.done;
+    return p;
+  }
+
+  it('a refresh dropping the worker, in flight, is waited for: the request resolves no-live-host and nothing is issued', async () => {
+    const r = await dueRequest();
+    const hold = holdOpen(async (tx) => {
+      const [reg] = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM host_registrations WHERE app_id = ${app.id} AND host_id = 'orca1' FOR UPDATE`;
+      await tx.hostRegistrationWorker.deleteMany({ where: { registrationId: reg!.id } });
+    });
+    expect(await resolveAgainst(hold, r)).toBe('no-live-host');
+    expect(await db.hostOperation.count()).toBe(0);
+  });
+
+  it('a lapse count lowered in flight is waited for: the host it lapses gets nothing', async () => {
+    // Refreshed 15 minutes before the request: at the grace (25 minutes on) it is live under 3 check-ins of 10, lapsed under 2.
+    await db.hostRegistration.updateMany({ data: { refreshedAt: new Date(Date.now() - 15 * MIN) } });
+    const r = await dueRequest();
+    const hold = holdOpen(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'host-lapse:' + app.id}))`;
+      await tx.agentTaskStallSchedule.upsert({ where: { appId: app.id }, create: { appId: app.id, hostLapseCheckIns: 2 }, update: { hostLapseCheckIns: 2 } });
+    });
+    expect(await resolveAgainst(hold, r)).toBe('no-live-host');
+    expect(await db.hostOperation.count()).toBe(0);
+  });
+
+  it('an uninstall in flight is waited for: nothing is issued to a dead App\'s hosts', async () => {
+    const r = await dueRequest();
+    const org = await db.app.findUniqueOrThrow({ where: { id: app.id }, select: { organizationId: true } });
+    const hold = holdOpen(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'authorization:app'}), hashtext(${app.id}))`;
+      if (org.organizationId) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'authorization:org'}), hashtext(${org.organizationId}))`;
+      await tx.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    });
+    expect(await resolveAgainst(hold, r)).toBe('no-live-host');
+    expect(await db.hostOperation.count()).toBe(0);
+  });
+
+  it('control: nothing in flight, a live registered host gets exactly one worker.end', async () => {
+    const r = await dueRequest();
+    expect(await resolveSessionEndRequest(db, r.id, r.dueAt)).toBe('end-issued');
+    expect(await resolveSessionEndRequest(db, r.id, r.dueAt)).toBeNull();
+    expect(await db.hostOperation.count({ where: { type: 'worker.end' } })).toBe(1);
+  });
+
+  it('Colin P3: after end-issued, the original ends and a replacement binds: the replacement may take work, and the old report touches only the original', async () => {
+    const r = await dueRequest();
+    await resolveSessionEndRequest(db, r.id, r.dueAt);
+    const [op] = await M.collectHostOperations({}, { appRef: app.id }, keyCtx(orca1));
+    await db.session.update({ where: { id: session.id }, data: { endedAt: new Date() } });
+    const replacement = await bind(kit, holder.id);
+    // The outstanding operation names an ended session: it no longer holds the worker back from matching.
+    expect((await loadWorkerWorkStates(db, app.id, new Date())).find((w) => w.id === kit.id)!.endingSession).toBe(false);
+    expect(await M.reportHostOperation({}, { input: { appRef: app.id, id: op.id, outcome: 'SUCCEEDED' } }, keyCtx(orca1)))
+      .toMatchObject({ status: 'succeeded', args: { sessionId: session.id } });
+    expect((await db.session.findUniqueOrThrow({ where: { id: replacement.id } })).endedAt).toBeNull();
+  });
+});
+
 describe('worker.end at the host (cor:agt:020:10: it fails only if the session did not end)', () => {
   async function issued() {
     const t = await startedTask();
