@@ -161,7 +161,7 @@ export async function markStalled(
       where: { workerId: args.workerId },
       data: {
         state: 'unavailable', reason: 'stalled', until: null, setAt: args.now, setBy: 'stall-rule',
-        setByUserId: null, setByWorkerId: null, setByAgentId: null,
+        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null,
       },
     });
     changed = !stalled;
@@ -214,7 +214,7 @@ export async function clearStalledMarks(db: PrismaClient, now: Date): Promise<nu
           where: { workerId: r.workerId, state: 'unavailable', reason: 'stalled', setAt: r.setAt },
           data: {
             state: 'available', reason: null, until: null, setAt: now, setBy: 'stall-rule',
-            setByUserId: null, setByWorkerId: null, setByAgentId: null,
+            setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null,
           },
         });
         if (n.count === 0) return false;
@@ -293,7 +293,7 @@ async function recordLapse(db: PrismaClient, r: LapsedRecord, now: Date): Promis
       where: { workerId: r.workerId, state: 'unavailable', until: r.until, setAt: r.setAt },
       data: {
         state: 'available', reason: null, until: null, setAt: r.until, setBy: 'lapse',
-        setByUserId: null, setByWorkerId: null, setByAgentId: null,
+        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null,
       },
     });
     if (n.count === 0) return false;

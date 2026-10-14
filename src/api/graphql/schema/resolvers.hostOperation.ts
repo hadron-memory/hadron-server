@@ -1,0 +1,561 @@
+// Host operations — #1709 (Task Management T6, server half; plan design:agent-tasks §7.1).
+//
+// Two kinds of caller, never mixed:
+//
+// A HOST, through an App key holding `host:operate` bound to one host
+// (cor:agt:070:04): `registerHost`, `collectHostOperations`,
+// `reportHostOperation` and `setHostWorkerAvailability`. The host's identity
+// comes from the key's scope row, never from the request: no host surface takes
+// a host id. A key of another App, a key without the scope, a revoked scope or
+// key, and a key bound to a session are refused, in that order, so what a key
+// learns never depends on something it does not hold (the #1749 order). Each
+// write re-checks the scope inside its transaction under the App's authority
+// anchor (shared; the scope's, the key's and the App's revokers take it
+// exclusively), and records the use in that same transaction (cor:agt:070:07).
+// The host starts every exchange; the server never connects to a host.
+//
+// A PERSON OR A WORKER, issuing (cor:agt:070:05): `issueHostOperation`. This
+// slice issues the worktree operations only: the worker's holder, the worker it
+// reports to, or whoever manages the App. `worker.start` and `worker.end` ship
+// with the launch grant and the close-on-finish fallback (#1709's later
+// slices); `worker.deliver` waits for the router port's delivery path
+// (hadron-cli#829). A task never issues a worktree operation (cor:agt:070:06):
+// nothing on the task paths calls this.
+
+import { GraphQLError } from 'graphql';
+import { Prisma } from '../../../generated/prisma/index.js';
+import type { Context } from './resolvers.helpers.js';
+import {
+  actorManagesApp,
+  inTaskWriteTx,
+  loadApp,
+  requireWritable,
+  resolveParticipatedApp,
+  resolveTaskWorkerId,
+  taskError,
+  withReadableApp,
+  type TaskActor,
+  type TaskApp,
+} from './resolvers.agentTask.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
+import { appKeyCaller, refuseSessionBound } from '../../../lib/appKeyScopes/scopes.js';
+import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { currentActor } from '../../../lib/requestActor.js';
+import { generateId } from '../../../lib/id.js';
+import { keyHostId, recordHostKeyUse, type HostKey } from '../../../lib/hostOperations/hostKey.js';
+import {
+  HOST_FAILURE_REASON_MAX,
+  HostOperationArgsError,
+  isHostToken,
+  validateHostOperation,
+  type HostOperationType,
+} from '../../../lib/hostOperations/types.js';
+import {
+  HostRegistrationError,
+  isRegistrationLive,
+  registerHost,
+  HOST_ID_PATTERN,
+  HOST_LAPSE_CHECK_INS_DEFAULT,
+} from '../../../lib/agentTasks/hosts.js';
+import { appendAvailabilityEvent, appendHostOperationEvent, eventActor, PLATFORM_ACTOR } from '../../../lib/agentTasks/events.js';
+import { recordInEffect } from '../../../lib/agentTasks/availability.js';
+import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import { normalizeAvailability, type AvailabilityInput } from './resolvers.agentTaskAlarms.js';
+
+const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.', { appRef });
+const opNotFound = (id: string): GraphQLError => taskError('HOST_OPERATION_NOT_FOUND', 'Host operation not found.', { id });
+const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
+
+/** At most this many operations per collection or page. */
+const PAGE_MAX = 200;
+
+/** The anchors every authority-revoking writer of an App takes exclusively (a scope, a key, the App itself). */
+const appAnchors = (app: TaskApp): AuthorityAnchor[] => [
+  { kind: 'app', id: app.id },
+  ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+  ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+];
+
+// ── The host's side: a host:operate key ───────────────────────────────────
+
+const scopeRequired = (): GraphQLError =>
+  taskError('APP_KEY_SCOPE_REQUIRED', 'This App key does not hold the host:operate scope. Whoever manages the App can grant it, for one host.');
+
+/**
+ * The host-key gate, outside any transaction (cor:agt:070:04): the caller is an App key; the App is the key's own (a
+ * foreign App is "not found"); the key holds host:operate now; it carries no session. Returns the key as its host, and
+ * the re-check to run inside the write's transaction under the App's anchor, where the host must still be the same one.
+ */
+async function hostKeyEntry(ctx: Context, appRef: string): Promise<{ app: TaskApp; host: HostKey; authorize: (tx: Prisma.TransactionClient) => Promise<void> }> {
+  const key = appKeyCaller(ctx);
+  if (!key) {
+    throw taskError('HOST_KEY_REQUIRED', "Only a host, with its App key's host:operate scope, does this.");
+  }
+  let app: TaskApp | null = null;
+  try {
+    const { id } = await resolveAppRef(ctx.db, appRef);
+    app = id === key.appId ? await loadApp(ctx, id) : null;
+  } catch {
+    app = null;
+  }
+  if (!app || app.deletedAt || app.uninstalledAt) throw appNotFound(appRef);
+  const hostId = await keyHostId(ctx.db, key);
+  if (!hostId) throw scopeRequired();
+  refuseSessionBound(ctx);
+  if (currentActor().workerId) throw taskError('APP_KEY_SESSION_BOUND', 'A host key does not act as a worker. Send no session.');
+  const host: HostKey = { ...key, hostId };
+  const held = app;
+  return {
+    app: held,
+    host,
+    authorize: async (tx) => {
+      await lockAuthorityAnchors(tx, appAnchors(held), 'shared');
+      // The same host, still: a scope revoked, re-granted for another host, or a key revoked, while we waited, refuses.
+      if ((await keyHostId(tx, key)) !== hostId) throw scopeRequired();
+    },
+  };
+}
+
+/** A host-key write: the gate, then one transaction holding the App's anchor shared, re-checked, with the use recorded by `body`. */
+async function asHost<T>(
+  ctx: Context,
+  appRef: string,
+  body: (tx: Prisma.TransactionClient, app: TaskApp, host: HostKey) => Promise<T>,
+): Promise<T> {
+  const { app, host, authorize } = await hostKeyEntry(ctx, appRef);
+  return ctx.db.$transaction(async (tx) => {
+    await authorize(tx);
+    return body(tx, app, host);
+  });
+}
+
+type RegisterHostInput = {
+  appRef: string;
+  label: string;
+  pollIntervalSeconds: number;
+  workers?: { worker: string; family: string; worktrees?: string[] | null }[] | null;
+};
+
+type HostOperationRow = Prisma.HostOperationGetPayload<Record<string, never>>;
+
+export const hostOperationMutations = {
+  /**
+   * cor:agt:070:01, :04 — a host registers, or refreshes, which of its App's workers it can launch, as which model
+   * family, and in which existing worktrees. The host id is the key's; the request names none.
+   */
+  registerHost: async (_: unknown, { input }: { input: RegisterHostInput }, ctx: Context) => {
+    if (!input) throw badInput('input is required.');
+    const { app, host, authorize } = await hostKeyEntry(ctx, input.appRef);
+    const workers: { workerId: string; family: string; worktrees: string[] }[] = [];
+    for (const w of input.workers ?? []) {
+      // A worker of another App, or none at all, is refused by the writer like a retired one: by its ref, no oracle.
+      const id = (await resolveTaskWorkerId(ctx, app.id, w.worker)) ?? w.worker;
+      workers.push({ workerId: id, family: w.family, worktrees: w.worktrees ?? [] });
+    }
+    try {
+      await registerHost(
+        ctx.db,
+        { appId: app.id, hostId: host.hostId, label: input.label, pollIntervalSeconds: input.pollIntervalSeconds, workers },
+        new Date(),
+        {
+          authorize,
+          afterWrite: (tx, r) => recordHostKeyUse(tx, host, 'register', { count: r.workerCount }),
+        },
+      );
+    } catch (e) {
+      if (e instanceof HostRegistrationError) {
+        if (e.code === 'APP_NOT_LIVE') throw appNotFound(input.appRef);
+        throw taskError(e.code, e.message);
+      }
+      throw e;
+    }
+    // A registration can make a worker launchable, so a queued task may now match (cor:agt:060:06).
+    await matchAfterChange(ctx.db, app.id);
+    return loadRegistrationView(ctx, app.id, host.hostId);
+  },
+
+  /**
+   * cor:agt:070:04 S1 — the host collects its own operations, oldest first: every one still `issued`, which this marks
+   * `collected`, and every one it collected before and has not reported (a restarted host resumes them). Only its own
+   * host's, in its own App.
+   */
+  collectHostOperations: async (_: unknown, a: { appRef: string; first?: number | null }, ctx: Context) => {
+    const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
+    return asHost(ctx, a.appRef, async (tx, app, host) => {
+      const rows = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM host_operations
+        WHERE app_id = ${app.id} AND host_id = ${host.hostId} AND status IN ('issued', 'collected')
+        ORDER BY issued_at, id
+        LIMIT ${first}
+        FOR UPDATE`;
+      const ids = rows.map((r) => r.id);
+      if (ids.length) {
+        await tx.hostOperation.updateMany({ where: { id: { in: ids }, status: 'issued' }, data: { status: 'collected', collectedAt: new Date() } });
+      }
+      await recordHostKeyUse(tx, host, 'collect', { count: ids.length });
+      const ops = ids.length ? await tx.hostOperation.findMany({ where: { id: { in: ids } } }) : [];
+      const byId = new Map(ops.map((o) => [o.id, o]));
+      return ids.map((id) => byId.get(id)!);
+    });
+  },
+
+  /**
+   * cor:agt:070:03 — the host reports an operation's final outcome: done, or failed with a reason. Only the host it was
+   * issued to, and only once it collected it; another host's operation is "not found". Reporting the same outcome
+   * again answers the operation as it is; a different one is refused. Writes `host.operation.succeeded` / `.failed`.
+   */
+  reportHostOperation: async (
+    _: unknown,
+    { input }: { input: { appRef: string; id: string; outcome: 'SUCCEEDED' | 'FAILED'; worktree?: string | null; failureReason?: string | null } },
+    ctx: Context,
+  ) => {
+    if (!input) throw badInput('input is required.');
+    if (input.outcome !== 'SUCCEEDED' && input.outcome !== 'FAILED') throw badInput('outcome is SUCCEEDED or FAILED.');
+    const status = input.outcome === 'SUCCEEDED' ? 'succeeded' : 'failed';
+    const reason = (input.failureReason ?? '').trim();
+    if (status === 'failed' && (reason === '' || reason.length > HOST_FAILURE_REASON_MAX)) {
+      throw badInput(`A failure says why, in 1 to ${HOST_FAILURE_REASON_MAX} characters.`);
+    }
+    if (status === 'succeeded' && input.failureReason != null) throw badInput('Only a failure carries a reason.');
+    return asHost(ctx, input.appRef, async (tx, app, host) => {
+      const [locked] = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM host_operations WHERE id = ${input.id} FOR UPDATE`;
+      const op = locked ? await tx.hostOperation.findUnique({ where: { id: input.id } }) : null;
+      if (!op || op.appId !== app.id || op.hostId !== host.hostId) throw opNotFound(input.id);
+      if (op.status === 'succeeded' || op.status === 'failed') {
+        if (op.status === status) {
+          // An idempotent re-report is still a use of the key (070:07; #1876 review, Diego P2-2). Nothing else changes.
+          await recordHostKeyUse(tx, host, 'report', { operationId: op.id });
+          return op;
+        }
+        throw taskError('HOST_OPERATION_ALREADY_REPORTED', `This operation was already reported ${op.status}.`, { id: op.id });
+      }
+      if (op.status !== 'collected') {
+        throw taskError('HOST_OPERATION_NOT_COLLECTED', 'Collect an operation before reporting it.', { id: op.id });
+      }
+      const result = status === 'succeeded' ? successResult(op.type as HostOperationType, input.worktree) : null;
+      if (status === 'failed' && input.worktree != null) throw badInput('A failure carries no result.');
+      const now = new Date();
+      const updated = await tx.hostOperation.update({
+        where: { id: op.id },
+        data: {
+          status,
+          finishedAt: now,
+          result: result ?? Prisma.DbNull,
+          failureReason: status === 'failed' ? reason : null,
+        },
+      });
+      await appendHostOperationEvent(tx, {
+        appId: app.id,
+        type: status === 'succeeded' ? 'host.operation.succeeded' : 'host.operation.failed',
+        operationId: op.id,
+        hostId: host.hostId,
+        operationType: op.type,
+        workerId: op.workerId,
+        createdAt: now,
+      });
+      await recordHostKeyUse(tx, host, 'report', { operationId: op.id });
+      return updated;
+    });
+  },
+
+  /**
+   * cor:agt:060:08, the host's arm: a host marks a worker it registers unavailable, only as out of tokens or host down,
+   * or clears a mark it set itself. It never clears or replaces anyone else's mark (a stall among them), and never a
+   * worker it does not register.
+   */
+  setHostWorkerAvailability: async (
+    _: unknown,
+    { input }: { input: { appRef: string; worker: string } & AvailabilityInput },
+    ctx: Context,
+  ) => {
+    if (!input) throw badInput('input is required.');
+    const now = new Date();
+    const { state, reason, until } = normalizeAvailability(input, now);
+    if (state === 'unavailable' && reason !== 'out-of-tokens' && reason !== 'host-down') {
+      throw taskError('AVAILABILITY_NOT_PERMITTED', 'A host marks a worker unavailable only as OUT_OF_TOKENS or HOST_DOWN.');
+    }
+    const notRegistered = () => taskError('WORKER_NOT_FOUND', 'This host does not register that worker.', { worker: input.worker });
+    let workerId: string | null = null;
+    // One gate (Greta P3-2): the host key's entry runs once, in asHost; the worker resolves after it.
+    const app = await asHost(ctx, input.appRef, async (tx, freshApp, host) => {
+      workerId = await resolveTaskWorkerId(ctx, freshApp.id, input.worker);
+      if (!workerId) throw notRegistered();
+      const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null }[]>`
+        SELECT app_id AS "appId", retired_at AS "retiredAt" FROM workers WHERE id = ${workerId} FOR UPDATE`;
+      // FOR UPDATE, not SHARE (#1876 review, Diego P2-3): the worker row exists before any availability row, so it is
+      // the per-worker lock for a FIRST mark too, where a FOR UPDATE on the absent availability row would lock nothing.
+      // It conflicts with the FOR SHARE every other availability writer takes, in their order (worker, then record).
+      //
+      // Then the host's REGISTRATION row FOR SHARE, before reading whether it lists the worker (#1876 review, Riana
+      // P2, #10733): registerHost replaces the worker list under that row FOR UPDATE, and a refresh to an empty list
+      // locks no worker row, so without this fence it could drop the worker between the read and the mark. Lock order
+      // worker, then registration, never the reverse: registerHost takes the workers it lists FOR SHARE before its
+      // registration row, so the two orders never cycle.
+      const [reg] = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM host_registrations WHERE app_id = ${freshApp.id} AND host_id = ${host.hostId} FOR SHARE`;
+      const listed = reg
+        ? await tx.hostRegistrationWorker.findFirst({ where: { registrationId: reg.id, workerId }, select: { workerId: true } })
+        : null;
+      if (!w || w.appId !== freshApp.id || w.retiredAt || !listed) throw notRegistered();
+      const [cur] = await tx.$queryRaw<{ state: string; reason: string | null; until: Date | null; setAt: Date; setBy: string; setByHostId: string | null }[]>`
+        SELECT state, reason, until, set_at AS "setAt", set_by AS "setBy", set_by_host_id AS "setByHostId"
+        FROM worker_availability WHERE worker_id = ${workerId} FOR UPDATE`;
+      const ownMark = cur?.setBy === 'host' && cur.setByHostId === host.hostId;
+      const othersMarkInEffect = cur && cur.state === 'unavailable' && !ownMark && recordInEffect(cur, now);
+      if (state === 'unavailable' && othersMarkInEffect) {
+        throw taskError('AVAILABILITY_NOT_PERMITTED', 'This worker is unavailable by someone else\'s mark; a host does not replace it.');
+      }
+      if (state === 'available' && !(ownMark && cur!.state === 'unavailable')) {
+        throw taskError('AVAILABILITY_NOT_PERMITTED', 'A host clears only a mark it set itself.');
+      }
+      const data = {
+        state, reason, until, setAt: now, setBy: 'host',
+        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: host.hostId,
+      };
+      await tx.workerAvailability.upsert({ where: { workerId }, create: { workerId, ...data }, update: data });
+      await appendAvailabilityEvent(tx, {
+        appId: freshApp.id,
+        actor: PLATFORM_ACTOR,
+        event: {
+          kind: 'worker', workerId, state, reason: reason as 'out-of-tokens' | 'host-down' | null, until, setBy: 'host', hostId: host.hostId,
+        },
+      });
+      await recordHostKeyUse(tx, host, 'availability', { count: 1 });
+      return freshApp;
+    });
+    await matchAfterChange(ctx.db, app.id);
+    return ctx.db.workerAvailability.findUniqueOrThrow({ where: { workerId: workerId! } });
+  },
+
+  /**
+   * cor:agt:070:05 — issue an operation to one of the App's registered hosts. This slice issues the worktree
+   * operations: the worker's holder, the worker it reports to (through its session), or whoever manages the App. The
+   * type is checked first: anything outside the closed set is refused HOST_OPERATION_TYPE_UNKNOWN (cor:agt:070:03).
+   */
+  issueHostOperation: async (
+    _: unknown,
+    { input }: { input: { appRef: string; hostId: string; worker: string; type: string; args?: Record<string, unknown> | null } },
+    ctx: Context,
+  ) => {
+    if (!input) throw badInput('input is required.');
+    if (appKeyCaller(ctx)) throw taskError('FORBIDDEN', 'An App key does not issue host operations.');
+    // The type and the shape of the arguments first: a refusal here depends only on the caller's own input.
+    let validated: { type: HostOperationType; args: Record<string, string> };
+    try {
+      if (input.args && Object.prototype.hasOwnProperty.call(input.args, 'workerId')) {
+        throw new HostOperationArgsError('BAD_HOST_OPERATION_ARGS', 'Name the worker with `worker`, not inside args.');
+      }
+      validated = validateHostOperation(input.type, { ...(input.args ?? {}), workerId: 'placeholder' });
+    } catch (e) {
+      if (e instanceof HostOperationArgsError) throw taskError(e.code, e.message);
+      throw e;
+    }
+    if (validated.type !== 'worktree.create' && validated.type !== 'worktree.remove') {
+      throw taskError(
+        'HOST_OPERATION_NOT_ISSUABLE',
+        validated.type === 'worker.deliver'
+          ? 'worker.deliver is not issued until a host has a delivery path for it (hadron-cli#829).'
+          : `${validated.type} is not issued by hand yet: it ships with #1709's next slice.`,
+      );
+    }
+    const hostId = (input.hostId ?? '').trim();
+    if (!HOST_ID_PATTERN.test(hostId)) throw badInput('hostId is a host token.');
+    const { app, actor } = await resolveParticipatedApp(ctx, input.appRef);
+    requireWritable(ctx, app);
+    const workerId = await resolveTaskWorkerId(ctx, app.id, input.worker);
+    const workerNotFound = () => taskError('WORKER_NOT_FOUND', 'Worker not found.', { worker: input.worker });
+    if (!workerId) throw workerNotFound();
+    const args: Record<string, string> = { ...validated.args, workerId };
+    const id = generateId();
+    await inTaskWriteTx(ctx, app, actor, () => appNotFound(input.appRef), async (tx, txCtx, freshApp) => {
+      // The worker under a lock (a release, a retire or a reportsTo change either committed first or waits; the
+      // reportsTo graph lock is held shared by inTaskWriteTx).
+      const [target] = await tx.$queryRaw<{ appId: string; heldByUserId: string | null; retiredAt: Date | null; reportsToWorkerId: string | null }[]>`
+        SELECT app_id AS "appId", held_by_user_id AS "heldByUserId", retired_at AS "retiredAt",
+               reports_to_worker_id AS "reportsToWorkerId"
+        FROM workers WHERE id = ${workerId} FOR SHARE`;
+      if (!target || target.appId !== freshApp.id) throw workerNotFound();
+      if (target.retiredAt) throw taskError('WORKER_RETIRED', 'This worker is retired.', { workerId });
+      if (!(await mayIssueWorktreeOp(txCtx, freshApp, actor, target))) {
+        throw taskError(
+          'HOST_OPERATION_NOT_PERMITTED',
+          "A worktree is created or removed by the worker's holder, the worker it reports to, or whoever manages the App.",
+        );
+      }
+      const [reg] = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM host_registrations WHERE app_id = ${freshApp.id} AND host_id = ${hostId} FOR SHARE`;
+      if (!reg) throw taskError('HOST_NOT_FOUND', 'No host with that id is registered in this App.', { hostId });
+      if (validated.type === 'worktree.remove') {
+        const listed = await tx.hostRegistrationWorker.findFirst({
+          where: { registrationId: reg.id, workerId, worktrees: { has: args.worktree } },
+          select: { workerId: true },
+        });
+        if (!listed) throw taskError('BAD_HOST_OPERATION_ARGS', 'That host registers no such worktree for this worker.');
+      }
+      await tx.hostOperation.create({
+        data: {
+          id,
+          appId: freshApp.id,
+          hostId,
+          type: validated.type,
+          args,
+          workerId,
+          ...issuer(ctx, actor),
+        },
+      });
+    });
+    return ctx.db.hostOperation.findUniqueOrThrow({ where: { id } });
+  },
+};
+
+/** cor:agt:070:05 — create or remove a worktree: the holder, the worker it reports to, or whoever manages the App. */
+async function mayIssueWorktreeOp(
+  txCtx: Context,
+  app: TaskApp,
+  actor: TaskActor,
+  target: { heldByUserId: string | null; reportsToWorkerId: string | null },
+): Promise<boolean> {
+  if (actor.kind === 'worker') return target.reportsToWorkerId !== null && target.reportsToWorkerId === actor.workerId;
+  if (target.heldByUserId !== null && target.heldByUserId === actor.userId) return true;
+  return actorManagesApp(txCtx, app, actor);
+}
+
+function issuer(ctx: Context, actor: TaskActor) {
+  const e = eventActor(ctx.userId);
+  return actor.kind === 'worker'
+    ? { issuedBy: 'worker', issuedByUserId: e.userId, issuedByWorkerId: actor.workerId, issuedByAgentId: e.agentId }
+    : { issuedBy: 'user', issuedByUserId: actor.userId, issuedByWorkerId: null, issuedByAgentId: null };
+}
+
+/** A success's typed result: the created worktree for `worktree.create`; nothing for the others in this slice. */
+function successResult(type: HostOperationType, worktree: string | null | undefined): Prisma.InputJsonObject | null {
+  if (type === 'worktree.create') {
+    if (!isHostToken(worktree)) throw badInput('A created worktree reports its name: a host-operation token.');
+    return { worktree };
+  }
+  if (worktree != null) throw badInput(`${type} reports no worktree.`);
+  return null;
+}
+
+// ── Reads ─────────────────────────────────────────────────────────────────
+
+/** The registration as the App's readers see it, with liveness derived now. */
+async function loadRegistrationView(ctx: Context, appId: string, hostId: string) {
+  const views = await loadRegistrationViews(ctx, appId, hostId);
+  return views[0]!;
+}
+
+async function loadRegistrationViews(ctx: Context, appId: string, hostId?: string) {
+  const regs = await ctx.db.hostRegistration.findMany({
+    where: { appId, ...(hostId ? { hostId } : {}) },
+    include: { workers: { orderBy: { workerId: 'asc' } } },
+    orderBy: { hostId: 'asc' },
+  });
+  const schedule = await ctx.db.agentTaskStallSchedule.findUnique({ where: { appId }, select: { hostLapseCheckIns: true } });
+  const checkIns = schedule?.hostLapseCheckIns ?? HOST_LAPSE_CHECK_INS_DEFAULT;
+  const now = new Date();
+  return regs.map((r) => ({
+    hostId: r.hostId,
+    label: r.label,
+    pollIntervalSeconds: r.pollIntervalSeconds,
+    registeredAt: r.registeredAt,
+    refreshedAt: r.refreshedAt,
+    live: isRegistrationLive(r, now, checkIns),
+    workers: r.workers.map((w) => ({ workerId: w.workerId, family: w.family, worktrees: w.worktrees })),
+  }));
+}
+
+export const hostOperationQueries = {
+  /** The App's host registrations: whoever reads its tasks and events (cor:agt:050:21), the App's own key included. */
+  hostRegistrations: (_: unknown, a: { appRef: string }, ctx: Context) =>
+    withReadableApp(ctx, a.appRef, (c, app) => loadRegistrationViews(c, app.id)),
+
+  /** The App's host operations, newest first: whoever reads its tasks and events (cor:agt:050:21). */
+  hostOperations: (
+    _: unknown,
+    a: { appRef: string; hostId?: string | null; status?: string | null; worker?: string | null; first?: number | null; after?: string | null },
+    ctx: Context,
+  ) =>
+    withReadableApp(ctx, a.appRef, async (c, app) => {
+      const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
+      const status = a.status ? a.status.toLowerCase() : null;
+      if (status && !['issued', 'collected', 'succeeded', 'failed'].includes(status)) {
+        throw badInput('status is ISSUED, COLLECTED, SUCCEEDED or FAILED.');
+      }
+      // Holger via Vera #10805 (cor:agt:070:04): a host key sees only its OWN host's operations; the App-wide listing is
+      // for the App's participants and its other keys. A key that has ever been granted host:operate is a host key
+      // here, held to the host of its latest grant even once revoked, so revoking the scope never widens its read.
+      const ownHost = await hostOfKey(c);
+      const hostFilter = ownHost ?? a.hostId ?? null;
+      if (ownHost && a.hostId && a.hostId !== ownHost) return { items: [], hasNextPage: false, endCursor: null };
+      let workerId: string | null = null;
+      if (a.worker) {
+        workerId = await resolveTaskWorkerId(c, app.id, a.worker);
+        if (!workerId) return { items: [], hasNextPage: false, endCursor: null };
+      }
+      let cursor: { issuedAt: Date; id: string } | null = null;
+      if (a.after) {
+        // Scoped like the list, so a cursor naming another host's operation reads as no cursor at all (no oracle).
+        const at = await c.db.hostOperation.findFirst({
+          where: { id: a.after, appId: app.id, ...(ownHost ? { hostId: ownHost } : {}) },
+          select: { issuedAt: true, id: true },
+        });
+        if (!at) throw badInput('after is not a cursor of this list.');
+        cursor = at;
+      }
+      const rows: HostOperationRow[] = await c.db.hostOperation.findMany({
+        where: {
+          appId: app.id,
+          ...(hostFilter ? { hostId: hostFilter } : {}),
+          ...(status ? { status } : {}),
+          ...(workerId ? { workerId } : {}),
+          ...(cursor ? { OR: [{ issuedAt: { lt: cursor.issuedAt } }, { issuedAt: cursor.issuedAt, id: { lt: cursor.id } }] } : {}),
+        },
+        orderBy: [{ issuedAt: 'desc' }, { id: 'desc' }],
+        take: first + 1,
+      });
+      const items = rows.slice(0, first);
+      return { items, hasNextPage: rows.length > first, endCursor: items.length ? items[items.length - 1]!.id : null };
+    }),
+};
+
+/**
+ * The host a calling App key is bound to for reads, or null for a person or a key that was never a host's: the host
+ * of the key's latest host:operate grant, live or revoked (#10805).
+ */
+async function hostOfKey(c: Context): Promise<string | null> {
+  const key = appKeyCaller(c);
+  if (!key) return null;
+  const row = await c.db.appKeyScope.findFirst({
+    where: { appKeyId: key.appKeyId, scope: 'host:operate' },
+    orderBy: [{ grantedAt: 'desc' }, { id: 'desc' }],
+    select: { hostId: true },
+  });
+  return row?.hostId ?? null;
+}
+
+export const hostOperationFieldResolvers = {
+  HostOperation: {
+    type: (o: HostOperationRow) => o.type,
+    status: (o: HostOperationRow) => o.status.toUpperCase(),
+    issuedBy: (o: HostOperationRow) => o.issuedBy.toUpperCase(),
+    worker: (o: HostOperationRow, _a: unknown, ctx: Context) => ctx.db.worker.findUnique({ where: { id: o.workerId } }),
+  },
+  HostRegistrationWorker: {
+    worker: (w: { workerId: string }, _a: unknown, ctx: Context) => ctx.db.worker.findUnique({ where: { id: w.workerId } }),
+  },
+};
+
+/**
+ * cor:agt:070:07 S3 — a host key's use record: whoever manages the key's App only, like its scopes. Newest first.
+ * An `AppKey` reaches callers through fields that do not re-check (App.keys), so this field does.
+ */
+export async function appKeyHostUses(key: { id: string; appId: string }, a: { first?: number | null }, ctx: Context) {
+  const app = await ctx.db.app.findUnique({ where: { id: key.appId }, select: { id: true, organizationId: true, ownerUserId: true } });
+  if (!app || !(await managesApp(ctx, app))) {
+    throw taskError('FORBIDDEN', "Only whoever manages this App can read what its keys did.");
+  }
+  const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
+  return ctx.db.hostKeyUse.findMany({ where: { appKeyId: key.id }, orderBy: [{ usedAt: 'desc' }, { id: 'desc' }], take: first });
+}

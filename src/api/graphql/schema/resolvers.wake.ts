@@ -28,6 +28,9 @@ import { generateId } from '../../../lib/id.js';
 
 type Reader = { manager: boolean; userId: string | null };
 
+/** `TASK:<id>:<event>`, the event lower-kebab: `TASK:t1:assigned`, `TASK:t1:child-finished`. */
+export const taskReasonRef = (taskId: string, event: string): string => `TASK:${taskId}:${event.toLowerCase().replace(/_/g, '-')}`;
+
 async function readerFor(ctx: Context, app: TaskApp, actor: Awaited<ReturnType<typeof resolveParticipatedApp>>['actor']): Promise<Reader> {
   // Concealed like any App the caller cannot reach: no oracle, and no key or impersonated session reads wakes here.
   // Nor does a worker's session: it is the worker, not the person behind it, and a holder's reading right is theirs
@@ -128,7 +131,14 @@ export async function dueWakesFor(
     withheld: result.withheld,
     wakes: result.wakes.map((w) => ({
       worker: workers.get(w.workerId)!,
-      reasons: w.wake.reasons.map((r) => ({ kind: r.kind, ticker: r.kind === 'TICK' ? tickers.get(r.tickerId) ?? null : null })),
+      reasons: w.wake.reasons.map((r) => ({
+        kind: r.kind,
+        ticker: r.kind === 'TICK' ? tickers.get(r.tickerId) ?? null : null,
+        // #1708: the task is gated in computeDueWakes (a reader of the App's tasks only), so it is shown as is.
+        task: r.kind === 'TASK'
+          ? { id: r.taskId, eventId: r.eventId, chainIndex: r.chainIndex, event: r.event, title: r.title, ref: taskReasonRef(r.taskId, r.event) }
+          : null,
+      })),
       channels: w.wake.channels.map((c) => ({
         channel: channels.get(c.channelId)!,
         fromSeq: c.fromSeq,

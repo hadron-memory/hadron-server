@@ -1,16 +1,17 @@
 /**
  * #1707 — host registrations (cor:agt:070:01): the internal writer, what makes
- * a worker launchable, and the lapse after LAPSE_POLLS poll intervals
- * (`host.lost`, once). There is no public mutation in this slice: the host's
- * identity will come from T6's `host:operate` key, never from a request.
+ * a worker launchable, and the lapse after the App's count of poll intervals (default 3, #1763)
+ * (`host.lost`, once). The public mutation (#1709) takes the host's identity
+ * from its `host:operate` key, never from a request: resolvers.hostOperation.test.ts.
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
+import { Client } from 'pg';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
-import { HostRegistrationError, isRegistrationLive, loadLaunchableFamilies, registerHost, sweepLostHosts } from './hosts.js';
+import { __lostHostTesting, HostRegistrationError, isRegistrationLive, loadLaunchableFamilies, registerHost, sweepLostHosts } from './hosts.js';
 
 const DAY = '2026-10-09';
 const at = (hhmm: string): Date => new Date(`${DAY}T${hhmm.length === 5 ? `${hhmm}:00` : hhmm}Z`);
@@ -92,8 +93,11 @@ describe('cor:agt:070:01 — a host registers which workers it can launch, and a
     await expect(registerHost(db, ORCA1(), at('10:00'))).rejects.toMatchObject({ code: 'APP_NOT_LIVE' });
   });
 
-  it('has no public mutation: the host identity comes from T6\'s key, never a request', () => {
-    expect(typeDefs).not.toMatch(/registerHost|hostRegistration/i);
+  it('#1709: the public registerHost takes no host id: the host identity comes from the key, never a request', () => {
+    const input = /input RegisterHostInput \{([^}]*)\}/.exec(typeDefs)?.[1] ?? '';
+    expect(input).toMatch(/appRef/);
+    expect(input).not.toMatch(/hostId/);
+    expect(typeDefs).toMatch(/registerHost\(input: RegisterHostInput!\): HostRegistration!/);
   });
 });
 
@@ -122,6 +126,104 @@ describe('lapse (cor:agt:070:01 open question: 3 poll intervals)', () => {
   it('a refresh after a lapse the sweep never saw still writes host.registered', async () => {
     await registerHost(db, ORCA1(), at('10:00'));
     expect((await registerHost(db, ORCA1(), at('10:10'))).registered).toBe(true);
+  });
+
+  it('#1763: an App that sets 5 check-ins keeps a registration live through 4 missed ones', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 5 } });
+    const { registrationId } = await registerHost(db, ORCA1(), at('10:00'));
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:04'))).size).toBe(3);
+    expect((await loadLaunchableFamilies(db, { workerIds: [anne.id] }, at('10:05'))).get(anne.id)).toEqual(['codex']);
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:05:00.001'))).size).toBe(0);
+    expect(await sweepLostHosts(db, at('10:05'))).toBe(0);
+    // A refresh inside the App's window is ordinary, not a re-registration.
+    expect((await registerHost(db, ORCA1(), at('10:04'))).registered).toBe(false);
+    expect(await sweepLostHosts(db, at('10:09:00.001'))).toBe(1);
+    expect((await db.hostRegistration.findUniqueOrThrow({ where: { id: registrationId } })).lostAt).toEqual(at('10:09:00.001'));
+  });
+
+  it('#1763: the setting is the App\'s own; another App keeps the default of 3, and 2 shortens it', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 2 } });
+    await registerHost(db, ORCA1(), at('10:00'));
+    await registerHost(db, { appId: other.id, hostId: 'orca1', label: 'Other', pollIntervalSeconds: 60, workers: [{ workerId: stranger.id, family: 'claude' }] }, at('10:00'));
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:02:00.001'))).size).toBe(0);
+    expect((await loadLaunchableFamilies(db, { appId: other.id }, at('10:03'))).size).toBe(1);
+    expect(await sweepLostHosts(db, at('10:02:30'))).toBe(1);
+    expect((await registerHost(db, ORCA1(), at('10:02:40'))).registered).toBe(true);
+  });
+
+  it('#1763 (Anne P2): a count raised after the sweep\'s read is honoured at its write; the host stays live', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 2 } });
+    const { registrationId } = await registerHost(db, ORCA1(), at('10:00'));
+    const [candidate] = await __lostHostTesting.readLostCandidates(db, at('10:02:30'));
+    expect(candidate).toMatchObject({ id: registrationId });
+    // The manager raises the count to 5 between the read and the write.
+    await db.agentTaskStallSchedule.update({ where: { appId: app.id }, data: { hostLapseCheckIns: 5 } });
+    expect(await __lostHostTesting.recordHostLost(db, candidate, at('10:02:30'))).toBe(false);
+    expect((await db.hostRegistration.findUniqueOrThrow({ where: { id: registrationId } })).lostAt).toBeNull();
+    expect((await hostEvents()).map((e) => e.type)).toEqual(['host.registered']);
+    // Controls: an unchanged count, and a refresh after the read.
+    await db.agentTaskStallSchedule.update({ where: { appId: app.id }, data: { hostLapseCheckIns: 2 } });
+    const [again] = await __lostHostTesting.readLostCandidates(db, at('10:02:30'));
+    await registerHost(db, ORCA1(), at('10:01:50'));
+    expect(await __lostHostTesting.recordHostLost(db, again, at('10:02:30'))).toBe(false);
+    const [later] = await __lostHostTesting.readLostCandidates(db, at('10:05'));
+    expect(await __lostHostTesting.recordHostLost(db, later, at('10:05'))).toBe(true);
+    // A second pass holding the same candidate records nothing more.
+    expect(await __lostHostTesting.recordHostLost(db, later, at('10:06'))).toBe(false);
+    expect((await hostEvents()).map((e) => e.type)).toEqual(['host.registered', 'host.lost']);
+  });
+
+  it('#1763 (Anne P2): the write waits for an in-flight count change and then honours it (FOR SHARE)', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 2 } });
+    const { registrationId } = await registerHost(db, ORCA1(), at('10:00'));
+    const [candidate] = await __lostHostTesting.readLostCandidates(db, at('10:02:30'));
+    // A manager's change, row-locked and not yet committed, on its own connection.
+    const manager = new Client({ connectionString: process.env.DATABASE_URL });
+    await manager.connect();
+    try {
+      await manager.query('BEGIN');
+      await manager.query('UPDATE agent_task_stall_schedule SET host_lapse_check_ins = 5 WHERE app_id = $1', [app.id]);
+      let settled = false;
+      const write = __lostHostTesting.recordHostLost(db, candidate, at('10:02:30')).finally(() => { settled = true; });
+      await new Promise((r) => setTimeout(r, 300));
+      expect(settled).toBe(false);
+      await manager.query('COMMIT');
+      expect(await write).toBe(false);
+    } finally {
+      await manager.end();
+    }
+    expect((await db.hostRegistration.findUniqueOrThrow({ where: { id: registrationId } })).lostAt).toBeNull();
+  });
+
+  it('#1763 (Anne P2, round 2): with NO schedule row yet, the write waits for the App\'s first setting and honours it', async () => {
+    const { registrationId } = await registerHost(db, ORCA1(), at('10:00'));
+    const [candidate] = await __lostHostTesting.readLostCandidates(db, at('10:03:30'));
+    expect(candidate).toMatchObject({ id: registrationId });
+    expect(await db.agentTaskStallSchedule.count()).toBe(0);
+    // The App's FIRST setting (5), in flight on its own connection, under the setter's lock protocol.
+    const manager = new Client({ connectionString: process.env.DATABASE_URL });
+    await manager.connect();
+    try {
+      await manager.query('BEGIN');
+      await manager.query("SELECT pg_advisory_xact_lock(hashtext('host-lapse:' || $1))", [app.id]);
+      await manager.query('INSERT INTO agent_task_stall_schedule (app_id, host_lapse_check_ins, updated_at) VALUES ($1, 5, now())', [app.id]);
+      let settled = false;
+      const write = __lostHostTesting.recordHostLost(db, candidate, at('10:03:30')).finally(() => { settled = true; });
+      await new Promise((r) => setTimeout(r, 300));
+      expect(settled).toBe(false);
+      await manager.query('COMMIT');
+      expect(await write).toBe(false);
+    } finally {
+      await manager.end();
+    }
+    expect((await db.hostRegistration.findUniqueOrThrow({ where: { id: registrationId } })).lostAt).toBeNull();
+  });
+
+  it('#1763: an App\'s schedule row with no lapse set keeps the default of 3', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, noProgressMinutes: 90 } });
+    await registerHost(db, ORCA1(), at('10:00'));
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:03'))).size).toBe(3);
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:03:00.001'))).size).toBe(0);
   });
 
   it('an uninstalled App\'s registrations launch nothing', async () => {

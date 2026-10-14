@@ -58,9 +58,10 @@ describe('prisma/comment-invariants.sql', () => {
   it('is copied verbatim into the migration (prod does not run post-push.sql)', () => {
     const invariants = read('../../../prisma/comment-invariants.sql');
     const dir = fileURLToPath(new URL('../../../prisma/migrations/', import.meta.url));
-    // The newest comment migration carries the current text (#1721).
-    const migration = readdirSync(dir).filter((d) => /_comment_(nodes|rulings)$/.test(d)).sort().at(-1)!;
-    expect(migration).toMatch(/_comment_rulings$/);
+    // The newest comment migration carries the current text (#1869).
+    const migration = readdirSync(dir)
+      .filter((d) => /_(comment_(nodes|rulings)|encrypted_comment_anchor_nullable|encrypted_anchor_hash_scrub)$/.test(d)).sort().at(-1)!;
+    expect(migration).toMatch(/_encrypted_anchor_hash_scrub$/);
     expect(read(`../../../prisma/migrations/${migration}/migration.sql`)).toContain(invariants);
     expect(read('../../../prisma/post-push.sql')).toContain('\\ir comment-invariants.sql');
   });

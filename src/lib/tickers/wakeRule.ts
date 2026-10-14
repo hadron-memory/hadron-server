@@ -36,7 +36,24 @@ export type SubscriptionInput = {
 
 export type WakeChannel = { channelId: string; incarnation: number; fromSeq: number; throughSeq: number; latestMentionSeq: number | null; unread: number; unreadMentions: number };
 
-export type WakeReason = { kind: 'MENTION' } | { kind: 'TICK'; tickerId: string; k: number };
+/**
+ * #1708 — a task event the worker must act on (src/lib/agentTasks/taskWakes.ts). `title` is the team's own
+ * words for the task, carried so the nudge can name it; it reaches only a requester who may read the task
+ * (cor:agt:050:21). `chainIndex` is 0 except for an alarm's woken position.
+ */
+export type TaskWakeReason = {
+  kind: 'TASK';
+  taskId: string;
+  eventId: string;
+  chainIndex: number;
+  event: 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'ALARM';
+  title: string;
+};
+
+export type WakeReason = { kind: 'MENTION' } | { kind: 'TICK'; tickerId: string; k: number } | TaskWakeReason;
+
+/** A task wake handed to the rule: already gated for the requester, oldest first. */
+export type TaskWakeInput = Omit<TaskWakeReason, 'kind'>;
 
 export type WorkerWake = {
   reasons: WakeReason[];
@@ -88,6 +105,8 @@ export function workerWake(args: {
   mentionsImmediate: boolean;
   channels: ChannelInput[];
   subscriptions: SubscriptionInput[];
+  /** #1708 — task events the worker is due for. They wake at once, like a mention, whatever the mentions setting. */
+  tasks?: TaskWakeInput[];
   now: Date;
 }): WorkerWake | null {
   const { workerId, workerTokens, channels, subscriptions, now } = args;
@@ -123,6 +142,10 @@ export function workerWake(args: {
       included.add(ch.channelId);
     }
     if (any) reasons.push({ kind: 'TICK', tickerId: sub.ticker.id, k });
+  }
+
+  for (const t of args.tasks ?? []) {
+    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title });
   }
 
   if (reasons.length === 0) return null;

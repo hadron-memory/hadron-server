@@ -21,6 +21,14 @@ const EXEMPT_AUDIT_COLUMNS = new Set([
   // is a sealed record of the time. Pinned in agentTasks/agentTasks.test.ts.
   'agent_team_events.actor_user_id',
   'agent_team_events.acknowledged_by_user_id',
+  // #1632 — signing requests and signature records are guarded history (a
+  // trigger refuses any change to a request's pins and any update of a
+  // record): who asked, who was named and who signed are sealed. A merged-away
+  // named signer or requester fails closed (cannot sign or withdraw), the
+  // automation run-as/signer rule above.
+  'signing_requests.requester_user_id',
+  'signing_requests.named_signer_id',
+  'node_signatures.signer_id',
 ]);
 
 function coveredPairs(registry: Readonly<Record<string, readonly string[]>>): Set<string> {
@@ -47,7 +55,9 @@ describe('mergeUsers audit actor registry', () => {
           OR (table_name = 'ticker_subscriptions' AND column_name IN ('ended_by', 'via_grant_person_id', 'ended_via_grant_person_id'))
           OR (table_name = 'app_grants' AND column_name = 'granted_by')
           OR (table_name = 'app_key_scopes' AND column_name IN ('granted_by_user_id', 'revoked_by_user_id'))
-          OR (table_name = 'agent_team_events' AND column_name IN ('actor_user_id', 'acknowledged_by_user_id')))
+          OR (table_name = 'agent_team_events' AND column_name IN ('actor_user_id', 'acknowledged_by_user_id'))
+          OR (table_name = 'signing_requests' AND column_name IN ('requester_user_id', 'named_signer_id'))
+          OR (table_name = 'node_signatures' AND column_name = 'signer_id'))
     `;
     const schemaPairs = new Set(columns.map(({ table_name, column_name }) => `${table_name}.${column_name}`));
     const covered = coveredPairs(AUDIT_USER_COLUMNS);

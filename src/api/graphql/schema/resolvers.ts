@@ -62,6 +62,7 @@ import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from '.
 import { tickerMutations, tickerQueries, tickerFieldResolvers } from './resolvers.ticker.js';
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
 import { appKeyScopeMutations, appKeyScopeFieldResolvers } from './resolvers.appKeyScope.js';
+import { hostOperationMutations, hostOperationQueries, hostOperationFieldResolvers } from './resolvers.hostOperation.js';
 import {
   agentTaskAlarmMutations,
   agentTaskAlarmQueries,
@@ -72,6 +73,7 @@ import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers 
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
 import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
 import { nodeAttributionFieldResolvers } from './resolvers.nodeAttribution.js';
+import { signingFieldResolvers, signingMutations, signingQueries } from './resolvers.signing.js';
 import { commentFieldResolvers, commentMutations, commentQueries } from './resolvers.comments.js';
 import { decisionFieldResolvers, decisionMutations, decisionQueries } from './resolvers.decisions.js';
 import {
@@ -106,6 +108,7 @@ export const resolvers = {
   ...agentTaskFieldResolvers,
   ...tickerFieldResolvers,
   ...appKeyScopeFieldResolvers,
+  ...hostOperationFieldResolvers,
   // #1706 — alarm wakes and availability. AgentTeamEvent already has a block
   // in agentTaskFieldResolvers; the wakes field joins it rather than replacing it.
   ...agentTaskAlarmFieldResolvers,
@@ -122,7 +125,10 @@ export const resolvers = {
   Memory: { ...typeResolvers.Memory, ...memoryConfigFieldResolvers.Memory },
   // #1591: approval status joins the existing Node block; #1610 the
   // Worker / Agent attribution with it.
-  Node: { ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node },
+  Node: { ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node, ...signingFieldResolvers.Node },
+  // #1632: signing requests and signatures.
+  SigningRequest: signingFieldResolvers.SigningRequest,
+  NodeSignature: signingFieldResolvers.NodeSignature,
   Comment: commentFieldResolvers.Comment,
   Decision: decisionFieldResolvers.Decision,
   DecisionLog: decisionFieldResolvers.DecisionLog,
@@ -139,6 +145,7 @@ export const resolvers = {
     ...nodeQueries,
     ...specCorpusQueries,
     ...nodeApprovalQueries,
+    ...signingQueries,
     ...commentQueries,
     ...decisionQueries,
     ...skillQueries,
@@ -156,6 +163,7 @@ export const resolvers = {
     ...agentTaskQueries,
     ...tickerQueries,
     ...wakeQueries,
+    ...hostOperationQueries,
     ...agentTaskAlarmQueries,
     ...agentTaskMatchingQueries,
     ...memoryConfigQueries,
@@ -206,6 +214,7 @@ export const resolvers = {
     ...tickerMutations,
     ...wakeMutations,
     ...appKeyScopeMutations,
+    ...hostOperationMutations,
     ...agentTaskAlarmMutations,
     ...memoryConfigMutations,
     ...memoryConfigTemplateMutations,
@@ -214,6 +223,7 @@ export const resolvers = {
     ...specCorpusRenumberMutations,
     ...specCorpusMintMutations,
     ...nodeApprovalMutations,
+    ...signingMutations,
     ...commentMutations,
     ...decisionMutations,
     ...scopeMutations,

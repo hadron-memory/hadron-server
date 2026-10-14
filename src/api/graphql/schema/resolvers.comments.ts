@@ -85,7 +85,7 @@ export type CommentView = {
   threadRootId: string | null;
   isTopLevel: boolean;
   anchorRevision: number;
-  anchorApprovalHash: string;
+  anchorApprovalHash: string | null;
   quote: string | null;
   body: string | null;
   state: 'OPEN' | 'RESOLVED' | null;
@@ -154,7 +154,7 @@ async function loadCommentViews(db: Context['db'] | Tx, ids: string[], key: Encr
   const anchorOf = new Map(anchors.map((a) => [a.sourceId, a]));
   const targets = await db.node.findMany({
     where: { id: { in: [...new Set(metas.map((r) => r.commentMeta!.targetNodeId))] } },
-    select: { id: true, loc: true, memoryId: true, name: true, nodeType: true, revSeq: true },
+    select: { id: true, loc: true, memoryId: true, name: true, nodeType: true, revSeq: true, memory: { select: { isEncrypted: true } } },
   });
   const targetOf = new Map(targets.map((t) => [t.id, t]));
   const byId = new Map<string, CommentView>();
@@ -177,7 +177,7 @@ async function loadCommentViews(db: Context['db'] | Tx, ids: string[], key: Encr
       threadRootId: meta.threadRootId,
       isTopLevel: meta.threadRootId == null,
       anchorRevision: anchor.anchorRevNo!,
-      anchorApprovalHash: anchor.anchorApprovalHash!,
+      anchorApprovalHash: target.memory.isEncrypted ? null : anchor.anchorApprovalHash,
       quote: stub ? null : data.quote ?? null,
       body: stub ? null : content,
       state: meta.threadState,
@@ -413,8 +413,8 @@ function isOpenThreadUniqueViolation(error: unknown): boolean {
 }
 
 /**
- * The target's title/abstract/content at `revision`, for the anchor hash:
- * the live row when it is current, else its retained snapshot.
+ * Validate the anchor revision and return its fields, or null for an encrypted
+ * target (cor:dmo:110:01). Historical snapshots retain their own read gate.
  */
 async function anchorFields(
   tx: Tx,
@@ -430,7 +430,8 @@ async function anchorFields(
       { currentRevision: target.revSeq },
     );
   }
-  if (revision === target.revSeq) return approvalFieldsOf(target, key);
+  const memory = await tx.memory.findUniqueOrThrow({ where: { id: target.memoryId }, select: { isEncrypted: true } });
+  if (revision === target.revSeq) return memory.isEncrypted ? null : approvalFieldsOf(target, key);
   const unavailable = () => commentError(
     'COMMENT_ANCHOR_REVISION_UNAVAILABLE',
     `Revision ${revision} of the target is no longer retained; comment on the current revision.`,
@@ -442,16 +443,16 @@ async function anchorFields(
   });
   if (!snapshot) throw unavailable();
   const sourceId = snapshot.memoryId ?? target.memoryId;
-  if (sourceId === target.memoryId) return approvalFieldsOf(snapshot, key);
+  if (sourceId === target.memoryId) return memory.isEncrypted ? null : approvalFieldsOf(snapshot, key);
   // #1663 review (Atilla P2-3) — a snapshot captured in ANOTHER memory (before
   // a move) is anchored only when the caller may read that memory too, the
   // same per-snapshot gate as nodeRevisions. A cached key is not a grant.
   if (!(await isMemoryReadableFresh(txCtx, sourceId, tx))) throw unavailable();
   const source = await tx.memory.findUnique({ where: { id: sourceId }, select: { isEncrypted: true } });
-  if (!source?.isEncrypted) return approvalFieldsOf(snapshot, null);
+  if (!source?.isEncrypted) return memory.isEncrypted ? null : approvalFieldsOf(snapshot, null);
   const foreignKey = sessionKeyCache.getByMemoryId(sourceId);
   if (!foreignKey) throw unavailable();
-  return approvalFieldsOf(snapshot, foreignKey);
+  return memory.isEncrypted ? null : approvalFieldsOf(snapshot, foreignKey);
 }
 
 /** Insert one comment (node + meta + governed edge) inside the caller's transaction. */
@@ -467,7 +468,7 @@ async function insertComment(
     body: string;
     quote: string | null;
     key: EncryptionKey | null;
-    anchor: { revNo: number; hash: string } | null;
+    anchor: { revNo: number; hash: string | null } | null;
   },
 ): Promise<string> {
   const id = generateId();
@@ -727,11 +728,11 @@ async function frozenDeletedViewOf(tx: Tx, commentId: string): Promise<CommentVi
     }),
     tx.node.findUnique({
       where: { id: meta.targetNodeId },
-      select: { id: true, loc: true, memoryId: true, nodeType: true },
+      select: { id: true, loc: true, memoryId: true, nodeType: true, memory: { select: { isEncrypted: true } } },
     }),
   ]);
   // The DB invariants make a comment without its anchor or target unreachable.
-  if (!anchor?.anchorRevNo || !anchor.anchorApprovalHash || !target) throw commentMissing();
+  if (!anchor?.anchorRevNo || !target) throw commentMissing();
   const data = commentDataOf(row.data);
   return {
     id: row.id,
@@ -740,7 +741,7 @@ async function frozenDeletedViewOf(tx: Tx, commentId: string): Promise<CommentVi
     threadRootId: meta.threadRootId,
     isTopLevel: meta.threadRootId == null,
     anchorRevision: anchor.anchorRevNo,
-    anchorApprovalHash: anchor.anchorApprovalHash,
+    anchorApprovalHash: target.memory.isEncrypted ? null : anchor.anchorApprovalHash,
     quote: null,
     body: null,
     state: null,
@@ -861,7 +862,7 @@ export const commentMutations = {
   ): Promise<CommentView> => {
     const body = validateBody(args.body);
     const quote = validateQuote(args.quote);
-    const { authorKey, node: target, key } = await prepareWrite(ctx, args.targetRef, 'target', 'write');
+    const { authorKey, node: target } = await prepareWrite(ctx, args.targetRef, 'target', 'write');
     let id: string;
     try {
       id = await commentTx(ctx, target.memoryId, 'write', async (tx, txCtx) => {
@@ -877,7 +878,10 @@ export const commentMutations = {
           throw commentError('COMMENT_TARGET_IS_COMMENT', 'A comment cannot be the target of a comment; use replyToComment.');
         }
         const revision = args.anchorRevision ?? row.revSeq;
-        const hash = computeApprovalHash(await anchorFields(tx, txCtx, row, revision, key));
+        // Re-read encryption and its key under the memory fence (cor:dmo:110:01).
+        const writeKey = await keyForMemory(tx, row.memoryId);
+        const fields = await anchorFields(tx, txCtx, row, revision, writeKey);
+        const hash = fields === null ? null : computeApprovalHash(fields);
         const open = await tx.commentMeta.findFirst({
           where: {
             targetNodeId: row.id, authorKey, threadRootId: null, threadState: 'OPEN',
@@ -892,14 +896,14 @@ export const commentMutations = {
         }
         return insertComment(tx, txCtx, {
           memoryId: row.memoryId, targetNodeId: row.id, targetName: row.name, threadRootId: null,
-          authorKey, body, quote, key, anchor: { revNo: revision, hash },
+          authorKey, body, quote, key: writeKey, anchor: { revNo: revision, hash },
         });
       });
     } catch (error) {
       if (isOpenThreadUniqueViolation(error)) throw await openThreadConflict(ctx.db, target.id, authorKey);
       throw error;
     }
-    return indexed(ctx, await viewOf(ctx, id, key));
+    return indexed(ctx, await viewOf(ctx, id, await keyForMemory(ctx.db, target.memoryId)));
   },
 
   /**

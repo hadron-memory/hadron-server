@@ -1329,6 +1329,14 @@ model Node {
   mintedByInfo       String?   @map("minted_by_info")
   mintedRevNo        Int?      @map("minted_rev_no")
   mintedHash         String?   @map("minted_hash")
+  /// #1632 / cor:dmo:130:04 — when the node's title, abstract or content last
+  /// changed, from the DB clock. Set only by the signing trigger
+  /// (prisma/signing-invariants.sql), never by application code, and never
+  /// decreases. A signature verified at or before this time reads EARLIER, so
+  /// restoring earlier text never revives it (#9824). Null = unchanged since
+  /// creation. A timestamp rather than a revision number, so pruning, history
+  /// clears and revSeq reconciliation cannot move it.
+  contentChangedAt   DateTime? @map("content_changed_at")
   createdAt          DateTime  @default(now()) @map("created_at")
   createdBy          String?   @map("created_by")
   updatedAt          DateTime  @updatedAt @map("updated_at")
@@ -1361,6 +1369,9 @@ model Node {
   /// Spec 049 Phase 4: the Channel whose chat root this node is, if any.
   channel       Channel?        @relation("ChannelRoot")
   embeddings    NodeEmbedding[] // 033: 1 abstract row + N chunk rows; Cascade delete
+
+  signingRequests    SigningRequest[]
+  signatures         NodeSignature[]
 
   @@unique([loc, memoryId])
   @@index([loc])
@@ -3182,6 +3193,7 @@ model App {
   agentTaskStallSchedule  AgentTaskStallSchedule?
   /// #1707 — hosts that registered which workers they can launch (cor:agt:070:01).
   hostRegistrations       HostRegistration[]
+  hostOperations          HostOperation[]
   mcpSessionStates McpSessionState[]
   scopes           Scope[]
   registerEntries  RegisterEntry[] @relation("RegisterOwnerApp")
@@ -3258,6 +3270,7 @@ model AppKey {
   app    App                @relation(fields: [appId], references: [id], onDelete: Cascade)
   scopes AppKeyScope[]
   reads  AppKeyWakeRead[]
+  hostUses HostKeyUse[]
 
   @@index([appId])
   @@map("app_keys")
@@ -3666,9 +3679,11 @@ model Worker {
   wakeSettings        WorkerWakeSettings?
   deliveryChannels    WorkerDeliveryChannel[]
   deliveryTicks       WorkerDeliveryTick[]
+  deliveryTaskEvents  WorkerDeliveryTaskEvent[]
   wakeReservation     AppWakeReservation?
   appGrants           AppGrant[]
   launchableVia      HostRegistrationWorker[]
+  hostOperations     HostOperation[]
 
   /// The URN atom's uniqueness. Unfiltered on retirement, like
   /// `workers_app_name_uniq`: a retired worker's URN must keep resolving.
@@ -3986,9 +4001,79 @@ model PasskeyCredential {
   cancelUserAgent    String?   @map("cancel_user_agent")
 
   owner User @relation(fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  signatures NodeSignature[]
 
   @@index([ownerId])
   @@map("passkey_credentials")
+}
+
+/// #1632 / cor:dmo:130:03 — a request for a person to sign one node's content.
+/// Pinned at creation and immutable: the node, its revision, the v1 approval
+/// hash and the payload version. It is open, then ends exactly once:
+/// completed | declined | expired | stale | withdrawn. Ended requests are kept
+/// for the node's lifetime (#10019). Every timestamp comes from the DB clock,
+/// set by the guard trigger (prisma/signing-invariants.sql), which also
+/// enforces the single end; application code only names the end state.
+/// User / App / worker ids are sealed history with no FK (an FK action would
+/// be a write the guard refuses): see conventions:append-only-table-trigger.
+model SigningRequest {
+  /// 128 bits of randomness, base64url (plan SEC-8): never guessable.
+  id                 String    @id
+  nodeId             String    @map("node_id")
+  revision           Int
+  approvalHash       String    @map("approval_hash")
+  payloadVersion     String    @map("payload_version")
+  /// Null = any eligible signer (a writer of the node's memory).
+  namedSignerId      String?   @map("named_signer_id")
+  /// The requester ACCOUNT is requesterUserId, else requesterAppId (#10397).
+  requesterUserId    String?   @map("requester_user_id")
+  requesterAppId     String?   @map("requester_app_id")
+  requesterWorkerId  String?   @map("requester_worker_id")
+  requesterSessionId String?   @map("requester_session_id")
+  /// open | completed | declined | expired | stale | withdrawn
+  state              String    @default("open")
+  createdAt          DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  expiresAt          DateTime  @map("expires_at")
+  endedAt            DateTime? @map("ended_at")
+
+  node      Node           @relation(fields: [nodeId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  signature NodeSignature?
+
+  @@index([nodeId, createdAt])
+  @@map("signing_requests")
+}
+
+/// #1632 / cor:dmo:130:07 — an append-only signature record: no update or
+/// delete surface at all (cor:dmo:130:05). Removed only with its node (hard
+/// delete, memory delete). State is never stored; it is derived on every read
+/// by re-verifying the stored assertion (src/lib/signing/state.ts).
+model NodeSignature {
+  id                  String   @id @default(cuid())
+  nodeId              String   @map("node_id")
+  /// The request it completed; one record per request.
+  signingRequestId    String   @unique @map("signing_request_id")
+  /// A person, always. Sealed history: no FK.
+  signerId            String   @map("signer_id")
+  passkeyCredentialId String   @map("passkey_credential_id")
+  revision            Int
+  approvalHash        String   @map("approval_hash")
+  payloadVersion      String   @map("payload_version")
+  /// The WebAuthn RP ID the signature was made under, from config at
+  /// completion. Re-verification uses this, never the current PASSKEY_RP_ID,
+  /// so a domain change cannot invalidate old signatures (#10469/#10470). The
+  /// guard requires the assertion's rpIdHash to match it.
+  rpId                String   @map("rp_id")
+  authenticatorData   Bytes    @map("authenticator_data")
+  clientDataJson      Bytes    @map("client_data_json")
+  signature           Bytes
+  verifiedAt          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("verified_at")
+
+  node           Node              @relation(fields: [nodeId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  signingRequest SigningRequest    @relation(fields: [signingRequestId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  passkey        PasskeyCredential @relation(fields: [passkeyCredentialId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([nodeId])
+  @@map("node_signatures")
 }
 
 /// Short-lived, single-use handoff codes that keep the session JWT out of
@@ -5107,6 +5192,7 @@ model AgentTeamEvent {
   app   App         @relation(fields: [appId], references: [id], onDelete: Cascade)
   task  AgentTask?  @relation(fields: [taskId], references: [id], onDelete: Cascade)
   wakes AgentTeamAlarmSchedule[]
+  deliveries WorkerDeliveryTaskEvent[]
 
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
   @@index([appId, createdAt])
@@ -5164,6 +5250,9 @@ model WorkerAvailability {
   setByUserId   String?   @map("set_by_user_id")
   setByWorkerId String?   @map("set_by_worker_id")
   setByAgentId  String?   @map("set_by_agent_id")
+  /// #1709 — the host whose key set this record (`setBy = host` only), so a
+  /// host clears only its own marks (cor:agt:060:08).
+  setByHostId   String?   @map("set_by_host_id")
 
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
 
@@ -5201,6 +5290,10 @@ model AgentTaskStallSchedule {
   noProgressMinutes    Int?     @map("no_progress_minutes")
   ownerReactionMinutes Int?     @map("owner_reaction_minutes")
   assignmentMinutes    Int?     @map("assignment_minutes")
+  /// #1763 (cor:agt:070:01) — how many of a host's own check-in intervals may
+  /// pass without a refresh before its registration in this App lapses: 2 to
+  /// 10 (chk_agent_task_stall_schedule_range); null is the default, 3.
+  hostLapseCheckIns    Int?     @map("host_lapse_check_ins")
   updatedAt            DateTime @updatedAt @map("updated_at")
   updatedBy            String?  @map("updated_by")
 
@@ -5214,9 +5307,9 @@ model AgentTaskStallSchedule {
 /// Identified within its App by `hostId` (Proposed); `label` is for display.
 ///
 /// The host's identity comes from its key, never from a request: the public
-/// `registerHost` path ships with the host-operations slice's `host:operate`
-/// key (T6). Until then only the internal writer
-/// (src/lib/agentTasks/hosts.ts) writes here.
+/// `registerHost` mutation (#1709) takes the host id from the calling key's
+/// `host:operate` scope row (cor:agt:070:04). The writer is
+/// src/lib/agentTasks/hosts.ts.
 ///
 /// A registration not refreshed within LAPSE_POLLS poll intervals has lapsed
 /// (plan default 3, cor:agt:070:01 open question): its workers stop counting as
@@ -5246,6 +5339,11 @@ model HostRegistrationWorker {
   registrationId String @map("registration_id")
   workerId       String @map("worker_id")
   family         String
+  /// #1709 — the worker's existing worktrees on this host, as the host names
+  /// them (tokens the host resolves from its own configuration, never paths the
+  /// platform invents). A worker is started only in one of these
+  /// (cor:agt:070:06, :08); empty means it has none here.
+  worktrees      String[] @default([])
 
   registration HostRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
   worker       Worker           @relation(fields: [workerId], references: [id], onDelete: Cascade)
@@ -5255,6 +5353,68 @@ model HostRegistrationWorker {
   @@map("host_registration_workers")
 }
 
+
+/// #1709 (Task Management T6) — one typed operation the platform issued to one
+/// host of a team App (cor:agt:070:02). `type` is one of the closed set of
+/// cor:agt:070:03 and `args` its typed arguments, validated at issue
+/// (src/lib/hostOperations/types.ts); there is no free-form type.
+///
+/// Status (070:02, `collected` Proposed by #1709): `issued` → `collected` (the
+/// host took it) → `succeeded` | `failed` (the host reported; a failure carries
+/// a reason). Each outcome also writes `host.operation.succeeded` / `.failed`.
+/// Only the host it names collects or reports it (070:04). The issuer is a
+/// person, a worker (through its session) or the platform (`issuedBy`).
+/// Shape: prisma/host-operation-invariants.sql.
+model HostOperation {
+  id               String    @id
+  appId            String    @map("app_id")
+  hostId           String    @map("host_id")
+  type             String
+  args             Json
+  /// The worker the operation is for; every type names one.
+  workerId         String    @map("worker_id")
+  status           String    @default("issued")
+  /// `user` | `worker` | `platform`.
+  issuedBy         String    @map("issued_by")
+  issuedByUserId   String?   @map("issued_by_user_id")
+  issuedByWorkerId String?   @map("issued_by_worker_id")
+  issuedByAgentId  String?   @map("issued_by_agent_id")
+  issuedAt         DateTime  @default(now()) @map("issued_at")
+  collectedAt      DateTime? @map("collected_at")
+  finishedAt       DateTime? @map("finished_at")
+  /// The typed result a success reports (e.g. the created worktree).
+  result           Json?
+  /// Why it failed, as the host said it; failures only.
+  failureReason    String?   @map("failure_reason")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([appId, hostId, status])
+  @@index([workerId])
+  @@map("host_operations")
+}
+
+/// #1709 — one use of a host key (cor:agt:070:07: every use is recorded):
+/// which key, for which App and host, what it did, and when. `operationId`
+/// names the operation a report was about; `count` how many operations a
+/// collection returned or workers a registration listed.
+model HostKeyUse {
+  id          String   @id
+  appKeyId    String   @map("app_key_id")
+  appId       String   @map("app_id")
+  hostId      String   @map("host_id")
+  /// `register` | `collect` | `report` | `availability`.
+  action      String
+  operationId String?  @map("operation_id")
+  count       Int?
+  usedAt      DateTime @default(now()) @map("used_at")
+
+  appKey AppKey @relation(fields: [appKeyId], references: [id], onDelete: Cascade)
+
+  @@index([appKeyId, usedAt])
+  @@map("host_key_uses")
+}
 
 /// #1719: mutable manual-trigger consent kept apart from the immutable run snapshot.
 model ManualAutomationPin {
@@ -5401,6 +5561,35 @@ model WorkerDeliveryTick {
   @@map("worker_delivery_ticks")
 }
 
+/// #1708 (Task Management T5) — the delivery record, part 3: one row per
+/// (worker, task event, alarm chain position). `deliveredAt` is set ONLY by
+/// `acknowledgeWakes` (a wake proof naming the event), and is the receipt that
+/// the nudge for this event reached this worker. It is never an alarm
+/// acknowledgement (cor:agt:050:20): that stays `acknowledgeAlarm`'s.
+/// `undeliverableAt` is set by the stall-evaluator tick when the subject is
+/// dormant (cor:agt:080:11); a later delivery still records `deliveredAt`.
+/// `chainIndex` is 0 for an ordinary event and the woken position for an alarm.
+model WorkerDeliveryTaskEvent {
+  workerId            String    @map("worker_id")
+  eventId             String    @map("event_id")
+  chainIndex          Int       @default(0) @map("chain_index")
+  deliveredAt         DateTime? @map("delivered_at")
+  ackedByUserId       String?   @map("acked_by_user_id")
+  ackedByWorkerId     String?   @map("acked_by_worker_id")
+  ackedByAppKeyId     String?   @map("acked_by_app_key_id")
+  undeliverableAt     DateTime? @map("undeliverable_at")
+  /// 'dormant' — the only reason this slice records.
+  undeliverableReason String?   @map("undeliverable_reason")
+
+  worker Worker         @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  event  AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@id([workerId, eventId, chainIndex])
+  @@index([workerId, deliveredAt])
+  @@index([eventId])
+  @@map("worker_delivery_task_events")
+}
+
 /// #1748 — wakes acknowledged per App per UTC day (cor:agt:080:15). `wakes` is
 /// the budget counter (exempt wakes are not counted); `noticePostedAt` is the
 /// once-a-day "budget spent" notice claim. Written only by `acknowledgeWakes`
@@ -5473,6 +5662,9 @@ model AppKeyScope {
   grantedAt       DateTime  @default(now()) @map("granted_at")
   revokedByUserId String?   @map("revoked_by_user_id")
   revokedAt       DateTime? @map("revoked_at")
+  /// #1709 — the one host a `host:operate` scope is bound to (cor:agt:070:04):
+  /// required for that scope, absent for every other (chk_app_key_scopes_shape).
+  hostId          String?   @map("host_id")
 
   appKey AppKey @relation(fields: [appKeyId], references: [id], onDelete: Cascade)
 

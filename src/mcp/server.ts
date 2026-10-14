@@ -61,9 +61,11 @@ import {
 import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { userUrn } from '../lib/userHandle.js';
 import { registerCommentTools } from './commentTools.js';
+import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
 import { registerTickerTools } from './tickerTools.js';
 import { openThreadCounts, type CommentCounts } from '../lib/comments/summary.js';
+import { loadSignatureStatuses, type NodeSignatureStatusView } from '../lib/signing/status.js';
 import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
 import { findLiveUrnAliasTargets, dedupeById } from '../lib/urnAlias.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
@@ -1524,12 +1526,47 @@ async function batchReadableTaskRefs(
   return new Map(refs);
 }
 
-async function batchHumanNames(nodes: readonly ReadProjectionNode[]): Promise<Map<string, string>> {
-  // #1591: approvers render by handle too, from the same lookup.
-  const ids = [...new Set(nodes.flatMap((n) => [n.authoredByHuman, n.approvedBy, n.mintedBy]).filter((id): id is string => !!id))];
+async function batchHumanNames(nodes: readonly ReadProjectionNode[], extraUserIds: readonly string[] = []): Promise<Map<string, string>> {
+  // #1591: approvers render by handle too, from the same lookup; #1632 signers too.
+  const ids = [...new Set([...nodes.flatMap((n) => [n.authoredByHuman, n.approvedBy, n.mintedBy]), ...extraUserIds].filter((id): id is string => !!id))];
   if (ids.length === 0) return new Map();
   const users = await db.user.findMany({ where: { id: { in: ids }, deletedAt: null }, select: { id: true, handle: true } });
   return new Map(users.filter((user) => !!user.handle).map((user) => [user.id, user.handle!]));
+}
+
+const SIGNATURE_LINE_ORDER = ['CURRENT', 'PENDING', 'EARLIER', 'CANCELLED'] as const;
+
+/**
+ * #1632 (cor:dmo:130:06) — `Signatures:` for an MCP node read. Current and
+ * pending signers are named (user URN by handle, the revision, the passkey
+ * label only, JSON-escaped so a label can never forge another line); earlier
+ * and cancelled ones are counted. Integrity problems are reported, never shown
+ * as signatures (#9853).
+ */
+async function renderSignatureLine(status: NodeSignatureStatusView, names?: ReadonlyMap<string, string>): Promise<string> {
+  if (status.signatures.length === 0 && status.integrityProblems === 0) return 'Signatures: none';
+  const missing = status.signatures.map((sig) => sig.signerId).filter((id) => !names?.has(id));
+  const looked = missing.length
+    ? new Map((await db.user.findMany({ where: { id: { in: missing }, deletedAt: null }, select: { id: true, handle: true } }))
+      .filter((u) => !!u.handle).map((u) => [u.id, u.handle!]))
+    : new Map<string, string>();
+  const who = (id: string) => {
+    const handle = names?.get(id) ?? looked.get(id);
+    return (handle ? userUrn(handle) : null) ?? 'a former user';
+  };
+  const parts: string[] = [];
+  for (const state of SIGNATURE_LINE_ORDER) {
+    const sigs = status.signatures.filter((sig) => sig.state === state);
+    if (sigs.length === 0) continue;
+    const label = state.toLowerCase();
+    parts.push(state === 'CURRENT' || state === 'PENDING'
+      ? `${sigs.length} ${label} — ${sigs.map((sig) => `${who(sig.signerId)} (r${sig.revision}, ${JSON.stringify(sig.passkeyLabel)}${state === 'PENDING' ? ', first passkey in its window' : ''})`).join(', ')}`
+      : `${sigs.length} ${label}`);
+  }
+  const problems = status.integrityProblems
+    ? `${status.integrityProblems} integrity problem${status.integrityProblems === 1 ? '' : 's'} (a signature record failed verification)`
+    : '';
+  return `Signatures: ${[parts.join('; '), problems].filter(Boolean).join(' · ')}`;
 }
 
 // #1610: one name/URN lookup per actor per batch read.
@@ -1585,6 +1622,8 @@ async function renderNodeReadProjection(
       humanNames: ReadonlyMap<string, string>;
       /** #1609 — comment counts per node, one grouped query for the batch. */
       feedback: ReadonlyMap<string, CommentCounts>;
+      /** #1632 — signature status per node, one batched load. */
+      signatures?: ReadonlyMap<string, NodeSignatureStatusView>;
     };
     memoryUrnOf?: (memoryId: string) => Promise<string>;
   } = {},
@@ -1713,6 +1752,15 @@ async function renderNodeReadProjection(
     }
   }
 
+  // #1632 (cor:dmo:130:06): the signatures line, beside Approval. An encrypted
+  // node loads nothing (no hash-dependent work there).
+  const signatureLine = opts.encryptedMemory
+    ? 'Signatures: not applicable (encrypted memory)'
+    : renderSignatureLine(
+      opts.batch?.signatures?.get(node.id) ?? (await loadSignatureStatuses(db, [node.id])).get(node.id)!,
+      opts.batch?.humanNames,
+    );
+
   // #1609: the unresolved-feedback cue (cor:dmo:110:07), so an agent reading a
   // node knows a discussion exists beside it without being told to look. The
   // counts are metadata (no comment text), and only live comments count — the
@@ -1748,6 +1796,7 @@ async function renderNodeReadProjection(
     authorshipLine,
     validationLine,
     approvalLine,
+    await signatureLine,
     mintLine,
     feedbackLine,
     createdByLine,
@@ -3265,6 +3314,9 @@ export function createMcpServerInstance(
   // ── #1609 — comment nodes (cor:dmo:110): thin over the GraphQL comment resolvers ──
   registerCommentTools(server, { db, auth });
 
+  // ── #1632 — signing requests (cor:dmo:130): request and read, never sign ──
+  registerSigningTools(server, { db, auth });
+
   // ── #1705 — agent tasks (cor:agt:050): thin over the GraphQL agent-task resolvers ──
   registerAgentTaskTools(server, { db, auth });
   registerTickerTools(server, { db, auth });
@@ -3281,6 +3333,7 @@ export function createMcpServerInstance(
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -4133,6 +4186,7 @@ export function createMcpServerInstance(
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -4964,12 +5018,16 @@ export function createMcpServerInstance(
       // render, and gate each distinct task memory before exposing its URN.
       const reports = await batchValidationReports(visible);
       const memoryUrnOf = memoizedMemoryUrnLookup();
+      // #1632: signatures for the batch in one load; their signers join the
+      // one human-name lookup.
+      const signatures = await loadSignatureStatuses(db, visible.map((n) => n.id));
+      const signerIds = [...signatures.values()].flatMap((st) => st.signatures.map((sig) => sig.signerId));
       const [taskRefs, humanNames, feedback] = await Promise.all([
         batchReadableTaskRefs(visible, reports, auth, memoryUrnOf),
-        batchHumanNames(visible),
+        batchHumanNames(visible, signerIds),
         openThreadCounts(db, visible.map((n) => n.id)),
       ]);
-      const batchProvenance = { reports, taskRefs, humanNames, feedback };
+      const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures };
       for (const n of visible) {
         if (truncated) {
           omitted.push(await nodeUrn(n.loc, n.memoryId, memoryUrnOf));
@@ -6543,6 +6601,9 @@ export function createMcpServerInstance(
     ...(canReplay ? { governedCanReplay: canReplay } : {}),
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
+    // #1868: the presented hdr_user_ key, for any gate on the door's path that
+    // re-checks it (consistency with the other delegating contexts).
+    apiKeyId: auth.apiKeyId ?? undefined,
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -6760,6 +6821,7 @@ export function createMcpServerInstance(
         governedCanReplay: () => true,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -6794,6 +6856,7 @@ export function createMcpServerInstance(
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -6934,6 +6997,7 @@ export function createMcpServerInstance(
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -8336,6 +8400,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
+            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -8493,6 +8558,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -8745,6 +8811,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           db,
           clientId: auth.clientId ?? undefined,
           userId: auth.userId ?? undefined,
+          apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
           appId: auth.appId ?? undefined,
           sessionId: auth.sessionId ?? undefined,
           roles: auth.roles as Context['roles'],
@@ -9079,6 +9146,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           db,
           clientId: auth.clientId ?? undefined,
           userId: auth.userId ?? undefined,
+          apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
           appId: auth.appId ?? undefined,
           sessionId: auth.sessionId ?? undefined,
           roles: auth.roles as Context['roles'],
@@ -9118,6 +9186,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -9635,6 +9704,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
+            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -9982,6 +10052,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -10204,6 +10275,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -10413,6 +10485,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -10487,6 +10560,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -10552,6 +10626,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
+            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -10667,6 +10742,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
+            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],

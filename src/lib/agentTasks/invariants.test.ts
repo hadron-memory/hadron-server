@@ -186,7 +186,7 @@ describe('agent-task-stall-invariants.sql (#1706)', () => {
   it('the latest stall-invariants migration carries a byte-identical copy of the invariants file', () => {
     const source = readFileSync(new URL('../../../prisma/agent-task-stall-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(
-      new URL('../../../prisma/migrations/20261013140000_worker_availability_reports_to/migration.sql', import.meta.url),
+      new URL('../../../prisma/migrations/20261014010200_host_availability_marks/migration.sql', import.meta.url),
       'utf8',
     );
     expect(migration.endsWith(source)).toBe(true);
@@ -282,10 +282,10 @@ describe('agent-task-stall-invariants.sql (#1706)', () => {
 // ── #1707: prisma/agent-task-matching-invariants.sql ──────────────────────
 
 describe('agent-task-matching-invariants.sql (#1707)', () => {
-  it('the T3 migration carries a byte-identical copy of the invariants file', () => {
+  it('the latest matching-invariants migration (#1709) carries a byte-identical copy of the invariants file', () => {
     const source = readFileSync(new URL('../../../prisma/agent-task-matching-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(
-      new URL('../../../prisma/migrations/20261010010000_agent_task_matching/migration.sql', import.meta.url),
+      new URL('../../../prisma/migrations/20261014010000_host_registration_worktrees/migration.sql', import.meta.url),
       'utf8',
     );
     expect(migration.endsWith(source)).toBe(true);
