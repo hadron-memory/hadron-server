@@ -236,7 +236,8 @@ describe('resolveAIConfig precedence (US1)', () => {
     await createConfig({ organizationId: otherOrg.id }, 'default', { apiKey: 'sk-builder-org' });
     await expect(resolvers.Query.resolveAIConfig(
       {}, { appRef: app.id, agentRef: foreignAgent.id }, ctxFor(admin.id),
-    )).rejects.toThrow(/Forbidden/);
+    // #1946 (ruling A): not installed in the named App answers as absent.
+    )).rejects.toThrow(/AGENT_NOT_FOUND/);
     await db.appAgent.create({ data: { appId: app.id, agentId: foreignAgent.id } });
     const resolved = await resolvers.Query.resolveAIConfig(
       {},
@@ -338,7 +339,8 @@ describe('resolveAIConfig user-owned App decrypt gate (#1487)', () => {
     await createConfig({ appId: ownApp.id }, 'default', { apiKey: 'sk-owner-only' });
     await expect(resolvers.Query.resolveAIConfig(
       {}, { appRef: ownApp.id, agentRef: ownAgent.id }, ctxFor(owner.id),
-    )).rejects.toThrow(/Forbidden/);
+    // #1946 (ruling A): still refused before any decrypt, now as absent.
+    )).rejects.toThrow(/AGENT_NOT_FOUND/);
     await db.appAgent.create({ data: { appId: ownApp.id, agentId: ownAgent.id } });
     expect((await resolvers.Query.resolveAIConfig(
       {}, { appRef: ownApp.id, agentRef: ownAgent.id }, ctxFor(owner.id),
