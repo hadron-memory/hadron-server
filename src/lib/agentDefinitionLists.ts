@@ -54,6 +54,7 @@ import {
   effectiveScope,
   findEffectiveNodeIdByLoc,
   retainEffective,
+  servedEndpointInEffect,
   stillInherited,
   systemMemoryChain,
   type InheritedFrom,
@@ -142,9 +143,13 @@ async function agentContext(db: Db, agent: GatedAgent) {
     if (!hit) return null;
     const row = await db.node.findFirst({ where: { id: hit.id, deletedAt: null }, select: LIST_NODE_SELECT });
     if (!row) return null;
-    // #1891's re-check on the version read: an inherited node that became a
-    // boot prompt, or was overridden, since the lookup is not passed down.
-    if (hit.inheritedFrom && !(await stillInherited(db, hit.inheritedFrom, row))) return null;
+    // #1899's served-endpoint check on the version read, for EVERY row, the
+    // child's own included (Andi's P2 on #1949): it must still sit at the
+    // selected memory and loc, and a fresh lookup must still select it; an
+    // inherited row must also still be passed down (#1891's stillInherited:
+    // not overridden since, not a boot prompt). A row moved, replaced or
+    // turned since the lookup is dropped, never served under a stale stamp.
+    if (!(await servedEndpointInEffect(db, agent.systemMemoryId, node.loc, hit, row))) return null;
     return { node: { ...pick(row), inheritedFrom: hit.inheritedFrom }, role: row.role };
   };
 
