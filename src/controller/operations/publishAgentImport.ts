@@ -18,6 +18,8 @@
 
 import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
+import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
+import { requireAgentAccess, type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 
 export class SelfImportError extends Error {
   constructor() {
@@ -61,9 +63,11 @@ interface PublishAgentImportInput {
   actorId?: string | null;
 }
 
+/** Publish under both Agents’ liveness fences; recheck caller authority when invoked by the API (cor:dmo:050:06). */
 export async function publishAgentImport(
   db: PrismaClient,
   input: PublishAgentImportInput,
+  ctx?: Context,
 ) {
   const { parentAgentId, importedAgentId, position, required = true, actorId = null } = input;
 
@@ -72,68 +76,82 @@ export async function publishAgentImport(
     throw new SelfImportError();
   }
 
-  // 2. 1-level enforcement: the imported Agent must not itself be a parent.
-  const importedAsParent = await db.agentImport.findFirst({
-    where: { parentAgentId: importedAgentId },
-  });
-  if (importedAsParent) {
-    throw new MultiLevelImportError(importedAgentId);
-  }
+  const parentBefore = await db.agent.findUniqueOrThrow({ where: { id: parentAgentId } });
+  return withAuthorizedTx(ctx ?? { db, roles: [] }, [
+    { kind: 'agent', id: parentAgentId },
+    { kind: 'agent', id: importedAgentId },
+    ...(parentBefore.organizationId ? [{ kind: 'org' as const, id: parentBefore.organizationId }] : []),
+    ...(parentBefore.ownerUserId ? [{ kind: 'user' as const, id: parentBefore.ownerUserId }] : []),
+  ], async txCtx => {
+    const parent = await txCtx.db.agent.findUniqueOrThrow({ where: { id: parentAgentId } });
+    if (parent.organizationId !== parentBefore.organizationId || parent.ownerUserId !== parentBefore.ownerUserId) {
+      throw new Error('Agent ownership changed; retry the import');
+    }
+    if (ctx) await requireAgentAccess(txCtx, parent, 'ADMIN');
+  }, async tx => {
+    // 2. 1-level enforcement: the imported Agent must not itself be a parent.
+    const importedAsParent = await tx.agentImport.findFirst({
+      where: { parentAgentId: importedAgentId },
+    });
+    if (importedAsParent) {
+      throw new MultiLevelImportError(importedAgentId);
+    }
 
-  // 3. Builder grant: the parent Agent's owning org must have an active
-  //    AgentOrgGrant for the imported Agent.
-  const parentAgent = await db.agent.findUniqueOrThrow({
-    where: { id: parentAgentId },
-    select: { organizationId: true },
-  });
-  // AgentOrgGrant/AgentImport model an org-to-org licensing relationship —
-  // not yet defined for a user-owned parent Agent.
-  if (!parentAgent.organizationId) {
-    throw new Error('Agent imports are not supported for a user-owned Agent yet.');
-  }
-  const grant = await db.agentOrgGrant.findUnique({
-    where: {
-      orgId_agentId: {
-        orgId: parentAgent.organizationId,
-        agentId: importedAgentId,
-      },
-    },
-  });
-  if (!grant || !isLifecycleActive(grant)) {
-    throw new MissingGrantError(parentAgent.organizationId, importedAgentId);
-  }
-
-  // 4. INSERT — the @@unique([parent_agent_id, position]) constraint catches
-  //    collisions; surface those as PositionConflictError. Other unique
-  //    violations (the composite PK on (parent, imported)) surface as a
-  //    rethrown error so callers see the underlying issue.
-  try {
-    return await db.agentImport.create({
-      data: {
-        parentAgentId,
-        importedAgentId,
-        position,
-        required,
-        agentOrgGrantOrgId: parentAgent.organizationId,
-        agentOrgGrantAgentId: importedAgentId,
-        createdBy: actorId,
+    // 3. Builder grant: the parent Agent's owning org must have an active
+    //    AgentOrgGrant for the imported Agent.
+    const parentAgent = await tx.agent.findUniqueOrThrow({
+      where: { id: parentAgentId },
+      select: { organizationId: true },
+    });
+    // AgentOrgGrant/AgentImport model an org-to-org licensing relationship —
+    // not yet defined for a user-owned parent Agent.
+    if (!parentAgent.organizationId) {
+      throw new Error('Agent imports are not supported for a user-owned Agent yet.');
+    }
+    const grant = await tx.agentOrgGrant.findUnique({
+      where: {
+        orgId_agentId: {
+          orgId: parentAgent.organizationId,
+          agentId: importedAgentId,
+        },
       },
     });
-  } catch (e: unknown) {
-    if (
-      typeof e === 'object' &&
-      e !== null &&
-      (e as Prisma.PrismaClientKnownRequestError).code === 'P2002'
-    ) {
-      // Unique violation. Determine whether it was the position constraint
-      // or the PK by inspecting the meta target (Prisma surfaces field names).
-      const target = ((e as Prisma.PrismaClientKnownRequestError).meta as
-        | { target?: string[] }
-        | undefined)?.target;
-      if (target?.includes('position')) {
-        throw new PositionConflictError(parentAgentId, position);
-      }
+    if (!grant || !isLifecycleActive(grant)) {
+      throw new MissingGrantError(parentAgent.organizationId, importedAgentId);
     }
-    throw e;
-  }
+
+    // 4. INSERT — the @@unique([parent_agent_id, position]) constraint catches
+    //    collisions; surface those as PositionConflictError. Other unique
+    //    violations (the composite PK on (parent, imported)) surface as a
+    //    rethrown error so callers see the underlying issue.
+    try {
+      return await tx.agentImport.create({
+        data: {
+          parentAgentId,
+          importedAgentId,
+          position,
+          required,
+          agentOrgGrantOrgId: parentAgent.organizationId,
+          agentOrgGrantAgentId: importedAgentId,
+          createdBy: actorId,
+        },
+      });
+    } catch (e: unknown) {
+      if (
+        typeof e === 'object' &&
+        e !== null &&
+        (e as Prisma.PrismaClientKnownRequestError).code === 'P2002'
+      ) {
+        // Unique violation. Determine whether it was the position constraint
+        // or the PK by inspecting the meta target (Prisma surfaces field names).
+        const target = ((e as Prisma.PrismaClientKnownRequestError).meta as
+          | { target?: string[] }
+          | undefined)?.target;
+        if (target?.includes('position')) {
+          throw new PositionConflictError(parentAgentId, position);
+        }
+      }
+      throw e;
+    }
+  });
 }
