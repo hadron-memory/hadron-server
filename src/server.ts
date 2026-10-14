@@ -97,6 +97,7 @@ import { startTaskStallEvaluatorLoop } from './jobs/taskStallEvaluator.js';
 import { startTaskMatcherLoop } from './jobs/taskMatcher.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
 import { mountHealthRoutes } from './api/health.js';
+import { mountCapabilitiesRoute } from './api/capabilities.js';
 import { mountPublicAssetRoutes } from './api/assetPublic.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
 import { mountSlackEventRoutes } from './api/slackEvents.js';
@@ -211,6 +212,9 @@ export async function createServer(): Promise<Express> {
     );
   }
 
+  // #1925: before the global CORS middleware, which allows the portal's origin WITH credentials; this
+  // unauthenticated read answers any origin without them. See src/api/capabilities.ts.
+  mountCapabilitiesRoute(app);
   app.use(
     cors({
       origin: process.env.FRONTEND_URL || 'http://localhost:5173',

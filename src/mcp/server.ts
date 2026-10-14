@@ -62,7 +62,7 @@ import {
 import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { userUrn } from '../lib/userHandle.js';
 import { registerCommentTools } from './commentTools.js';
-import { signingSurfacePolicy } from '../lib/signing/surface.js';
+import { signingSurfacePolicy, switchCapabilities } from '../lib/signing/surface.js';
 import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
 import { registerTickerTools } from './tickerTools.js';
@@ -3063,8 +3063,8 @@ export function createMcpServerInstance(
         `version: ${dep.version}`,
         `capabilities: ${[
           ...MCP_SURFACE_CAPABILITIES,
-          ...(dep.signing ? ['node-signing'] : []),
-          ...(dep.passkeyRegistration ? ['passkey-registration'] : []),
+          // #1925: the same function GET /capabilities answers from, so the two cannot disagree.
+          ...switchCapabilities(),
           // Probed exactly as the tools will admit the call: allowlists, a
           // live App and current participation (#1362 review).
           ...(auth.appId && (await teamAttentionAvailable(chatCtx(), auth.appId))
