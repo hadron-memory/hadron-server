@@ -9,6 +9,8 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     environment:
+      PASSKEY_SPIKE_SESSION_TTL_SECONDS: ${AL_SESSION_TTL_SECONDS:-300}
+      PASSKEY_SPIKE_PAIRING_TTL_SECONDS: ${AL_PAIRING_TTL_SECONDS:-60}
       PASSKEY_SPIKE_BASE_PATH: ${AL_BASE_PATH:?Holger must choose a random path or an allowlisted path}
       PASSKEY_SPIKE_ORIGIN: ${AL_ORIGIN:?Holger must choose the exact ceremony origin}
     networks: [proxy]

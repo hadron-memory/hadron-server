@@ -16,7 +16,12 @@ async function bodyOf(req) {
   return JSON.parse(data);
 }
 
-export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost', basePath = '/', bind = '127.0.0.1', beforeRegistrationVerify } = {}) {
+export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost', basePath = '/', bind = '127.0.0.1', beforeRegistrationVerify,
+  sessionTtlSeconds = Number(process.env.PASSKEY_SPIKE_SESSION_TTL_SECONDS ?? 300),
+  pairingTtlSeconds = Number(process.env.PASSKEY_SPIKE_PAIRING_TTL_SECONDS ?? 60) } = {}) {
+  for (const [name, value] of Object.entries({ sessionTtlSeconds, pairingTtlSeconds })) {
+    if (!Number.isSafeInteger(value) || value < 1 || value > 86400) throw new Error(`Invalid ${name}: expected 1–86400 seconds`);
+  }
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid PASSKEY_SPIKE_PORT');
   if (!/^\/(?:[a-zA-Z0-9_-]+\/)*$/.test(basePath)) throw new Error('Invalid base path');
   if (expectedOrigin) {
@@ -45,6 +50,7 @@ export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost',
       const [file, type] = files[url.pathname]; res.writeHead(200, { 'Content-Type': type });
       return res.end(readFileSync(new URL(file, import.meta.url)));
     }
+    if (req.method === 'GET' && url.pathname === '/config') return json(res, 200, { sessionTtlSeconds, pairingTtlSeconds });
     if (req.method === 'GET' && url.pathname === '/fixture') return json(res, 200, example);
     if (req.method !== 'POST') return json(res, 404, { code: 'NOT_FOUND' });
     if (req.headers.origin && req.headers.origin !== origin) return json(res, 403, { code: 'ORIGIN_REFUSED' });
@@ -53,7 +59,7 @@ export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost',
       try { const b = await bodyOf(req); join = pairs.get(b.code); pairs.delete(b.code); }
       catch { return json(res,400,{code:'PAIRING_REFUSED'}); }
       if (!join || join.expiresAt < Date.now() || !sessions.has(join.sid)) return json(res,400,{code:'PAIRING_REFUSED'});
-      res.setHeader('Set-Cookie', `spike_sid=${join.sid}; HttpOnly; SameSite=Strict; Path=${basePath}; Max-Age=300${expectedOrigin ? '; Secure' : ''}`);
+      res.setHeader('Set-Cookie', `spike_sid=${join.sid}; HttpOnly; SameSite=Strict; Path=${basePath}; Max-Age=${Math.max(0, Math.floor((sessions.get(join.sid).expiresAt - Date.now()) / 1000))}${expectedOrigin ? '; Secure' : ''}`);
       return json(res,200,{joined:true});
     }
     let sid = req.headers.cookie?.match(/(?:^|;\s*)spike_sid=([A-Za-z0-9_-]+)/)?.[1];
@@ -61,9 +67,9 @@ export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost',
     if (!session) {
       if (url.pathname !== '/registration/options' || sessions.size >= 32) return json(res, 400, { code: 'SESSION_REQUIRED' });
       sid = randomBytes(24).toString('base64url');
-      session = { expiresAt: Date.now() + 300000, pickerTag: randomBytes(6).toString('base64url'), userHandle: randomBytes(32), pending: new Map(), usedAssertions: new Set(), credential: null };
+      session = { expiresAt: Date.now() + sessionTtlSeconds * 1000, pickerTag: randomBytes(6).toString('base64url'), userHandle: randomBytes(32), pending: new Map(), usedAssertions: new Set(), credential: null };
       sessions.set(sid, session);
-      res.setHeader('Set-Cookie', `spike_sid=${sid}; HttpOnly; SameSite=Strict; Path=${basePath}; Max-Age=300${expectedOrigin ? '; Secure' : ''}`);
+      res.setHeader('Set-Cookie', `spike_sid=${sid}; HttpOnly; SameSite=Strict; Path=${basePath}; Max-Age=${sessionTtlSeconds}${expectedOrigin ? '; Secure' : ''}`);
     }
     try {
       const body = await bodyOf(req);
@@ -71,8 +77,9 @@ export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost',
         if (!session.credential || pairs.size >= 32) return json(res,400,{code:'REGISTER_FIRST'});
         for (const [code,p] of pairs) if (p.sid === sid || p.expiresAt < Date.now()) pairs.delete(code);
         const code = randomBytes(24).toString('base64url');
-        pairs.set(code,{sid,expiresAt:Math.min(session.expiresAt,Date.now()+60000)});
-        return json(res,200,{code,expiresInSeconds:60});
+        const expiresAt = Math.min(session.expiresAt, Date.now() + pairingTtlSeconds * 1000);
+        pairs.set(code,{sid,expiresAt});
+        return json(res,200,{code,expiresInSeconds:Math.ceil((expiresAt - Date.now()) / 1000)});
       }
       if (url.pathname === '/registration/options' || url.pathname === '/authentication/options') {
         if (session.pending.size >= 16 || session.usedAssertions.size >= 128) return json(res, 400, { code: 'DEMO_LIMIT' });
