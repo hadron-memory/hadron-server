@@ -5339,6 +5339,10 @@ model AgentTaskStallSchedule {
   /// session on its task's finish or cancellation has before the platform ends
   /// it through its host: 1 to 1440; null is the default, 10.
   sessionEndGraceMinutes Int?   @map("session_end_grace_minutes")
+  /// #1881 (cor:agt:070:02) — how many minutes a host has to report an
+  /// operation it collected before the platform fails it: 5 to 1440; null is
+  /// the default, 60.
+  hostReportTimeoutMinutes Int? @map("host_report_timeout_minutes")
   updatedAt            DateTime @updatedAt @map("updated_at")
   updatedBy            String?  @map("updated_by")
 
@@ -5520,10 +5524,14 @@ model HostKeyUse {
   appKeyId    String   @map("app_key_id")
   appId       String   @map("app_id")
   hostId      String   @map("host_id")
-  /// `register` | `collect` | `report` | `availability`.
+  /// `register` | `collect` | `report` | `availability` | `read` (#1881: the
+  /// App's host registrations or host-operations listing, read with the key).
   action      String
   operationId String?  @map("operation_id")
   count       Int?
+  /// #1881 (cor:agt:070:07, Holger #10849): the refusal's code when the call
+  /// was refused, written apart from the refused call so its rollback keeps it.
+  refusedCode String?  @map("refused_code")
   usedAt      DateTime @default(now()) @map("used_at")
 
   appKey AppKey @relation(fields: [appKeyId], references: [id], onDelete: Cascade)

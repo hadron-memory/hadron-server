@@ -64,5 +64,6 @@ ALTER TABLE agent_task_stall_schedule ADD CONSTRAINT chk_agent_task_stall_schedu
   (owner_reaction_minutes IS NULL OR owner_reaction_minutes BETWEEN 1 AND 10080) AND
   (assignment_minutes IS NULL OR assignment_minutes BETWEEN 1 AND 10080) AND
   (host_lapse_check_ins IS NULL OR host_lapse_check_ins BETWEEN 2 AND 10) AND
-  (session_end_grace_minutes IS NULL OR session_end_grace_minutes BETWEEN 1 AND 1440)
+  (session_end_grace_minutes IS NULL OR session_end_grace_minutes BETWEEN 1 AND 1440) AND
+  (host_report_timeout_minutes IS NULL OR host_report_timeout_minutes BETWEEN 5 AND 1440)
 );

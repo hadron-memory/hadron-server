@@ -54,9 +54,11 @@ ALTER TABLE host_operations ADD CONSTRAINT chk_host_operations_shape CHECK (
   CASE status
     WHEN 'issued' THEN num_nonnulls(collected_at, finished_at, result, failure_reason) = 0
     WHEN 'collected' THEN collected_at IS NOT NULL AND num_nonnulls(finished_at, result, failure_reason) = 0
-    WHEN 'succeeded' THEN collected_at IS NOT NULL AND finished_at IS NOT NULL AND failure_reason IS NULL
+    -- #1881: an operation settled before any host collected it (its host lapsed, or its reason went away) has no
+    -- collected_at; one collected keeps it.
+    WHEN 'succeeded' THEN finished_at IS NOT NULL AND failure_reason IS NULL
       AND (result IS NULL OR jsonb_typeof(result) = 'object')
-    WHEN 'failed' THEN collected_at IS NOT NULL AND finished_at IS NOT NULL AND result IS NULL
+    WHEN 'failed' THEN finished_at IS NOT NULL AND result IS NULL
       AND failure_reason IS NOT NULL AND char_length(failure_reason) BETWEEN 1 AND 2000
     ELSE false
   END AND
@@ -108,12 +110,18 @@ BEGIN
       OLD.issued_by_user_id, OLD.issued_by_worker_id, OLD.issued_by_agent_id, OLD.issued_at) THEN
     RAISE EXCEPTION 'A host operation''s type, arguments, host, worker and issuer never change' USING ERRCODE = '23514';
   END IF;
+  -- #1881 (cor:agt:070:02, Holger #10765): nothing stays in flight forever. An operation never collected is settled
+  -- by the platform when its host lapses or its reason goes away: failed, or (a worker.end whose session already
+  -- ended, cor:agt:020:10) succeeded. It keeps no collected_at.
   IF NOT (
-    (OLD.status = 'issued' AND NEW.status = 'collected') OR
+    (OLD.status = 'issued' AND NEW.status IN ('collected', 'succeeded', 'failed')) OR
     (OLD.status = 'collected' AND NEW.status IN ('succeeded', 'failed'))
   ) THEN
-    RAISE EXCEPTION 'A host operation moves only issued → collected → succeeded | failed (was %, now %)', OLD.status, NEW.status
+    RAISE EXCEPTION 'A host operation moves only issued → collected → succeeded | failed, or issued → succeeded | failed (was %, now %)', OLD.status, NEW.status
       USING ERRCODE = '23514';
+  END IF;
+  IF OLD.status = 'issued' AND NEW.status IN ('succeeded', 'failed') AND NEW.collected_at IS NOT NULL THEN
+    RAISE EXCEPTION 'An operation settled before collection has no collected_at' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END;
@@ -128,10 +136,12 @@ CREATE TRIGGER trg_host_operations_forward_only
 -- never changed, removed only with its key (the cascade).
 ALTER TABLE host_key_uses DROP CONSTRAINT IF EXISTS chk_host_key_uses_shape;
 ALTER TABLE host_key_uses ADD CONSTRAINT chk_host_key_uses_shape CHECK (
-  action IN ('register', 'collect', 'report', 'availability') AND
+  action IN ('register', 'collect', 'report', 'availability', 'read') AND
   host_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' AND
   (count IS NULL OR count >= 0) AND
-  ((action = 'report') = (operation_id IS NOT NULL))
+  -- A refused report may name no operation it could see; an accepted one always names its own.
+  (CASE WHEN refused_code IS NULL THEN (action = 'report') = (operation_id IS NOT NULL)
+        ELSE (operation_id IS NULL OR action = 'report') AND refused_code ~ '^[A-Z][A-Z0-9_]{0,63}$' END)
 );
 
 CREATE OR REPLACE FUNCTION host_key_use_append_only() RETURNS trigger

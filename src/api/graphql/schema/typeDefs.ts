@@ -3181,12 +3181,14 @@ export const typeDefs = `#graphql
   type HostKeyUse {
     id: ID!
     hostId: String!
-    "register, collect, report or availability."
+    "register, collect, report, availability or read."
     action: String!
     "The operation a report was about."
     operationId: ID
     "How many operations a collection returned, or workers a registration listed."
     count: Int
+    "#1881 — the refusal code when the server refused this use (e.g. APP_KEY_SCOPE_REQUIRED); null for a use that succeeded. A refused use is recorded too (hrn:node:hadronmemory.com:specs:cor:agt:070:07: every use)."
+    refusedCode: String
     usedAt: DateTime!
   }
 
@@ -12513,11 +12515,13 @@ export const typeDefs = `#graphql
     hostLapseCheckIns: Int!
     "#1709 — how many minutes a worker asked to end its session on its task's finish or cancellation has before the platform ends it through its host (hrn:node:hadronmemory.com:specs:cor:agt:050:10): 1 to 1440, default 10."
     sessionEndGraceMinutes: Int!
+    "#1881 — how many minutes a host has to report an operation it collected before the platform fails it (hrn:node:hadronmemory.com:specs:cor:agt:070:02): 5 to 1440, default 60."
+    hostReportTimeoutMinutes: Int!
     "When the App last changed them; null while every window is the default."
     updatedAt: DateTime
   }
 
-  "An omitted field keeps its value; null returns it to the platform default. Each window is 1 to 10080 minutes; hostLapseCheckIns is 2 to 10; sessionEndGraceMinutes is 1 to 1440."
+  "An omitted field keeps its value; null returns it to the platform default. Each window is 1 to 10080 minutes; hostLapseCheckIns is 2 to 10; sessionEndGraceMinutes is 1 to 1440; hostReportTimeoutMinutes is 5 to 1440."
   input AgentTaskStallScheduleInput {
     notStartedMinutes: Int
     noProgressMinutes: Int
@@ -12525,6 +12529,7 @@ export const typeDefs = `#graphql
     assignmentMinutes: Int
     hostLapseCheckIns: Int
     sessionEndGraceMinutes: Int
+    hostReportTimeoutMinutes: Int
   }
 
   input SetWorkerAvailabilityInput {
