@@ -21,8 +21,9 @@ import { generateId } from '../id.js';
 import { runAsActor } from '../requestActor.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskMatcherTick } from '../../jobs/taskMatcher.js';
-import { __matcherTesting, compareRank, eligibleFamily, loadWorkerWorkStates, matchQueuedTasks, parseRequirements } from './matcher.js';
+import { __matcherTesting, compareRank, eligibleFamily, loadWorkerWorkStates, matchable, matchQueuedTasks, parseRequirements } from './matcher.js';
 import { registerHost } from './hosts.js';
+import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -239,7 +240,7 @@ describe('the family follows the BINDING, not activity (#1723 review, Diego P2-2
     expect(await familyOf(baloo)).toBe('codex');
     const [state] = (await loadWorkerWorkStates(db, app.id, new Date())).filter((w) => w.id === baloo.id);
     expect(state).toMatchObject({ bound: true, live: false, bindingFamily: 'codex', launchableFamilies: ['glm'], families: ['codex'], freeFamilies: ['codex'] });
-    // Quiet is not matchable until T6, so a glm-only task stays queued, and so does a codex one.
+    // A quiet BOUND worker is not matchable, whatever a host could launch it as: a glm-only task stays queued, and so does a codex one.
     const glmOnly = await queued('09:00', { familyIn: ['glm'] });
     const codexOk = await queued('09:01', { familyIn: ['codex'] });
     await matchQueuedTasks(db, new Date(), { appId: app.id });
@@ -625,5 +626,25 @@ describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
     expect(await taskMatcherTick(db, at('11:31'))).toEqual({ lost: 0, lapsed: 0, matched: 1 });
     expect(await assigneeOf(older.id)).toBe(baloo.id);
     expect(await assigneeOf(younger.id)).toBeNull();
+  });
+});
+
+describe('#1961 the roster SDL states the shipped matching rule', () => {
+  const field = (name: string) => new RegExp(`"([^"]*)"\\n\\s*${name}: `).exec(/type TeamRosterEntry \{[^}]*\}/.exec(typeDefs)![0])?.[1] ?? '';
+  const state = (name: string) => new RegExp(`"([^"]*)"\\n\\s*${name}\\n`).exec(/enum TeamRosterState \{[^}]*\}/.exec(typeDefs)![0])?.[1] ?? '';
+
+  it('matchable: a bound worker only while live, an unbound one always (free for work then needs a launchable family)', () => {
+    expect(matchable({ bound: true, live: true })).toBe(true);
+    expect(matchable({ bound: true, live: false })).toBe(false);
+    expect(matchable({ bound: false, live: false })).toBe(true);
+    expect(matchable({ bound: false, live: false, endingSession: true })).toBe(false);
+  });
+
+  it('liveSession and AVAILABLE describe that rule, with no pre-T6 restriction left', () => {
+    expect(field('liveSession')).toContain('The matcher assigns to a BOUND worker only while it has one');
+    expect(field('liveSession')).toContain('an unbound worker is matched when a live host can launch it');
+    expect(state('AVAILABLE')).toContain('an unbound worker a live host can launch, which the matcher assigns to');
+    expect(state('AVAILABLE')).toContain('which the matcher leaves alone until its session is live again');
+    for (const text of [field('liveSession'), state('AVAILABLE')]) expect(text).not.toMatch(/host-operations slice|until T6/);
   });
 });

@@ -22,9 +22,10 @@
  *   WORKING               the assignee of a started task
  *   ASSIGNED_NOT_STARTED  the assignee of a pending task
  *   AVAILABLE             free for work (060:05) — including an unbound worker
- *                         a live host can launch, and a bound one whose
- *                         session is quiet, both of which the matcher leaves
- *                         alone until T6 (`liveSession` tells them apart)
+ *                         a live host can launch, which the matcher assigns to
+ *                         (T6, #1709), and a bound one whose session is quiet,
+ *                         which it leaves alone until the session is live again
+ *                         (`liveSession` tells them apart)
  *   NO_FAMILY             bound, but its session reported no model family, so
  *                         it can't be matched until one is given (060:04)
  *   NOT_LAUNCHABLE        unbound, and no live host registers it
@@ -51,7 +52,7 @@ export type RosterEntry = {
   state: RosterState;
   /** Has an open session, live or quiet (the binding). */
   bound: boolean;
-  /** Has a live session (cor:agt:020:11); the matcher assigns only to these until T6. */
+  /** Has a live session (cor:agt:020:11); a BOUND worker is matched only with one. Unbound workers are matched through a host. */
   liveSession: boolean;
   /** The binding's family (its newest open session's); null when unbound or none was reported. */
   family: string | null;
