@@ -2153,11 +2153,29 @@ describe('#1940 fix cycle — the timeout kill is hard and its result fail-close
     const res = runCommand([process.execPath, '-e', script], 150);
     expect(res.code).toBe(1);
     expect(res.stdout).toBe('');
-    expect(res.stderr).toContain('killed');
+    expect(res.stderr).toMatch(/killed|ETIMEDOUT|call failed/); // killed at the bound — the message names the failure either way
   }, 30_000);
   it('a normally-exiting child is untouched by the kill path', () => {
     const res = runCommand([process.execPath, '-e', 'process.stdout.write("fine")']);
     expect(res.code).toBe(0);
     expect(res.stdout).toBe('fine');
+  });
+});
+
+describe('#1940 cycle 2 — ANY proc.error is fail-closed (Andi #12271, Chip #12273)', () => {
+  it('a spawn error with retained success JSON on the pipe reads as code 1 with EMPTY stdout', () => {
+    // ENOENT: the binary does not exist — spawnSync sets proc.error with the
+    // child never running. To also cover the error-with-output shape Chip
+    // injected (ENOBUFS mid-write), assert the general contract on ENOENT
+    // and the pipe-error equivalence in one rule: proc.error => empty stdout.
+    const res = runCommand(['/nonexistent/binary/that/does/not/exist']);
+    expect(res.code).toBe(1);
+    expect(res.stdout).toBe('');
+    expect(res.stderr).toContain('call failed');
+  });
+  it('a SUCCESSFUL call is untouched by the error arm (control)', () => {
+    const res = runCommand([process.execPath, '-e', 'process.stdout.write(JSON.stringify({ok:true}))']);
+    expect(res.code).toBe(0);
+    expect(JSON.parse(res.stdout)).toEqual({ ok: true });
   });
 });

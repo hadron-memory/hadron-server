@@ -196,9 +196,17 @@ export const runCommand: Runner = (argv, timeoutMs: number = CALL_TIMEOUT_MS) =>
     timeout: timeoutMs,
     killSignal: 'SIGKILL',
   });
-  const killed = proc.error?.code === 'ETIMEDOUT' || (proc.status === null && proc.signal === 'SIGKILL');
+  // ANY spawn error (ETIMEDOUT kill, ENOENT, EPIPE, ENOBUFS…) is a failed
+  // call: code 1 with EMPTY stdout (Andi #12271, Chip #12273 — a non-zero
+  // exit with retained success output can reach send/idle callers as a
+  // result the failure invalidated; the wrapper's contract is fail-closed
+  // on every proc.error, not only the timeout arm).
+  if (proc.error) {
+    return { code: 1, stdout: '', stderr: `call failed: ${proc.error.code ?? String(proc.error.message ?? proc.error)}` };
+  }
+  const killed = proc.status === null && proc.signal === 'SIGKILL';
   if (killed) return { code: 1, stdout: '', stderr: `call exceeded ${timeoutMs}ms and was killed` };
-  return { code: proc.status ?? 1, stdout: proc.stdout ?? '', stderr: proc.stderr ?? String(proc.error ?? '') };
+  return { code: proc.status ?? 1, stdout: proc.stdout ?? '', stderr: proc.stderr ?? '' };
 };
 
 /** A failure that must leave the adopted token untouched. */
