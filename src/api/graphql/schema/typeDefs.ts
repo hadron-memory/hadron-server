@@ -8687,8 +8687,10 @@ export const typeDefs = `#graphql
     holder, the worker it reports to, or whoever manages the App (else HOST_OPERATION_NOT_PERMITTED). worker.start:
     whoever manages the App only, with an optional taskId, for a held worker with no live session and no start in
     flight, in a worktree and family the live host registers for it (WORKER_NOT_HELD, WORKER_LIVE,
-    WORKER_START_PENDING). worker.end ships with #1709's close-on-finish slice, and worker.deliver with a host delivery
-    path: HOST_OPERATION_NOT_ISSUABLE until then. An unregistered host is HOST_NOT_FOUND.
+    WORKER_START_PENDING). worker.end: whoever manages the App only (else HOST_OPERATION_NOT_PERMITTED), naming an open
+    session of the worker on a host that registers it (else BAD_HOST_OPERATION_ARGS). worker.deliver is the one type
+    not issued yet, HOST_OPERATION_NOT_ISSUABLE until a host has a delivery path for it (hadron-cli#829). An App key
+    issues nothing (FORBIDDEN). An unregistered host is HOST_NOT_FOUND.
     """
     issueHostOperation(input: IssueHostOperationInput!): HostOperation!
 
