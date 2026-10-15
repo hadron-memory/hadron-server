@@ -34,6 +34,139 @@ const CLAUDE_UNKNOWN_QUIET = ['  some status output nobody classified', '  anoth
 const CLAUDE_IDLE_REAL_XAN = ["  Queued for my gate: Bindi's remaining attach-steps, Dan's 12-follow-up batch,", '  Session open.', '✻ Brewed for 2m 36s · done 3:20 AM', RULE, '❯ ', RULE, CLAUDE_HINT];
 const CLAUDE_IDLE_REAL_LIAM = ['  both types.', "  file\". I've marked team chat read through #8177, the worktree is clean, and I'm standing by.", '✻ Cooked for 9m 42s · done 3:26 AM', '  ✔ Update installed · Restart to update', RULE, '❯ ', RULE, CLAUDE_HINT];
 const CLAUDE_IDLE_COMPACTED = ['✻ Compacted while idle', RULE, '❯ ', RULE, CLAUDE_HINT];
+/** REAL idle Codex screens captured live 2026-10-15 (Hugo, #1968): Diego, Gene
+ * and Xavier held for hours as 'unrecognized chrome above the prompt' while
+ * idle at completed turns — the `Worked for …` footer renders ABOVE its
+ * `↳ Recap:` block, so the recap tail is positionally NEWEST and its
+ * continuation lines indent ~12 columns. Diego's marker sits 10 lines above
+ * the prompt (outside the old 8-line window), Gene's 11, Xavier's 6. Verbatim
+ * screen tails, recap prose truncated only where it ran past the screen edge. */
+const CODEX_IDLE_RECAP_DIEGO = [
+  '    + 1 line (^t to expand)',
+  '  Worked for 10s • 3:49 AM',
+  '  ↳ Recap: Completed and posted the assigned blind reviews and carries,',
+  '            including #1899’s race fix, #1929, #1923, cli#883, and latest',
+  '            #1930/#1959 approvals. Reviews were static; local test execution is',
+  '            not reported. The router classifier fix is merged but not yet',
+  '            reloaded. Chat is confirmed read through #12203; the latest unread',
+  '            batch remains pending.',
+  '            Next: Read unfiltered team chat from #12204 using the live session,',
+  '            handle dispatches, and mark read; finish silently if no action is',
+  '            needed.',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/diego · Review hadron-…',
+  '  ? for shortcuts',
+];
+const CODEX_IDLE_RECAP_GENE = [
+  '  Worked for 24s • 7:38 PM',
+  '  ↳ Recap: Gene completed the comment API migration in PR #1070 after #1059/',
+  '            #1060 merged, then pushed hint and history-link fixes with',
+  '            regression tests. The migration passed full validation; follow-ups',
+  '            passed targeted tests and typecheck. Latest review/deployment',
+  '            status is unconfirmed. Current task is reading unread chat from',
+  '            #9605; completion and any assignments remain unconfirmed. Keep',
+  '            Gene’s session open.',
+  '            Next: Read chat unfiltered from #9605 using Gene’s existing',
+  '            session, act on assignments, then mark read; finish silently if',
+  '            none.',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/gene · Bind Gene worker…',
+  '  ? for shortcuts',
+];
+const CODEX_IDLE_RECAP_XAVIER = [
+  '    + 2 lines (^t to expand)',
+  '• Read unfiltered and marked through #11441. Replied to Vera’s Built-line',
+  '  survey as Xavier in #11442.',
+  '  Worked for 1m 4s • 4:04 PM',
+  '  ↳ Recap: The task is to read Hadron team chat unfiltered, handle actionable',
+  '            mentions, and mark it read. Latest backlog was read and marked',
+  '            through #11441; Xavier replied to Vera’s Built-line survey in',
+  '            #11442. #1842 reached CHECKED, T2 + §10 and was posted to Eden.',
+  '            #1770 was dispatched but remains in review under Xylon’s gate.',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/xavier · Verify Xavier…',
+  '  ? for shortcuts',
+];
+/** Synthetic from Atilla's canonical #1968 capture: a receipt URL folded across
+ * lines plus the recap block pushes `Worked for` 9 lines above the prompt —
+ * outside the old 8-line fold (recap skip alone at depth 8 cannot reach it). */
+const CODEX_IDLE_URL_RECEIPT = [
+  '  Reviewer approved: https://github.com/hadron-memory/hadron-portal/pull/',
+  '  1118#issuecomment-6182034412',
+  '  Receipt posted: https://github.com/hadron-memory/hadron-server/pull/1932#',
+  '  issuecomment-6180470118',
+  '    + 3 lines (^t to expand)',
+  '  Worked for 1m 28s • 7:41 AM',
+  '  ↳ Recap: Seat verdict saved and read back before the signed receipt was',
+  '            posted; the private stack is cleaned and the binding stays live.',
+  '            Chat was marked read through the receipt; nothing else was owed.',
+  '            Next: available for routing.',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/atilla · Static review…',
+  '  ? for shortcuts',
+];
+/** #1968 counterexamples — the skip rules must not degenerate: a deep-indented
+ * tail with NO idle marker anywhere stays unknown, and Riana's captured
+ * notice-box tail (2-space indent, no marker on screen) stays unknown. */
+const CODEX_UNKNOWN_INDENT_NO_MARKER = [
+  '            deeply indented continuation-shaped output with no completed-',
+  '            turn footer anywhere on screen',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/riana · Start worker session…',
+  '  ? for shortcuts',
+];
+const CODEX_UNKNOWN_NOTICE_RIANA = [
+  '• Ran hadron node create --help; ls /tmp/riana*1883* /tmp/riana*1877* | head -20',
+  '    + 109 lines (^t to expand)',
+  '  ⓘ This content can’t be shown',
+  '  We take extra care with some cybersecurity requests. If you’re doing',
+  '  authorized security work, apply for Daybreak to get broader access.',
+  '  Learn more: https://help.openai.com/en/articles/20001326',
+  '  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access-for-cyber/',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/riana · Start worker session…',
+  '  ? for shortcuts',
+];
+/** Andi's P2 negative controls (#1976 review, 2026-10-15): a deep indent with
+ * NO recap header above it is an unrecognized CURRENT status — the flat ≥8
+ * floor proved idle over an old marker + an 8/12-space status line (only 0/2
+ * spaces held), which is the send direction. Structural anchoring: only lines
+ * INSIDE a header-anchored recap block are skipped. */
+const CODEX_UNKNOWN_INDENTED_STATUS_NO_HEADER = [
+  '  Worked for 1m 28s • 7:41 AM',
+  '          an indented current status nobody classified',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+  '  ? for shortcuts',
+];
+const CODEX_UNKNOWN_STATUS_NO_RECAP = [
+  '  Worked for 1m 28s • 7:41 AM',
+  '  an unindented current status nobody classified',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+  '  ? for shortcuts',
+];
+/** Claude-family recap block, captured live from Yuri's terminal 2026-10-15
+ * (#1977): header `※ recap:` indents 2, continuation 4 — header-RELATIVE
+ * indent covers both families (Codex 2→12) in one structural rule. */
+const CLAUDE_IDLE_RECAP_YURI = [
+  '  #1958 progress: shed node done and corrected; rotate, start-session (both',
+  '  tracks), and end-session nodes next — same ladders, rotation keeps end',
+  '  --resume-claim since its successor starts fresh by design.',
+  '✻ Worked for 1m 10s · done 3:54 PM',
+  '  ※ recap: Executing my half of #1958: rewriting the lifecycle task nodes to use',
+  '    resume claims. The shed node is done and corrected; next action is applying',
+  '    the same claim ladders to the rotate and start/end-session nodes.',
+  RULE, '❯ ', RULE, CLAUDE_HINT,
+];
+/** Claude counterexample: 4-indent output (a code block) under a done-marker
+ * with NO recap header — the header-relative rule must not skip it. */
+const CLAUDE_UNKNOWN_CODEBLOCK_NO_HEADER = [
+  '✻ Worked for 2m 6s · done 3:58 PM',
+  '    const verdict = computeLiveness(row);',
+  '    return verdict;',
+  RULE, '❯ ', RULE, CLAUDE_HINT,
+];
 const withPrompt = (screen: string[], marker: string, text: string) => {
   const i = screen.map((l) => l.trimStart().startsWith(marker)).lastIndexOf(true);
   return [...screen.slice(0, i), `${marker} ${text}`, ...screen.slice(i + 1)];
@@ -188,7 +321,7 @@ class FakeCLIs {
       }
       // attendeeRegister: the winning row for the team Channel.
       const w = argv[argv.indexOf('-F') + 1].replace(/^w=/, '');
-      const ids = this.mentionOnly ?? new Set(['w-eli', 'w-baloo', 'w-ada']);
+      const ids = this.mentionOnly ?? new Set(['w-eli', 'w-baloo', 'w-ada', 'w-diego', 'w-gene', 'w-xavier', 'w-atilla', 'w-riana', 'w-andi', 'w-yuri']);
       const row = this.registerRow?.(w) ?? { namedBy: 'WORKER', channel: { id: CHANNEL }, entry: { mentionOnly: ids.has(w) } };
       return out({ data: { attendeeRegister: [row] } });
     }
@@ -487,6 +620,147 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     expect(out.nudged).toEqual([]);
     expect(out.held.Eli).toContain('unknown idle state');
     expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a completed Codex turn whose ↳ Recap tail trails the Worked-for footer DELIVERS — the recap is the marker’s own chrome (#1968, Diego captured 2026-10-15)', () => {
+    const c = cfg(['w-diego', 'Diego']);
+    fake.terminal('diego', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-diego', 'Diego')];
+    fake.screens.set('term_diego', { tail: CODEX_IDLE_RECAP_DIEGO }); // marker 10 lines above the prompt
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Diego'], adopted: true });
+  });
+
+  it('a Worked-for footer 11 lines above the prompt is INSIDE the deepened window and delivers (#1968, Gene captured 2026-10-15)', () => {
+    const c = cfg(['w-gene', 'Gene']);
+    fake.terminal('gene', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-gene', 'Gene')];
+    fake.screens.set('term_gene', { tail: CODEX_IDLE_RECAP_GENE });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Gene'], adopted: true });
+  });
+
+  it('a recap tail over an in-window Worked-for footer is skipped like trailing banner chrome and delivers (#1968, Xavier captured 2026-10-15)', () => {
+    const c = cfg(['w-xavier', 'Xavier']);
+    fake.terminal('xavier', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-xavier', 'Xavier')];
+    fake.screens.set('term_xavier', { tail: CODEX_IDLE_RECAP_XAVIER }); // marker 6 above, recap positionally newest
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Xavier'], adopted: true });
+  });
+
+  it('a folded-URL receipt pushing Worked-for past the old 8-line fold still delivers — depth 16 reaches the footer (#1968, Atilla’s canonical shape)', () => {
+    const c = cfg(['w-atilla', 'Atilla']);
+    fake.terminal('atilla', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-atilla', 'Atilla')];
+    fake.screens.set('term_atilla', { tail: CODEX_IDLE_URL_RECEIPT }); // marker 9 above the prompt
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Atilla'], adopted: true });
+  });
+
+  it('a deep-indented tail with NO idle marker anywhere on screen still HOLDS — the recap skip never substitutes for a marker (#1968)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', { tail: CODEX_UNKNOWN_INDENT_NO_MARKER });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a deep indent with NO recap header is a current status — an old Worked-for marker must NOT prove idle over it (Andi P2, #1976 review)', () => {
+    const c = cfg(['w-andi', 'Andi']);
+    fake.terminal('andi', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-andi', 'Andi')];
+    fake.screens.set('term_andi', { tail: CODEX_UNKNOWN_INDENTED_STATUS_NO_HEADER });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Andi).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('an unindented current status over an old Worked-for marker holds — the codex arm of the #1700 r3 counterexample (Andi control, #1976 review)', () => {
+    const c = cfg(['w-andi', 'Andi']);
+    fake.terminal('andi', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-andi', 'Andi')];
+    fake.screens.set('term_andi', { tail: CODEX_UNKNOWN_STATUS_NO_RECAP });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Andi).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a Claude recap block (header 2, continuation 4) trails its done-marker and DELIVERS — header-RELATIVE indent covers both families (#1977, Yuri captured 2026-10-15)', () => {
+    const c = cfg(['w-yuri', 'Yuri']);
+    fake.terminal('yuri', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-yuri', 'Yuri')];
+    fake.screens.set('term_yuri', { tail: CLAUDE_IDLE_RECAP_YURI });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Yuri'], adopted: true });
+  });
+
+  it('4-indent output under a done-marker with NO recap header is unrecognized and HOLDS — the rule never skips without an anchor (#1977 counterexample)', () => {
+    const c = cfg(['w-yuri', 'Yuri']);
+    fake.terminal('yuri', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-yuri', 'Yuri')];
+    fake.screens.set('term_yuri', { tail: CLAUDE_UNKNOWN_CODEBLOCK_NO_HEADER });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Yuri).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a notice-box tail (2-space indent, no marker) stays unrecognized and HOLDS (#1968, Riana captured 2026-10-15)', () => {
+    const c = cfg(['w-riana', 'Riana']);
+    fake.terminal('riana', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-riana', 'Riana')];
+    fake.screens.set('term_riana', { tail: CODEX_UNKNOWN_NOTICE_RIANA });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Riana).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a pinned busy line ABOVE a recap tail still wins — the sweep runs before the positional judgment (#1968)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [...CODEX_IDLE_RECAP_XAVIER.slice(0, 9), '  • Working (6s • esc to interrupt)', ...CODEX_IDLE_RECAP_XAVIER.slice(9)],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('a running turn is drawn above the prompt');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a COLUMN-ZERO status line after a recap block ends the block and is judged — no throw, unrecognized holds (Andi round 2, #1976 review)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      // A previous turn's recap, then a column-zero unrecognized current
+      // status: the extension must END at indent 0, not dereference null.
+      tail: [...CODEX_IDLE_RECAP_XAVIER.slice(0, 9), 'a column-zero current status nobody classified', ...CODEX_IDLE_RECAP_XAVIER.slice(9)],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a COLUMN-ZERO known busy line after a recap block is caught by the sweep — busy wins, no throw (Chip runtime matrix, #1976 review)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [...CODEX_IDLE_RECAP_XAVIER.slice(0, 9), '• Working (6s • esc to interrupt)', ...CODEX_IDLE_RECAP_XAVIER.slice(9)],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('a running turn is drawn above the prompt');
     expect(fake.sent).toEqual([]);
   });
 
