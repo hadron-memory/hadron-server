@@ -182,9 +182,22 @@ export type Runner = (argv: string[]) => RunResult;
 export const CALL_TIMEOUT_MS = 90_000;
 export const MIN_CALL_TIMEOUT_MS = 75_000;
 
-/** Run a CLI and capture its output; never throws on a non-zero exit. */
-export const runCommand: Runner = (argv) => {
-  const proc = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: CALL_TIMEOUT_MS });
+/** Run a CLI and capture its output; never throws on a non-zero exit.
+ * #1940 fix cycle: spawnSync's timeout sends a CATCHABLE SIGTERM, so a child
+ * that ignores it overruns the bound (Andi P2-1, Chip repro #12226), and a
+ * timed-out child that already printed success JSON still reports code 0 with
+ * that output, letting send/idle callers act on a result the kill invalidated
+ * (Andi P2-2). So: SIGKILL as the kill signal (uncatchable, unignorable), and
+ * any proc.error / timed-out status is normalised to code 1 with EMPTY stdout —
+ * the fail-closed shape every consumer already treats as failure. */
+export const runCommand: Runner = (argv, timeoutMs: number = CALL_TIMEOUT_MS) => {
+  const proc = spawnSync(argv[0], argv.slice(1), {
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    killSignal: 'SIGKILL',
+  });
+  const killed = proc.error?.code === 'ETIMEDOUT' || (proc.status === null && proc.signal === 'SIGKILL');
+  if (killed) return { code: 1, stdout: '', stderr: `call exceeded ${timeoutMs}ms and was killed` };
   return { code: proc.status ?? 1, stdout: proc.stdout ?? '', stderr: proc.stderr ?? String(proc.error ?? '') };
 };
 

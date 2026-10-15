@@ -2137,3 +2137,27 @@ describe('#1940 — reported prune is keyed by NAME (Joshua port-find)', () => {
     expect(after.reported['Eli']).toBeUndefined(); // the id-keyed delete was a no-op before this fix
   });
 });
+
+describe('#1940 fix cycle — the timeout kill is hard and its result fail-closed', () => {
+  it('a SIGTERM-IGNORING child that prints success JSON is killed and reads as code 1 with EMPTY stdout (Andi P2-1+2, Chip repro)', () => {
+    // The production wrapper runs node; a tiny script that traps SIGTERM and
+    // prints success JSON reproduces both P2s in one child: without the fix,
+    // the catchable SIGTERM lets it overrun and exit 0 with output retained.
+    const script = [
+      'process.on("SIGTERM", () => { /* ignore: we are a wedged child */ });',
+      'process.stdout.write(JSON.stringify({ ok: true }));',
+      'setTimeout(() => { process.exit(0); }, 500);',
+    ].join('');
+    // Scaled-down bound (Chip's repro approach): 150ms bound vs a child that
+    // ignores SIGTERM and would run 500ms — only the hard kill can stop it.
+    const res = runCommand([process.execPath, '-e', script], 150);
+    expect(res.code).toBe(1);
+    expect(res.stdout).toBe('');
+    expect(res.stderr).toContain('killed');
+  }, 30_000);
+  it('a normally-exiting child is untouched by the kill path', () => {
+    const res = runCommand([process.execPath, '-e', 'process.stdout.write("fine")']);
+    expect(res.code).toBe(0);
+    expect(res.stdout).toBe('fine');
+  });
+});
