@@ -7,7 +7,10 @@ const pin=(name,run)=>{try {run();} catch(e){failures.push(name+': '+e.message);
 import { chromium } from 'playwright';
 import { startSpike } from './preview.mjs';
 
-const primary = await startSpike({basePath:'/__passkey-al/'});
+const timingEnvKeys = ['PASSKEY_SPIKE_SESSION_TTL_SECONDS','PASSKEY_SPIKE_PAIRING_TTL_SECONDS'];
+const savedTimingEnv = timingEnvKeys.map(key => process.env[key]);
+for (const key of timingEnvKeys) delete process.env[key];
+const primary = await startSpike({basePath:'/__passkey-al/',sessionTtlSeconds:1800,pairingTtlSeconds:300});
 const otherOrigin = await startSpike();
 let releaseRegistration, firstEnteredResolve, secondEnteredResolve;
 let registrationCalls=0;
@@ -32,6 +35,20 @@ try {
   } });
   await page.goto(primary.url);
   await page.waitForFunction(() => window.spike?.ready);
+  assert.equal(await page.locator('#pairing-lifetime').textContent(), '5 minutes');
+  assert.equal(await page.locator('.session-lifetime').first().textContent(), '30 minutes');
+  assert.equal(await page.getByLabel('Pairing code from the other device').isVisible(), true);
+  assert.equal(await page.locator('#pair-code').evaluate(el => getComputedStyle(el).borderTopStyle), 'solid');
+  assert.deepEqual(await (await fetch(otherOrigin.url+'config')).json(), {sessionTtlSeconds:300,pairingTtlSeconds:60});
+  process.env.PASSKEY_SPIKE_SESSION_TTL_SECONDS='1800';
+  process.env.PASSKEY_SPIKE_PAIRING_TTL_SECONDS='300';
+  const envSpike = await startSpike();
+  try { assert.deepEqual(await (await fetch(envSpike.url+'config')).json(), {sessionTtlSeconds:1800,pairingTtlSeconds:300}); }
+  finally { await envSpike.close(); for (const key of timingEnvKeys) delete process.env[key]; }
+  for (const value of [0,-1,1.5,Infinity,86401]) {
+    await assert.rejects(startSpike({sessionTtlSeconds:value}), /Invalid sessionTtlSeconds/);
+    await assert.rejects(startSpike({pairingTtlSeconds:value}), /Invalid pairingTtlSeconds/);
+  }
   const fixture = await page.evaluate(() => window.spike.fixture);
   const firstOptions = await page.evaluate(() => window.spike.request('/registration/options', {}));
   const preissuedReplacement = await page.evaluate(() => window.spike.request('/registration/options', {}));
@@ -46,6 +63,9 @@ try {
   pin('registration identifies credential',()=>assert.equal(registration.credentialIdHash,credentialIdHash));
 
   const cookie = (await context.cookies()).find(c => c.name === 'spike_sid');
+  assert.ok(cookie.expires - Date.now()/1000 > 1790 && cookie.expires - Date.now()/1000 <= 1800);
+  const defaultOptions = await fetch(otherOrigin.url+'registration/options', {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  assert.match(defaultOptions.headers.get('set-cookie'), /Max-Age=300(?:;|$)/);
   const regOptions = firstOptions;
   pin('per-session picker name',()=>assert.match(firstOptions.options.user.name,/^synthetic-retention-user-[A-Za-z0-9_-]+$/));
   const compose = readFileSync(new URL('./al.compose.yml',import.meta.url),'utf8');
@@ -180,6 +200,31 @@ try {
     assert.equal(raceResults[1].body.code,'ALREADY_REGISTERED');
   });
   await raceContext.close();
+  // Advance only the server process clock: no real waits and browser cookies remain intact.
+  const realNow = Date.now;
+  const started = realNow();
+  const direct = async (path, body = {}, sid = cookie.value) => fetch(primary.url + path, {
+    method:'POST', headers:{'Content-Type':'application/json',Cookie:`spike_sid=${sid}`}, body:JSON.stringify(body),
+  });
+  try {
+    Date.now = () => started + 6 * 60000;
+    const latePair = await (await direct('pairing/options')).json();
+    assert.equal(latePair.expiresInSeconds,300, 'session survives old five-minute deadline');
+    Date.now = () => started + 8 * 60000;
+    const lateJoin = await direct('pairing/join',{code:latePair.code},'');
+    assert.equal(lateJoin.status,200, 'pair survives old sixty-second deadline');
+    assert.match(lateJoin.headers.get('set-cookie'), /Max-Age=1[23]\d\d(?:;|$)/, 'join cookie is bounded by remaining session');
+    assert.equal((await (await direct('pairing/join',{code:latePair.code},'')).json()).code,'PAIRING_REFUSED');
+    const expiredPair = await (await direct('pairing/options')).json();
+    Date.now = () => started + 14 * 60000;
+    assert.equal((await (await direct('pairing/join',{code:expiredPair.code},'')).json()).code,'PAIRING_REFUSED');
+    Date.now = () => started + 29 * 60000;
+    const nearEndPair = await (await direct('pairing/options')).json();
+    assert.ok(nearEndPair.expiresInSeconds > 0 && nearEndPair.expiresInSeconds <= 60, 'pair lifetime capped by original session');
+    Date.now = () => started + 30 * 60000 + 1000;
+    assert.equal((await (await direct('pairing/join',{code:nearEndPair.code},'')).json()).code,'PAIRING_REFUSED');
+    assert.equal((await (await direct('authentication/options')).json()).code,'SESSION_REQUIRED');
+  } finally { Date.now = realNow; }
   if(failures.length) throw new Error(failures.join('\n'));
   console.log(JSON.stringify({ localLeg: 'PASS', browser: await browser.version(), rpID: 'localhost',
     origin: primary.origin, fixture: 'spec-retention-example', discoverable: true,
@@ -189,6 +234,7 @@ try {
     refusals: ['UV=false', 'wrong origin', 'spent ceremony replay', 'new ceremony stored assertion replay (canonical and encoding alias)', 'wrong RP control', 'wrong challenge control'],
     limits: ['synthetic authenticator', 'no production/device/sync/hybrid proof', 'deterministic payload replay contract is outside this spike'] }, null, 2));
 } finally {
+  for (const [i,key] of timingEnvKeys.entries()) { if (savedTimingEnv[i] === undefined) delete process.env[key]; else process.env[key] = savedTimingEnv[i]; }
   releaseRegistration();
   await browser?.close();
   await Promise.all([primary.close(), otherOrigin.close(),registrationRace.close()]);
