@@ -70,6 +70,16 @@ function withLocalSettings(base: typeof db, sets: string[]): typeof db {
  */
 const PREFER_HNSW = ['SET LOCAL enable_sort = off'];
 
+/**
+ * The window tests assert EXACT ranking and exhaustion, which only an exact
+ * plan gives: HNSW is approximate, and its results here are within the
+ * production contract (a short page, never a wrong one; see the HNSW describe
+ * below). HNSW serves only plain index scans, so with them off the query is a
+ * scan plus a sort, whatever the statistics say. Applied last, it wins over
+ * any ambient setting.
+ */
+const EXACT_PLAN = ['SET LOCAL enable_sort = on', 'SET LOCAL enable_indexscan = off'];
+
 /** The handle the window tests search through, set per planner below. */
 let searchDb: typeof db = db;
 const admin = (): Context => ({ db: searchDb, roles: ['ADMIN'], userId: 'admin-vw' } as Context);
@@ -111,7 +121,7 @@ describe.each([
   ['the default planner', [] as string[]],
   ['a planner that prefers the HNSW index (#1970)', PREFER_HNSW],
 ])('@codex P2 — the vector window widens until the filtered page fills, under %s', (_planner, ambient) => {
-  beforeEach(() => { searchDb = withLocalSettings(db, ambient); });
+  beforeEach(() => { searchDb = withLocalSettings(withLocalSettings(db, ambient), EXACT_PLAN); });
   afterEach(() => { searchDb = db; });
 
   it('node granularity: limit 1 finds the only spec-family node ranked past the old window', async () => {
@@ -229,5 +239,58 @@ describe('@copilot round 7 — lexical/regex hydration re-asserts scope and filt
     ]);
     const res = await findNodes({ query: 'body', mode: 'keyword', filter: { memoryIds: [memId], role: 'spec' } });
     expect(res.hits.map((h: any) => h.node.id)).toEqual([matchId]);
+  });
+});
+
+describe('#1970 — each handle gives the plan it names, and the HNSW plan keeps the production contract', () => {
+  const qvec = () => { const q = new Array(DIM).fill(0); q[1] = 1; return q; };
+  // Shaped like the provider's ANN query: the nodes join is what lets the
+  // planner drive from either side.
+  const planOf = async (handle: typeof db) => {
+    const rows = await handle.$transaction((tx) => tx.$queryRawUnsafe<{ 'QUERY PLAN': string }[]>(
+      `EXPLAIN SELECT ne.node_id FROM node_embeddings ne JOIN nodes n ON n.id = ne.node_id
+       WHERE ne.memory_id = '${memId}' ORDER BY ne.embedding <=> '[${qvec().join(',')}]'::vector LIMIT 10`));
+    return rows.map((r) => r['QUERY PLAN']).join('\n');
+  };
+
+  it('PREFER_HNSW reaches the HNSW index, and EXACT_PLAN keeps it out even then', async () => {
+    // If either stops holding (a Postgres or pgvector upgrade), the window
+    // tests above silently stop testing what their names say.
+    expect(await planOf(withLocalSettings(db, PREFER_HNSW))).toContain('node_embeddings_embedding_hnsw');
+    expect(await planOf(withLocalSettings(withLocalSettings(db, PREFER_HNSW), EXACT_PLAN))).not.toContain('node_embeddings_embedding_hnsw');
+  });
+
+  it('on the HNSW plan, a filtered page may come back short but never wrong', async () => {
+    // The approximate scan can miss a match behind hundreds of nearer chunks;
+    // the resolver's contract is "past the cap a page can be short; it is
+    // never wrong".
+    await db.memory.update({ where: { id: memId }, data: { chunkTokens: 8, chunkOverlap: 0 } });
+    await db.node.deleteMany({ where: { memoryId: memId } });
+    await seed(memId, 'bulk', Array.from({ length: 2600 }, (_, i) => `near${i}`).join(' '), { role: 'review' });
+    const match = await seed(memId, 'match2', 'far body match', { role: 'spec' });
+    searchDb = withLocalSettings(db, PREFER_HNSW);
+    try {
+      const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryIds: [memId], role: 'spec' } });
+      expect(res.hits.map((h: any) => h.node.id).filter((id: string) => id !== match)).toEqual([]);
+    } finally {
+      searchDb = db;
+    }
+  });
+
+  it('on the HNSW plan, exhaustion is never claimed for a window that missed eligible rows', async () => {
+    // Dead index entries from a deleted bulk node take ef_search slots: the
+    // CI condition in which the scan returned 8 of the 9 live nodes.
+    await db.memory.update({ where: { id: memId }, data: { chunkTokens: 8, chunkOverlap: 0 } });
+    await seed(memId, 'churn', Array.from({ length: 2600 }, (_, i) => `near${i}`).join(' '));
+    await db.node.deleteMany({ where: { memoryId: memId, loc: 'churn' } });
+    const provider = getRetrievalProvider();
+    const handle = withLocalSettings(db, PREFER_HNSW);
+    for (const kind of ['node', 'chunk'] as const) {
+      let flag: boolean | null = null;
+      const opts = { db: handle, queryEmbedding: qvec(), memoryIds: [memId], limit: 20, onWindow: (w: { exhausted: boolean }) => { flag = w.exhausted; } };
+      const got = await (kind === 'node' ? provider.vectorSearch(opts) : provider.vectorSearchChunks(opts));
+      expect(flag, kind).not.toBeNull();
+      if (flag) expect(got.length, kind).toBe(9);
+    }
   });
 });
