@@ -17,17 +17,25 @@
  *  (b) no enumeration: every read is keyed on the caller's own user id, so a non-holder's answer is the answer for a
  *      caller who has nothing, byte for byte;
  *  (c) single use: consumption is one guarded update on (unconsumed, unrevoked, unexpired, this holder), the #882
- *      pattern, never a read then a write. Of two racing redemptions exactly one wins; the loser is refused.
+ *      pattern, never a read then a write. Of two racing redemptions exactly one wins; the loser is refused. Expiry
+ *      is judged by the DATABASE clock at that update (#1966 review, Anne P2-3), so a redemption that paused
+ *      between its read and its consume cannot spend a claim past its 60 seconds.
+ *
+ * A claim is recovery intent, never a waiver (#1966 review, Anne P2-1): resuming an open session goes through the
+ * shared lifecycle gate (`resumeOwnLapsedSessionInTx`), and starting the next one through startSession's.
  */
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient, SessionType } from '../generated/prisma/index.js';
 import { generateId } from './id.js';
-import { isSessionLive, loadLastEventBySession } from './sessionActivity.js';
+import { isSessionLive, loadLastEventBySession, OPEN_SESSION_SCAN_CAP, recentlyTouchedFilter } from './sessionActivity.js';
 
 /** Holger, 2026-10-15 (#12291 item 8): a claim is redeemable for 60 seconds from its write. */
 export const RESUME_CLAIM_TTL_MS = 60_000;
 
-/** At most this many of the caller's own claims or live sessions are listed; one page of choices for a human. */
+/**
+ * At most this many of the caller's own claims are listed: one page of choices for a human. It never decides
+ * anything, since a page this full already holds more than one claim. The live-session pool is not capped this way.
+ */
 const CANDIDATE_CAP = 50;
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -62,6 +70,9 @@ export async function writeResumeClaim(
 ): Promise<{ expiresAt: Date }> {
   const expiresAt = new Date(now.getTime() + RESUME_CLAIM_TTL_MS);
   const write = async (tx: Prisma.TransactionClient) => {
+    // Serialize writers per session (#1966 review, Anne P3): without the row lock two first writes both see no
+    // claim to revoke and both create one, breaking "at most one live claim per session".
+    await tx.$queryRaw`SELECT id FROM sessions WHERE id = ${s.sessionId} FOR UPDATE`;
     await tx.resumeClaim.updateMany({
       where: { sessionId: s.sessionId, consumedAt: null, revokedAt: null },
       data: { revokedAt: now },
@@ -86,24 +97,43 @@ export async function liveClaimsOf(db: Db, holderUserId: string, now: Date) {
 
 /**
  * Consume one claim: the single-use guard. True only for the one call that won; a used, revoked, expired or foreign
- * claim (the holder is part of the guard) consumes nothing.
+ * claim (the holder is part of the guard) consumes nothing. Expiry is judged by the database's own clock when the
+ * row is updated, re-evaluated after any row-lock wait, never by a timestamp the caller read earlier (Anne P2-3);
+ * the consumption is stamped with that same clock. Columns are UTC `timestamp(3)`, hence the `AT TIME ZONE 'UTC'`.
  */
-export async function consumeResumeClaim(db: Db, claimId: string, holderUserId: string, now: Date): Promise<boolean> {
-  const n = await db.resumeClaim.updateMany({
-    where: { id: claimId, holderUserId, consumedAt: null, revokedAt: null, expiresAt: { gt: now } },
-    data: { consumedAt: now },
-  });
-  return n.count === 1;
+export async function consumeResumeClaim(db: Db, claimId: string, holderUserId: string): Promise<boolean> {
+  const n = await db.$executeRaw`
+    UPDATE resume_claims SET consumed_at = (clock_timestamp() AT TIME ZONE 'UTC')
+    WHERE id = ${claimId} AND holder_user_id = ${holderUserId}
+      AND consumed_at IS NULL AND revoked_at IS NULL
+      AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')`;
+  return n === 1;
 }
 
-/** The caller's own open, worker-bound sessions that read LIVE now (the fast path's pool), newest first. */
+/** The fast path cannot decide: more possibly-live sessions than one scan holds. */
+export const tooManyToResume = () =>
+  new GraphQLError(
+    'You have too many recently driven worker sessions to pick one without a resume claim. Name the worker ' +
+      '(startSession with workerRef) instead. Nothing was bound.',
+    { extensions: { code: 'RESUME_AMBIGUOUS' } },
+  );
+
+/**
+ * The caller's own open, worker-bound sessions that read LIVE now (the fast path's pool), newest first.
+ *
+ * The WHOLE pool decides (Anne P2-2): rows that cannot be live are filtered in the query by the same type-aware
+ * predicate the bind gate uses (`recentlyTouchedFilter`), and a pool larger than one scan refuses rather than
+ * deciding uniqueness on a page, the `resumeVerdict` discipline (#1625 review, P3). A page cap that ran BEFORE the
+ * liveness filter let 50 quiet sessions hide a second live one, and the fast path then auto-bound a guess.
+ */
 export async function liveWorkerSessionsOf(db: Db, userId: string, now: Date) {
   const open = await db.session.findMany({
-    where: { userId, endedAt: null, deletedAt: null, workerId: { not: null } },
+    where: { userId, endedAt: null, deletedAt: null, workerId: { not: null }, ...recentlyTouchedFilter(now) },
     orderBy: { startedAt: 'desc' },
-    take: CANDIDATE_CAP,
+    take: OPEN_SESSION_SCAN_CAP + 1,
     select: { id: true, workerId: true, plan: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
   });
+  if (open.length > OPEN_SESSION_SCAN_CAP) throw tooManyToResume();
   const lastEvents = await loadLastEventBySession(db as never, open.map((s) => s.id));
   return open.filter((s) => isSessionLive({ ...s, type: s.type as SessionType }, lastEvents.get(s.id), now));
 }

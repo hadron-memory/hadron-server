@@ -9591,7 +9591,14 @@ export const typeDefs = `#graphql
     posted or recorded on your behalf. Judged only on your own user: anyone
     else's claims and sessions are invisible, and an App key or an impersonation
     gets the same refusal as a caller with nothing. A claim is single use: of two
-    racing redemptions one binds and the other refuses NOTHING_TO_RESUME.
+    racing redemptions one binds and the other refuses NOTHING_TO_RESUME, and a
+    claim's 60 seconds are judged by the database clock when it is consumed.
+    A claim is recovery intent, not a waiver: resuming an open session passes
+    the same lifecycle gate as any resume (you still hold the name and may drive
+    its App, it is not past its hard expiry or dormant, no other session of the
+    worker is live), else RESUME_REFUSED; starting the next one passes
+    startSession's. Either refusal spends the claim. More recently driven worker
+    sessions than one scan holds refuses RESUME_AMBIGUOUS rather than guessing.
     """
     resumeSession(input: ResumeSessionInput): ResumeSessionResult!
 
