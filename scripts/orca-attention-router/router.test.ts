@@ -800,6 +800,83 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     expect(fake.sent).toEqual([]);
   });
 
+  it('a BARE Learn-more URL with no notice above is ordinary output and HOLDS (Andi delta P2, #1985 review round 2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  Worked for 2m 6s • 16:32',
+        '  Learn more: https://example.com/documentation',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a BARE Apply label with no notice above is ordinary output and HOLDS (Andi delta P2, #1985 review round 2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  Worked for 2m 6s • 16:32',
+        '  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access/',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a BARE wrapped notice URL fragment with no notice above HOLDS (Andi delta P2, #1985 review round 2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  Worked for 2m 6s • 16:32',
+        '  openai.com/form/enterprise-trusted-access-for-cyber/',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a status line BETWEEN the notice header and its body ends the block — the status is judged and HOLDS (nothing newer in between, #12876)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  ⓘ This content can’t be shown',
+        '  an unrecognized current status arrived after the header',
+        '  Learn more: https://help.openai.com/en/articles/20001326',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
   it('a pinned busy line ABOVE a recap tail still wins — the sweep runs before the positional judgment (#1968)', () => {
     const c = cfg(['w-eli', 'Eli']);
     fake.terminal('eli', 'codex', undefined, false);
