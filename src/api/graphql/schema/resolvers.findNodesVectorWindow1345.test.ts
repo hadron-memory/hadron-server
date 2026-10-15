@@ -42,7 +42,37 @@ const stub: EmbeddingClient = {
   },
 };
 
-const admin = (): Context => ({ db, roles: ['ADMIN'], userId: 'admin-vw' } as Context);
+/**
+ * A db whose every interactive transaction first runs `sets` (`SET LOCAL …`).
+ * The vector queries run inside one (`withEfSearch`), so this is how a test
+ * chooses the planner settings the ranking query sees.
+ */
+function withLocalSettings(base: typeof db, sets: string[]): typeof db {
+  return new Proxy(base, {
+    get(target, prop) {
+      const v = Reflect.get(target, prop);
+      if (prop !== '$transaction') return typeof v === 'function' ? v.bind(target) : v;
+      return (arg: unknown, opts?: unknown) =>
+        typeof arg !== 'function'
+          ? (target.$transaction as any)(arg, opts)
+          : (target.$transaction as any)(async (tx: any) => {
+              for (const s of sets) await tx.$executeRawUnsafe(s);
+              return (arg as (tx: unknown) => unknown)(tx);
+            }, opts);
+    },
+  });
+}
+
+/**
+ * #1970 — the planner may answer the ANN query from the HNSW index whenever its
+ * statistics make that cheaper, which on CI depends on what earlier files left
+ * in the shard's database. Disabling sort makes that choice deterministic.
+ */
+const PREFER_HNSW = ['SET LOCAL enable_sort = off'];
+
+/** The handle the window tests search through, set per planner below. */
+let searchDb: typeof db = db;
+const admin = (): Context => ({ db: searchDb, roles: ['ADMIN'], userId: 'admin-vw' } as Context);
 const findNodes = (args: Record<string, unknown>) => (resolvers.Query as any).findNodes(null, args, admin());
 
 let memId: string;
@@ -77,7 +107,13 @@ afterAll(() => {
   delete process.env.EMBEDDING_API_URL;
 });
 
-describe('@codex P2 — the vector window widens until the filtered page fills', () => {
+describe.each([
+  ['the default planner', [] as string[]],
+  ['a planner that prefers the HNSW index (#1970)', PREFER_HNSW],
+])('@codex P2 — the vector window widens until the filtered page fills, under %s', (_planner, ambient) => {
+  beforeEach(() => { searchDb = withLocalSettings(db, ambient); });
+  afterEach(() => { searchDb = db; });
+
   it('node granularity: limit 1 finds the only spec-family node ranked past the old window', async () => {
     const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryIds: [memId], role: 'spec' } });
     expect(res.hits.map((h: any) => h.node.id)).toEqual([matchId]);
@@ -114,7 +150,7 @@ describe('@codex P2 — the vector window widens until the filtered page fills',
     const q = new Array(768).fill(0); q[1] = 1;
     const exhausted = async (kind: 'node' | 'chunk', limit: number) => {
       let flag: boolean | null = null;
-      const opts = { db, queryEmbedding: q, memoryIds: [memId], limit, onWindow: (w: { exhausted: boolean }) => { flag = w.exhausted; } };
+      const opts = { db: searchDb, queryEmbedding: q, memoryIds: [memId], limit, onWindow: (w: { exhausted: boolean }) => { flag = w.exhausted; } };
       await (kind === 'node' ? provider.vectorSearch(opts) : provider.vectorSearchChunks(opts));
       return flag;
     };
