@@ -231,22 +231,23 @@ describe('the consume guard itself', () => {
     const s = await start(holder, ada);
     await claim(holder, s.id);
     const { id } = await db.resumeClaim.findFirstOrThrow({ where: { sessionId: s.id } });
-    const now = new Date();
-    const wins = await Promise.all([1, 2, 3, 4].map(() => consumeResumeClaim(db, id, holder, now)));
+    const wins = await Promise.all([1, 2, 3, 4].map(() => consumeResumeClaim(db, id, holder)));
     expect(wins.filter(Boolean)).toHaveLength(1);
-    expect(await consumeResumeClaim(db, id, holder, new Date())).toBe(false);
+    expect(await consumeResumeClaim(db, id, holder)).toBe(false);
   });
 
   it('never consumes for a non-holder, an expired claim or a revoked one', async () => {
     const s = await start(holder, ada);
     await claim(holder, s.id);
     const first = await db.resumeClaim.findFirstOrThrow({ where: { sessionId: s.id } });
-    expect(await consumeResumeClaim(db, first.id, other, new Date())).toBe(false);
+    expect(await consumeResumeClaim(db, first.id, other)).toBe(false);
     await claim(holder, s.id); // revokes the first
-    expect(await consumeResumeClaim(db, first.id, holder, new Date())).toBe(false);
+    expect(await consumeResumeClaim(db, first.id, holder)).toBe(false);
     const second = await db.resumeClaim.findFirstOrThrow({ where: { sessionId: s.id, revokedAt: null } });
-    expect(await consumeResumeClaim(db, second.id, holder, new Date(second.expiresAt.getTime() + 1))).toBe(false);
-    expect(await consumeResumeClaim(db, second.id, holder, new Date())).toBe(true);
+    expect(await consumeResumeClaim(db, second.id, holder)).toBe(true);
+    const third = await claim(holder, s.id).then(() => db.resumeClaim.findFirstOrThrow({ where: { sessionId: s.id, revokedAt: null, consumedAt: null } }));
+    await db.resumeClaim.update({ where: { id: third.id }, data: { expiresAt: new Date(Date.now() - 1) } });
+    expect(await consumeResumeClaim(db, third.id, holder)).toBe(false);
   });
 });
 
@@ -314,5 +315,110 @@ describe('MCP: hadron_resume_session and the claim tools', () => {
     const none = await mcp(other).callToolText('hadron_resume_session', {});
     expect(none).toContain('NOTHING_TO_RESUME');
     expect(await footprint()).toEqual(before);
+  });
+});
+
+describe('fix head: Anne\'s blind review on #1966', () => {
+  it('P2-1: a claim is recovery intent, not a waiver — the name moved to another holder refuses, nothing is touched', async () => {
+    const s = await start(holder, ada);
+    await claim(holder, s.id);
+    // Lapse the claimed session, release the name, and let another member bind the worker.
+    await db.session.update({ where: { id: s.id }, data: { startedAt: new Date(0), updatedAt: new Date(0) } });
+    await db.worker.update({ where: { id: ada }, data: { heldByUserId: null, heldAt: null } });
+    const theirs = await start(other, ada);
+    const before = await db.session.findUniqueOrThrow({ where: { id: s.id } });
+    expect(await envelope(resume(ctx(holder)))).toContain('RESUME_REFUSED');
+    expect((await db.session.findUniqueOrThrow({ where: { id: s.id } })).updatedAt).toEqual(before.updatedAt);
+    expect((await db.session.findUniqueOrThrow({ where: { id: theirs.id } })).endedAt).toBeNull();
+  });
+
+  it('P2-1: driving authority revoked after the claim refuses (the holder left the App)', async () => {
+    const s = await start(holder, ada);
+    await claim(holder, s.id);
+    await db.appMember.deleteMany({ where: { appId: app.id, userId: holder } });
+    expect(await envelope(resume(ctx(holder)))).toContain('RESUME_REFUSED');
+  });
+
+  it('P2-1: a session past its hard expiry refuses, and so does the fast path', async () => {
+    const s = await start(holder, ada);
+    await db.session.update({ where: { id: s.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    await claim(holder, s.id);
+    expect(await envelope(resume(ctx(holder)))).toContain('RESUME_REFUSED');
+    expect(await envelope(resume(ctx(holder), { session: s.id }))).toContain('RESUME_REFUSED');
+  });
+
+  it('P2-1: an end racing the selection is never answered RESUMED', async () => {
+    const s = await start(holder, ada);
+    await claim(holder, s.id);
+    // The session ends between the redemption's read and its touch: the shared gate re-decides under the lock.
+    const ending = new Proxy(db, {
+      get(target, prop, receiver) {
+        const v = Reflect.get(target, prop, receiver);
+        if (prop !== '$transaction') return typeof v === 'function' ? v.bind(target) : v;
+        return async (...args: unknown[]) => {
+          await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+          return (v as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    });
+    const r = await resume({ ...ctx(holder), db: ending } as Context).catch((e: GraphQLError) => e);
+    expect(r instanceof GraphQLError ? r.extensions.code : (r as any).outcome).not.toBe('RESUMED');
+  });
+
+  it('P2-2: the fast path decides on the whole live pool — 60 quiet open sessions never hide a second live one', async () => {
+    const day = 24 * 60 * 60 * 1000;
+    const live1 = await start(holder, ada);
+    const live2 = await start(holder, bea);
+    // Started 10 days ago but driven just now: live, and sorted after every quiet row by startedAt.
+    await db.$executeRaw`UPDATE sessions SET started_at = ${new Date(Date.now() - 10 * day)} WHERE id = ${live2.id}`;
+    // 60 open sessions started 2 days ago and never driven since: not live, but newer than live2 by startedAt.
+    const quietStart = new Date(Date.now() - 2 * day);
+    const quiet = Array.from({ length: 60 }, () => generateId());
+    await db.session.createMany({
+      data: quiet.map((id) => ({ id, userId: holder, appId: app.id, workerId: ada, type: 'DEVELOPER' as const, startedAt: quietStart })),
+    });
+    await db.$executeRawUnsafe(`UPDATE sessions SET updated_at = $1 WHERE id = ANY($2)`, quietStart, quiet);
+    const r = await resume(ctx(holder));
+    expect(r.outcome).toBe('CHOOSE');
+    expect(r.candidates.map((c: any) => c.sessionId).sort()).toEqual([live1.id, live2.id].sort());
+  });
+
+  it('P2-3: expiry is judged at the transition by the database clock, not by a timestamp read before a wait', async () => {
+    const s = await start(holder, ada);
+    await M.endSession({}, { id: s.id, resumeClaim: true }, ctx(holder));
+    // The claim lapses while the redemption is paused between its read and its consume.
+    const pausing = new Proxy(db, {
+      get(target, prop, receiver) {
+        const v = Reflect.get(target, prop, receiver);
+        if (prop !== 'resumeClaim') return typeof v === 'function' ? v.bind(target) : v;
+        return new Proxy(v as object, {
+          get(t, p) {
+            const f = Reflect.get(t, p) as (...a: unknown[]) => Promise<unknown>;
+            if (p !== 'findMany') return typeof f === 'function' ? f.bind(t) : f;
+            return async (...a: unknown[]) => {
+              // The redemption read its clock before this call. The claim lapses at t0 + 5 ms, after that read and
+              // before the consume, which runs once this returns, 30 ms later.
+              const t0 = Date.now();
+              await new Promise((r) => setTimeout(r, 15));
+              const rows = await f.apply(t, a);
+              await db.resumeClaim.updateMany({ data: { expiresAt: new Date(t0 + 5) } });
+              await new Promise((r) => setTimeout(r, 15));
+              return rows;
+            };
+          },
+        });
+      },
+    });
+    const before = await db.session.count();
+    const r = await resume({ ...ctx(holder), db: pausing } as Context).catch((e: GraphQLError) => e);
+    expect(r).toBeInstanceOf(GraphQLError);
+    expect((r as GraphQLError).extensions.code).toBe('NOTHING_TO_RESUME');
+    expect(await db.session.count()).toBe(before);
+  });
+
+  it('P3: concurrent claim writes for one session leave exactly one live claim', async () => {
+    const s = await start(holder, ada);
+    await Promise.all(Array.from({ length: 20 }, () => claim(holder, s.id)));
+    expect(await db.resumeClaim.count({ where: { sessionId: s.id, revokedAt: null, consumedAt: null } })).toBe(1);
   });
 });
