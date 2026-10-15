@@ -759,6 +759,47 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     expect(fake.sent).toEqual([]);
   });
 
+  it('a newer SAME-INDENT unknown status after a RECAP header is judged, not swallowed — holds (Andi P2, #1985 review)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  Worked for 1m 4s • 4:04 PM',
+        '  ↳ Recap: The task is to read Hadron team chat unfiltered,',
+        '            mentions, and mark it read.',
+        '  an unrecognized current status at the header indent',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a newer SAME-INDENT unknown status after the NOTICE header is judged, not swallowed — holds (Andi P2, #1985 review)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  ⓘ This content can’t be shown',
+        '  We take extra care with some cybersecurity requests.',
+        '  an unrecognized current status at the header indent',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
   it('a pinned busy line ABOVE a recap tail still wins — the sweep runs before the positional judgment (#1968)', () => {
     const c = cfg(['w-eli', 'Eli']);
     fake.terminal('eli', 'codex', undefined, false);

@@ -1026,7 +1026,17 @@ const IDLE_MARKERS: readonly RegExp[] = [
   /Claude Code v\d/, /glm-[\d.]/,
   /OpenAI Codex \(v/, /Update available!/, /Worked for /,
   /Update installed/,
+  // The content-suppression notice box (#1983): its body lines are markers
+  // THEMSELVES (no block skip — a status below the box is judged, never
+  // swallowed; Andi's #1985 blind P2). The box's stable anchors: the
+  // header, the two footer URL lines by label, and the URL wrap fragments
+  // (the Apply URL is long enough to fold on narrow terminals). Prose
+  // wraps that leave none of these as the newest line hold — fail-closed.
   /ⓘ This content can’t be shown/,
+  /^Learn more: https:/,
+  /^Apply for Daybreak:/,
+  /^https:\/\/openai\.com\/form\//,
+  /^openai\.com\/form\//,
 ];
 
 /**
@@ -1066,21 +1076,22 @@ const recapBlockSkip = (rawWindow: string[]): boolean[] => {
   const skip = rawWindow.map(() => false);
   for (let j = 0; j < rawWindow.length; j++) {
     const header = /^(\s*)(?:↳ Recap:|※ recap:)/.exec(rawWindow[j]);
-    // A notice header opens a block for its TAILS but is NOT skipped itself:
-    // a content-suppressed turn has no footer, so the header IS the
-    // completion evidence the backward scan must stop and judge (#1983).
-    const notice = header ? null : /^(\s*)ⓘ This content can’t be shown/.exec(rawWindow[j]);
-    if (!header && !notice) continue;
-    const base = (header ?? notice)![1].length;
-    if (header) skip[j] = true;
+    if (!header) continue;
+    skip[j] = true;
+    const base = header[1].length;
     for (let k = j + 1; k < rawWindow.length; k++) {
       // \s* (never null — a column-zero line has indent 0): the extension
       // ENDS at such a line instead of dereferencing null and throwing
       // before the busy sweep (Andi round 2, Chip's runtime matrix — Codex
       // tool lines like `• Ran …` are column-zero and render after a
       // previous turn's recap whenever a new turn starts).
-      if (/^(\s*)/.exec(rawWindow[k])![1].length >= base) skip[k] = true;
-      else break; // a line shallower than the header is new chrome, not continuation
+      // STRICTLY deeper than the header, as #1976 shipped: at-or-deeper
+      // swallowed a newer same-indent current status after a header and
+      // SENT — Andi's #1985 blind P2; the notice box carries no block at
+      // all (its body lines are IDLE_MARKERS instead, so a status below
+      // the box is judged, never skipped).
+      if (/^(\s*)/.exec(rawWindow[k])![1].length > base) skip[k] = true;
+      else break; // a line at/below the header's indent is new chrome, not continuation
     }
   }
   return skip;
