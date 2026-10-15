@@ -487,7 +487,8 @@ describe('fix head 2: Anne\'s delta on #1966', () => {
 });
 
 describe('a refused resumeClaim writes no handoff (found composing with #1938)', () => {
-  const handoffs = () => db.node.count({ where: { loc: { startsWith: 'handoffs:' } } });
+  // A handoff is a node; nothing else in these ends writes one, so the node count is the handoff count.
+  const handoffs = () => db.node.count();
 
   it('GraphQL: someone else\'s endSession(handoff, resumeClaim) refuses before the handoff, and nothing ends', async () => {
     const s = await start(holder, ada);
