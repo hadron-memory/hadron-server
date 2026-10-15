@@ -338,6 +338,10 @@ describe('#1663 review — encrypted memories (local P2-2)', () => {
     await client.connect();
     try {
       await client.query(readFileSync(new URL('../../../../prisma/migrations/20261013170000_encrypted_comment_anchor_nullable/migration.sql', import.meta.url), 'utf8'));
+      // The replay installs that migration's invariants; restore the current
+      // ones, as the later migrations do in prod, so no later test file on
+      // this worker's database runs against a stale check (#1935).
+      await client.query(readFileSync(new URL('../../../../prisma/comment-invariants.sql', import.meta.url), 'utf8'));
     } finally { await client.end(); }
     expect((await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).anchorApprovalHash).toBe(edge.anchorApprovalHash);
     await expect(db.$executeRaw`UPDATE edges SET anchor_approval_hash = NULL WHERE id = ${edge.id}`)

@@ -60,6 +60,10 @@ const migrate = async (): Promise<number> => {
   await client.connect();
   try {
     const results = await client.query(MIGRATION) as unknown as { command: string; rowCount: number | null }[];
+    // The replay installs the invariants as they stood at #1869; restore the
+    // current ones, as the later migrations do in prod, so no later test file
+    // on this worker's database runs against a stale check (#1935).
+    await client.query(INVARIANTS);
     const updates = results.filter((r) => r.command === 'UPDATE');
     expect(updates).toHaveLength(1);
     return updates[0].rowCount ?? 0;
