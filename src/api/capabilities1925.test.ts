@@ -151,7 +151,49 @@ describe('the rate limit', () => {
     const over = await fetch(`${base}/capabilities`);
     expect(over.status).toBe(429);
     expect(await over.text()).toBe('');
-    expect(over.headers.get('retry-after')).toBeNull();
+  });
+
+  it('#1964: the 429 is readable cross-origin, says when to retry, and carries nothing per-client', async () => {
+    const app = express();
+    mountCapabilitiesRoute(app, { limitPerMinute: 1 });
+    const base = await listen(app as unknown as RequestListener);
+    expect((await fetch(`${base}/capabilities`)).status).toBe(200);
+    const origins = [undefined, 'https://hostile.example', 'http://localhost:5173', 'null'];
+    const seen: Array<Record<string, string>> = [];
+    for (const origin of origins) {
+      const over = await fetch(`${base}/capabilities`, origin ? { headers: { origin } } : {});
+      expect(over.status).toBe(429);
+      expect(await over.text()).toBe('');
+      // Any origin may read it, never with credentials: the 200's posture, so a browser sees a rate limit, not a CORS failure.
+      expect(over.headers.get('access-control-allow-origin')).toBe('*');
+      expect(over.headers.get('access-control-allow-credentials')).toBeNull();
+      // The fixed window, not this client's remaining time (Holger's 60-a-minute, #12291 item 5).
+      expect(over.headers.get('retry-after')).toBe('60');
+      // Still nothing cacheable or per-client: no cache headers, no counters, no cookie.
+      expect(over.headers.get('cache-control')).toBeNull();
+      expect(over.headers.get('etag')).toBeNull();
+      expect(over.headers.get('set-cookie')).toBeNull();
+      expect([...over.headers.keys()].filter((k) => k.startsWith('ratelimit') || k.startsWith('x-ratelimit'))).toEqual([]);
+      seen.push(visibleHeaders(over));
+    }
+    // Byte-identical whatever the Origin: nothing about the request is echoed.
+    for (const h of seen) expect(h).toEqual(seen[0]);
+  });
+
+  it('#1964: on the real server, the 429 to the portal\'s own origin is still `*` without credentials', async () => {
+    const base = await listen((await createServer()) as unknown as RequestListener);
+    const origin = process.env.FRONTEND_URL || 'http://localhost:5173';
+    let over: Response | undefined;
+    for (let i = 0; i <= CAPABILITIES_RATE_LIMIT_PER_MINUTE && !over; i++) {
+      const r = await fetch(`${base}/capabilities`, { headers: { origin } });
+      if (r.status === 429) over = r;
+      else await r.arrayBuffer();
+    }
+    expect(over?.status).toBe(429);
+    // The global CORS (the portal's origin, WITH credentials) is mounted after this route and never reaches it.
+    expect(over!.headers.get('access-control-allow-origin')).toBe('*');
+    expect(over!.headers.get('access-control-allow-credentials')).toBeNull();
+    expect(over!.headers.get('retry-after')).toBe('60');
   });
 });
 

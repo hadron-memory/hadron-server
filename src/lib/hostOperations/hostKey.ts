@@ -40,6 +40,18 @@ export async function keyHostId(db: Db, key: { appKeyId: string; appId: string }
   return row?.hostId ?? null;
 }
 
+/**
+ * Has this App key EVER been granted `host:operate`, live or revoked? Such a key is a host key for every refusal that
+ * must not reopen when the scope is revoked (cor:agt:070:04): the App-wide host-operations listing (#1919) and every
+ * session write (#1934). Revoking the scope never restores what it took away; a key that needs ordinary access is
+ * replaced with a new key (Holger's ruling via Vera, team chat #11544). Scope rows are revoked, never deleted, so the
+ * row's existence is the whole answer.
+ */
+export async function keyEverHeldHostOperate(db: Db, appKeyId: string): Promise<boolean> {
+  const row = await db.appKeyScope.findFirst({ where: { appKeyId, scope: 'host:operate' }, select: { id: true } });
+  return row !== null;
+}
+
 /** Record one use of a host key, in the caller's transaction, so it commits exactly when the use does. */
 export async function recordHostKeyUse(
   tx: Prisma.TransactionClient,
