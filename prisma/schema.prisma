@@ -3234,6 +3234,8 @@ model App {
   hostRegistrations       HostRegistration[]
   hostOperations          HostOperation[]
   launchGrants            LaunchGrant[]
+  /// #1956 — resume claims written before a deliberate context reset (cor:agt:020:03).
+  resumeClaims            ResumeClaim[]
   sessionEndRequests      TaskSessionEndRequest[]
   mcpSessionStates McpSessionState[]
   scopes           Scope[]
@@ -5449,6 +5451,39 @@ model HostOperation {
   @@index([appId, hostId, status])
   @@index([workerId])
   @@map("host_operations")
+}
+
+/// #1956 (cor:agt:020:03; Holger via Vera #11904, the window #12291) — a resume
+/// claim: written by a worker session's own driver before a deliberate context
+/// reset (a shed keeps the session open; a rotation ends it with its handoff),
+/// so the fresh context can recover its worker with one call and no arguments,
+/// with no binding file. Single use, consumed by a guarded update; it lives
+/// RESUME_CLAIM_TTL_MS (60 s) from the write. Redeemable only by its holder,
+/// judged by the caller's token, never by anything the caller presents: the
+/// claim carries no secret and its id is never shown, so a non-holder has
+/// nothing to present and learns nothing. Same mechanics family as
+/// `LaunchGrant` (#1883), but it authorizes nothing the holder could not
+/// already do by naming the worker.
+model ResumeClaim {
+  id               String    @id
+  appId            String    @map("app_id")
+  sessionId        String    @map("session_id")
+  workerId         String    @map("worker_id")
+  holderUserId     String    @map("holder_user_id")
+  issuedAt         DateTime  @default(now()) @map("issued_at")
+  expiresAt        DateTime  @map("expires_at")
+  consumedAt       DateTime? @map("consumed_at")
+  /// The session the redemption bound: the claimed one when it was still open,
+  /// or the new session started for its worker when it had ended.
+  resumedSessionId String?   @map("resumed_session_id")
+  /// Set when a newer claim for the same session replaced this one unused.
+  revokedAt        DateTime? @map("revoked_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([holderUserId, expiresAt])
+  @@index([sessionId])
+  @@map("resume_claims")
 }
 
 /// #1709 (T6 slice 2; Holger's ruling A, Vera #10761) — a single-use launch

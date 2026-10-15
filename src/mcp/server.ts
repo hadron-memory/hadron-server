@@ -1,3 +1,4 @@
+import { writeResumeClaim, type ResumeCandidate } from '../lib/resumeClaims.js';
 import { registerAutomationPinTools } from './automationPinTools.js';
 import { registerAgentDefinitionTools } from './agentDefinitionTools.js';
 import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, resolveInheritedEdges, retainEffective, stillInherited, type InheritedFrom } from '../lib/effectiveSystemMemory.js';
@@ -2095,6 +2096,8 @@ export function createMcpServerInstance(
     'hadron_unlock_memory', 'hadron_lock_memory',
     // Binding itself: it is how a caller SAYS who it is.
     'hadron_start_session',
+    // #1956 — recovering a binding is binding: it is how a fresh context says who it is.
+    'hadron_resume_session',
   ]);
   /** Tools whose own required argument names the caller's session under another name. */
   const SESSION_ARGUMENT: Record<string, string> = { hadron_end_session: 'id' };
@@ -8673,6 +8676,157 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
+  /**
+   * Everything a worker bind does after the session exists, shared by hadron_start_session and #1956's
+   * hadron_resume_session so a resumed binding is pinned, remembered and briefed exactly like a started one:
+   * pin the session's App, remember the binding on this connection, and render the briefing and handoff.
+   * Returns the receipt suffix. Never throws: the session is already bound, and its id is what the caller cannot
+   * recover on its own.
+   */
+  async function bindReceipt(
+    session: { id: string; appId: string | null; workerId: string | null; agentId: string | null },
+    mcpCtx: Context,
+  ): Promise<string> {
+    // #1005: pin the session's App as this MCP session's active App.
+    //
+    // The App is settled the moment the session exists — `startSession`
+    // stamps `appId` from the worker's casting when it had no App context,
+    // and from the caller's scope otherwise — so every App-scoped tool
+    // afterwards has an unambiguous answer. Before this, a multi-App user
+    // following the documented path (start_session with workerRef → team
+    // chat read/post → record_work) had to have called
+    // `hadron_set_active_app` first, and the failure for not doing so was
+    // DEFERRED: it surfaced on whichever later call happened to need App
+    // scope, reading as a client limitation rather than a missed step.
+    //
+    // Gated on `auth.userId`: an App-key caller's App identity comes from
+    // its credential and must never be re-pointed by a session argument.
+    // A no-op when it already matches, which is the single-App case.
+    //
+    // BEST-EFFORT (PR #1007 review, Codex P1): this read runs AFTER
+    // startSession has committed, so a transient failure here must never be
+    // reported as a failed start. Falling through to the outer catch would
+    // return "Error: …" and withhold the session id — and the client's
+    // retry would then hit WORKER_TAKEN for the very session it was told
+    // had failed, unable to either continue or end it. Same reasoning, and
+    // the same remedy, as the briefing block below (PR #996 review). A
+    // missed pin costs one hadron_set_active_app; a withheld id is
+    // unrecoverable.
+    if (auth.userId && session.appId && session.appId !== auth.appId) {
+      try {
+        const boundApp = await db.app.findUnique({
+          where: { id: session.appId },
+          select: { id: true, organizationId: true },
+        });
+        if (boundApp) pinActiveApp(boundApp.id, boundApp.organizationId, 'worker_bind');
+      } catch {
+        // Swallowed deliberately — the session IS started and bound.
+      }
+    }
+
+    // DAC: bind this MCP connection to the new session, so every later
+    // write on it is attributed to its Worker / Agent (#1610). Only a
+    // session with someone behind it; plain sessions attribute nothing.
+    //
+    // #1701: the binding is APPENDED to the connection's list, never
+    // swapped in for the previous one — a host may be multiplexing
+    // several chat sessions over this one connection, and the previous
+    // binder may be another of them, still at work. When that leaves the
+    // connection bound to more than one actor, the receipt says so, since
+    // it is the one moment the caller is certain to read.
+    //
+    // A PLAIN session (no worker, no agent) is appended too, as a binding
+    // whose actor is nobody (#1702 QA, Cody P2). It used to REPLACE the
+    // connection's bindings (#1665 review), which on a shared connection
+    // let one chat session silently strip every other chat session's
+    // worker: their unnamed writes then landed as the human alone. A
+    // plain start does still stop a previous worker's credit, as #1665
+    // wanted, but by making the connection ambiguous, so the next
+    // unnamed write is refused rather than quietly re-attributed.
+    let sharedConnectionNote = '';
+    {
+      const sid = getSessionId();
+      if (sid) {
+        rememberConnectionBinding(sid, session.id, { workerId: session.workerId ?? null, agentId: session.agentId ?? null });
+        sharedConnectionNote = await sharedConnectionWarning(sid, session.id);
+      }
+    }
+
+    // #990: when a worker is bound, ALWAYS return its resolved boot
+    // briefing. Binding IS briefing — an MCP host has no discovery surface
+    // to go looking for the prompt afterwards, and nothing routes it to one
+    // (hadron_server_info returns deployment identity only). Returning it
+    // live also removes the reason to publish briefing NODES into the Team
+    // Agent's memory (hadron-cli#443): those are copies of
+    // Agent.systemPrompt + Worker.promptOverride that nothing recomputes,
+    // so they go stale silently the moment a role agent's prompt changes.
+    //
+    // Resolved through the SAME field resolver GraphQL serves
+    // (Worker.prompt), so the two surfaces cannot drift — and that resolver
+    // self-guards behind the worker read gate, so this cannot widen access.
+    //
+    // SELF-CONTAINED failure handling (PR #996 review, Codex P2): these are
+    // reads that run AFTER startSession has already committed the session,
+    // so a transient failure here must never be reported as a failed start.
+    // It used to fall through to the outer catch, which returned "Error: …"
+    // and withheld the id — and the client's retry would then hit
+    // WORKER_TAKEN for the very session it was told had failed, unable to
+    // either continue or end it. The session id is the thing the caller
+    // cannot recover on its own; the briefing it can ask for again.
+    let workerLine = '';
+    if (session.workerId) {
+      try {
+        const worker = await db.worker.findUnique({ where: { id: session.workerId } });
+        // #1090: the composition itself carries the freshness facts, so
+        // the stamps describe the text printed below (one agent read — no
+        // parallel lookup that could race a template edit).
+        const briefing = worker
+          ? await composeWorkerPrompt(mcpCtx, worker)
+          : { text: null as string | null, renderedAt: null as Date | null, roleAgentUpdatedAt: null as Date | null };
+        const prompt = briefing.text;
+        // #1029: the previous stint's handoff, delivered with the briefing
+        // rather than left to be discovered. A fresh session does not know
+        // there is anything to look for, so a design that requires it to go
+        // looking fails — binding is briefing, so binding is handoff. The
+        // session just created is still open and so is never its own
+        // "previous" (Worker.continuity keys on ENDED sessions).
+        const continuity = worker
+          ? await resolvers.Worker.continuity(worker, {}, mcpCtx)
+          : null;
+        // #1026 — the bind is where a worker FIRST needs its own identity,
+        // and it printed neither the URN nor a link. #1008 asks every
+        // worker to sign what it publishes with a hyperlinked URN, so the
+        // briefing had to send it to hadron_get_worker for a string the
+        // bind already had in hand. Emitting both here removes that round
+        // trip at exactly the moment the need arises, and removes the
+        // reason the prompts carve out an exception to "never hand-build a
+        // portal link".
+        const boundUrn = worker
+          ? ((await resolvers.Worker.urn(worker, {}, mcpCtx)) as string | null)
+          : null;
+        const boundUrl = workerPortalUrl(boundUrn);
+        workerLine =
+          `\nWorking as ${worker?.name ?? 'worker'} (${session.workerId}).` +
+          (boundUrn ? `\n${boundUrn}` : '') +
+          (boundUrl ? `\nURL: ${boundUrl}` : '') +
+          // A worker whose agent carries no template and who has no override
+          // has no briefing — say so, rather than emitting a bare heading.
+          (prompt
+            ? `\n\nBoot briefing — adopt this for the rest of the session:` +
+              `\nrendered at: ${briefing.renderedAt!.toISOString()}` +
+              `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update — no per-override mtime is tracked)` +
+              `\n\n${prompt}`
+            : '\n\n(No boot briefing: the role agent carries no systemPrompt template and this worker has no promptOverride.)') +
+          renderWorkerContinuity(continuity as RenderableContinuity | null);
+      } catch {
+        workerLine =
+          `\nWorking as worker ${session.workerId}.` +
+          '\n\n(The boot briefing could not be rendered just now — the session IS started and bound. Retry with hadron_get_node on the role agent, or start again after ending this session; do NOT retry hadron_start_session, which would refuse WORKER_TAKEN.)';
+      }
+    }
+    return `${sharedConnectionNote}${workerLine}`;
+  }
+
   // ── hadron_start_session ──────────────────────────────────────────────────────
 
   server.tool(
@@ -8769,147 +8923,97 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           mcpCtx,
         );
 
-        // #1005: pin the session's App as this MCP session's active App.
-        //
-        // The App is settled the moment the session exists — `startSession`
-        // stamps `appId` from the worker's casting when it had no App context,
-        // and from the caller's scope otherwise — so every App-scoped tool
-        // afterwards has an unambiguous answer. Before this, a multi-App user
-        // following the documented path (start_session with workerRef → team
-        // chat read/post → record_work) had to have called
-        // `hadron_set_active_app` first, and the failure for not doing so was
-        // DEFERRED: it surfaced on whichever later call happened to need App
-        // scope, reading as a client limitation rather than a missed step.
-        //
-        // Gated on `auth.userId`: an App-key caller's App identity comes from
-        // its credential and must never be re-pointed by a session argument.
-        // A no-op when it already matches, which is the single-App case.
-        //
-        // BEST-EFFORT (PR #1007 review, Codex P1): this read runs AFTER
-        // startSession has committed, so a transient failure here must never be
-        // reported as a failed start. Falling through to the outer catch would
-        // return "Error: …" and withhold the session id — and the client's
-        // retry would then hit WORKER_TAKEN for the very session it was told
-        // had failed, unable to either continue or end it. Same reasoning, and
-        // the same remedy, as the briefing block below (PR #996 review). A
-        // missed pin costs one hadron_set_active_app; a withheld id is
-        // unrecoverable.
-        if (auth.userId && session.appId && session.appId !== auth.appId) {
-          try {
-            const boundApp = await db.app.findUnique({
-              where: { id: session.appId },
-              select: { id: true, organizationId: true },
-            });
-            if (boundApp) pinActiveApp(boundApp.id, boundApp.organizationId, 'worker_bind');
-          } catch {
-            // Swallowed deliberately — the session IS started and bound.
-          }
-        }
-
-        // DAC: bind this MCP connection to the new session, so every later
-        // write on it is attributed to its Worker / Agent (#1610). Only a
-        // session with someone behind it; plain sessions attribute nothing.
-        //
-        // #1701: the binding is APPENDED to the connection's list, never
-        // swapped in for the previous one — a host may be multiplexing
-        // several chat sessions over this one connection, and the previous
-        // binder may be another of them, still at work. When that leaves the
-        // connection bound to more than one actor, the receipt says so, since
-        // it is the one moment the caller is certain to read.
-        //
-        // A PLAIN session (no worker, no agent) is appended too, as a binding
-        // whose actor is nobody (#1702 QA, Cody P2). It used to REPLACE the
-        // connection's bindings (#1665 review), which on a shared connection
-        // let one chat session silently strip every other chat session's
-        // worker: their unnamed writes then landed as the human alone. A
-        // plain start does still stop a previous worker's credit, as #1665
-        // wanted, but by making the connection ambiguous, so the next
-        // unnamed write is refused rather than quietly re-attributed.
-        let sharedConnectionNote = '';
-        {
-          const sid = getSessionId();
-          if (sid) {
-            rememberConnectionBinding(sid, session.id, { workerId: session.workerId ?? null, agentId: session.agentId ?? null });
-            sharedConnectionNote = await sharedConnectionWarning(sid, session.id);
-          }
-        }
-
-        // #990: when a worker is bound, ALWAYS return its resolved boot
-        // briefing. Binding IS briefing — an MCP host has no discovery surface
-        // to go looking for the prompt afterwards, and nothing routes it to one
-        // (hadron_server_info returns deployment identity only). Returning it
-        // live also removes the reason to publish briefing NODES into the Team
-        // Agent's memory (hadron-cli#443): those are copies of
-        // Agent.systemPrompt + Worker.promptOverride that nothing recomputes,
-        // so they go stale silently the moment a role agent's prompt changes.
-        //
-        // Resolved through the SAME field resolver GraphQL serves
-        // (Worker.prompt), so the two surfaces cannot drift — and that resolver
-        // self-guards behind the worker read gate, so this cannot widen access.
-        //
-        // SELF-CONTAINED failure handling (PR #996 review, Codex P2): these are
-        // reads that run AFTER startSession has already committed the session,
-        // so a transient failure here must never be reported as a failed start.
-        // It used to fall through to the outer catch, which returned "Error: …"
-        // and withheld the id — and the client's retry would then hit
-        // WORKER_TAKEN for the very session it was told had failed, unable to
-        // either continue or end it. The session id is the thing the caller
-        // cannot recover on its own; the briefing it can ask for again.
-        let workerLine = '';
-        if (session.workerId) {
-          try {
-            const worker = await db.worker.findUnique({ where: { id: session.workerId } });
-            // #1090: the composition itself carries the freshness facts, so
-            // the stamps describe the text printed below (one agent read — no
-            // parallel lookup that could race a template edit).
-            const briefing = worker
-              ? await composeWorkerPrompt(mcpCtx, worker)
-              : { text: null as string | null, renderedAt: null as Date | null, roleAgentUpdatedAt: null as Date | null };
-            const prompt = briefing.text;
-            // #1029: the previous stint's handoff, delivered with the briefing
-            // rather than left to be discovered. A fresh session does not know
-            // there is anything to look for, so a design that requires it to go
-            // looking fails — binding is briefing, so binding is handoff. The
-            // session just created is still open and so is never its own
-            // "previous" (Worker.continuity keys on ENDED sessions).
-            const continuity = worker
-              ? await resolvers.Worker.continuity(worker, {}, mcpCtx)
-              : null;
-            // #1026 — the bind is where a worker FIRST needs its own identity,
-            // and it printed neither the URN nor a link. #1008 asks every
-            // worker to sign what it publishes with a hyperlinked URN, so the
-            // briefing had to send it to hadron_get_worker for a string the
-            // bind already had in hand. Emitting both here removes that round
-            // trip at exactly the moment the need arises, and removes the
-            // reason the prompts carve out an exception to "never hand-build a
-            // portal link".
-            const boundUrn = worker
-              ? ((await resolvers.Worker.urn(worker, {}, mcpCtx)) as string | null)
-              : null;
-            const boundUrl = workerPortalUrl(boundUrn);
-            workerLine =
-              `\nWorking as ${worker?.name ?? 'worker'} (${session.workerId}).` +
-              (boundUrn ? `\n${boundUrn}` : '') +
-              (boundUrl ? `\nURL: ${boundUrl}` : '') +
-              // A worker whose agent carries no template and who has no override
-              // has no briefing — say so, rather than emitting a bare heading.
-              (prompt
-                ? `\n\nBoot briefing — adopt this for the rest of the session:` +
-                  `\nrendered at: ${briefing.renderedAt!.toISOString()}` +
-                  `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update — no per-override mtime is tracked)` +
-                  `\n\n${prompt}`
-                : '\n\n(No boot briefing: the role agent carries no systemPrompt template and this worker has no promptOverride.)') +
-              renderWorkerContinuity(continuity as RenderableContinuity | null);
-          } catch {
-            workerLine =
-              `\nWorking as worker ${session.workerId}.` +
-              '\n\n(The boot briefing could not be rendered just now — the session IS started and bound. Retry with hadron_get_node on the role agent, or start again after ending this session; do NOT retry hadron_start_session, which would refuse WORKER_TAKEN.)';
-          }
-        }
-        return textResult(`Session started: ${session.id}\n> ${description}${sharedConnectionNote}${workerLine}`);
+        const receipt = await bindReceipt(session, mcpCtx);
+        return textResult(`Session started: ${session.id}\n> ${description}${receipt}`);
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'session start failed'}`);
       }
+    },
+  );
+
+  // ── #1956: resume claims ──────────────────────────────────────────────────────
+
+  server.tool(
+    'hadron_create_resume_claim',
+    '#1956 (cor:agt:020:03): before a deliberate context reset that KEEPS your worker session open (a shed, a /clear), write a resume claim so the fresh context recovers this worker with hadron_resume_session and no arguments — no binding file, no worker name to remember. The claim is single use, lives 60 seconds from this call, and is redeemable only by you (judged by your credential; it has no id to copy). Write it as the LAST step before the reset, after your handoff or shed note. For a rotation that ENDS the session, pass resumeClaim: true to hadron_end_session instead.',
+    {
+      session: z.string().describe('Your open worker session id (hadron_whoami lists it).'),
+    },
+    async ({ session }) => {
+      const mcpCtx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+        impersonation: auth.impersonation ?? undefined,
+      } as Context;
+      try {
+        const r = await resolvers.Mutation.createResumeClaim({}, { sessionId: session }, mcpCtx);
+        return textResult(
+          `Resume claim written for session ${r.sessionId}. After the reset, call hadron_resume_session with no arguments ` +
+            `before ${r.expiresAt.toISOString()} (60 seconds, once). Only you can redeem it.`,
+        );
+      } catch (e) {
+        const code = e instanceof ScopeGraphQLError ? String(e.extensions?.code ?? '') : '';
+        return textResult(`Error${code ? ` [${code}]` : ''}: ${e instanceof Error ? e.message : 'the claim could not be written'}`);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_resume_session',
+    '#1956 (cor:agt:020:03): recover your worker binding after a context reset — call this FIRST, with no arguments, when you do not know which worker session you are. One unused resume claim of yours binds it and returns the boot briefing and handoff, exactly as hadron_start_session would: the same open session after a shed, or the worker\'s next session after a rotation that ended the last one. Several claims are LISTED (worker name, description, session id) and nothing is bound: ask the human which, then call again with session. With no claim, if exactly one of your worker sessions is live it is resumed; several are listed, never guessed. Nothing to resume refuses NOTHING_TO_RESUME and binds nothing — then ask the human which worker you are and use hadron_start_session. This never posts or records anything as you or anyone else.',
+    {
+      session: z.string().optional().describe('Pick one of a listed answer\'s sessions by its id. Omit on the first call.'),
+      description: z.string().optional().describe('What the next session is about, used only when the redemption starts a new one (after a rotation).'),
+      llmModel: z.string().optional().describe('LLM model, recorded only on a session the redemption starts.'),
+      family: z.string().optional().describe('Model family (claude, codex, glm…), recorded only on a session the redemption starts.'),
+    },
+    async ({ session, description, llmModel, family }) => {
+      const mcpCtx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+        impersonation: auth.impersonation ?? undefined,
+      } as Context;
+      let r: Awaited<ReturnType<typeof resolvers.Mutation.resumeSession>>;
+      try {
+        r = await resolvers.Mutation.resumeSession(
+          {},
+          { input: { session: session ?? null, description: description ?? null, llmModel: llmModel ?? null, family: family ?? null, tool: 'mcp' } },
+          mcpCtx,
+        );
+      } catch (e) {
+        const code = e instanceof ScopeGraphQLError ? String(e.extensions?.code ?? '') : '';
+        return textResult(`Error${code ? ` [${code}]` : ''}: ${e instanceof Error ? e.message : 'resume failed'}`);
+      }
+      if (r.outcome === 'CHOOSE') {
+        const lines = (r.candidates as ResumeCandidate[]).map(
+          (c) =>
+            `- ${c.workerName}: session ${c.sessionId}${c.description ? ` — ${c.description}` : ''}` +
+            (c.source === 'CLAIM' ? ` (resume claim, until ${c.expiresAt?.toISOString()})` : ' (live session)'),
+        );
+        return textResult(
+          `Several workers could be yours, so nothing was bound. Ask the human which one you are, then call ` +
+            `hadron_resume_session with session set to its id:\n${lines.join('\n')}`,
+        );
+      }
+      const bound = r.session!;
+      const receipt = await bindReceipt(bound, mcpCtx);
+      return textResult(
+        `${r.outcome === 'STARTED' ? 'Session started' : 'Session resumed'}: ${bound.id}` +
+          (bound.plan ? `\n> ${bound.plan}` : '') +
+          receipt,
+      );
     },
   );
 
@@ -8935,12 +9039,18 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         .describe(
           'The closing handoff for this worker: prose the NEXT worker session bound to this worker receives at bind. Worker-bound sessions only.',
         ),
+      resumeClaim: z
+        .boolean()
+        .optional()
+        .describe(
+          '#1956: also write a RESUME CLAIM, with the handoff and before the end, so the fresh context after this rotation recovers the worker with hadron_resume_session and no arguments. Single use, 60 seconds, redeemable only by you. Your own worker session only.',
+        ),
       inputTokens: z.number().optional().describe('Total input tokens used'),
       outputTokens: z.number().optional().describe('Total output tokens used'),
       turnCount: z.number().optional().describe('Number of conversation turns'),
       errorCount: z.number().optional().describe('Number of errors encountered'),
     },
-    async ({ id, summary, handoff, inputTokens, outputTokens, turnCount, errorCount }) => {
+    async ({ id, summary, handoff, resumeClaim, inputTokens, outputTokens, turnCount, errorCount }) => {
       // Spec 026 / D-2026-05-21-003 strict tool: paired with hadron_start_session.
       //
       // #1009: `id` IS the session, so scope is recoverable here with no new
@@ -9007,6 +9117,20 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
       }
 
+      // #1956: the resume claim, after the handoff and before the end, through the same writer as the GraphQL
+      // endSession. Refused, with the session left open, unless it is the caller's own open worker session.
+      let claimNote = '';
+      if (resumeClaim) {
+        if (!auth.userId || auth.impersonation || session.userId !== auth.userId || !session.workerId || !session.appId || session.endedAt || session.deletedAt) {
+          return textResult(
+            `No resume claim was written, so the session is STILL OPEN and was not ended: a claim needs your own open worker session. ` +
+              'End it without resumeClaim, or start the next stint by naming the worker.',
+          );
+        }
+        const { expiresAt } = await writeResumeClaim(db, { sessionId: id, appId: session.appId, workerId: session.workerId, holderUserId: auth.userId });
+        claimNote = `\nResume claim written: the next context recovers this worker with hadron_resume_session (no arguments) until ${expiresAt.toISOString()} (60 seconds, once).`;
+      }
+
       // FIRST END WINS, through the SHARED writer the GraphQL resolver uses
       // (#1050, hardened by PR #1055 review). Two reasons it is shared rather
       // than reimplemented here: this tool having its own raw update is exactly
@@ -9070,7 +9194,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                   '\n  comes next, bind the worker again and end THAT session with `handoff` — while you' +
                   '\n  still have the prose. See #1100.'
                 : '\n(No handoff written. The next driver will be told this stint ended without one.)'
-              : ''),
+              : '') +
+          claimNote,
       );
     },
   );

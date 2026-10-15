@@ -17,7 +17,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
-import { RESUME_CLAIM_TTL_MS } from '../../../lib/resumeClaims.js';
+import { RESUME_CLAIM_TTL_MS, consumeResumeClaim } from '../../../lib/resumeClaims.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -141,7 +141,7 @@ describe('redeeming: one claim binds', () => {
     expect(r.session.endedAt).toBeNull();
     const row = await db.resumeClaim.findFirstOrThrow({ where: { sessionId: s.id } });
     expect(row.resumedSessionId).toBe(r.session.id);
-    const continuity = await (resolvers as any).Worker.continuity({ id: ada, appId: app.id }, {}, ctx(holder));
+    const continuity = await (resolvers as any).Worker.continuity(await db.worker.findUniqueOrThrow({ where: { id: ada } }), {}, ctx(holder));
     expect(continuity.handoff?.content ?? '').toContain('the open items');
   });
 });
@@ -220,6 +220,33 @@ describe('single use under a race', () => {
     expect(lost).toHaveLength(1);
     expect(await envelope(Promise.reject(lost[0].reason))).toBe(none);
     expect(await db.session.count({ where: { workerId: ada, endedAt: null } })).toBe(1);
+  });
+});
+
+describe('the consume guard itself', () => {
+  // The resolver-level race above can pass without the guard (the loser often reads the claim already spent), so
+  // the guard is pinned directly: a spent claim never consumes again, concurrently or later, and a claim is never
+  // consumed for anyone but its holder.
+  it('consumes once: concurrent and repeated consumes of one claim succeed exactly once', async () => {
+    const s = await start(holder, ada);
+    await claim(holder, s.id);
+    const { id } = await db.resumeClaim.findFirstOrThrow({ where: { sessionId: s.id } });
+    const now = new Date();
+    const wins = await Promise.all([1, 2, 3, 4].map(() => consumeResumeClaim(db, id, holder, now)));
+    expect(wins.filter(Boolean)).toHaveLength(1);
+    expect(await consumeResumeClaim(db, id, holder, new Date())).toBe(false);
+  });
+
+  it('never consumes for a non-holder, an expired claim or a revoked one', async () => {
+    const s = await start(holder, ada);
+    await claim(holder, s.id);
+    const first = await db.resumeClaim.findFirstOrThrow({ where: { sessionId: s.id } });
+    expect(await consumeResumeClaim(db, first.id, other, new Date())).toBe(false);
+    await claim(holder, s.id); // revokes the first
+    expect(await consumeResumeClaim(db, first.id, holder, new Date())).toBe(false);
+    const second = await db.resumeClaim.findFirstOrThrow({ where: { sessionId: s.id, revokedAt: null } });
+    expect(await consumeResumeClaim(db, second.id, holder, new Date(second.expiresAt.getTime() + 1))).toBe(false);
+    expect(await consumeResumeClaim(db, second.id, holder, new Date())).toBe(true);
   });
 });
 
