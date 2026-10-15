@@ -1035,19 +1035,37 @@ const isWeakChrome = (s: string): boolean =>
   /^❯ /.test(s) || /^[▐▛█▝▜▀│╭╮╰╯ ]*[~❯]/.test(s) || /^permissions: /.test(s);
 
 /**
- * Continuation lines of a completed turn's OWN summary block — never a new
- * status (#1968). Codex renders `Worked for …` ABOVE its `↳ Recap:` block,
- * so the recap tail is positionally NEWER than the idle marker that proves
- * the turn completed; the same deep indent carries Claude-style wrapped
- * output under a summary header. Membership is judged on the RAW line
- * (squash collapses indentation), and the threshold is deliberately deep
- * (≥8 columns): ordinary output prose and notice boxes indent 2 — an
- * unrecognized CURRENT status is never indented like a continuation, so
- * #1700 r3's counterexample (old marker above a new unexplained status)
- * cannot be rescued by this rule.
+ * The recap block — a completed turn's OWN summary chrome, positionally NEWER
+ * than the idle marker that proves the turn completed (both agents render the
+ * footer ABOVE the block: Codex `Worked for …` above `↳ Recap:`, Claude
+ * `✻ … · done` above `※ recap:`). Membership is STRUCTURAL, not a flat indent
+ * floor: a line is continuation only inside a block, opened by a header line
+ * and extending while each RAW line indents strictly deeper than that header
+ * (Codex 2→12, Claude 2→4; both agents draw current status chrome at ≤2, so
+ * a new status ends the block and is judged). A deep indent with NO header
+ * above it is never skipped — an old marker must not rescue a
+ * drifted/indented current status (Andi's P2, #1976 review: the flat ≥8 rule
+ * proved idle over `Worked for` + an 8/12-space unrecognized status).
+ * Returns skip flags aligned with the window; judged on RAW lines (squash
+ * collapses indentation). Headers are skipped too — the Codex `↳ Recap:`
+ * form is capital-R and matches no IDLE_MARKER, so the backward scan must
+ * pass through it to reach the footer (Claude's `※ recap:` already matches
+ * /recap:/ and skips for free).
  */
-const isRecapContinuation = (raw: string): boolean =>
-  /^\s*↳ Recap:/.test(raw) || /^\s{8,}\S/.test(raw);
+const recapBlockSkip = (rawWindow: string[]): boolean[] => {
+  const skip = rawWindow.map(() => false);
+  for (let j = 0; j < rawWindow.length; j++) {
+    const header = /^(\s*)(?:↳ Recap:|※ recap:)/.exec(rawWindow[j]);
+    if (!header) continue;
+    skip[j] = true;
+    const base = header[1].length;
+    for (let k = j + 1; k < rawWindow.length; k++) {
+      if (/^(\s+)/.exec(rawWindow[k])![1].length > base) skip[k] = true;
+      else break; // a line at/below the header's indent is new chrome, not continuation
+    }
+  }
+  return skip;
+};
 
 /**
  * [verdict, detail] on the window directly above the prompt chrome: 'busy'
@@ -1083,6 +1101,7 @@ export function idleProofAbovePrompt(lines: string[], agent: string): ['busy' | 
   }
   const rawWindow = lines.slice(Math.max(0, at - 16), at).filter((l) => l.trim() !== '');
   const window = rawWindow.map(squash);
+  const recapSkip = recapBlockSkip(rawWindow);
   for (const l of window) {
     if (l.includes('to interrupt') || l.includes('run in background') || l.includes('Working (') || /^calling [a-z]/i.test(l)) return ['busy', l];
     if (spinnerTimer(l)) return ['busy', l];
@@ -1098,11 +1117,12 @@ export function idleProofAbovePrompt(lines: string[], agent: string): ['busy' | 
   // looks exactly like that, and old completion text must not rescue it. An
   // absent or weak-only window is missing evidence, not quiet. #1968 adds the
   // one exemption that counterexample permits: a completed turn's OWN summary
-  // tail (deep-indented recap continuation — judged on the RAW line, squash
+  // tail (the recap BLOCK — header-anchored, judged on the RAW lines, squash
   // erases the indent) trails its marker the way banner tails do, so it is
-  // skipped like weak chrome; an unindented current status is never skipped.
+  // skipped like weak chrome; a deep indent with no header above it is a
+  // current status and is never skipped (Andi's P2, #1976 review).
   let i = window.length - 1;
-  while (i >= 0 && (isWeakChrome(window[i]) || isRecapContinuation(rawWindow[i]))) i--;
+  while (i >= 0 && (isWeakChrome(window[i]) || recapSkip[i])) i--;
   if (i < 0) return ['unknown', 'no positive liveness evidence above the prompt'];
   if (IDLE_MARKERS.some((re) => re.test(window[i]))) return ['idle', 'completed or fresh-launch chrome'];
   return ['unknown', 'unrecognized chrome above the prompt'];

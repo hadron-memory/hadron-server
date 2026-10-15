@@ -127,6 +127,46 @@ const CODEX_UNKNOWN_NOTICE_RIANA = [
   '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/riana · Start worker session…',
   '  ? for shortcuts',
 ];
+/** Andi's P2 negative controls (#1976 review, 2026-10-15): a deep indent with
+ * NO recap header above it is an unrecognized CURRENT status — the flat ≥8
+ * floor proved idle over an old marker + an 8/12-space status line (only 0/2
+ * spaces held), which is the send direction. Structural anchoring: only lines
+ * INSIDE a header-anchored recap block are skipped. */
+const CODEX_UNKNOWN_INDENTED_STATUS_NO_HEADER = [
+  '  Worked for 1m 28s • 7:41 AM',
+  '          an indented current status nobody classified',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+  '  ? for shortcuts',
+];
+const CODEX_UNKNOWN_STATUS_NO_RECAP = [
+  '  Worked for 1m 28s • 7:41 AM',
+  '  an unindented current status nobody classified',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+  '  ? for shortcuts',
+];
+/** Claude-family recap block, captured live from Yuri's terminal 2026-10-15
+ * (#1977): header `※ recap:` indents 2, continuation 4 — header-RELATIVE
+ * indent covers both families (Codex 2→12) in one structural rule. */
+const CLAUDE_IDLE_RECAP_YURI = [
+  '  #1958 progress: shed node done and corrected; rotate, start-session (both',
+  '  tracks), and end-session nodes next — same ladders, rotation keeps end',
+  '  --resume-claim since its successor starts fresh by design.',
+  '✻ Worked for 1m 10s · done 3:54 PM',
+  '  ※ recap: Executing my half of #1958: rewriting the lifecycle task nodes to use',
+  '    resume claims. The shed node is done and corrected; next action is applying',
+  '    the same claim ladders to the rotate and start/end-session nodes.',
+  RULE, '❯ ', RULE, CLAUDE_HINT,
+];
+/** Claude counterexample: 4-indent output (a code block) under a done-marker
+ * with NO recap header — the header-relative rule must not skip it. */
+const CLAUDE_UNKNOWN_CODEBLOCK_NO_HEADER = [
+  '✻ Worked for 2m 6s · done 3:58 PM',
+  '    const verdict = computeLiveness(row);',
+  '    return verdict;',
+  RULE, '❯ ', RULE, CLAUDE_HINT,
+];
 const withPrompt = (screen: string[], marker: string, text: string) => {
   const i = screen.map((l) => l.trimStart().startsWith(marker)).lastIndexOf(true);
   return [...screen.slice(0, i), `${marker} ${text}`, ...screen.slice(i + 1)];
@@ -281,7 +321,7 @@ class FakeCLIs {
       }
       // attendeeRegister: the winning row for the team Channel.
       const w = argv[argv.indexOf('-F') + 1].replace(/^w=/, '');
-      const ids = this.mentionOnly ?? new Set(['w-eli', 'w-baloo', 'w-ada', 'w-diego', 'w-gene', 'w-xavier', 'w-atilla', 'w-riana']);
+      const ids = this.mentionOnly ?? new Set(['w-eli', 'w-baloo', 'w-ada', 'w-diego', 'w-gene', 'w-xavier', 'w-atilla', 'w-riana', 'w-andi', 'w-yuri']);
       const row = this.registerRow?.(w) ?? { namedBy: 'WORKER', channel: { id: CHANNEL }, entry: { mentionOnly: ids.has(w) } };
       return out({ data: { attendeeRegister: [row] } });
     }
@@ -626,7 +666,49 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     fake.screens.set('term_eli', { tail: CODEX_UNKNOWN_INDENT_NO_MARKER });
     const out = poll(c);
     expect(out.nudged).toEqual([]);
-    expect(out.held.Eli).toContain('no positive liveness evidence');
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a deep indent with NO recap header is a current status — an old Worked-for marker must NOT prove idle over it (Andi P2, #1976 review)', () => {
+    const c = cfg(['w-andi', 'Andi']);
+    fake.terminal('andi', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-andi', 'Andi')];
+    fake.screens.set('term_andi', { tail: CODEX_UNKNOWN_INDENTED_STATUS_NO_HEADER });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Andi).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('an unindented current status over an old Worked-for marker holds — the codex arm of the #1700 r3 counterexample (Andi control, #1976 review)', () => {
+    const c = cfg(['w-andi', 'Andi']);
+    fake.terminal('andi', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-andi', 'Andi')];
+    fake.screens.set('term_andi', { tail: CODEX_UNKNOWN_STATUS_NO_RECAP });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Andi).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a Claude recap block (header 2, continuation 4) trails its done-marker and DELIVERS — header-RELATIVE indent covers both families (#1977, Yuri captured 2026-10-15)', () => {
+    const c = cfg(['w-yuri', 'Yuri']);
+    fake.terminal('yuri', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-yuri', 'Yuri')];
+    fake.screens.set('term_yuri', { tail: CLAUDE_IDLE_RECAP_YURI });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Yuri'], adopted: true });
+  });
+
+  it('4-indent output under a done-marker with NO recap header is unrecognized and HOLDS — the rule never skips without an anchor (#1977 counterexample)', () => {
+    const c = cfg(['w-yuri', 'Yuri']);
+    fake.terminal('yuri', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-yuri', 'Yuri')];
+    fake.screens.set('term_yuri', { tail: CLAUDE_UNKNOWN_CODEBLOCK_NO_HEADER });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Yuri).toContain('unrecognized chrome');
     expect(fake.sent).toEqual([]);
   });
 
