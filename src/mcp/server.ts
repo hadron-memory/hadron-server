@@ -2111,7 +2111,7 @@ export function createMcpServerInstance(
    * A session named alongside it is settled as usual, and the tool refuses
    * the conflict.
    */
-  const EXPLICIT_HUMAN_ARGUMENT: Record<string, string> = { hadron_channel_post: 'asMe' };
+  const EXPLICIT_HUMAN_ARGUMENT: Record<string, string> = { hadron_channel_post: 'asMe', hadron_team_chat_post: 'asMe' };
   const SESSION_PARAM_DESCRIPTION =
     'Your worker session id (from hadron_start_session or hadron_whoami). Attributes this write to that ' +
     'session\'s worker. Optional on a connection bound to one worker; REQUIRED when the connection carries ' +
@@ -9215,7 +9215,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_whoami',
-    'Answer "what am I driving right now?" — your own OPEN sessions, each with its App, when it started, and the worker it is bound to IF it is bound (#1016). Not every row is a worker session: a session started without workerRef is listed too and says "working as: nobody", which is the shape in which work goes unattributed, so it is shown rather than hidden. This is also the tool that tells you a WORKER SESSION outlived the CHAT SESSION it was started from: the two are independent, and ending a chat session never ends a worker session (#1034), so a bound row here may well be one whose Desktop window or Claude Code session is long gone. For a BOUND row, its session id is the only handle that makes that work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The loss is worst where it is quietest — hadron_team_chat_post takes the session as an OPTIONAL argument, so omitting it posts as the human instead of the worker, silently, with no error and the wrong authorship recorded. Do NOT read a successful call as evidence your binding is alive: hadron_record_work accepts an ended session on purpose (late attribution, cor:agt:020:05) and hadron_end_session is idempotent, so neither refuses one — both now SAY so in their receipt instead. The team chat is the only surface that refuses outright, because authoring as a worker needs a live session. This tool is the direct answer, and the one to trust. Call this whenever you are unsure which session you are driving, or after any context loss, and pass back a row that is BOUND and still OPEN — with includeEnded this list also returns bound rows marked [ENDED], and team chat refuses an unbound row (SESSION_NOT_WORKER_BOUND) and an ended one (SESSION_ENDED) rather than silently attributing either. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
+    'Answer "what am I driving right now?" — your own OPEN sessions, each with its App, when it started, and the worker it is bound to IF it is bound (#1016). Not every row is a worker session: a session started without workerRef is listed too and says "working as: nobody", which is the shape in which work goes unattributed, so it is shown rather than hidden. This is also the tool that tells you a WORKER SESSION outlived the CHAT SESSION it was started from: the two are independent, and ending a chat session never ends a worker session (#1034), so a bound row here may well be one whose Desktop window or Claude Code session is long gone. For a BOUND row, its session id is the only handle that makes that work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The chat tools no longer hide the loss: since #1967, hadron_team_chat_post (like hadron_channel_post) refuses a post that names no session on a connection with no bound worker [authorship_required] instead of recording it under the human\'s name, so a lost id surfaces as that refusal — come here for the id. Do NOT read a successful call as evidence your binding is alive: hadron_record_work accepts an ended session on purpose (late attribution, cor:agt:020:05) and hadron_end_session is idempotent, so neither refuses one — both now SAY so in their receipt instead. The team chat is the only surface that refuses outright, because authoring as a worker needs a live session. This tool is the direct answer, and the one to trust. Call this whenever you are unsure which session you are driving, or after any context loss, and pass back a row that is BOUND and still OPEN — with includeEnded this list also returns bound rows marked [ENDED], and team chat refuses an unbound row (SESSION_NOT_WORKER_BOUND) and an ended one (SESSION_ENDED) rather than silently attributing either. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
     {
       limit: z.number().int().optional().describe('Max sessions to return (default 10, cap 50). Newest first.'),
       includeEnded: z.boolean().optional().describe('Also list recently ENDED sessions — useful to confirm you did end one, or to find the session a work record should have been attributed to.'),
@@ -9976,26 +9976,51 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_team_chat_post',
-    'Post a message into the team App\'s chat (#939). The team chat is one well-known chat per team App (loc chats:team in the Team Agent\'s shared app memory), bootstrapped on first post. Mention teammates as @worker-name or @handle — mentions are extracted server-side into the message envelope. Pass session to post AS the Worker bound to that session (the driving session is recorded; the worker must not be retired, and it authors here when its App is this one — or, on the `channel` path, when you may write the Channel\'s host memory (spec 049 item J; a cross-App post is marked); omit it to post as yourself. Pass replyToSeq to reply to an earlier message. Returns the posted message\'s seq.',
+    'Post a message into the team App\'s chat (#939). The team chat is one well-known chat per team App (loc chats:team in the Team Agent\'s shared app memory), bootstrapped on first post. Mention teammates as @worker-name or @handle — mentions are extracted server-side into the message envelope. Pass session to post AS the Worker bound to that session (the driving session is recorded; the worker must not be retired). AUTHORSHIP IS EXPLICIT (#1967, the same contract as hadron_channel_post and the CLI\'s `team chat post --session | --as-me`): with no session, a connection bound to one worker session (hadron_start_session) posts as that Worker; otherwise pass asMe: true to post as yourself, or the post is refused [authorship_required] — never silently recorded under your name. A Worker of ANOTHER App authors here only when you (its driver) may write the chat\'s host memory — the post is then marked cross-App (spec 049 item J). Pass replyToSeq to reply to an earlier message. Returns the posted message\'s seq.',
     {
       body: z.string().describe('The message text (max 65536 characters). Mention teammates as @worker-name or @handle.'),
       replyToSeq: z.number().int().optional().describe('seq of the message this replies to (a replies-to edge is wired).'),
-      session: z.string().optional().describe('A session id — the message is authored by that session\'s bound Worker. Omit to post as yourself — except on a SHARED connection (several of your sessions bound on it, e.g. several chat sessions on one host), where an omitted session is refused SESSION_AMBIGUOUS (#1701): pass the id of the session you are, a plain one to post as yourself.'),
+      session: z.string().optional().describe('A session id — the message is authored by that session\'s bound Worker. Omit it on a connection bound to ONE worker session to post as that Worker; on a SHARED connection (several of your sessions bound on it, e.g. several chat sessions on one host) an omitted session is refused SESSION_AMBIGUOUS (#1701). Not combinable with asMe.'),
+      asMe: z.boolean().optional().describe('true posts as YOU, the human, even on a connection bound to a worker (#1967, as hadron_channel_post). Required to post as yourself when no worker session is bound or named; without it such a post is refused [authorship_required]. Not combinable with session.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
       channel: z.string().optional().describe('Spec 049: post into THIS Channel (its id or address, from hadron_list_channels) instead of the App\'s default team chat. Item J: your worker authors there when its App is the Channel\'s, or when you may write the Channel\'s host memory.'),
     },
-    async ({ body, replyToSeq, session, app, channel }) => {
+    async ({ body, replyToSeq, session, asMe, app, channel }) => {
+      // #1967 (cor:agt:020:03 rev 55; Holger #12681): never default to the human, on either path. The contract and
+      // the refusal text are hadron_channel_post's (#1697), so the two tools teach one rule.
+      if (session && asMe) {
+        return {
+          isError: true as const,
+          content: [{ type: 'text' as const, text: '[bad_user_input] hadron_team_chat_post: pass session OR asMe, not both — one says a Worker authors, the other that you do. Nothing was posted.' }],
+        };
+      }
+      let author = session ?? null;
+      if (!author && !asMe) {
+        author = await boundWorkerSession();
+        if (!author) {
+          return {
+            isError: true as const,
+            content: [{
+              type: 'text' as const,
+              text:
+                '[authorship_required] hadron_team_chat_post: no worker session is named or bound on this connection, ' +
+                'so this post would be recorded under YOUR name. Nothing was posted. Pass session: "<your worker ' +
+                'session id>" (hadron_whoami lists yours) to post as that Worker, or asMe: true to post as yourself (#1967).',
+            }],
+          };
+        }
+      }
       // Presence, not truthiness (Copilot on PR #1169): a supplied '' is a
       // malformed Channel selector and resolves as CHANNEL_NOT_FOUND, never
       // a silent fall-through to the default team chat.
       if (channel !== undefined) {
-        await heartbeatSession(session);
-        return postToChannel(channel, body, replyToSeq ?? null, session ?? null);
+        await heartbeatSession(author ?? undefined);
+        return postToChannel(channel, body, replyToSeq ?? null, author);
       }
       // #1081 — the caller just drove this session, so it is alive. The
       // touch is explicit here rather than a side effect of whichever tool
       // happens to write the Session row (see heartbeatSession).
-      await heartbeatSession(session);
+      await heartbeatSession(author ?? undefined);
       // Delegate to the GraphQL resolver (findings:node-write-surface-
       // invariants — MCP tools delegate, never re-implement). App default
       // mirrors hadron_cast_worker: requireAppScope() runs BEFORE reading
@@ -10004,7 +10029,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (!appRef) {
         // #1005: the session names its App — recover scope from it before
         // declaring the caller's App set ambiguous.
-        await adoptAppFromSession(session);
+        await adoptAppFromSession(author ?? undefined);
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
         appRef = auth.appId;
@@ -10015,7 +10040,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       try {
         const msg = await resolvers.Mutation.createTeamChatMessage(
           {},
-          { appRef, body, replyToSeq: replyToSeq ?? null, sessionRef: session ?? null },
+          { appRef, body, replyToSeq: replyToSeq ?? null, sessionRef: author },
           {
             db,
             clientId: auth.clientId ?? undefined,

@@ -1035,6 +1035,44 @@ const isWeakChrome = (s: string): boolean =>
   /^❯ /.test(s) || /^[▐▛█▝▜▀│╭╮╰╯ ]*[~❯]/.test(s) || /^permissions: /.test(s);
 
 /**
+ * The recap block — a completed turn's OWN summary chrome, positionally NEWER
+ * than the idle marker that proves the turn completed (both agents render the
+ * footer ABOVE the block: Codex `Worked for …` above `↳ Recap:`, Claude
+ * `✻ … · done` above `※ recap:`). Membership is STRUCTURAL, not a flat indent
+ * floor: a line is continuation only inside a block, opened by a header line
+ * and extending while each RAW line indents strictly deeper than that header
+ * (Codex 2→12, Claude 2→4; both agents draw current status chrome at ≤2, so
+ * a new status ends the block and is judged). A deep indent with NO header
+ * above it is never skipped — an old marker must not rescue a
+ * drifted/indented current status (Andi's P2, #1976 review: the flat ≥8 rule
+ * proved idle over `Worked for` + an 8/12-space unrecognized status).
+ * Returns skip flags aligned with the window; judged on RAW lines (squash
+ * collapses indentation). Headers are skipped too — the Codex `↳ Recap:`
+ * form is capital-R and matches no IDLE_MARKER, so the backward scan must
+ * pass through it to reach the footer (Claude's `※ recap:` already matches
+ * /recap:/ and skips for free).
+ */
+const recapBlockSkip = (rawWindow: string[]): boolean[] => {
+  const skip = rawWindow.map(() => false);
+  for (let j = 0; j < rawWindow.length; j++) {
+    const header = /^(\s*)(?:↳ Recap:|※ recap:)/.exec(rawWindow[j]);
+    if (!header) continue;
+    skip[j] = true;
+    const base = header[1].length;
+    for (let k = j + 1; k < rawWindow.length; k++) {
+      // \s* (never null — a column-zero line has indent 0): the extension
+      // ENDS at such a line instead of dereferencing null and throwing
+      // before the busy sweep (Andi round 2, Chip's runtime matrix — Codex
+      // tool lines like `• Ran …` are column-zero and render after a
+      // previous turn's recap whenever a new turn starts).
+      if (/^(\s*)/.exec(rawWindow[k])![1].length > base) skip[k] = true;
+      else break; // a line at/below the header's indent is new chrome, not continuation
+    }
+  }
+  return skip;
+};
+
+/**
  * [verdict, detail] on the window directly above the prompt chrome: 'busy'
  * (a running-turn line is drawn), 'idle' (the NEWEST non-weak line is a
  * positive idle/completed/fresh-launch marker — everything older is then
@@ -1044,7 +1082,11 @@ const isWeakChrome = (s: string): boolean =>
  * presentation we failed to enumerate looks exactly like this; @codex P2
  * #1700 r2/r3, production calibration #1746). The window is bounded because
  * both agents PIN their running-turn line directly above the prompt while a
- * turn runs.
+ * turn runs — which is also why depth here does not trade busy-detection
+ * reliability: the busy sweep below covers the whole window, and a pinned
+ * indicator is adjacent to the prompt at any depth (#1968 deepened 8 → 16
+ * so a completed turn's summary tail — recap block or folded-URL receipt —
+ * cannot push its `Worked for`/done footer out of evidence).
  */
 export function idleProofAbovePrompt(lines: string[], agent: string): ['busy' | 'idle' | 'unknown', string] {
   let at: number; // the first line of the prompt chrome
@@ -1062,7 +1104,9 @@ export function idleProofAbovePrompt(lines: string[], agent: string): ['busy' | 
   } else {
     return ['unknown', `unknown agent ${agent}`];
   }
-  const window = lines.slice(Math.max(0, at - 8), at).map(squash).filter((l) => l !== '');
+  const rawWindow = lines.slice(Math.max(0, at - 16), at).filter((l) => l.trim() !== '');
+  const window = rawWindow.map(squash);
+  const recapSkip = recapBlockSkip(rawWindow);
   for (const l of window) {
     if (l.includes('to interrupt') || l.includes('run in background') || l.includes('Working (') || /^calling [a-z]/i.test(l)) return ['busy', l];
     if (spinnerTimer(l)) return ['busy', l];
@@ -1076,9 +1120,14 @@ export function idleProofAbovePrompt(lines: string[], agent: string): ['busy' | 
   // without hiding it. An unrecognized newest line still holds — @codex P2
   // #1700 r3's counterexample stands: a busy presentation that drifted format
   // looks exactly like that, and old completion text must not rescue it. An
-  // absent or weak-only window is missing evidence, not quiet.
+  // absent or weak-only window is missing evidence, not quiet. #1968 adds the
+  // one exemption that counterexample permits: a completed turn's OWN summary
+  // tail (the recap BLOCK — header-anchored, judged on the RAW lines, squash
+  // erases the indent) trails its marker the way banner tails do, so it is
+  // skipped like weak chrome; a deep indent with no header above it is a
+  // current status and is never skipped (Andi's P2, #1976 review).
   let i = window.length - 1;
-  while (i >= 0 && isWeakChrome(window[i])) i--;
+  while (i >= 0 && (isWeakChrome(window[i]) || recapSkip[i])) i--;
   if (i < 0) return ['unknown', 'no positive liveness evidence above the prompt'];
   if (IDLE_MARKERS.some((re) => re.test(window[i]))) return ['idle', 'completed or fresh-launch chrome'];
   return ['unknown', 'unrecognized chrome above the prompt'];

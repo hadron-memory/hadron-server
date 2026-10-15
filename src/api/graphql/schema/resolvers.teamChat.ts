@@ -477,7 +477,7 @@ async function resolveSessionAuthor(
   const lapsed = !isSessionLive(session, events.get(session.id), now);
   if (!session.workerId) {
     throw new GraphQLError(
-      `Session "${sessionRef}" is not bound to a worker — omit sessionRef to post as yourself.`,
+      `Session "${sessionRef}" is not bound to a worker — to post as yourself, say so (omit sessionRef on GraphQL; asMe: true on MCP).`,
       { extensions: { code: 'SESSION_NOT_WORKER_BOUND' } },
     );
   }

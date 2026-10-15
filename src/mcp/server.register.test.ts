@@ -148,7 +148,7 @@ describe('team-chat monitor (#1265)', () => {
       role: 'WATCH',
       mentionOnly: true,
     })).toContain('Added.');
-    expect(await asAdmin.callToolText('hadron_team_chat_post', { body: 'Please check this, @Iris.' })).toContain('message #1');
+    expect(await asAdmin.callToolText('hadron_team_chat_post', { asMe: true, body: 'Please check this, @Iris.' })).toContain('message #1');
 
     const first = await asAdmin.callToolText('hadron_team_chat_read', { monitor: true });
     expect(first).toContain('1 message needs routing');
@@ -187,9 +187,9 @@ describe('team-chat monitor (#1265)', () => {
     ]);
     expect(await server(admin.id).callToolText('hadron_team_chat_read', { monitor: true })).toContain('No new registered team-chat attention');
 
-    await restarted.callToolText('hadron_team_chat_post', { body: '@all broadcast' });
-    await restarted.callToolText('hadron_team_chat_post', { body: '@team broadcast' });
-    await restarted.callToolText('hadron_team_chat_post', { body: '@someone unrelated' });
+    await restarted.callToolText('hadron_team_chat_post', { asMe: true, body: '@all broadcast' });
+    await restarted.callToolText('hadron_team_chat_post', { asMe: true, body: '@team broadcast' });
+    await restarted.callToolText('hadron_team_chat_post', { asMe: true, body: '@someone unrelated' });
     const broadcasts = await restarted.callToolText('hadron_team_chat_read', { monitor: true });
     expect(broadcasts).toContain('2 messages need routing');
     expect(broadcasts).toContain('@all broadcast');
@@ -259,7 +259,7 @@ describe('team-chat monitor (#1265)', () => {
     expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, monitorFor: idle.id })).toMatch(/^\[monitor_target_not_live\]/);
     expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, monitorFor: 'does-not-exist' })).toMatch(/^\[monitor_target_not_live\]/);
     expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, channel: channel2.id })).toMatch(/^\[channel_not_found\]/);
-    await asAdmin.callToolText('hadron_team_chat_post', { body: 'checkpoint me' });
+    await asAdmin.callToolText('hadron_team_chat_post', { asMe: true, body: 'checkpoint me' });
     const checkpoint = checkpointsOf(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, monitorFor: worker.id }))[0];
     expect(await asAdmin.callToolText('hadron_team_chat_read', {
       monitor: true,
@@ -330,7 +330,7 @@ describe('team-chat monitor (#1265)', () => {
     const asAdmin = server(admin.id);
     const started = await asAdmin.callToolText('hadron_start_session', { description: 'observed stint', workerRef: 'Iris' });
     const sessionId = started.match(/Session started: (\S+)/)![1];
-    await asAdmin.callToolText('hadron_team_chat_post', { body: 'new attention' });
+    await asAdmin.callToolText('hadron_team_chat_post', { asMe: true, body: 'new attention' });
     await db.usageEvent.deleteMany({ where: { sessionId } });
     const bound = createTestableMcpServer(
       { userId: admin.id, roles: ['READER'], clientId: `user:${admin.id}`, appId: app.id, organizationId: org.id, sessionId } as AuthContext,
@@ -344,7 +344,7 @@ describe('team-chat monitor (#1265)', () => {
   it('checkpoints the captured watermark after an exhausted page ending in a tombstone', async () => {
     const asAdmin = server(admin.id);
     await asAdmin.callToolText('hadron_start_session', { description: 'Iris stint', workerRef: 'Iris' });
-    await asAdmin.callToolText('hadron_team_chat_post', { body: 'soon deleted' });
+    await asAdmin.callToolText('hadron_team_chat_post', { asMe: true, body: 'soon deleted' });
     const { memoryId } = await db.channel.findUniqueOrThrow({ where: { id: channel.id }, select: { memoryId: true } });
     await db.node.updateMany({ where: { memoryId, seq: 1, nodeType: { in: ['chat-message', 'record'] } }, data: { deletedAt: new Date() } });
 
