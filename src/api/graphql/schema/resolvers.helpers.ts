@@ -82,7 +82,7 @@ import {
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isUserOwnedAgentDefinition } from '../../../lib/auth/userOwnedAgentDefinition.js';
-import { appPrincipalMayWriteSession } from '../../../lib/sessionOwnership.js';
+import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
 
 /**
  * The STORED (uncompiled) content of a Node whose `content` a read resolver
@@ -2361,7 +2361,8 @@ export async function requireSessionWriteAccess(
   // ever held host:operate writes none — the shared predicate MCP's
   // hadron_end_session uses too.
   if (!ctx.userId) {
-    if (await appPrincipalMayWriteSession(ctx.db, ctx, session)) return;
+    // #1969: a host key's refusal here is recorded (cor:agt:070:07), apart, after the decision.
+    if (await appPrincipalSessionWriteAllowed(ctx.db, ctx, session)) return;
     throw authorizationDenied();
   }
   if (session.userId === ctx.userId && !ctx.impersonation) return;

@@ -1,4 +1,5 @@
-import { keyEverHeldHostOperate } from './hostOperations/hostKey.js';
+import type { PrismaClient } from '../generated/prisma/index.js';
+import { keyEverHeldHostOperate, recordHostKeyUseApart } from './hostOperations/hostKey.js';
 
 /**
  * Session attribution ownership, shared by binding and usage recording (#1662).
@@ -54,4 +55,33 @@ export async function appPrincipalMayWriteSession(
   if (session.userId) return false;
   if (principal.appKeyId && (await keyEverHeldHostOperate(db, principal.appKeyId))) return false;
   return true;
+}
+
+/**
+ * #1969 (cor:agt:070:07: every call the platform refuses a host key is recorded) — the session write gate's App branch
+ * WITH its use record, the one call both surfaces make: GraphQL `requireSessionWriteAccess` (updateSession, endSession,
+ * and the gate's other callers) and MCP `hadron_end_session`. So a refusal is recorded once, at one site, whichever
+ * surface refused it.
+ *
+ * The DECISION is `appPrincipalMayWriteSession`'s alone and is taken first; the record is written afterwards, apart
+ * (its own write, never a caller's transaction), only for a refusal, and never reads back into the answer:
+ * `recordHostKeyUseApart` never throws, so a failed record leaves the refusal exactly as it was (#1932's rule).
+ *
+ * WHO IS RECORDED: a key that is, or ever was, a host key (`host:operate` granted, live or revoked): a host key's
+ * refused use. A plain App key refused here (ruling A's user-less rule, #11860) is not a host-key use and records
+ * nothing: `recordHostKeyUseApart` finds no host to record it under (Xylon's read of 070:07 on the #1969 gate). Pass
+ * the ROOT client as `db`, so the record survives the refused call's rollback.
+ */
+export async function appPrincipalSessionWriteAllowed(
+  db: PrismaClient,
+  principal: { userId?: string | null; appId?: string | null; appKeyId?: string | null },
+  session: { appId: string | null; userId: string | null; launchOperationId: string | null },
+): Promise<boolean> {
+  const allowed = await appPrincipalMayWriteSession(db, principal, session);
+  if (!allowed && !principal.userId && principal.appId && principal.appKeyId) {
+    await recordHostKeyUseApart(db, { appKeyId: principal.appKeyId, appId: principal.appId }, 'session', {
+      refusedCode: 'FORBIDDEN',
+    });
+  }
+  return allowed;
 }

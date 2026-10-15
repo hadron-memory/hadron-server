@@ -225,3 +225,90 @@ describe('MCP hadron_end_session shares the gate', () => {
     expect(await createTestableMcpServer(keyAuth(plainKey)).callToolText('hadron_end_session', { id: s.id })).toContain('Session ended');
   });
 });
+
+/**
+ * #1969 (cor:agt:070:07: every call the platform refuses a host key is recorded). The gate above refuses; this is the
+ * record of it. A key that is or was a host key leaves one `HostKeyUse` row per refused session write, action
+ * `session`, code FORBIDDEN, written apart from the refused call, on both surfaces (one shared site,
+ * `appPrincipalSessionWriteAllowed`). A plain App key refused here is not a host key and records nothing.
+ */
+describe('#1969: a host key\'s refused session write is recorded as a host-key use', () => {
+  const sessionUses = () =>
+    db.hostKeyUse.findMany({ where: { action: 'session' }, orderBy: [{ usedAt: 'asc' }, { id: 'asc' }] });
+  const shape = (u: { appKeyId: string; appId: string; hostId: string; operationId: string | null; count: number | null; refusedCode: string | null }) =>
+    [u.appKeyId, u.appId, u.hostId, u.operationId, u.count, u.refusedCode];
+
+  it('GraphQL, the launched-session clause: each refused update and end of the host key records one row', async () => {
+    const s = await launchedSession();
+    expect(await code(update(keyCtx(orca1), s.id))).toBe('FORBIDDEN');
+    expect(await code(end(keyCtx(orca1), s.id))).toBe('FORBIDDEN');
+    expect((await sessionUses()).map(shape)).toEqual([
+      [orca1.id, app.id, 'orca1', null, null, 'FORBIDDEN'],
+      [orca1.id, app.id, 'orca1', null, null, 'FORBIDDEN'],
+    ]);
+  });
+
+  it('GraphQL, the ever-host clause: a live host key and a revoked one, each under its own host', async () => {
+    const formerHost = await mkKey('former-host');
+    await M.grantAppKeyScope({}, { id: formerHost.id, scope: 'host:operate', hostId: 'orca2' }, ctx(manager.id));
+    await M.revokeAppKeyScope({}, { id: formerHost.id, scope: 'host:operate' }, ctx(manager.id));
+    const s = await ordinarySession();
+    expect(await code(update(keyCtx(orca1), s.id))).toBe('FORBIDDEN');
+    expect(await code(end(keyCtx(formerHost), s.id))).toBe('FORBIDDEN');
+    expect((await sessionUses()).map(shape).sort()).toEqual([
+      [formerHost.id, app.id, 'orca2', null, null, 'FORBIDDEN'],
+      [orca1.id, app.id, 'orca1', null, null, 'FORBIDDEN'],
+    ].sort());
+  });
+
+  it('MCP hadron_end_session records through the same site, on both clauses', async () => {
+    const launched = await launchedSession();
+    const ordinary = await ordinarySession();
+    for (const s of [launched, ordinary]) {
+      expect(await createTestableMcpServer(keyAuth(orca1)).callToolText('hadron_end_session', { id: s.id })).toContain('Forbidden');
+    }
+    expect((await sessionUses()).map(shape)).toEqual([
+      [orca1.id, app.id, 'orca1', null, null, 'FORBIDDEN'],
+      [orca1.id, app.id, 'orca1', null, null, 'FORBIDDEN'],
+    ]);
+  });
+
+  it('the plain-App-key choice: a never-host key refused here records nothing, on either surface', async () => {
+    const launched = await launchedSession();
+    const person = await personSession();
+    for (const s of [launched, person]) {
+      expect(await code(update(keyCtx(plainKey), s.id))).toBe('FORBIDDEN');
+      expect(await createTestableMcpServer(keyAuth(plainKey)).callToolText('hadron_end_session', { id: s.id })).toContain('Forbidden');
+    }
+    expect(await db.hostKeyUse.count({ where: { appKeyId: plainKey.id } })).toBe(0);
+  });
+
+  it('controls: an admitted write records nothing, and nor does a person refused on someone else\'s session', async () => {
+    const userless = await ordinarySession();
+    expect((await update(keyCtx(plainKey), userless.id)).prNumber).toBe(1934);
+    const held = await heldWorkerSession();
+    expect((await update(ctx(holder.id), held.id)).prNumber).toBe(1934);
+    expect(await code(update(ctx(manager.id), held.id))).toBe('FORBIDDEN');
+    expect(await sessionUses()).toEqual([]);
+  });
+
+  it('the record never decides: a failed record leaves the refusal as it was, and nothing is written', async () => {
+    const s = await launchedSession();
+    const spy = vi.spyOn(db.hostKeyUse, 'create').mockRejectedValueOnce(new Error('record down'));
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await code(update(keyCtx(orca1), s.id))).toBe('FORBIDDEN');
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+      quiet.mockRestore();
+    }
+    expect(await sessionUses()).toEqual([]);
+    expect((await row(s.id)).prNumber).toBeNull();
+  });
+
+  it('the six host-operation recordings are unchanged: registration still records register, and no session row', async () => {
+    const uses = await db.hostKeyUse.findMany({ where: { appKeyId: orca1.id } });
+    expect(uses.map((u) => [u.action, u.refusedCode])).toEqual([['register', null]]);
+  });
+});
