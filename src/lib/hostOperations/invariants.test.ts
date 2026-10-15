@@ -47,7 +47,7 @@ beforeEach(async () => {
 describe('the invariants file', () => {
   it('the migration carries a byte-identical copy, and post-push includes it after the file whose token function it uses', () => {
     const source = readFileSync(new URL('../../../prisma/host-operation-invariants.sql', import.meta.url), 'utf8');
-    const migration = readFileSync(new URL('../../../prisma/migrations/20261014020000_task_session_end_requests/migration.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261014150100_host_operation_settlement/migration.sql', import.meta.url), 'utf8');
     expect(migration.endsWith(`\n${source}`)).toBe(true);
     const post = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
     const at = post.indexOf('\\ir host-operation-invariants.sql');
@@ -102,12 +102,23 @@ describe('cor:agt:070:03 — the closed set, with exactly its typed arguments', 
 describe('cor:agt:070:02 — the status runs forward only, and what was issued never changes', () => {
   it('issued → collected → succeeded, each stage stamping its time; never back, never skipped', async () => {
     const o = await op();
-    await expectCheck(db.hostOperation.update({ where: { id: o.id }, data: { status: 'succeeded', collectedAt: new Date(), finishedAt: new Date() } }), /moves only issued/);
+    // #1881: settling before collection is allowed, but never with a collected_at.
+    await expectCheck(db.hostOperation.update({ where: { id: o.id }, data: { status: 'succeeded', collectedAt: new Date(), finishedAt: new Date() } }), /no collected_at/);
     await expectCheck(db.hostOperation.update({ where: { id: o.id }, data: { status: 'collected' } }));
     await db.hostOperation.update({ where: { id: o.id }, data: { status: 'collected', collectedAt: new Date() } });
     await expectCheck(db.hostOperation.update({ where: { id: o.id }, data: { status: 'failed', finishedAt: new Date() } }));
     await db.hostOperation.update({ where: { id: o.id }, data: { status: 'succeeded', finishedAt: new Date(), result: { worktree: 'w' } } });
     await expectCheck(db.hostOperation.update({ where: { id: o.id }, data: { status: 'failed', failureReason: 'x', result: undefined } }), /moves only/);
+  });
+
+  it('#1881 (070:02): an operation never collected may be settled, failed with a reason or succeeded, keeping no collected_at', async () => {
+    const f = await op();
+    await expectCheck(db.hostOperation.update({ where: { id: f.id }, data: { status: 'failed', finishedAt: new Date() } }));
+    await db.hostOperation.update({ where: { id: f.id }, data: { status: 'failed', finishedAt: new Date(), failureReason: 'host lost' } });
+    const s = await op();
+    await db.hostOperation.update({ where: { id: s.id }, data: { status: 'succeeded', finishedAt: new Date() } });
+    // Settled is final, as reported is.
+    await expectCheck(db.hostOperation.update({ where: { id: f.id }, data: { status: 'collected', collectedAt: new Date(), finishedAt: null, failureReason: null } }), /moves only/);
   });
 
   it('type, arguments, host, worker and issuer are fixed; an operation is kept, not deleted', async () => {

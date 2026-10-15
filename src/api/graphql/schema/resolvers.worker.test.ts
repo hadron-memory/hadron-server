@@ -359,11 +359,11 @@ describe('castWorker — agent resolution', () => {
 
   it('agentRef naming a soft-deleted installed agent refuses (ref resolution excludes tombstones)', async () => {
     // resolveAgentRef excludes soft-deleted rows by default, so the explicit
-    // ref fails BEFORE the install check — translated to the typed
-    // BAD_USER_INPUT (matching startSession's agentRef handling), and the
+    // ref fails BEFORE the install check. #1946 (ruling A): that answers as
+    // not installed (one answer for absent and not-installed, no id), and the
     // tombstone never casts either way.
     await db.agent.update({ where: { id: roleAgent.id }, data: { deletedAt: new Date() } });
-    await expectCode(cast({ agentRef: roleAgent.id, name: 'Zoe' }), 'BAD_USER_INPUT');
+    await expectCode(cast({ agentRef: roleAgent.id, name: 'Zoe' }), 'WORKER_AGENT_NOT_INSTALLED');
     expect(await db.worker.count({ where: { appId: app.id } })).toBe(0);
   });
 
@@ -2278,11 +2278,13 @@ describe('#1050 — worker name holding', () => {
       where: { appId_userId: { appId: membership.appId, userId: membership.userId } },
     });
 
+    // #1937: a revoked member reads the App's staff no more than anyone else does, so the
+    // answer is the absent ref's, not a FORBIDDEN that says the worker exists.
     await expectCode(
       M.startSession(
         {}, { input: { id: generateId(), workerRef: w.id } }, ctx(gone.id, app.id),
       ),
-      'FORBIDDEN',
+      'WORKER_NOT_FOUND',
     );
     expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
   });

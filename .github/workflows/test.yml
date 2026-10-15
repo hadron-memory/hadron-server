@@ -78,17 +78,10 @@ jobs:
 
       - run: pnpm prisma generate
 
-      - name: Sync test DB schema (db push + post-push.sql)
-        # `prisma db push` creates tables/columns/indexes but skips CHECK
-        # constraints (Prisma's schema language doesn't model them).
-        # `prisma/post-push.sql` adds the spec-005 / spec-008 / spec-023
-        # CHECKs the tests depend on. The vitest globalSetup also adds a
-        # subset of these IF NOT EXISTS; running post-push.sql first
-        # ensures the complete set lands in the canonical post-023 form.
-        # This builds the `hadron_test` TEMPLATE that perWorkerDb.ts clones.
-        run: |
-          pnpm prisma db push --skip-generate
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f prisma/post-push.sql
+      # No schema step (#1922): the vitest globalSetup builds the test template
+      # itself, from an empty database, for this checkout's schema fingerprint
+      # (src/test/schemaTemplate.ts). Pushing to `hadron_test` here would build
+      # a database the parallel suite never reads.
 
       - name: Run vitest suite (shard ${{ matrix.shard }}/${{ strategy.job-total }})
         # Go through the `pnpm test` script (= `vitest run`) so CI can't drift

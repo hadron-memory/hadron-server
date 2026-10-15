@@ -242,19 +242,26 @@ export async function locateTeamAgent(
   teamAgentRef: string | null | undefined,
 ): Promise<TeamAgentRow> {
   if (teamAgentRef) {
-    const { id } = await resolveAgentRef(ctx.db, teamAgentRef);
     // The explicit ref must name an agent INSTALLED in this App — otherwise
     // the operation would read cast lists (and allocate against a register)
-    // from an agent the team App never adopted.
+    // from an agent the team App never adopted. #1946 (ruling A): an absent
+    // Agent gets the same answer as a not-installed one, and neither carries
+    // the Agent's id, so an App reader learns only what is installed here.
+    const notInstalled = () => new GraphQLError('teamAgentRef must name an Agent installed in this App.', {
+      extensions: { code: 'TEAM_AGENT_NOT_INSTALLED', appId },
+    });
+    let id: string;
+    try {
+      ({ id } = await resolveAgentRef(ctx.db, teamAgentRef));
+    } catch (e) {
+      if (e instanceof AgentNotFoundError) throw notInstalled();
+      throw e;
+    }
     const row = await ctx.db.appAgent.findUnique({
       where: { appId_agentId: { appId, agentId: id } },
       select: { agent: { select: { id: true, name: true, urn: true, systemMemoryId: true } } },
     });
-    if (!row) {
-      throw new GraphQLError('teamAgentRef must name an Agent installed in this App.', {
-        extensions: { code: 'TEAM_AGENT_NOT_INSTALLED', appId, agentId: id },
-      });
-    }
+    if (!row) throw notInstalled();
     return row.agent;
   }
   const installed = await ctx.db.appAgent.findMany({
@@ -785,18 +792,18 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
   // 2. Resolve the agent being cast — installed in this App at cast time.
   let agent: CastTarget['agent'];
   if (agentRef && agentRef.trim() !== '') {
-    // resolveAgentRef throws a plain AgentNotFoundError (which would read
-    // INTERNAL_SERVER_ERROR on the wire) — translate to the typed refusal,
-    // matching startSession's agentRef handling.
+    // #1946 (ruling A): an absent Agent and one not installed here are ONE
+    // answer, WORKER_AGENT_NOT_INSTALLED with no agentId, so the App's staff
+    // learn only what is installed in their own App.
+    const notInstalled = () => new GraphQLError(
+      'agentRef must name an Agent installed in this App — casting requires the agent on the roster at cast time.',
+      { extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId } },
+    );
     let id: string;
     try {
       ({ id } = await resolveAgentRef(ctx.db, agentRef.trim()));
     } catch (e) {
-      if (e instanceof AgentNotFoundError) {
-        throw new GraphQLError(`Agent not found: ${agentRef.trim()}`, {
-          extensions: { code: 'BAD_USER_INPUT' },
-        });
-      }
+      if (e instanceof AgentNotFoundError) throw notInstalled();
       throw e;
     }
     const row = await ctx.db.appAgent.findUnique({
@@ -807,12 +814,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
         },
       },
     });
-    if (!row || row.agent.deletedAt) {
-      throw new GraphQLError(
-        'agentRef must name an Agent installed in this App — casting requires the agent on the roster at cast time.',
-        { extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId, agentId: id } },
-      );
-    }
+    if (!row || row.agent.deletedAt) throw notInstalled();
     agent = row.agent;
   } else {
     if (!roleNorm) {
@@ -1946,12 +1948,20 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
     FROM sessions s
     JOIN workers w ON w.id = s.worker_id
     LEFT JOIN LATERAL (
-      SELECT max(e.created_at) AS max_created
+      -- #1952: the "+ interval '0'" is load-bearing. A bare max(created_at)
+      -- lets the planner serve the max by walking usage_events_created_at_idx
+      -- backwards with a filter, which for a session with no (or ancient)
+      -- activity reads the whole index: the 2026-10-14 outage. Statistics in
+      -- which a few sessions dominate activity choose that walk even with the
+      -- index below present, and ORDER BY … LIMIT 1 is the same plan. No
+      -- created_at index can order this expression, so only session-keyed
+      -- paths remain. Cost: a session's activity rows are all read, bounded
+      -- per App. A stored last-activity column is #1957.
+      SELECT max(e.created_at + interval '0') AS max_created
       FROM usage_events e
       -- #1653 / DY-2: only events written while the session was live count.
       -- #1903: served by the partial usage_events_session_activity_idx
-      -- (post-push.sql). Without it the planner walked created_at backwards
-      -- over the whole table for a session with no activity rows.
+      -- (post-push.sql).
       WHERE e.session_id = s.id AND e.counts_as_activity
     ) ue ON true
     WHERE ${scope} AND s.deleted_at IS NULL

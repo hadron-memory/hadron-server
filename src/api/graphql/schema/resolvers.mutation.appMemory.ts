@@ -37,6 +37,7 @@ import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { createNode } from '../../../controller/operations/createNode.js';
@@ -121,18 +122,25 @@ async function resolveInstalledAgent(
   appId: string,
   agentRef: string,
 ): Promise<{ id: string; urn: string }> {
-  const { id: agentId } = await resolveAgentRef(ctx.db, agentRef);
+  // #1946 (ruling A): "no such Agent" answers exactly as "not installed in
+  // this App" — one answer, no id.
+  const notInstalled = () => new GraphQLError('That Agent is not installed in this App.', {
+    extensions: { code: 'AGENT_NOT_INSTALLED' },
+  });
+  let agentId: string;
+  try {
+    ({ id: agentId } = await resolveAgentRef(ctx.db, agentRef));
+  } catch (e) {
+    if (e instanceof AgentNotFoundError) throw notInstalled();
+    throw e;
+  }
   // One query does the install check AND fetches the agent's urn (via the
   // AppAgent join) instead of isAgentInstalled + a separate agent read.
   const appAgent = await ctx.db.appAgent.findUnique({
     where: { appId_agentId: { appId, agentId } },
     select: { agent: { select: { id: true, urn: true } } },
   });
-  if (!appAgent) {
-    throw new GraphQLError('That Agent is not installed in this App.', {
-      extensions: { code: 'AGENT_NOT_INSTALLED' },
-    });
-  }
+  if (!appAgent) throw notInstalled();
   return appAgent.agent;
 }
 

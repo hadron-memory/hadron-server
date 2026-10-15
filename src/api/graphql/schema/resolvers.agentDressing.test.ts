@@ -278,6 +278,7 @@ describe('startSession — coding provenance + agentRef (#928)', () => {
         { input: { id: generateId(), agentRef: agent.id } },
         ctx(outsider.id),
       ),
-    ).rejects.toThrow(/Forbidden/);
+    // #1944: an Agent the caller can't read answers exactly as an absent one.
+    ).rejects.toThrow(`Agent not found: ${agent.id}`);
   });
 });
