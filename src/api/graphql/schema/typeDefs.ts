@@ -3181,12 +3181,14 @@ export const typeDefs = `#graphql
   type HostKeyUse {
     id: ID!
     hostId: String!
-    "register, collect, report or availability."
+    "register, collect, report, availability or read."
     action: String!
     "The operation a report was about."
     operationId: ID
     "How many operations a collection returned, or workers a registration listed."
     count: Int
+    "#1881 — the refusal code when the server refused this use (e.g. APP_KEY_SCOPE_REQUIRED); null for a use that succeeded. A refused use is recorded too (hrn:node:hadronmemory.com:specs:cor:agt:070:07: every use)."
+    refusedCode: String
     usedAt: DateTime!
   }
 

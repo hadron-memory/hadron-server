@@ -15,6 +15,7 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { resolvers, type Context } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -486,5 +487,13 @@ describe('reads', () => {
     const uses = await F.AppKey.hostUses({ id: orca1.id, appId: app.id }, {}, ctx(manager.id));
     expect(uses.map((u: any) => u.action)).toEqual(['register']);
     expect(await code(F.AppKey.hostUses({ id: orca1.id, appId: app.id }, {}, ctx(member.id)))).toBe('FORBIDDEN');
+  });
+
+  it('#1881: a refused use reads back with its code, and the SDL exposes it', async () => {
+    expect(await code(M.registerHost({}, { input: { appRef: app.id, label: 'x', pollIntervalSeconds: 60 } }, keyCtx(orca1, app.id, { sessionId: 's1' } as any)))).toBe('APP_KEY_SESSION_BOUND');
+    const uses = await F.AppKey.hostUses({ id: orca1.id, appId: app.id }, {}, ctx(manager.id));
+    expect(uses.map((u: any) => [u.action, u.refusedCode]).sort()).toEqual([['register', null], ['register', 'APP_KEY_SESSION_BOUND']]);
+    // The resolver returns whole rows, so the field reaches a client exactly when the SDL declares it.
+    expect(/type HostKeyUse \{[^}]*\n\s*refusedCode: String\n/.exec(typeDefs)).not.toBeNull();
   });
 });
