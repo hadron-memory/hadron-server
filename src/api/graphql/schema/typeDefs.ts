@@ -1690,6 +1690,60 @@ export const typeDefs = `#graphql
     events: [UsageEvent!]!
   }
 
+  """
+  #1956 (hrn:node:hadronmemory.com:specs:cor:agt:020:03) — what resumeSession did. RESUMED: bound to an open
+  session (a shed's claim, or the one live session of the fast path). STARTED:
+  the claimed session had ended (a rotation), so the worker's next session was
+  started. CHOOSE: several candidates, nothing bound or consumed; call again with
+  \`session\` set to the one the human picks.
+  """
+  enum ResumeOutcome { RESUMED STARTED CHOOSE }
+
+  "#1956 — where a resume candidate came from: an unused resume claim, or (with no claim) a live bound session."
+  enum ResumeSource { CLAIM LIVE_SESSION }
+
+  "#1956 — one of the caller's own sessions offered by a CHOOSE answer. Never carries a claim id."
+  type ResumeCandidate {
+    "The session to pass back as resumeSession(input: { session }) to pick this one."
+    sessionId: ID!
+    workerId: ID!
+    workerName: String!
+    "The session's description (its plan), when it has one."
+    description: String
+    source: ResumeSource!
+    "When the claim lapses; null for a live session."
+    expiresAt: DateTime
+  }
+
+  "#1956 — the answer to resumeSession: the bound session, or the candidates to choose from."
+  type ResumeSessionResult {
+    outcome: ResumeOutcome!
+    "The bound session for RESUMED and STARTED; null for CHOOSE."
+    session: Session
+    "Empty unless outcome is CHOOSE."
+    candidates: [ResumeCandidate!]!
+  }
+
+  "#1956 — the receipt of a written resume claim. It names no claim id: redemption is judged by the caller's token."
+  type ResumeClaimReceipt {
+    sessionId: ID!
+    workerId: ID!
+    expiresAt: DateTime!
+  }
+
+  "#1956 — resumeSession's optional input. Everything but \`session\` is provenance for a session the redemption starts."
+  input ResumeSessionInput {
+    "Pick one of a CHOOSE answer's candidates by its sessionId."
+    session: ID
+    "What the next session is about, when the redemption starts one (its plan)."
+    description: String
+    tool: String
+    host: String
+    llmModel: String
+    family: String
+    transcriptPath: String
+  }
+
   type UsageEvent {
     id: ID!
     type: String!
@@ -9513,8 +9567,47 @@ export const typeDefs = `#graphql
     session whose handoff evaporated is not, because the context that composed
     it is gone. Passing \`handoff\` on a session with no worker is refused rather
     than dropped; there is no sequence to write it to.
+
+    #1956: \`resumeClaim: true\` also writes a resume claim, after the handoff
+    and before the end, so the fresh context of a rotation starts this worker's
+    next session with resumeSession and no arguments (see createResumeClaim).
+    Only on your own open worker session: otherwise it refuses and nothing ends.
     """
-    endSession(id: ID!, summary: String, handoff: String, inputTokens: Int, outputTokens: Int, turnCount: Int, errorCount: Int): Session!
+    endSession(id: ID!, summary: String, handoff: String, inputTokens: Int, outputTokens: Int, turnCount: Int, errorCount: Int, resumeClaim: Boolean): Session!
+    """
+    #1956 (hrn:node:hadronmemory.com:specs:cor:agt:020:03) — write a RESUME CLAIM for your own open worker
+    session before a deliberate context reset that keeps the session (a shed).
+    The fresh context recovers the worker with resumeSession and no arguments,
+    so no binding file is needed. The claim is single use, lives 60 seconds from
+    this write (Holger, #12291), is redeemable only by you (judged by your token,
+    never by anything presented), and replaces any unused claim for the same
+    session. For a rotation, pass endSession(resumeClaim: true) instead, which
+    writes it with the handoff, before the end. Someone else's session answers
+    as an absent one; an ended session refuses SESSION_ENDED; a session with no
+    worker refuses SESSION_NOT_WORKER_BOUND.
+    """
+    createResumeClaim(sessionId: ID!): ResumeClaimReceipt!
+    """
+    #1956 (hrn:node:hadronmemory.com:specs:cor:agt:020:03) — recover your worker binding after a context reset,
+    with one call and no arguments. One unused resume claim of yours binds it
+    (RESUMED to the open session, or STARTED: the worker's next session, when
+    the claimed one had ended); several list as CHOOSE and consume nothing. With
+    no claim, the fast path: exactly one of your worker sessions that reads LIVE
+    is RESUMED, several list as CHOOSE, never a guess. Pass \`session\` to pick
+    a listed candidate. Nothing at all refuses NOTHING_TO_RESUME, and nothing is
+    posted or recorded on your behalf. Judged only on your own user: anyone
+    else's claims and sessions are invisible, and an App key or an impersonation
+    gets the same refusal as a caller with nothing. A claim is single use: of two
+    racing redemptions one binds and the other refuses NOTHING_TO_RESUME, and a
+    claim's 60 seconds are judged by the database clock when it is consumed.
+    A claim is recovery intent, not a waiver: resuming an open session passes
+    the same lifecycle gate as any resume (you still hold the name and may drive
+    its App, it is not past its hard expiry or dormant, no other session of the
+    worker is live), else RESUME_REFUSED; starting the next one passes
+    startSession's. Either refusal spends the claim. More recently driven worker
+    sessions than one scan holds refuses RESUME_AMBIGUOUS rather than guessing.
+    """
+    resumeSession(input: ResumeSessionInput): ResumeSessionResult!
 
     """
     Record a usage event. A supplied session is attributed only when owned

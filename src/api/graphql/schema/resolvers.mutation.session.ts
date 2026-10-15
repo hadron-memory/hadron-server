@@ -88,6 +88,15 @@ import {
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
 import { consumeGrant, failOperation, loadLiveGrant, sameHold, type LoadedGrant } from '../../../lib/hostOperations/launch.js';
+import {
+  consumeResumeClaim,
+  liveClaimsOf,
+  liveWorkerSessionsOf,
+  nothingToResume,
+  toCandidates,
+  writeResumeClaim,
+} from '../../../lib/resumeClaims.js';
+import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx } from '../../../lib/teamAttention.js';
 import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
@@ -451,6 +460,60 @@ export async function writeSessionHandoff(
     );
   }
 }
+
+// ── #1956: resume claims ───────────────────────────────────────────────────
+
+/** The optional provenance a redemption passes on when it must start the worker's next session. */
+type ResumeSessionInput = {
+  session?: string | null;
+  description?: string | null;
+  tool?: string | null;
+  host?: string | null;
+  llmModel?: string | null;
+  family?: string | null;
+  transcriptPath?: string | null;
+};
+
+/**
+ * The session a caller may write a resume claim for: their OWN worker session, judged on the user, never an App
+ * key or an impersonation. Anything else answers exactly as an absent session (the claim is the caller's own
+ * recovery handle, so no one else's session is theirs to name).
+ */
+async function ownSessionForClaim(ctx: Context, sessionId: string) {
+  const session = await ctx.db.session.findUnique({
+    where: { id: sessionId },
+    select: { id: true, userId: true, appId: true, workerId: true, endedAt: true, deletedAt: true },
+  });
+  if (!session || session.deletedAt || !ctx.userId || ctx.impersonation || session.userId !== ctx.userId || !session.appId) {
+    throw new GraphQLError(`Session not found: ${sessionId}`, { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  if (!session.workerId) {
+    throw new GraphQLError(
+      'A resume claim recovers a worker, and this session is not bound to one.',
+      { extensions: { code: 'SESSION_NOT_WORKER_BOUND', sessionId } },
+    );
+  }
+  return { ...session, userId: ctx.userId, appId: session.appId, workerId: session.workerId };
+}
+
+/**
+ * #1956 — the caller's own session exists but the shared lifecycle gate will not let it be resumed now. Told
+ * plainly: every path here is keyed on the caller's own claims and sessions, so the reason leaks nothing.
+ */
+const resumeRefused = (dormant: boolean) =>
+  new GraphQLError(
+    dormant
+      ? 'That session is dormant: it was idle past its App\'s dormancy period, so no act resumes it. Start the worker again by name.'
+      : 'That session cannot be resumed now: the name is no longer yours, you can no longer drive its App, it is past ' +
+        'its hard expiry or has ended, or another session of the worker is live. Nothing was bound.',
+    { extensions: { code: 'RESUME_REFUSED', dormant } },
+  );
+
+const sessionEndedForClaim = (sessionId: string) =>
+  new GraphQLError(
+    'This session has ended. Write the claim before the end: endSession(resumeClaim: true) writes it with the handoff.',
+    { extensions: { code: 'SESSION_ENDED', sessionId } },
+  );
 
 export const sessionMutations = {
     startSession: async (_: unknown, { input: given }: { input: SessionInput }, ctx: Context) => withLaunch(given, ctx, async (input, launch) => {
@@ -1430,7 +1493,8 @@ export const sessionMutations = {
         outputTokens,
         turnCount,
         errorCount,
-      }: { id: string; summary?: string; handoff?: string; inputTokens?: number; outputTokens?: number; turnCount?: number; errorCount?: number },
+        resumeClaim,
+      }: { id: string; summary?: string; handoff?: string; inputTokens?: number; outputTokens?: number; turnCount?: number; errorCount?: number; resumeClaim?: boolean | null },
       ctx: Context,
     ) => {
       // #931: same write gate as updateSession — this was previously ungated,
@@ -1448,6 +1512,11 @@ export const sessionMutations = {
       // this throws, the session is still open and the caller can retry or end
       // without a handoff deliberately. Ending first and losing the prose is
       // unrecoverable: the context that composed it is gone with the stint.
+      // #1956: a claim's eligibility is judged BEFORE the handoff is written, so a refused claim leaves no handoff
+      // behind for a stint that did not end. The claim itself is written after the handoff, before the end.
+      const claimOwner = resumeClaim ? await ownSessionForClaim(ctx, id) : null;
+      if (claimOwner?.endedAt) throw sessionEndedForClaim(id);
+
       const handoffBody = handoff?.trim();
       if (handoffBody) {
         if (!session.workerId) {
@@ -1462,6 +1531,13 @@ export const sessionMutations = {
         await writeSessionHandoff(ctx, session.id, session.workerId, handoffBody);
       }
 
+      // #1956: the resume claim, written with the handoff and before the end, so the fresh context of a rotation
+      // can start the worker's next stint with one no-argument resumeSession. Only the session's own driver, and
+      // only while it is open: the claim is a promise about this stint, not a key to an ended one.
+      if (claimOwner) {
+        await writeResumeClaim(ctx.db, { sessionId: id, appId: claimOwner.appId, workerId: claimOwner.workerId, holderUserId: claimOwner.userId });
+      }
+
       // FIRST END WINS, decided by a guarded write rather than by the row read
       // above: `endedAt` orders the continuity chain (both `Worker.continuity`'s
       // "previous" and startSession's `prevSessionId` derivation key on it), so
@@ -1472,6 +1548,129 @@ export const sessionMutations = {
         summary, inputTokens, outputTokens, turnCount, errorCount,
       });
       return ctx.db.session.findUniqueOrThrow({ where: { id }, include: SESSION_INCLUDE });
+    },
+
+    /**
+     * #1956 (cor:agt:020:03) — write a resume claim for the caller's own open worker session, before a deliberate
+     * context reset that keeps the session (a shed). Redeemable by resumeSession for RESUME_CLAIM_TTL_MS (60 s),
+     * once, and only by this caller. Replaces any unused claim for the same session. The receipt names no claim id:
+     * redemption is judged by the caller's token, so there is nothing to present.
+     */
+    createResumeClaim: async (_: unknown, { sessionId }: { sessionId: string }, ctx: Context) => {
+      const own = await ownSessionForClaim(ctx, sessionId);
+      if (own.endedAt) throw sessionEndedForClaim(sessionId);
+      const { expiresAt } = await writeResumeClaim(ctx.db, { sessionId, appId: own.appId, workerId: own.workerId, holderUserId: own.userId });
+      return { sessionId, workerId: own.workerId, expiresAt };
+    },
+
+    /**
+     * #1956 (cor:agt:020:03; Vera's proposal on hadron-cli#842) — recover a worker binding after a context reset,
+     * with one call and no arguments. Judged entirely on the caller's own user id, so a non-holder, an App key or
+     * an impersonation gets the same NOTHING_TO_RESUME as a caller with nothing (no oracle, gate invariant b):
+     *  - one live claim: consumed by a guarded update and bound (RESUMED for an open session, STARTED for an ended
+     *    one: the worker's next session, through startSession's own gates, inheriting the handoff);
+     *  - several: CHOOSE, listing the worker and session for each, consuming nothing;
+     *  - none: the fast path over the caller's own LIVE worker sessions, one RESUMED, several CHOOSE;
+     *  - `session` picks one of the listed sessions.
+     * A redemption that loses the consume race is refused rather than falling through to the fast path, so two
+     * contexts never both take one claim. Resuming an open session goes through the shared lifecycle gate, so a
+     * moved name, lost App eligibility, a hard expiry, dormancy or another live session refuses RESUME_REFUSED
+     * (#1966 review, Anne P2-1); a STARTED redemption that startSession refuses surfaces that refusal. Either way
+     * the claim is spent. A fast-path pool too large to decide on refuses RESUME_AMBIGUOUS rather than guessing.
+     * Nothing is ever posted or recorded on a refusal.
+     */
+    resumeSession: async (_: unknown, { input }: { input?: ResumeSessionInput | null }, ctx: Context) => {
+      const given = input ?? {};
+      if (!ctx.userId || ctx.impersonation) throw nothingToResume();
+      const userId = ctx.userId;
+      const now = new Date();
+      const claims = await liveClaimsOf(ctx.db, userId, now);
+
+      const resumed = async (sessionId: string, outcome: 'RESUMED' | 'STARTED') => ({
+        outcome,
+        session: await ctx.db.session.findUniqueOrThrow({ where: { id: sessionId }, include: SESSION_INCLUDE }),
+        candidates: [],
+      });
+      /**
+       * Resume an open session through the shared lifecycle gate (#1966 review, Anne P2-1), in ONE transaction with
+       * the claim's consume when there is one: the gate re-reads ownership, the hold, current App eligibility, the
+       * hard expiry, dormancy and "no other live session" under the App→Worker locks a bind takes, and its touch is
+       * guarded. A claim is spent even when the gate refuses (it was redeemed; the answer is the refusal).
+       * A claim lost to a racing replacement or redemption rolls the whole act back and answers NOTHING_TO_RESUME.
+       */
+      const resumeOpen = async (sessionId: string, claimId: string | null) => {
+        // The gate runs FIRST and the claim is consumed LAST (Anne's P2-4): App -> Worker -> Session -> Claim, the
+        // order the claim writer's Session -> Claim agrees with. A claim that turns out spent (a replacement or a
+        // racing redemption won) rolls the gate's touch back with it.
+        const lost = new Error('resume claim lost');
+        let verdict: 'OK' | 'REFUSED' | 'GONE';
+        try {
+          verdict = await ctx.db.$transaction(async (tx) => {
+            const ok = await resumeOwnLapsedSessionInTx(ctx, tx, sessionId);
+            if (claimId) {
+              if (!(await consumeResumeClaim(tx, claimId, userId))) throw lost;
+              if (ok) await tx.resumeClaim.update({ where: { id: claimId }, data: { resumedSessionId: sessionId } });
+            }
+            return ok ? ('OK' as const) : ('REFUSED' as const);
+          });
+        } catch (e) {
+          if (e !== lost) throw e;
+          verdict = 'GONE';
+        }
+        if (verdict === 'GONE') throw nothingToResume();
+        if (verdict === 'REFUSED') throw resumeRefused((await lapsedResumeVerdict(ctx, sessionId)) === 'DORMANT');
+        return resumed(sessionId, 'RESUMED');
+      };
+      const redeem = async (c: (typeof claims)[number]) => {
+        const claimed = await ctx.db.session.findUnique({ where: { id: c.sessionId }, select: { endedAt: true, deletedAt: true } });
+        // A shed: the session is still open, so it is resumed, never replaced.
+        if (claimed && !claimed.deletedAt && !claimed.endedAt) return resumeOpen(c.sessionId, c.id);
+        // A rotation: the claimed stint ended, so the worker's next one starts through startSession's own gates
+        // (hold, retirement, App, WORKER_TAKEN), which derive prevSessionId and deliver the handoff at bind.
+        if (!(await consumeResumeClaim(ctx.db, c.id, userId))) throw nothingToResume();
+        const started = await sessionMutations.startSession({}, {
+          input: {
+            id: generateId(),
+            appRef: c.appId,
+            workerRef: c.workerId,
+            plan: given.description ?? undefined,
+            tool: given.tool ?? undefined,
+            host: given.host ?? undefined,
+            llmModel: given.llmModel ?? undefined,
+            family: given.family ?? undefined,
+            transcriptPath: given.transcriptPath ?? undefined,
+          } as SessionInput,
+        }, ctx);
+        await ctx.db.resumeClaim.update({ where: { id: c.id }, data: { resumedSessionId: started.id } });
+        return resumed(started.id, 'STARTED');
+      };
+      const resumeLive = (sessionId: string) => resumeOpen(sessionId, null);
+
+      if (given.session) {
+        const picked = claims.find((c) => c.sessionId === given.session);
+        if (picked) return redeem(picked);
+        const live = await liveWorkerSessionsOf(ctx.db, userId, now);
+        if (live.some((l) => l.id === given.session)) return resumeLive(given.session);
+        throw nothingToResume();
+      }
+      if (claims.length === 1) return redeem(claims[0]);
+      if (claims.length > 1) {
+        return {
+          outcome: 'CHOOSE',
+          session: null,
+          candidates: await toCandidates(ctx.db, claims.map((c) => ({ sessionId: c.sessionId, workerId: c.workerId, source: 'CLAIM' as const, expiresAt: c.expiresAt }))),
+        };
+      }
+      const live = await liveWorkerSessionsOf(ctx.db, userId, now);
+      if (live.length === 1) return resumeLive(live[0].id);
+      if (live.length > 1) {
+        return {
+          outcome: 'CHOOSE',
+          session: null,
+          candidates: await toCandidates(ctx.db, live.map((l) => ({ sessionId: l.id, workerId: l.workerId!, source: 'LIVE_SESSION' as const, expiresAt: null }))),
+        };
+      }
+      throw nothingToResume();
     },
 
     recordUsage: async (_: unknown, { event }: { event: UsageEventInput }, ctx: Context) => {
