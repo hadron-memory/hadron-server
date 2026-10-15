@@ -1948,12 +1948,20 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
     FROM sessions s
     JOIN workers w ON w.id = s.worker_id
     LEFT JOIN LATERAL (
-      SELECT max(e.created_at) AS max_created
+      -- #1952: the "+ interval '0'" is load-bearing. A bare max(created_at)
+      -- lets the planner serve the max by walking usage_events_created_at_idx
+      -- backwards with a filter, which for a session with no (or ancient)
+      -- activity reads the whole index: the 2026-10-14 outage. Statistics in
+      -- which a few sessions dominate activity choose that walk even with the
+      -- index below present, and ORDER BY … LIMIT 1 is the same plan. No
+      -- created_at index can order this expression, so only session-keyed
+      -- paths remain. Cost: a session's activity rows are all read, bounded
+      -- per App. A stored last-activity column is #1957.
+      SELECT max(e.created_at + interval '0') AS max_created
       FROM usage_events e
       -- #1653 / DY-2: only events written while the session was live count.
       -- #1903: served by the partial usage_events_session_activity_idx
-      -- (post-push.sql). Without it the planner walked created_at backwards
-      -- over the whole table for a session with no activity rows.
+      -- (post-push.sql).
       WHERE e.session_id = s.id AND e.counts_as_activity
     ) ue ON true
     WHERE ${scope} AND s.deleted_at IS NULL
