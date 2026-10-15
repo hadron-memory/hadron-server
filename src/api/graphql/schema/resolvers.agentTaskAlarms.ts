@@ -33,6 +33,11 @@
 // escalation holds the alarm FOR SHARE while it wakes the next owner, so an
 // acknowledgement and a wake never interleave.
 
+import {
+  HOST_REPORT_TIMEOUT_DEFAULT_MINUTES,
+  HOST_REPORT_TIMEOUT_MAX_MINUTES,
+  HOST_REPORT_TIMEOUT_MIN_MINUTES,
+} from '../../../lib/hostOperations/settle.js';
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { type Context } from './resolvers.helpers.js';
@@ -356,11 +361,11 @@ export const agentTaskAlarmMutations = {
    */
   setAgentTaskStallSchedule: async (
     _: unknown,
-    { appRef, input }: { appRef: string; input: Partial<Record<keyof StallWindows | 'hostLapseCheckIns' | 'sessionEndGraceMinutes', number | null>> },
+    { appRef, input }: { appRef: string; input: Partial<Record<keyof StallWindows | 'hostLapseCheckIns' | 'sessionEndGraceMinutes' | 'hostReportTimeoutMinutes', number | null>> },
     ctx: Context,
   ) => {
     if (!input) throw badInput('input is required.');
-    const data: Partial<Record<keyof StallWindows | 'hostLapseCheckIns' | 'sessionEndGraceMinutes', number | null>> = {};
+    const data: Partial<Record<keyof StallWindows | 'hostLapseCheckIns' | 'sessionEndGraceMinutes' | 'hostReportTimeoutMinutes', number | null>> = {};
     for (const key of Object.keys(STALL_WINDOW_DEFAULTS) as (keyof StallWindows)[]) {
       if (!(key in input)) continue;
       const v = input[key];
@@ -391,6 +396,17 @@ export const agentTaskAlarmMutations = {
       }
       data.sessionEndGraceMinutes = v ?? null;
     }
+    // cor:agt:070:02 (#1881): the time a host has to report an operation it collected, in minutes.
+    if ('hostReportTimeoutMinutes' in input) {
+      const v = input.hostReportTimeoutMinutes;
+      if (v != null && (!Number.isInteger(v) || v < HOST_REPORT_TIMEOUT_MIN_MINUTES || v > HOST_REPORT_TIMEOUT_MAX_MINUTES)) {
+        throw badInput(
+          `hostReportTimeoutMinutes is a whole number of minutes from ${HOST_REPORT_TIMEOUT_MIN_MINUTES} to ${HOST_REPORT_TIMEOUT_MAX_MINUTES}, ` +
+            `or null for the default (${HOST_REPORT_TIMEOUT_DEFAULT_MINUTES}).`,
+        );
+      }
+      data.hostReportTimeoutMinutes = v ?? null;
+    }
     const { app, actor } = await resolveParticipatedApp(ctx, appRef);
     requireWritable(ctx, app);
     await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
@@ -398,7 +414,8 @@ export const agentTaskAlarmMutations = {
         throw taskError('APP_MANAGER_REQUIRED', "Only whoever manages the App sets its stall windows.");
       }
       // #1863: a lapse decision in flight either finishes under the old count or waits for this one.
-      if ('hostLapseCheckIns' in data) await lockAppHostLapse(tx, freshApp.id, 'exclusive');
+      // #1881: so is a report-timeout decision, which reads the timeout under the same lock shared.
+      if ('hostLapseCheckIns' in data || 'hostReportTimeoutMinutes' in data) await lockAppHostLapse(tx, freshApp.id, 'exclusive');
       await tx.agentTaskStallSchedule.upsert({
         where: { appId: freshApp.id },
         create: { appId: freshApp.id, ...data, updatedBy: ctx.userId ?? null },
@@ -416,6 +433,7 @@ async function stallWindowsView(ctx: Context, appId: string) {
     ...effectiveWindows(row),
     hostLapseCheckIns: row?.hostLapseCheckIns ?? HOST_LAPSE_CHECK_INS_DEFAULT,
     sessionEndGraceMinutes: row?.sessionEndGraceMinutes ?? SESSION_END_GRACE_DEFAULT_MINUTES,
+    hostReportTimeoutMinutes: row?.hostReportTimeoutMinutes ?? HOST_REPORT_TIMEOUT_DEFAULT_MINUTES,
     updatedAt: row?.updatedAt ?? null,
   };
 }

@@ -8,7 +8,8 @@ import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
 import { nudgeText,
   type Config, type Runner, type RunResult, type Terminal, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce,
-  promptLineIsEmpty, resolveTerminal, screenAgentFamily, status,
+  promptLineIsEmpty, resolveTerminal, runCommand, screenAgentFamily, status,
+  CALL_TIMEOUT_MS, MIN_CALL_TIMEOUT_MS,
 } from './router.js';
 
 /** Rendered screens as Orca returned them on 2026-10-01 (idle, nobody typing). */
@@ -2094,5 +2095,87 @@ describe('#1845 — the terminal pin: a roster row may name its MAIN terminal', 
     expect(out.nudged).toEqual(['Eli']);
     const [, , via] = resolveTerminal(c.roster[0]!, fake.terminals as unknown as Terminal[], c, fake.run);
     expect(via).toBe('identity');
+  });
+});
+
+describe('per-call hard timeout (2026-10-14 wedged-cycle incidents)', () => {
+  it('bounds every child call at 90s — ≥ busyWaitMs + margin, never the old 300s', () => {
+    // The 300_000 backstop let a slow/502ing gateway hang each call for five
+    // minutes; ~180 calls/cycle × a few hangs = 45+ minute cycles. 90s covers
+    // the one legitimately long call (the 60s busy-wait) with margin.
+    expect(CALL_TIMEOUT_MS).toBe(90_000);
+    expect(CALL_TIMEOUT_MS).toBeLessThan(300_000);
+    expect(CALL_TIMEOUT_MS).toBeGreaterThanOrEqual(MIN_CALL_TIMEOUT_MS);
+    expect(60_000).toBeLessThanOrEqual(CALL_TIMEOUT_MS - 15_000); // busyWaitMs's default (loadConfig: raw.busyWaitMs ?? 60_000)
+  });
+  it('a killed/timed-out child reads as code 1 with empty output — the fail-closed shape every consumer already handles', () => {
+    expect(runCommand(['false']).code).not.toBe(0);
+    expect(runCommand(['/nonexistent/binary']).code).not.toBe(0);
+    expect(runCommand(['/nonexistent/binary']).stdout).toBe('');
+  });
+});
+
+describe('#1940 — reported prune is keyed by NAME (Joshua port-find)', () => {
+  it('a worker re-held with a REPEAT reason after leaving the held set logs the fresh hold line', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.busy.add('term_eli');
+    fake.screens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    poll(c); // held once: reported['Eli'] = <busy reason>
+    const st = new State(c.stateDir);
+    const ledger = st.ledger();
+    expect(Object.keys(ledger.reported ?? {})).toContain('Eli'); // keyed by NAME
+    // The worker recovers (leaves the held set entirely): the prune must drop
+    // the reported entry by name, or a later SAME-reason hold stays silent.
+    fake.busy.clear();
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE });
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3, relevant: 105 })];
+    poll(c); // nudged: leaves the held set
+    const after = new State(c.stateDir).ledger();
+    expect(after.heldSince['w-eli']).toBeUndefined();
+    expect(after.reported['Eli']).toBeUndefined(); // the id-keyed delete was a no-op before this fix
+  });
+});
+
+describe('#1940 fix cycle — the timeout kill is hard and its result fail-closed', () => {
+  it('a SIGTERM-IGNORING child that prints success JSON is killed and reads as code 1 with EMPTY stdout (Andi P2-1+2, Chip repro)', () => {
+    // The production wrapper runs node; a tiny script that traps SIGTERM and
+    // prints success JSON reproduces both P2s in one child: without the fix,
+    // the catchable SIGTERM lets it overrun and exit 0 with output retained.
+    const script = [
+      'process.on("SIGTERM", () => { /* ignore: we are a wedged child */ });',
+      'process.stdout.write(JSON.stringify({ ok: true }));',
+      'setTimeout(() => { process.exit(0); }, 500);',
+    ].join('');
+    // Scaled-down bound (Chip's repro approach): 150ms bound vs a child that
+    // ignores SIGTERM and would run 500ms — only the hard kill can stop it.
+    const res = runCommand([process.execPath, '-e', script], 150);
+    expect(res.code).toBe(1);
+    expect(res.stdout).toBe('');
+    expect(res.stderr).toMatch(/killed|ETIMEDOUT|call failed/); // killed at the bound — the message names the failure either way
+  }, 30_000);
+  it('a normally-exiting child is untouched by the kill path', () => {
+    const res = runCommand([process.execPath, '-e', 'process.stdout.write("fine")']);
+    expect(res.code).toBe(0);
+    expect(res.stdout).toBe('fine');
+  });
+});
+
+describe('#1940 cycle 2 — ANY proc.error is fail-closed (Andi #12271, Chip #12273)', () => {
+  it('a spawn error with retained success JSON on the pipe reads as code 1 with EMPTY stdout', () => {
+    // ENOENT: the binary does not exist — spawnSync sets proc.error with the
+    // child never running. To also cover the error-with-output shape Chip
+    // injected (ENOBUFS mid-write), assert the general contract on ENOENT
+    // and the pipe-error equivalence in one rule: proc.error => empty stdout.
+    const res = runCommand(['/nonexistent/binary/that/does/not/exist']);
+    expect(res.code).toBe(1);
+    expect(res.stdout).toBe('');
+    expect(res.stderr).toContain('call failed');
+  });
+  it('a SUCCESSFUL call is untouched by the error arm (control)', () => {
+    const res = runCommand([process.execPath, '-e', 'process.stdout.write(JSON.stringify({ok:true}))']);
+    expect(res.code).toBe(0);
+    expect(JSON.parse(res.stdout)).toEqual({ ok: true });
   });
 });

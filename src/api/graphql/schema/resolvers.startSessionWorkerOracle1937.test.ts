@@ -10,7 +10,8 @@
  * The strict pin is the same ref before and after its worker's deletion: an outsider must not be able to tell the
  * two apart in message, code or extensions. Controls keep every precise code for a reader of the App, the #1037
  * selection-yields order, the soft-deleted-App collapse, and the narrow catch (an outage propagates).
- * The launch-grant arm is pinned in src/lib/hostOperations/launch.test.ts.
+ * The launch-grant exception is pinned twice, on purpose (#1945): here, so a mutant run of this suite alone kills its
+ * removal, and in src/lib/hostOperations/launch.test.ts, beside the rest of the launch contract.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -22,6 +23,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
+import { LAUNCH_GRANT_PREFIX } from '../../../lib/hostOperations/launch.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -197,5 +199,65 @@ describe('the narrow catch', () => {
   it('control: without the failure the same call is the absent envelope', async () => {
     expect(await envelope(start(ctx(outsider), { workerRef: uma.id }))).toBe(absentEnvelope(uma.id));
     expect((await start(ctx(owner), { workerRef: uma.id })).workerId).toBe(uma.id);
+  });
+});
+
+describe('#1945: the one exception, the worker the caller\'s own launch grant names', () => {
+  // The grant already told its holder that this worker exists, so the read gate is skipped for it alone. A holder who
+  // has since lost the App must reach the FORBIDDEN that fails the start (#10775), not a not-found that leaves the
+  // start hanging. Removing the exception turns both answers below into the absent envelope.
+  let holder: string;
+  let kit: { id: string; urn: string };
+  let hostKey: { id: string };
+  const hostCtx = () => ({ db, appId: app.id, appKeyId: hostKey.id, organizationId: org.id, roles: [] }) as unknown as Context;
+
+  beforeEach(async () => {
+    const n = Math.floor(Math.random() * 1_000_000);
+    const manager = (await db.user.create({ data: { githubId: 75 * 1_000_000 + n, githubUsername: `o37-mgr-${n}`, roles: ['READER'] }, select: { id: true } })).id;
+    holder = (await db.user.create({ data: { githubId: 76 * 1_000_000 + n, githubUsername: `o37-holder-${n}`, roles: ['READER'] }, select: { id: true } })).id;
+    await db.orgMember.create({ data: { organizationId: org.id, userId: manager, role: 'ADMIN' } });
+    await db.appMember.create({ data: { appId: app.id, userId: holder, role: 'member' } });
+    kit = await worker(app, 'Kit', { heldByUserId: holder, heldAt: new Date() });
+    const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
+    hostKey = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label: 'host' }, select: { id: true } });
+    await M.grantAppKeyScope({}, { id: hostKey.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager));
+    await M.registerHost({}, {
+      input: { appRef: app.id, label: 'Orca', pollIntervalSeconds: 600, workers: [{ worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] }] },
+    }, hostCtx());
+    await M.issueHostOperation({}, {
+      input: { appRef: app.id, hostId: 'orca1', worker: kit.id, type: 'worker.start', args: { worktree: 'hadron-server/kit', family: 'claude' } },
+    }, ctx(manager));
+  });
+
+  const grantFor = async (): Promise<string> => {
+    const [op] = await M.collectHostOperations({}, { appRef: app.id }, hostCtx());
+    expect(op.launchGrant.startsWith(LAUNCH_GRANT_PREFIX)).toBe(true);
+    return op.launchGrant as string;
+  };
+  const refusal = async (p: Promise<unknown>) => JSON.parse(await envelope(p)) as { extensions: Record<string, unknown> };
+
+  for (const [form, ref] of [['the grant alone', () => undefined], ['the worker\'s URN', () => kit.urn], ['the worker\'s id', () => kit.id]] as const) {
+    it(`by ${form}: a holder who lost the App reaches the FORBIDDEN that fails the start, never the absent envelope`, async () => {
+      const grant = await grantFor();
+      await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: holder } } });
+      const workerRef = ref();
+      const got = await refusal(start(ctx(holder), { launchGrant: grant, ...(workerRef ? { workerRef } : {}) }));
+      expect(got.extensions).toMatchObject({ code: 'LAUNCH_REFUSED', reason: 'FORBIDDEN' });
+      expect(got.extensions.code).not.toBe('WORKER_NOT_FOUND');
+      expect(await db.session.count()).toBe(0);
+    });
+  }
+
+  it('the disclosed marginal: that holder also learns their own grant\'s worker was retired, and nothing about any other', async () => {
+    const grant = await grantFor();
+    await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: holder } } });
+    await db.worker.update({ where: { id: kit.id }, data: { retiredAt: new Date() } });
+    expect((await refusal(start(ctx(holder), { launchGrant: grant }))).extensions).toMatchObject({ code: 'LAUNCH_REFUSED', reason: 'WORKER_RETIRED' });
+  });
+
+  it('control: any other ref the holder sends is gated first, so a retired worker of the App reads as absent', async () => {
+    const grant = await grantFor();
+    await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: holder } } });
+    expect(await envelope(start(ctx(holder), { launchGrant: grant, workerRef: ret.urn }))).toBe(absentEnvelope(ret.urn));
   });
 });
