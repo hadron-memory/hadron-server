@@ -3,6 +3,7 @@ import { registerAgentDefinitionTools } from './agentDefinitionTools.js';
 import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, resolveInheritedEdges, retainEffective, stillInherited, type InheritedFrom } from '../lib/effectiveSystemMemory.js';
 import { chatByline } from './chatByline.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
+import { appPrincipalMayWriteSession } from '../lib/sessionOwnership.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentGovernedError, isCommentGovernedError } from '../lib/comments/index.js';
@@ -8962,9 +8963,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // userId (#932 Codex P1): for OAuth/user callers requireAppScope()
       // fills auth.appId from the user's active-App SELECTION, and that must
       // not let co-members of an App end each other's sessions.
-      const mayEnd =
-        (!auth.userId && auth.appId && session.appId === auth.appId) ||
-        (auth.userId && session.userId === auth.userId);
+      // #1934 (cor:agt:070:04): the App branch is the SHARED predicate the
+      // GraphQL gate uses — an App key ends only user-less sessions (#11860),
+      // never a host-launched one, and a key that ever held host:operate ends
+      // none — so the two cannot drift again.
+      const mayEnd = auth.userId
+        ? session.userId === auth.userId
+        : await appPrincipalMayWriteSession(db, auth, session);
       if (!mayEnd) {
         return textResult(`Forbidden: session "${id}" belongs to a different App or user.`);
       }

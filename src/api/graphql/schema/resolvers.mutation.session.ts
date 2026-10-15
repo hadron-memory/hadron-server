@@ -1406,7 +1406,7 @@ export const sessionMutations = {
       if (!session || session.deletedAt) {
         throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
       }
-      requireSessionWriteAccess(ctx, session);
+      await requireSessionWriteAccess(ctx, session);
       return ctx.db.session.update({
         where: { id },
         data: {
@@ -1441,7 +1441,7 @@ export const sessionMutations = {
       if (!session || session.deletedAt) {
         throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
       }
-      requireSessionWriteAccess(ctx, session);
+      await requireSessionWriteAccess(ctx, session);
 
       // #1029: the closing handoff, written BEFORE the end and only for a
       // worker-bound session. Ordering is the whole safety property here — if
