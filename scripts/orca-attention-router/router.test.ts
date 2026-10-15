@@ -736,6 +736,34 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     expect(fake.sent).toEqual([]);
   });
 
+  it('a COLUMN-ZERO status line after a recap block ends the block and is judged — no throw, unrecognized holds (Andi round 2, #1976 review)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      // A previous turn's recap, then a column-zero unrecognized current
+      // status: the extension must END at indent 0, not dereference null.
+      tail: [...CODEX_IDLE_RECAP_XAVIER.slice(0, 9), 'a column-zero current status nobody classified', ...CODEX_IDLE_RECAP_XAVIER.slice(9)],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a COLUMN-ZERO known busy line after a recap block is caught by the sweep — busy wins, no throw (Chip runtime matrix, #1976 review)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [...CODEX_IDLE_RECAP_XAVIER.slice(0, 9), '• Working (6s • esc to interrupt)', ...CODEX_IDLE_RECAP_XAVIER.slice(9)],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('a running turn is drawn above the prompt');
+    expect(fake.sent).toEqual([]);
+  });
+
   it('a REAL idle screen — ordinary output text above the done-marker — DELIVERS (production calibration, #8165)', () => {
     const c = cfg(['w-eli', 'Eli']);
     fake.terminal('eli', 'claude', undefined, false);

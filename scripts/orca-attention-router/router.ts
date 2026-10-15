@@ -1060,7 +1060,12 @@ const recapBlockSkip = (rawWindow: string[]): boolean[] => {
     skip[j] = true;
     const base = header[1].length;
     for (let k = j + 1; k < rawWindow.length; k++) {
-      if (/^(\s+)/.exec(rawWindow[k])![1].length > base) skip[k] = true;
+      // \s* (never null — a column-zero line has indent 0): the extension
+      // ENDS at such a line instead of dereferencing null and throwing
+      // before the busy sweep (Andi round 2, Chip's runtime matrix — Codex
+      // tool lines like `• Ran …` are column-zero and render after a
+      // previous turn's recap whenever a new turn starts).
+      if (/^(\s*)/.exec(rawWindow[k])![1].length > base) skip[k] = true;
       else break; // a line at/below the header's indent is new chrome, not continuation
     }
   }
