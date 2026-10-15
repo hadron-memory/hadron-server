@@ -2,11 +2,13 @@
 
 Source: https://github.com/hadron-memory/hadron-server/issues/1931#issuecomment-6177957159 (Yuri, operator-supplied; 2026-10-14).
 
-The companion JSON pins 60 verified worker/family pairs. Exact worker IDs were verified against the live hadron-dev-team roster, including retired workers; suffixed worktree aliases were resolved from existing per-worktree CLI bindings. No suffix stripping or family inference from tool spelling. Extra worktreeSlug/workerUrn fields are audit metadata; the backfill consumes workerId/family.
+The companion JSON pins 61 verified worker/family pairs. Exact worker IDs were verified against the live hadron-dev-team roster, including retired workers; suffixed worktree aliases were resolved from existing per-worktree CLI bindings. No suffix stripping or family inference from tool spelling. Extra worktreeSlug/workerUrn fields are audit metadata; the backfill consumes workerId/family.
 
 Yuri corrected the source count to 45 live entries plus 15 from the record, and confirmed in team chat #11933 that "daria" was a typo for Dara (CODEX). Dara’s exact worker ID is verified against the team roster. Reserves and Bo stay excluded. Known session families are preserved even where the operator reports re-familying; those workers refresh explicitly via updateSession.
 
 Preview after deployment: `pnpm tsx scripts/backfill-session-families.ts scripts/backfill-session-families-1931.json`. Inspect returned session IDs before adding `--apply`. No production application was performed.
+
+Cooper is the 61st entry (GLM), added by Yuri’s explicit operator correction in team chat #12108; exact worker ID verified from the live roster. This supplements the source table below.
 
 ## Source table, verbatim
 

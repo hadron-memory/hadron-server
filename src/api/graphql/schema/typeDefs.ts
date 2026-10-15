@@ -3181,12 +3181,14 @@ export const typeDefs = `#graphql
   type HostKeyUse {
     id: ID!
     hostId: String!
-    "register, collect, report or availability."
+    "register, collect, report, availability or read."
     action: String!
     "The operation a report was about."
     operationId: ID
     "How many operations a collection returned, or workers a registration listed."
     count: Int
+    "#1881 — the refusal code when the server refused this use (e.g. APP_KEY_SCOPE_REQUIRED); null for a use that succeeded. A refused use is recorded too (hrn:node:hadronmemory.com:specs:cor:agt:070:07: every use)."
+    refusedCode: String
     usedAt: DateTime!
   }
 
@@ -6153,7 +6155,11 @@ export const typeDefs = `#graphql
     role-agent. The worker must belong to the session's App: with appRef (or an
     App-key credential) it must match the worker's App; without one, the
     worker's App becomes the session's, behind the same membership gate as
-    appRef. A retired worker refuses (WORKER_RETIRED). #940: a worker with an
+    appRef. A retired worker refuses (WORKER_RETIRED). #1937: an id or URN
+    naming a worker in an App the caller cannot read refuses exactly like an
+    absent ref (WORKER_NOT_FOUND, same message and extensions), so no other
+    refusal here tells an outsider the worker exists. The one exception is the
+    worker the caller's own launchGrant names (see launchGrant). #940: a worker with an
     ACTIVE session refuses WORKER_TAKEN — extensions carry workerId, sessionId,
     lastDriver, lastSeenAt, everything the takeover prompt needs — unless
     force is true (informed takeover, cor:agt:020:03: show who last drove it,
@@ -6184,6 +6190,9 @@ export const typeDefs = `#graphql
     LAUNCH_GRANT_INVALID when unknown, expired, used or not minted for the caller (an App key never redeems one);
     LAUNCH_REFUSED, failing the start with the reason, when the hold changed, the holder may no longer hold the
     worker, or it already has a live session. Never forced: with force it is BAD_USER_INPUT.
+    The grant's own worker skips the #1937 worker read gate, because the grant already told its holder that worker
+    exists: a holder who has lost the App gets LAUNCH_REFUSED with its reason rather than WORKER_NOT_FOUND, and so
+    may learn that this one worker was retired (#1945). Any other workerRef sent with a grant is gated first.
     """
     launchGrant: String
     "The session's stated intent (Session.plan) - what this session is about. MCP's hadron_start_session description lands here."
@@ -8653,7 +8662,8 @@ export const typeDefs = `#graphql
     registerHost(input: RegisterHostInput!): HostRegistration!
     """
     #1709 — a host collects its own operations, oldest first: those still ISSUED (now marked COLLECTED) and those it
-    collected and has not reported. Only its own host's, in its own App (hrn:node:hadronmemory.com:specs:cor:agt:070:04).
+    collected and has not reported, except a worker.start whose launch grant is still live (#1928: a re-collection never
+    revokes a launch in flight). Only its own host's, in its own App (hrn:node:hadronmemory.com:specs:cor:agt:070:04).
     first: at most 200, default 50.
     """
     collectHostOperations(appRef: String!, first: Int): [HostOperation!]!
@@ -9445,8 +9455,10 @@ export const typeDefs = `#graphql
     preserves; an empty update is a valid liveness touch (bumps updatedAt,
     which liveness counts — #1114). id-only - sessions have no URN.
     Gate: platform admin, the session's App, or the attributed user (not via
-    impersonation). Updates on an ended session stay allowed (late PR-merge
-    attribution).
+    impersonation). An App key updates only user-less sessions (never one a
+    person is behind), never a host-launched one, and a key ever granted
+    host:operate updates none (#1934, hrn:node:hadronmemory.com:specs:cor:agt:070:04).
+    Updates on an ended session stay allowed (late PR-merge attribution).
     #1931 — llmModel refreshes the model-family derivation; an explicit family wins.
     Null or omitted family metadata preserves the existing family. Unclassified models do not clear it.
     """
@@ -9470,7 +9482,10 @@ export const typeDefs = `#graphql
     untouched.
 
     Gate (#931): platform admin, the session's App, or the attributed user
-    (not via impersonation).
+    (not via impersonation). An App key ends only user-less sessions (never one
+    a person is behind), never a host-launched one, and a key ever granted
+    host:operate ends none (#1934, hrn:node:hadronmemory.com:specs:cor:agt:070:04);
+    a host ends a launched session only by reporting its worker.end.
 
     \`handoff\` is agent-composed prose: what landed, what is open, what is
     blocked, what the next driver should not repeat. The server owns where it
@@ -12329,8 +12344,10 @@ export const typeDefs = `#graphql
     failureReason: String
     """
     #1709 — worker.start only, and only in collectHostOperations' answer: the single-use launch grant to pass to the
-    agent the host starts (it redeems it at startSession with its holder's own token). Minted at each collection, which
-    revokes the previous one; short-lived; never stored in clear and never shown again. Null everywhere else.
+    agent the host starts (it redeems it at startSession with its holder's own token). Short-lived; never stored in clear
+    and never shown again. #1928: while it is live, a re-collection leaves the start out of the answer; once it expires,
+    the next collection revokes it and delivers the start with a fresh one; once redeemed, the start is delivered with
+    null here, so a restarted host can still report it. Null everywhere else.
     """
     launchGrant: String
   }
@@ -12505,11 +12522,13 @@ export const typeDefs = `#graphql
     hostLapseCheckIns: Int!
     "#1709 — how many minutes a worker asked to end its session on its task's finish or cancellation has before the platform ends it through its host (hrn:node:hadronmemory.com:specs:cor:agt:050:10): 1 to 1440, default 10."
     sessionEndGraceMinutes: Int!
+    "#1881 — how many minutes a host has to report an operation it collected before the platform fails it (hrn:node:hadronmemory.com:specs:cor:agt:070:02): 5 to 1440, default 60."
+    hostReportTimeoutMinutes: Int!
     "When the App last changed them; null while every window is the default."
     updatedAt: DateTime
   }
 
-  "An omitted field keeps its value; null returns it to the platform default. Each window is 1 to 10080 minutes; hostLapseCheckIns is 2 to 10; sessionEndGraceMinutes is 1 to 1440."
+  "An omitted field keeps its value; null returns it to the platform default. Each window is 1 to 10080 minutes; hostLapseCheckIns is 2 to 10; sessionEndGraceMinutes is 1 to 1440; hostReportTimeoutMinutes is 5 to 1440."
   input AgentTaskStallScheduleInput {
     notStartedMinutes: Int
     noProgressMinutes: Int
@@ -12517,6 +12536,7 @@ export const typeDefs = `#graphql
     assignmentMinutes: Int
     hostLapseCheckIns: Int
     sessionEndGraceMinutes: Int
+    hostReportTimeoutMinutes: Int
   }
 
   input SetWorkerAvailabilityInput {

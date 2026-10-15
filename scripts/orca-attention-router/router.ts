@@ -168,10 +168,45 @@ export interface RunResult {
 }
 export type Runner = (argv: string[]) => RunResult;
 
-/** Run a CLI and capture its output; never throws on a non-zero exit. */
-export const runCommand: Runner = (argv) => {
-  const proc = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 300_000 });
-  return { code: proc.status ?? 1, stdout: proc.stdout ?? '', stderr: proc.stderr ?? String(proc.error ?? '') };
+/**
+ * Hard per-call timeout. The only LEGITIMATELY long call is the busy-wait
+ * (`orca terminal wait`, busyWaitMs = 60s by design); everything else is
+ * seconds. The old 300_000 backstop is how a slow/502ing gateway wedged the
+ * single-threaded loop: ~180 calls per cycle × a few multi-minute hangs =
+ * 45+ minute cycles while mentions sat undelivered (2026-10-14, three
+ * incidents: 16:38 and 17:35 deploy windows plus the sustained slow window
+ * after). 90s bounds a hung backend to ONE cycle-slot's worth of loss, and
+ * must stay ≥ busyWaitMs + margin — a timed-out call reads as code 1 with
+ * empty output, which every consumer already treats fail-closed.
+ */
+export const CALL_TIMEOUT_MS = 90_000;
+export const MIN_CALL_TIMEOUT_MS = 75_000;
+
+/** Run a CLI and capture its output; never throws on a non-zero exit.
+ * #1940 fix cycle: spawnSync's timeout sends a CATCHABLE SIGTERM, so a child
+ * that ignores it overruns the bound (Andi P2-1, Chip repro #12226), and a
+ * timed-out child that already printed success JSON still reports code 0 with
+ * that output, letting send/idle callers act on a result the kill invalidated
+ * (Andi P2-2). So: SIGKILL as the kill signal (uncatchable, unignorable), and
+ * any proc.error / timed-out status is normalised to code 1 with EMPTY stdout —
+ * the fail-closed shape every consumer already treats as failure. */
+export const runCommand: Runner = (argv, timeoutMs: number = CALL_TIMEOUT_MS) => {
+  const proc = spawnSync(argv[0], argv.slice(1), {
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    killSignal: 'SIGKILL',
+  });
+  // ANY spawn error (ETIMEDOUT kill, ENOENT, EPIPE, ENOBUFS…) is a failed
+  // call: code 1 with EMPTY stdout (Andi #12271, Chip #12273 — a non-zero
+  // exit with retained success output can reach send/idle callers as a
+  // result the failure invalidated; the wrapper's contract is fail-closed
+  // on every proc.error, not only the timeout arm).
+  if (proc.error) {
+    return { code: 1, stdout: '', stderr: `call failed: ${proc.error.code ?? String(proc.error.message ?? proc.error)}` };
+  }
+  const killed = proc.status === null && proc.signal === 'SIGKILL';
+  if (killed) return { code: 1, stdout: '', stderr: `call exceeded ${timeoutMs}ms and was killed` };
+  return { code: proc.status ?? 1, stdout: proc.stdout ?? '', stderr: proc.stderr ?? '' };
 };
 
 /** A failure that must leave the adopted token untouched. */
@@ -1660,12 +1695,20 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       // yesterday's epoch ("held 2442 min" on a 5-minute-old stall), which
       // reads as an incident that never happened.
       const heldWorkers = new Set(held.map(([n]) => cfg.roster.find((e) => e.name === n)?.worker ?? n));
+      // `reported` is keyed by NAME (Object.assign from outcome.held), unlike
+      // heldSince/heldLoggedAt which are keyed by worker id — prune it by name
+      // (Joshua, found while porting to Go: the id-keyed delete was a no-op,
+      // so a re-held worker with a repeat reason stayed silent instead of
+      // logging the fresh incident's hold line).
+      const heldNames = new Set(held.map(([n]) => n));
       for (const w of Object.keys(ledger.heldSince ?? {})) {
         if (!heldWorkers.has(w)) {
           delete ledger.heldSince[w];
           delete (ledger.heldLoggedAt ?? {})[w];
-          delete ledger.reported[w];
         }
+      }
+      for (const n of Object.keys(ledger.reported ?? {})) {
+        if (!heldNames.has(n)) delete ledger.reported[n];
       }
       const longHolds: string[] = [];
       for (const [n] of held) {

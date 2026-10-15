@@ -44,7 +44,7 @@ import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/au
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { generateId } from '../../../lib/id.js';
-import { keyHostId, recordHostKeyUse, type HostKey } from '../../../lib/hostOperations/hostKey.js';
+import { keyEverHeldHostOperate, keyHostId, recordHostKeyUse, recordHostKeyUseApart, type HostKey, type HostKeyAction } from '../../../lib/hostOperations/hostKey.js';
 import {
   HOST_FAILURE_REASON_MAX,
   HostOperationArgsError,
@@ -64,7 +64,8 @@ import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 import { fenceHostDecision, insertWorkerStart, LaunchRefusal, liveRegistrationsFor, lockStartableWorker, mintLaunchGrants } from '../../../lib/hostOperations/launch.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
-import { handoffSessionId, newestHandoff } from '../../../lib/workerHandoff.js';
+import { sessionHasHandoff } from '../../../lib/hostOperations/settle.js';
+import { isId } from '../../../lib/entityRef/shape.js';
 import { normalizeAvailability, type AvailabilityInput } from './resolvers.agentTaskAlarms.js';
 
 const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.', { appRef });
@@ -143,12 +144,38 @@ type RegisterHostInput = {
 
 type HostOperationRow = Prisma.HostOperationGetPayload<Record<string, never>>;
 
+
+/** A refusal's code, when it carries one the use record can hold. */
+function refusalCode(e: unknown): string | null {
+  const code = (e as { extensions?: { code?: unknown } } | null)?.extensions?.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : null;
+}
+
+/**
+ * #1881 (cor:agt:070:07, Holger #10849): every host-key call is recorded, refusals included. A refused call made with
+ * a key that is or was a host key records its use, with the refusal's code, in its own write after the refusal, so
+ * rolling the refused call back cannot erase it. An accepted write records inside its own transaction, as before.
+ */
+async function recordingRefusal<T>(ctx: Context, action: HostKeyAction, operationId: unknown, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    const key = appKeyCaller(ctx);
+    const code = refusalCode(e);
+    if (key && code) {
+      const opId = action === 'report' && typeof operationId === 'string' && isId(operationId) ? operationId : null;
+      await recordHostKeyUseApart(ctx.db, key, action, { operationId: opId, refusedCode: code });
+    }
+    throw e;
+  }
+}
+
 export const hostOperationMutations = {
   /**
    * cor:agt:070:01, :04 — a host registers, or refreshes, which of its App's workers it can launch, as which model
    * family, and in which existing worktrees. The host id is the key's; the request names none.
    */
-  registerHost: async (_: unknown, { input }: { input: RegisterHostInput }, ctx: Context) => {
+  registerHost: async (_: unknown, { input }: { input: RegisterHostInput }, ctx: Context) => recordingRefusal(ctx, 'register', null, async () => {
     if (!input) throw badInput('input is required.');
     const { app, host, authorize } = await hostKeyEntry(ctx, input.appRef);
     const workers: { workerId: string; family: string; worktrees: string[] }[] = [];
@@ -177,37 +204,49 @@ export const hostOperationMutations = {
     // A registration can make a worker launchable, so a queued task may now match (cor:agt:060:06).
     await matchAfterChange(ctx.db, app.id);
     return loadRegistrationView(ctx, app.id, host.hostId);
-  },
+  }),
 
   /**
    * cor:agt:070:04 S1 — the host collects its own operations, oldest first: every one still `issued`, which this marks
    * `collected`, and every one it collected before and has not reported (a restarted host resumes them). Only its own
    * host's, in its own App.
    */
-  collectHostOperations: async (_: unknown, a: { appRef: string; first?: number | null }, ctx: Context) => {
+  collectHostOperations: async (_: unknown, a: { appRef: string; first?: number | null }, ctx: Context) => recordingRefusal(ctx, 'collect', null, async () => {
     const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
     return asHost(ctx, a.appRef, async (tx, app, host) => {
-      const rows = await tx.$queryRaw<{ id: string }[]>`
-        SELECT id FROM host_operations
-        WHERE app_id = ${app.id} AND host_id = ${host.hostId} AND status IN ('issued', 'collected')
-        ORDER BY issued_at, id
-        LIMIT ${first}
-        FOR UPDATE`;
-      const ids = rows.map((r) => r.id);
       const now = new Date();
-      if (ids.length) {
+      const out: Array<HostOperationRow & { launchGrant: string | null }> = [];
+      // #1928 (Diego P2): a start held back (its grant still live) or failed at collection takes no page slot, so the
+      // page is refilled past it, oldest first, until `first` operations are delivered or the host has no more.
+      // The cursor is the last row's id, compared through the row itself (no JS Date bound against a naive column).
+      let afterId: string | null = null;
+      while (out.length < first) {
+        const want = first - out.length;
+        const rows: { id: string }[] = await tx.$queryRaw`
+          SELECT id FROM host_operations
+          WHERE app_id = ${app.id} AND host_id = ${host.hostId} AND status IN ('issued', 'collected')
+            ${afterId ? Prisma.sql`AND (issued_at, id) > (SELECT issued_at, id FROM host_operations WHERE id = ${afterId})` : Prisma.empty}
+          ORDER BY issued_at, id
+          LIMIT ${want}
+          FOR UPDATE`;
+        if (rows.length === 0) break;
+        const ids = rows.map((r) => r.id);
         await tx.hostOperation.updateMany({ where: { id: { in: ids }, status: 'issued' }, data: { status: 'collected', collectedAt: now } });
+        // #1709 slice 2: each worker.start collected gets a fresh single-use launch grant, shown in this answer only.
+        // One whose worker is no longer held fails here instead, and is left out. #1928: one whose grant is still live
+        // is left out too, so a re-collect never revokes a launch in flight.
+        const starts = await tx.hostOperation.findMany({ where: { id: { in: ids }, type: 'worker.start' } });
+        const { grants, withheld } = await mintLaunchGrants(tx, starts, now);
+        const ops = await tx.hostOperation.findMany({ where: { id: { in: ids }, status: 'collected' } });
+        const byId = new Map(ops.filter((o) => !withheld.has(o.id)).map((o) => [o.id, o]));
+        for (const id of ids) if (byId.has(id)) out.push({ ...byId.get(id)!, launchGrant: grants.get(id) ?? null });
+        if (rows.length < want) break;
+        afterId = rows[rows.length - 1]!.id;
       }
-      // #1709 slice 2: each worker.start collected gets a fresh single-use launch grant, shown in this answer only.
-      // One whose worker is no longer held fails here instead, and is left out.
-      const starts = ids.length ? await tx.hostOperation.findMany({ where: { id: { in: ids }, type: 'worker.start' } }) : [];
-      const grants = await mintLaunchGrants(tx, starts, now);
-      const ops = ids.length ? await tx.hostOperation.findMany({ where: { id: { in: ids }, status: 'collected' } }) : [];
-      await recordHostKeyUse(tx, host, 'collect', { count: ops.length });
-      const byId = new Map(ops.map((o) => [o.id, o]));
-      return ids.filter((id) => byId.has(id)).map((id) => ({ ...byId.get(id)!, launchGrant: grants.get(id) ?? null }));
+      await recordHostKeyUse(tx, host, 'collect', { count: out.length });
+      return out;
     });
-  },
+  }),
 
   /**
    * cor:agt:070:03 — the host reports an operation's final outcome: done, or failed with a reason. Only the host it was
@@ -218,7 +257,7 @@ export const hostOperationMutations = {
     _: unknown,
     { input }: { input: { appRef: string; id: string; outcome: 'SUCCEEDED' | 'FAILED'; worktree?: string | null; failureReason?: string | null } },
     ctx: Context,
-  ) => {
+  ) => recordingRefusal(ctx, 'report', input?.id, async () => {
     if (!input) throw badInput('input is required.');
     if (input.outcome !== 'SUCCEEDED' && input.outcome !== 'FAILED') throw badInput('outcome is SUCCEEDED or FAILED.');
     const status = input.outcome === 'SUCCEEDED' ? 'succeeded' : 'failed';
@@ -303,7 +342,7 @@ export const hostOperationMutations = {
     // A session the host ended releases its memory keys once its end is durable, as every end does.
     for (const id of endedSessions) sessionKeyCache.evict(id);
     return reported;
-  },
+  }),
 
   /**
    * cor:agt:060:08, the host's arm: a host marks a worker it registers unavailable, only as out of tokens or host down,
@@ -314,7 +353,7 @@ export const hostOperationMutations = {
     _: unknown,
     { input }: { input: { appRef: string; worker: string } & AvailabilityInput },
     ctx: Context,
-  ) => {
+  ) => recordingRefusal(ctx, 'availability', null, async () => {
     if (!input) throw badInput('input is required.');
     const now = new Date();
     const { state, reason, until } = normalizeAvailability(input, now);
@@ -372,7 +411,7 @@ export const hostOperationMutations = {
     });
     await matchAfterChange(ctx.db, app.id);
     return ctx.db.workerAvailability.findUniqueOrThrow({ where: { workerId: workerId! } });
-  },
+  }),
 
   /**
    * cor:agt:070:05 — issue an operation to one of the App's registered hosts. This slice issues the worktree
@@ -532,14 +571,6 @@ function issuer(ctx: Context, actor: TaskActor) {
     : { issuedBy: 'user', issuedByUserId: actor.userId, issuedByWorkerId: null, issuedByAgentId: null };
 }
 
-/** Did the worker write its closing handoff for this session (cor:agt:020:10)? Its newest handoff names the session. */
-async function sessionHasHandoff(tx: Prisma.TransactionClient, workerId: string, sessionId: string): Promise<boolean> {
-  const worker = await tx.worker.findUnique({ where: { id: workerId }, select: { memoryId: true } });
-  if (!worker?.memoryId) return false;
-  const newest = await newestHandoff(tx, worker.memoryId);
-  return Boolean(newest && handoffSessionId(newest.data) === sessionId);
-}
-
 /** A success's typed result: the created worktree for `worktree.create`; nothing for the others in this slice. */
 function successResult(type: HostOperationType, worktree: string | null | undefined): Prisma.InputJsonObject | null {
   if (type === 'worktree.create') {
@@ -581,7 +612,13 @@ async function loadRegistrationViews(ctx: Context, appId: string, hostId?: strin
 export const hostOperationQueries = {
   /** The App's host registrations: whoever reads its tasks and events (cor:agt:050:21), the App's own key included. */
   hostRegistrations: (_: unknown, a: { appRef: string }, ctx: Context) =>
-    withReadableApp(ctx, a.appRef, (c, app) => loadRegistrationViews(c, app.id)),
+    recordingRefusal(ctx, 'read', null, async () => {
+      const views = await withReadableApp(ctx, a.appRef, (c, app) => loadRegistrationViews(c, app.id));
+      // #1881 (cor:agt:070:07): a host key's read is a use too, recorded apart from the read.
+      const key = appKeyCaller(ctx);
+      if (key) await recordHostKeyUseApart(ctx.db, key, 'read', { count: views.length });
+      return views;
+    }),
 
   /** The App's host operations, newest first: whoever reads its tasks and events (cor:agt:050:21). */
   hostOperations: (
@@ -589,7 +626,7 @@ export const hostOperationQueries = {
     a: { appRef: string; hostId?: string | null; status?: string | null; worker?: string | null; first?: number | null; after?: string | null },
     ctx: Context,
   ) =>
-    withReadableApp(ctx, a.appRef, async (c, app) => {
+    recordingRefusal(ctx, 'read', null, () => withReadableApp(ctx, a.appRef, async (c, app) => {
       // Ruling 0 (Holger via Vera #10955; cor:agt:070:04 S5): a host key does not read the App-wide listing; it sees
       // its own host's operations only by collecting them. Refused before any argument is read, so the answer is the
       // same whatever hostId, status, worker or cursor it passes: no oracle for another host's operations.
@@ -628,7 +665,7 @@ export const hostOperationQueries = {
       });
       const items = rows.slice(0, first);
       return { items, hasNextPage: rows.length > first, endCursor: items.length ? items[items.length - 1]!.id : null };
-    }),
+    })),
 };
 
 /**
@@ -637,12 +674,7 @@ export const hostOperationQueries = {
  */
 async function wasEverHostKey(c: Context): Promise<boolean> {
   const key = appKeyCaller(c);
-  if (!key) return false;
-  const row = await c.db.appKeyScope.findFirst({
-    where: { appKeyId: key.appKeyId, scope: 'host:operate' },
-    select: { id: true },
-  });
-  return row !== null;
+  return key ? keyEverHeldHostOperate(c.db, key.appKeyId) : false;
 }
 
 export const hostOperationFieldResolvers = {

@@ -8,8 +8,8 @@
  * stamps `userId`; a co-member carrying the same App selection (the hybrid
  * OAuth shape — `requireAppScope()` fills auth.appId from the user's
  * active-App SELECTION) cannot end another member's session; a pure App-key
- * principal can end its own App's sessions; the attributed user can end
- * their own.
+ * principal can end its own App's user-less sessions (never a person's,
+ * #1934 / ruling #11860); the attributed user can end their own.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -92,17 +92,18 @@ describe('MCP hadron_start_session → hadron_end_session write gate (#931)', ()
     expect(row.summary).toBeNull();
   });
 
-  it("lets a pure App-key principal end its own App's sessions, including user-attributed ones", async () => {
-    // App-key-started session (userId null): the App ends it.
+  it("lets a pure App-key principal end its own App's user-less sessions, but never a person's (#1934, ruling #11860)", async () => {
+    // App-key-started session (userId null): the App ends it — #932's purpose.
     const ownSession = await startSessionAs(appKeyAuth());
     const srv = createTestableMcpServer(appKeyAuth());
     expect(await srv.callToolText('hadron_end_session', { id: ownSession })).toContain('Session ended');
 
-    // A user-attributed session of the SAME App: the App (the operator
-    // holding the key) may end it too — the App branch requires only the
-    // absence of a userId on the CALLER, not on the session.
+    // A user-attributed session of the SAME App: a person is behind it, so the
+    // App may not end it (Holger's ruling A via Vera, team chat #11860,
+    // reversing #932's "absence of a userId on the CALLER only" rule).
     const userSession = await startSessionAs(hybridAuth(alice.id));
-    expect(await srv.callToolText('hadron_end_session', { id: userSession })).toContain('Session ended');
+    expect(await srv.callToolText('hadron_end_session', { id: userSession })).toContain('Forbidden');
+    expect((await db.session.findUniqueOrThrow({ where: { id: userSession } })).endedAt).toBeNull();
   });
 
   it('refuses an App-key principal for a different App\'s session', async () => {

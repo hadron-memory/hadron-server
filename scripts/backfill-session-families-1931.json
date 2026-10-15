@@ -358,5 +358,11 @@
     "family": "codex",
     "worktreeSlug": "dara",
     "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:dara"
+  },
+  {
+    "workerId": "01a1271881f47ba4afcc66d52af9e53c",
+    "family": "glm",
+    "worktreeSlug": "cooper",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:cooper"
   }
 ]

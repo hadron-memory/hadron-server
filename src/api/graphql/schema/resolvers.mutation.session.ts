@@ -51,7 +51,6 @@ import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
 import { compileTemplate } from '../../../lib/template.js';
-import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { NodeNotFoundError, AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -76,6 +75,7 @@ import {
   requireRole,
   requireOrgRole,
   requireAgentAccess,
+  resolveReadableAgentRef,
   requireOwnerOrOrgRole,
   requireSessionWriteAccess,
   resolveReadableNodeByLoc,
@@ -465,9 +465,10 @@ export const sessionMutations = {
       // absent, not as a malformed URN (#929 review).
       const agentRef = input.agentRef?.trim();
       if (agentRef) {
-        let resolvedAgentId: string;
         try {
-          ({ id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef));
+          // #1944: Query.agent's read gate, shared, with a denial answered
+          // exactly like an absent (or retired) Agent.
+          agentId = (await resolveReadableAgentRef(ctx, agentRef)).id;
         } catch (e) {
           // A mutation input error surfaces loudly (contrast Query.agent,
           // which masks not-found to null); malformed URNs propagate their
@@ -477,14 +478,6 @@ export const sessionMutations = {
           }
           throw e;
         }
-        const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-        if (agent.deletedAt) {
-          throw new GraphQLError(`Agent not found: ${agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
-        }
-        if (agent.visibility !== 'PUBLIC') {
-          await requireAgentAccess(ctx, agent, 'READER');
-        }
-        agentId = resolvedAgentId;
       }
 
       // #943: optional App pivot. Before this, `Session.appId` was stamped
@@ -706,7 +699,8 @@ export const sessionMutations = {
         // SESSION_WORKER_NOT_IN_APP with both Apps' ids, the participant FORBIDDEN) is therefore reachable only
         // by a reader; anyone else gets exactly the absent ref's envelope. One exception: the worker a launch
         // grant names, whose holder the grant has already told it exists. A holder who has since lost the App
-        // must still reach the FORBIDDEN that fails the start (#10775), not a not-found that leaves it hanging.
+        // must still reach the FORBIDDEN that fails the start (#10775), not a not-found that leaves it hanging. The
+        // accepted marginal (#1945): that holder can also learn their own grant's worker was retired, and no other's.
         if (!(launch && worker.id === launch.grant.workerId)) await requireWorkerVisibleOrNotFound(ctx, worker.appId, workerRef);
         // #1709: a grant starts the worker it names, and no other; checked before any gate whose refusal would
         // fail the start, so a mismatched ref is the caller's mistake, never a change in the world.
@@ -1412,7 +1406,7 @@ export const sessionMutations = {
       if (!session || session.deletedAt) {
         throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
       }
-      requireSessionWriteAccess(ctx, session);
+      await requireSessionWriteAccess(ctx, session);
       // #1931: refresh a binding without guessing a model family from its host.
       // Null/omitted metadata never clears an existing family during recovery.
       const explicit = family != null ? normalizeFamily(family) : null;
@@ -1456,7 +1450,7 @@ export const sessionMutations = {
       if (!session || session.deletedAt) {
         throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
       }
-      requireSessionWriteAccess(ctx, session);
+      await requireSessionWriteAccess(ctx, session);
 
       // #1029: the closing handoff, written BEFORE the end and only for a
       // worker-bound session. Ordering is the whole safety property here — if
@@ -1830,8 +1824,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
@@ -1907,8 +1902,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
@@ -1942,8 +1938,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
@@ -2125,8 +2122,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
 
       const now = new Date();
@@ -2154,8 +2152,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
 
       await ctx.db.agent.update({
