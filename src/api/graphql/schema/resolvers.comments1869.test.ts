@@ -157,8 +157,11 @@ describe('the #1869 scrub migration', () => {
     const scrubBranch = temporary.slice(temporary.indexOf("  IF TG_OP = 'UPDATE'\n     AND"), temporary.indexOf("  IF TG_OP = 'UPDATE' THEN"));
     expect(scrubBranch).toContain('RETURN NEW;');
     expect(temporary.replace(scrubBranch, '')).toBe(fn(INVARIANTS));
-    // Step 3 re-applies the canonical text after the scrub and before COMMIT.
-    expect(MIGRATION.indexOf(INVARIANTS)).toBeGreaterThan(MIGRATION.indexOf('UPDATE "edges"'));
+    // Step 3 re-applies the canonical text after the scrub and before COMMIT:
+    // the file as it stood then, since an applied migration never changes
+    // (#1935 has since widened the class check, in its own migration).
+    const header = INVARIANTS.slice(0, INVARIANTS.indexOf('\n'));
+    expect(MIGRATION.indexOf(header)).toBeGreaterThan(MIGRATION.indexOf('UPDATE "edges"'));
     expect(MIGRATION.trimEnd().endsWith('COMMIT;')).toBe(true);
     // A re-run on every schema sync would sweep memories encrypted later.
     expect(read('../../../../prisma/post-push.sql')).not.toContain('encrypted_anchor_hash_scrub');

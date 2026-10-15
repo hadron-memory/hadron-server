@@ -11,7 +11,7 @@ import { currentActor } from '../requestActor.js';
 export const COMMENT_NODE_TYPE = 'comment';
 
 /** Memory classes a comment may live in (`cor:dmo:110:02`). */
-export const COMMENTABLE_CLASSES: ReadonlySet<string> = new Set(['app', 'knowledge', 'personal', 'group']);
+export const COMMENTABLE_CLASSES: ReadonlySet<string> = new Set(['app', 'knowledge', 'personal', 'group', 'system']);
 
 export const COMMENT_BODY_MAX = 20_000;
 export const COMMENT_QUOTE_MAX = 2_000;

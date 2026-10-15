@@ -160,6 +160,15 @@ describe('a target\'s lifecycle carries its threads (cor:dmo:110:02/05)', () => 
       .toMatchObject({ code: 'COMMENT_MOVE_UNCOMMENTABLE', class: 'private', nodes: [{ nodeId: target.id, loc: 'mv:1', comments: 2 }] });
   });
 
+  it('a move into a system memory carries the threads (#1935: only private refuses)', async () => {
+    const target = await node('mv:sys');
+    const c = await comment(target.id);
+    const sys = await resolvers.Mutation.createMemory(null, { orgId, name: 'sys-dest' }, as());
+    await db.memory.update({ where: { id: sys.id }, data: { class: 'system', visibility: null } });
+    await M.moveNode(null, { sourceRef: target.id, targetUrn: nodeUrn(sys, 'mv:sys') }, as());
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).memoryId).toBe(sys.id);
+  });
+
   it('a comment never moves on its own', async () => {
     const target = await node('mv:2');
     const c = await comment(target.id);

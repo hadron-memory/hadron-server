@@ -49,6 +49,7 @@
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { canReadMemory, filterReadableMemoryIds } from '../mcp/access-control.js';
+import { COMMENT_NODE_TYPE } from './comments/index.js';
 import { AgentNotFoundError } from './entityRef/errors.js';
 import {
   effectiveScope,
@@ -199,8 +200,10 @@ function pick(row: { id: string; memoryId: string; loc: string; name: string }) 
 /**
  * The live sources of the edges into `indexNodeIds`, nearest index first,
  * each with the edge's name as its trigger. Only edges whose source and
- * target are both live count. Order within one index is by the source's loc,
- * so the list is stable.
+ * target are both live count. A comment on an index node is discussion, never
+ * a listed task or process (#1935, cor:dmo:110), so a comment source never
+ * counts. Order within one index is by the source's loc, so the list is
+ * stable.
  */
 async function indexEdgeSources(db: Db, indexNodeIds: string[]) {
   if (indexNodeIds.length === 0) return [];
@@ -208,7 +211,7 @@ async function indexEdgeSources(db: Db, indexNodeIds: string[]) {
     where: {
       targetId: { in: indexNodeIds },
       deletedAt: null,
-      source: { deletedAt: null },
+      source: { deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE } },
       target: { deletedAt: null },
     },
     select: { targetId: true, name: true, source: { select: LIST_NODE_SELECT } },
@@ -273,6 +276,9 @@ async function tasksOf(
       memoryId: { in: ctx.scope.memoryIds },
       isRunnable: true,
       deletedAt: null,
+      // A comment is never content (cor:dmo:110); the comment path never sets
+      // isRunnable, and this keeps the list from relying on that (#1935).
+      nodeType: { not: COMMENT_NODE_TYPE },
       ...(ctx.scope.excludeNodeIds.length > 0 ? { id: { notIn: ctx.scope.excludeNodeIds } } : {}),
     },
     select: LIST_NODE_SELECT,
