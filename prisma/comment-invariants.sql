@@ -4,7 +4,8 @@
 -- post-push.sql): 20261005200000_comment_nodes, then #1721's
 -- 20261010100000_comment_rulings, then the anchor CHECK in #1857
 -- 20261013170000_encrypted_comment_anchor_nullable, then #1869's insert check in
--- 20261013180000_encrypted_anchor_hash_scrub. Change it only together with a new
+-- 20261013180000_encrypted_anchor_hash_scrub, then #1935's commentable system
+-- memories in 20261015100000_system_memories_commentable. Change it only together with a new
 -- migration that carries the new text. Idempotent.
 --
 -- The application path refuses every case first with a typed error; these are
@@ -69,9 +70,10 @@ BEGIN
   END IF;
   -- Only a LIVE comment needs a commentable memory: a deleted thread is gone
   -- from every check (cor:dmo:110:05) but keeps its history, so it may follow
-  -- its target into a private or system memory (cor:dmo:110:02).
+  -- its target into a private memory (cor:dmo:110:02; system memories are
+  -- commentable since #1935).
   SELECT class INTO mem_class FROM memories WHERE id = n.memory_id;
-  IF n.deleted_at IS NULL AND (mem_class IS NULL OR mem_class NOT IN ('app', 'knowledge', 'personal', 'group')) THEN
+  IF n.deleted_at IS NULL AND (mem_class IS NULL OR mem_class NOT IN ('app', 'knowledge', 'personal', 'group', 'system')) THEN
     RAISE EXCEPTION 'COMMENT_INVARIANT: comment % is in a % memory, which is not commentable', p_node_id, mem_class USING ERRCODE = 'check_violation';
   END IF;
   IF m.thread_root_id IS NOT NULL THEN

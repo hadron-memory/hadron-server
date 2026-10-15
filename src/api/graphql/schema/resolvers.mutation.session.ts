@@ -1462,7 +1462,7 @@ export const sessionMutations = {
     // session ends, and late attribution is better than none.
     updateSession: async (
       _: unknown,
-      { id, prNumber, branch }: { id: string; prNumber?: number | null; branch?: string | null },
+      { id, prNumber, branch, llmModel, family }: { id: string; prNumber?: number | null; branch?: string | null; llmModel?: string | null; family?: string | null },
       ctx: Context,
     ) => {
       const session = await ctx.db.session.findUnique({ where: { id } });
@@ -1470,11 +1470,20 @@ export const sessionMutations = {
         throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
       }
       await requireSessionWriteAccess(ctx, session);
+      // #1931: refresh a binding without guessing a model family from its host.
+      // Null/omitted metadata never clears an existing family during recovery.
+      const explicit = family != null ? normalizeFamily(family) : null;
+      if (family != null && !explicit) {
+        throw new GraphQLError('family must be a valid model-family token.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      const refreshedFamily = explicit ?? (llmModel != null ? deriveFamily({ llmModel, tool: session.tool }) : null);
       return ctx.db.session.update({
         where: { id },
         data: {
           ...(prNumber !== undefined ? { prNumber } : {}),
           ...(branch !== undefined ? { branch } : {}),
+          ...(llmModel != null ? { llmModel } : {}),
+          ...(refreshedFamily != null ? { family: refreshedFamily } : {}),
           updatedBy: ctx.userId ?? ctx.clientId ?? null,
           // #1543 — a pr/branch edit must not revive a lapsed session.
           ...(await preserveHeartbeatIfLapsed(ctx.db as never, id)),

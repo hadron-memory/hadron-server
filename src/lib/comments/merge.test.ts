@@ -77,6 +77,14 @@ describe('mergeMemories carries threads (cor:dmo:110:02)', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: a.id } })).memoryId).toBe(src.id);
   });
 
+  it('carries live threads into a system memory (#1935: only private refuses)', async () => {
+    const a = await node(src.id, 'a');
+    const t = await M.createComment(null, { targetRef: a.id, body: 'x' }, as());
+    await db.memory.update({ where: { id: dst.id }, data: { class: 'system', visibility: null } });
+    await merge();
+    expect((await db.node.findUniqueOrThrow({ where: { id: t.id } })).memoryId).toBe(dst.id);
+  });
+
   it('refuses folding a commented node (its anchor cannot move); after the admin deletes the thread the merge folds it', async () => {
     const a = await node(src.id, 'shared');
     await node(dst.id, 'shared');

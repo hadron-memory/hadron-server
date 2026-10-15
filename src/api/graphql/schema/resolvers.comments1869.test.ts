@@ -60,6 +60,10 @@ const migrate = async (): Promise<number> => {
   await client.connect();
   try {
     const results = await client.query(MIGRATION) as unknown as { command: string; rowCount: number | null }[];
+    // The replay installs the invariants as they stood at #1869; restore the
+    // current ones, as the later migrations do in prod, so no later test file
+    // on this worker's database runs against a stale check (#1935).
+    await client.query(INVARIANTS);
     const updates = results.filter((r) => r.command === 'UPDATE');
     expect(updates).toHaveLength(1);
     return updates[0].rowCount ?? 0;
@@ -157,8 +161,11 @@ describe('the #1869 scrub migration', () => {
     const scrubBranch = temporary.slice(temporary.indexOf("  IF TG_OP = 'UPDATE'\n     AND"), temporary.indexOf("  IF TG_OP = 'UPDATE' THEN"));
     expect(scrubBranch).toContain('RETURN NEW;');
     expect(temporary.replace(scrubBranch, '')).toBe(fn(INVARIANTS));
-    // Step 3 re-applies the canonical text after the scrub and before COMMIT.
-    expect(MIGRATION.indexOf(INVARIANTS)).toBeGreaterThan(MIGRATION.indexOf('UPDATE "edges"'));
+    // Step 3 re-applies the canonical text after the scrub and before COMMIT:
+    // the file as it stood then, since an applied migration never changes
+    // (#1935 has since widened the class check, in its own migration).
+    const header = INVARIANTS.slice(0, INVARIANTS.indexOf('\n'));
+    expect(MIGRATION.indexOf(header)).toBeGreaterThan(MIGRATION.indexOf('UPDATE "edges"'));
     expect(MIGRATION.trimEnd().endsWith('COMMIT;')).toBe(true);
     // A re-run on every schema sync would sweep memories encrypted later.
     expect(read('../../../../prisma/post-push.sql')).not.toContain('encrypted_anchor_hash_scrub');
