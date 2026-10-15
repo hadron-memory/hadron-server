@@ -1593,14 +1593,27 @@ export const sessionMutations = {
        * the claim's consume when there is one: the gate re-reads ownership, the hold, current App eligibility, the
        * hard expiry, dormancy and "no other live session" under the App→Worker locks a bind takes, and its touch is
        * guarded. A claim is spent even when the gate refuses (it was redeemed; the answer is the refusal).
+       * A claim lost to a racing replacement or redemption rolls the whole act back and answers NOTHING_TO_RESUME.
        */
       const resumeOpen = async (sessionId: string, claimId: string | null) => {
-        const verdict = await ctx.db.$transaction(async (tx) => {
-          if (claimId && !(await consumeResumeClaim(tx, claimId, userId))) return 'GONE' as const;
-          const ok = await resumeOwnLapsedSessionInTx(ctx, tx, sessionId);
-          if (ok && claimId) await tx.resumeClaim.update({ where: { id: claimId }, data: { resumedSessionId: sessionId } });
-          return ok ? ('OK' as const) : ('REFUSED' as const);
-        });
+        // The gate runs FIRST and the claim is consumed LAST (Anne's P2-4): App -> Worker -> Session -> Claim, the
+        // order the claim writer's Session -> Claim agrees with. A claim that turns out spent (a replacement or a
+        // racing redemption won) rolls the gate's touch back with it.
+        const lost = new Error('resume claim lost');
+        let verdict: 'OK' | 'REFUSED' | 'GONE';
+        try {
+          verdict = await ctx.db.$transaction(async (tx) => {
+            const ok = await resumeOwnLapsedSessionInTx(ctx, tx, sessionId);
+            if (claimId) {
+              if (!(await consumeResumeClaim(tx, claimId, userId))) throw lost;
+              if (ok) await tx.resumeClaim.update({ where: { id: claimId }, data: { resumedSessionId: sessionId } });
+            }
+            return ok ? ('OK' as const) : ('REFUSED' as const);
+          });
+        } catch (e) {
+          if (e !== lost) throw e;
+          verdict = 'GONE';
+        }
         if (verdict === 'GONE') throw nothingToResume();
         if (verdict === 'REFUSED') throw resumeRefused((await lapsedResumeVerdict(ctx, sessionId)) === 'DORMANT');
         return resumed(sessionId, 'RESUMED');

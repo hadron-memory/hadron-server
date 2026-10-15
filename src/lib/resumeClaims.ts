@@ -97,17 +97,29 @@ export async function liveClaimsOf(db: Db, holderUserId: string, now: Date) {
 
 /**
  * Consume one claim: the single-use guard. True only for the one call that won; a used, revoked, expired or foreign
- * claim (the holder is part of the guard) consumes nothing. Expiry is judged by the database's own clock when the
- * row is updated, re-evaluated after any row-lock wait, never by a timestamp the caller read earlier (Anne P2-3);
- * the consumption is stamped with that same clock. Columns are UTC `timestamp(3)`, hence the `AT TIME ZONE 'UTC'`.
+ * claim (the holder is part of the guard) consumes nothing.
+ *
+ * LOCK FIRST, THEN JUDGE (#1966 review, Anne P2-3 and its delta): the claim row is locked before expiry is read, and
+ * expiry is then judged by the database clock in a statement that cannot wait. A single guarded UPDATE is not enough:
+ * when it blocks on a row lock that is released WITHOUT a change, PostgreSQL keeps the WHERE result it computed
+ * before the wait, so a claim held past its deadline by another locker would still be consumed, stamped with a
+ * pre-deadline time. Columns are UTC `timestamp(3)`, hence `AT TIME ZONE 'UTC'`.
+ *
+ * Lock order: the claim is the LAST row an act locks. The writer takes Session then Claim, and an open redemption
+ * runs the lifecycle gate (App, Worker, Session) before consuming, so the two never wait on each other in a cycle
+ * (Anne P2-4). Pass the caller's transaction to join it; a client runs the pair in a transaction of its own.
  */
 export async function consumeResumeClaim(db: Db, claimId: string, holderUserId: string): Promise<boolean> {
-  const n = await db.$executeRaw`
-    UPDATE resume_claims SET consumed_at = (clock_timestamp() AT TIME ZONE 'UTC')
-    WHERE id = ${claimId} AND holder_user_id = ${holderUserId}
-      AND consumed_at IS NULL AND revoked_at IS NULL
-      AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')`;
-  return n === 1;
+  const run = async (tx: Prisma.TransactionClient) => {
+    await tx.$queryRaw`SELECT id FROM resume_claims WHERE id = ${claimId} FOR UPDATE`;
+    const n = await tx.$executeRaw`
+      UPDATE resume_claims SET consumed_at = (clock_timestamp() AT TIME ZONE 'UTC')
+      WHERE id = ${claimId} AND holder_user_id = ${holderUserId}
+        AND consumed_at IS NULL AND revoked_at IS NULL
+        AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')`;
+    return n === 1;
+  };
+  return '$transaction' in db ? (db as PrismaClient).$transaction(run) : run(db as Prisma.TransactionClient);
 }
 
 /** The fast path cannot decide: more possibly-live sessions than one scan holds. */
