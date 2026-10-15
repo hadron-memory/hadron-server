@@ -485,3 +485,30 @@ describe('fix head 2: Anne\'s delta on #1966', () => {
     expect(live + consumed).toBe(1);
   });
 });
+
+describe('a refused resumeClaim writes no handoff (found composing with #1938)', () => {
+  const handoffs = () => db.node.count({ where: { loc: { startsWith: 'handoffs:' } } });
+
+  it('GraphQL: someone else\'s endSession(handoff, resumeClaim) refuses before the handoff, and nothing ends', async () => {
+    const s = await start(holder, ada);
+    // An App key may end this App's user-less sessions; give the session no user so #1938's gate admits the key.
+    await db.session.update({ where: { id: s.id }, data: { userId: null } });
+    const key = { db, appId: app.id, roles: [] } as unknown as Context;
+    const before = await handoffs();
+    await expect(M.endSession({}, { id: s.id, handoff: 'prose', resumeClaim: true }, key)).rejects.toThrow();
+    expect(await handoffs()).toBe(before);
+    expect((await db.session.findUniqueOrThrow({ where: { id: s.id } })).endedAt).toBeNull();
+    expect(await db.resumeClaim.count()).toBe(0);
+  });
+
+  it('MCP: hadron_end_session(handoff, resumeClaim) on a session that cannot take a claim writes no handoff', async () => {
+    const s = await start(holder, ada);
+    await db.session.update({ where: { id: s.id }, data: { userId: null } });
+    const srv = createTestableMcpServer({ appId: app.id, roles: [] } as never, { sessionId: generateId() });
+    const before = await handoffs();
+    const text = await srv.callToolText('hadron_end_session', { id: s.id, handoff: 'prose', resumeClaim: true });
+    expect(text).toContain('No resume claim was written');
+    expect(await handoffs()).toBe(before);
+    expect((await db.session.findUniqueOrThrow({ where: { id: s.id } })).endedAt).toBeNull();
+  });
+});
