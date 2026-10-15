@@ -30,6 +30,7 @@ import { resolveAppRunRef, composeAppRunUrn } from '../../../lib/entityRef/appRu
 import { AppRunNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
@@ -399,16 +400,24 @@ async function resolveInstalledAgent(
   // PR-486): '' never silently clears or skips validation — clearing an
   // agent is expressed with an explicit null (PR-502 review).
   if (agentRef == null || agentRef.trim() === '') return null;
-  const { id: agentId } = await resolveAgentRef(ctx.db, agentRef);
+  // #1946 (Holger's ruling A, team chat #11863): "no such Agent" and "not
+  // installed in this App" are ONE answer, with no id, so an App's admin
+  // can't probe Agents outside it.
+  const notInstalled = () => new GraphQLError('agentRef does not name an agent installed in this App.', {
+    extensions: { code: 'BAD_USER_INPUT' },
+  });
+  let agentId: string;
+  try {
+    ({ id: agentId } = await resolveAgentRef(ctx.db, agentRef));
+  } catch (e) {
+    if (e instanceof AgentNotFoundError) throw notInstalled();
+    throw e;
+  }
   const installed = await ctx.db.appAgent.findFirst({
     where: { appId, agentId },
     select: { agentId: true },
   });
-  if (!installed) {
-    throw new GraphQLError('agentRef does not name an agent installed in this App.', {
-      extensions: { code: 'BAD_USER_INPUT' },
-    });
-  }
+  if (!installed) throw notInstalled();
   return agentId;
 }
 

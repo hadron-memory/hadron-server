@@ -172,7 +172,11 @@ export const orgQueries = {
       // amendment does not address and which no outsider can reach.
       const auditsSelf = !!ctx.userId && subjectUser.id === ctx.userId;
       const memoryShaped = resolved.kind === 'memory' || resolved.kind === 'node';
-      if ((memoryShaped || auditsSelf) && !(await callerCanOpenResource(ctx, resolved))) {
+      // #1946: an Agent too, whoever is audited: a cross-subject audit of an
+      // Agent the caller can't open used to answer FORBIDDEN (callerCanAudit)
+      // where an absent one answers NOT_FOUND, an existence oracle.
+      const concealed = memoryShaped || resolved.kind === 'agent';
+      if ((concealed || auditsSelf) && !(await callerCanOpenResource(ctx, resolved))) {
         throw new GraphQLError('Resource not found', { extensions: { code: 'NOT_FOUND' } });
       }
       // Who may CALL this — the same visibility bar as the underlying grant

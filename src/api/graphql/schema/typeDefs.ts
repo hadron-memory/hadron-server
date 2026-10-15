@@ -1325,6 +1325,34 @@ export const typeDefs = `#graphql
     agentUrn: String!
   }
 
+  """
+  #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - one task on an Agent's task list.
+  """
+  type AgentListedTask {
+    "The task. A base's task, listed through the Agent, keeps its own URN and carries inheritedFrom."
+    node: Node!
+    "The name of the index edge that lists it; null for a task no index edge lists."
+    trigger: String
+  }
+
+  "#1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:16) - how an Agent takes part in a process."
+  enum AgentProcessKind {
+    "Listed in the Agent's processes index: a process it starts or owns."
+    STARTS
+    "Derived: the process has a stage edge to one of the Agent's tasks."
+    INVOLVED
+  }
+
+  """
+  #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:16) - one process on an Agent's process list.
+  """
+  type AgentListedProcess {
+    node: Node!
+    kind: AgentProcessKind!
+    "The name of the index edge that lists it, for STARTS; always null for INVOLVED."
+    trigger: String
+  }
+
   type Node {
     id: ID!
     "#1392 — warnings from a cross-memory move. Null on other Node reads; [] when a move changes no local content links. Raw content is preserved."
@@ -3944,6 +3972,19 @@ export const typeDefs = `#graphql
     or null. Set, change or clear it with setAgentBase.
     """
     extendsAgentId: ID
+    """
+    #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - the id of the index node whose incoming,
+    trigger-labelled edges list this Agent's own tasks, or null. Set or clear
+    it with setAgentIndexRefs; read the Agent's whole task list with agentTaskList.
+    """
+    tasksIndexRef: ID
+    """
+    #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:16) - the id of the index node whose incoming,
+    trigger-labelled edges list the processes this Agent starts or owns, or
+    null. Set or clear it with setAgentIndexRefs; read the Agent's processes
+    with agentProcessList.
+    """
+    processesIndexRef: ID
     # 036-ai-service-config: the four AI fields below are registry-backed
     # reads of the Agent's config named 'default' (legacy columns dropped).
     aiProvider: String
@@ -6112,7 +6153,11 @@ export const typeDefs = `#graphql
     role-agent. The worker must belong to the session's App: with appRef (or an
     App-key credential) it must match the worker's App; without one, the
     worker's App becomes the session's, behind the same membership gate as
-    appRef. A retired worker refuses (WORKER_RETIRED). #940: a worker with an
+    appRef. A retired worker refuses (WORKER_RETIRED). #1937: an id or URN
+    naming a worker in an App the caller cannot read refuses exactly like an
+    absent ref (WORKER_NOT_FOUND, same message and extensions), so no other
+    refusal here tells an outsider the worker exists. The one exception is the
+    worker the caller's own launchGrant names (see launchGrant). #940: a worker with an
     ACTIVE session refuses WORKER_TAKEN — extensions carry workerId, sessionId,
     lastDriver, lastSeenAt, everything the takeover prompt needs — unless
     force is true (informed takeover, cor:agt:020:03: show who last drove it,
@@ -6143,6 +6188,9 @@ export const typeDefs = `#graphql
     LAUNCH_GRANT_INVALID when unknown, expired, used or not minted for the caller (an App key never redeems one);
     LAUNCH_REFUSED, failing the start with the reason, when the hold changed, the holder may no longer hold the
     worker, or it already has a live session. Never forced: with force it is BAD_USER_INPUT.
+    The grant's own worker skips the #1937 worker read gate, because the grant already told its holder that worker
+    exists: a holder who has lost the App gets LAUNCH_REFUSED with its reason rather than WORKER_NOT_FOUND, and so
+    may learn that this one worker was retired (#1945). Any other workerRef sent with a grant is gated first.
     """
     launchGrant: String
     "The session's stated intent (Session.plan) - what this session is about. MCP's hadron_start_session description lands here."
@@ -6816,7 +6864,7 @@ export const typeDefs = `#graphql
 
     "#1709 — the App's host registrations, liveness derived now (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Whoever reads the App's tasks and events, the App's own key included."
     hostRegistrations(appRef: String!): [HostRegistration!]!
-    "#1709 — the App's host operations, newest first (hrn:node:hadronmemory.com:specs:cor:agt:070:02). Whoever reads the App's tasks and events. A host key (one ever granted host:operate) sees only its own host's operations (hrn:node:hadronmemory.com:specs:cor:agt:070:04, Holger 2026-10-13): another hostId returns nothing. after: the endCursor of the previous page."
+    "#1709 — the App's host operations, newest first (hrn:node:hadronmemory.com:specs:cor:agt:070:02). Whoever reads the App's tasks and events. A host key (one ever granted host:operate, revoked or not) is refused with FORBIDDEN, whatever it passes: it sees its own host's operations only by collecting them (hrn:node:hadronmemory.com:specs:cor:agt:070:04 S5, Holger's ruling 0). after: the endCursor of the previous page."
     hostOperations(appRef: String!, hostId: String, status: HostOperationStatus, worker: String, first: Int, after: String): HostOperationPage!
 
     """
@@ -7697,6 +7745,25 @@ export const typeDefs = `#graphql
     'ref' accepts the entity's ID or URN.
     """
     agent(ref: ID!): Agent
+    """
+    #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - an Agent's tasks, across its base chain:
+    every runnable node in its effective system memory, and every task the
+    tasks index of an Agent in the chain lists, each once. A task an index
+    lists carries that edge's name as its trigger, the nearest index's where
+    two list it. Readable by whoever may read the Agent's system memory; a
+    listed task outside the chain's memories is returned only when its own
+    memory is readable too. Refused as AGENT_NOT_FOUND otherwise. The MCP tool
+    hadron_agent_tasks returns the same list. Accepts the Agent's ID or URN.
+    """
+    agentTaskList(ref: ID!): [AgentListedTask!]!
+    """
+    #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:16) - an Agent's processes: the ones its own
+    processes index lists (STARTS, with the edge's trigger), then the ones with
+    a stage edge (named 'stage ...') to one of its agentTaskList tasks (INVOLVED, no
+    trigger), each once. Same gate as agentTaskList; the MCP tool
+    hadron_agent_processes returns the same list. Accepts the Agent's ID or URN.
+    """
+    agentProcessList(ref: ID!): [AgentListedProcess!]!
 
     """
     Uniform paginated agent list (#473). Scope: Agents owned by the caller's
@@ -8593,7 +8660,8 @@ export const typeDefs = `#graphql
     registerHost(input: RegisterHostInput!): HostRegistration!
     """
     #1709 — a host collects its own operations, oldest first: those still ISSUED (now marked COLLECTED) and those it
-    collected and has not reported. Only its own host's, in its own App (hrn:node:hadronmemory.com:specs:cor:agt:070:04).
+    collected and has not reported, except a worker.start whose launch grant is still live (#1928: a re-collection never
+    revokes a launch in flight). Only its own host's, in its own App (hrn:node:hadronmemory.com:specs:cor:agt:070:04).
     first: at most 200, default 50.
     """
     collectHostOperations(appRef: String!, first: Int): [HostOperation!]!
@@ -9110,7 +9178,7 @@ export const typeDefs = `#graphql
     """
     approveNode(nodeRef: ID!, revision: Int): NodeApprovalReceipt!
     """
-    #1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — ask for a node's current content to be signed. Any reader of the node may ask, agents included; agents never sign. expectedRevision, when given, must still be current (REVISION_MISMATCH). signerRef names one signer (a user id); omitted, any writer of the memory may sign. Refusals: NODE_NOT_FOUND, ENCRYPTED_MEMORY_NOT_APPLICABLE, and (hrn:node:hadronmemory.com:specs:cor:dmo:130:02, Holger #10430) COMMENT_NOT_SIGNABLE, NODE_IS_PLACEHOLDER, REVISION_MISMATCH, SIGNER_NOT_FOUND. No call takes an assertion: the signer signs on the server-hosted ceremony page (S2b-2).
+    #1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — ask for a node's current content to be signed. Any reader of the node may ask, agents included; agents never sign. expectedRevision, when given, must still be current (REVISION_MISMATCH). signerRef names one signer (a user id); omitted, any writer of the memory may sign. Refusals: NODE_NOT_FOUND, ENCRYPTED_MEMORY_NOT_APPLICABLE, and (hrn:node:hadronmemory.com:specs:cor:dmo:130:02, Holger #10430) COMMENT_NOT_SIGNABLE, NODE_IS_PLACEHOLDER, REVISION_MISMATCH, SIGNER_NOT_FOUND, and (Holger #11094, #1904) SIGNER_NOT_A_WRITER when the named signer may not write the node's memory (checked again when they sign or decline). No call takes an assertion: the signer signs on the server-hosted ceremony page (S2b-2).
     """
     requestNodeSignature(nodeRef: ID!, expectedRevision: Int, signerRef: ID): SigningRequest!
     "#1632 — withdraw an open signing request. Only the requester account, from any of its sessions (#10397). Refusals (hrn:node:hadronmemory.com:specs:cor:dmo:130:03, Holger #10430): SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
@@ -9892,6 +9960,16 @@ export const typeDefs = `#graphql
     Accepts each Agent's ID or URN.
     """
     setAgentBase(ref: ID!, baseRef: ID): Agent!
+
+    """
+    #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15, hrn:node:hadronmemory.com:specs:cor:dmo:050:16) - set or clear
+    this Agent's tasks-index and processes-index pointers. An omitted argument
+    leaves that pointer unchanged; null clears it. Each target is a node ID or
+    fully-qualified URN, and must be a live node the caller may read (refused
+    as NODE_NOT_FOUND otherwise). Whoever manages this Agent may call it.
+    Accepts the Agent's ID or URN.
+    """
+    setAgentIndexRefs(ref: ID!, tasksIndexRef: ID, processesIndexRef: ID): Agent!
 
     """
     #949 — re-own an Agent's class=system memory to the Agent's own owner
@@ -12257,8 +12335,10 @@ export const typeDefs = `#graphql
     failureReason: String
     """
     #1709 — worker.start only, and only in collectHostOperations' answer: the single-use launch grant to pass to the
-    agent the host starts (it redeems it at startSession with its holder's own token). Minted at each collection, which
-    revokes the previous one; short-lived; never stored in clear and never shown again. Null everywhere else.
+    agent the host starts (it redeems it at startSession with its holder's own token). Short-lived; never stored in clear
+    and never shown again. #1928: while it is live, a re-collection leaves the start out of the answer; once it expires,
+    the next collection revokes it and delivers the start with a fresh one; once redeemed, the start is delivered with
+    null here, so a restarted host can still report it. Null everywhere else.
     """
     launchGrant: String
   }

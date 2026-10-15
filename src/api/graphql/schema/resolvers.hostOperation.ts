@@ -187,25 +187,37 @@ export const hostOperationMutations = {
   collectHostOperations: async (_: unknown, a: { appRef: string; first?: number | null }, ctx: Context) => {
     const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
     return asHost(ctx, a.appRef, async (tx, app, host) => {
-      const rows = await tx.$queryRaw<{ id: string }[]>`
-        SELECT id FROM host_operations
-        WHERE app_id = ${app.id} AND host_id = ${host.hostId} AND status IN ('issued', 'collected')
-        ORDER BY issued_at, id
-        LIMIT ${first}
-        FOR UPDATE`;
-      const ids = rows.map((r) => r.id);
       const now = new Date();
-      if (ids.length) {
+      const out: Array<HostOperationRow & { launchGrant: string | null }> = [];
+      // #1928 (Diego P2): a start held back (its grant still live) or failed at collection takes no page slot, so the
+      // page is refilled past it, oldest first, until `first` operations are delivered or the host has no more.
+      // The cursor is the last row's id, compared through the row itself (no JS Date bound against a naive column).
+      let afterId: string | null = null;
+      while (out.length < first) {
+        const want = first - out.length;
+        const rows: { id: string }[] = await tx.$queryRaw`
+          SELECT id FROM host_operations
+          WHERE app_id = ${app.id} AND host_id = ${host.hostId} AND status IN ('issued', 'collected')
+            ${afterId ? Prisma.sql`AND (issued_at, id) > (SELECT issued_at, id FROM host_operations WHERE id = ${afterId})` : Prisma.empty}
+          ORDER BY issued_at, id
+          LIMIT ${want}
+          FOR UPDATE`;
+        if (rows.length === 0) break;
+        const ids = rows.map((r) => r.id);
         await tx.hostOperation.updateMany({ where: { id: { in: ids }, status: 'issued' }, data: { status: 'collected', collectedAt: now } });
+        // #1709 slice 2: each worker.start collected gets a fresh single-use launch grant, shown in this answer only.
+        // One whose worker is no longer held fails here instead, and is left out. #1928: one whose grant is still live
+        // is left out too, so a re-collect never revokes a launch in flight.
+        const starts = await tx.hostOperation.findMany({ where: { id: { in: ids }, type: 'worker.start' } });
+        const { grants, withheld } = await mintLaunchGrants(tx, starts, now);
+        const ops = await tx.hostOperation.findMany({ where: { id: { in: ids }, status: 'collected' } });
+        const byId = new Map(ops.filter((o) => !withheld.has(o.id)).map((o) => [o.id, o]));
+        for (const id of ids) if (byId.has(id)) out.push({ ...byId.get(id)!, launchGrant: grants.get(id) ?? null });
+        if (rows.length < want) break;
+        afterId = rows[rows.length - 1]!.id;
       }
-      // #1709 slice 2: each worker.start collected gets a fresh single-use launch grant, shown in this answer only.
-      // One whose worker is no longer held fails here instead, and is left out.
-      const starts = ids.length ? await tx.hostOperation.findMany({ where: { id: { in: ids }, type: 'worker.start' } }) : [];
-      const grants = await mintLaunchGrants(tx, starts, now);
-      const ops = ids.length ? await tx.hostOperation.findMany({ where: { id: { in: ids }, status: 'collected' } }) : [];
-      await recordHostKeyUse(tx, host, 'collect', { count: ops.length });
-      const byId = new Map(ops.map((o) => [o.id, o]));
-      return ids.filter((id) => byId.has(id)).map((id) => ({ ...byId.get(id)!, launchGrant: grants.get(id) ?? null }));
+      await recordHostKeyUse(tx, host, 'collect', { count: out.length });
+      return out;
     });
   },
 
@@ -590,17 +602,17 @@ export const hostOperationQueries = {
     ctx: Context,
   ) =>
     withReadableApp(ctx, a.appRef, async (c, app) => {
+      // Ruling 0 (Holger via Vera #10955; cor:agt:070:04 S5): a host key does not read the App-wide listing; it sees
+      // its own host's operations only by collecting them. Refused before any argument is read, so the answer is the
+      // same whatever hostId, status, worker or cursor it passes: no oracle for another host's operations.
+      if (await wasEverHostKey(c)) {
+        throw taskError('FORBIDDEN', "A host key reads its own host's operations by collecting them, not from the App's listing.");
+      }
       const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
       const status = a.status ? a.status.toLowerCase() : null;
       if (status && !['issued', 'collected', 'succeeded', 'failed'].includes(status)) {
         throw badInput('status is ISSUED, COLLECTED, SUCCEEDED or FAILED.');
       }
-      // Holger via Vera #10805 (cor:agt:070:04): a host key sees only its OWN host's operations; the App-wide listing is
-      // for the App's participants and its other keys. A key that has ever been granted host:operate is a host key
-      // here, held to the host of its latest grant even once revoked, so revoking the scope never widens its read.
-      const ownHost = await hostOfKey(c);
-      const hostFilter = ownHost ?? a.hostId ?? null;
-      if (ownHost && a.hostId && a.hostId !== ownHost) return { items: [], hasNextPage: false, endCursor: null };
       let workerId: string | null = null;
       if (a.worker) {
         workerId = await resolveTaskWorkerId(c, app.id, a.worker);
@@ -608,9 +620,8 @@ export const hostOperationQueries = {
       }
       let cursor: { issuedAt: Date; id: string } | null = null;
       if (a.after) {
-        // Scoped like the list, so a cursor naming another host's operation reads as no cursor at all (no oracle).
         const at = await c.db.hostOperation.findFirst({
-          where: { id: a.after, appId: app.id, ...(ownHost ? { hostId: ownHost } : {}) },
+          where: { id: a.after, appId: app.id },
           select: { issuedAt: true, id: true },
         });
         if (!at) throw badInput('after is not a cursor of this list.');
@@ -619,7 +630,7 @@ export const hostOperationQueries = {
       const rows: HostOperationRow[] = await c.db.hostOperation.findMany({
         where: {
           appId: app.id,
-          ...(hostFilter ? { hostId: hostFilter } : {}),
+          ...(a.hostId ? { hostId: a.hostId } : {}),
           ...(status ? { status } : {}),
           ...(workerId ? { workerId } : {}),
           ...(cursor ? { OR: [{ issuedAt: { lt: cursor.issuedAt } }, { issuedAt: cursor.issuedAt, id: { lt: cursor.id } }] } : {}),
@@ -633,18 +644,17 @@ export const hostOperationQueries = {
 };
 
 /**
- * The host a calling App key is bound to for reads, or null for a person or a key that was never a host's: the host
- * of the key's latest host:operate grant, live or revoked (#10805).
+ * Is the caller an App key that has ever been granted host:operate, live or revoked? Such a key is a host key for the
+ * listing's refusal, so revoking the scope never opens the App-wide read (#1894; it replaces #1884's host binding).
  */
-async function hostOfKey(c: Context): Promise<string | null> {
+async function wasEverHostKey(c: Context): Promise<boolean> {
   const key = appKeyCaller(c);
-  if (!key) return null;
+  if (!key) return false;
   const row = await c.db.appKeyScope.findFirst({
     where: { appKeyId: key.appKeyId, scope: 'host:operate' },
-    orderBy: [{ grantedAt: 'desc' }, { id: 'desc' }],
-    select: { hostId: true },
+    select: { id: true },
   });
-  return row?.hostId ?? null;
+  return row !== null;
 }
 
 export const hostOperationFieldResolvers = {

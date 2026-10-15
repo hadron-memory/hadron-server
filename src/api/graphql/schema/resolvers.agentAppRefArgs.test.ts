@@ -95,20 +95,21 @@ describe('#554 — widening to a URN does NOT widen authorization (#789)', () =>
   it('updateAgent by URN still requires the org write gate', async () => {
     await expect(
       M.updateAgent({}, { ref: agentUrn(), description: 'nope' }, outsiderCtx()),
-    ).rejects.toThrow(/Forbidden/i);
+    // #1944: an outsider can't read the Agent, so it answers as absent.
+    ).rejects.toThrow(/AGENT_NOT_FOUND/);
     // Unchanged on disk.
     expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).description).toBeNull();
   });
 
   it('deleteAgent by URN still requires the org write gate', async () => {
-    await expect(M.deleteAgent({}, { ref: agentUrn() }, outsiderCtx())).rejects.toThrow(/Forbidden/i);
+    await expect(M.deleteAgent({}, { ref: agentUrn() }, outsiderCtx())).rejects.toThrow(/AGENT_NOT_FOUND/); // #1944
     expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).deletedAt).toBeNull();
   });
 
   it('the PK path is gated identically — the ref shape changes nothing', async () => {
     await expect(
       M.updateAgent({}, { ref: agent.id, description: 'nope' }, outsiderCtx()),
-    ).rejects.toThrow(/Forbidden/i);
+    ).rejects.toThrow(/AGENT_NOT_FOUND/); // #1944
   });
 });
 

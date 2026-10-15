@@ -161,7 +161,8 @@ describe('createApp — user-owned (no orgId), installing a PUBLIC agent', () =>
     });
     await expect(
       resolvers.Mutation.createApp({}, { agentRef: privAgent.id, name: 'Sneaky' }, ctx({ userId: ownerId, roles: ['READER'] })),
-    ).rejects.toThrow(/PUBLIC agent or your own/i);
+    // #1946: an Agent the caller can't read answers as absent.
+    ).rejects.toThrow(/AGENT_NOT_FOUND/);
   });
 });
 
@@ -398,7 +399,7 @@ describe('installAgentIntoApp — personal-App accessibility gate (#756)', () =>
         { appRef: app.id, agentRef: victimAgent.id },
         ctx({ userId: ownerId, roles: ['READER'] }),
       ),
-    ).rejects.toThrow(/PUBLIC agent or your own/i);
+    ).rejects.toThrow(/AGENT_NOT_FOUND/); // #1946: unreadable answers as absent
 
     // No link and no license were written.
     expect(await db.appAgent.count({ where: { appId: app.id, agentId: victimAgent.id } })).toBe(0);
@@ -419,7 +420,7 @@ describe('installAgentIntoApp — personal-App accessibility gate (#756)', () =>
         { appRef: app.id, agentRef: privAgent.id },
         ctx({ userId: ownerId, roles: ['READER'] }),
       ),
-    ).rejects.toThrow(/PUBLIC agent or your own/i);
+    ).rejects.toThrow(/AGENT_NOT_FOUND/); // #1946: unreadable answers as absent
   });
 
   it('allows the owner’s OWN personal agent, unlicensed (ownership licenses it)', async () => {

@@ -283,17 +283,17 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     // The wrapper must delegate org-owned agents unchanged: the platform-admin
     // arm fires only on the user-owned shape.
     expect((await resolvers.Query.agent(null, { ref: orgAgent.id }, admin()))?.id).toBe(orgAgent.id);
-    await expect(
-      resolvers.Query.agent(null, { ref: orgAgent.id }, ctx({ userId: otherId, roles: ['READER'] })),
-    ).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    // #1944: a non-member can't read it, so it reads as absent.
+    expect(await resolvers.Query.agent(null, { ref: orgAgent.id }, ctx({ userId: otherId, roles: ['READER'] }))).toBeNull();
   });
 
   it('an ordinary non-owner is still refused everywhere', async () => {
     const agent = await rogueAgent();
     const ordinary = ctx({ userId: otherId, roles: ['READER'] });
-    await expect(resolvers.Query.agent(null, { ref: agent.id }, ordinary)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
-    await expect(resolvers.Mutation.updateAgent(null, { ref: agent.id, name: 'X' }, ordinary)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
-    await expect(resolvers.Mutation.deleteAgent(null, { ref: agent.id }, ordinary)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    // #1944: refused as absent, since an ordinary non-owner can't read it.
+    expect(await resolvers.Query.agent(null, { ref: agent.id }, ordinary)).toBeNull();
+    await expect(resolvers.Mutation.updateAgent(null, { ref: agent.id, name: 'X' }, ordinary)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+    await expect(resolvers.Mutation.deleteAgent(null, { ref: agent.id }, ordinary)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
     await expect(resolvers.Query.memory(null, { ref: agent.systemMemoryId! }, ordinary)).resolves.toBeNull();
   });
 
@@ -316,8 +316,9 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     const agent = await rogueAgent();
     const imp = { orgId: 'some-org', sessionId: 'imp-session', actorUserId: otherId };
     const impAdmin = ctx({ userId: otherId, roles: ['ADMIN'], impersonation: imp as never });
-    await expect(resolvers.Query.agent(null, { ref: agent.id }, impAdmin)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
-    await expect(resolvers.Mutation.deleteAgent(null, { ref: agent.id }, impAdmin)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    // #1944: impersonation gains no read, so the Agent reads as absent.
+    expect(await resolvers.Query.agent(null, { ref: agent.id }, impAdmin)).toBeNull();
+    await expect(resolvers.Mutation.deleteAgent(null, { ref: agent.id }, impAdmin)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
     await expect(resolvers.Query.memory(null, { ref: agent.systemMemoryId! }, impAdmin)).resolves.toBeNull();
   });
 

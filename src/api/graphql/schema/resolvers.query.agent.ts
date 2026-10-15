@@ -12,6 +12,8 @@ import {
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
+import { listAgentProcesses, listAgentTasks, reverifyServed, type ListedNode } from '../../../lib/agentDefinitionLists.js';
+import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { isAgentInstalled } from '../../../lib/appAgent.js';
 import {
   type Context,
@@ -19,6 +21,8 @@ import {
   clampListTake,
   requireOrgRole,
   requireAgentAccess,
+  resolveReadableAgentRef,
+  requireReadableAgent,
   requireOwnerOrOrgRole,
   resolveOrgScope,
   isPlatformAdmin,
@@ -30,7 +34,53 @@ import {
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 
+/**
+ * #1892 — the full Node rows behind a list's entries, in list order, each
+ * stamped `inheritedFrom` where the list marked it, so the inherited-node
+ * projection (resolvers.inheritedNode.ts) applies to every Node field. The
+ * rows are re-read here, so what is served is re-authorized on the version
+ * read (`reverifyServed`, Anne's P2-1 on #1896): an entry deleted, moved,
+ * overridden, turned boot prompt or made unreadable since the list was built
+ * is dropped rather than served.
+ */
+async function listedEntries<E extends { node: ListedNode }>(ctx: Context, agentId: string, entries: E[]) {
+  if (entries.length === 0) return [];
+  const { systemMemoryId } = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId }, select: { systemMemoryId: true } });
+  const rows = await ctx.db.node.findMany({ where: { id: { in: entries.map((e) => e.node.id) } } });
+  const ok = systemMemoryId ? await reverifyServed(ctx.db, ctx, systemMemoryId, entries.map((e) => e.node), rows) : new Set<string>();
+  const served = rows.filter((r) => ok.has(r.id));
+  await decryptNodesBatch(ctx.db, served);
+  const byId = new Map(served.map((r) => [r.id, r]));
+  return entries.flatMap((e) => {
+    const row = byId.get(e.node.id);
+    if (!row) return [];
+    return [{ ...e, node: e.node.inheritedFrom ? Object.assign(row, { inheritedFrom: e.node.inheritedFrom }) : row }];
+  });
+}
+
 export const agentQueries = {
+    /**
+     * #1892 (cor:dmo:050:15) — an Agent's tasks across its base chain: every
+     * runnable node of its effective system memory and every task a chain
+     * index lists, each once, with the listing edge's trigger where one exists.
+     * hadron_agent_tasks returns the same list (src/lib/agentDefinitionLists.ts).
+     */
+    agentTaskList: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      const { id } = await resolveAgentRef(ctx.db, ref);
+      return listedEntries(ctx, id, await listAgentTasks(ctx.db, ctx, id, ref));
+    },
+
+    /**
+     * #1892 (cor:dmo:050:16) — an Agent's processes: those it starts or owns
+     * (its processes index, with triggers), then those it's involved in
+     * (derived from stage edges into its tasks). hadron_agent_processes
+     * returns the same list.
+     */
+    agentProcessList: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      const { id } = await resolveAgentRef(ctx.db, ref);
+      return listedEntries(ctx, id, await listAgentProcesses(ctx.db, ctx, id, ref));
+    },
+
     // #473 — the uniform single-agent read; the first top-level Agent query
     // (previously reachable only via Organization.agents / App.agents
     // nesting). Gate mirrors resolveUrn's agent branch: a PUBLIC agent
@@ -41,9 +91,18 @@ export const agentQueries = {
     // appCount / orgGrants / importedBy) are scoped to the caller's own access
     // and come back empty for an outsider (#552, #757).
     agent: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
-      let resolvedId: string;
       try {
-        ({ id: resolvedId } = await resolveAgentRef(ctx.db, ref));
+        const { id } = await resolveAgentRef(ctx.db, ref);
+        // ONE read, with the includes it serves, and the gate runs on THAT row
+        // (Atilla's P2 on #1950: gating an earlier read and serving a later one
+        // let a PUBLIC→ORGANIZATION flip between them reach a foreign reader).
+        const agent = await ctx.db.agent.findUnique({ where: { id }, include: AGENT_INCLUDE });
+        // #551: PUBLIC visibility widens the READ gate to everyone (mirrors the
+        // memories PUBLIC carve-out, #362); non-public needs READER. #1944: the
+        // shared read gate answers a denied Agent exactly like an absent one,
+        // so both come back null here, never FORBIDDEN.
+        await requireReadableAgent(ctx, agent, ref);
+        return agent;
       } catch (e) {
         // Genuine miss (AgentNotFoundError) → null. A malformed /
         // under-qualified URN throws UrnNotQualifiedError from
@@ -52,18 +111,6 @@ export const agentQueries = {
         if (!(e instanceof AgentNotFoundError)) throw e;
         return null;
       }
-      const agent = await ctx.db.agent.findUnique({
-        where: { id: resolvedId },
-        include: AGENT_INCLUDE,
-      });
-      if (!agent || agent.deletedAt) return null;
-      // #551: PUBLIC visibility widens the READ gate to everyone (mirrors the
-      // memories PUBLIC carve-out, #362). Non-public falls through to the
-      // membership gate.
-      if (agent.visibility !== 'PUBLIC') {
-        await requireAgentAccess(ctx, agent, 'READER');
-      }
-      return agent;
     },
 
     // #551 — the public-agent marketplace slice: ALL live PUBLIC agents,
@@ -210,8 +257,10 @@ export const agentQueries = {
     agentAIConfig: async (_: unknown, { agentRef }: { agentRef: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
       // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate first, so an unreadable Agent answers as
+      // absent; the key read itself stays owner/org-ADMIN only, below.
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
+      const resolvedAgentId = agent.id;
       // Org ADMIN on the agent's org can read the decrypted key.
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       // 036-ai-service-config: registry-backed — the Agent's 'default'
@@ -315,9 +364,26 @@ export const agentQueries = {
           await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
         }
         if (agentRef) {
-          const { id } = await resolveAgentRef(ctx.db, agentRef);
+          // #1944: with no App named, the Agent goes through the read gate, so
+          // one the caller can't read answers as absent; the owner/org gates
+          // below still apply. With an App named, the App ADMIN gate above and
+          // the installation check below are the authority: an App's admin
+          // legitimately resolves an Agent installed from another org that
+          // they can't read directly, so the read gate must not run there.
+          // (Whether an App admin may tell absent from not-installed is
+          // #1946's open question.)
+          const agent = resolvedAppId
+            ? await ctx.db.agent.findUniqueOrThrow({ where: { id: (await resolveAgentRef(ctx.db, agentRef)).id } })
+            : await resolveReadableAgentRef(ctx, agentRef);
+          const { id } = agent;
           resolvedAgentId = id;
-          const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+          // #1946 (Atilla's P2 on #1955): with an App named, "not installed
+          // here" is decided BEFORE any Agent-specific denial below (the
+          // personal-Agent owner gate), so a foreign Agent answers exactly as
+          // an absent one (ruling A).
+          if (resolvedAppId && !(await isAgentInstalled(ctx.db, resolvedAppId, id))) {
+            throw new AgentNotFoundError(agentRef);
+          }
           agentOwner = agent;
           userOwnedAgent = agent.ownerUserId !== null;
           personalAgentOwnerId = agent.ownerUserId;
@@ -330,8 +396,10 @@ export const agentQueries = {
             effectiveOrgId = agent.organizationId;
           }
         }
+        // #1946 (ruling A): with an App named, an Agent not installed in it
+        // answers exactly as an absent one — one answer, no id.
         if (resolvedAppId && resolvedAgentId && !(await isAgentInstalled(ctx.db, resolvedAppId, resolvedAgentId))) {
-          throw new Error('Forbidden');
+          throw new AgentNotFoundError(agentRef!);
         }
         // A user-owned App's config is eligible only when it belongs to the
         // same owner as the named personal Agent. Otherwise naming another
@@ -420,10 +488,19 @@ export const agentQueries = {
         // 007-entity-id-or-urn: appRef/agentRef may be ID or URN. A ref that
         // doesn't resolve to a row simply contributes nothing to the walk.
         const resolvedAppId = appRef ? (await resolveAppRef(ctx.db, appRef)).id : null;
-        const resolvedAgentId = agentRef ? (await resolveAgentRef(ctx.db, agentRef)).id : null;
         // Masked picker: ALL App members may list the configs their chat
         // context can resolve (not just org admins — no key material leaves).
-        await requireAiConfigPickerAccess(ctx, resolvedAppId, resolvedAgentId);
+        // #1946: the App gate runs BEFORE the Agent is resolved, and for an App
+        // member "not installed in this App" answers exactly as "no such Agent"
+        // (Holger's ruling A, team chat #11863): one answer, no id.
+        await requireAiConfigPickerAccess(ctx, resolvedAppId, null);
+        let resolvedAgentId: string | null = null;
+        if (agentRef) {
+          resolvedAgentId = (await resolveAgentRef(ctx.db, agentRef)).id;
+          if (!isPlatformAdmin(ctx) && !(await isAgentInstalled(ctx.db, resolvedAppId!, resolvedAgentId))) {
+            throw new AgentNotFoundError(agentRef);
+          }
+        }
         const resolved = await resolveAiConfigs(ctx.db, {
           appId: resolvedAppId,
           agentId: resolvedAgentId,
@@ -452,8 +529,9 @@ export const agentQueries = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: an Agent the caller can't read answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       return ctx.db.agentSubscription.findMany({
         where: { agentId: resolvedAgentId },

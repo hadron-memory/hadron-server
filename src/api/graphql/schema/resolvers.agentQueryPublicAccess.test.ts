@@ -85,8 +85,9 @@ describe('agent(ref:) — PUBLIC visibility (issue #551)', () => {
   });
 
   it('still forbids a non-member on an ORGANIZATION agent', async () => {
-    await expect(Q.agent(null, { ref: orgAgentA.id }, asStranger())).rejects.toThrow('Forbidden');
-    await expect(Q.agent(null, { ref: orgAgentA.id }, asAnon())).rejects.toThrow('Forbidden');
+    // #1944: an Agent the caller can't read reads as absent (null), never FORBIDDEN.
+    expect(await Q.agent(null, { ref: orgAgentA.id }, asStranger())).toBeNull();
+    expect(await Q.agent(null, { ref: orgAgentA.id }, asAnon())).toBeNull();
   });
 
   it('an org member still reads their org ORGANIZATION agent (no regression)', async () => {
@@ -95,7 +96,7 @@ describe('agent(ref:) — PUBLIC visibility (issue #551)', () => {
 
   it('a REVOKED member is denied on an ORGANIZATION agent but still reads a PUBLIC one', async () => {
     await db.orgMember.updateMany({ where: { organizationId: orgA.id, userId: member.id }, data: { deletedAt: new Date() } });
-    await expect(Q.agent(null, { ref: orgAgentA.id }, asMember())).rejects.toThrow('Forbidden');
+    expect(await Q.agent(null, { ref: orgAgentA.id }, asMember())).toBeNull(); // #1944: as absent
     expect((await Q.agent(null, { ref: pubAgentA.id }, asMember()))?.id).toBe(pubAgentA.id);
   });
 });

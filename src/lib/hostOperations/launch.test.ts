@@ -211,12 +211,68 @@ describe('the grant (Holger\'s ruling A, Rook #10734)', () => {
     expect((await redeem(holder.id, grant)).workerId).toBe(kit.id);
   });
 
-  it('a re-collection revokes the earlier grant and mints a new one', async () => {
+  it('#1937: a grant holder naming a worker of an App they cannot read learns nothing: the absent envelope, and the start stands', async () => {
+    const { opId, grant } = await collectedStart();
+    const elsewhereOrg = await db.organization.create({ data: { name: 'Elsewhere', urn: `${org.urn}-else` }, select: { id: true } });
+    const elsewhere = await db.app.create({ data: { organizationId: elsewhereOrg.id, name: 'Else', urn: `${org.urn}-else:else` }, select: { id: true } });
+    const foreign = await db.worker.create({ data: { appId: elsewhere.id, agentId, name: 'Zed', slug: 'zed' }, select: { id: true } });
+    const env = async (ref: string) => {
+      try {
+        await redeem(holder.id, grant, { workerRef: ref });
+      } catch (e) {
+        return JSON.stringify({ m: (e as GraphQLError).message, x: (e as GraphQLError).extensions });
+      }
+      throw new Error('expected a refusal');
+    };
+    const real = await env(foreign.id);
+    expect(real).toBe(JSON.stringify({ m: `Worker not found: ${foreign.id}`, x: { code: 'WORKER_NOT_FOUND' } }));
+    await db.worker.delete({ where: { id: foreign.id } });
+    expect(await env(foreign.id)).toBe(real);
+    // A caller's mistake fails nothing: the start stands and the holder still binds the grant's worker.
+    expect((await opOf(opId)).status).toBe('collected');
+    expect((await redeem(holder.id, grant)).workerId).toBe(kit.id);
+  });
+
+  it('#1928: a re-collection while the grant is live leaves the start out, and the grant stays redeemable', async () => {
+    const { opId, grant } = await collectedStart();
+    const other = await M.issueHostOperation({}, { input: { appRef: app.id, hostId: 'orca1', worker: kit.id, type: 'worktree.create', args: { repo: 'hadron-server', baseBranch: 'main', branchName: 'kit-2', label: 'kit-2' } } }, ctx(manager.id));
+    const again = await collect();
+    expect(again.map((o) => o.id)).not.toContain(opId);
+    // No starvation: the host's other unreported operations are still delivered on every collect.
+    expect(again.map((o) => o.id)).toContain(other.id);
+    expect((await collect()).map((o) => o.id)).toContain(other.id);
+    expect(await db.launchGrant.count({ where: { operationId: opId } })).toBe(1);
+    expect((await redeem(holder.id, grant)).launchOperationId).toBe(opId);
+  });
+
+  it('#1928 (Diego P2): a withheld start never takes a page slot: with first:1 the later operation is delivered on every collect', async () => {
+    const { opId, grant } = await collectedStart();
+    const later = await M.issueHostOperation({}, { input: { appRef: app.id, hostId: 'orca1', worker: kit.id, type: 'worktree.create', args: { repo: 'hadron-server', baseBranch: 'main', branchName: 'kit-3', label: 'kit-3' } } }, ctx(manager.id));
+    const one = () => M.collectHostOperations({}, { appRef: app.id, first: 1 }, keyCtx(orca1)) as Promise<Array<{ id: string }>>;
+    for (let i = 0; i < 3; i += 1) expect((await one()).map((o) => o.id)).toEqual([later.id]);
+    expect((await redeem(holder.id, grant)).launchOperationId).toBe(opId);
+  });
+
+  it('#1928: once the grant has expired, a re-collection delivers the start with a fresh grant and the old one is revoked', async () => {
     const { opId, grant: first } = await collectedStart();
+    await db.launchGrant.updateMany({ where: { operationId: opId }, data: { expiresAt: new Date(Date.now() - 1000), issuedAt: new Date(Date.now() - 2000) } });
     const [again] = (await collect()).filter((o) => o.id === opId);
+    expect(again!.launchGrant).toBeTruthy();
     expect(again!.launchGrant).not.toBe(first);
+    expect((await db.launchGrant.findFirstOrThrow({ where: { operationId: opId, revokedAt: { not: null } } })).consumedAt).toBeNull();
     expect(await code(redeem(holder.id, first))).toBe('LAUNCH_GRANT_INVALID');
     expect((await redeem(holder.id, again!.launchGrant!)).launchOperationId).toBe(opId);
+  });
+
+  it('#1928: once the grant is consumed (the session bound), a re-collection mints nothing and delivers the start without a grant, so a restarted host can report it', async () => {
+    const { opId, grant } = await collectedStart();
+    const session = await redeem(holder.id, grant);
+    const [again] = (await collect()).filter((o) => o.id === opId);
+    expect(again).toBeTruthy();
+    expect(again!.launchGrant).toBeNull();
+    expect(await db.launchGrant.count({ where: { operationId: opId } })).toBe(1);
+    await report(opId, { outcome: 'SUCCEEDED' });
+    expect(await opOf(opId)).toMatchObject({ status: 'succeeded', result: { sessionId: session.id } });
   });
 
   it('is kept only as a hash, and no operation, grant or report carries a credential (cor:sec:050:01, #10777)', async () => {
