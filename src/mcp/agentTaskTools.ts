@@ -487,7 +487,8 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'hadron_alarm_ack',
     'Acknowledge a stall alarm (cor:agt:050:20): it stops waking owners further up the chain. It does not resolve the ' +
       'stall: the task moves only when it is reassigned, cancelled, or its assignee acts. Any owner in the alarm\'s ' +
-      'chain may acknowledge it, and nobody else; a second acknowledgement is refused. Find alarms with ' +
+      'chain, or whoever manages the App (cor:agt:050:24), may acknowledge it, and nobody else; a second ' +
+      'acknowledgement is refused. Find alarms with ' +
       'hadron_team_events (alarmsOnly: true).',
     { eventId: z.string().describe('The alarm event id.'), session: SESSION_WRITE },
     async ({ session, eventId }) =>

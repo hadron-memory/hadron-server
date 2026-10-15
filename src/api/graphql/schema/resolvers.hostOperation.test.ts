@@ -214,6 +214,14 @@ describe('issueHostOperation: the closed set (cor:agt:070:03) and who issues (co
     expect(await create(ctx(manager.id), start)).toMatchObject({ type: 'worker.start', issuedBy: 'user', args: { workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude' } });
   });
 
+  it('#12143: the issueHostOperation SDL says worker.end is issuable by whoever manages the App; only worker.deliver is not', () => {
+    const doc = /"""\n([^"]*)"""\n\s*issueHostOperation\(/.exec(typeDefs)?.[1] ?? '';
+    expect(doc).toContain('worker.end: whoever manages the App only');
+    expect(doc.replace(/\s+/g, ' ')).toContain('worker.deliver is the one type not issued yet, HOST_OPERATION_NOT_ISSUABLE');
+    // The pre-#1709 wording said worker.end was not issuable yet.
+    expect(doc).not.toMatch(/worker\.end ships with/);
+  });
+
   it('S1 (070:05): the holder removes a worktree the host registers for Kit; one it does not register is refused', async () => {
     const op = await create(ctx(holder.id), { type: 'worktree.remove', args: { worktree: 'hadron-server/kit' } });
     expect(op).toMatchObject({ type: 'worktree.remove', args: { workerId: kit.id, worktree: 'hadron-server/kit' } });

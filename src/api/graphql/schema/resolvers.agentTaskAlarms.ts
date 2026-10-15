@@ -10,7 +10,8 @@
 // (`inTaskWriteTx`). Nothing here hand-rolls a second gate.
 //
 // AUTHORIZATION (plan design:agent-tasks §10):
-//   acknowledge an alarm   any owner in its chain, and nobody else (050:20, Proposed)
+//   acknowledge an alarm   any owner in its chain, or whoever manages the App
+//                           (050:24, #1762), and nobody else (050:20, Proposed)
 //   set worker availability   the worker itself (only to unavailable); the
 //                           person holding its name; whoever manages the App;
 //                           the worker it reports to DIRECTLY, only to clear a

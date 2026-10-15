@@ -13,11 +13,14 @@
  * bound, else one a live host registration can launch it as (060:04). A worker kept bound after a finished
  * task (`closeSessionWhenDone: false`) is free and keeps its family.
  *
- * UNTIL T6 SHIPS, ONLY WORKERS WITH A LIVE SESSION ARE MATCHED (`matchable`,
- * `MATCH_UNBOUND_LAUNCHABLE`): an unbound or quiet worker has no way to be
- * reached yet, so matching it would only park the task. That restriction is
- * the matcher's; the family still follows the binding (#1723 review, Diego
- * P2-2). The roster still reports such a worker as free.
+ * WHO IS MATCHED (`matchable`, shipped with T6, #1709): a BOUND worker only
+ * while its session is LIVE (cor:agt:020:11) and has reported a family, since
+ * a quiet session has nobody driving it and matching it would only park the
+ * task; an UNBOUND worker when a live host registration can launch it, as one
+ * of the families that host lists (`MATCH_UNBOUND_LAUNCHABLE`; the assignment
+ * then issues a `worker.start`). That restriction is the matcher's; the family
+ * still follows the binding (#1723 review, Diego P2-2), and the roster still
+ * reports a quiet bound worker as free (`liveSession` tells them apart).
  * #1709 (T6): a worker waiting on a session end (cor:agt:050:10: an open
  * request whose session is still open, or an outstanding `worker.end`) is not
  * matched either (`endingSession`), so new work never lands in a session the
@@ -55,7 +58,7 @@ import { loadLaunchableFamilies } from './hosts.js';
 import { launchForAssignment } from '../hostOperations/launch.js';
 import { PENDING_SESSION_END_SQL } from '../hostOperations/sessionEnd.js';
 
-/** T6 flips this once a host can start an unbound worker (see the file header). */
+/** On since T6 (#1709): a host can start an unbound worker, so the matcher assigns to one (see the file header). */
 export const MATCH_UNBOUND_LAUNCHABLE = true;
 /** Queued tasks considered per App per run, oldest first. */
 const QUEUE_PAGE = 500;
@@ -132,7 +135,7 @@ export type WorkerWorkState = {
   role: string | null;
   /** Bound: has an OPEN session — live or quiet (cor:agt:060:04 follows the binding). */
   bound: boolean;
-  /** Has a LIVE session (cor:agt:020:11): what matching requires until T6. */
+  /** Has a LIVE session (cor:agt:020:11): what matching requires of a BOUND worker. */
   live: boolean;
   /** The binding's family (its newest open session's); null when unbound or it reported none. */
   bindingFamily: string | null;
@@ -164,10 +167,12 @@ export function familiesOf(w: { bound: boolean; bindingFamily: string | null; la
 }
 
 /**
- * May the matcher assign to this worker at all? Until T6, only a worker with a
- * LIVE session (#1707: an unbound or quiet worker has no way to be reached, so
- * a match would only park the task). After T6, also an unbound worker a host
- * can start. This is the matcher's restriction, kept apart from free for work.
+ * May the matcher assign to this worker at all? A bound worker only while its
+ * session is LIVE (#1707: a quiet one has nobody driving it, so a match would
+ * only park the task); an unbound worker always here, since free for work then
+ * requires a family a live host can launch it as (#1709, T6). Never one waiting
+ * on a session end. This is the matcher's restriction, kept apart from free for
+ * work.
  */
 export function matchable(w: { bound: boolean; live: boolean; endingSession?: boolean }): boolean {
   if (w.endingSession) return false;
