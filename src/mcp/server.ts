@@ -9084,6 +9084,18 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         return textResult(`Forbidden: session "${id}" belongs to a different App or user.`);
       }
 
+      // #1956: a resume claim needs the caller's own open worker session. Judged BEFORE the handoff is written, so a
+      // refused claim leaves the session open with no handoff behind it; the claim is written after the handoff.
+      const claimRefused =
+        !!resumeClaim &&
+        (!auth.userId || !!auth.impersonation || session.userId !== auth.userId || !session.workerId || !session.appId || !!session.endedAt || !!session.deletedAt);
+      if (claimRefused) {
+        return textResult(
+          `No resume claim was written, so the session is STILL OPEN and was not ended: a claim needs your own open worker session. ` +
+            'End it without resumeClaim, or start the next stint by naming the worker.',
+        );
+      }
+
       // #1029: the handoff goes through the SAME writer the GraphQL endSession
       // uses, so the loc convention, the parent bootstrap and the session
       // stamping cannot drift between the two surfaces. This tool does its own
@@ -9123,15 +9135,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       }
 
       // #1956: the resume claim, after the handoff and before the end, through the same writer as the GraphQL
-      // endSession. Refused, with the session left open, unless it is the caller's own open worker session.
+      // endSession. Eligibility was judged above, before the handoff.
       let claimNote = '';
-      if (resumeClaim) {
-        if (!auth.userId || auth.impersonation || session.userId !== auth.userId || !session.workerId || !session.appId || session.endedAt || session.deletedAt) {
-          return textResult(
-            `No resume claim was written, so the session is STILL OPEN and was not ended: a claim needs your own open worker session. ` +
-              'End it without resumeClaim, or start the next stint by naming the worker.',
-          );
-        }
+      if (resumeClaim && auth.userId && session.workerId && session.appId) {
         const { expiresAt } = await writeResumeClaim(db, { sessionId: id, appId: session.appId, workerId: session.workerId, holderUserId: auth.userId });
         claimNote = `\nResume claim written: the next context recovers this worker with hadron_resume_session (no arguments) until ${expiresAt.toISOString()} (60 seconds, once).`;
       }

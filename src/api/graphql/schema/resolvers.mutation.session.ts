@@ -1512,6 +1512,11 @@ export const sessionMutations = {
       // this throws, the session is still open and the caller can retry or end
       // without a handoff deliberately. Ending first and losing the prose is
       // unrecoverable: the context that composed it is gone with the stint.
+      // #1956: a claim's eligibility is judged BEFORE the handoff is written, so a refused claim leaves no handoff
+      // behind for a stint that did not end. The claim itself is written after the handoff, before the end.
+      const claimOwner = resumeClaim ? await ownSessionForClaim(ctx, id) : null;
+      if (claimOwner?.endedAt) throw sessionEndedForClaim(id);
+
       const handoffBody = handoff?.trim();
       if (handoffBody) {
         if (!session.workerId) {
@@ -1529,10 +1534,8 @@ export const sessionMutations = {
       // #1956: the resume claim, written with the handoff and before the end, so the fresh context of a rotation
       // can start the worker's next stint with one no-argument resumeSession. Only the session's own driver, and
       // only while it is open: the claim is a promise about this stint, not a key to an ended one.
-      if (resumeClaim) {
-        const own = await ownSessionForClaim(ctx, id);
-        if (own.endedAt) throw sessionEndedForClaim(id);
-        await writeResumeClaim(ctx.db, { sessionId: id, appId: own.appId, workerId: own.workerId, holderUserId: own.userId });
+      if (claimOwner) {
+        await writeResumeClaim(ctx.db, { sessionId: id, appId: claimOwner.appId, workerId: claimOwner.workerId, holderUserId: claimOwner.userId });
       }
 
       // FIRST END WINS, decided by a guarded write rather than by the row read
