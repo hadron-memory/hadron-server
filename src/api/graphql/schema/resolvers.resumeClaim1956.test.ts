@@ -17,7 +17,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
-import { RESUME_CLAIM_TTL_MS, consumeResumeClaim } from '../../../lib/resumeClaims.js';
+import { RESUME_CLAIM_TTL_MS, consumeResumeClaim, writeResumeClaim } from '../../../lib/resumeClaims.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -420,5 +420,68 @@ describe('fix head: Anne\'s blind review on #1966', () => {
     const s = await start(holder, ada);
     await Promise.all(Array.from({ length: 20 }, () => claim(holder, s.id)));
     expect(await db.resumeClaim.count({ where: { sessionId: s.id, revokedAt: null, consumedAt: null } })).toBe(1);
+  });
+});
+
+describe('fix head 2: Anne\'s delta on #1966', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('P2-3: a consume that waits on a lock released unchanged after the deadline does not consume', async () => {
+    const s = await start(holder, ada);
+    await claim(holder, s.id);
+    const row = await db.resumeClaim.findFirstOrThrow({ where: { sessionId: s.id } });
+    await db.$executeRaw`UPDATE resume_claims SET expires_at = (clock_timestamp() AT TIME ZONE 'UTC') + interval '400 milliseconds' WHERE id = ${row.id}`;
+    // A holds the claim's row lock past its deadline and releases it without changing the row.
+    const holderTx = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM resume_claims WHERE id = ${row.id} FOR UPDATE`;
+      await sleep(900);
+    }, { timeout: 10_000 });
+    await sleep(100);
+    const consumed = await consumeResumeClaim(db, row.id, holder);
+    await holderTx;
+    expect(consumed).toBe(false);
+    expect((await db.resumeClaim.findUniqueOrThrow({ where: { id: row.id } })).consumedAt).toBeNull();
+  });
+
+  it('P2-4: a claim replacement racing an open redemption never deadlocks, and the outcome is coherent', async () => {
+    const s = await start(holder, ada);
+    await claim(holder, s.id);
+    // The writer takes the session lock, then pauses before touching the claims; the redemption starts meanwhile.
+    const pausingWriter = new Proxy(db, {
+      get(target, prop, receiver) {
+        const v = Reflect.get(target, prop, receiver);
+        if (prop !== '$transaction') return typeof v === 'function' ? v.bind(target) : v;
+        return (fn: (tx: unknown) => Promise<unknown>) =>
+          target.$transaction(async (tx) => {
+            const paused = new Proxy(tx, {
+              get(t, p) {
+                const f = Reflect.get(t, p);
+                if (p !== '$queryRaw') return typeof f === 'function' ? f.bind(t) : f;
+                return async (...a: unknown[]) => {
+                  const r = await (f as (...x: unknown[]) => Promise<unknown>).apply(t, a);
+                  await sleep(500);
+                  return r;
+                };
+              },
+            });
+            return fn(paused);
+          }, { timeout: 10_000 });
+      },
+    });
+    const writing = writeResumeClaim(pausingWriter as typeof db, { sessionId: s.id, appId: app.id, workerId: ada, holderUserId: holder });
+    await sleep(150);
+    const redeeming = resume(ctx(holder)).then((r: any) => ({ ok: r }), (e: unknown) => ({ err: e }));
+    const [w, r] = await Promise.allSettled([writing, redeeming]);
+    expect(w.status).toBe('fulfilled');
+    const out = (r as PromiseFulfilledResult<any>).value;
+    if (out.err) {
+      expect(String((out.err as GraphQLError).extensions?.code), String((out.err as Error).message)).toBe('NOTHING_TO_RESUME');
+    } else {
+      expect(out.ok.outcome).toBe('RESUMED');
+    }
+    // Either way exactly one claim is still unconsumed and unrevoked unless the redemption spent it.
+    const live = await db.resumeClaim.count({ where: { sessionId: s.id, consumedAt: null, revokedAt: null } });
+    const consumed = await db.resumeClaim.count({ where: { sessionId: s.id, consumedAt: { not: null } } });
+    expect(live + consumed).toBe(1);
   });
 });
