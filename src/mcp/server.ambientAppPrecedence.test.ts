@@ -227,6 +227,7 @@ describe('#1037 — the team tools', () => {
     // dropped the team name in exactly the case where the caller named an App
     // explicitly. Routed through the shared ref resolver instead.
     const out = await createTestableMcpServer(unpinned()).callToolText('hadron_team_chat_post', {
+      asMe: true,
       app: `hrn:app:${appA.urn}`, body: 'posted by full URN',
     });
     expect(out).toContain('Posted team-chat message');

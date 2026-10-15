@@ -53,7 +53,7 @@ describe('Channel-addressed chat tools', () => {
     const posted = await s.callToolText('hadron_channel_post', { channel: release.id, body: 'cut the release @nobody', asMe: true });
     expect(posted).toContain('Posted message #1 in Channel release (chats:release)');
     expect(posted).toContain('mentions: @nobody');
-    const viaTeam = await s.callToolText('hadron_team_chat_post', { body: 'second', channel: release.id, replyToSeq: 1 });
+    const viaTeam = await s.callToolText('hadron_team_chat_post', { asMe: true, body: 'second', channel: release.id, replyToSeq: 1 });
     expect(viaTeam).toContain('Posted message #2 in Channel release (chats:release)');
     expect(viaTeam).toContain('in reply to #1');
     const read = await s.callToolText('hadron_channel_read', { channel: release.id });
@@ -112,7 +112,7 @@ describe('#1171 — the address on the MCP channel tools', () => {
       'Posted message #1 in Channel release (chats:release)',
     );
     expect(await s.callToolText('hadron_channel_read', { channel: address })).toContain('1 message(s) total');
-    expect(await s.callToolText('hadron_team_chat_post', { channel: address, body: 'again' })).toContain('Posted message #2');
+    expect(await s.callToolText('hadron_team_chat_post', { asMe: true, channel: address, body: 'again' })).toContain('Posted message #2');
     expect(await s.callToolText('hadron_channel_read', { channel: `hrn:node:${mem.urn}:chats:absent` })).toMatch(/^\[channel_not_found\]/);
   });
 });

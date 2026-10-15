@@ -66,7 +66,7 @@ function hybridAuth(userId: string): AuthContext {
 describe('hadron_team_chat_post / hadron_team_chat_read (#939)', () => {
   it('posts via the active-App selection and reads it back with a watermark', async () => {
     const srv = createTestableMcpServer(hybridAuth(admin.id));
-    const posted = await srv.callToolText('hadron_team_chat_post', { body: 'hello @Iris' });
+    const posted = await srv.callToolText('hadron_team_chat_post', { asMe: true, body: 'hello @Iris' });
     expect(posted).toContain('Posted team-chat message #1');
     expect(posted).toContain('@iris');
 
@@ -93,7 +93,7 @@ describe('hadron_team_chat_post / hadron_team_chat_read (#939)', () => {
   it('forwards beforeSeq, so a backward page is not silently the oldest one', async () => {
     const srv = createTestableMcpServer(hybridAuth(admin.id));
     for (let i = 1; i <= 6; i++) {
-      await srv.callToolText('hadron_team_chat_post', { body: `msg-${i}` });
+      await srv.callToolText('hadron_team_chat_post', { asMe: true, body: `msg-${i}` });
     }
 
     const page = await srv.callToolText('hadron_team_chat_read', { beforeSeq: 5, limit: 2 });
@@ -110,7 +110,7 @@ describe('hadron_team_chat_post / hadron_team_chat_read (#939)', () => {
 
   it('defaults to the newest MCP page, with explicit sinceSeq retaining forward paging', async () => {
     const srv = createTestableMcpServer(hybridAuth(admin.id));
-    for (let i = 1; i <= 5; i++) await srv.callToolText('hadron_team_chat_post', { body: `msg-${i}` });
+    for (let i = 1; i <= 5; i++) await srv.callToolText('hadron_team_chat_post', { asMe: true, body: `msg-${i}` });
     const latest = await srv.callToolText('hadron_team_chat_read', { limit: 2 });
     expect(latest).toContain('msg-4');
     expect(latest).toContain('msg-5');
@@ -123,8 +123,9 @@ describe('hadron_team_chat_post / hadron_team_chat_read (#939)', () => {
 
   it('accepts an explicit app URN and a replyToSeq', async () => {
     const srv = createTestableMcpServer(hybridAuth(admin.id));
-    await srv.callToolText('hadron_team_chat_post', { body: 'question?', app: app.urn });
+    await srv.callToolText('hadron_team_chat_post', { asMe: true, body: 'question?', app: app.urn });
     const out = await srv.callToolText('hadron_team_chat_post', {
+      asMe: true,
       body: 'answer.',
       app: app.urn,
       replyToSeq: 1,
@@ -135,10 +136,10 @@ describe('hadron_team_chat_post / hadron_team_chat_read (#939)', () => {
 
   it('a pure App-key principal is refused for post but reads its own team chat', async () => {
     const member = createTestableMcpServer(hybridAuth(admin.id));
-    await member.callToolText('hadron_team_chat_post', { body: 'for the automation' });
+    await member.callToolText('hadron_team_chat_post', { asMe: true, body: 'for the automation' });
 
     const appKey = createTestableMcpServer({ appId: app.id, clientId: `app:${app.id}` });
-    const denied = await appKey.callToolText('hadron_team_chat_post', { body: 'as the App' });
+    const denied = await appKey.callToolText('hadron_team_chat_post', { asMe: true, body: 'as the App' });
     expect(denied).toContain('Error:');
     expect(denied).toContain('not authorized');
 
@@ -148,7 +149,7 @@ describe('hadron_team_chat_post / hadron_team_chat_read (#939)', () => {
 
   it('an App key bound to a session cannot widen its team-chat read with an explicit session', async () => {
     const member = createTestableMcpServer(hybridAuth(admin.id));
-    await member.callToolText('hadron_team_chat_post', { body: 'team-only message' });
+    await member.callToolText('hadron_team_chat_post', { asMe: true, body: 'team-only message' });
     const { agentId } = await db.appAgent.findFirstOrThrow({ where: { appId: app.id }, select: { agentId: true } });
     const sessionMemory = await db.memory.create({
       data: {
@@ -170,7 +171,7 @@ describe('hadron_team_chat_post / hadron_team_chat_read (#939)', () => {
 
   it('surfaces typed refusals as tool text', async () => {
     const srv = createTestableMcpServer(hybridAuth(admin.id));
-    const out = await srv.callToolText('hadron_team_chat_post', { body: 'reply', replyToSeq: 42 });
+    const out = await srv.callToolText('hadron_team_chat_post', { asMe: true, body: 'reply', replyToSeq: 42 });
     expect(out).toContain('Error:');
     expect(out).toContain('42');
   });
