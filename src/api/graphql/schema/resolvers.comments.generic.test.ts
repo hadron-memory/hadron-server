@@ -160,6 +160,15 @@ describe('a target\'s lifecycle carries its threads (cor:dmo:110:02/05)', () => 
       .toMatchObject({ code: 'COMMENT_MOVE_UNCOMMENTABLE', class: 'private', nodes: [{ nodeId: target.id, loc: 'mv:1', comments: 2 }] });
   });
 
+  it('a move into a system memory carries the threads (#1935: only private refuses)', async () => {
+    const target = await node('mv:sys');
+    const c = await comment(target.id);
+    const sys = await resolvers.Mutation.createMemory(null, { orgId, name: 'sys-dest' }, as());
+    await db.memory.update({ where: { id: sys.id }, data: { class: 'system', visibility: null } });
+    await M.moveNode(null, { sourceRef: target.id, targetUrn: nodeUrn(sys, 'mv:sys') }, as());
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).memoryId).toBe(sys.id);
+  });
+
   it('a comment never moves on its own', async () => {
     const target = await node('mv:2');
     const c = await comment(target.id);
@@ -329,6 +338,10 @@ describe('#1663 review — encrypted memories (local P2-2)', () => {
     await client.connect();
     try {
       await client.query(readFileSync(new URL('../../../../prisma/migrations/20261013170000_encrypted_comment_anchor_nullable/migration.sql', import.meta.url), 'utf8'));
+      // The replay installs that migration's invariants; restore the current
+      // ones, as the later migrations do in prod, so no later test file on
+      // this worker's database runs against a stale check (#1935).
+      await client.query(readFileSync(new URL('../../../../prisma/comment-invariants.sql', import.meta.url), 'utf8'));
     } finally { await client.end(); }
     expect((await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).anchorApprovalHash).toBe(edge.anchorApprovalHash);
     await expect(db.$executeRaw`UPDATE edges SET anchor_approval_hash = NULL WHERE id = ${edge.id}`)

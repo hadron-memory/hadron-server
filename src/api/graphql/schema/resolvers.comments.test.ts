@@ -126,6 +126,16 @@ describe('createComment (cor:dmo:110:01–05)', () => {
     expect((await errorOf(comment(target.id, 'x', admin.id))).extensions)
       .toMatchObject({ code: 'COMMENT_MEMORY_NOT_COMMENTABLE', class: 'private' });
   });
+
+  it('accepts a comment and a reply in a system memory (#1935, cor:dmo:110:02)', async () => {
+    const target = await node('task:1');
+    await db.memory.update({ where: { id: memory.id }, data: { class: 'system', visibility: null } });
+    await db.agent.create({ data: { organizationId: orgId, name: 'coordinator', urn: 'comment.example:coordinator', visibility: 'ORGANIZATION', systemMemoryId: memory.id } });
+    const c = await comment(target.id, 'Is this step right?', admin.id);
+    expect(c).toMatchObject({ memoryId: memory.id, isTopLevel: true, state: 'OPEN' });
+    const reply = await M.replyToComment(null, { commentRef: c.id, body: 'Yes' }, as());
+    expect(reply).toMatchObject({ memoryId: memory.id, threadRootId: c.id });
+  });
 });
 
 describe('one open thread per author (cor:dmo:110:05)', () => {

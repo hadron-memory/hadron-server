@@ -8,6 +8,11 @@
  * never inherited: a base's node whose role family is `boot-prompt`
  * (cor:agt:040:05) is not part of any child's effective memory, and doesn't
  * hide a farther base's node either, since it isn't a candidate at all.
+ * Comments are never inherited either (#1935): a comment lives in its
+ * target's memory and is read by exactly that memory's readers
+ * (cor:dmo:110:02), so a base's comment is never part of a child's effective
+ * memory. Comment locs are unique (`comments:<id>`), so excluding one hides
+ * nothing else.
  *
  * Addressing (Holger, team chat #10929): an inherited node keeps its own
  * address, the base's URN, and is marked as inherited, naming the base it
@@ -18,6 +23,7 @@
 
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { AGENT_BASE_CHAIN_CAP } from './agentBase.js';
+import { COMMENT_NODE_TYPE } from './comments/index.js';
 
 type Db = Pick<PrismaClient, '$queryRaw'> | Prisma.TransactionClient;
 
@@ -72,6 +78,7 @@ export async function inheritedNodeIds(db: Db, chain: ChainLink[]): Promise<Map<
       SELECT n.id, n.loc, c.pos FROM nodes n JOIN chain c ON n.memory_id = c.memory_id
       WHERE n.deleted_at IS NULL
         AND (c.pos = 1 OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
+        AND (c.pos = 1 OR n.node_type <> ${COMMENT_NODE_TYPE})
     )
     SELECT c.id, c.pos FROM candidate c
     WHERE c.pos > 1
@@ -84,14 +91,16 @@ export async function inheritedNodeIds(db: Db, chain: ChainLink[]): Promise<Map<
  * Where a node is effective, for the read gate: every live system memory whose
  * effective memory includes `node`, other than the node's own. Each entry
  * names the descendant memory and the Agent the node is inherited from. Empty
- * for a node outside any Agent's system memory, a boot prompt, or a node every
- * descendant overrides.
+ * for a node outside any Agent's system memory, a boot prompt, a comment
+ * (#1935), or a node every descendant overrides.
  */
 export async function descendantMemoriesInheriting(
   db: Db,
   node: { id: string; memoryId: string; loc: string; role: string | null },
 ): Promise<string[]> {
   if (node.role === NOT_INHERITED_ROLE || node.role?.startsWith(`${NOT_INHERITED_ROLE}.`)) return [];
+  const self = await db.$queryRaw<Array<{ node_type: string }>>`SELECT node_type FROM nodes WHERE id = ${node.id}`;
+  if (self[0]?.node_type === COMMENT_NODE_TYPE) return [];
   // Every live Agent below the node's own Agent, with the memories between
   // it and the node's: a descendant inherits the node unless one of those
   // nearer memories, or its own, holds a live non-boot-prompt node at the loc.
@@ -136,8 +145,8 @@ export type InheritedFrom = {
  * - `memoryIds`: the requested memories plus every base system memory one of
  *   them inherits from. A base the scope already names stays as it was.
  * - `excludeNodeIds`: the nodes of those ADDED base memories that no memory in
- *   the scope inherits (boot prompts, and nodes every inheriting memory in the
- *   scope overrides). A listing applies `id NOT IN excludeNodeIds` with the
+ *   the scope inherits (boot prompts, comments, and nodes every inheriting
+ *   memory in the scope overrides). A listing applies `id NOT IN excludeNodeIds` with the
  *   widened `memoryIds`, so a reader sees a base's node only when it is part
  *   of the effective memory they asked for, and never a base's other content.
  * - `inheritedFrom`: for each added base memory, its Agent: a node read from
@@ -204,6 +213,7 @@ export async function findEffectiveNodeIdByLoc(
     JOIN nodes n ON n.memory_id = c.memory_id
     WHERE n.loc = ${loc} AND n.deleted_at IS NULL
       AND (c.pos = 1 OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
+      AND (c.pos = 1 OR n.node_type <> ${COMMENT_NODE_TYPE})
     ORDER BY c.pos LIMIT 1`;
   const hit = rows[0];
   if (!hit) return null;
