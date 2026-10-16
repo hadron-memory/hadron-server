@@ -1911,15 +1911,15 @@ export const typeDefs = `#graphql
     note: String
   }
 
-  "#1591 — whether a node's current revision is approved."
+  "#1591 — whether a node's approval still covers its current text (#1611: title, abstract and content under approval-hash v1; a metadata-only revision keeps it)."
   enum NodeApprovalState {
     "Approval is not applicable in an encrypted memory."
     NOT_APPLICABLE
     "Never approved."
     NOT_APPROVED
-    "The current revision is approved."
+    "The approval covers the current text: it was recorded at the revision in NodeApproval.revision, which can be older than Node.revision when only metadata (tags, properties, role, description, alias, loc, edges) changed since."
     APPROVED
-    "Approved once, edited since: the approval covers an older revision."
+    "Approved once, then the title, abstract or content changed (or the text no longer hashes to the approval, see verifyNode's TAMPERED)."
     SUPERSEDED
   }
 
