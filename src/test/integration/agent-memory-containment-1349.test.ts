@@ -248,6 +248,22 @@ describe('#1349 Slice 1 — a subscribed memory (Vera\'s control)', () => {
   });
 });
 
+/** Give an agent a minimal conversation, so startChat reaches its target-memory choice. */
+async function giveConversation(agentId: string) {
+  const sys = await db.memory.create({
+    data: { id: generateId(), urn: `home-${suffix}:sys-${generateId()}`, name: 'sys', organizationId: homeOrgId, class: 'system' } as never,
+  });
+  await db.agent.update({ where: { id: agentId }, data: { systemMemoryId: sys.id } as never });
+  for (const [loc, data, content] of [
+    ['conversations', null, null],
+    ['conversations:c', { stageOrder: ['s'], isSetup: false }, null],
+    ['conversations:c:s', { promptRef: 'prompts:c:s' }, null],
+    ['prompts', null, null], ['prompts:c', null, null], ['prompts:c:s', null, 'Hi.'],
+  ] as const) {
+    await db.node.create({ data: { id: generateId(), memoryId: sys.id, loc, name: loc.split(':').pop()!, nodeType: 'system', data: data as never, content } });
+  }
+}
+
 describe('#1349 Slice 1 — the folds that read links directly use the same cap', () => {
   it('shared-chat grounding: a foreign ORG link grounds nothing; PUBLIC and home links still do', async () => {
     const foreign = await legacyLink('foreignOrg', 'read');
@@ -277,6 +293,31 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
     }
     const { agentId } = await legacyLink('homeOrg', 'read-write');
     expect(await resolveAssetTargetMemoryId(db, agentId, owner.id)).toEqual({ memoryId: mem.homeOrg!.id });
+  });
+
+  it("legacy startChat target: never another user's personal memory through a read-write link (Colin, P2)", async () => {
+    const link = await legacyLink('foreignPersonal', 'read-write');
+    await giveConversation(link.agentId);
+    const before = await db.node.count({ where: { memoryId: mem.foreignPersonal!.id } });
+    const response = await gql(link.appKey, 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', { agent: link.agentId });
+    expect(response.errors, JSON.stringify(response)).toBeDefined();
+    expect(await db.node.count({ where: { memoryId: mem.foreignPersonal!.id } })).toBe(before);
+  });
+
+  it("asset upload target: never another user's personal memory through a read-write link", async () => {
+    const stranger = await db.user.create({ data: { id: generateId(), handle: `s-${generateId()}`, githubUsername: `s-${generateId()}` } });
+    const { agentId } = await legacyLink('foreignPersonal', 'read-write');
+    await expect(resolveAssetTargetMemoryId(db, agentId, stranger.id)).rejects.toThrow(/NO_TARGET_MEMORY/);
+  });
+
+  it('listings follow the cap: GraphQL memories and MCP hadron_list_memories (Colin)', async () => {
+    for (const [target, want] of [['foreignOrg', false], ['foreignPublic', true], ['homeOrg', true]] as const) {
+      const { appId, appKey } = await legacyLink(target, 'read-write');
+      const response = await gql(appKey, 'query { memories { items { id } } }', {});
+      expect(response.errors).toBeUndefined();
+      expect(response.data?.memories.items.some((m: { id: string }) => m.id === mem[target]!.id)).toBe(want);
+      expect((await mcpFor(appId).callToolText('hadron_list_memories', {})).includes(mem[target]!.urn)).toBe(want);
+    }
   });
 
   it('legacy startChat target: an App key never writes a chat into a foreign memory through a link', async () => {
