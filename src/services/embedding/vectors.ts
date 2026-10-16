@@ -105,7 +105,7 @@ export async function upsertAbstractVector(
     INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, embedding, created_at)
     SELECT ${generateId()}, ${row.nodeId}, ${row.memoryId}, 'abstract', ${row.provider}, ${row.model}, ${row.dim}, ${toVectorLiteral(row.embedding)}::vector, now()
     FROM nodes n
-    WHERE n.id = ${row.nodeId} AND ${pendingGuard(expectedPendingAt)}
+    WHERE n.id = ${row.nodeId} AND n.memory_id = ${row.memoryId} AND ${pendingGuard(expectedPendingAt)}
     FOR NO KEY UPDATE OF n
     ON CONFLICT (node_id) WHERE kind = 'abstract'
     DO UPDATE SET
@@ -216,6 +216,7 @@ export async function upsertChunkVectors(
     const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
       SELECT n.id FROM nodes n
       WHERE n.id = ${nodeId} AND ${pendingGuard(expectedPendingAt)}
+        ${rows.length ? Prisma.sql`AND n.memory_id = ${rows[0].memoryId}` : Prisma.empty}
       FOR NO KEY UPDATE
     `);
     if (locked.length === 0) return false;
@@ -321,7 +322,7 @@ export async function vectorSearchNodes(
     const rows = await db.$queryRaw<{ node_id: string; distance: number }[]>`
       SELECT ne.node_id, MIN(ne.embedding <=> ${qvec}::vector) AS distance
       FROM node_embeddings ne
-      JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL AND n.node_type = 'comment'
+      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id AND n.deleted_at IS NULL AND n.node_type = 'comment'
       WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB}
       GROUP BY ne.node_id
       ORDER BY distance ASC
@@ -344,7 +345,7 @@ export async function vectorSearchNodes(
     WITH ann AS (
       SELECT ne.node_id, ne.embedding <=> ${qvec}::vector AS distance
       FROM node_embeddings ne
-      JOIN nodes n ON n.id = ne.node_id ${scopeSql}
+      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${scopeSql}
       WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB}
       ORDER BY ne.embedding <=> ${qvec}::vector
       LIMIT ${candidateK}
@@ -365,7 +366,7 @@ export async function vectorSearchNodes(
     if (!truncated && (rows.length === 0 || windowRows < candidateK)) {
       const [c] = await db.$queryRaw<{ n: number }[]>`
         SELECT count(*)::int AS n FROM node_embeddings ne
-        JOIN nodes n ON n.id = ne.node_id ${scopeSql}
+        JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${scopeSql}
         WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB}`;
       const eligibleRows = Number(c?.n ?? 0);
       exhausted = rows.length === 0 ? eligibleRows === 0 : vectorWindowExhausted({ windowRows, eligibleRows, truncated });
@@ -421,7 +422,7 @@ export async function vectorSearchChunks(
       SELECT ne.node_id, ne.chunk_index, ne.char_start, ne.char_end, ne.chunk_text,
              ne.embedding <=> ${qvec}::vector AS distance
       FROM node_embeddings ne
-      JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL AND n.node_type = 'comment'
+      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id AND n.deleted_at IS NULL AND n.node_type = 'comment'
       WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB}
       ORDER BY distance ASC
       LIMIT ${k}`;
@@ -448,7 +449,7 @@ export async function vectorSearchChunks(
     SELECT ne.node_id, ne.chunk_index, ne.char_start, ne.char_end, ne.chunk_text,
            ne.embedding <=> ${qvec}::vector AS distance
     FROM node_embeddings ne
-    JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL ${chunkScopeSql}
+    JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id AND n.deleted_at IS NULL ${chunkScopeSql}
     WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB}
     ORDER BY ne.embedding <=> ${qvec}::vector
     LIMIT ${candidateK}
@@ -461,7 +462,7 @@ export async function vectorSearchChunks(
     if (!truncated && rows.length < candidateK) {
       const [c] = await db.$queryRaw<{ n: number }[]>`
         SELECT count(*)::int AS n FROM node_embeddings ne
-        JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL ${chunkScopeSql}
+        JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id AND n.deleted_at IS NULL ${chunkScopeSql}
         WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB}`;
       exhausted = vectorWindowExhausted({ windowRows: rows.length, eligibleRows: Number(c?.n ?? 0), truncated });
     }

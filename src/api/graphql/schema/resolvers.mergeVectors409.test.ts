@@ -158,6 +158,28 @@ describe('#409 merge vector isolation', () => {
     expect(await db.nodeEmbedding.count({ where: { nodeId: node.id } })).toBe(0);
   }, 15000);
 
+  it('uses a distinct due stamp even when relocation shares the old worker millisecond', async () => {
+    const node = await seed();
+    await db.memory.update({ where: { id: target.id }, data: { vectorIndexEnabled: true } });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(oldStamp);
+    try {
+      await rawMerge();
+      const moved = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+      expect(moved.embeddingPendingAt!.getTime()).toBeLessThan(oldStamp.getTime());
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('rolls relocation and vector deletion back together when a batch fails', async () => {
+    const node = await seed();
+    const failing = db.$extends({ query: { nodeEmbedding: { async deleteMany({ args, query }) {
+      await query(args); throw new Error('injected vector maintenance failure');
+    } } } }) as unknown as typeof db;
+    await expect(rawMerge(failing)).rejects.toThrow('injected vector maintenance failure');
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).memoryId).toBe(source.id);
+    expect(await db.nodeEmbedding.count({ where: { nodeId: node.id } })).toBe(2);
+  });
+
   it('a refused encrypted merge leaves node and vectors untouched', async () => {
     const node = await seed();
     await db.memory.update({ where: { id: target.id }, data: { isEncrypted: true } });
