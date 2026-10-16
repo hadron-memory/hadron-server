@@ -142,6 +142,18 @@ describe('hashed-field changes supersede (cor:dmo:120:01, 120:04)', () => {
     expect((await verify(n.id)).state).toBe('INTACT');
   });
 
+  it('a title line-ending-only rewrite (CRLF, lone CR) keeps the approval like content and abstract', async () => {
+    const n = await node('a:1', { name: 'one\ntwo', abstract: 'a\nb' });
+    await approve(n.id);
+    for (const [field, value] of [['name', 'one\r\ntwo'], ['name', 'one\rtwo'], ['abstract', 'a\r\nb']] as const) {
+      await db.$executeRawUnsafe(`UPDATE nodes SET ${field === 'name' ? 'name' : 'abstract'} = $1, revision_content_hash = 'refresh', rev_seq = rev_seq + 1 WHERE id = $2`, value, n.id);
+      expect((await statusOf(n.id)).state).toBe('APPROVED');
+      expect((await verify(n.id)).state).toBe('INTACT');
+    }
+    await db.$executeRawUnsafe(`UPDATE nodes SET name = 'one two', revision_content_hash = 'refresh', rev_seq = rev_seq + 1 WHERE id = $1`, n.id);
+    expect((await statusOf(n.id)).state).toBe('SUPERSEDED');
+  });
+
   it('keeps missing and empty abstract distinct', async () => {
     const n = await node('a:1', { abstract: null });
     await approve(n.id);

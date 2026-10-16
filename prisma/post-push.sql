@@ -607,7 +607,8 @@ BEGIN
     -- detectable as TAMPERED instead of passing for a supported edit.
     IF TG_OP = 'INSERT' THEN
       NEW."content_rev_seq" := NEW."rev_seq";
-    ELSIF NEW."name" IS DISTINCT FROM OLD."name"
+    ELSIF replace(replace(NEW."name", E'\r\n', E'\n'), E'\r', E'\n')
+         IS DISTINCT FROM replace(replace(OLD."name", E'\r\n', E'\n'), E'\r', E'\n')
       OR replace(replace(NEW."abstract", E'\r\n', E'\n'), E'\r', E'\n')
          IS DISTINCT FROM replace(replace(OLD."abstract", E'\r\n', E'\n'), E'\r', E'\n')
       OR replace(replace(NEW."content", E'\r\n', E'\n'), E'\r', E'\n')
