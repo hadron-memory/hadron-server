@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb, createDbNode, createDbOrgAndGraph } from '../../test/helpers.js';
+import { cleanDb, createDbNode, createDbOrgAndGraph, createDbWorkerAttribution } from '../../test/helpers.js';
 import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../../test/softPasskey.js';
 import { computeApprovalHash } from '../approvalHash.js';
 import { signaturePayloadBytes, SIGNATURE_PAYLOAD_V1 } from './payload.js';
@@ -127,6 +127,7 @@ describe('requestNodeSignature: what a request pins (cor:dmo:130:03)', () => {
   });
 
   it('records an App as the requester only when the App itself asks', async () => {
+    await createDbWorkerAttribution(db, requesterId, 'w-1', 's-1');
     const app = await create({ requester: { userId: null, appId: 'app-1', workerId: 'w-1', sessionId: 's-1' } });
     expect(app.requesterAppId).toBe('app-1');
     const person = await create({ requester: { userId: requesterId, appId: 'app-1', workerId: null, sessionId: null } });
@@ -153,6 +154,7 @@ describe('withdraw: the requester account, from any session (#10024, #10397)', (
     db.$transaction((tx) => withdrawSigningRequestInTransaction(tx, id, { memoryId, caller }));
 
   it('the same user withdraws, whichever session or worker asks', async () => {
+    await createDbWorkerAttribution(db, requesterId, 'w-a', 's-a');
     const req = await create({ requester: asUser(requesterId, { sessionId: 's-a', workerId: 'w-a' }) });
     const done = await withdraw(req.id, { userId: requesterId, appId: 'some-app' });
     expect(done.state).toBe('withdrawn');

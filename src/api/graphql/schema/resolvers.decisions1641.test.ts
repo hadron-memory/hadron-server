@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { PrismaClient } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createDbWorkerAttribution } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { decisionDataSchema, decisionLogDataSchema, type DecisionData } from '../../../lib/decisions/codec.js';
@@ -253,6 +253,7 @@ describe('the App owner arm under concurrent revocation (#1690 review: Rook P3-1
 describe('askDecision (§4, §5, §7)', () => {
   it('a writer asks; the server issues DA, renders the content, and the state is OPEN and verifiable', async () => {
     const log = await createLog();
+    await createDbWorkerAttribution(db, writer.id, 'worker-ada');
     const d = await runAsActor({ workerId: 'worker-ada', agentId: null }, () => ask(log.row.id, simple({
       urgency: 'URGENT', context: 'Background.', blocks: [{ ref: 'hadron-server#1641' }],
     })));
@@ -630,6 +631,7 @@ describe('Rook §10 on #1690 — the asker worker arm needs a person (P3-3)', ()
   it('an App key bound to the asking worker\'s session is not the asker', async () => {
     const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Team', urn: `${orgId.toLowerCase()}:team` } });
     const log = await createLog();
+    await createDbWorkerAttribution(db, writer.id, 'worker-ada');
     const d = await runAsActor({ workerId: 'worker-ada', agentId: null }, () => ask(log.row.id));
     // An admin-role App key, so the memory write gate passes and the asker check is what decides.
     const key = { db, appId: app.id, roles: ['ADMIN'] } as Context;
