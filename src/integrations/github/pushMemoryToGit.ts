@@ -148,7 +148,7 @@ async function pushMemoryToGitUnderLock(
   // — leaf or parent — is `<...loc>.md` (children live in the sibling
   // `<seg>/` folder); edges are inline in `nodes:`, no sidecar.
   for (const node of nodes) {
-    const mdPath = nodeFilePath(localPath, node.loc);
+    const mdPath = nodeFilePath(localPath, node.loc, memory.urn);
 
     // Build frontmatter (shared builder — keeps this bulk path and the
     // incremental writeNodeToGit path emitting the exact same fields, edges
@@ -184,7 +184,7 @@ async function pushMemoryToGitUnderLock(
     // migrating repo reshapes cleanly and no stale sidecar masks the inline
     // edges on re-import. `git add -A` stages the deletions. Skipped for the
     // empty-loc root (its file IS README.md, owned by the manifest below).
-    if (node.loc !== '') {
+    if (node.loc !== '' && mdPath === nodeFilePath(localPath, node.loc)) {
       const legacy = orphanedLegacyPaths(localPath, node.loc);
       rmSync(legacy.readme, { force: true });
       rmSync(legacy.sidecar, { recursive: true, force: true });

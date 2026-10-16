@@ -135,7 +135,7 @@ async function mirrorMove(
           : `Move ${label}`,
         logPrefix: '[mirrorNodeMove]',
       },
-      async ({ localPath }) => {
+      async ({ localPath, memoryUrn }) => {
         // Re-read only after the checkout lock is held. A later Node/Edge
         // write or another move may have committed while this job waited;
         // carrying a pre-lock row would write its old path/content last.
@@ -168,9 +168,9 @@ async function mirrorMove(
         // `a:b:b` on the vacated `a:b`), and removing after writing would delete
         // the file just written.
         if (!crossMemory) {
-          for (const m of moved) removeNodeFile(localPath, m.previousLoc, m.id);
+          for (const m of moved) removeNodeFile(localPath, m.previousLoc, m.id, memoryUrn);
         }
-        for (const row of live) writeNodeFile(localPath, toNodeForGit(row));
+        for (const row of live) writeNodeFile(localPath, toNodeForGit(row), memoryUrn);
       },
     );
   }
@@ -183,8 +183,8 @@ async function mirrorMove(
         commitSubject: `Move out ${label} to ${destination?.urn ?? 'another memory'}`,
         logPrefix: '[mirrorNodeMove]',
       },
-      ({ localPath }) => {
-        for (const m of moved) removeNodeFile(localPath, m.previousLoc, m.id);
+      ({ localPath, memoryUrn }) => {
+        for (const m of moved) removeNodeFile(localPath, m.previousLoc, m.id, memoryUrn);
       },
     );
   }

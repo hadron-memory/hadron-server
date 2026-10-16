@@ -405,7 +405,7 @@ const syncGraphFromGithubAsSystem = async (
     // Mirror writes use this same checkout. Hold their lock through the read:
     // otherwise a writer can switch to the write branch between checkout and
     // loadGraphFromFs, even when the read branch was selected correctly.
-    const { graph: fsGraph, edges, skippedInvalidLoc, unreadable } = await withMirrorCheckoutLock(graph.id, async () => {
+    const { graph: fsGraph, edges, skippedInvalidLoc, unreadable, rootNode } = await withMirrorCheckoutLock(graph.id, async () => {
       await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
       return loadGraphFromFs(localPath, graphName, ownerRepo);
     });
@@ -448,7 +448,7 @@ const syncGraphFromGithubAsSystem = async (
     // deleted-message disclosure.
     const candidateLocs = fsGraph.nodes
       .map((node) => node.loc)
-      .filter((loc): loc is string => typeof loc === 'string' && loc !== '');
+      .filter((loc): loc is string => typeof loc === 'string');
     const rawTargetIds = [...new Set(edges.map((edge) => edge.targetId))];
     const [rawTargets, existingGraphRows] = await Promise.all([
       rawTargetIds.length
@@ -527,7 +527,7 @@ const syncGraphFromGithubAsSystem = async (
       const isProtected = (loc: string) => protectedLocs.some((p) => protectedLocCovers(p, loc));
       const writableLocs = fsGraph.nodes
         .map((n) => n.loc)
-        .filter((l): l is string => typeof l === 'string' && l !== '' && !isProtected(l));
+        .filter((l): l is string => typeof l === 'string' && !isProtected(l));
 
       // Declare the COMPLETE loc-key set before taking any of it. Incoming
       // nodes need ancestor keys for create/delete coordination; every edge
@@ -535,6 +535,7 @@ const syncGraphFromGithubAsSystem = async (
       // ancestors + exact loc) so a subtree move cannot relocate it after the
       // sync built its id map but before the edge insert.
       await acquireLockSet(tx, [
+        ...(rootNode ? [{ memoryId: graph.id, loc: rootNode.loc! }, { memoryId: graph.id, loc: '' }] : []),
         ...writableLocs.flatMap((loc) =>
           ancestorLocs(loc).map((ancestor) => ({ memoryId: graph.id, loc: ancestor })),
         ),
@@ -558,12 +559,16 @@ const syncGraphFromGithubAsSystem = async (
       // #1568: refuse before any write if an unreadable file sits on a live
       // node, instead of letting repo-wins cleanup hard-delete it.
       if (unreadable.length > 0) {
+        // An unreadable root may still occupy the pre-#1228 empty address.
+        // Its new derived loc alone cannot vouch for destructive cleanup.
+        const legacyUnreadableRoot = unreadable.some((f) => ['README.md', '.hadron/README.md', '.node/node.yaml', '.hadron/.node/node.yaml'].includes(f.file));
+        const unreadableLocs = [...unreadable.map((f) => f.loc), ...(legacyUnreadableRoot ? [''] : [])];
         const held = await tx.node.findMany({
-          where: { memoryId: graph.id, deletedAt: null, loc: { in: unreadable.map((f) => f.loc) } },
+          where: { memoryId: graph.id, deletedAt: null, loc: { in: unreadableLocs } },
           select: { loc: true },
         });
         const heldLocs = new Set(held.map((row) => row.loc));
-        const blocking = unreadable.filter((f) => heldLocs.has(f.loc));
+        const blocking = unreadable.filter((f) => heldLocs.has(f.loc) || (legacyUnreadableRoot && heldLocs.has('') && ['README.md', '.hadron/README.md', '.node/node.yaml', '.hadron/.node/node.yaml'].includes(f.file)));
         if (blocking.length > 0) throw new GitSyncUnreadableFileError(blocking);
       }
       await lockAncestorsForCreateMany(
@@ -588,6 +593,26 @@ const syncGraphFromGithubAsSystem = async (
         throw new Error('Git sync Read branch changed while syncing; retry with the current Memory config.');
       }
       const memorySchema = memoryState.schema as MemorySchema | null;
+      // #1228: operator-owned rollout prerequisites, judged before any Node
+      // write. Never replace a legacy root via loc fallback or silently park
+      // an API node at an invalid address. README owns the slug after repair.
+      if (rootNode) {
+        if (memoryState.urn !== graph.urn) {
+          throw new Error('Git root README memory was renamed while syncing; retry with the current memory.');
+        }
+        const oldRoot = await tx.node.findUnique({
+          where: { loc_memoryId: { loc: '', memoryId: graph.id } },
+        });
+        if (oldRoot && rootNode.id !== oldRoot.id) {
+          throw new Error('Git root README must carry the existing live root id before migration; add its id to frontmatter.');
+        }
+        const occupant = await tx.node.findUnique({
+          where: { loc_memoryId: { loc: rootNode.loc!, memoryId: graph.id } },
+        });
+        if (occupant && occupant.id !== rootNode.id && occupant.ownerRepo !== ownerRepo) {
+          throw new Error('Git root README slug is occupied by an API node; an authorized operator must move it or delete it if redundant before sync.');
+        }
+      }
 
       // A move that won before these locks were granted invalidates preflight.
       // Retry the whole collection phase so the endpoint's current memory and
@@ -1278,6 +1303,29 @@ const syncGraphFromGithubAsSystem = async (
           select: { id: true },
         });
         if (unsettled.length > 0) throw new GitSyncUnsettledParking(unsettled.map((n) => n.id));
+      }
+
+      // #1228: rekey retained incident edges as well as repo-declared edges.
+      // The legacy empty root produced trailing/leading empty atoms. Preserve
+      // edge identity and custom locs; collisions abort the whole transaction.
+      if (rootNode?.id && originalLocs.has(rootNode.id)) {
+        const movedRoot = await tx.node.findUnique({ where: { id: rootNode.id } });
+        if (movedRoot) {
+          const oldLoc = originalLocs.get(rootNode.id)!;
+          const incident = await tx.edge.findMany({
+            where: { OR: [{ sourceId: movedRoot.id }, { targetId: movedRoot.id }] },
+            include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
+          });
+          for (const edge of incident) {
+            const beforeSource = edge.sourceId === movedRoot.id ? oldLoc : edge.source.loc;
+            const beforeTarget = edge.targetId === movedRoot.id ? oldLoc : edge.target.loc;
+            if (edge.loc === deriveEdgeLoc(beforeSource, edge.name, beforeTarget)) {
+              await tx.edge.update({ where: { id: edge.id }, data: {
+                loc: deriveEdgeLoc(edge.source.loc, edge.name, edge.target.loc),
+              } });
+            }
+          }
+        }
       }
 
       // cor:urn:030:01 — compare committed pre-sync addresses with surviving

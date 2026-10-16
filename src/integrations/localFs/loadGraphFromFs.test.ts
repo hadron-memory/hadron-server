@@ -241,17 +241,11 @@ describe('a path that cannot be a loc (#1224)', () => {
     expect(skippedInvalidLoc).toEqual([]);
   });
 
-  it('still loads the GRAPH ROOT, whose loc is empty by design', async () => {
-    // The exemption, and the case that would have broken five live memories
-    // (incl. micromentor.org:mmdata, 533 nodes) had this shipped as a plain
-    // `validateLoc` call: a top-level README.md derives `''`, which
-    // validateLoc rejects as `empty`.
+  it('loads the root at the memory slug after #1228, without a validation exemption', async () => {
     writeMd('README', { id: 'root-id', name: 'Hadron Graph' });
     writeMd('server', { id: 'child-id', name: 'server' });
-
-    const { graph, skippedInvalidLoc } = await loadGraphFromFs(graphRoot, 'org/graph', 'test/repo');
-
-    expect(graph.nodes.map((n) => n.loc).sort()).toEqual(['', 'server']);
+    const { graph, skippedInvalidLoc } = await loadGraphFromFs(graphRoot, 'org:graph', 'test/repo');
+    expect(graph.nodes.map((n) => n.loc).sort()).toEqual(['graph', 'server']);
     expect(skippedInvalidLoc).toEqual([]);
   });
 

@@ -651,9 +651,17 @@ describe('syncGraphFromGithub', () => {
       await expectRefusedAndUntouched(result, 'decisions/retention-policy.md', id(2));
     });
 
-    it('the root README broken: refused, the root node kept', async () => {
-      const result = await breakAfterSync('README.md', id(3), `---\nname: [broken\n---\nRoot`);
-      await expectRefusedAndUntouched(result, 'README.md', id(3));
+    it('the root README broken: refused, the addressable #1228 root node kept', async () => {
+      await db.memory.update({ where: { id: dbGraphId }, data: { urn: 'test-org:root-memory' } });
+      const target = makeGraph({ urn: 'test-org:root-memory' });
+      const dir = join(mockSources, 'test-org', 'root-memory');
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, 'README.md');
+      writeFileSync(file, `---\nid: ${id(3)}\nname: Existing\n---\nOld body`);
+      expect((await syncGraphFromGithub(target)).error).toBeUndefined();
+      writeFileSync(file, `---\nname: [broken\n---\nRoot`);
+      writeFileSync(join(dir, 'new.md'), '---\nname: New\n---\nNew node');
+      await expectRefusedAndUntouched(await syncGraphFromGithub(target), 'README.md', id(3));
     });
 
     it('CONTROL: an unreadable file with no node at its path is skipped, and the rest syncs', async () => {
