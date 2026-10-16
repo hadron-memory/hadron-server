@@ -4,6 +4,7 @@
  * side effects. The admin's own sessions and sessions bound to shared memories keep the override.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { hashAppKey } from '../../../middleware/auth.js';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { db } from '../../../integrations/db/client.js';
@@ -105,16 +106,50 @@ describe('requireSessionWriteAccess, strict owner (#1647)', () => {
 describe('POST /sessions/:id/outcome, strict owner (#1647)', () => {
   it('refuses a platform admin on a foreign personal-bound session with no side effects', async () => {
     const before = await db.session.findUniqueOrThrow({ where: { id: personalSession } });
-    expect(await outcome(personalSession, adminJwt)).toBe(404);
+    expect(await outcome(personalSession, adminJwt)).toBe(403);
     const after = await db.session.findUniqueOrThrow({ where: { id: personalSession } });
     expect(after.outcome).toBeNull();
     expect(after.updatedAt).toEqual(before.updatedAt);
   });
   it('refuses a platform admin on a private-bound session too', async () => {
-    expect(await outcome(privateSession, adminJwt)).toBe(404);
+    expect(await outcome(privateSession, adminJwt)).toBe(403);
   });
   it('still records an outcome for the owner and for a shared-memory session', async () => {
     expect(await outcome(personalSession, ownerJwt)).toBe(200);
     expect(await outcome(sharedSession, adminJwt)).toBe(200);
+  });
+});
+
+describe('POST /sessions/:id/outcome, the shared write gate for App keys (#1647)', () => {
+  async function appWithKey(tag: string) {
+    const org = await db.organization.create({ data: { id: generateId(), name: `o-${tag}`, urn: `o1647-${tag}-${generateId()}.test` } });
+    const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: tag, urn: `${org.urn}:${tag}` } });
+    const key = `hdr_app_1647${tag}${generateId()}`;
+    await db.appKey.create({ data: { appId: app.id, keyHash: hashAppKey(key), keyPreview: key.slice(-4) } });
+    return { app, key };
+  }
+
+  it('lets a pure App key report on its own App\'s user-less session, and refuses the rest unchanged', async () => {
+    const mine = await appWithKey('mine');
+    const other = await appWithKey('other');
+    const userless = await db.session.create({ data: { id: generateId(), type: 'CHATBOT', appId: mine.app.id } });
+    const attributed = await db.session.create({ data: { id: generateId(), type: 'CHATBOT', appId: mine.app.id, userId: owner.id } });
+
+    expect(await outcome(userless.id, mine.key)).toBe(200);
+    expect((await db.session.findUniqueOrThrow({ where: { id: userless.id } })).outcome).toBe(0.5);
+
+    expect(await outcome(userless.id, other.key)).toBe(403); // foreign App
+    // Host-launched sessions and host-scope keys are pinned by sessionWriteGate1934.test.ts on the same shared gate.
+    for (const s of [attributed]) {
+      expect(await outcome(s.id, mine.key)).toBe(403); // a person is behind it
+      expect((await db.session.findUniqueOrThrow({ where: { id: s.id } })).outcome).toBeNull();
+    }
+  });
+
+  it('refuses a co-member user (hybrid) who is not the attributed user', async () => {
+    const stranger = await db.user.create({ data: { id: generateId(), handle: `s1647-${generateId().slice(-6)}`, roles: ['CONTRIBUTOR'] } });
+    const strangerJwt = await signJwt({ sub: stranger.id, roles: ['CONTRIBUTOR'] });
+    expect(await outcome(sharedSession, strangerJwt)).toBe(403);
+    expect((await db.session.findUniqueOrThrow({ where: { id: sharedSession } })).outcome).toBeNull();
   });
 });

@@ -98,8 +98,9 @@ beforeAll(async () => {
   // A token claiming CONTRIBUTOR for a user who no longer is one (#1251).
   staleContributorJwt = await signJwt({ sub: reader.id, roles: ['CONTRIBUTOR'] });
 
+  // #1647: the outcome is a session WRITE, so the reporting contributor's own session is the control.
   const session = await db.session.create({
-    data: { id: generateId(), type: 'CHATBOT' },
+    data: { id: generateId(), type: 'CHATBOT', userId: contributor.id },
   });
   sessionId = session.id;
 
@@ -133,10 +134,10 @@ describe('#556 — a credential is required', () => {
     expect(await report(sessionId, 'not-a-real-token')).toBe(401);
   });
 
-  it('refuses a READER — below the documented contributor bar', async () => {
+  it('refuses a READER who is not behind the session (#1647: the shared write gate, not a role bar)', async () => {
     // Authentication is not authorization. Without this, a gate requiring
     // merely *a* credential would satisfy both cases above.
-    expect(await report(sessionId, readerJwt)).toBe(401);
+    expect(await report(sessionId, readerJwt)).toBe(403);
   });
 
   it('refuses a token that CLAIMS contributor for a user who is not one', async () => {
@@ -144,7 +145,7 @@ describe('#556 — a credential is required', () => {
     // so auth resolution and this gate read the current user row instead.
     // Without this case the choice of source is unasserted, since the
     // contributor fixture matches in both token and row.
-    expect(await report(sessionId, staleContributorJwt)).toBe(401);
+    expect(await report(sessionId, staleContributorJwt)).toBe(403);
   });
 
   it('leaves the session untouched after a refusal', async () => {
@@ -207,17 +208,12 @@ describe('#556 — a credentialed reporter still works', () => {
   });
 });
 
-describe('#556 — cross-session reporting stays OPEN, by design', () => {
-  it("lets a credentialed reporter stamp another user's session", async () => {
-    // Pinned deliberately. The design says a machine client "can report
-    // outcomes for any session ... keeps edge devices and CRM webhooks on
-    // equal footing", because the reporter is usually a third system holding
-    // only the id.
-    //
-    // #556 asks for tenancy scoping here. That is a product change to a
-    // deliberate decision, not a security oversight — so this case exists to
-    // make a future tightening a DECISION: whoever adds an ownership check
-    // reds this test and has to come and change it on purpose.
-    expect(await report(strangersSessionId, contributorJwt, { outcome: 0.5 })).toBe(200);
+describe('#1647 — cross-session reporting is CLOSED', () => {
+  it("refuses a contributor stamping another user's session, and leaves it untouched", async () => {
+    // #556 pinned this open (a third system holding only the id). #1647 reversed it on Holger's rulings: the outcome
+    // is a session write and goes through the shared write gate (cor:dmo:070:05). The attributed user, or a pure App
+    // key for its own App's user-less session, still reports.
+    expect(await report(strangersSessionId, contributorJwt, { outcome: 0.5 })).toBe(403);
+    expect((await db.session.findUniqueOrThrow({ where: { id: strangersSessionId } })).outcome).toBeNull();
   });
 });
