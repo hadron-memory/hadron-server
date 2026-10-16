@@ -1,0 +1,33 @@
+# User-key lineage and subtree revocation (#1253)
+
+Implements cor:aut:010:02 rules 1, 8 and the recorded rule 9 A ruling. Xavier's CHECKED gate explicitly accepts the disclosed Proposed dependencies: mint means creating a user key while authenticated with a key; sign-in/OAuth authorization/bootstrap issuance is parentless; legacy ancestry is not inferred. This implementation does not approve or mint corpus law.
+
+## Stored state and issuance
+
+`UserApiKey.mintedByKeyId` is nullable, indexed, and references the parent key. The additive migration leaves every existing row null, preserving credentials and provenance. The FK uses NO ACTION: physical deletion cannot silently erase a child's lineage; normal revocation retains rows, and a user's cascading deletion removes its complete key set. There is no parent input or update API. GraphQL exposes the nullable ID on the existing owner-only UserApiKey projection, without hydrating another entity.
+
+The GraphQL mint mutation is the only key-authenticated mint entry point. It already takes the user's shared authority anchor and validates the presented credential with a locking read. Inside that transaction it reads that same live, owned key, checks its persisted OAuth scopes, and copies its ID and issuance identity (including unknown/null). It never reads a caller-supplied parent, active App, or clientId as issuance identity. The new child retains existing unscoped mint semantics; it does not mutate its parent's scopes. OAuth token redemption and operator bootstrap use the same primitive with no authenticated-key parent. Sign-in/JWT minting stays portal-issued and parentless.
+
+## Revocation and races
+
+The existing revoke mutation holds the user's authority anchor exclusively. One parameterized recursive CTE visits the named owned key and all same-owner descendants, including children below an already revoked key. UNION terminates even if privileged database corruption introduced a cycle. One conditional UPDATE stamps only previously live keys, preserving old revocation timestamps. Unknown and foreign IDs retain the same NOT_FOUND refusal. No descendant list is returned or logged.
+
+The lock spans traversal and update. A concurrent mint holding the shared anchor commits before revocation enters, so its child is included. A mint queued behind revocation rechecks its specific credential after the anchor wait and refuses. No new credential cache exists: GraphQL resolves credentials per request; MCP already reauthenticates each request on an open transport. User deletion already takes the same anchor and revokes every owned key.
+
+## Evidence and acceptance
+
+Red checkpoint b2179655 on main f693a50e: four expected failures (parent, OAuth issuance, root cascade, intermediate cascade), two controls pass. Tests call real resolvers and resolveAuthContext with synthetic credentials in per-run test databases.
+
+Added coverage: deep/branching ancestry; independent legacy root; intermediate-only revoke; repeated revoke with stable timestamps; OAuth client distinction and unknown issuance; hashed-only storage; revoked/missing/foreign parent identities; live persisted narrow/unsupported scope refusal; user deletion; migration executed against legacy table shape in a rollback-only transaction; actual localhost GraphQL schema and existing MCP session requests; wire-level parent forgery refused. Race barriers match the exact blocker backend in the current test database, with bounded waits and cleanup.
+
+The HTTP test mints a chain through GraphQL, opens MCP sessions before revocation, revokes through GraphQL, then observes descendant GraphQL refusal and MCP 401. Its independent root continues on both. The suite's existing credential, OAuth, bootstrap, impersonation and deletion tests supply adjacent controls. Author tests are not independent fresh-stack QA.
+
+## Author review accounting
+
+Applied: raw-sql-mutations (bound parameters, mapped names, set operation, anchored transaction); prove-the-concurrent-path-actually-ran (exact backend wait barriers and mutant); check-the-corpus-before-implementing-a-proposed-fix and needs-a-spec-when-it-decides-a-rule (recorded A rule, Proposed dependencies explicitly retained); fix-at-the-call-site-is-a-fix-on-one-surface, scope-a-guard-to-the-hazard-not-to-your-scar and enumerate-writers-by-state-not-by-call-site (enumerated all UserApiKey creation/revocation writers); replacing-a-mechanism-sweeps-every-surface-that-describes-it (schema/helper/resolver/SDL descriptions updated); graphql-nullable-input (existing nullable label preserved, new parent has no input); a-refusal-must-name-an-act-its-recipient-can-perform (neutral condition, no invented remedy).
+
+Skipped by scope: widened-read-gate-nested-objects (no audience widening/entity hydration); non-prisma-ddl-sync (ordinary FK/index modeled by Prisma); narrow-catch-blocks (none added); computed-field-honesty (persisted field); urn-handling, effective-access-resource-kind, convention-ratchets-must-be-flipped, sentinel-values-are-writable-values, org-xor-owner-null-comparison, entity-ref-args and inline-bulk-ref-gate-parity (no respective shape or caller-selected parent); user-fks-need-explicit-soft-delete-handling (parent is a key, existing User ownership/deletion unchanged); narrow-a-predicate-against-free-form-data (ID linkage); authz-and-the-guard-must-name-the-same-subject (no CAS input); deferred-deletion-must-reverify-ownership (no deferred destructive effect); a-redundant-guard-is-either-a-backstop-or-a-wrong-answer (persisted-scope recheck is an explicit backstop for an incomplete request projection); ask-the-component-that-owns-the-answer (actual ID/context and stored issuance used); a-population-guard-expires-silently (none); a-documented-limitation-needs-a-failure-direction (legacy unknown ancestry cannot cascade to an unrecorded child; no guessed repair); a-test-that-hardcodes-a-configured-value (no new config); a-refusal-must-name-a-remedy-that-can-act (no remedy); narrow-to-every-discriminator-the-spec-names (owner ID and authenticated credential both checked).
+
+## Rollout and limits
+
+Migration precedes new server code. Drain old server processes as part of deployment: old mint writers cannot record ancestry and old revokers update only one row. No production credential operation, lineage reconstruction, client input expansion, or new credential kind is included. Legacy unknown ancestry stays unknown, so revoking a historical parent cannot reach children never linked. Optional GraphQL output is additive; existing clients need no input change. Cross-family blind/local/section10 and independent fresh-stack GraphQL/MCP QA are routed by Eden; an author green head is not merge authority.

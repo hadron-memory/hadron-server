@@ -3856,10 +3856,9 @@ model UserApiKey {
   /// the actor. For self-service v1 this equals `userId`; the column
   /// exists for future admin-issued paths (where actor != owner).
   createdBy  String?   @map("created_by")
-  /// Issuance-path discriminator: `'portal'` for createUserApiKey
-  /// GraphQL mutation; `'oauth:<client_id>'` for /oauth/token-issued
-  /// tokens. Distinct from `createdBy` so the audit-actor convention
-  /// is preserved.
+  /// Issuance identity: portal for direct sign-in, oauth:<client_id> for
+  /// OAuth issuance, inherited from an authenticated minting key. Nullable
+  /// historical provenance remains unknown. Distinct from the User actor.
   issuedVia  String?   @map("issued_via")
   /// Immutable OAuth scopes copied from the authorization code at token
   /// redemption. Empty means an unrestricted portal/legacy user key. There is
@@ -3868,9 +3867,16 @@ model UserApiKey {
   lastUsedAt DateTime? @map("last_used_at")
   revokedAt  DateTime? @map("revoked_at")
 
+  /// Authenticated credential that minted this key (#1253). Null means
+  /// direct issuance or unknown legacy ancestry; never inferred/backfilled.
+  mintedByKeyId String? @map("minted_by_key_id")
+  mintedByKey UserApiKey? @relation("UserKeyLineage", fields: [mintedByKeyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  mintedKeys UserApiKey[] @relation("UserKeyLineage")
+
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([mintedByKeyId])
   @@map("user_api_keys")
 }
 
