@@ -310,6 +310,29 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
     await expect(resolveAssetTargetMemoryId(db, agentId, stranger.id)).rejects.toThrow(/NO_TARGET_MEMORY/);
   });
 
+  it("a personal memory's strict owner is its userId, whatever ownerUserId says (Riana, P2 1)", async () => {
+    const victim = await db.user.create({ data: { id: generateId(), handle: `v-${generateId()}`, githubUsername: `v-${generateId()}` } });
+    const caller = await db.user.create({ data: { id: generateId(), handle: `c-${generateId()}`, githubUsername: `c-${generateId()}` } });
+    const skewed = await db.memory.create({
+      data: { id: generateId(), urn: `home-${suffix}:skewed-${generateId()}`, name: 'skewed', class: 'personal', visibility: null, userId: victim.id, ownerUserId: caller.id } as never,
+    });
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: homeOrgId, name: 'skew', urn: `ag-skew-${generateId()}` } as never });
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: agent.id, memoryId: skewed.id, role: 'read-write' } });
+    await expect(resolveAssetTargetMemoryId(db, agent.id, caller.id)).rejects.toThrow(/NO_TARGET_MEMORY/);
+  });
+
+  it("legacy startChat target: never the App's shared app-class memory through a link (Riana, P2 2)", async () => {
+    const link = await legacyLink('homeOrg', 'read');
+    await giveConversation(link.agentId);
+    const shared = await db.memory.create({
+      data: { id: generateId(), urn: `home-${suffix}:shared-${generateId()}`, name: 'shared', organizationId: homeOrgId, class: 'app', appId: link.appId } as never,
+    });
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: link.agentId, memoryId: shared.id, role: 'read-write' } });
+    const response = await gql(link.appKey, 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', { agent: link.agentId });
+    expect(response.errors, JSON.stringify(response)).toBeDefined();
+    expect(await db.node.count({ where: { memoryId: shared.id } })).toBe(0);
+  });
+
   it('listings follow the cap: GraphQL memories and MCP hadron_list_memories (Colin)', async () => {
     for (const [target, want] of [['foreignOrg', false], ['foreignPublic', true], ['homeOrg', true]] as const) {
       const { appId, appKey } = await legacyLink(target, 'read-write');
