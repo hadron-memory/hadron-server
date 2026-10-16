@@ -69,7 +69,7 @@ export type DecisionNodeRow = NodeApprovalRow & { data: unknown };
  */
 export function evaluateDecision(
   node: DecisionNodeRow,
-  approvedSnapshot: ApprovalHashFields | null,
+  approvedSnapshot: ApprovalHashFields | ApprovalHashFields[] | null,
   approverIdentities?: ReadonlySet<string>,
 ): DecisionEvaluation {
   const findings: DecisionIntegrityFinding[] = [];
