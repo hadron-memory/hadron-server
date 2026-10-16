@@ -78,7 +78,7 @@ import { findLiveUrnAliasTargets, dedupeById } from '../lib/urnAlias.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
 import { NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
-import { normalizeObjectType, validateNodeSchemaOnWrite } from '../lib/enforceNodeSchema.js';
+import { normalizeObjectType, normalizeRole, validateNodeSchemaOnWrite } from '../lib/enforceNodeSchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 import { archiveTombstone } from '../lib/tombstoneArchive.js';
@@ -5822,7 +5822,11 @@ export function createMcpServerInstance(
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('Outgoing edges (replaces the full set on the source node)'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+      // #1219 — this tool is an inline parity writer, NOT a writeNodeCore
+      // delegate (#206), so the core's role normalization does not reach it:
+      // normalize here, before the governance probe and the payload build.
+      const role = normalizeRole(rawRole);
       // Spec 022: enforce qualification at the API boundary. Relative-form
       // URNs (e.g., `review:sort-imports` without org+memory) reject here
       // before any DB lookup runs.
@@ -6393,7 +6397,10 @@ export function createMcpServerInstance(
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
     },
-    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+      // #1219 — inline parity writer, not a writeNodeCore delegate (#206):
+      // normalize before mergedGovernedState, the door replay and the payload.
+      const role = normalizeRole(rawRole);
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');

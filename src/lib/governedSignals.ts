@@ -55,6 +55,7 @@
  */
 
 import { GOVERNED_KINDS } from './governedRole.js';
+import { normalizeRole } from './enforceNodeSchema.js';
 
 /**
  * The node columns the governed-kind gate keys on, derived from the register so
@@ -142,5 +143,12 @@ export function governedSignalsFromMirror(parsed: {
   for (const field of GOVERNED_SIGNAL_FIELDS) {
     if (field in src && src[field] !== undefined) out[field] = src[field] ?? null;
   }
+  // #1219 (cor:dmo:060:02, ruling A): an empty or whitespace file role is the
+  // same as no role → null, so a mirror never writes the second spelling of
+  // "ungoverned" either. Key-absent stays absent (preserve), and an explicit
+  // `role: null` already cleared — role's file codec HAS a clear form, unlike
+  // objectType's never-clear contract (cor:int:020:01), so '' matching null
+  // here is the ruling applied at this seam, not a parity accident.
+  if ('role' in out) out.role = normalizeRole(out.role as string | null);
   return out as Partial<GovernedSignals>;
 }
