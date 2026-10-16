@@ -2071,6 +2071,22 @@ describe('#1348 — objectType through git sync', () => {
     expect(await stored('r')).toEqual({ objectType: 'insight', role: 'review' });
     expect(await stored('s')).toEqual({ objectType: 'insight', role: 'review' });
   });
+
+  // #1219 (cor:dmo:060:02, ruling A): an empty or whitespace file role is the
+  // same as no role → null — on create (never stored as "") and on update
+  // (clears, like the file's explicit `role: null` clear — role's file codec
+  // HAS a clear form, unlike objectType's never-clear contract, cor:int:020:01).
+  it('#1219 an empty or whitespace file role stores null, and clears a stored role on update', async () => {
+    frontmatter('blank-role', { name: 'Blank role', role: '' });
+    frontmatter('ws-role', { name: 'Ws role', role: '   ' });
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'clr-role', name: 'Clr', role: 'anchor', ownerRepo: 'test/repo' } });
+    frontmatter('clr-role', { id, name: 'Clr', role: '' });
+    await sync();
+    expect((await stored('blank-role'))?.role).toBeNull();
+    expect((await stored('ws-role'))?.role).toBeNull();
+    expect((await stored('clr-role'))?.role).toBeNull();
+  });
 });
 
 describe('#1330 — strict sub-roles through git sync', () => {

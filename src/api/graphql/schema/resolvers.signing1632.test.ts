@@ -77,6 +77,7 @@ afterEach(() => {
 describe('requestNodeSignature (cor:dmo:130:03)', () => {
   it('any reader may ask; the request pins the current revision and records the requester', async () => {
     const n = await node('p:1');
+    await db.session.create({ data: { id: 'sess-1', userId: reader.id } });
     const req = await request(n.id, reader.id, {}, { sessionId: 'sess-1' });
     expect(req).toMatchObject({ nodeId: n.id, revision: 1, state: 'open', requesterUserId: reader.id, requesterSessionId: 'sess-1' });
     expect(R.state(req, {}, as(reader.id))).toBe('OPEN');
@@ -138,6 +139,7 @@ describe('requestNodeSignature (cor:dmo:130:03)', () => {
 describe('withdrawSigningRequest (#10024, #10397)', () => {
   it('the requester withdraws from another session; another reader may not; an outsider sees NOT_FOUND', async () => {
     const n = await node('w:1');
+    await db.session.create({ data: { id: 'a', userId: reader.id } });
     const req = await request(n.id, reader.id, {}, { sessionId: 'a' });
     expect(await codeOf(M.withdrawSigningRequest(null, { id: req.id }, as(writer.id)))).toBe('SIGNING_REQUEST_NOT_REQUESTER');
     expect(await codeOf(M.withdrawSigningRequest(null, { id: req.id }, as(outsider.id)))).toBe('SIGNING_REQUEST_NOT_FOUND');
