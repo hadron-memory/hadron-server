@@ -11108,13 +11108,19 @@ export const typeDefs = `#graphql
     updateWorker(workerRef: ID!, promptOverride: String): Worker!
 
     """
-    #974 — hard-delete a NEVER-USED miscast (cor:dmo:050:11's only removal
-    escape): refused with WORKER_IN_USE unless no session was ever bound and
-    the worker's working memory holds no content. Anything with history
-    retires instead — its name is bound to that history forever. Also removes
-    the empty working memory. Same authorization as castWorker.
+    #1162 — hard-delete a never-referenced miscast only.
+    hrn:node:hadronmemory.com:specs:cor:dmo:050:11
+    Empty normally ended and released stints are repairable; persisted
+    attribution, including tombstones/history, refuses WORKER_IN_USE.
+    The requester must explicitly verify no signed commit, trailer, PR,
+    comment, review or published artifact attributes work to this Worker.
+    Database counts cannot prove external absence: known or uncertain
+    external history means retire instead. Omitted or false confirmation
+    refuses WORKER_EXTERNAL_ATTRIBUTION_UNCONFIRMED. No external crawl.
+    Also removes empty ended stints and the empty working memory.
+    Same staffing authorization as castWorker.
     """
-    deleteWorker(workerRef: ID!): Boolean!
+    deleteWorker(workerRef: ID!, confirmNoExternalAttribution: Boolean): Boolean!
 
     """
     #960 — mint a roles:<role> definition in the Team Agent's system memory.

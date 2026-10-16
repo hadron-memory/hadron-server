@@ -13,7 +13,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, createDbWorkerAttribution } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
@@ -341,6 +341,7 @@ describe('#1783 — aggregatePlaintextWindow edge semantics', () => {
     // walk skipped, so the counted frontier is the lower-loc row.
     await put(4, { mentions: [] });
     await put(5, { mentions: [] }, '5a');
+    await createDbWorkerAttribution(db, user.id, 'w-target');
     await put(5, { authorWorkerId: 'w-target', mentions: [] }, '5b');
     const r = await aggregatePlaintextWindow(db, channel.id, 0, 10, [target()]);
     expect(r.frontierLoc).toBe(`${channel.loc}:messages:5a`);

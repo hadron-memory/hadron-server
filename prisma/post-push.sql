@@ -713,3 +713,6 @@ DROP TRIGGER IF EXISTS user_deletion_audits_immutable ON user_deletion_audits;
 CREATE TRIGGER user_deletion_audits_immutable
   BEFORE UPDATE OR DELETE ON user_deletion_audits
   FOR EACH ROW EXECUTE FUNCTION hadron_user_deletion_audit_immutable();
+
+-- #1162: newly introduced typed Worker/session references fence hard deletion.
+\ir worker-reference-invariants.sql
