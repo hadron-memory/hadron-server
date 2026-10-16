@@ -51,11 +51,15 @@ describe('linkWriteTargetAdmits (#1349, Colin on #2002) — a write target picke
     expect(linkWriteTargetAdmits({ ...tenant, userId: 'u1' }, { ...personal, class: 'private' }, 'read-write')).toBe(true);
     expect(linkWriteTargetAdmits({ ...tenant, userId: 'u1' }, personal, 'read')).toBe(false);
   });
-  it('an app-class memory only for its own App', () => {
+  it('the strict owner is userId, not ownerUserId', () => {
+    const skewed = knowledge({ class: 'personal', organizationId: null, ownerUserId: 'u2', userId: 'u1' });
+    expect(linkWriteTargetAdmits({ ...tenant, userId: 'u2' }, skewed, 'read-write')).toBe(false);
+    expect(linkWriteTargetAdmits({ ...tenant, userId: 'u1' }, skewed, 'read-write')).toBe(true);
+  });
+  it('an app-class memory is never a write target through a link, even for its own App', () => {
     const appMem = knowledge({ class: 'app', appId: 'x' });
     expect(linkWriteTargetAdmits(tenant, appMem, 'read-write')).toBe(false);
-    expect(linkWriteTargetAdmits({ ...tenant, appId: 'y' }, appMem, 'read-write')).toBe(false);
-    expect(linkWriteTargetAdmits({ ...tenant, appId: 'x' }, appMem, 'read-write')).toBe(true);
+    expect(linkWriteTargetAdmits({ ...tenant, appId: 'x' }, appMem, 'read-write')).toBe(false);
   });
   it('knowledge only at a capped READ_WRITE', () => {
     expect(linkWriteTargetAdmits(tenant, knowledge({ organizationId: 'home' }), 'read-write')).toBe(true);

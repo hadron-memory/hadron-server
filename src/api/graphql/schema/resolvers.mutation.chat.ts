@@ -496,7 +496,7 @@ export const chatMutations = {
         // #1349: one the Agent's tenant can WRITE on its own — a link is a
         // limit, never a grant (cor:dmo:050:09) — and live on both ends. This
         // branch has no user, so a personal or private memory is never the
-        // target (Colin on #2002), and an app-class one only for this App.
+        // target (Colin on #2002), and an app-class one never is (Riana).
         const tenant = {
           organizationId: agent.organizationId, ownerUserId: agent.ownerUserId,
           appId: ctx.appId ?? null, userId: ctx.userId ?? null,

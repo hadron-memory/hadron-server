@@ -149,9 +149,14 @@ export function cappedLinkLevel(
  * target). {@link cappedLinkLevel} passes personal, private and app through
  * because the access map's consumers strict-gate them afterwards; a write
  * target picked straight from the links has no such gate (Colin on #2002), so
- * it applies the owner rules here: a personal or private memory only for its
- * own user (`tenant.userId`), an app-class memory only for its own App
- * (`tenant.appId`), and everything else only at a capped READ_WRITE.
+ * it applies the owner rules here:
+ *   - a personal or private memory only for its strict owner, which is the
+ *     row's `userId` (the `chk_personal_visibility_user` invariant and the
+ *     canonical owner gate), never `ownerUserId` (Riana on #2002);
+ *   - an app-class memory NEVER: an App's app-class memories need no item and
+ *     are reached through the App itself (cor:dmo:050:09), and the canonical
+ *     write refuses a pure App key there (Riana on #2002);
+ *   - everything else only at a capped READ_WRITE.
  */
 export function linkWriteTargetAdmits(
   tenant: LinkTenant,
@@ -160,11 +165,10 @@ export function linkWriteTargetAdmits(
 ): boolean {
   if (cappedLinkLevel(tenant, memory, role) !== 'READ_WRITE') return false;
   if (memory.class === 'personal' || memory.class === 'private') {
-    const owner = memory.ownerUserId ?? memory.userId ?? null;
+    const owner = memory.userId ?? null;
     return owner !== null && tenant.userId != null && owner === tenant.userId;
   }
-  if (memory.class === 'app') return memory.appId !== null && tenant.appId != null && memory.appId === tenant.appId;
-  return true;
+  return memory.class !== 'app';
 }
 
 /** Load an Agent's tenant. A missing Agent has none, so every capped item confers only PUBLIC reads. */
