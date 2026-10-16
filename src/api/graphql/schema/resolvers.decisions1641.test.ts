@@ -1,4 +1,4 @@
-import { waitForAdvisoryWaiter } from '../../../test/advisoryWaiter.js';
+import { observeTransactionBackend, waitForAdvisoryWaiter } from '../../../test/advisoryWaiter.js';
 import { approvedMergeProof } from '../../../test/mergeConsent.js';
 /**
  * #1641 S1 — decision nodes: the log and decision doors, the reads, and the
@@ -46,8 +46,8 @@ const errorOf = async (p: Promise<unknown>): Promise<GraphQLError> => {
   throw new Error('expected a refusal');
 };
 
-const createLog = (extra: Record<string, unknown> = {}, userId = admin.id) =>
-  M.createDecisionLog(null, { memoryRef: memory.id, loc: 'decisions', defaultDeciders: [holger.id], ...extra }, as(userId));
+const createLog = (extra: Record<string, unknown> = {}, userId = admin.id, context: Partial<Context> = {}) =>
+  M.createDecisionLog(null, { memoryRef: memory.id, loc: 'decisions', defaultDeciders: [holger.id], ...extra }, as(userId, context));
 
 const simple = (extra: Record<string, unknown> = {}) => ({
   title: 'Ship the codec?',
@@ -186,9 +186,6 @@ describe("the log gate admits whoever manages the App (Holger's ruling, team cha
 });
 
 describe('the App owner arm under concurrent revocation (#1690 review: Rook P3-1, Chip R7)', () => {
-  /** Resolves once some transaction waits on an advisory lock it can't have. */
-  const untilAdvisoryWaiter = () => waitForAdvisoryWaiter(db, undefined, 5_000);
-
   it("a demotion can't commit between the in-transaction gate and the log write: it waits for the write", async () => {
     const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Team', urn: 'decision.example:team' } });
     await db.memory.update({ where: { id: memory.id }, data: { appId: app.id, class: 'app', visibility: null } });
@@ -206,12 +203,15 @@ describe('the App owner arm under concurrent revocation (#1690 review: Rook P3-1
     }, { timeout: 30_000 });
     await isLocked;
 
-    const create = createLog({ defaultDeciders: [reader.id] }, reader.id);
+    const observed = observeTransactionBackend(db);
+    const create = createLog({ defaultDeciders: [reader.id] }, reader.id, { db: observed.db });
+    void create.catch(() => {});
     let demoted = false;
     let demotion: Promise<void> = Promise.resolve();
     let demotedWhileHeld = false;
     try {
-      await untilAdvisoryWaiter();
+      const pid = await observed.backendFor(create);
+      await waitForAdvisoryWaiter(db, { pid, key: { form: 'int-pair', first: memory.id, second: 'decisions' } });
       demotion = db.appMember.update({
         where: { appId_userId: { appId: app.id, userId: reader.id } }, data: { role: 'member' },
       }).then(() => { demoted = true; });
@@ -221,6 +221,7 @@ describe('the App owner arm under concurrent revocation (#1690 review: Rook P3-1
       demotedWhileHeld = demoted;
       release();
       await holder;
+      await Promise.allSettled([create, demotion]);
     }
     expect(demotedWhileHeld).toBe(false);
     const log = await create;

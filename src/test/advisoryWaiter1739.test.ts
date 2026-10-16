@@ -59,6 +59,7 @@ describe('#1739 advisory barrier identity', () => {
   it('rejects another key on the intended backend in the same database', async () => {
     const scope = await intWait();
     expect(await advisoryWaiterPresent(db, { ...scope, key: { ...scope.key, second: 'different-key' } }), '#1739 unrelated key released the barrier').toBe(false);
+    expect(await advisoryWaiterPresent(db, { ...scope, key: { ...scope.key, first: 'different-memory' } })).toBe(false);
     expect(await advisoryWaiterPresent(db, scope)).toBe(true);
   });
   it('rejects the same backend/key in another database', async () => {
