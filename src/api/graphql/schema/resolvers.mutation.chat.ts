@@ -1,4 +1,5 @@
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { LINK_CAP_MEMORY_SELECT, cappedLinkLevel } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { generateId } from '../../../lib/id.js';
 import { lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import {
@@ -486,7 +487,15 @@ export const chatMutations = {
         }
       } else {
         // Legacy: use the agent's first writable attached memory.
-        targetMemoryId = agent.memoryItems.find((m) => m.role === 'read-write')?.memory.id ?? null;
+        // #1349: one the Agent's tenant can WRITE on its own — a link is a
+        // limit, never a grant (cor:dmo:050:09) — and live on both ends.
+        const tenant = { organizationId: agent.organizationId, ownerUserId: agent.ownerUserId, appId: ctx.appId ?? null };
+        const writable = await ctx.db.agentMemoryItem.findMany({
+          where: { agentId: resolvedAgentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } },
+          orderBy: { createdAt: 'asc' },
+          select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
+        });
+        targetMemoryId = writable.find((m) => cappedLinkLevel(tenant, m.memory, m.role) === 'READ_WRITE')?.memoryId ?? null;
       }
 
       if (!targetMemoryId) {

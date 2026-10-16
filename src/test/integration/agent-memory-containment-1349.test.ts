@@ -19,6 +19,10 @@ import { cleanDb, createDbAppWithKey, createDbAppAgent } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { createTestableMcpServer } from '../../mcp/server.js';
 import { getAppMemoryAccess } from '../../mcp/access-control.js';
+import { sharedChatKnowledgeMemoryIds } from '../../api/graphql/schema/chat-scope.js';
+import { sessionScopedMemoryIds } from '../../lib/auth/sessionScopedMemoryIds.js';
+import { resolveAssetTargetMemoryId } from '../../api/graphql/schema/resolvers.helpers.js';
+import { resolvers } from '../../api/graphql/schema/resolvers.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -124,6 +128,11 @@ beforeAll(async () => {
     data: { memoryId: mem.foreignRevoked!.id, organizationId: home.id, role: 'CONTRIBUTOR', deletedAt: new Date() } as never,
   });
 
+  // An ORGANIZATION memory a THIRD org subscribes to: someone else's subscription is no reach for home.
+  const third = await mkOrg('third');
+  await mkMem('foreignThirdSub', foreign.urn, { organizationId: foreign.id, class: 'knowledge', visibility: 'ORGANIZATION' });
+  await db.memorySubscription.create({ data: { memoryId: mem.foreignThirdSub!.id, organizationId: third.id, role: 'CONTRIBUTOR' } as never });
+
   const app = await createServer();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -224,10 +233,93 @@ describe('#1349 Slice 1 — a subscribed memory (Vera\'s control)', () => {
     expect(await writes(appKey, 'foreignSubscribed')).toBe(false);
   });
 
+  it("another organization's subscription is no reach for this agent's tenant", async () => {
+    const { appId, appKey } = await legacyLink('foreignThirdSub', 'read-write');
+    expect(await reads(appKey, 'foreignThirdSub')).toBeNull();
+    expect(await writes(appKey, 'foreignThirdSub')).toBe(false);
+    expect((await getAppMemoryAccess(db, appId)).has(mem.foreignThirdSub!.id)).toBe(false);
+  });
+
   it('a revoked subscription is no reach: the PUBLIC read stays, the write goes', async () => {
     const { appId, appKey } = await legacyLink('foreignRevoked', 'read-write');
     expect(await reads(appKey, 'foreignRevoked')).toBe('foreignRevoked SECRET');
     expect((await getAppMemoryAccess(db, appId)).get(mem.foreignRevoked!.id)).toBe('READ_ONLY');
     expect(await writes(appKey, 'foreignRevoked')).toBe(false);
+  });
+});
+
+describe('#1349 Slice 1 — the folds that read links directly use the same cap', () => {
+  it('shared-chat grounding: a foreign ORG link grounds nothing; PUBLIC and home links still do', async () => {
+    const foreign = await legacyLink('foreignOrg', 'read');
+    const pub = await legacyLink('foreignPublic', 'read');
+    const home = await legacyLink('homeOrg', 'read');
+    const owner = await db.user.create({ data: { id: generateId(), handle: `g-${generateId()}`, githubUsername: `g-${generateId()}` } });
+    expect(await sharedChatKnowledgeMemoryIds(db, foreign.agentId, foreign.appId, owner.id)).toEqual([]);
+    expect(await sharedChatKnowledgeMemoryIds(db, pub.agentId, pub.appId, owner.id)).toEqual([mem.foreignPublic!.id]);
+    expect(await sharedChatKnowledgeMemoryIds(db, home.agentId, home.appId, owner.id)).toEqual([mem.homeOrg!.id]);
+  });
+
+  it('session scope: a session naming a foreign ORG memory through its agent link admits nothing', async () => {
+    for (const [target, admitted] of [['foreignOrg', false], ['homeOrg', true]] as const) {
+      const { appId, agentId } = await legacyLink(target, 'read-write');
+      const session = await db.session.create({
+        data: { id: generateId(), appId, agentId, memoryId: mem[target]!.id } as never,
+      });
+      expect((await sessionScopedMemoryIds(db, appId, session.id)).includes(mem[target]!.id)).toBe(admitted);
+    }
+  });
+
+  it('asset upload target: a foreign read-write link is never the target; a home one is', async () => {
+    const owner = await db.user.create({ data: { id: generateId(), handle: `a-${generateId()}`, githubUsername: `a-${generateId()}` } });
+    for (const target of ['foreignOrg', 'foreignPublic']) {
+      const { agentId } = await legacyLink(target, 'read-write');
+      await expect(resolveAssetTargetMemoryId(db, agentId, owner.id)).rejects.toThrow(/NO_TARGET_MEMORY/);
+    }
+    const { agentId } = await legacyLink('homeOrg', 'read-write');
+    expect(await resolveAssetTargetMemoryId(db, agentId, owner.id)).toEqual({ memoryId: mem.homeOrg!.id });
+  });
+
+  it('legacy startChat target: an App key never writes a chat into a foreign memory through a link', async () => {
+    const foreign = await legacyLink('foreignOrg', 'read-write');
+    // A minimal conversation, so the call reaches the target-memory choice.
+    const sys = await db.memory.create({
+      data: { id: generateId(), urn: `home-${suffix}:sys-${generateId()}`, name: 'sys', organizationId: homeOrgId, class: 'system' } as never,
+    });
+    await db.agent.update({ where: { id: foreign.agentId }, data: { systemMemoryId: sys.id } as never });
+    for (const [loc, data, content] of [
+      ['conversations', null, null],
+      ['conversations:c', { stageOrder: ['s'], isSetup: false }, null],
+      ['conversations:c:s', { promptRef: 'prompts:c:s' }, null],
+      ['prompts', null, null], ['prompts:c', null, null], ['prompts:c:s', null, 'Hi.'],
+    ] as const) {
+      await db.node.create({ data: { id: generateId(), memoryId: sys.id, loc, name: loc.split(':').pop()!, nodeType: 'system', data: data as never, content } });
+    }
+    const before = await db.node.count({ where: { memoryId: mem.foreignOrg!.id } });
+    const err = await resolvers.Mutation.startChat({}, { agentId: foreign.agentId }, { db, appId: foreign.appId, roles: ['READER'] } as never)
+      .then(() => null, (e: Error) => e.message);
+    expect(err).toMatch(/No target memory available/);
+    expect(await db.node.count({ where: { memoryId: mem.foreignOrg!.id } })).toBe(before);
+  });
+});
+
+describe("#1349 Slice 1 — the same-App row grants nothing extra (Vera's control; the exception stays Proposed)", () => {
+  it('an App-scoped memory of App X, linked to an agent: X reads it as before; another App installing the agent does not', async () => {
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: homeOrgId, name: 'same-app', urn: `ag-same-app-${suffix}` } as never,
+    });
+    const x = await createDbAppWithKey(db, 'same-app-x', homeOrgId);
+    const y = await createDbAppWithKey(db, 'same-app-y', homeOrgId);
+    await createDbAppAgent(db, x.app.id, agent.id);
+    await createDbAppAgent(db, y.app.id, agent.id);
+    const scoped = await db.memory.create({
+      data: {
+        id: generateId(), urn: `home-${suffix}:x-scoped`, name: 'x-scoped', organizationId: homeOrgId,
+        class: 'knowledge', visibility: 'ORGANIZATION', appId: x.app.id,
+      } as never,
+    });
+    const node = await db.node.create({ data: { id: generateId(), memoryId: scoped.id, loc: 'payroll', name: 'p', content: 'X SCOPED' } });
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: agent.id, memoryId: scoped.id, role: 'read' } });
+    expect((await gql(x.rawKey, READ, { r: node.id })).data?.node?.content).toBe('X SCOPED');
+    expect((await gql(y.rawKey, READ, { r: node.id })).data?.node ?? null).toBeNull();
   });
 });
