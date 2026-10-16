@@ -427,15 +427,20 @@ describe('encryptMemory — locked conversion (#1346)', () => {
   });
 
   it('pages more than 200 old snapshots and encrypts tombstone history', async () => {
+    // encryptMemory pages 200 snapshots. Keep exactly one beyond that boundary
+    // (#1999), with tombstone history on the second page; no timeout increase.
+    const snapshotCount = 201;
     const deleted = await db.node.create({
       data: {
         id: generateId(), memoryId, loc: 'deleted-history', name: 'deleted history',
         content: 'deleted live', deletedAt: new Date(),
       },
     });
-    const history = Array.from({ length: 205 }, (_, index) => ({
-      id: generateId(), nodeId: index === 204 ? deleted.id : nodeId,
-      memoryId, loc: index === 204 ? 'deleted-history' : 'entry-1',
+    // UUIDv7's random suffix does not order IDs generated in the same millisecond.
+    const snapshotIds = Array.from({ length: snapshotCount }, () => generateId()).sort();
+    const history = snapshotIds.map((id, index) => ({
+      id, nodeId: index === snapshotCount - 1 ? deleted.id : nodeId,
+      memoryId, loc: index === snapshotCount - 1 ? 'deleted-history' : 'entry-1',
       name: 'history', content: `historical ${index}`,
     }));
     await db.nodeRevision.createMany({ data: history });
@@ -443,10 +448,10 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
 
     const rows = await db.nodeRevision.findMany({ where: { id: { in: history.map((r) => r.id) } } });
-    expect(rows).toHaveLength(205);
+    expect(rows).toHaveLength(snapshotCount);
     expect(rows.every((revision) => isCiphertext(revision.content))).toBe(true);
     const tombstoneHistory = rows.find((revision) => revision.nodeId === deleted.id)!;
-    expect(decryptNodeFieldsWithKey(tombstoneHistory, parseDataKey(dataKey)).content).toBe('historical 204');
+    expect(decryptNodeFieldsWithKey(tombstoneHistory, parseDataKey(dataKey)).content).toBe(`historical ${snapshotCount - 1}`);
   });
 
   it('continues past a pruned page-boundary snapshot', async () => {
