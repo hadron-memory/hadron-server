@@ -10490,7 +10490,8 @@ export const typeDefs = `#graphql
     """
     saveChatSummary(chatId: String!, summary: String!): Boolean!
     """
-    Rename a saved chat (user must own it)
+    Rename a saved chat. A chat has no ACL of its own: this takes current
+    write access to the chat's host memory, the same rule as posting to it.
     """
     updateChatTitle(chatId: String!, title: String!): Boolean!
     """

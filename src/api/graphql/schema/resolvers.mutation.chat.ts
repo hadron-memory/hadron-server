@@ -87,11 +87,17 @@ class ChatAuthorityScopeChanged extends Error {}
  * So the gate runs again on the transaction, after the authority anchors a
  * revoker holds exclusively (the memory, its owners, the caller, and the App
  * an app-class memory belongs to) and before any chat lock or write.
+ *
+ * #1991: rename and delete take this path with no extra gate — a chat has no
+ * ACL of its own (cor:acl:030:01), so the memory-write predicate IS the
+ * authorization, exactly as for sends. The pre-#1991 author-or-admin arm
+ * (with its legacy memory-creator fallback) over-refused the very
+ * participants that predicate admits; it was provenance gating access, the
+ * thing 030:01 forbids.
  */
 async function chatWriteTx(
   ctx: Context,
   memoryId: string,
-  extraGate?: (txCtx: Context) => Promise<void>,
 ): Promise<ChatTxRunner> {
   const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { appId: true } });
   const anchors = memory?.appId ? [{ kind: 'app' as const, id: memory.appId }] : [];
@@ -99,38 +105,9 @@ async function chatWriteTx(
     ctx, memoryId, anchors,
     async (txCtx) => {
       await requireMemoryWriteAccess(txCtx, memoryId);
-      await extraGate?.(txCtx);
     },
     (tx) => fn(tx),
   );
-}
-
-/**
- * Spec 017 — renaming or deleting a chat is author-only regardless of scope
- * (design-discussion D7), with a platform ADMIN/OWNER bypass. A non-author
- * participant of a shared chat can read and post to it, but not rename or
- * delete it. Legacy fallback: pre-feature chats may not have `createdBy` on
- * the chat root, so the historical "memory creator" check applies to them.
- *
- * #1717 (Diego on #1725): runs on the request context as a fast refusal and
- * again on the transaction context, whose platform roles are re-read under
- * the caller's authority anchor — a role revoked during the lock wait must
- * not leave a stale admin bypass behind.
- */
-async function requireChatAuthorOrAdmin(
-  c: Context,
-  chatNode: { createdBy: string | null; memoryId: string },
-): Promise<void> {
-  if (c.roles?.includes('ADMIN') || c.roles?.includes('OWNER')) return;
-  if (chatNode.createdBy === c.userId) return;
-  if (chatNode.createdBy === null) {
-    const legacyMem = await c.db.memory.findUniqueOrThrow({
-      where: { id: chatNode.memoryId },
-      select: { createdBy: true },
-    });
-    if (legacyMem.createdBy === c.userId) return;
-  }
-  throw new Error('Forbidden');
 }
 
 export const chatMutations = {
@@ -1670,10 +1647,12 @@ export const chatMutations = {
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
       // outlive membership, so they must never be the grant.
+      // #1991: that predicate is the rename's whole authorization now — the
+      // pre-#1991 author-only arm (spec-017 D7) over-refused participants
+      // the write path itself admits. The chat's stored creator stays
+      // provenance (Chat.author), never a gate.
       await requireMemoryWriteAccess(ctx, chatNode.memoryId);
-      // Spec 017 — author-only rename (D7); re-checked on the transaction.
-      await requireChatAuthorOrAdmin(ctx, chatNode);
-      const inTx = await chatWriteTx(ctx, chatNode.memoryId, (txCtx) => requireChatAuthorOrAdmin(txCtx, chatNode));
+      const inTx = await chatWriteTx(ctx, chatNode.memoryId);
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
       // #919: a rename is a whole-blob write like any other, so it goes through
       // the serializer too. Renaming is nowhere near a message append in
@@ -1712,10 +1691,10 @@ export const chatMutations = {
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
       // outlive membership, so they must never be the grant.
+      // #1991: that predicate is the deletion's whole authorization now —
+      // same reasoning as the rename above.
       await requireMemoryWriteAccess(ctx, chatNode.memoryId);
-      // Spec 017 — author-only deletion (D7); re-checked on the transaction.
-      await requireChatAuthorOrAdmin(ctx, chatNode);
-      const inTx = await chatWriteTx(ctx, chatNode.memoryId, (txCtx) => requireChatAuthorOrAdmin(txCtx, chatNode));
+      const inTx = await chatWriteTx(ctx, chatNode.memoryId);
       // Soft-delete the chat node and its messages.
       // #1468 (Codex on #1475) — a legacy chat is an ordinary writable node,
       // so it can carry the spec marker in a minted corpus: the rows are

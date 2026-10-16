@@ -1970,26 +1970,33 @@ describe('#1717 — chat-by-loc writes', () => {
     },
   );
 
-  // Diego on #1725 (delta at 40e62306): rename and delete keep an extra
-  // author-or-admin condition beyond write access. A platform admin who is
-  // also an ordinary participant, but not the author, loses the admin role
-  // while the write waits — the participant grant alone must not carry it.
+  // Diego on #1725, re-pinned for #1991: rename and delete are gated by the
+  // memory-write predicate alone now, so the revocation that matters is the
+  // one that predicate re-reads on the transaction. A platform admin whose
+  // ONLY claim is the ADMIN bypass (no org membership, no App membership,
+  // not the author) loses the role while the write waits — the in-tx
+  // re-check must refuse. (#1991 flipped the old premise: a participant's
+  // membership alone now DOES carry rename/delete — the participant cells
+  // in the #1991 matrix above pin that direction.)
   it.each(['updateChatTitle', 'deleteChat'] as const)(
     '%s is refused when the admin role is revoked while it waits for its lock',
     async (op) => {
+      const bypassOnly = await db.user.create({
+        data: { githubId: 19913, githubUsername: 'bypass-only-admin', roles: ['ADMIN'] },
+      });
       await member(adminUser.id);
       await member(otherUser.id);
       const { chatId, root } = await sharedChat(otherUser.id);
       const before = await snapshot(root.id);
-      const asAdmin = userCtx(adminUser.id, { roles: ['ADMIN'] });
+      const asAdmin = userCtx(bypassOnly.id, { roles: ['ADMIN'] });
       const run = op === 'updateChatTitle'
         ? () => resolvers.Mutation.updateChatTitle({}, { chatId, title: 'renamed' }, asAdmin)
         : () => resolvers.Mutation.deleteChat({}, { chatId }, asAdmin);
 
       let outcome: unknown;
       await db.$transaction(async (tx) => {
-        await lockAuthorityAnchors(tx, [{ kind: 'user', id: adminUser.id }], 'exclusive');
-        await tx.user.update({ where: { id: adminUser.id }, data: { roles: ['READER'] } });
+        await lockAuthorityAnchors(tx, [{ kind: 'user', id: bypassOnly.id }], 'exclusive');
+        await tx.user.update({ where: { id: bypassOnly.id }, data: { roles: ['READER'] } });
         outcome = run().then(() => 'written', (e: unknown) => e);
         await waitForLockWaitersOfType(db, 'advisory', 1, 3_000);
       }, { timeout: 20_000 });
