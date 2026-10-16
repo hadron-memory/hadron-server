@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
@@ -42,6 +43,18 @@ describe('#1162 never-referenced repair', () => {
     expect(await db.worker.findUnique({ where: { id: worker.id } })).toBeNull();
     expect(await db.session.findUnique({ where: { id: session.id } })).toBeNull();
     expect(await db.memory.findUnique({ where: { id: worker.memoryId } })).toBeNull();
+  });
+
+  it('MCP exposes the same empty-stint repair gate', async () => {
+    const worker = await cast();
+    const session = await M.startSession({}, { input: { id: generateId(), appRef: appId, workerRef: worker.id, tool: 'test' } }, ctx);
+    await M.endSession({}, { id: session.id }, ctx);
+    await M.releaseWorker({}, { workerRef: worker.id }, ctx);
+    const text = await createTestableMcpServer({ userId: ctx.userId, roles: ['READER'] }).callToolText(
+      'hadron_delete_worker', { workerRef: worker.id, confirmNoExternalAttribution: true },
+    );
+    expect(text).not.toMatch(/error|WORKER_IN_USE/i);
+    expect(await db.worker.findUnique({ where: { id: worker.id } })).toBeNull();
   });
 
   for (const field of ['createdByWorkerId', 'updatedByWorkerId'] as const) {
