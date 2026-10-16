@@ -1,3 +1,4 @@
+import { waitForAdvisoryWaiter } from '../../../test/advisoryWaiter.js';
 /**
  * #1726 — a Worker records who it reports to (Task Management, #1704).
  *
@@ -281,14 +282,7 @@ describe('reportsTo at startSession (a spawn brief in one step)', () => {
 
 describe('#1737 review — anchored authority and one lock protocol (Rook P2-1, Diego P2-1..P2-3)', () => {
   /** Resolves once some transaction waits on an advisory lock (the graph lock) it can't have. */
-  async function untilAdvisoryWaiter(): Promise<void> {
-    for (let i = 0; i < 400; i++) {
-      const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
-      if (n > 0n) return;
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    throw new Error('nothing ever waited on the reportsTo graph lock');
-  }
+  const untilAdvisoryWaiter = () => waitForAdvisoryWaiter(db, undefined, 10_000);
   /** Is this worker's row free to lock right now (no other transaction holds it)? */
   const rowFree = (id: string) => db.$transaction(async (t) => {
     await t.$queryRaw`SELECT id FROM workers WHERE id = ${id} FOR UPDATE NOWAIT`;

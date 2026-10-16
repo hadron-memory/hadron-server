@@ -1,3 +1,4 @@
+import { waitForAdvisoryWaiter } from '../../../test/advisoryWaiter.js';
 import { approvedMergeProof } from '../../../test/mergeConsent.js';
 /**
  * #1641 S1 — decision nodes: the log and decision doors, the reads, and the
@@ -186,14 +187,7 @@ describe("the log gate admits whoever manages the App (Holger's ruling, team cha
 
 describe('the App owner arm under concurrent revocation (#1690 review: Rook P3-1, Chip R7)', () => {
   /** Resolves once some transaction waits on an advisory lock it can't have. */
-  async function untilAdvisoryWaiter(): Promise<void> {
-    for (let i = 0; i < 200; i++) {
-      const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
-      if (n > 0n) return;
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    throw new Error('no transaction ever waited on the path lock');
-  }
+  const untilAdvisoryWaiter = () => waitForAdvisoryWaiter(db, undefined, 5_000);
 
   it("a demotion can't commit between the in-transaction gate and the log write: it waits for the write", async () => {
     const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Team', urn: 'decision.example:team' } });
