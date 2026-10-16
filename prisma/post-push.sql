@@ -599,6 +599,22 @@ LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP = 'INSERT' OR NEW."revision_content_hash" = 'refresh' THEN
     NEW."revision_content_hash" := hadron_node_revision_state_hash(NEW);
+    -- #1611 (cor:dmo:120:04): the content-change boundary moves only through a
+    -- SANCTIONED writer (the same 'refresh' marker as the fingerprint above) and
+    -- only when the three approval-hashed fields change under approval-hash v1
+    -- normalization (CRLF and lone CR become LF; nothing else). A write outside
+    -- the revision system never moves it, so its content change stays
+    -- detectable as TAMPERED instead of passing for a supported edit.
+    IF TG_OP = 'INSERT' THEN
+      NEW."content_rev_seq" := NEW."rev_seq";
+    ELSIF replace(replace(NEW."name", E'\r\n', E'\n'), E'\r', E'\n')
+         IS DISTINCT FROM replace(replace(OLD."name", E'\r\n', E'\n'), E'\r', E'\n')
+      OR replace(replace(NEW."abstract", E'\r\n', E'\n'), E'\r', E'\n')
+         IS DISTINCT FROM replace(replace(OLD."abstract", E'\r\n', E'\n'), E'\r', E'\n')
+      OR replace(replace(NEW."content", E'\r\n', E'\n'), E'\r', E'\n')
+         IS DISTINCT FROM replace(replace(OLD."content", E'\r\n', E'\n'), E'\r', E'\n') THEN
+      NEW."content_rev_seq" := NEW."rev_seq";
+    END IF;
   END IF;
   RETURN NEW;
 END;
