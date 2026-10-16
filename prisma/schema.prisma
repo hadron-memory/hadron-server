@@ -5856,7 +5856,8 @@ model AppKeyWakeRead {
 
 /// #1162: internal MVCC coordination, not authored history or a Worker FK.
 /// Writers and miscast deletion update this version in their own transaction.
-/// Deleted with the Worker; no public API. The key is an immutable Worker id.
+/// Retained after deletion to fence older snapshots; no public API.
+/// The key is an immutable Worker id.
 model WorkerReferenceFence {
   subjectId String @id @map("subject_id")
   version   BigInt @default(0)

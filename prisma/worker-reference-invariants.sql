@@ -162,13 +162,10 @@ DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "workers";
 CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "workers"
   FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.reports_to_worker_id');
 
--- App/worker cascades leave no coordination rows behind either.
-CREATE OR REPLACE FUNCTION worker_reference_fence_cleanup_1162()
-RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  DELETE FROM worker_reference_fences WHERE subject_id = OLD.id;
-  RETURN OLD;
-END $$;
+-- Retain the coordination tuple after Worker deletion. A REPEATABLE READ
+-- writer may still see the old Worker snapshot: it must collide with this
+-- newer tuple and abort, rather than recreate a removed fence and commit a
+-- dangling reference. These tiny tombstones are internal, never attribution.
+-- Drop an older installation's cleanup trigger when post-push re-applies.
 DROP TRIGGER IF EXISTS worker_reference_fence_cleanup_1162 ON workers;
-CREATE TRIGGER worker_reference_fence_cleanup_1162 AFTER DELETE ON workers
-  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_cleanup_1162();
+DROP FUNCTION IF EXISTS worker_reference_fence_cleanup_1162();

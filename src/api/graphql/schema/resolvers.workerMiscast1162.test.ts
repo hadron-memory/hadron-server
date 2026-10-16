@@ -129,14 +129,14 @@ describe('#1162 never-referenced repair', () => {
         createdByWorkerId: worker.id,
       } });
     }, { isolationLevel: 'RepeatableRead', timeout: 20_000 }).then(
-      () => 'committed', () => 'refused',
+      () => 'committed', (error: unknown) => (error as { code?: string }).code ?? 'unexpected',
     );
     await ready;
     try {
       expect(await remove(worker.id)).toBe(true);
       expect(await db.worker.findUnique({ where: { id: worker.id } })).toBeNull();
     } finally { write(); }
-    expect(await writer).toBe('refused');
+    expect(await writer).toBe('P2034');
     expect(await db.node.findUnique({ where: { id: nodeId } })).toBeNull();
   });
 
