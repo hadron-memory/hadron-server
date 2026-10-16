@@ -36,6 +36,7 @@ import {
   resolveAppleUser,
 } from './auth/index.js';
 import { issueLoginCode, redeemLoginCode } from './auth/authHandoff.js';
+import { boundSessionPrivacyFilter } from './lib/auth/sessionPrivacy.js';
 import {
   createPendingLoginState,
   claimPendingLoginState,
@@ -1323,6 +1324,18 @@ export async function createServer(): Promise<Express> {
       if (!mayReport) {
         res.status(401).json({ error: 'A contributor-or-higher credential is required' });
         return;
+      }
+
+      // #1647 (cor:acl:010:02, strict owner wins): a session bound to ANOTHER user's personal/private memory takes no
+      // outcome from anyone, a platform admin included. The shared bound-session predicate decides, and the refusal is
+      // the same 404 as a missing session so the id can't be probed; nothing below runs, so no outcome or liveness moves.
+      const bound = await db.session.findUnique({ where: { id }, select: { memoryId: true } });
+      if (bound?.memoryId) {
+        const visible = await db.session.count({ where: { id, ...boundSessionPrivacyFilter(auth) } });
+        if (visible === 0) {
+          res.status(404).json({ error: 'Session not found' });
+          return;
+        }
       }
 
       await db.session.update({
