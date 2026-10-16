@@ -169,6 +169,9 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
     transport: 'mcp',
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
+    // #1868: the presented hdr_user_ key, so the shared authorized transaction
+    // re-checks it is still unrevoked at the write (as #1864's signing tools do).
+    apiKeyId: auth.apiKeyId ?? undefined,
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -237,7 +240,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
   server.tool(
     'hadron_create_comment',
     'Start a comment thread on a node: feedback beside it, never an edit of it (cor:dmo:110:01–05). The node itself is not touched, re-approved or re-minted. '
-      + 'Needs write access to the node\'s memory, in an app, knowledge, personal or group memory. You hold at most ONE open thread per node: '
+      + 'Needs write access to the node\'s memory, in an app, knowledge, personal, group or system memory (never a private one). You hold at most ONE open thread per node: '
       + 'a second is refused [comment_open_thread_exists] with its threadId, so reply there instead. If you started a worker session with '
       + 'hadron_start_session, the comment is authored by that worker.',
     {

@@ -77,6 +77,16 @@ beforeEach(async () => {
   await spec('pas:010:01', 'Rule body.');
 });
 
+describe('encrypted-memory mint refusal (#1861)', () => {
+  it('keeps the existing code and states that encrypted memories are unsupported', async () => {
+    await db.memory.update({where:{id:draft.id},data:{isEncrypted:true,vectorIndexEnabled:false}});
+    await expect(specCorpusMintMutations.mintSpecCorpus(null,{memoryRef:draft.id},as())).rejects.toMatchObject({
+      message:'Reference scans do not support encrypted memories.',
+      extensions:{code:'SPEC_CORPUS_ENCRYPTED_UNSUPPORTED',memoryId:draft.id},
+    });
+  });
+});
+
 describe('mintSpecCorpus: a clean corpus (#1448)', () => {
   it('dry run reports nothing blocking and changes nothing; the real run mints once, one-way', async () => {
     const dry = await mint(true);

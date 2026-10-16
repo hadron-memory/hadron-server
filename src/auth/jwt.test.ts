@@ -81,6 +81,23 @@ describe('verifyJwt error cases', () => {
     await expect(verifyJwt(token)).rejects.toThrow();
   });
 
+  it('#421 rejects a token signed with another HMAC algorithm on the same secret', async () => {
+    // jose accepts any HS* algorithm for a Uint8Array key unless the verifier
+    // pins one; signJwt only ever emits HS256.
+    const secret = new TextEncoder().encode(process.env.JWT_SECRET!);
+    for (const alg of ['HS384', 'HS512']) {
+      const token = await new SignJWT(PAYLOAD)
+        .setProtectedHeader({ alg })
+        .setIssuedAt()
+        .setIssuer('hadron-server')
+        .setAudience('hadron')
+        .setExpirationTime('7d')
+        .sign(secret);
+
+      await expect(verifyJwt(token)).rejects.toThrow();
+    }
+  });
+
   it('throws on a malformed token string', async () => {
     await expect(verifyJwt('not.a.jwt')).rejects.toThrow();
   });

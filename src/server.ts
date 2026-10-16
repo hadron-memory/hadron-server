@@ -53,12 +53,12 @@ import {
   resolveAuthContext,
 } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
+import { assertProductionSigningSecret } from './auth/signingSecret.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
-import { resolvers } from './api/graphql/schema/resolvers.js';
 import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
 import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
-import { typeDefs } from './api/graphql/schema/typeDefs.js';
+import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
 import {
   formatGraphQLError,
   isExpectedClientError,
@@ -71,6 +71,7 @@ import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
+import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
@@ -96,6 +97,8 @@ import { startSchedulerLoop } from './jobs/scheduler.js';
 import { startTaskStallEvaluatorLoop } from './jobs/taskStallEvaluator.js';
 import { startTaskMatcherLoop } from './jobs/taskMatcher.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
+import { mountHealthRoutes } from './api/health.js';
+import { mountCapabilitiesRoute } from './api/capabilities.js';
 import { mountPublicAssetRoutes } from './api/assetPublic.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
 import { mountSlackEventRoutes } from './api/slackEvents.js';
@@ -165,6 +168,8 @@ const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
 };
 
 export async function createServer(): Promise<Express> {
+  // #421: before anything else, so a weak signing secret never serves.
+  assertProductionSigningSecret();
   // AM Q13: absent leaves team record operations unavailable; an invalid
   // configured keyring refuses boot without echoing secret values.
   readTeamRecordKeys();
@@ -210,6 +215,9 @@ export async function createServer(): Promise<Express> {
     );
   }
 
+  // #1925: before the global CORS middleware, which allows the portal's origin WITH credentials; this
+  // unauthenticated read answers any origin without them. See src/api/capabilities.ts.
+  mountCapabilitiesRoute(app);
   app.use(
     cors({
       origin: process.env.FRONTEND_URL || 'http://localhost:5173',
@@ -1123,9 +1131,10 @@ export async function createServer(): Promise<Express> {
   // GraphQL
   // ---------------------------------------------------------------------------
 
+  const { typeDefs, resolvers: deploymentResolvers } = deploymentSchema();
   const apollo = new ApolloServer({
     typeDefs,
-    resolvers,
+    resolvers: deploymentResolvers,
     plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin],
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.
@@ -1791,14 +1800,21 @@ export async function createServer(): Promise<Express> {
   // src/api/assetPublic.ts before touching or extending it.
   mountPublicAssetRoutes(app, db);
 
-  app.get('/health', (_req, res) => {
-    res.json({ ok: true });
-  });
+  // #1906: /health runs SELECT 1 through this pool, so a wedged pool reads
+  // unhealthy. See src/api/health.ts.
+  mountHealthRoutes(app, db);
 
   // Background job: purge expired anonymous memories hourly.
   // Skipped in test environments to avoid leaking timers.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_ANON_CLEANUP !== 'true') {
     startAnonymousMemoryCleanupLoop(db);
+  }
+
+  // #1770 — retention for account-merge consent requests: a retired request
+  // is deleted 30 days after the later of its expiry and consumption
+  // (cor:api:010:02), in bounded batches. Live proofs and sealed receipts stay.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
+    startMergeConsentSweepLoop(db);
   }
 
   // Background job: purge soft-deleted assets past their 24h recovery

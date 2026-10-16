@@ -183,10 +183,10 @@ async function workerRow(): Promise<string> {
 // ── #1706: prisma/agent-task-stall-invariants.sql ─────────────────────────
 
 describe('agent-task-stall-invariants.sql (#1706)', () => {
-  it('the T2 migration carries a byte-identical copy of the invariants file', () => {
+  it('the latest stall-invariants migration carries a byte-identical copy of the invariants file', () => {
     const source = readFileSync(new URL('../../../prisma/agent-task-stall-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(
-      new URL('../../../prisma/migrations/20261009010000_agent_task_stalls/migration.sql', import.meta.url),
+      new URL('../../../prisma/migrations/20261014150000_host_report_timeout/migration.sql', import.meta.url),
       'utf8',
     );
     expect(migration.endsWith(source)).toBe(true);
@@ -249,6 +249,20 @@ describe('agent-task-stall-invariants.sql (#1706)', () => {
     await expect(row({ reason: 'stalled', setBy: 'stall-rule' })).resolves.toBeTruthy();
   });
 
+  it('worker_availability (#1766): `lapse` is a setter, for the record a passed until left available', async () => {
+    const w = await workerRow();
+    await expect(
+      db.workerAvailability.create({ data: { workerId: w, state: 'available', setAt: new Date(), setBy: 'lapse' } }),
+    ).resolves.toBeTruthy();
+  });
+
+  it('worker_availability (#1759): `reports-to` is a setter, for the stall mark the reports-to worker cleared', async () => {
+    const w = await workerRow();
+    await expect(
+      db.workerAvailability.create({ data: { workerId: w, state: 'available', setAt: new Date(), setBy: 'reports-to' } }),
+    ).resolves.toBeTruthy();
+  });
+
   it('model_family_availability (cor:agt:060:03): a lowercase family token and the same state shape', async () => {
     const row = (data: Record<string, unknown>) =>
       db.modelFamilyAvailability.create({ data: { appId: app.id, family: 'claude', state: 'unavailable', reason: 'other', setAt: new Date(), ...data } });
@@ -268,10 +282,10 @@ describe('agent-task-stall-invariants.sql (#1706)', () => {
 // ── #1707: prisma/agent-task-matching-invariants.sql ──────────────────────
 
 describe('agent-task-matching-invariants.sql (#1707)', () => {
-  it('the T3 migration carries a byte-identical copy of the invariants file', () => {
+  it('the latest matching-invariants migration (#1709) carries a byte-identical copy of the invariants file', () => {
     const source = readFileSync(new URL('../../../prisma/agent-task-matching-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(
-      new URL('../../../prisma/migrations/20261010010000_agent_task_matching/migration.sql', import.meta.url),
+      new URL('../../../prisma/migrations/20261014010000_host_registration_worktrees/migration.sql', import.meta.url),
       'utf8',
     );
     expect(migration.endsWith(source)).toBe(true);

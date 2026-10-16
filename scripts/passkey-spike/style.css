@@ -1,0 +1,8 @@
+body { font: 1rem/1.5 system-ui; margin: 0; color: #17212b; background: #f4f7fa; }
+main { max-width: 48rem; margin: 2rem auto; padding: 1.5rem; background: white; }
+pre, code, dd { white-space: pre-wrap; overflow-wrap: anywhere; }
+dd { margin: .25rem 0 1rem; } dt { font-weight: bold; }
+button { padding: .75rem; } pre { background: #eef2f6; padding: 1rem; }
+
+.pairing-label { display: block; margin-top: 1rem; font-weight: bold; }
+#pair-code { display: block; box-sizing: border-box; width: 100%; max-width: 32rem; margin: .5rem 0; padding: .75rem; border: 2px solid #526475; border-radius: .25rem; font: inherit; }

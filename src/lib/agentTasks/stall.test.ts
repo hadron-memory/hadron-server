@@ -250,10 +250,12 @@ describe('cor:agt:050:15 — a started task with no progress raises an alarm', (
       parentTaskId: t.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('10:05'),
       status: 'cancelled', cancelledAt: at('10:40'),
     });
+    // The cancel also starts the owner-reaction window (#1760), so only the
+    // no-progress rule is read here.
     await tick('11:00');
-    expect(await alarms()).toEqual([]);
+    expect(await alarms('stall.no-progress')).toEqual([]);
     await tick('11:40');
-    expect(await alarms()).toEqual([expect.objectContaining({ type: 'stall.no-progress', taskId: t.id, episodeStart: at('10:40') })]);
+    expect(await alarms('stall.no-progress')).toEqual([expect.objectContaining({ taskId: t.id, episodeStart: at('10:40') })]);
   });
 
   it('edge case: reassigned while started, the window counts from the reassignment', async () => {
@@ -323,10 +325,51 @@ describe('cor:agt:050:16 r2 — an owner who doesn\'t react to a finished child 
     expect((await alarms('stall.owner-unreactive')).map((a) => a.episodeStart)).toEqual([at('10:00')]);
   });
 
-  it('interim: a cancelled child starts no window (only a finished one, as decided)', async () => {
-    await reviewFinished('10:00', 'cancelled');
-    await tick('10:30');
-    expect(await alarms('stall.owner-unreactive')).toEqual([]);
+  describe('#1760 — a cancelled child starts the window too (cor:agt:050:16, #7817)', () => {
+    it('child cancelled at 10:00, Anne idle → at 10:20 the alarm is about the parent, episode starts at the cancel', async () => {
+      const { parent, child } = await reviewFinished('10:00', 'cancelled');
+      await drive(anne, '09:45');
+      await tick('10:19');
+      expect(await alarms('stall.owner-unreactive')).toEqual([]);
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({
+        taskId: parent.id, episodeStart: at('10:00'), subjectWorkerId: anne.id,
+        payload: { windowMinutes: 20, assignee: { workerId: anne.id }, childTaskId: child.id },
+      })]);
+      expect(await db.workerAvailability.findUnique({ where: { workerId: anne.id } })).toMatchObject({ reason: 'stalled' });
+    });
+
+    it('Anne moves after the cancel → no alarm', async () => {
+      await reviewFinished('10:00', 'cancelled');
+      await drive(anne, '10:05');
+      await tick('10:30');
+      expect(await alarms('stall.owner-unreactive')).toEqual([]);
+    });
+
+    it('activity before the cancel does not count', async () => {
+      await reviewFinished('10:00', 'cancelled');
+      await drive(anne, '09:59');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
+    });
+
+    it('a cancel and a finish in the same silence are one episode, from the earlier end', async () => {
+      const { parent } = await reviewFinished('10:00', 'cancelled');
+      await task({
+        parentTaskId: parent.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('09:25'),
+        status: 'finished', startedAt: at('09:35'), finishedAt: at('10:10'), resultOutcome: 'succeeded',
+      });
+      await tick('10:30');
+      await tick('10:50');
+      expect((await alarms('stall.owner-unreactive')).map((a) => a.episodeStart)).toEqual([at('10:00')]);
+    });
+
+    it('a parent cancelled with its children raises nothing (the parent has ended)', async () => {
+      const { parent } = await reviewFinished('10:00', 'cancelled');
+      await db.agentTask.update({ where: { id: parent.id }, data: { status: 'cancelled', cancelledAt: at('10:00') } });
+      await tick('10:30');
+      expect(await alarms('stall.owner-unreactive')).toEqual([]);
+    });
   });
 
   it('interim: no alarm when the parent has already ended', async () => {
@@ -336,15 +379,125 @@ describe('cor:agt:050:16 r2 — an owner who doesn\'t react to a finished child 
     expect(await alarms()).toEqual([]);
   });
 
-  it('a person as the parent\'s assignee: only a move on the parent stops it (interim)', async () => {
-    const parent = await task({ ownerWorkerId: ada.id, assigneeUserId: mia.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10') });
-    await task({
-      parentTaskId: parent.id, ownerUserId: mia.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),
-      status: 'finished', startedAt: at('09:30'), finishedAt: at('10:00'), resultOutcome: 'succeeded',
+  describe('#1848 — a person owner\'s own task calls end the window (cor:agt:050:12)', () => {
+    /** Mia owns Rook's child under Ada's parent; the child finishes at 10:00. */
+    async function personOwned() {
+      const parent = await task({ ownerWorkerId: ada.id, assigneeUserId: mia.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10') });
+      await task({
+        parentTaskId: parent.id, ownerUserId: mia.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),
+        status: 'finished', startedAt: at('09:30'), finishedAt: at('10:00'), resultOutcome: 'succeeded',
+      });
+      return parent;
+    }
+    const call = (taskId: string | null, by: { id: string }, t: string, type = 'task.progress', worker?: { id: string }) =>
+      db.agentTeamEvent.create({
+        data: { appId: app.id, taskId, type, actorUserId: by.id, ...(worker ? { actorWorkerId: worker.id } : {}), createdAt: at(t) },
+      });
+
+    it('silent: alarmed after the window, never marked (cor:agt:060:07: a person is not marked); a move on the parent is no reaction', async () => {
+      const parent = await personOwned();
+      await db.agentTask.update({ where: { id: parent.id }, data: { assignedAt: at('10:05') } });
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({ taskId: parent.id, subjectWorkerId: null })]);
+      expect(await db.workerAvailability.count()).toBe(0);
     });
-    await tick('10:20');
-    expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({ taskId: parent.id, subjectWorkerId: null })]);
+
+    it('a task call Mia makes after the end clears it', async () => {
+      const parent = await personOwned();
+      await call(parent.id, mia, '10:05');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toEqual([]);
+    });
+
+    it('a task call on ANOTHER task in the App counts too ("any task call they make")', async () => {
+      await personOwned();
+      const other = await task({ ownerWorkerId: ada.id, createdAt: at('09:00') });
+      await call(other.id, mia, '10:05', 'task.created');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toEqual([]);
+    });
+
+    it('a call before the end does not count', async () => {
+      const parent = await personOwned();
+      await call(parent.id, mia, '09:59');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
+    });
+
+    it('someone else\'s call does not clear it', async () => {
+      const parent = await personOwned();
+      await call(parent.id, admin, '10:05');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
+    });
+
+    it('a WORKER-bound call under Mia\'s credential is the worker\'s activity, not Mia\'s (Riana P2)', async () => {
+      const parent = await personOwned();
+      await call(parent.id, mia, '10:05', 'task.created', anne); // Anne acting through Mia's credential
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
+    });
+
+    it('Mia\'s NON-task activity does not clear it (an event with no task, e.g. availability)', async () => {
+      await personOwned();
+      await call(null, mia, '10:05', 'availability.changed');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
+    });
   });
+
+
+  describe('#1831 — the window tests the CHILD OWNER\'s silence, not the parent assignee\'s', () => {
+    /** Anne owns Rook's child, which ends at 10:00; the parent (Ada's) is reassigned to Liam at 09:40. */
+    async function reassigned() {
+      const parent = await assignedToAnne('09:00', { status: 'started', startedAt: at('09:10') });
+      const child = await task({
+        parentTaskId: parent.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),
+        status: 'finished', startedAt: at('09:30'), finishedAt: at('10:00'), resultOutcome: 'succeeded',
+      });
+      await db.agentTask.update({ where: { id: parent.id }, data: { assigneeWorkerId: liam.id, assignedAt: at('09:40') } });
+      return { parent, child };
+    }
+
+    it('Liam (the parent\'s new assignee) acting does not clear it; the alarm raises on Anne\'s silence and marks Anne', async () => {
+      const { parent } = await reassigned();
+      await drive(liam, '10:05');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({ taskId: parent.id, episodeStart: at('10:00') })]);
+      expect((await db.workerAvailability.findMany()).map((r) => r.workerId)).toEqual([anne.id]);
+    });
+
+    it('Anne acting after the end clears it, whoever the parent is assigned to', async () => {
+      await reassigned();
+      await drive(anne, '10:05');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toEqual([]);
+    });
+
+    it('a move on the parent after the end (reassignment, start, progress note) is no reaction', async () => {
+      const parent = await assignedToAnne('09:00', { status: 'pending' });
+      await task({
+        parentTaskId: parent.id, ownerWorkerId: liam.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),
+        status: 'finished', startedAt: at('09:30'), finishedAt: at('10:00'), resultOutcome: 'succeeded',
+      });
+      // Rook finishes Liam's child at 10:00; the parent is then reassigned to Anne (10:10), started and noted (10:12).
+      await db.agentTask.update({ where: { id: parent.id }, data: {
+        assigneeWorkerId: anne.id, assignedAt: at('10:10'), status: 'started', startedAt: at('10:11'),
+      } });
+      await note(parent.id, '10:12', anne);
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({ taskId: parent.id, episodeStart: at('10:00') })]);
+      expect((await db.workerAvailability.findMany()).map((r) => r.workerId)).toEqual([liam.id]);
+    });
+
+    it('the episode boundaries are unchanged: activity before the end does not count', async () => {
+      await reassigned();
+      await drive(anne, '09:59');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
+    });
+  });
+
 });
 
 // ── cor:agt:050:17 — couldn't be assigned ─────────────────────────────────
@@ -382,7 +535,7 @@ describe('cor:agt:050:13 — exactly one alarm per stall episode', () => {
   it('a re-run of the same pass is a no-op', async () => {
     await assignedToAnne('10:00');
     expect((await tick('10:15')).raised).toBe(1);
-    expect(await tick('10:15')).toEqual({ raised: 0, woken: 0, cleared: 0 });
+    expect(await tick('10:15')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0 });
     expect(await alarms()).toHaveLength(1);
   });
 
@@ -840,7 +993,7 @@ describe('Diego P2 on #1720 — an account merge never strands an alarm\'s ackno
     await task({ parentTaskId: root.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('10:00') });
     const review = await db.agentTask.findFirstOrThrow({ where: { parentTaskId: root.id } });
     const candidate = stallCandidates({
-      task: review, openChildCount: 0, lastChildEndedAt: null, finishedChildren: [], lastProgressAt: null, assigneeActivityAt: null,
+      task: review, openChildCount: 0, lastChildEndedAt: null, endedChildren: [], lastProgressAt: null, assigneeActivityAt: null,
       queuedAt: null,
     }, STALL_WINDOW_DEFAULTS, at('10:15')).find((c) => c.rule === 'not-started')!;
     let raised: unknown;
@@ -907,12 +1060,13 @@ describe('Rook P3-4 on #1720 — the chain never leaves the task\'s App', () => 
   });
 });
 
-describe('PINNED until T5 (Rook P3-1 on #1720): escalation continues after the task moves', () => {
-  it('an unacknowledged alarm keeps waking up the chain after the task starts, and in an uninstalled App', async () => {
-    // As 050:19 / :20 read today, only an acknowledgement stops escalation. A wake only stamps
-    // agent_team_alarm_schedule.woken_at; nothing is delivered in T2. T5 (delivery) must re-check, before
-    // delivering, that the episode is current, the task open, the App installed, and the party's
-    // CURRENT access (isAppParticipant / mayStillDriveWorkerApp). Change this test deliberately.
+describe('Escalation stamps continue after the task moves; DELIVERY is re-checked (T5, #1708; Rook P3-1 on #1720)', () => {
+  it('an unacknowledged alarm keeps stamping up the chain after the task starts, and in an uninstalled App', async () => {
+    // As 050:19 / :20 read, only an acknowledgement stops escalation, so the schedule's woken_at stamps go on.
+    // Replaced deliberately in T5 (#1708): a stamp is no longer what reaches anyone. Delivery is the due-wake
+    // read, which re-checks the episode, the open task, the live App and the worker's current standing before
+    // handing a wake out (src/lib/agentTasks/taskWakes.ts). Pinned there: taskWakes1708.test.ts, "pre-delivery
+    // re-checks", including this exact case (the task started; the App uninstalled).
     const root = await assignedToAnne('09:00', { status: 'started', startedAt: at('09:05') });
     await drive(anne, '10:15');
     const review = await task({ parentTaskId: root.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('10:00') });
@@ -986,7 +1140,7 @@ describe('#1754 — backlog and the stall rules (cor:agt:050:02, :17)', () => {
     expect(await wakes(a.id)).toHaveLength(3); // ada (child owner), liam (root owner), then the App manager (#1761)
     await db.agentTask.update({ where: { id: child.id }, data: { status: 'backlog' } });
     // Row 1 fell due at 09:01; the 09:10 pass wakes it, and raises nothing new.
-    expect(await tick('09:10')).toEqual({ raised: 0, woken: 1, cleared: 0 });
+    expect(await tick('09:10')).toEqual({ raised: 0, woken: 1, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0 });
     expect(await alarms('assignment.unassignable')).toHaveLength(1);
     expect((await wakes(a.id))[1].wokenAt).toEqual(at('09:10'));
   });

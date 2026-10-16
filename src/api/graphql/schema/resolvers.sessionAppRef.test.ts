@@ -540,10 +540,12 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
     );
   });
 
-  it('gates the derived-App path on the same participant predicate (non-member → FORBIDDEN)', async () => {
+  it('gates the derived-App path on the same participant predicate (non-member → WORKER_NOT_FOUND, #1937)', async () => {
     // Binding a worker with no App context must not widen who can attribute a
-    // session to the worker's App.
-    await expectCode(startSession(ctx(outsider.id), { workerRef: worker.id }), 'FORBIDDEN');
+    // session to the worker's App. Since #1937 the non-member gets the absent
+    // ref's answer, not a FORBIDDEN that says the worker exists.
+    await expectCode(startSession(ctx(outsider.id), { workerRef: worker.id }), 'WORKER_NOT_FOUND');
+    expect(await db.session.count()).toBe(0);
   });
 
   it('refuses the derived-App path into an uninstalled App → APP_UNINSTALLED', async () => {
@@ -665,10 +667,11 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
     }
   });
 
-  it('an unauthorized caller hits FORBIDDEN, never WORKER_TAKEN (no driver-identity oracle)', async () => {
+  it('an unauthorized caller hits WORKER_NOT_FOUND, never WORKER_TAKEN (no driver-identity oracle)', async () => {
     // WORKER_TAKEN discloses who is driving; the App gates must run first.
+    // #1937: and the first of them answers like an absent ref.
     await startSession(ctx(contrib.id), { workerRef: worker.id });
-    await expectCode(startSession(ctx(outsider.id), { workerRef: worker.id }), 'FORBIDDEN');
+    await expectCode(startSession(ctx(outsider.id), { workerRef: worker.id }), 'WORKER_NOT_FOUND');
   });
 
   it('sessions(workerRef:) filters to that worker\'s sessions inside the ordinary scope', async () => {

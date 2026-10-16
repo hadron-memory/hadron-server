@@ -1,6 +1,12 @@
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { generateId } from '../../../lib/id.js';
-import { lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
+import { lockAncestorsForCreateMany, lockLocForWrite } from '../../../lib/nodeSubtreeLock.js';
+import {
+  DATA_HOST_MEMORY_SELECT,
+  declaredMemoryWideFields,
+  isMultiHumanChatHost,
+  mergeTurnExtraction,
+} from '../../../lib/memoryDataView.js';
 import {
   appendChatMessage,
   updateChatRootData,
@@ -520,7 +526,8 @@ export const chatMutations = {
                 },
               )
             : await memoryAccessFilter(ctx);
-        systemMessage = await compileTemplate(promptContent, null, targetMemoryId, ctx.db, access);
+        // #910: the first prompt reads the starter's own extracted values only.
+        systemMessage = await compileTemplate(promptContent, null, targetMemoryId, ctx.db, access, ctx.userId ?? null);
       }
 
       // Build tool schema from hierarchical extraction spec
@@ -1048,7 +1055,9 @@ export const chatMutations = {
           access = await memoryAccessFilter(ctx);
         }
         if (promptContent.includes('{{')) {
-          systemMessage = await compileTemplate(promptContent, null, chatNode.memoryId, ctx.db, access);
+          // #910: the sender's own extracted values, never another participant's
+          // (the same identity the user message is attributed to, #914).
+          systemMessage = await compileTemplate(promptContent, null, chatNode.memoryId, ctx.db, access, senderUserId);
         } else {
           systemMessage = promptContent;
         }
@@ -1289,14 +1298,35 @@ export const chatMutations = {
       // Save extracted data to memory's default data node
       // #1717: under the same anchored gate as the turn itself; the write is
       // recorded once it has committed (#1061).
-      if (data && Object.keys(data).length > 0) recordNodeWrite(ctx.db, await inTx(async (tx) => {
+      // #910: in a multi-human host the values are filed per person — the
+      // speaker's under `users.<speakerId>`, declared memory-wide ones flat —
+      // so one member's answer is never another's prompt variable.
+      const hasExtraction = !!data && Object.keys(data).length > 0;
+      const hostMemory = hasExtraction
+        ? await ctx.db.memory.findUniqueOrThrow({
+            where: { id: chatNode.memoryId },
+            select: DATA_HOST_MEMORY_SELECT,
+          })
+        : null;
+      const declaredMemoryWide = hostMemory && isMultiHumanChatHost(hostMemory)
+        ? await declaredMemoryWideFields(ctx.db, hostMemory)
+        : null;
+      const fold = (stored: Record<string, unknown> | null, extracted: Record<string, unknown>) =>
+        declaredMemoryWide
+          ? mergeTurnExtraction(stored, extracted, declaredMemoryWide, ctx.userId ?? null)
+          : { ...(stored ?? {}), ...extracted };
+      if (data && hasExtraction) recordNodeWrite(ctx.db, await inTx(async (tx) => {
+        // #910: two members extract into the same memory from different chats,
+        // under different chat locks. Serialize the read-modify-write on the
+        // `data` loc so neither turn loses the other's bucket.
+        await lockLocForWrite(tx, chatNode.memoryId, 'data');
         const dataNode = await tx.node.findFirst({
           where: { loc: 'data', memoryId: chatNode.memoryId, deletedAt: null },
         });
         if (dataNode) {
           if (memEncInfo.isEncrypted) decryptNodeFields(dataNode, memEncInfo);
           const existingData = (dataNode.data as Record<string, unknown>) ?? {};
-          const merged = { ...existingData, ...data };
+          const merged = fold(existingData, data);
           const encData = encryptNodeFields({ content: null, data: merged }, memEncInfo);
           await tx.node.update({
             where: { id: dataNode.id },
@@ -1306,7 +1336,7 @@ export const chatMutations = {
           // rewrites a real node, so it is its own write.
           return { id: dataNode.id, loc: dataNode.loc, memoryId: dataNode.memoryId };
         } else {
-          const encNew = encryptNodeFields({ content: null, data }, memEncInfo);
+          const encNew = encryptNodeFields({ content: null, data: fold(null, data) }, memEncInfo);
           const dataNodeId = generateId();
           await tx.node.create({
             data: {
@@ -1400,12 +1430,14 @@ export const chatMutations = {
               //     chat memory IS the system memory, we skip the
               //     duplicate layer.
               const memoryLayers: MemoryLayerHandle[] = [];
+              // #910: conditions read the turn's own person's values only.
+              const turnPersonId = ctx.userId ?? null;
               memoryLayers.push(await buildPrismaMemoryLayer(
-                ctx.db, 'edge-memory', sysMemId, currentStageLoc,
+                ctx.db, 'edge-memory', sysMemId, currentStageLoc, turnPersonId,
               ));
               if (chatNode.memoryId !== sysMemId) {
                 memoryLayers.push(await buildPrismaMemoryLayer(
-                  ctx.db, 'user-memory', chatNode.memoryId, currentStageLoc,
+                  ctx.db, 'user-memory', chatNode.memoryId, currentStageLoc, turnPersonId,
                 ));
               }
               for (const edge of edges) {

@@ -127,3 +127,12 @@ describe('availability tools', () => {
     expect(read).toMatch(/family claude: unavailable/);
   });
 });
+
+describe('#1960 hadron_alarm_ack discovery', () => {
+  it('names both arms the resolver admits: an owner in the chain, or whoever manages the App', () => {
+    const d = mcp(authOf('u-1960')).toolDescription('hadron_alarm_ack');
+    expect(d).toContain("Any owner in the alarm's chain, or whoever manages the App (cor:agt:050:24), may acknowledge it");
+    // The pre-#1960 text excluded managers outright.
+    expect(d).not.toMatch(/chain may acknowledge it, and nobody else/);
+  });
+});

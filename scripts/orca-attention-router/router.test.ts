@@ -8,7 +8,8 @@ import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
 import { nudgeText,
   type Config, type Runner, type RunResult, type Terminal, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce,
-  promptLineIsEmpty, resolveTerminal, screenAgentFamily, status,
+  promptLineIsEmpty, resolveTerminal, runCommand, screenAgentFamily, status,
+  CALL_TIMEOUT_MS, MIN_CALL_TIMEOUT_MS,
 } from './router.js';
 
 /** Rendered screens as Orca returned them on 2026-10-01 (idle, nobody typing). */
@@ -33,6 +34,153 @@ const CLAUDE_UNKNOWN_QUIET = ['  some status output nobody classified', '  anoth
 const CLAUDE_IDLE_REAL_XAN = ["  Queued for my gate: Bindi's remaining attach-steps, Dan's 12-follow-up batch,", '  Session open.', '✻ Brewed for 2m 36s · done 3:20 AM', RULE, '❯ ', RULE, CLAUDE_HINT];
 const CLAUDE_IDLE_REAL_LIAM = ['  both types.', "  file\". I've marked team chat read through #8177, the worktree is clean, and I'm standing by.", '✻ Cooked for 9m 42s · done 3:26 AM', '  ✔ Update installed · Restart to update', RULE, '❯ ', RULE, CLAUDE_HINT];
 const CLAUDE_IDLE_COMPACTED = ['✻ Compacted while idle', RULE, '❯ ', RULE, CLAUDE_HINT];
+/** REAL idle Codex screens captured live 2026-10-15 (Hugo, #1968): Diego, Gene
+ * and Xavier held for hours as 'unrecognized chrome above the prompt' while
+ * idle at completed turns — the `Worked for …` footer renders ABOVE its
+ * `↳ Recap:` block, so the recap tail is positionally NEWEST and its
+ * continuation lines indent ~12 columns. Diego's marker sits 10 lines above
+ * the prompt (outside the old 8-line window), Gene's 11, Xavier's 6. Verbatim
+ * screen tails, recap prose truncated only where it ran past the screen edge. */
+const CODEX_IDLE_RECAP_DIEGO = [
+  '    + 1 line (^t to expand)',
+  '  Worked for 10s • 3:49 AM',
+  '  ↳ Recap: Completed and posted the assigned blind reviews and carries,',
+  '            including #1899’s race fix, #1929, #1923, cli#883, and latest',
+  '            #1930/#1959 approvals. Reviews were static; local test execution is',
+  '            not reported. The router classifier fix is merged but not yet',
+  '            reloaded. Chat is confirmed read through #12203; the latest unread',
+  '            batch remains pending.',
+  '            Next: Read unfiltered team chat from #12204 using the live session,',
+  '            handle dispatches, and mark read; finish silently if no action is',
+  '            needed.',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/diego · Review hadron-…',
+  '  ? for shortcuts',
+];
+const CODEX_IDLE_RECAP_GENE = [
+  '  Worked for 24s • 7:38 PM',
+  '  ↳ Recap: Gene completed the comment API migration in PR #1070 after #1059/',
+  '            #1060 merged, then pushed hint and history-link fixes with',
+  '            regression tests. The migration passed full validation; follow-ups',
+  '            passed targeted tests and typecheck. Latest review/deployment',
+  '            status is unconfirmed. Current task is reading unread chat from',
+  '            #9605; completion and any assignments remain unconfirmed. Keep',
+  '            Gene’s session open.',
+  '            Next: Read chat unfiltered from #9605 using Gene’s existing',
+  '            session, act on assignments, then mark read; finish silently if',
+  '            none.',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/gene · Bind Gene worker…',
+  '  ? for shortcuts',
+];
+const CODEX_IDLE_RECAP_XAVIER = [
+  '    + 2 lines (^t to expand)',
+  '• Read unfiltered and marked through #11441. Replied to Vera’s Built-line',
+  '  survey as Xavier in #11442.',
+  '  Worked for 1m 4s • 4:04 PM',
+  '  ↳ Recap: The task is to read Hadron team chat unfiltered, handle actionable',
+  '            mentions, and mark it read. Latest backlog was read and marked',
+  '            through #11441; Xavier replied to Vera’s Built-line survey in',
+  '            #11442. #1842 reached CHECKED, T2 + §10 and was posted to Eden.',
+  '            #1770 was dispatched but remains in review under Xylon’s gate.',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/xavier · Verify Xavier…',
+  '  ? for shortcuts',
+];
+/** Synthetic from Atilla's canonical #1968 capture: a receipt URL folded across
+ * lines plus the recap block pushes `Worked for` 9 lines above the prompt —
+ * outside the old 8-line fold (recap skip alone at depth 8 cannot reach it). */
+const CODEX_IDLE_URL_RECEIPT = [
+  '  Reviewer approved: https://github.com/hadron-memory/hadron-portal/pull/',
+  '  1118#issuecomment-6182034412',
+  '  Receipt posted: https://github.com/hadron-memory/hadron-server/pull/1932#',
+  '  issuecomment-6180470118',
+  '    + 3 lines (^t to expand)',
+  '  Worked for 1m 28s • 7:41 AM',
+  '  ↳ Recap: Seat verdict saved and read back before the signed receipt was',
+  '            posted; the private stack is cleaned and the binding stays live.',
+  '            Chat was marked read through the receipt; nothing else was owed.',
+  '            Next: available for routing.',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/atilla · Static review…',
+  '  ? for shortcuts',
+];
+/** #1968 counterexamples — the skip rules must not degenerate: a deep-indented
+ * tail with NO idle marker anywhere stays unknown, and Riana's captured
+ * notice-box tail (2-space indent, no marker on screen) stays unknown. */
+const CODEX_UNKNOWN_INDENT_NO_MARKER = [
+  '            deeply indented continuation-shaped output with no completed-',
+  '            turn footer anywhere on screen',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/riana · Start worker session…',
+  '  ? for shortcuts',
+];
+const CODEX_IDLE_NOTICE_RIANA = [
+  '• Ran hadron node create --help; ls /tmp/riana*1883* /tmp/riana*1877* | head -20',
+  '    + 109 lines (^t to expand)',
+  '  ⓘ This content can’t be shown',
+  '  We take extra care with some cybersecurity requests. If you’re doing',
+  '  authorized security work, apply for Daybreak to get broader access.',
+  '  Learn more: https://help.openai.com/en/articles/20001326',
+  '  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access-for-cyber/',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/riana · Start worker session…',
+  '  ? for shortcuts',
+];
+/** Chip's verbatim capture, same class (#1983): a suppressed turn with no
+ * output at all — `└ (no output)` + the notice box, NO Worked-for footer. */
+const CODEX_IDLE_NOTICE_CHIP = [
+  '  └ (no output)',
+  '    + Show details',
+  '  ⓘ This content can’t be shown',
+  '  We take extra care with some cybersecurity requests. If you’re doing authorized security work, apply for Daybreak to',
+  '  get broader access.',
+  '  Learn more: https://help.openai.com/en/articles/20001326',
+  '  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access-for-cyber/',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/chip-t1 · Catch up Chip QA session',
+  '  ? for shortcuts',
+];
+/** Andi's P2 negative controls (#1976 review, 2026-10-15): a deep indent with
+ * NO recap header above it is an unrecognized CURRENT status — the flat ≥8
+ * floor proved idle over an old marker + an 8/12-space status line (only 0/2
+ * spaces held), which is the send direction. Structural anchoring: only lines
+ * INSIDE a header-anchored recap block are skipped. */
+const CODEX_UNKNOWN_INDENTED_STATUS_NO_HEADER = [
+  '  Worked for 1m 28s • 7:41 AM',
+  '          an indented current status nobody classified',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+  '  ? for shortcuts',
+];
+const CODEX_UNKNOWN_STATUS_NO_RECAP = [
+  '  Worked for 1m 28s • 7:41 AM',
+  '  an unindented current status nobody classified',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+  '  ? for shortcuts',
+];
+/** Claude-family recap block, captured live from Yuri's terminal 2026-10-15
+ * (#1977): header `※ recap:` indents 2, continuation 4 — header-RELATIVE
+ * indent covers both families (Codex 2→12) in one structural rule. */
+const CLAUDE_IDLE_RECAP_YURI = [
+  '  #1958 progress: shed node done and corrected; rotate, start-session (both',
+  '  tracks), and end-session nodes next — same ladders, rotation keeps end',
+  '  --resume-claim since its successor starts fresh by design.',
+  '✻ Worked for 1m 10s · done 3:54 PM',
+  '  ※ recap: Executing my half of #1958: rewriting the lifecycle task nodes to use',
+  '    resume claims. The shed node is done and corrected; next action is applying',
+  '    the same claim ladders to the rotate and start/end-session nodes.',
+  RULE, '❯ ', RULE, CLAUDE_HINT,
+];
+/** Claude counterexample: 4-indent output (a code block) under a done-marker
+ * with NO recap header — the header-relative rule must not skip it. */
+const CLAUDE_UNKNOWN_CODEBLOCK_NO_HEADER = [
+  '✻ Worked for 2m 6s · done 3:58 PM',
+  '    const verdict = computeLiveness(row);',
+  '    return verdict;',
+  RULE, '❯ ', RULE, CLAUDE_HINT,
+];
 const withPrompt = (screen: string[], marker: string, text: string) => {
   const i = screen.map((l) => l.trimStart().startsWith(marker)).lastIndexOf(true);
   return [...screen.slice(0, i), `${marker} ${text}`, ...screen.slice(i + 1)];
@@ -77,6 +225,26 @@ class FakeCLIs {
   sent: Array<[string, string]> = [];
   /** Workers with a mention-only row; `null` = every worker queried has one. */
   mentionOnly: Set<string> | null = null;
+  /** #1826 — the team Channel's head served to `channel(ref:)`; `headOk=false` errors. */
+  head = 120;
+  headOk = true;
+  headReads = 0;
+  /** Served on the SECOND+ head query (the recompute at send); undefined = always base. */
+  freshHead?: number;
+  /** #1826 — the worker's cursor (channelReadState.lastSeenSeq); absent = 0 (never checkpointed). */
+  cursors = new Map<string, number>();
+  cursorQueries = new Map<string, number>();
+  /** Served on the worker's SECOND+ cursor query (the recompute at send). */
+  freshCursors = new Map<string, number>();
+  /** channelReadState answers null (unreadable/unknown) for these workers. */
+  cursorNulls = new Set<string>();
+  cursorFails = new Set<string>();
+  /** #1829 P1-1 — serve errors WITH partial data for these workers (legal GraphQL). */
+  cursorErrors = new Set<string>();
+  /** #1829 P2-4 — from this `terminal list` call on, every handle gains a suffix (a mid-poll replacement). */
+  renameTerminalsFromList = 0;
+  /** `terminal list` calls at and beyond this count serve an EMPTY list (#1826 chain re-resolution). */
+  hideTerminalsFromList = 0;
   pages = 1;
   dropFinalToken = false;
   incompleteFinal = false;
@@ -136,21 +304,51 @@ class FakeCLIs {
     }
     if (argv[1] === 'api') {
       this.sawWait = false; // a new target begins; its fresh scan (if any) follows its idle gate
+      if (argv[2].includes('channelReadState')) {
+        // #1826 — the worker's read cursor (the liveness source attention cannot see).
+        const w = argv[argv.indexOf('-F') + 1].replace(/^w=/, '');
+        const n = (this.cursorQueries.get(w) ?? 0) + 1;
+        this.cursorQueries.set(w, n);
+        if (this.cursorFails.has(w)) return out({ errors: [{ message: 'read-state down' }] }, 1);
+        if (this.cursorErrors.has(w)) {
+          // Legal GraphQL: a field error rides WITH partial data. The integer
+          // fragment must not pass as live (#1829 local P1-1).
+          return out({ errors: [{ message: 'partial' }], data: { channelReadState: { lastSeenSeq: this.cursors.get(w) ?? 100 } } });
+        }
+        if (n >= 2 && this.freshCursors.has(w)) {
+          return out({ data: { channelReadState: { lastSeenSeq: this.freshCursors.get(w) } } });
+        }
+        if (this.cursorNulls.has(w)) return out({ data: { channelReadState: null } });
+        return out({ data: { channelReadState: { lastSeenSeq: this.cursors.get(w) ?? 0 } } });
+      }
+      if (argv[2].includes('channel(ref')) {
+        // #1826 — the team Channel's watermark.
+        this.headReads++;
+        if (!this.headOk) return out({ errors: [{ message: 'channel query down' }] }, 1);
+        if (this.headReads >= 2 && this.freshHead !== undefined) {
+          return out({ data: { channel: { lastSeq: this.freshHead } } });
+        }
+        return out({ data: { channel: { lastSeq: this.head } } });
+      }
       if (this.registerFails.size && this.registerFails.has(argv[argv.indexOf('-F') + 1].replace(/^w=/, ''))) {
         return out({ errors: [{ message: 'register down' }] }, 1);
       }
       // attendeeRegister: the winning row for the team Channel.
       const w = argv[argv.indexOf('-F') + 1].replace(/^w=/, '');
-      const ids = this.mentionOnly ?? new Set(['w-eli', 'w-baloo', 'w-ada']);
+      const ids = this.mentionOnly ?? new Set(['w-eli', 'w-baloo', 'w-ada', 'w-diego', 'w-gene', 'w-xavier', 'w-atilla', 'w-riana', 'w-andi', 'w-yuri', 'w-chip']);
       const row = this.registerRow?.(w) ?? { namedBy: 'WORKER', channel: { id: CHANNEL }, entry: { mentionOnly: ids.has(w) } };
       return out({ data: { attendeeRegister: [row] } });
     }
     if (verb === 'terminal list') {
       this.listCalls++;
+      if (this.hideTerminalsFromList && this.listCalls >= this.hideTerminalsFromList) {
+        return out({ ok: true, result: { terminals: [] } });
+      }
+      const renamed = this.renameTerminalsFromList && this.listCalls >= this.renameTerminalsFromList;
       const terminals = this.listCalls > 1 && this.healTracking.size
         ? this.terminals.map((t) => (this.healTracking.has(t.handle as string) ? { ...t, lastOutputAt: Date.now() } : t))
         : this.terminals;
-      return out({ ok: true, result: { terminals } });
+      return out({ ok: true, result: { terminals: renamed ? terminals.map((t) => ({ ...t, handle: `${t.handle}_r` })) : terminals } });
     }
     const handle = argv[argv.indexOf('--terminal') + 1];
     if (verb === 'terminal wait') {
@@ -207,10 +405,10 @@ function cfg(...entries: Array<[string, string]>): Config {
   return {
     app: 'hrn:app:x:team', channel: CHANNEL, hadronCli: 'hadron', orcaCli: 'orca', stateDir: join(root, 'state'),
     roster: entries.map(([worker, name]) => ({ worker, name, worktree: join(root, 'workspaces', name.toLowerCase()) })),
-    busyWaitMs: 10, submitWaitS: 1,
+    busyWaitMs: 10, submitWaitS: 1, coordinatorWatchMinutes: 20,
   };
 }
-const poll = (c: Config) => pollOnce(c, fake.run, (l) => logs.push(l));
+const poll = (c: Config, now?: () => number) => pollOnce(c, fake.run, (l) => logs.push(l), now);
 const adopted = (c: Config) => new State(c.stateDir).token();
 const sentHandles = () => fake.sent.map(([h]) => h);
 
@@ -284,13 +482,37 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     expect(fake.sent).toEqual([]);
   });
 
-  it('a TRACKED terminal that times out still holds as busy — the fallback never widens that', () => {
+  it('#1845 — a TRACKED terminal that times out NUDGES when the screen proves a completed turn (the busy-misread fix)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli'); // tracked; the tui-idle wait times out below
+    fake.busy.add('term_eli');
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE }); // completed turn, empty composer
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(sentHandles()).toEqual(['term_eli']);
+  });
+
+  it('#1845 codex shape — tracked timeout over a Worked-for frame nudges (Atilla/Chip, held 2442/877 min as busy)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex');
+    fake.busy.add('term_eli');
+    fake.screens.set('term_eli', { tail: CODEX_IDLE });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(sentHandles()).toEqual(['term_eli']);
+  });
+
+  it('a TRACKED terminal that times out still HOLDS on a live working indicator — the screen vetoes', () => {
     const c = cfg(['w-eli', 'Eli']);
     fake.terminal('eli'); // tracked
     fake.busy.add('term_eli');
+    fake.screens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY });
     fake.attention.workers = [worker('w-eli', 'Eli')];
     const out = poll(c);
-    expect(out.held.Eli).toContain('busy for');
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('a running turn is drawn above the prompt');
     expect(fake.sent).toEqual([]);
   });
 
@@ -351,9 +573,10 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     fake.attention.workers = [worker('w-eli', 'Eli')];
     fake.healTracking.add('term_eli'); // produced output after the gate: the recheck's list shows it tracked
     fake.busyRecheck.add('term_eli');  // and its recheck wait times out
+    fake.recheckScreens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY }); // #1845: a live indicator, not just the wait
     const out = poll(c);
     expect(out.nudged).toEqual([]);
-    expect(out.held.Eli).toContain('busy again after the recompute (busy for');
+    expect(out.held.Eli).toContain('busy again after the recompute (a running turn is drawn above the prompt');
     expect(out.held.Eli).not.toContain('unknown');
     expect(fake.sent).toEqual([]);
   });
@@ -411,6 +634,287 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     expect(out.nudged).toEqual([]);
     expect(out.held.Eli).toContain('unknown idle state');
     expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a completed Codex turn whose ↳ Recap tail trails the Worked-for footer DELIVERS — the recap is the marker’s own chrome (#1968, Diego captured 2026-10-15)', () => {
+    const c = cfg(['w-diego', 'Diego']);
+    fake.terminal('diego', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-diego', 'Diego')];
+    fake.screens.set('term_diego', { tail: CODEX_IDLE_RECAP_DIEGO }); // marker 10 lines above the prompt
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Diego'], adopted: true });
+  });
+
+  it('a Worked-for footer 11 lines above the prompt is INSIDE the deepened window and delivers (#1968, Gene captured 2026-10-15)', () => {
+    const c = cfg(['w-gene', 'Gene']);
+    fake.terminal('gene', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-gene', 'Gene')];
+    fake.screens.set('term_gene', { tail: CODEX_IDLE_RECAP_GENE });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Gene'], adopted: true });
+  });
+
+  it('a recap tail over an in-window Worked-for footer is skipped like trailing banner chrome and delivers (#1968, Xavier captured 2026-10-15)', () => {
+    const c = cfg(['w-xavier', 'Xavier']);
+    fake.terminal('xavier', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-xavier', 'Xavier')];
+    fake.screens.set('term_xavier', { tail: CODEX_IDLE_RECAP_XAVIER }); // marker 6 above, recap positionally newest
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Xavier'], adopted: true });
+  });
+
+  it('a folded-URL receipt pushing Worked-for past the old 8-line fold still delivers — depth 16 reaches the footer (#1968, Atilla’s canonical shape)', () => {
+    const c = cfg(['w-atilla', 'Atilla']);
+    fake.terminal('atilla', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-atilla', 'Atilla')];
+    fake.screens.set('term_atilla', { tail: CODEX_IDLE_URL_RECEIPT }); // marker 9 above the prompt
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Atilla'], adopted: true });
+  });
+
+  it('a deep-indented tail with NO idle marker anywhere on screen still HOLDS — the recap skip never substitutes for a marker (#1968)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', { tail: CODEX_UNKNOWN_INDENT_NO_MARKER });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a deep indent with NO recap header is a current status — an old Worked-for marker must NOT prove idle over it (Andi P2, #1976 review)', () => {
+    const c = cfg(['w-andi', 'Andi']);
+    fake.terminal('andi', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-andi', 'Andi')];
+    fake.screens.set('term_andi', { tail: CODEX_UNKNOWN_INDENTED_STATUS_NO_HEADER });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Andi).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('an unindented current status over an old Worked-for marker holds — the codex arm of the #1700 r3 counterexample (Andi control, #1976 review)', () => {
+    const c = cfg(['w-andi', 'Andi']);
+    fake.terminal('andi', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-andi', 'Andi')];
+    fake.screens.set('term_andi', { tail: CODEX_UNKNOWN_STATUS_NO_RECAP });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Andi).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a Claude recap block (header 2, continuation 4) trails its done-marker and DELIVERS — header-RELATIVE indent covers both families (#1977, Yuri captured 2026-10-15)', () => {
+    const c = cfg(['w-yuri', 'Yuri']);
+    fake.terminal('yuri', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-yuri', 'Yuri')];
+    fake.screens.set('term_yuri', { tail: CLAUDE_IDLE_RECAP_YURI });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Yuri'], adopted: true });
+  });
+
+  it('4-indent output under a done-marker with NO recap header is unrecognized and HOLDS — the rule never skips without an anchor (#1977 counterexample)', () => {
+    const c = cfg(['w-yuri', 'Yuri']);
+    fake.terminal('yuri', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-yuri', 'Yuri')];
+    fake.screens.set('term_yuri', { tail: CLAUDE_UNKNOWN_CODEBLOCK_NO_HEADER });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Yuri).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a content-suppressed turn (notice box, NO Worked-for footer) is completed chrome and DELIVERS (#1983, Riana captured 2026-10-15)', () => {
+    const c = cfg(['w-riana', 'Riana']);
+    fake.terminal('riana', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-riana', 'Riana')];
+    fake.screens.set('term_riana', { tail: CODEX_IDLE_NOTICE_RIANA });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Riana'], adopted: true });
+  });
+
+  it('a suppressed turn with NO output at all — └ (no output) + the notice — DELIVERS (#1983, Chip captured 2026-10-15)', () => {
+    const c = cfg(['w-chip', 'Chip']);
+    fake.terminal('chip', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-chip', 'Chip')];
+    fake.screens.set('term_chip', { tail: CODEX_IDLE_NOTICE_CHIP });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Chip'], adopted: true });
+  });
+
+  it('a pinned busy line ABOVE a notice box still wins — the sweep runs before the marker judgment (#1983)', () => {
+    const c = cfg(['w-chip', 'Chip']);
+    fake.terminal('chip', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-chip', 'Chip')];
+    fake.screens.set('term_chip', {
+      // the notice header is at index 2 and the prompt at 7: insert the busy
+      // line directly above the placeholder
+      tail: [...CODEX_IDLE_NOTICE_CHIP.slice(0, 7), '  • Working (6s • esc to interrupt)', ...CODEX_IDLE_NOTICE_CHIP.slice(7)],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Chip).toContain('a running turn is drawn above the prompt');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a newer SAME-INDENT unknown status after a RECAP header is judged, not swallowed — holds (Andi P2, #1985 review)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  Worked for 1m 4s • 4:04 PM',
+        '  ↳ Recap: The task is to read Hadron team chat unfiltered,',
+        '            mentions, and mark it read.',
+        '  an unrecognized current status at the header indent',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a newer SAME-INDENT unknown status after the NOTICE header is judged, not swallowed — holds (Andi P2, #1985 review)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  ⓘ This content can’t be shown',
+        '  We take extra care with some cybersecurity requests.',
+        '  an unrecognized current status at the header indent',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a BARE Learn-more URL with no notice above is ordinary output and HOLDS (Andi delta P2, #1985 review round 2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  Worked for 2m 6s • 16:32',
+        '  Learn more: https://example.com/documentation',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a BARE Apply label with no notice above is ordinary output and HOLDS (Andi delta P2, #1985 review round 2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  Worked for 2m 6s • 16:32',
+        '  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access/',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a BARE wrapped notice URL fragment with no notice above HOLDS (Andi delta P2, #1985 review round 2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  Worked for 2m 6s • 16:32',
+        '  openai.com/form/enterprise-trusted-access-for-cyber/',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a status line BETWEEN the notice header and its body ends the block — the status is judged and HOLDS (nothing newer in between, #12876)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  ⓘ This content can’t be shown',
+        '  an unrecognized current status arrived after the header',
+        '  Learn more: https://help.openai.com/en/articles/20001326',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a pinned busy line ABOVE a recap tail still wins — the sweep runs before the positional judgment (#1968)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [...CODEX_IDLE_RECAP_XAVIER.slice(0, 9), '  • Working (6s • esc to interrupt)', ...CODEX_IDLE_RECAP_XAVIER.slice(9)],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('a running turn is drawn above the prompt');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a COLUMN-ZERO status line after a recap block ends the block and is judged — no throw, unrecognized holds (Andi round 2, #1976 review)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      // A previous turn's recap, then a column-zero unrecognized current
+      // status: the extension must END at indent 0, not dereference null.
+      tail: [...CODEX_IDLE_RECAP_XAVIER.slice(0, 9), 'a column-zero current status nobody classified', ...CODEX_IDLE_RECAP_XAVIER.slice(9)],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a COLUMN-ZERO known busy line after a recap block is caught by the sweep — busy wins, no throw (Chip runtime matrix, #1976 review)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [...CODEX_IDLE_RECAP_XAVIER.slice(0, 9), '• Working (6s • esc to interrupt)', ...CODEX_IDLE_RECAP_XAVIER.slice(9)],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('a running turn is drawn above the prompt');
     expect(fake.sent).toEqual([]);
   });
 
@@ -564,6 +1068,8 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     fake.terminal('eli');
     fake.terminal('baloo');
     fake.busy.add('term_baloo');
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
     fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 110 }), worker('w-baloo', 'Baloo')];
     fake.fresh = [worker('w-baloo', 'Baloo')]; // Eli read its chat; Baloo still has its mention
     const first = poll(c);
@@ -581,7 +1087,9 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     const c = cfg(['w-eli', 'Eli'], ['w-baloo', 'Baloo']);
     fake.terminal('eli');
     fake.terminal('baloo');
-    fake.busy.add('term_baloo'); // hold the token so the ledger's base (and its rows) survive to be read
+    fake.busy.add('term_baloo');
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY }); fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY }); // hold the token so the ledger's base (and its rows) survive to be read
     fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5, relevant: 110, head: 120 }), worker('w-baloo', 'Baloo')];
     fake.fresh = [worker('w-eli', 'Eli', { mentions: 3, unread: 9, relevant: 118, head: 121 })];
     const out = poll(c);
@@ -652,6 +1160,7 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     const c = cfg(['w-eli', 'Eli']);
     fake.terminal('eli');
     fake.busy.add('term_eli');
+    fake.screens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY });
     fake.attention.workers = [worker('w-eli', 'Eli')];
     poll(c); // held: busy
     const st = new State(c.stateDir);
@@ -660,7 +1169,7 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     st.saveLedger(ledger);
     logs.length = 0;
     poll(c);
-    expect(logs.join('\n')).toMatch(/Eli held 4[01] min with mentions pending \(busy/);
+    expect(logs.join('\n')).toMatch(/Eli held 4[01] min with mentions pending \(a running turn/);
     logs.length = 0;
     poll(c); // within 30 min of the last long-hold line: silent
     expect(logs.join('\n')).not.toMatch(/held \d+ min/);
@@ -686,6 +1195,7 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     fake.terminal('eli');
     fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 2, relevant: 110 })];
     fake.busyRecheck.add('term_eli'); // the agent went busy during the fresh scan
+    fake.recheckScreens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY }); // #1845: busy needs the live indicator on screen
     const out = poll(c);
     expect(out.nudged).toEqual([]);
     expect(out.held.Eli).toContain('busy again after the recompute');
@@ -738,6 +1248,7 @@ describe('Orca attention router — busy: never typed into; hold the token', () 
     fake.terminal('eli');
     fake.terminal('baloo', 'codex');
     fake.busy.add('term_baloo');
+    fake.screens.set('term_baloo', { tail: CODEX_BUSY_EMPTY });
     fake.attention.workers = [worker('w-eli', 'Eli'), worker('w-baloo', 'Baloo')];
     let out = poll(c);
     expect(out.nudged).toEqual(['Eli']);
@@ -757,6 +1268,8 @@ describe('Orca attention router — busy: never typed into; hold the token', () 
     fake.terminal('eli');
     fake.terminal('baloo');
     fake.busy.add('term_baloo');
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
     fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 110 }), worker('w-baloo', 'Baloo')];
     poll(c);
     // Unrelated chat moved the head; Eli's latest mention is still 110.
@@ -770,6 +1283,8 @@ describe('Orca attention router — busy: never typed into; hold the token', () 
     fake.terminal('eli');
     fake.terminal('baloo');
     fake.busy.add('term_baloo');
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
     fake.attention.workers = [worker('w-eli', 'Eli', { first: 100, relevant: 110, head: 120 }), worker('w-baloo', 'Baloo')];
     poll(c);
     // Eli read only its mention: firstUnreadSeq is still 100 (at or below the old head),
@@ -1367,5 +1882,728 @@ describe('Orca attention router — a human typing: never appended to; hold the 
     const out = poll(c);
     expect(out.held).toEqual({ Eli: 'prompt not empty (text in the composer draft)' });
     expect(fake.sent).toEqual([]);
+  });
+});
+
+describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)', () => {
+  /** A config whose roster carries liveness flags: [worker, name, flag?]. */
+  const mcfg = (
+    entries: Array<[string, string, 'coordinator' | 'lifecycle' | undefined]>,
+    watchMinutes = 20,
+  ): Config => ({
+    ...cfg(...entries.map(([w, n]) => [w, n] as [string, string])),
+    coordinatorWatchMinutes: watchMinutes,
+    roster: entries.map(([worker, name, flag]) => ({
+      worker, name, worktree: join(root, 'workspaces', name.toLowerCase()),
+      ...(flag === 'coordinator' ? { coordinator: true } : {}),
+      ...(flag === 'lifecycle' ? { lifecycle: true } : {}),
+    })),
+  });
+  /** Seed liveness.json directly — the durable file is the contract, not an API. */
+  const seedLiveness = (c: Config, workers: Record<string, unknown>) => {
+    mkdirSync(c.stateDir, { recursive: true });
+    writeFileSync(join(c.stateDir, 'liveness.json'), JSON.stringify(workers));
+  };
+  const readLiveness = (c: Config): Record<string, any> =>
+    JSON.parse(readFileSync(join(c.stateDir, 'liveness.json'), 'utf8'));
+  const AGO_21MIN = 21 * 60_000;
+
+  it('an idle flagged worker whose watermark fell behind — ZERO mentions — is woken through the full guard chain', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.attention.workers = []; // attention sees nothing relevant: the suppressed-row gap (#1826 delta 1)
+    fake.cursors.set('w-ada', 100); // watermark 100 < head 120, no mention anywhere in the span
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    const out = poll(c);
+    expect(out.liveness).toEqual(['Ada']);
+    expect(out.nudged).toEqual([]);
+    expect(out.adopted).toBe(true);
+    expect(fake.sent).toHaveLength(1);
+    expect(fake.sent[0][0]).toBe('term_ada');
+    const text = fake.sent[0][1];
+    expect(text).toContain('liveness');
+    expect(text).toContain('idle-watch rule'); // it names its rule — why it arrived with no mention (Taylor #9748)
+    expect(text).toContain('#100'); // its cursor, named
+    expect(text).toContain('#120'); // the head, named
+    expect(text).toContain('--since 100');
+    expect(text).toContain('sinceSeq=100');
+    expect(text).toContain('mark read');
+    expect((text.match(/mark read/g) ?? []).length).toBe(1); // once, not twice (Taylor #9748)
+    expect(text).toContain('as of send');
+    expect(text).not.toContain('relevant unread'); // its own literal: never a counts claim
+    expect(text).not.toMatch(/\d+ mention/); // identifying the rule is fine; a count claim never is
+    // The full guard chain ran, in order, with the cheap probe / full gate / recheck waits.
+    const verbs = fake.calls.map((a) => a.slice(1, 3).join(' '));
+    expect(verbs.indexOf('terminal wait')).toBeLessThan(verbs.indexOf('terminal read'));
+    expect(verbs.indexOf('terminal read')).toBeLessThan(verbs.indexOf('terminal send'));
+    const waits = fake.calls.filter((a) => a.slice(1, 3).join(' ') === 'terminal wait');
+    const ms = (a: string[]) => Number(a[a.indexOf('--timeout-ms') + 1]);
+    expect(waits).toHaveLength(3);
+    expect(ms(waits[0])).toBeLessThanOrEqual(1_000); // cheap per-poll probe
+    expect(ms(waits[1])).toBe(c.busyWaitMs); // the full gate before the send
+    expect(ms(waits[2])).toBeLessThanOrEqual(1_000); // fail-closed post-recompute recheck
+    // Persisted at once: frontier = the head at send, clock restarted at the send.
+    const rec = readLiveness(c)['w-ada'];
+    expect(rec.coveredFrontier).toBe(120);
+    expect(rec.idleSince).toBeGreaterThan(Date.now() - 60_000);
+  });
+
+  it('a NON-flagged worker with the same idle + unread backlog gets nothing: liveness is opt-in per roster flag', () => {
+    const c = mcfg([['w-eli', 'Eli', undefined]]);
+    fake.terminal('eli');
+    fake.attention.workers = [];
+    fake.cursors.set('w-eli', 100);
+    seedLiveness(c, { 'w-eli': { idleSince: Date.now() - AGO_21MIN, handle: 'term_eli' } });
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.adopted).toBe(true);
+  });
+
+  it('fires only at STRICTLY more than N minutes of continuous idle — never at exactly N', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]); // N = 20 min
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    const frozen = Date.now();
+    seedLiveness(c, { 'w-ada': { idleSince: frozen - 20 * 60_000, handle: 'term_ada' } });
+    expect(poll(c, () => frozen).liveness).toEqual([]); // exactly N: never fires
+    seedLiveness(c, { 'w-ada': { idleSince: frozen - 20 * 60_000 - 1, handle: 'term_ada' } });
+    expect(poll(c, () => frozen).liveness).toEqual(['Ada']); // one tick past N: fires
+  });
+
+  it('a busy screen at the full gate HOLDS with its reason and resets the clock', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.busyRecheck.add('term_ada'); // idle at the probe, busy at the full gate
+    fake.recheckScreens.set('term_ada', { tail: CLAUDE_BUSY_EMPTY }); // #1845: busy needs the live indicator
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(out.held.Ada).toContain('liveness');
+    expect(out.held.Ada).toContain('a running turn is drawn above the prompt');
+    expect(out.adopted).toBe(false); // a held liveness nudge holds the token like a held mention nudge
+    expect(fake.sent).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+  });
+
+  it('a non-empty draft at the full gate HOLDS with its reason and resets the clock', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.recheckScreens.set('term_ada', { tail: withPrompt(CLAUDE_IDLE, '❯', 'typed mid-watch'), draft: 'typed mid-watch' });
+    const out = poll(c);
+    expect(out.held.Ada).toContain('liveness');
+    expect(out.held.Ada).toContain('prompt not empty');
+    expect(fake.sent).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+    expect(logs.join('\n')).not.toContain('typed mid-watch'); // the reason never quotes the text
+  });
+
+  it('an unreadable screen at the full gate HOLDS with its reason', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.recheckScreens.set('term_ada', { ok: false });
+    const out = poll(c);
+    expect(out.held.Ada).toContain('liveness');
+    expect(out.held.Ada).toContain('screen unreadable');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('an ambiguous resolution at the send HOLDS with its reason (fresh re-resolution on the chain)', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.hideTerminalsFromList = 2; // the probe's list sees it; the chain's fresh list does not
+    const out = poll(c);
+    expect(out.held.Ada).toContain('liveness');
+    expect(out.held.Ada).toContain('no live agent terminal');
+    expect(fake.sent).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+  });
+
+  it('the idle clock survives token adoption: adopt clears the ledger, never liveness.json', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator'], ['w-eli', 'Eli', undefined]]);
+    fake.terminal('ada');
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli')]; // a mention nudge adopts the token
+    fake.cursors.set('w-ada', 100);
+    const seeded = Date.now() - 5 * 60_000; // behind, but only 5 idle minutes — not yet eligible
+    seedLiveness(c, { 'w-ada': { idleSince: seeded, handle: 'term_ada' } });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Eli'], liveness: [], adopted: true });
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(seeded); // EXACTLY untouched by adoption
+  });
+
+  it('the idle clock survives a restart mid-wait and keeps aging the same episode across polls', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    const seeded = Date.now() - 19 * 60_000; // one minute short of N
+    seedLiveness(c, { 'w-ada': { idleSince: seeded, handle: 'term_ada' } });
+    expect(poll(c).liveness).toEqual([]); // 19 < 20
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(seeded); // a poll is a restart: same episode
+    expect(poll(c).liveness).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(seeded); // still the same episode, not restarted
+  });
+
+  it('interrupted idle: a busy probe observation resets the clock to zero and preserves coveredFrontier', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.busy.add('term_ada');
+    fake.screens.set('term_ada', { tail: CODEX_BUSY_EMPTY });
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada', coveredFrontier: 90 } });
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(out.held).toEqual({}); // a probe reset is silent — no delivery was attempted
+    expect(fake.sent).toEqual([]);
+    const rec = readLiveness(c)['w-ada'];
+    expect(rec.idleSince).toBeUndefined();
+    expect(rec.coveredFrontier).toBe(90); // the delivered frontier still dedupes
+    fake.busy.clear();
+    fake.screens.set('term_ada', { tail: CLAUDE_IDLE }); // the turn finished: the probe can prove idle again (family-matched)
+    expect(poll(c).liveness).toEqual([]); // clock restarted at the idle poll — N more minutes needed
+    expect(typeof readLiveness(c)['w-ada'].idleSince).toBe('number');
+  });
+
+  it('a half-typed prompt at the probe is interrupted idle: silent reset, no send, no hold', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.screens.set('term_ada', { tail: withPrompt(CLAUDE_IDLE, '❯', 'Holger typing here'), draft: 'Holger typing here' });
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(out.held).toEqual({});
+    expect(fake.sent).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+  });
+
+  it('an ambiguous resolution at the probe resets the clock silently', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada', 'claude', 'term_a');
+    fake.terminal('ada', 'codex', 'term_b');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_a' } });
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(out.held).toEqual({}); // the watch never resolved a terminal; nothing was owed a send
+    expect(fake.sent).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+  });
+
+  it('a repeated unchanged backlog never re-nudges; an advancing head re-arms after idle', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    expect(poll(c).liveness).toEqual(['Ada']); // delivered at head 120
+    // Twenty more idle minutes pass, but the head has not moved past the frontier.
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada', coveredFrontier: 120 } });
+    expect(poll(c).liveness).toEqual([]);
+    expect(fake.sent).toHaveLength(1);
+    // New content past the frontier: eligible again once idle > N measured from the send.
+    fake.head = 130;
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada', coveredFrontier: 120 } });
+    expect(poll(c).liveness).toEqual(['Ada']);
+    expect(fake.sent).toHaveLength(2);
+    expect(fake.sent[1][1]).toContain('#130');
+  });
+
+  it('mention-first collapse: a delivered mention nudge skips the liveness send and restarts the clock', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.attention.workers = [worker('w-ada', 'Ada', { mentions: 1, unread: 4 })];
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Ada'], liveness: [] });
+    expect(fake.sent).toHaveLength(1); // exactly one send — the mention nudge
+    expect(fake.sent[0][1]).toContain('relevant unread (1 mention'); // the mention shape, not the liveness text
+    const rec = readLiveness(c)['w-ada'];
+    expect(rec.idleSince).toBeGreaterThan(Date.now() - 60_000); // clock restarted at the send
+    expect(rec.coveredFrontier).toBeUndefined(); // no liveness frontier claimed
+  });
+
+  it('a HELD mention observation is non-idle evidence: the liveness clock restarts and no liveness send happens', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.busy.add('term_ada');
+    fake.screens.set('term_ada', { tail: CODEX_BUSY_EMPTY });
+    fake.attention.workers = [worker('w-ada', 'Ada')];
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    const out = poll(c);
+    expect(out.held.Ada).toBeTruthy(); // the mention hold
+    expect(out.liveness).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+  });
+
+  it('read-while-waiting: the recompute right before the send re-checks head > cursor and drops the nudge', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.freshCursors.set('w-ada', 120); // the worker caught up while the gates ran
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(out.livenessDropped).toEqual(['Ada']);
+    expect(describeOutcome(out)).toContain('liveness dropped');
+    expect(fake.sent).toEqual([]);
+    const rec = readLiveness(c)['w-ada'];
+    expect(rec.idleSince).toBeUndefined(); // reset — the worker demonstrably acted
+    expect(rec.coveredFrontier).toBeUndefined();
+  });
+
+  it('a held token (busy mention worker) neither restarts nor resets a pending liveness clock; both deliver when clear', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator'], ['w-baloo', 'Baloo', undefined]]);
+    fake.terminal('ada');
+    fake.terminal('baloo');
+    fake.busy.add('term_baloo');
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
+    fake.attention.workers = [worker('w-baloo', 'Baloo')];
+    fake.cursors.set('w-ada', 100);
+    const seeded = Date.now() - 10 * 60_000;
+    seedLiveness(c, { 'w-ada': { idleSince: seeded, handle: 'term_ada' } });
+    const first = poll(c);
+    expect(first.adopted).toBe(false); // Baloo's mention hold holds the token
+    expect(first.liveness).toEqual([]); // 10 idle minutes < N — clock pending
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(seeded); // untouched by the held poll
+    fake.busy.clear();
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    const second = poll(c);
+    expect(second).toMatchObject({ nudged: ['Baloo'], liveness: ['Ada'], adopted: true });
+  });
+
+  it('a delivered liveness nudge is persisted at once: a failure later in the same poll cannot resend it', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator'], ['w-yuri', 'Yuri', 'lifecycle']]);
+    fake.terminal('ada');
+    fake.terminal('yuri');
+    fake.cursors.set('w-ada', 100);
+    fake.cursors.set('w-yuri', 100);
+    seedLiveness(c, {
+      'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' },
+      'w-yuri': { idleSince: Date.now() - AGO_21MIN, handle: 'term_yuri' },
+    });
+    // Ada delivers; Yuri's recompute then fails hard — a failed fresh check fails the poll.
+    const base = fake.run;
+    let armed = false;
+    fake.run = (argv) => {
+      if (argv[1] === 'api' && argv[2].includes('channelReadState')
+        && argv[argv.indexOf('-F') + 1] === 'w=w-yuri') armed = true;
+      if (armed && argv[1] === 'api' && argv[2].includes('channel(ref')) return { code: 1, stdout: '', stderr: 'gateway 502' };
+      return base(argv);
+    };
+    expect(() => poll(c)).toThrow(RouterError);
+    expect(sentHandles()).toEqual(['term_ada']);
+    expect(readLiveness(c)['w-ada'].coveredFrontier).toBe(120); // persisted at once
+    fake.run = base;
+    expect(poll(c).liveness).toEqual(['Yuri']); // Yuri delivers on the retry
+    expect(sentHandles()).toEqual(['term_ada', 'term_yuri']);
+    expect(fake.sent.filter(([h]) => h === 'term_ada')).toHaveLength(1); // Ada NOT re-nudged
+  });
+
+  it('fail-closed liveness source: an unreadable cursor is no candidate this poll — logged once, clock kept, poll healthy', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    const seeded = Date.now() - AGO_21MIN;
+    seedLiveness(c, { 'w-ada': { idleSince: seeded, handle: 'term_ada' } });
+    fake.cursorNulls.add('w-ada'); // channelReadState: null — unknown, not zero
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.adopted).toBe(true); // the poll itself is healthy; only the candidate is suppressed
+    expect(logs.filter((l) => l.includes('liveness')).length).toBeGreaterThan(0); // the reason logged
+    logs.length = 0;
+    poll(c);
+    expect(logs.filter((l) => l.includes('liveness'))).toHaveLength(0); // once per reason, not per poll
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(seeded); // the clock kept aging through the outage
+    fake.cursorNulls.clear();
+    expect(poll(c).liveness).toEqual(['Ada']); // fires on recovery — the episode never restarted
+  });
+
+  it('fail-closed liveness source: a failed channel-head query is no candidate this poll and does not throw', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.headOk = false;
+    expect(poll(c).liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(poll(c).adopted).toBe(true); // still a healthy poll
+  });
+
+  it('an UNTRACKED flagged terminal still wakes: the #1823 screen fallback proves idle at probe and gates', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada', 'claude', undefined, false); // lastOutputAt null — tracking lost
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    expect(poll(c).liveness).toEqual(['Ada']);
+  });
+
+  it('a replaced terminal restarts the clock: the idle episode is measured on one continuous terminal', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada', 'claude', 'term_new');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_old' } });
+    const out = poll(c);
+    expect(out.liveness).toEqual([]); // handle mismatch ⇒ fresh clock on the new terminal
+    const rec = readLiveness(c)['w-ada'];
+    expect(rec.handle).toBe('term_new');
+    expect(rec.idleSince).toBeGreaterThan(Date.now() - 60_000);
+  });
+
+  it('removing the roster flag resets the watch: records are pruned from liveness.json', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, {
+      'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' },
+      'w-gone': { idleSince: 1, handle: 'x' },
+    });
+    const unflagged = mcfg([['w-ada', 'Ada', undefined]]); // same stateDir
+    poll(unflagged);
+    expect(readLiveness(unflagged)).toEqual({}); // pruned: no flagged workers ⇒ no records
+  });
+
+  // ── #1829 local-seat cycle 1 (Xylon #9736) ─────────────────────────────
+
+  it('P1-1: a GraphQL errors+data response never passes as live — no candidate, clock kept', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    const seeded = Date.now() - AGO_21MIN;
+    seedLiveness(c, { 'w-ada': { idleSince: seeded, handle: 'term_ada' } });
+    fake.cursorErrors.add('w-ada'); // partial data WITH an error rides the same integer
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(seeded); // fail-closed, not a reset
+    fake.cursorErrors.clear();
+    expect(poll(c).liveness).toEqual(['Ada']); // fires on recovery
+  });
+
+  it('P1-1: a NEGATIVE lastSeenSeq is not a cursor — no candidate', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', -5); // parsed, integer, nonsense
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    expect(poll(c).liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('P1-1: a non-zero exit with parsable stdout fails the RECOMPUTE, so the poll throws and nothing sends', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    // Candidacy passes on the clean read; the recompute's head query then exits
+    // non-zero while still printing a JSON body.
+    const base = fake.run;
+    let served = false;
+    fake.run = (argv) => {
+      const r = base(argv);
+      if (argv[1] === 'api' && argv[2].includes('channel(ref') && served) return { ...r, code: 1 };
+      if (argv[1] === 'api' && argv[2].includes('channelReadState')) served = true;
+      return r;
+    };
+    expect(() => poll(c)).toThrow(RouterError);
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('P2-2: a syntactically-valid CORRUPT record never suppresses delivery — only typed fields survive the read', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    // A huge frontier (above any real seq) and a string handle: both drop on
+    // read, so the worker cannot look covered forever (fail-closed direction).
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada', coveredFrontier: 9007199254740991 } });
+    expect(poll(c).liveness).toEqual(['Ada']);
+    expect(readLiveness(c)['w-ada'].coveredFrontier).toBe(120); // the honest frontier the send recorded
+  });
+
+  it('P2-2: a corrupt liveness.json top level (null / array / non-object record) reads as fresh and never crashes', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator'], ['w-baloo', 'Baloo', 'coordinator']]);
+    fake.terminal('ada');
+    fake.terminal('baloo');
+    fake.cursors.set('w-ada', 100);
+    mkdirSync(c.stateDir, { recursive: true });
+    writeFileSync(join(c.stateDir, 'liveness.json'), 'null'); // top-level null once crashed Object.keys
+    expect(poll(c).liveness).toEqual([]); // fresh clocks, no throw
+    expect(typeof readLiveness(c)['w-ada'].idleSince).toBe('number');
+    seedLiveness(c, { 'w-ada': 5, 'w-baloo': ['x'] }); // non-object records
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(out.held).toEqual({});
+    const rec = readLiveness(c)['w-ada'];
+    expect(rec.idleSince).toBeGreaterThan(Date.now() - 60_000); // re-seeded by the probe, not carried
+  });
+
+  it('P2-4: a terminal replaced between the probe and the chain RESETS the clock — the episode is one terminal\'s', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.renameTerminalsFromList = 2; // the probe's list shows term_ada; the chain's shows term_ada_r
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held).toEqual({}); // a reset, not a delivery failure
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+  });
+
+  it('P2-5: a FIRST-EVER record born from a mention collapse carries the handle — the next probe keeps the clock', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.attention.workers = [worker('w-ada', 'Ada', { mentions: 1, unread: 4 })];
+    fake.cursors.set('w-ada', 100);
+    const out = poll(c); // no seeded record: the collapse write is its first
+    expect(out.nudged).toEqual(['Ada']);
+    const born = readLiveness(c)['w-ada'];
+    expect(born.handle).toBe('term_ada');
+    const at = born.idleSince;
+    expect(at).toBeGreaterThan(Date.now() - 60_000);
+    fake.attention.workers = []; // nothing new; the clock must survive the next probe
+    poll(c);
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(at); // NOT restarted by a handle mismatch
+  });
+
+  it('P2-7: coordinatorWatchMinutes must be a JSON number whose ms product is finite — true, "20" and the overflow class throw', () => {
+    const path = join(root, 'c.json');
+    const write = (over: Record<string, unknown>) => {
+      writeFileSync(path, JSON.stringify({
+        app: 'a', channel: 'c', stateDir: join(root, 's'),
+        roster: [{ worker: 'w', name: 'E', worktree: '/x' }], ...over,
+      }));
+      return path;
+    };
+    expect(loadConfig(write({})).coordinatorWatchMinutes).toBe(20);
+    expect(loadConfig(write({ coordinatorWatchMinutes: 5.5 })).coordinatorWatchMinutes).toBe(5.5);
+    // 1e307 × 60_000 overflows to Infinity — the class whose comparison
+    // against elapsed time silently disables delivery. (A finite-but-huge
+    // window stays legal: it is coherent config, equivalent to the rule off.)
+    for (const bad of [true, '20', 1e307, [20]]) {
+      expect(() => loadConfig(write({ coordinatorWatchMinutes: bad }))).toThrow(RouterError);
+    }
+  });
+});
+
+describe('loadConfig — liveness configuration (#1826)', () => {
+  const write = (over: Record<string, unknown>) => {
+    const path = join(root, 'c.json');
+    writeFileSync(path, JSON.stringify({
+      app: 'a', channel: 'c', stateDir: join(root, 's'),
+      roster: [{ worker: 'w', name: 'E', worktree: '/x' }], ...over,
+    }));
+    return path;
+  };
+  it('defaults coordinatorWatchMinutes to 20 and accepts positive finite numbers', () => {
+    expect(loadConfig(write({})).coordinatorWatchMinutes).toBe(20);
+    expect(loadConfig(write({ coordinatorWatchMinutes: 5.5 })).coordinatorWatchMinutes).toBe(5.5);
+  });
+  it('rejects a non-positive or non-finite coordinatorWatchMinutes, loudly', () => {
+    for (const bad of [0, -3, 'abc', null]) {
+      expect(() => loadConfig(write({ coordinatorWatchMinutes: bad }))).toThrow(RouterError);
+    }
+  });
+  it('roster flags must be booleans', () => {
+    const flagged = loadConfig(write({ roster: [{ worker: 'w', name: 'E', worktree: '/x', coordinator: true }] }));
+    expect(flagged.roster[0].coordinator).toBe(true);
+    expect(() => loadConfig(write({ roster: [{ worker: 'w', name: 'E', worktree: '/x', coordinator: 'yes' }] }))).toThrow(RouterError);
+    expect(() => loadConfig(write({ roster: [{ worker: 'w', name: 'E', worktree: '/x', lifecycle: 1 }] }))).toThrow(RouterError);
+  });
+});
+
+describe('#1845 — the terminal pin: a roster row may name its MAIN terminal', () => {
+  // The pin resolves FIRST, before identity and the screen, so it survives the
+  // agentIdentity flap and the two-family ambiguity — the Atilla case: five
+  // busy-misread holds in one day on a terminal whose identity was lost, where
+  // every screen fallback failed on completed-turn chrome (Yuri #10736).
+  const pinned = (handle?: string) => {
+    const c = cfg(['w-eli', 'Eli']);
+    if (handle) c.roster[0]!.terminal = handle;
+    return c;
+  };
+
+  it('a pin resolves a TWO-AGENT worktree the identity resolver must refuse as ambiguous (the review-spawn case)', () => {
+    const c = pinned('term_eli');
+    fake.terminal('eli', 'claude');
+    // A codex review spawn in the SAME worktree: two agent identities, one
+    // worktree — the identity resolver holds 'ambiguous' without a pin, and
+    // the screen fallback would too (both families present = hold).
+    const eliWt = fake.terminals[fake.terminals.length - 1]!.worktreePath!;
+    fake.terminals.push({
+      handle: 'term_spawn', worktreePath: eliWt, agentIdentity: 'codex', connected: true, writable: true,
+      lastOutputAt: Date.now(),
+    });
+    fake.screens.set('term_spawn', { tail: CODEX_IDLE });
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3 })];
+    const unpinned = cfg(['w-eli', 'Eli']);
+    expect(poll(unpinned).held.Eli).toContain('ambiguous');
+    expect(fake.sent).toEqual([]);
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(sentHandles()).toEqual(['term_eli']);
+  });
+
+  it('a pin whose handle lives in ANOTHER worktree never resolves — it falls through as stale', () => {
+    const c = pinned('term_other');
+    fake.terminal('eli', null);
+    fake.terminal('other', 'claude'); // exists, but not in Eli's worktree
+    // A plain shell screen: the fallback refuses shells, so the stale pin
+    // surfaces in the hold reason instead of being silently rescued.
+    fake.screens.set('term_eli', { tail: ['orca@orca1:~/ws/eli$ '] });
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3 })];
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held.Eli).toContain('pinned handle is stale');
+  });
+
+  it('a pin and a healthy identity agree on the same terminal — the pin simply wins first', () => {
+    const c = pinned('term_eli');
+    fake.terminal('eli', 'codex');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3 })];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(sentHandles()).toEqual(['term_eli']);
+    // The identity flows as the family for the idle gates.
+    const [h, detail, via] = resolveTerminal(c.roster[0]!, fake.terminals as unknown as Terminal[], c, fake.run);
+    expect([h, via]).toEqual(['term_eli', 'pin']);
+    expect(detail).toBe('codex');
+  });
+
+  it('a pin on an identity-lost, UNTRACKED terminal derives the family from ONE screen read and still proves idle', () => {
+    const c = pinned('term_eli');
+    fake.terminal('eli', null, 'term_eli', false); // flap AND untracked (#7398 regime)
+    fake.screens.set('term_eli', { tail: CODEX_IDLE });
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3 })];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(sentHandles()).toEqual(['term_eli']);
+  });
+
+  it('a pin never bypasses the guard chain: a busy pinned terminal holds', () => {
+    const c = pinned('term_eli');
+    fake.terminal('eli', 'codex');
+    fake.busy.add('term_eli');
+    fake.screens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY });
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3 })];
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held.Eli).toBeTruthy();
+  });
+
+  it('loadConfig rejects a non-string pin and two rows pinning one terminal', () => {
+    const write = (roster: unknown) => {
+      const path = join(root, 'c.json');
+      writeFileSync(path, JSON.stringify({ app: 'a', channel: 'c', stateDir: join(root, 's'), roster }));
+      return path;
+    };
+    expect(() => loadConfig(write([{ worker: 'w', name: 'E', worktree: '/x', terminal: 7 }]))).toThrow(/"terminal" must be a non-empty/);
+    expect(() => loadConfig(write([
+      { worker: 'w1', name: 'E', worktree: '/x', terminal: 'term_t' },
+      { worker: 'w2', name: 'F', worktree: '/y', terminal: 'term_t' },
+    ]))).toThrow(/pins one terminal for two workers/);
+  });
+
+  it('an unpinned row is untouched — resolution order and reasons identical to before', () => {
+    const c = pinned(); // no terminal field
+    fake.terminal('eli', 'claude');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3 })];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    const [, , via] = resolveTerminal(c.roster[0]!, fake.terminals as unknown as Terminal[], c, fake.run);
+    expect(via).toBe('identity');
+  });
+});
+
+describe('per-call hard timeout (2026-10-14 wedged-cycle incidents)', () => {
+  it('bounds every child call at 90s — ≥ busyWaitMs + margin, never the old 300s', () => {
+    // The 300_000 backstop let a slow/502ing gateway hang each call for five
+    // minutes; ~180 calls/cycle × a few hangs = 45+ minute cycles. 90s covers
+    // the one legitimately long call (the 60s busy-wait) with margin.
+    expect(CALL_TIMEOUT_MS).toBe(90_000);
+    expect(CALL_TIMEOUT_MS).toBeLessThan(300_000);
+    expect(CALL_TIMEOUT_MS).toBeGreaterThanOrEqual(MIN_CALL_TIMEOUT_MS);
+    expect(60_000).toBeLessThanOrEqual(CALL_TIMEOUT_MS - 15_000); // busyWaitMs's default (loadConfig: raw.busyWaitMs ?? 60_000)
+  });
+  it('a killed/timed-out child reads as code 1 with empty output — the fail-closed shape every consumer already handles', () => {
+    expect(runCommand(['false']).code).not.toBe(0);
+    expect(runCommand(['/nonexistent/binary']).code).not.toBe(0);
+    expect(runCommand(['/nonexistent/binary']).stdout).toBe('');
+  });
+});
+
+describe('#1940 — reported prune is keyed by NAME (Joshua port-find)', () => {
+  it('a worker re-held with a REPEAT reason after leaving the held set logs the fresh hold line', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.busy.add('term_eli');
+    fake.screens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    poll(c); // held once: reported['Eli'] = <busy reason>
+    const st = new State(c.stateDir);
+    const ledger = st.ledger();
+    expect(Object.keys(ledger.reported ?? {})).toContain('Eli'); // keyed by NAME
+    // The worker recovers (leaves the held set entirely): the prune must drop
+    // the reported entry by name, or a later SAME-reason hold stays silent.
+    fake.busy.clear();
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE });
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3, relevant: 105 })];
+    poll(c); // nudged: leaves the held set
+    const after = new State(c.stateDir).ledger();
+    expect(after.heldSince['w-eli']).toBeUndefined();
+    expect(after.reported['Eli']).toBeUndefined(); // the id-keyed delete was a no-op before this fix
+  });
+});
+
+describe('#1940 fix cycle — the timeout kill is hard and its result fail-closed', () => {
+  it('a SIGTERM-IGNORING child that prints success JSON is killed and reads as code 1 with EMPTY stdout (Andi P2-1+2, Chip repro)', () => {
+    // The production wrapper runs node; a tiny script that traps SIGTERM and
+    // prints success JSON reproduces both P2s in one child: without the fix,
+    // the catchable SIGTERM lets it overrun and exit 0 with output retained.
+    const script = [
+      'process.on("SIGTERM", () => { /* ignore: we are a wedged child */ });',
+      'process.stdout.write(JSON.stringify({ ok: true }));',
+      'setTimeout(() => { process.exit(0); }, 500);',
+    ].join('');
+    // Scaled-down bound (Chip's repro approach): 150ms bound vs a child that
+    // ignores SIGTERM and would run 500ms — only the hard kill can stop it.
+    const res = runCommand([process.execPath, '-e', script], 150);
+    expect(res.code).toBe(1);
+    expect(res.stdout).toBe('');
+    expect(res.stderr).toMatch(/killed|ETIMEDOUT|call failed/); // killed at the bound — the message names the failure either way
+  }, 30_000);
+  it('a normally-exiting child is untouched by the kill path', () => {
+    const res = runCommand([process.execPath, '-e', 'process.stdout.write("fine")']);
+    expect(res.code).toBe(0);
+    expect(res.stdout).toBe('fine');
+  });
+});
+
+describe('#1940 cycle 2 — ANY proc.error is fail-closed (Andi #12271, Chip #12273)', () => {
+  it('a spawn error with retained success JSON on the pipe reads as code 1 with EMPTY stdout', () => {
+    // ENOENT: the binary does not exist — spawnSync sets proc.error with the
+    // child never running. To also cover the error-with-output shape Chip
+    // injected (ENOBUFS mid-write), assert the general contract on ENOENT
+    // and the pipe-error equivalence in one rule: proc.error => empty stdout.
+    const res = runCommand(['/nonexistent/binary/that/does/not/exist']);
+    expect(res.code).toBe(1);
+    expect(res.stdout).toBe('');
+    expect(res.stderr).toContain('call failed');
+  });
+  it('a SUCCESSFUL call is untouched by the error arm (control)', () => {
+    const res = runCommand([process.execPath, '-e', 'process.stdout.write(JSON.stringify({ok:true}))']);
+    expect(res.code).toBe(0);
+    expect(JSON.parse(res.stdout)).toEqual({ ok: true });
   });
 });

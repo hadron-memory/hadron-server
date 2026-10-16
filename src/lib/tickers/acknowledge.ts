@@ -7,6 +7,12 @@
 // reservation dueWakes made for it). A repeat changes nothing. It NEVER touches
 // ChannelReadState: delivery and reading are different facts.
 //
+// #1708 (T5): a v2 proof also names task events. Each is recorded delivered on
+// (worker, event, chain position), once. That is a receipt, NEVER an alarm
+// acknowledgement (cor:agt:050:20): nothing here touches the alarm row, so a
+// delivery cannot silently stop an escalation. An event of another App is
+// skipped, like a deleted ticker's tick.
+//
 // Refusals: an unknown version, a forged signature or an attention token →
 // WAKE_PROOF_INVALID; a proof issued to somebody else → WAKE_PROOF_REQUESTER_MISMATCH;
 // older than 15 minutes, or a channel recreated since issue → WAKE_PROOF_STALE
@@ -156,6 +162,23 @@ export async function acknowledgeWakes(args: {
             acked_by_user_id = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.acked_by_user_id ELSE worker_delivery_ticks.acked_by_user_id END,
             acked_by_worker_id = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.acked_by_worker_id ELSE worker_delivery_ticks.acked_by_worker_id END,
             acked_by_app_key_id = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.acked_by_app_key_id ELSE worker_delivery_ticks.acked_by_app_key_id END`;
+      }
+      for (const t of p.tasks) {
+        const ev = await tx.agentTeamEvent.findUnique({ where: { id: t.eventId }, select: { appId: true } });
+        if (!ev || ev.appId !== p.appId) continue; // a forged or foreign event records nothing
+        // Delivered once: a repeat moves nothing, neither the time nor who acknowledged it (cf. Diego P2-3 above).
+        const moved = await tx.$executeRaw`
+          INSERT INTO worker_delivery_task_events
+            (worker_id, event_id, chain_index, delivered_at, acked_by_user_id, acked_by_worker_id, acked_by_app_key_id)
+          VALUES (${p.workerId}, ${t.eventId}, ${t.chainIndex}, ${nowNaive}::timestamp,
+                  ${ackedBy.ackedByUserId}, ${ackedBy.ackedByWorkerId}, ${ackedBy.ackedByAppKeyId})
+          ON CONFLICT (worker_id, event_id, chain_index) DO UPDATE SET
+            delivered_at = EXCLUDED.delivered_at,
+            acked_by_user_id = EXCLUDED.acked_by_user_id,
+            acked_by_worker_id = EXCLUDED.acked_by_worker_id,
+            acked_by_app_key_id = EXCLUDED.acked_by_app_key_id
+          WHERE worker_delivery_task_events.delivered_at IS NULL`;
+        if (moved > 0) advanced = true;
       }
       // Only the reservation of THIS wake is spent or void: the one carrying this proof's wake key. A re-read of an
       // unchanged wake shares the key, so it is freed whichever proof is acknowledged; a replay of an old, unchanged

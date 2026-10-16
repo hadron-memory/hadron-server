@@ -30,6 +30,7 @@ import { pendingEdgeStableTargetId } from '../../../lib/pendingEdgePromotion.js'
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { editorFromAuth, ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 import { mayMintNodes } from './resolvers.nodeApproval.js';
+import { approvalHoldsFor, checkNodeIntegrity, loadApprovedSnapshots } from '../../../lib/nodeApproval.js';
 import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
 import { NOT_DECISION_FAMILY_WHERE } from '../../../lib/decisions/index.js';
 import { unresolvedFeedbackOf, type UnresolvedFeedbackRow } from '../../../lib/comments/summary.js';
@@ -230,7 +231,7 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
     select: { urn: true, isEncrypted: true },
   });
   if (memory.isEncrypted) {
-    throw new GraphQLError('Reference scans do not support encrypted memories yet.', {
+    throw new GraphQLError('Reference scans do not support encrypted memories.', {
       extensions: { code: 'SPEC_CORPUS_ENCRYPTED_UNSUPPORTED', memoryId: id },
     });
   }
@@ -1222,7 +1223,7 @@ async function mintMemoryNodes(
       select: {
         id: true, loc: true, nodeType: true, tags: true, role: true, isPlaceholder: true, revSeq: true,
         name: true, description: true, abstract: true, content: true, abstractOriginHash: true,
-        mintedAt: true, approvedRevNo: true, approvalHash: true,
+        mintedAt: true, approvedRevNo: true, contentRevSeq: true, approvalHash: true,
       },
     });
     const inScope = nodes.filter((n) => n.mintedAt === null);
@@ -1262,11 +1263,28 @@ async function mintMemoryNodes(
       if (!inScopeLocs.has(f.loc)) continue;
       blockers.push({ kind: 'LINT', loc: f.loc, rule: f.rule, message: f.message, targetLoc: null });
     }
+    // An approval that no longer covers the text is TAMPERED, not merely
+    // not approved, when the retained evidence says the approved text was
+    // altered outside the revision system (cor:dmo:120:05).
+    const approvedSnapshots = await loadApprovedSnapshots(tx, inScope);
     for (const n of inScope) {
       if (n.isPlaceholder) continue;
-      if (n.approvedRevNo === n.revSeq) {
-        // The approval names the current revision, but a write outside the
-        // revision system leaves that number unchanged: recompute the hash
+      if (n.approvedRevNo != null && !approvalHoldsFor(n)) {
+        const evidence = (approvedSnapshots.get(n.id) ?? [])
+          .map((s) => ({ title: s.name, abstract: s.abstract, content: s.content }));
+        const live = { title: n.name, abstract: n.abstract, content: n.content };
+        if (checkNodeIntegrity(n, live, evidence).state === 'TAMPERED') {
+          blockers.push({
+            kind: 'TAMPERED', loc: n.loc, rule: null, targetLoc: null,
+            message: `revision ${n.approvedRevNo} changed after it was approved, outside the revision system; re-approve it`,
+          });
+          continue;
+        }
+      }
+      if (approvalHoldsFor(n)) {
+        // The approval still covers the text (no content change since it was
+        // recorded, #1611), but a write outside the
+        // revision system leaves that boundary unchanged: recompute the hash
         // the mint is about to certify (Atilla, PR #1593). The memory is
         // plaintext here (an encrypted one is refused above).
         const actual = computeApprovalHash({ title: n.name, abstract: n.abstract, content: n.content });
@@ -1352,8 +1370,9 @@ async function mintMemoryNodes(
     const now = new Date();
     const minter = editorFromAuth(ctx);
     // Every node in scope passed NOT_APPROVED and TAMPERED under this fence,
-    // so each one's approval names its current revision and its stored hash
-    // equals the text being minted: stamp that revision and that hash.
+    // so each one's approval still covers its current text (no content change
+    // since it was recorded, #1611) and its stored hash equals the text being
+    // minted: stamp the current revision and that hash.
     const ids = [...inScopeIds];
     const mintedCount = await tx.$executeRaw`
       UPDATE nodes SET
@@ -1363,7 +1382,7 @@ async function mintMemoryNodes(
         minted_rev_no = rev_seq,
         minted_hash = approval_hash
       WHERE memory_id = ${id} AND deleted_at IS NULL AND minted_at IS NULL
-        AND id = ANY(${ids}::text[]) AND approved_rev_no = rev_seq`;
+        AND id = ANY(${ids}::text[]) AND approved_rev_no >= content_rev_seq`;
     if (mintedCount !== ids.length) {
       // Unreachable under the fence; refuse rather than mint a partial set.
       throw new Error(`Mint stamped ${mintedCount} of ${ids.length} nodes; the memory changed under the fence`);

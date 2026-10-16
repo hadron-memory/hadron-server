@@ -71,7 +71,7 @@
 // APP_NOT_FOUND (#1713 review, Rook P3-1; the resolvePilotApp posture).
 
 import { GraphQLError } from 'graphql';
-import { Prisma } from '../../../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { type Context, isAppParticipant, clampListTake, withoutRequestCaches } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -85,6 +85,8 @@ import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { appKeyCaller, refuseSessionBound } from '../../../lib/appKeyScopes/scopes.js';
+import { launchForAssignment } from '../../../lib/hostOperations/launch.js';
+import { requestSessionEnd } from '../../../lib/hostOperations/sessionEnd.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import {
   appendTaskEvent,
@@ -311,6 +313,18 @@ export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c:
   }
   if (appId !== key.appId) throw appNotFound(appRef);
   return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body);
+}
+
+/**
+ * #1708 — may this caller read the App's tasks and events (cor:agt:050:21)? The arms of `withReadableApp`,
+ * as a boolean: a participant (a person, or a worker session whose credential may still drive the App), or
+ * the App's own live key. App-wide: whoever reads one of the App's tasks reads them all.
+ */
+export async function mayReadAppTasks(ctx: Context, appId: string): Promise<boolean> {
+  const app = await loadApp(ctx, appId);
+  if (!app || app.deletedAt) return false;
+  if (appKeyCaller(ctx)) return keyMayReadApp(ctx, app);
+  return (await resolveTaskActor(ctx, app)) !== null;
 }
 
 /** Load a task the caller may read, with its App and the actor — or null (concealed as missing). */
@@ -770,8 +784,10 @@ async function insertTask(
 export async function createRootTaskForRun(
   principal: Context,
   run: { id: string; appId: string },
-  input: Omit<CreateInput, 'parentTaskId'> & { parentTaskId?: unknown },
+  input: Omit<CreateInput, 'parentTaskId' | 'status'> & { parentTaskId?: unknown; status?: never },
 ) {
+  // #1832: a run's root task is created pending (queued unless an assignee is named); a status is refused, never silently dropped. The type is `never` so a typed caller cannot pass one; an untyped one (the run tool) is caught here.
+  if (input.status != null) throw badInput('A run-created task takes no status; it is created pending.');
   if (input.parentTaskId != null && input.parentTaskId !== '') throw badInput('A run creates root tasks only; it names no parentTaskId.');
   if (input.appRef) {
     let namedAppId: string | null = null;
@@ -915,7 +931,10 @@ export const agentTaskMutations = {
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
     // committed; the returned task shows the assignee when one was free.
     if (made.queued) await matchAfterChange(ctx.db, app.id);
-    return ctx.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
+    const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
+    // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
+    await launchAssignee(ctx.db, created);
+    return created;
   },
 
   /**
@@ -931,7 +950,7 @@ export const agentTaskMutations = {
     ctx: Context,
   ) => {
     let party: TaskParty | null = null;
-    return mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+    const assigned = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, assigns it.", { taskId });
       }
@@ -972,6 +991,9 @@ export const agentTaskMutations = {
         event: { type: 'task.assigned', assignee: party, closeSessionWhenDone: close },
       });
     });
+    // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no live session through its host.
+    await launchAssignee(ctx.db, assigned);
+    return assigned;
   },
 
   /**
@@ -1055,7 +1077,7 @@ export const agentTaskMutations = {
     ctx: Context,
   ) => {
     let party: TaskParty | null = null;
-    return mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+    const reassigned = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, reassigns it.", { taskId });
       }
@@ -1078,6 +1100,8 @@ export const agentTaskMutations = {
         event: { type: 'task.reassigned', from, to: party, closeSessionWhenDone: close },
       });
     });
+    await launchAssignee(ctx.db, reassigned);
+    return reassigned;
   },
 
   /**
@@ -1117,7 +1141,8 @@ export const agentTaskMutations = {
   /**
    * Finish a started task with its result: the assignee only (cor:agt:050:08).
    * Finishing without starting is refused (050:02 Proposed; #1705 interim).
-   * `closeSessionWhenDone` is stored, not acted on here — T6 carries out 050:10.
+   * #1709: with `closeSessionWhenDone`, the assignee is asked to end its session
+   * (cor:agt:050:10, src/lib/hostOperations/sessionEnd.ts).
    */
   finishAgentTask: async (
     _: unknown,
@@ -1149,6 +1174,8 @@ export const agentTaskMutations = {
       await appendTaskEvent(tx, {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.finished', outcome },
       });
+      // #1709 (cor:agt:050:10): ask the assignee to end its session when the task says so.
+      await requestSessionEnd(tx, { appId: app.id, task, actor: eventActor(ctx.userId), now: new Date() });
     });
     // #1707: a worker may have freed up (cor:agt:060:06).
     await matchAfterChange(ctx.db, finished.appId);
@@ -1174,12 +1201,24 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
         event: { type: 'task.cancelled', fromStatus: task.status as 'backlog' | 'pending' | 'started', openChildCount },
       });
+      // #1709 (cor:agt:050:10): cancelling asks the assignee to end its session too.
+      await requestSessionEnd(tx, { appId: app.id, task, actor: eventActor(ctx.userId), now: new Date() });
     });
     // #1707: a worker may have freed up (cor:agt:060:06).
     await matchAfterChange(ctx.db, cancelled.appId);
     return cancelled;
   },
 };
+
+/**
+ * #1709 (cor:agt:070:08; Holger via Vera #10773 (6): assignment by hand launches too, not only matching). After the
+ * assignment committed: if its assignee is a worker, ask the platform to start it through its host. Never fails the
+ * assignment; a worker it cannot start leaves the task waiting.
+ */
+async function launchAssignee(db: Context['db'], t: TaskRow): Promise<void> {
+  if (!t.assigneeWorkerId || !['pending', 'started'].includes(t.status)) return;
+  await launchForAssignment(db as PrismaClient, { appId: t.appId, taskId: t.id, workerId: t.assigneeWorkerId });
+}
 
 // ── Queries ───────────────────────────────────────────────────────────────
 
@@ -1348,6 +1387,11 @@ export const agentTaskFieldResolvers = {
         familyNotIn: (r.familyNotIn as string[]) ?? null,
         excludeWorkerIds: (r.excludeWorkerIds as string[]) ?? null,
       };
+    },
+    /** #1709 (cor:agt:050:10) — the request this task's end made; the task was already read, so its readers read it. */
+    sessionEndRequest: async (t: TaskRow, _: unknown, ctx: Context) => {
+      const r = await ctx.db.taskSessionEndRequest.findUnique({ where: { taskId: t.id } });
+      return r ? { ...r, resolution: r.resolution ? r.resolution.toUpperCase().replace(/-/g, '_') : null } : null;
     },
     /** cor:agt:050:03 — pending with no assignee. Derived, never stored. */
     queued: (t: TaskRow) => t.status === 'pending' && !t.assigneeWorkerId && !t.assigneeUserId,

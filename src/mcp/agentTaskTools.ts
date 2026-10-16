@@ -104,7 +104,7 @@ export function renderRosterEntry(r: RosterRow): string {
     r.pendingTaskIds.length ? `pending ${r.pendingTaskIds.join(', ')}` : null,
     r.waitingOnTaskIds.length ? `waiting on ${r.waitingOnTaskIds.join(', ')} since ${r.waitingSince?.toISOString()}` : null,
     r.alarmEventIds.length ? `woken on alarm ${r.alarmEventIds.join(', ')}` : null,
-    r.unreactedChildTaskId ? `child ${r.unreactedChildTaskId} finished` : null,
+    r.unreactedChildTaskId ? `child ${r.unreactedChildTaskId} ended (finished or cancelled)` : null,
     r.lastAssignedAt ? `last assigned ${r.lastAssignedAt.toISOString()}` : 'never assigned',
     // #1726: beside last activity, so a stale claim is easy to spot.
     r.reportsTo ? `reports to ${r.reportsTo.name}${r.reportsTo.retired ? ' (retired)' : ''}` : null,
@@ -144,6 +144,14 @@ export async function renderTask(t: TaskRow, ctx: Context): Promise<string> {
   ].filter(Boolean);
   lines.push(`  created ${t.createdAt.toISOString()}${times.length ? ` · ${times.join(' · ')}` : ''}`);
   lines.push(`  closeSessionWhenDone: ${t.closeSessionWhenDone ? 'yes' : 'no'}`);
+  // #1709 (cor:agt:050:10): the ask, in the words the asked worker acts on.
+  const end = (await T.sessionEndRequest(t as never, {}, ctx)) as { sessionId: string; dueAt: Date; resolution: string | null } | null;
+  if (end) {
+    lines.push(end.resolution
+      ? `  session end: ${end.resolution.toLowerCase().replace(/_/g, '-')} (session ${end.sessionId})`
+      : `  session end requested: end session ${end.sessionId} with your handoff (hadron_end_session) before ${end.dueAt.toISOString()}; ` +
+        'if it is still open then, the platform ends it through its host.');
+  }
   if (t.status === 'finished') {
     lines.push(`  result: ${t.resultOutcome}${t.resultEvidence ? ` · evidence ${t.resultEvidence}` : ''}`);
     if (t.resultSummary) lines.push(...String(t.resultSummary).split('\n').map((l) => `    ${l}`));
@@ -215,6 +223,9 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     transport: 'mcp',
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
+    // #1868: the presented hdr_user_ key, so the shared authorized transaction
+    // re-checks it is still unrevoked at the write (as #1864's signing tools do).
+    apiKeyId: auth.apiKeyId ?? undefined,
     appId: auth.appId ?? undefined,
     appKeyId: auth.appKeyId ?? undefined,
     // An App key's session state is the current request's; anyone else's is the connection's.
@@ -476,7 +487,8 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'hadron_alarm_ack',
     'Acknowledge a stall alarm (cor:agt:050:20): it stops waking owners further up the chain. It does not resolve the ' +
       'stall: the task moves only when it is reassigned, cancelled, or its assignee acts. Any owner in the alarm\'s ' +
-      'chain may acknowledge it, and nobody else; a second acknowledgement is refused. Find alarms with ' +
+      'chain, or whoever manages the App (cor:agt:050:24), may acknowledge it, and nobody else; a second ' +
+      'acknowledgement is refused. Find alarms with ' +
       'hadron_team_events (alarmsOnly: true).',
     { eventId: z.string().describe('The alarm event id.'), session: SESSION_WRITE },
     async ({ session, eventId }) =>
@@ -495,7 +507,8 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'hadron_worker_availability_set',
     'Set a worker\'s availability for work (cor:agt:060:08). A worker, through its own session, may mark ITSELF ' +
       'unavailable (never available); the person holding the worker\'s name, or whoever manages the App, may set ' +
-      'either. A worker is never chosen for new work while unavailable.',
+      'either. The worker it reports to directly may set it AVAILABLE, only to clear a mark the stall rule set ' +
+      '(cor:agt:060:11). A worker is never chosen for new work while unavailable.',
     {
       worker: z.string().describe('The worker: id or URN, or its name with appRef.'),
       appRef: z.string().optional().describe('The team App (id or URN); needed when worker is a name.'),

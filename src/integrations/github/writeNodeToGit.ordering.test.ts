@@ -27,7 +27,7 @@ describe('Node Git mirror ordering', () => {
     const checkoutGate = new Promise<void>((resolve) => { enterCheckout = resolve; });
     checkout.mockImplementationOnce(async (_opts, mutate) => {
       await checkoutGate;
-      await mutate({ localPath: dir, branch: 'hadron-updates' });
+      await mutate({ localPath: dir, branch: 'hadron-updates', memoryUrn: 'test-org:root-memory' });
       return 'mirrored';
     });
 
@@ -85,11 +85,11 @@ describe('Node Git mirror ordering', () => {
     const oldGate = new Promise<void>((resolve) => { releaseOld = resolve; });
     checkout.mockImplementationOnce(async (_opts, mutate) => {
       await oldGate;
-      await mutate({ localPath: dir, branch: 'hadron-updates' });
+      await mutate({ localPath: dir, branch: 'hadron-updates', memoryUrn: 'test-org:root-memory' });
       return 'mirrored';
     });
     checkout.mockImplementationOnce(async (_opts, mutate) => {
-      await mutate({ localPath: dir, branch: 'hadron-updates' });
+      await mutate({ localPath: dir, branch: 'hadron-updates', memoryUrn: 'test-org:root-memory' });
       return 'mirrored';
     });
 

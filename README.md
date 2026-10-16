@@ -32,7 +32,7 @@ pnpm run dev            # http://localhost:4000
 |----------|---------|-------------|
 | `DATABASE_URL` | — | Prisma connection string |
 | `DB_PROVIDER` | `postgresql` | Leave unset. PostgreSQL is the only supported database (see below). |
-| `JWT_SECRET` | — | HS256 signing secret (≥ 32 chars) |
+| `JWT_SECRET` | — | HS256 signing secret. Production refuses to boot when it is missing or under 32 UTF-8 bytes (#421) |
 | `HADRON_ENCRYPTION_KEY` | — | AES-256-GCM key for encrypting secrets at rest (32 bytes, hex) |
 | `GRAPHS_PATH` | `./graphs` | Root directory for cloned graph repos |
 | `PORT` | `4000` | HTTP listen port |
@@ -240,21 +240,18 @@ docker compose run --rm hadron-server npx prisma db seed
 
 ## Testing
 
-Tests require a `hadron_test` PostgreSQL database. Push the current schema to it:
+Tests need a local PostgreSQL with pgvector that the `holger` role can create
+databases on. No setup step is needed: each run clones a template that the
+vitest globalSetup builds from an empty database for this checkout's schema
+(`hadron_test_s<fingerprint>`, see `src/test/schemaTemplate.ts`). A schema
+change gets a new template; nothing is pushed over an old one.
+
+For serial mode (`HADRON_TEST_PARALLEL=0`, a single database and no CREATE
+DATABASE), rebuild `hadron_test` from empty after every schema change:
 
 ```bash
 pnpm run db:test-setup
 ```
-
-If the schema has changed in a way that can't be applied incrementally (e.g. a new
-required column without a default), you'll need to force-reset the test database:
-
-```bash
-DATABASE_URL=postgresql://holger@localhost:5432/hadron_test pnpm prisma db push --force-reset
-```
-
-This drops and recreates the database — all test data is lost. Only use this on the
-test database, never on production.
 
 Then run:
 
@@ -264,8 +261,8 @@ pnpm run test:watch      # watch mode
 pnpm run test:coverage   # with coverage report
 ```
 
-Tests use Vitest with `pool: 'forks'` (one process per file) and `fileParallelism: false`
-to prevent concurrent writes to the shared test database.
+Tests use Vitest with `pool: 'forks'` (one process per file), each worker on its own
+cloned database.
 
 ## Scripts
 
@@ -281,7 +278,7 @@ to prevent concurrent writes to the shared test database.
 | `pnpm run db:push` | Push schema to database |
 | `pnpm run db:migrate` | Run Prisma migrations (PostgreSQL) |
 | `pnpm run db:studio` | Open Prisma Studio |
-| `pnpm run db:test-setup` | Create/update the `hadron_test` database |
+| `pnpm run db:test-setup` | Rebuild `hadron_test` from empty (serial mode only) |
 
 ## Database provider adapter
 

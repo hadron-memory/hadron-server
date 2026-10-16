@@ -10,13 +10,17 @@
 // (`inTaskWriteTx`). Nothing here hand-rolls a second gate.
 //
 // AUTHORIZATION (plan design:agent-tasks §10):
-//   acknowledge an alarm   any owner in its chain, and nobody else (050:20, Proposed)
+//   acknowledge an alarm   any owner in its chain, or whoever manages the App
+//                           (050:24, #1762), and nobody else (050:20, Proposed)
 //   set worker availability   the worker itself (only to unavailable); the
-//                           person holding its name; whoever manages the App
-//                           (060:08, Proposed). The stall rule sets it from the
-//                           evaluator; the host arm is T6 (#1709).
+//                           person holding its name; whoever manages the App;
+//                           the worker it reports to DIRECTLY, only to clear a
+//                           mark the stall rule set (060:08, Proposed; 060:11;
+//                           #1759). The stall rule sets it from the evaluator;
+//                           the host arm is T6 (#1709).
 //   set model-family availability  whoever manages the App (060:09, Proposed)
-//   set the stall schedule  whoever manages the App (#1706)
+//   set the stall schedule  whoever manages the App (#1706); with it the host
+//                           lapse count (cor:agt:070:01, #1763)
 //   read all of the above  the App's task audience: every participant and the
 //                           App's own key, read-only (050:21, 060:02, :03; #1767)
 // "Whoever manages the App" stays T1's INTERIM reading: a person acting as
@@ -30,6 +34,11 @@
 // escalation holds the alarm FOR SHARE while it wakes the next owner, so an
 // acknowledgement and a wake never interleave.
 
+import {
+  HOST_REPORT_TIMEOUT_DEFAULT_MINUTES,
+  HOST_REPORT_TIMEOUT_MAX_MINUTES,
+  HOST_REPORT_TIMEOUT_MIN_MINUTES,
+} from '../../../lib/hostOperations/settle.js';
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { type Context } from './resolvers.helpers.js';
@@ -59,6 +68,17 @@ import {
 import { FAMILY_PATTERN, recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { effectiveWindows, STALL_WINDOW_DEFAULTS, type StallWindows } from '../../../lib/agentTasks/stall.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import {
+  HOST_LAPSE_CHECK_INS_DEFAULT,
+  HOST_LAPSE_CHECK_INS_MAX,
+  HOST_LAPSE_CHECK_INS_MIN,
+  lockAppHostLapse,
+} from '../../../lib/agentTasks/hosts.js';
+import {
+  SESSION_END_GRACE_DEFAULT_MINUTES,
+  SESSION_END_GRACE_MAX_MINUTES,
+  SESSION_END_GRACE_MIN_MINUTES,
+} from '../../../lib/hostOperations/sessionEnd.js';
 
 // ── Errors and parsing ────────────────────────────────────────────────────
 
@@ -82,10 +102,10 @@ function parseDate(value: unknown, field: string): Date | null {
   return d;
 }
 
-type AvailabilityInput = { state: string; reason?: string | null; until?: unknown };
+export type AvailabilityInput = { state: string; reason?: string | null; until?: unknown };
 
 /** cor:agt:060:02 shape: a reason (from the closed set) exactly when unavailable; an `until` only then, in the future. */
-function normalizeAvailability(input: AvailabilityInput, now: Date) {
+export function normalizeAvailability(input: AvailabilityInput, now: Date) {
   const state = STATE_FROM_GQL[input.state];
   if (!state) throw badInput('state is AVAILABLE or UNAVAILABLE.');
   const reason = input.reason == null ? null : REASON_FROM_GQL[input.reason] ?? null;
@@ -150,6 +170,28 @@ async function resolveAvailabilityWorker(
   return { workerId, app, actor };
 }
 
+/**
+ * cor:agt:060:11 (#1759) — may the worker a target reports to DIRECTLY make this
+ * write? Only to set it available, and only when the target's current record is
+ * a mark the stall rule set (cor:agt:060:07: unavailable, `stalled`, set by
+ * `stall-rule`). A mark anyone else set stays for them, whatever its reason
+ * (Victor, team chat #10324). The record is locked FOR UPDATE, so the stall
+ * evaluator's clearance or a holder's write cannot slip in between this check
+ * and the upsert. Throws AVAILABILITY_NOT_PERMITTED otherwise.
+ */
+async function authorizeReportsToClear(tx: Prisma.TransactionClient, workerId: string, state: 'available' | 'unavailable'): Promise<void> {
+  if (state !== 'available') {
+    throw notPermitted('The worker another reports to may only clear its stall, never mark it unavailable.');
+  }
+  const [cur] = await tx.$queryRaw<{ state: string; reason: string | null; setBy: string }[]>`
+    SELECT state, reason, set_by AS "setBy" FROM worker_availability WHERE worker_id = ${workerId} FOR UPDATE`;
+  if (!cur || cur.state !== 'unavailable' || cur.reason !== 'stalled' || cur.setBy !== 'stall-rule') {
+    throw notPermitted(
+      'The worker another reports to may clear only a mark the stall rule set; this record is for its holder or whoever manages the App.',
+    );
+  }
+}
+
 // ── Mutations ─────────────────────────────────────────────────────────────
 
 export const agentTaskAlarmMutations = {
@@ -205,7 +247,9 @@ export const agentTaskAlarmMutations = {
   /**
    * cor:agt:060:08 — set a worker's availability for work: the worker itself
    * (only to unavailable), the person holding its name, or whoever manages the
-   * App. Another worker never may (S2). Writes `availability.changed`.
+   * App. Another worker may only when the target reports to it directly, and
+   * then only to clear a stall (cor:agt:060:11, #1759): see
+   * {@link authorizeReportsToClear}. Writes `availability.changed`.
    */
   setWorkerAvailability: async (
     _: unknown,
@@ -219,21 +263,34 @@ export const agentTaskAlarmMutations = {
     requireWritable(ctx, app);
     await inTaskWriteTx(ctx, app, actor, () => workerNotFound(input.worker), async (tx, txCtx, freshApp) => {
       // The holder and retirement are read under a lock: releaseWorker and
-      // retireWorker update this row.
-      const [target] = await tx.$queryRaw<{ appId: string; heldByUserId: string | null; retiredAt: Date | null }[]>`
-        SELECT app_id AS "appId", held_by_user_id AS "heldByUserId", retired_at AS "retiredAt"
+      // retireWorker update this row. Who it reports to is read under the
+      // App's reportsTo graph lock, which inTaskWriteTx holds SHARED, so no
+      // writer can move the line before this commits (#1726 lock protocol).
+      const [target] = await tx.$queryRaw<{
+        appId: string; heldByUserId: string | null; retiredAt: Date | null; reportsToWorkerId: string | null;
+      }[]>`
+        SELECT app_id AS "appId", held_by_user_id AS "heldByUserId", retired_at AS "retiredAt",
+               reports_to_worker_id AS "reportsToWorkerId"
         FROM workers WHERE id = ${workerId} FOR SHARE`;
       if (!target || target.appId !== freshApp.id) throw workerNotFound(input.worker);
       if (target.retiredAt) throw taskError('WORKER_RETIRED', 'This worker is retired.', { workerId });
       let setBy: AvailabilitySetter;
       if (actor.kind === 'worker') {
         if (actor.workerId !== workerId) {
-          throw notPermitted("A worker sets only its own availability; another worker's is set by its holder or whoever manages the App.");
+          if (target.reportsToWorkerId !== actor.workerId) {
+            throw notPermitted(
+              "A worker sets only its own availability; another worker's is set by its holder, whoever manages the App, " +
+                'or, to clear a stall, the worker it reports to.',
+            );
+          }
+          await authorizeReportsToClear(tx, workerId, value.state);
+          setBy = 'reports-to';
+        } else {
+          if (value.state !== 'unavailable') {
+            throw notPermitted('A worker may mark itself unavailable, never available: its holder or whoever manages the App does that.');
+          }
+          setBy = 'worker';
         }
-        if (value.state !== 'unavailable') {
-          throw notPermitted('A worker may mark itself unavailable, never available: its holder or whoever manages the App does that.');
-        }
-        setBy = 'worker';
       } else if (target.heldByUserId !== null && target.heldByUserId === actor.userId) {
         setBy = 'holder';
       } else if (await actorManagesApp(txCtx, freshApp, actor)) {
@@ -241,7 +298,8 @@ export const agentTaskAlarmMutations = {
       } else {
         throw notPermitted("Only the worker itself, the person holding its name, or whoever manages the App sets a worker's availability.");
       }
-      const data = { ...value, setAt: now, setBy, ...setByColumns(ctx) };
+      // #1709: a person's or a worker's write replaces a host's mark, and no longer names the host.
+      const data = { ...value, setAt: now, setBy, ...setByColumns(ctx), setByHostId: null };
       await tx.workerAvailability.upsert({
         where: { workerId },
         create: { workerId, ...data },
@@ -296,16 +354,19 @@ export const agentTaskAlarmMutations = {
 
   /**
    * #1706 — an App's stall windows, in minutes (cor:agt:050:14–:17 "What Can
-   * Change"): whoever manages the App. An omitted field keeps its value; null
-   * returns it to the platform default.
+   * Change"), and (#1763) its host-registration lapse in check-ins
+   * (cor:agt:070:01, 2 to 10), and (#1709) the grace before the platform ends
+   * a finished task's session (cor:agt:050:10, 1 to 1440 minutes): whoever
+   * manages the App. An omitted field keeps its value; null returns it to the
+   * platform default.
    */
   setAgentTaskStallSchedule: async (
     _: unknown,
-    { appRef, input }: { appRef: string; input: Partial<Record<keyof StallWindows, number | null>> },
+    { appRef, input }: { appRef: string; input: Partial<Record<keyof StallWindows | 'hostLapseCheckIns' | 'sessionEndGraceMinutes' | 'hostReportTimeoutMinutes', number | null>> },
     ctx: Context,
   ) => {
     if (!input) throw badInput('input is required.');
-    const data: Partial<Record<keyof StallWindows, number | null>> = {};
+    const data: Partial<Record<keyof StallWindows | 'hostLapseCheckIns' | 'sessionEndGraceMinutes' | 'hostReportTimeoutMinutes', number | null>> = {};
     for (const key of Object.keys(STALL_WINDOW_DEFAULTS) as (keyof StallWindows)[]) {
       if (!(key in input)) continue;
       const v = input[key];
@@ -314,12 +375,48 @@ export const agentTaskAlarmMutations = {
       }
       data[key] = v ?? null;
     }
+    // cor:agt:070:01 (#1763): the host-registration lapse, in check-ins.
+    if ('hostLapseCheckIns' in input) {
+      const v = input.hostLapseCheckIns;
+      if (v != null && (!Number.isInteger(v) || v < HOST_LAPSE_CHECK_INS_MIN || v > HOST_LAPSE_CHECK_INS_MAX)) {
+        throw badInput(
+          `hostLapseCheckIns is a whole number of check-ins from ${HOST_LAPSE_CHECK_INS_MIN} to ${HOST_LAPSE_CHECK_INS_MAX}, ` +
+            `or null for the default (${HOST_LAPSE_CHECK_INS_DEFAULT}).`,
+        );
+      }
+      data.hostLapseCheckIns = v ?? null;
+    }
+    // cor:agt:050:10 (#1709): the session-end grace, in minutes.
+    if ('sessionEndGraceMinutes' in input) {
+      const v = input.sessionEndGraceMinutes;
+      if (v != null && (!Number.isInteger(v) || v < SESSION_END_GRACE_MIN_MINUTES || v > SESSION_END_GRACE_MAX_MINUTES)) {
+        throw badInput(
+          `sessionEndGraceMinutes is a whole number of minutes from ${SESSION_END_GRACE_MIN_MINUTES} to ${SESSION_END_GRACE_MAX_MINUTES}, ` +
+            `or null for the default (${SESSION_END_GRACE_DEFAULT_MINUTES}).`,
+        );
+      }
+      data.sessionEndGraceMinutes = v ?? null;
+    }
+    // cor:agt:070:02 (#1881): the time a host has to report an operation it collected, in minutes.
+    if ('hostReportTimeoutMinutes' in input) {
+      const v = input.hostReportTimeoutMinutes;
+      if (v != null && (!Number.isInteger(v) || v < HOST_REPORT_TIMEOUT_MIN_MINUTES || v > HOST_REPORT_TIMEOUT_MAX_MINUTES)) {
+        throw badInput(
+          `hostReportTimeoutMinutes is a whole number of minutes from ${HOST_REPORT_TIMEOUT_MIN_MINUTES} to ${HOST_REPORT_TIMEOUT_MAX_MINUTES}, ` +
+            `or null for the default (${HOST_REPORT_TIMEOUT_DEFAULT_MINUTES}).`,
+        );
+      }
+      data.hostReportTimeoutMinutes = v ?? null;
+    }
     const { app, actor } = await resolveParticipatedApp(ctx, appRef);
     requireWritable(ctx, app);
     await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
       if (!(await actorManagesApp(txCtx, freshApp, actor))) {
         throw taskError('APP_MANAGER_REQUIRED', "Only whoever manages the App sets its stall windows.");
       }
+      // #1863: a lapse decision in flight either finishes under the old count or waits for this one.
+      // #1881: so is a report-timeout decision, which reads the timeout under the same lock shared.
+      if ('hostLapseCheckIns' in data || 'hostReportTimeoutMinutes' in data) await lockAppHostLapse(tx, freshApp.id, 'exclusive');
       await tx.agentTaskStallSchedule.upsert({
         where: { appId: freshApp.id },
         create: { appId: freshApp.id, ...data, updatedBy: ctx.userId ?? null },
@@ -332,7 +429,14 @@ export const agentTaskAlarmMutations = {
 
 async function stallWindowsView(ctx: Context, appId: string) {
   const row = await ctx.db.agentTaskStallSchedule.findUnique({ where: { appId } });
-  return { appId, ...effectiveWindows(row), updatedAt: row?.updatedAt ?? null };
+  return {
+    appId,
+    ...effectiveWindows(row),
+    hostLapseCheckIns: row?.hostLapseCheckIns ?? HOST_LAPSE_CHECK_INS_DEFAULT,
+    sessionEndGraceMinutes: row?.sessionEndGraceMinutes ?? SESSION_END_GRACE_DEFAULT_MINUTES,
+    hostReportTimeoutMinutes: row?.hostReportTimeoutMinutes ?? HOST_REPORT_TIMEOUT_DEFAULT_MINUTES,
+    updatedAt: row?.updatedAt ?? null,
+  };
 }
 
 // ── Queries ───────────────────────────────────────────────────────────────

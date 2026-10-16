@@ -1,7 +1,7 @@
 // #1707 — Task Management slice T3: the team roster (plan
 // design:agent-tasks §7.4). Matching itself has no public surface: the
-// platform assigns (src/lib/agentTasks/matcher.ts), and host registration is
-// internal until T6's `host:operate` key (src/lib/agentTasks/hosts.ts).
+// platform assigns (src/lib/agentTasks/matcher.ts). Host registration is a
+// `host:operate` App key's (T6, #1709: registerHost, resolvers.hostOperation.ts).
 //
 // AUTHORIZATION: the roster reads with the App's task audience — its
 // participants, workers included (cor:agt:050:21, Proposed) — through T1's

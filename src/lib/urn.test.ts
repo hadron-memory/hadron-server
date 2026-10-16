@@ -645,12 +645,24 @@ describe('validateOrgSlug', () => {
     expect(() => validateOrgSlug('sub.acme.co.uk')).not.toThrow();
   });
 
-  it('#692: rejects an undotted org root', () => {
-    expect(() => validateOrgSlug('personal-holger')).toThrow(UrnParseError);
-    try {
-      validateOrgSlug('acme');
-    } catch (e) {
-      expect((e as UrnParseError).reason).toBe('org-root-not-dotted');
+  it('#1733: accepts an undotted org root (a dot means nothing)', () => {
+    expect(() => validateOrgSlug('acme')).not.toThrow();
+    expect(() => validateOrgSlug('personal-holger')).not.toThrow();
+  });
+
+  it('#1733: refuses an ID-shaped root and the scheme words', () => {
+    for (const [bad, reason] of [
+      ['0193a1b2c3d4e5f60718293a4b5c6d7e', 'root-id-shaped'],
+      ['cabcdefghijklmnopqrstuvwx', 'root-id-shaped'],
+      ['hrn', 'reserved-word-slug'],
+      ['urn', 'reserved-word-slug'],
+    ] as const) {
+      try {
+        validateOrgSlug(bad);
+        throw new Error('should have thrown');
+      } catch (e) {
+        expect((e as UrnParseError).reason).toBe(reason);
+      }
     }
   });
 

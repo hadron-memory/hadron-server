@@ -21,8 +21,9 @@ import { generateId } from '../id.js';
 import { runAsActor } from '../requestActor.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskMatcherTick } from '../../jobs/taskMatcher.js';
-import { __matcherTesting, compareRank, eligibleFamily, loadWorkerWorkStates, matchQueuedTasks, parseRequirements } from './matcher.js';
+import { __matcherTesting, compareRank, eligibleFamily, loadWorkerWorkStates, matchable, matchQueuedTasks, parseRequirements } from './matcher.js';
 import { registerHost } from './hosts.js';
+import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -108,7 +109,7 @@ describe('cor:agt:060:06 — a queued task goes to the matching worker free for 
     await lastAssigned(baloo, '09:00');
     await lastAssigned(liam, '10:00');
     const t = await queued('11:00', NOT_CLAUDE_REVIEWER);
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, matched: 1 });
     expect(await assigneeOf(t.id)).toBe(baloo.id);
     const task = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
     expect(task).toMatchObject({ status: 'pending', assignedAt: at('11:01'), assignedBy: null, assignedByWorkerId: null });
@@ -222,7 +223,7 @@ describe('cor:agt:060:06 — a queued task goes to the matching worker free for 
       })),
     });
     const last = await queued('10:00', { role: 'reviewer' });
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, matched: 1 });
     expect(await assigneeOf(last.id)).toBe(baloo.id);
   });
 });
@@ -235,11 +236,11 @@ describe('the family follows the BINDING, not activity (#1723 review, Diego P2-2
   it('a quiet, still-open binding keeps its family — and a live host family does not replace it', async () => {
     // Bound as codex at 10:00, quiet ever since; a host can launch Baloo as glm.
     await bind(baloo, 'codex', new Date(Date.now() - 25 * 3_600_000));
-    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'glm' }] });
+    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'glm', worktrees: ['repo/baloo'] }] });
     expect(await familyOf(baloo)).toBe('codex');
     const [state] = (await loadWorkerWorkStates(db, app.id, new Date())).filter((w) => w.id === baloo.id);
     expect(state).toMatchObject({ bound: true, live: false, bindingFamily: 'codex', launchableFamilies: ['glm'], families: ['codex'], freeFamilies: ['codex'] });
-    // Quiet is not matchable until T6, so a glm-only task stays queued, and so does a codex one.
+    // A quiet BOUND worker is not matchable, whatever a host could launch it as: a glm-only task stays queued, and so does a codex one.
     const glmOnly = await queued('09:00', { familyIn: ['glm'] });
     const codexOk = await queued('09:01', { familyIn: ['codex'] });
     await matchQueuedTasks(db, new Date(), { appId: app.id });
@@ -249,7 +250,7 @@ describe('the family follows the BINDING, not activity (#1723 review, Diego P2-2
 
   it('an actual end clears it; only then does a host family apply', async () => {
     const s = await bind(baloo, 'codex', new Date(Date.now() - 25 * 3_600_000));
-    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'glm' }] });
+    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'glm', worktrees: ['repo/baloo'] }] });
     await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
     expect(await familyOf(baloo)).toBeNull();
     const [state] = (await loadWorkerWorkStates(db, app.id, new Date())).filter((w) => w.id === baloo.id);
@@ -377,11 +378,23 @@ describe('cor:agt:060:05 — free for work: each disqualifier on its own', () =>
     })).toBe(false);
   });
 
-  it('UNTIL T6: unbound but launchable by a live host → free for work, but NOT matched', async () => {
+  it('#1709 (T6): unbound but launchable by a live host → matched, and its host is asked to start it in its worktree', async () => {
+    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'codex', worktrees: ['repo/baloo'] }] }, at('11:00'));
+    const t = await queued('11:00', { role: 'reviewer' });
+    await matchQueuedTasks(db, at('11:01'), { appId: app.id });
+    expect(await assigneeOf(t.id)).toBe(baloo.id);
+    const ops = await db.hostOperation.findMany();
+    expect(ops.map((o) => [o.type, o.hostId, o.issuedBy, o.args])).toEqual([
+      ['worker.start', 'orca1', 'platform', { workerId: baloo.id, worktree: 'repo/baloo', family: 'codex', taskId: t.id }],
+    ]);
+  });
+
+  it('#1709: a registered worker with no worktree on the host is not launchable, so not matched; the task waits', async () => {
     await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'codex' }] }, at('11:00'));
     const t = await queued('11:00', { role: 'reviewer' });
     await matchQueuedTasks(db, at('11:01'), { appId: app.id });
     expect(await assigneeOf(t.id)).toBeNull();
+    expect(await db.hostOperation.count()).toBe(0);
   });
 });
 
@@ -436,10 +449,26 @@ describe('matching triggers (060:06 interim): create, finish, cancel, availabili
   it('cancelling a task frees its worker', async () => {
     await bind(baloo, 'codex');
     const busy = await db.agentTask.create({
-      data: { appId: app.id, title: 'Busy', ownerUserId: mia.id, assigneeWorkerId: baloo.id, assignedAt: new Date() },
+      data: { appId: app.id, title: 'Busy', ownerUserId: mia.id, assigneeWorkerId: baloo.id, assignedAt: new Date(), closeSessionWhenDone: false },
     });
     const waiting = await queued('09:00', { role: 'reviewer' });
     await M.cancelAgentTask({}, { taskId: busy.id }, ctx(mia.id));
+    expect(await assigneeOf(waiting.id)).toBe(baloo.id);
+  });
+
+  it('#1709: a worker asked to end its session gets no new work until that session ends (Proposed)', async () => {
+    const s = await bind(baloo, 'codex');
+    const busy = await db.agentTask.create({
+      data: { appId: app.id, title: 'Busy', ownerUserId: mia.id, assigneeWorkerId: baloo.id, assignedAt: new Date(), closeSessionWhenDone: true },
+    });
+    const waiting = await queued('09:00', { role: 'reviewer' });
+    await M.cancelAgentTask({}, { taskId: busy.id }, ctx(mia.id));
+    expect(await db.taskSessionEndRequest.count({ where: { workerId: baloo.id, sessionId: s.id } })).toBe(1);
+    expect(await assigneeOf(waiting.id)).toBeNull();
+    // The session ends: the worker is matched again, on its next session.
+    await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+    await bind(baloo, 'codex');
+    await matchQueuedTasks(db, new Date(), { appId: app.id });
     expect(await assigneeOf(waiting.id)).toBe(baloo.id);
   });
 
@@ -571,7 +600,7 @@ describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
       data: { appId: app.id, title: 'Parked', ownerUserId: mia.id, status: 'backlog', createdAt: at('11:00') },
       select: { id: true },
     });
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, matched: 0 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, matched: 0 });
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))
       .toMatchObject({ status: 'backlog', assigneeWorkerId: null, assigneeUserId: null });
     expect(await db.agentTeamEvent.findMany({ where: { taskId: t.id } })).toEqual([]);
@@ -580,7 +609,7 @@ describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
   it('a task parked FROM THE QUEUE (a real queue stint behind it) is not matched (#1790 Xylon P2-2)', async () => {
     await bind(baloo, 'codex', at('11:00'));
     const t = await queuedAt('10:00', { status: 'backlog' }); // queued at 10:00, parked since
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, matched: 0 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, matched: 0 });
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))
       .toMatchObject({ status: 'backlog', assigneeWorkerId: null, assigneeUserId: null });
   });
@@ -594,8 +623,28 @@ describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
     });
     await db.agentTask.update({ where: { id: older.id }, data: { status: 'pending' } });
     const younger = await queuedAt('11:00'); // queued continuously
-    expect(await taskMatcherTick(db, at('11:31'))).toEqual({ lost: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('11:31'))).toEqual({ lost: 0, lapsed: 0, matched: 1 });
     expect(await assigneeOf(older.id)).toBe(baloo.id);
     expect(await assigneeOf(younger.id)).toBeNull();
+  });
+});
+
+describe('#1961 the roster SDL states the shipped matching rule', () => {
+  const field = (name: string) => new RegExp(`"([^"]*)"\\n\\s*${name}: `).exec(/type TeamRosterEntry \{[^}]*\}/.exec(typeDefs)![0])?.[1] ?? '';
+  const state = (name: string) => new RegExp(`"([^"]*)"\\n\\s*${name}\\n`).exec(/enum TeamRosterState \{[^}]*\}/.exec(typeDefs)![0])?.[1] ?? '';
+
+  it('matchable: a bound worker only while live, an unbound one always (free for work then needs a launchable family)', () => {
+    expect(matchable({ bound: true, live: true })).toBe(true);
+    expect(matchable({ bound: true, live: false })).toBe(false);
+    expect(matchable({ bound: false, live: false })).toBe(true);
+    expect(matchable({ bound: false, live: false, endingSession: true })).toBe(false);
+  });
+
+  it('liveSession and AVAILABLE describe that rule, with no pre-T6 restriction left', () => {
+    expect(field('liveSession')).toContain('The matcher assigns to a BOUND worker only while it has one');
+    expect(field('liveSession')).toContain('an unbound worker is matched when a live host can launch it');
+    expect(state('AVAILABLE')).toContain('an unbound worker a live host can launch, which the matcher assigns to');
+    expect(state('AVAILABLE')).toContain('which the matcher leaves alone until its session is live again');
+    for (const text of [field('liveSession'), state('AVAILABLE')]) expect(text).not.toMatch(/host-operations slice|until T6/);
   });
 });

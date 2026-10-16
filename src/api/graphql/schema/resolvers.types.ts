@@ -16,6 +16,8 @@ import {
   bestEffortFlatNodeUrn,
 } from '../../../lib/urnEmit.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
+import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
+import type { InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { nodeContentValidationState } from '../../../lib/nodeContentValidation.js';
 // Spec 049 Phase 3b — AppRun.scope: the mint snapshot as the caller may read it.
 import { parseRunScopeSnapshot, resolveRunScope, scopeInfoOf } from '../../../lib/scopes.js';
@@ -389,6 +391,11 @@ async function resolveEdgeEndpoint(
       ? pre
       : ((await loadEdgeEndpointNode(ctx, wantId)) as { memoryId?: string } | null);
   if (!node || typeof node.memoryId !== 'string') return null;
+  // #1893 — an endpoint stamped inherited was admitted through the child it
+  // was read through (resolveInheritedEdges); its own memory is the base's,
+  // which a child-only reader can't read, and must not be re-gated here.
+  // The stamp is transient: no row loaded by FK ever carries it.
+  if ((node as { inheritedFrom?: unknown }).inheritedFrom) return node;
 
   // Fast path: the edge and BOTH endpoints share one memory ⇒ that authorized
   // memory holds both endpoints, no per-endpoint check needed.
@@ -971,6 +978,10 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => portalUrlForUrn(await resolveNodeUrnField(n, ctx)),
+    // #1885 — stamped by the effective-system-memory reads (markInherited);
+    // absent everywhere else, which reads as not inherited.
+    inheritedFrom: (n: { inheritedFrom?: InheritedFrom }) =>
+      n.inheritedFrom ? { agentId: n.inheritedFrom.agentId, agentUrn: emitEntityUrnV2('agent', n.inheritedFrom.agentUrn) } : null,
   },
   Edge: {
     // `Edge.source` / `Edge.target` are NULLABLE (`Node`) in the schema, for two

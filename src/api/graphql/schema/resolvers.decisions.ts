@@ -408,10 +408,10 @@ async function evaluateRows(db: Pick<Tx, 'nodeRevision'>, rows: DecisionRow[]): 
   const approvers = [...new Set(rows.map((r) => r.approvedBy).filter((id): id is string => id != null))];
   const identities = new Map(await Promise.all(approvers.map(async (id) => [id, await identitiesOf(db as Tx, id)] as const)));
   return rows.map((row) => {
-    const snap = snapshots.get(row.id);
+    const snaps = snapshots.get(row.id);
     const evaluation = evaluateDecision(
       row as DecisionNodeRow,
-      snap ? { title: snap.name, abstract: snap.abstract, content: snap.content } : null,
+      snaps ? snaps.map((snap) => ({ title: snap.name, abstract: snap.abstract, content: snap.content })) : null,
       row.approvedBy ? identities.get(row.approvedBy) : undefined,
     );
     const cached = evaluation.decision ? null : decisionDataSchema.safeParse(row.data);

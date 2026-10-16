@@ -4,7 +4,7 @@ import { signWakeProof, verifyWakeProof, sameRequester, type WakeProof } from '.
 import { attentionTokenSecret } from '../teamAttention.js';
 
 const proof = (over: Partial<WakeProof> = {}): WakeProof => ({
-  v: 1, kind: 'wake-proof', appId: 'a', workerId: 'w', requester: { userId: 'u' }, channels: [], ticks: [], exempt: false, issuedAt: Date.now(), ...over,
+  v: 1, kind: 'wake-proof', appId: 'a', workerId: 'w', requester: { userId: 'u' }, channels: [], ticks: [], tasks: [], exempt: false, issuedAt: Date.now(), ...over,
 });
 const code = (fn: () => unknown) => {
   try { fn(); } catch (e) { return (e as any).extensions?.code; }
@@ -31,7 +31,17 @@ describe('wake proofs — R4', () => {
   });
 
   it('an unknown version is refused even when correctly signed', () => {
-    expect(code(() => verifyWakeProof(signWakeProof({ ...proof(), v: 2 } as never)))).toBe('WAKE_PROOF_INVALID');
+    expect(code(() => verifyWakeProof(signWakeProof({ ...proof(), v: 3 } as never)))).toBe('WAKE_PROOF_INVALID');
+  });
+
+  it('#1708: v2 carries tasks and must; v1 reads as delivering none', () => {
+    const tasks = [{ eventId: 'e', chainIndex: 1 }];
+    expect(verifyWakeProof(signWakeProof(proof({ v: 2, tasks }))).tasks).toEqual(tasks);
+    const { tasks: _t, ...v1 } = proof();
+    expect(verifyWakeProof(signWakeProof(v1 as never)).tasks).toEqual([]);
+    const { tasks: _u, ...bare } = proof({ v: 2 });
+    expect(code(() => verifyWakeProof(signWakeProof(bare as never)))).toBe('WAKE_PROOF_INVALID');
+    expect(code(() => verifyWakeProof(signWakeProof(proof({ v: 2, tasks: [{ eventId: 'e', chainIndex: -1 }] }))))).toBe('WAKE_PROOF_INVALID');
   });
 
   it('is domain-separated from the attention token: a token signed under the attention key is not a proof', () => {

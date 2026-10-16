@@ -2,7 +2,10 @@
 -- this SQL: included verbatim by prisma/post-push.sql (dev DB, test template,
 -- CI) and copied into the newest comment migration (prod, which does not run
 -- post-push.sql): 20261005200000_comment_nodes, then #1721's
--- 20261010100000_comment_rulings. Change it only together with a new
+-- 20261010100000_comment_rulings, then the anchor CHECK in #1857
+-- 20261013170000_encrypted_comment_anchor_nullable, then #1869's insert check in
+-- 20261013180000_encrypted_anchor_hash_scrub, then #1935's commentable system
+-- memories in 20261015100000_system_memories_commentable. Change it only together with a new
 -- migration that carries the new text. Idempotent.
 --
 -- The application path refuses every case first with a typed error; these are
@@ -14,11 +17,12 @@ ALTER TABLE "nodes" ADD CONSTRAINT "chk_nodes_comment_unapproved" CHECK (
   "node_type" <> 'comment'
   OR ("approved_rev_no" IS NULL AND "approval_hash" IS NULL AND "minted_at" IS NULL AND "minted_hash" IS NULL));
 
--- An anchor edge carries its revision and hash; no other edge does (cor:dmo:110:01).
+-- An anchor carries its revision and an optional hash; other edges carry neither (cor:dmo:110:01).
 ALTER TABLE "edges" DROP CONSTRAINT IF EXISTS "chk_edges_governed_anchor";
 ALTER TABLE "edges" ADD CONSTRAINT "chk_edges_governed_anchor" CHECK (
   ("governed_kind" IS NOT DISTINCT FROM 'COMMENT_ANCHOR')
-    = ("anchor_rev_no" IS NOT NULL AND "anchor_approval_hash" IS NOT NULL)
+    = ("anchor_rev_no" IS NOT NULL)
+  AND ("governed_kind" IS NOT DISTINCT FROM 'COMMENT_ANCHOR' OR "anchor_approval_hash" IS NULL)
   AND ("anchor_rev_no" IS NULL OR "anchor_rev_no" > 0)
   AND ("anchor_approval_hash" IS NULL OR "anchor_approval_hash" ~ '^[0-9a-f]{64}$'));
 
@@ -66,9 +70,10 @@ BEGIN
   END IF;
   -- Only a LIVE comment needs a commentable memory: a deleted thread is gone
   -- from every check (cor:dmo:110:05) but keeps its history, so it may follow
-  -- its target into a private or system memory (cor:dmo:110:02).
+  -- its target into a private memory (cor:dmo:110:02; system memories are
+  -- commentable since #1935).
   SELECT class INTO mem_class FROM memories WHERE id = n.memory_id;
-  IF n.deleted_at IS NULL AND (mem_class IS NULL OR mem_class NOT IN ('app', 'knowledge', 'personal', 'group')) THEN
+  IF n.deleted_at IS NULL AND (mem_class IS NULL OR mem_class NOT IN ('app', 'knowledge', 'personal', 'group', 'system')) THEN
     RAISE EXCEPTION 'COMMENT_INVARIANT: comment % is in a % memory, which is not commentable', p_node_id, mem_class USING ERRCODE = 'check_violation';
   END IF;
   IF m.thread_root_id IS NOT NULL THEN
@@ -92,7 +97,7 @@ END $$;
 
 CREATE OR REPLACE FUNCTION hadron_comment_node_changed() RETURNS trigger
 LANGUAGE plpgsql AS $$
-DECLARE c RECORD;
+DECLARE c RECORD; target_encrypted BOOLEAN;
 BEGIN
   IF TG_TABLE_NAME = 'nodes' THEN
     PERFORM hadron_check_comment_node(NEW.id);
@@ -105,6 +110,18 @@ BEGIN
   ELSIF TG_TABLE_NAME = 'comment_meta' THEN
     PERFORM hadron_check_comment_node(CASE WHEN TG_OP = 'DELETE' THEN OLD.node_id ELSE NEW.node_id END);
   ELSIF TG_TABLE_NAME = 'edges' THEN
+    -- An anchor is born with a hash exactly when its target is plaintext
+    -- (cor:dmo:110:01; #1869, Rook's #1866 P3-3). Checked at insert only: a
+    -- thread that later moves, or whose memory is later encrypted, keeps its row.
+    IF NEW.governed_kind = 'COMMENT_ANCHOR' THEN
+      SELECT m.is_encrypted INTO target_encrypted
+        FROM nodes t JOIN memories m ON m.id = t.memory_id WHERE t.id = NEW.target_id;
+      IF target_encrypted AND NEW.anchor_approval_hash IS NOT NULL THEN
+        RAISE EXCEPTION 'COMMENT_INVARIANT: anchor % of comment % carries a hash, but its target is in an encrypted memory', NEW.id, NEW.source_id USING ERRCODE = 'check_violation';
+      ELSIF NOT target_encrypted AND NEW.anchor_approval_hash IS NULL THEN
+        RAISE EXCEPTION 'COMMENT_INVARIANT: anchor % of comment % has no hash, but its target is in a plaintext memory', NEW.id, NEW.source_id USING ERRCODE = 'check_violation';
+      END IF;
+    END IF;
     PERFORM hadron_check_comment_node(NEW.source_id);
   ELSIF TG_TABLE_NAME = 'memories' THEN
     FOR c IN SELECT cm.node_id FROM comment_meta cm JOIN nodes n ON n.id = cm.node_id WHERE n.memory_id = NEW.id LOOP

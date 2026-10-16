@@ -10,13 +10,15 @@ import {
   createAssetReferenceNode,
   type CreateAssetReferenceNodeInput,
 } from '../../../controller/operations/createAssetReferenceNode.js';
-import { setAgentAssetUploadEnabled } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
+import { setAgentAssetUploadEnabled, SetAssetEnabledError } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
+import { AssetUploadError } from '../../../controller/operations/beginAssetUpload.js';
 import { softDeleteAsset } from '../../../controller/operations/softDeleteAsset.js';
 import { restoreAsset } from '../../../controller/operations/restoreAsset.js';
 import {
   type Context,
   resolveAssetTargetMemoryId,
   isOrgAdminFor,
+  requireReadableAgentForAssetOp,
 } from './resolvers.helpers.js';
 
 export const assetMutations = {
@@ -26,6 +28,8 @@ export const assetMutations = {
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
+      // #1946: an Agent the caller can't read answers the op's own "agent not found".
+      await requireReadableAgentForAssetOp(ctx, input.agentUrn, () => new AssetUploadError('NOT_FOUND', 'agent not found'));
       const ticket = await beginAssetUpload(
         ctx.db,
         { userId: ctx.userId, appId: ctx.appId },
@@ -116,6 +120,9 @@ export const assetMutations = {
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
+      // #1946: an Agent the caller can't read answers the op's own "agent not
+      // found", never PERMISSION_DENIED or the user-owned message.
+      await requireReadableAgentForAssetOp(ctx, input.agentUrn, () => new SetAssetEnabledError('NOT_FOUND', 'agent not found'));
       return setAgentAssetUploadEnabled(
         ctx.db,
         { userId: ctx.userId },

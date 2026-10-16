@@ -599,6 +599,22 @@ LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP = 'INSERT' OR NEW."revision_content_hash" = 'refresh' THEN
     NEW."revision_content_hash" := hadron_node_revision_state_hash(NEW);
+    -- #1611 (cor:dmo:120:04): the content-change boundary moves only through a
+    -- SANCTIONED writer (the same 'refresh' marker as the fingerprint above) and
+    -- only when the three approval-hashed fields change under approval-hash v1
+    -- normalization (CRLF and lone CR become LF; nothing else). A write outside
+    -- the revision system never moves it, so its content change stays
+    -- detectable as TAMPERED instead of passing for a supported edit.
+    IF TG_OP = 'INSERT' THEN
+      NEW."content_rev_seq" := NEW."rev_seq";
+    ELSIF replace(replace(NEW."name", E'\r\n', E'\n'), E'\r', E'\n')
+         IS DISTINCT FROM replace(replace(OLD."name", E'\r\n', E'\n'), E'\r', E'\n')
+      OR replace(replace(NEW."abstract", E'\r\n', E'\n'), E'\r', E'\n')
+         IS DISTINCT FROM replace(replace(OLD."abstract", E'\r\n', E'\n'), E'\r', E'\n')
+      OR replace(replace(NEW."content", E'\r\n', E'\n'), E'\r', E'\n')
+         IS DISTINCT FROM replace(replace(OLD."content", E'\r\n', E'\n'), E'\r', E'\n') THEN
+      NEW."content_rev_seq" := NEW."rev_seq";
+    END IF;
   END IF;
   RETURN NEW;
 END;
@@ -633,7 +649,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 
 -- #1706: stall alarms (one per episode), alarm wakes, availability for work and
 -- per-App stall windows. One source, shared verbatim with migration
--- 20261009010000_agent_task_stalls (pinned by src/lib/agentTasks/invariants.test.ts).
+-- 20261014150000_host_report_timeout (the newest to carry it) (pinned by src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-stall-invariants.sql
 
 -- #1707: a session's model family and host registrations. One source, shared
@@ -649,3 +665,36 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1749: App key scopes (cor:aut:010:03). One source, shared verbatim with migration
 -- 20261011190000_app_key_scopes (pinned by src/lib/appKeyScopes/appKeyScopes.test.ts).
 \ir app-key-scope-invariants.sql
+
+-- #1709: host operations and the record of host-key use. One source, shared
+-- verbatim with migration 20261014150100_host_operation_settlement (the newest to carry it) (pinned by
+-- src/lib/hostOperations/invariants.test.ts). After agent-task-matching-invariants.sql,
+-- whose host_operation_token_ok it uses.
+\ir host-operation-invariants.sql
+
+-- #1709 slice 2: launch grants and host-launched sessions. One source, shared
+-- verbatim with migration 20261014030000_host_launch (pinned by
+-- src/lib/hostOperations/launch.test.ts).
+\ir host-launch-invariants.sql
+
+-- #1631: shared passkey registry invariant guards.
+\ir passkey-invariants.sql
+
+-- #1632: signing requests, append-only signature records, the content-change
+-- marker. One source, shared verbatim with migration 20261013160000_signing_requests.
+\ir signing-invariants.sql
+
+-- #1885: an Agent extends at most one base Agent; no cycles, at most 4 in a
+-- chain. One source, shared verbatim with migration 20261014120000_agent_base
+-- (pinned by src/api/graphql/schema/resolvers.agentBase1885.test.ts).
+\ir agent-base-invariants.sql
+
+-- #1903: session liveness's activity probe, max(created_at) over a session's
+-- counts_as_activity events. Partial, so Prisma's schema language can't model
+-- it; `db push` and `migrate diff` leave it alone (verified on Prisma 6.19), so
+-- this file is what builds it on push-managed DBs. Same definition as migration
+-- 20261014040000_usage_events_session_activity_idx, which builds it
+-- CONCURRENTLY for production; production went down for an hour without it
+-- (ops:alpha:incident-2026-10-14-pool-exhaustion-liveness-query).
+CREATE INDEX IF NOT EXISTS usage_events_session_activity_idx
+  ON usage_events (session_id, created_at) WHERE counts_as_activity;

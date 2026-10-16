@@ -10,14 +10,14 @@ export default defineConfig({
     // test files would otherwise be collected into THIS run (and race on the
     // shared hadron_test DB; see findings:parallel-vitest-shared-test-db).
     // Disposable-stack regressions use node:test, not Vitest.
-    exclude: ['dist/**', 'node_modules/**', '.claude/**', 'scripts/e2e/**'],
+    exclude: ['dist/**', '**/node_modules/**', '.claude/**', 'scripts/e2e/**'],
     pool: 'forks',
     // Parallel by default: perWorkerDb.ts points each worker at its own cloned
     // DB (hadron_test_<VITEST_POOL_ID>), so files no longer race and can run
     // concurrently at vitest's default fork concurrency (~cores-2).
     // HADRON_TEST_PARALLEL=0 restores the old single-DB serial behavior.
     fileParallelism: PARALLEL_DBS,
-    setupFiles: ['./src/test/perWorkerDb.ts', './src/test/drainUsage.ts'],
+    setupFiles: ['./src/test/perWorkerDb.ts', './src/test/graphRootSetup.ts', './src/test/drainUsage.ts'],
     // CHECK constraints declared in migrations don't survive `prisma db push`
     // (which is what tests use to set up a fresh schema). Apply them once
     // here, before any test file runs. Per spec 005-agent-subscription FR-014.
@@ -29,7 +29,8 @@ export default defineConfig({
       JWT_SECRET: 'test-secret-at-least-32-characters-!!',
       // 64 hex chars = 32 bytes = AES-256 key. Fixed for test reproducibility.
       HADRON_ENCRYPTION_KEY: '0'.repeat(64),
-      GRAPHS_PATH: '/tmp/hadron-test-graphs',
+      // GRAPHS_PATH is NOT pinned here: it is per run (#1951), set by
+      // src/test/graphRootSetup.ts from the run id globalSetup stamps.
       // Prisma auto-loads .env into every worker, so a dev machine's real
       // endpoints leak into tests that CI (no .env) never sees — e.g. the
       // llama.cpp EMBEDDING_API_URL caused knowledge-class fixtures (vector-

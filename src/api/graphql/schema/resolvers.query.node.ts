@@ -2,6 +2,7 @@
 import { contentScopeWhere, effectiveContentScope, type ContentScope } from '../../../lib/comments/scope.js';
 import { isConcealedCommentHistory } from './resolvers.comments.js';
 import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
+import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, retainEffective, stillInherited, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import {
   renderNodeExport,
   type NodeExportFormat,
@@ -38,6 +39,7 @@ import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import {
   parseUrnInput,
   validateUrnType,
+  splitNodeUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
@@ -87,7 +89,7 @@ import {
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
-import { approvalStatePrismaWhere, type NodeApprovalState } from '../../../lib/nodeApproval.js';
+import { approvalStatePrismaWhere, mintedPrismaWhere, type NodeApprovalState } from '../../../lib/nodeApproval.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /** findNodes' arguments (cor:api:090), shared by the resolver and its spec-049 scope wrapper. */
@@ -655,6 +657,10 @@ export const nodeQueries = {
       // every dispatch form. Generic so the full node row type flows through.
       const finish = async <T extends { id: string; loc: string; deletedAt: Date | null; content: string | null; data: unknown; memoryId: string }>(
         selected: T,
+        // #1885 — set only by Form 3a's effective-memory lookup: the node is a
+        // base's, read through a system memory `allowed` already admitted, so
+        // its own memory is not re-gated here (cor:dmo:050:14 ruling 4).
+        inheritedFrom?: InheritedFrom,
       ) => {
         // The lookup above selects the address. Reconcile and re-fetch while
         // holding its row lock so Node.revision and every sibling field come
@@ -668,9 +674,13 @@ export const nodeQueries = {
           current.deletedAt ||
           current.memoryId !== selected.memoryId ||
           current.loc !== selected.loc ||
-          !allowed(current.memoryId)
+          (!inheritedFrom && !allowed(current.memoryId))
         ) return null;
-        const node = current;
+        // An inherited selection is re-checked on the version actually served:
+        // a base node turned boot prompt, or a child override added, since
+        // the selection is no longer the child's to show (Diego, #1891 P2-1).
+        if (inheritedFrom && !(await stillInherited(ctx.db, inheritedFrom, current))) return null;
+        const node = inheritedFrom ? Object.assign(current, { inheritedFrom }) : current;
         // #1061 — every dispatch form of this query funnels its ONE successful
         // return through `finish`, so this is the single place a `read` is
         // recorded for the canonical node read (and for `nextNode`, which
@@ -707,12 +717,30 @@ export const nodeQueries = {
       const typeErr = validateUrnType(parsed, 'node');
       if (typeErr) throw new Error(typeErr);
       const value = parsed.value;
+      // #1885 (cor:dmo:050:14) — a node URN in an Agent's system memory whose
+      // loc has no node of its own (and none moved from it) reads through to
+      // the nearest base that passes one down, as MCP hadron_get_node does.
+      // Gated on the URN's own memory; the node keeps the base's address.
+      const inheritedUrnRead = async () => {
+        let parts: { memoryUrn: string; loc: string };
+        try {
+          parts = splitNodeUrn(ref);
+        } catch {
+          return null;
+        }
+        const memory = await resolveMemoryRef(ctx.db, parts.memoryUrn).catch(() => null);
+        if (!memory || !allowed(memory.id)) return null;
+        const effective = await findEffectiveNodeIdByLoc(ctx.db, memory.id, parts.loc);
+        if (!effective?.inheritedFrom) return null;
+        const inherited = await ctx.db.node.findUnique({ where: { id: effective.id }, include });
+        return inherited && !inherited.deletedAt ? finish(inherited, effective.inheritedFrom) : null;
+      };
       const movedUrnRead = async () => {
         let id: string;
         try {
           ({ id } = await resolveNodeRefForCaller(ctx, ref));
         } catch (e) {
-          if (e instanceof NodeNotFoundError) return null;
+          if (e instanceof NodeNotFoundError) return inheritedUrnRead();
           throw e;
         }
         const selected = await ctx.db.node.findUnique({ where: { id }, include });
@@ -745,7 +773,13 @@ export const nodeQueries = {
           where: { loc: value, memoryId: scopedMemoryId, deletedAt: null },
           include,
         });
-        return node ? finish(node) : null;
+        if (node) return finish(node);
+        // #1885 (cor:dmo:050:14) — no node of its own at the loc: a system
+        // memory reads through to the nearest base that passes one down.
+        const effective = await findEffectiveNodeIdByLoc(ctx.db, scopedMemoryId, value);
+        if (!effective?.inheritedFrom) return null;
+        const inherited = await ctx.db.node.findUnique({ where: { id: effective.id }, include });
+        return inherited && !inherited.deletedAt ? finish(inherited, effective.inheritedFrom) : null;
       }
 
       // Form 3b: unprefixed + unscoped. A 3+-segment ref whose memory prefix
@@ -1056,6 +1090,13 @@ export const nodeQueries = {
       if (scopeIds.length === 0) {
         return { hits: [], passages: [], total: 0, reason: null, degraded: null };
       }
+      // #1885 (cor:dmo:050:14) — a system memory in the scope reads as its
+      // effective memory: its bases' inherited nodes join it, under their own
+      // URNs and marked inherited, and a base's overridden nodes and boot
+      // prompts stay out. Widened only from memories already gated above.
+      const inheritance = await effectiveScope(ctx.db, scopeIds);
+      scopeIds = inheritance.memoryIds;
+      const inheritanceExcluded = new Set(inheritance.excludeNodeIds);
 
       // Structured node-attribute filters (cor:api:090:02), AND-combined. Applied
       // to BOTH the no-query list path and the ranked-query path (via re-fetch),
@@ -1087,13 +1128,14 @@ export const nodeQueries = {
             } }
           : {}),
         ...approvalStatePrismaWhere(f.approvalState, ctx.db),
-        ...(f.minted != null ? { mintedAt: f.minted ? { not: null } : null } : {}),
         // #1607 (cor:dmo:110:06) — approval and mint status sets never contain
         // comments; #1608 (cor:dmo:110:08) — content, comments or both, CONTENT
         // by default. Both ride AND so neither clobbers the nodeType key above.
         AND: [
+          ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
           ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
           ...(scopeWhere ? [scopeWhere] : []),
+          ...(inheritance.excludeNodeIds.length > 0 ? [{ id: { notIn: inheritance.excludeNodeIds } }] : []),
         ],
       };
       const nodeInclude = {
@@ -1130,7 +1172,14 @@ export const nodeQueries = {
       // so a caller that reads 30 nodes through one search and one that reads
       // them one at a time land in the same place. Every branch has already
       // scoped its rows to the caller's readable memories before reaching here.
-      const recordSearchHits = (hits: readonly { node: unknown }[]): void => {
+      const recordSearchHits = async (hits: { node: unknown }[]): Promise<void> => {
+        // #1885 — the exclusion list was a snapshot taken before this query:
+        // re-check every inherited hit on the version read (P2-1), in place.
+        if (inheritance.inheritedFrom.size > 0) {
+          const kept = new Set((await retainEffective(ctx.db, hits.map((h) => h.node as { id: string; memoryId: string; role?: string | null }), inheritance)).map((n) => n.id));
+          for (let i = hits.length - 1; i >= 0; i--) if (!kept.has((hits[i]!.node as { id: string }).id)) hits.splice(i, 1);
+        }
+        markInherited(hits.map((h) => h.node as { memoryId: string }), inheritance.inheritedFrom);
         recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(hits.map((h) => h.node)), ctx);
       };
 
@@ -1164,7 +1213,7 @@ export const nodeQueries = {
           const byId = new Map(rows.map((n) => [n.id, n]));
           const ordered = ids.map((id) => byId.get(id)).filter((n): n is NonNullable<typeof n> => !!n);
           const browseHits = ordered.map((n) => ({ node: n, score: null, vector: null }));
-          recordSearchHits(browseHits);
+          await recordSearchHits(browseHits);
           return { hits: browseHits, passages: [], total: null, reason: null, degraded: null };
         }
         const orderBy =
@@ -1180,7 +1229,7 @@ export const nodeQueries = {
         });
         await decryptNodesBatch(ctx.db, rows);
         const listHits = rows.map((n) => ({ node: n, score: null, vector: null }));
-        recordSearchHits(listHits);
+        await recordSearchHits(listHits);
         return {
           hits: listHits,
           passages: [],
@@ -1317,7 +1366,7 @@ export const nodeQueries = {
           const shown = new Set(pageRows.map((n) => n.id));
           const neighbourIds = (await expandWithNeighbors(
             ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
-          )).filter((id) => !shown.has(id));
+          )).filter((id) => !shown.has(id) && !inheritanceExcluded.has(id));
           if (neighbourIds.length > 0) {
             // Neighbours are deliberately UNFILTERED (appended context), but
             // never out of scope: re-assert it here, like every other hydration
@@ -1338,7 +1387,7 @@ export const nodeQueries = {
             }
           }
         }
-        recordSearchHits(hits);
+        await recordSearchHits(hits);
         return { hits, passages: [], total: null, reason, degraded };
       };
 
@@ -1384,7 +1433,7 @@ export const nodeQueries = {
           const shown = new Set(pageRows.map((n) => n.id));
           const neighbourIds = (await expandWithNeighbors(
             ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
-          )).filter((id) => !shown.has(id));
+          )).filter((id) => !shown.has(id) && !inheritanceExcluded.has(id));
           if (neighbourIds.length > 0) {
             const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null, ...(scopeWhere ? { AND: [scopeWhere] } : {}) }, include: nodeInclude }); // #1608
             await decryptNodesBatch(ctx.db, nRows);
@@ -1392,7 +1441,7 @@ export const nodeQueries = {
             for (const id of neighbourIds) { const n = nById.get(id); if (n) hits.push({ node: n, score: null, vector: null }); }
           }
         }
-        recordSearchHits(hits);
+        await recordSearchHits(hits);
         return { hits, passages: [], total: null, reason, degraded };
       };
 
@@ -1586,6 +1635,15 @@ export const nodeQueries = {
           },
           include: { memory: { select: { urn: true } } },
         });
+        // #1885 (Diego, #1891 P2-1, chunk mode): the scope's exclusions were a
+        // snapshot, so re-check every hydrated parent against the effective
+        // set now, before eligibility, paging, usage and passage text. A base
+        // node a child override or a boot-prompt turn took out after the
+        // snapshot keeps its indexed chunks, and its text must not come back.
+        if (inheritance.inheritedFrom.size > 0) {
+          const kept = new Set((await retainEffective(ctx.db, parents, inheritance)).map((p) => p.id));
+          for (let i = parents.length - 1; i >= 0; i--) if (!kept.has(parents[i]!.id)) parents.splice(i, 1);
+        }
         const eligible = new Set(parents.map((p) => p.id));
         const chunkHits = scoredChunks.filter((c) => eligible.has(c.nodeId)).slice(off, off + finalLimit);
         const pageParentIds = new Set(chunkHits.map((c) => c.nodeId));
@@ -1765,10 +1823,18 @@ export const nodeQueries = {
         properties?: unknown;
       }> = [];
       const unavailable: string[] = [];
+      let batchInheritance: Awaited<ReturnType<typeof effectiveScope>> | null = null;
       // Explicit-set form only: resolved node id -> the caller's ref string, so
       // `unavailable` / `omitted` report back what the caller actually sent.
       // Null for the prefix form, where there are no caller refs (ids there).
       let refByNodeId: Map<string, string> | null = null;
+      // #1885 — explicit refs that read through a child's effective system
+      // memory (as node(ref:) does), with the child each came through.
+      const explicitInherited = new Map<string, InheritedFrom>();
+      const memoryAllowed = (memoryId: string) => {
+        const scoped = access.memoryId as { in: string[] } | undefined;
+        return !scoped || scoped.in.includes(memoryId);
+      };
 
       if (hasSet) {
         // Count cap (cor:api:040:02) — caller knows the count; fail loud up front.
@@ -1814,9 +1880,23 @@ export const nodeQueries = {
               const { id } = await resolveNodeRefForCaller(ctx, ref);
               return { ref, id: id as string | null };
             } catch (e) {
-              if (e instanceof NodeNotFoundError || e instanceof AmbiguousLegacyUrnError)
+              if (e instanceof AmbiguousLegacyUrnError) return { ref, id: null };
+              if (!(e instanceof NodeNotFoundError)) throw e;
+              // #1885 (cor:dmo:050:14) — no node of its own and none moved:
+              // a child URN reads through to the base that passes the loc
+              // down, gated on the child's memory (Diego, #1891 P2-3).
+              let parts: { memoryUrn: string; loc: string };
+              try {
+                parts = splitNodeUrn(ref);
+              } catch {
                 return { ref, id: null };
-              throw e;
+              }
+              const child = await resolveMemoryRef(ctx.db, parts.memoryUrn).catch(() => null);
+              if (!child || !memoryAllowed(child.id)) return { ref, id: null };
+              const effective = await findEffectiveNodeIdByLoc(ctx.db, child.id, parts.loc);
+              if (!effective?.inheritedFrom) return { ref, id: null };
+              explicitInherited.set(effective.id, effective.inheritedFrom);
+              return { ref, id: effective.id as string | null };
             }
           }),
         );
@@ -1834,7 +1914,9 @@ export const nodeQueries = {
         // simply absent from the result — reported indistinguishably from a
         // ref that never resolved.
         const rows = await ctx.db.node.findMany({
-          where: { id: { in: [...refByNodeId.keys()] }, deletedAt: null, ...access },
+          where: explicitInherited.size > 0
+            ? { id: { in: [...refByNodeId.keys()] }, deletedAt: null, OR: [access, { id: { in: [...explicitInherited.keys()] } }] }
+            : { id: { in: [...refByNodeId.keys()] }, deletedAt: null, ...access },
           include,
         });
         const byId = new Map(rows.map((n) => [n.id, n]));
@@ -1853,8 +1935,16 @@ export const nodeQueries = {
         if (accessibleIds && !accessibleIds.in.includes(memId)) throw new MemoryNotFoundError(memory!);
         // Count cap: take MAX+1 to detect overflow, then fail loud rather than
         // silently returning a truncated subtree.
+        // #1885 (cor:dmo:050:14) — the subtree of an Agent's system memory
+        // reads as its effective memory, as MCP hadron_get_nodes does.
+        batchInheritance = await effectiveScope(ctx.db, [memId]);
         const rows = await ctx.db.node.findMany({
-          where: { memoryId: memId, loc: { startsWith: locPrefix! }, deletedAt: null },
+          where: {
+            memoryId: { in: batchInheritance.memoryIds },
+            loc: { startsWith: locPrefix! },
+            deletedAt: null,
+            ...(batchInheritance.excludeNodeIds.length > 0 ? { id: { notIn: batchInheritance.excludeNodeIds } } : {}),
+          },
           orderBy: { loc: 'asc' },
           take: BATCH_READ_MAX_NODES + 1,
           include,
@@ -1882,10 +1972,30 @@ export const nodeQueries = {
         );
         if (live != null) liveIds.push(id);
       }
+      // #1885 — inherited rows were admitted through the child's memory, so
+      // the re-check admits exactly those ids alongside the caller's access.
+      const inheritedIds = [
+        ...(batchInheritance ? ordered.filter((n) => batchInheritance!.inheritedFrom.has(n.memoryId)).map((n) => n.id) : []),
+        ...explicitInherited.keys(),
+      ];
       const currentRows = await ctx.db.node.findMany({
-        where: { id: { in: liveIds }, deletedAt: null, ...access },
+        where: inheritedIds.length > 0
+          ? { id: { in: liveIds }, deletedAt: null, OR: [access, { id: { in: inheritedIds } }] }
+          : { id: { in: liveIds }, deletedAt: null, ...access },
         include,
       });
+      if (batchInheritance) {
+        const kept = new Set((await retainEffective(ctx.db, currentRows, batchInheritance)).map((n) => n.id));
+        for (let i = currentRows.length - 1; i >= 0; i--) if (!kept.has(currentRows[i]!.id)) currentRows.splice(i, 1);
+        markInherited(currentRows, batchInheritance.inheritedFrom);
+      }
+      for (let i = currentRows.length - 1; i >= 0; i--) {
+        const row = currentRows[i]!;
+        const from = explicitInherited.get(row.id);
+        if (!from) continue;
+        if (await stillInherited(ctx.db, from, row)) Object.assign(row, { inheritedFrom: from });
+        else currentRows.splice(i, 1);
+      }
       const currentById = new Map(currentRows.map((n) => [n.id, n]));
       ordered = ordered.flatMap((selected) => {
         const current = currentById.get(selected.id);
@@ -2237,8 +2347,12 @@ export const nodeQueries = {
         },
         select: { id: true },
       });
-      const memoryIds = scoped.map((m) => m.id);
-      if (memoryIds.length === 0) return [];
+      if (scoped.length === 0) return [];
+      // #1885 (cor:dmo:050:14) — an installed Agent's system memory reads as
+      // its effective memory: inherited nodes join, marked, under their own
+      // URNs; a base's overridden nodes and boot prompts stay out.
+      const inheritance = await effectiveScope(ctx.db, scoped.map((m) => m.id));
+      const memoryIds = inheritance.memoryIds;
 
       // #525 — optional node-level NodeFilter, pushed server-side so callers
       // (e.g. an App's runnable-task picker) can request `{ isRunnable: true }`
@@ -2292,13 +2406,14 @@ export const nodeQueries = {
               } }
             : {}),
           ...approvalStatePrismaWhere(f.approvalState, ctx.db),
-          ...(f.minted != null ? { mintedAt: f.minted ? { not: null } : null } : {}),
           // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
           // #1607 + #1608 — no comments in status sets; content, comments or
           // both by contentScope (CONTENT by default, cor:dmo:110:08).
           AND: [
+            ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
             ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
             ...((sw) => (sw ? [sw] : []))(contentScopeWhere(effectiveContentScope(f))),
+            ...(inheritance.excludeNodeIds.length > 0 ? [{ id: { notIn: inheritance.excludeNodeIds } }] : []),
           ],
         },
         orderBy: { loc: 'asc' },
@@ -2309,7 +2424,11 @@ export const nodeQueries = {
           memory: { select: { id: true, urn: true, name: true, organizationId: true } },
         },
       });
+      // The exclusion list was a snapshot: re-check what was read (P2-1).
+      const kept = new Set((await retainEffective(ctx.db, results, inheritance)).map((r) => r.id));
+      for (let i = results.length - 1; i >= 0; i--) if (!kept.has(results[i]!.id)) results.splice(i, 1);
       await decryptNodesBatch(ctx.db, results);
+      markInherited(results, inheritance.inheritedFrom);
       // #1061 — the App-scoped node list returns full node projections, so each
       // one is a read. Scope is the App's installed-agent memories, established
       // above.

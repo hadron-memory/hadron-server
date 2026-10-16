@@ -215,8 +215,13 @@ export async function appendAlarmEvent(
   return rows[0]?.id ?? null;
 }
 
-/** cor:agt:060:02 / :03 — who set an availability record (cor:agt:060:08 setter classes). */
-export type AvailabilitySetter = 'worker' | 'holder' | 'app-manager' | 'stall-rule' | 'host';
+/**
+ * cor:agt:060:02 / :03 — who set an availability record: cor:agt:060:08's
+ * setter classes (`reports-to`, #1759: the worker it reports to, clearing a
+ * stall), plus `lapse` (#1766): the platform writing down that an `until`
+ * passed (cor:agt:060:02).
+ */
+export type AvailabilitySetter = 'worker' | 'holder' | 'app-manager' | 'reports-to' | 'stall-rule' | 'host' | 'lapse';
 export type AvailabilityReason = 'stalled' | 'out-of-tokens' | 'host-down' | 'other';
 
 /** `availability.changed`: a worker's or a model family's record changed. Words and ids only. */
@@ -230,6 +235,10 @@ export type AvailabilityEvent =
       setBy: AvailabilitySetter;
       /** The alarm that made the worker unavailable (cor:agt:060:07). */
       alarmEventId?: string;
+      /** #1766: the `until` that passed, when the lapse made the worker available (cor:agt:060:02). */
+      lapsedAt?: Date;
+      /** #1709: the host whose key set it (`setBy: 'host'`, cor:agt:060:08). */
+      hostId?: string;
     }
   | {
       kind: 'family';
@@ -247,7 +256,13 @@ export async function appendAvailabilityEvent(
   const e = args.event;
   const common = { state: e.state, reason: e.reason, until: e.until ? e.until.toISOString() : null };
   const payload: Prisma.InputJsonObject = e.kind === 'worker'
-    ? { ...common, setBy: e.setBy, ...(e.alarmEventId ? { alarmEventId: e.alarmEventId } : {}) }
+    ? {
+        ...common,
+        setBy: e.setBy,
+        ...(e.alarmEventId ? { alarmEventId: e.alarmEventId } : {}),
+        ...(e.lapsedAt ? { lapsedAt: e.lapsedAt.toISOString() } : {}),
+        ...(e.hostId ? { hostId: e.hostId } : {}),
+      }
     : { ...common, family: e.family };
   await tx.agentTeamEvent.create({
     data: {
@@ -263,7 +278,7 @@ export async function appendAvailabilityEvent(
   });
 }
 
-/** The actor of a platform-made change (the stall evaluator): nobody. */
+/** The actor of a platform-made change (the stall evaluator, a lapse): nobody. */
 export const PLATFORM_ACTOR: EventActor = { userId: null, workerId: null, agentId: null };
 
 // ── #1707: host registrations ──────────────────────────────────────────────
@@ -288,6 +303,36 @@ export async function appendHostEvent(
       actorWorkerId: null,
       actorAgentId: null,
       payload: { registrationId: args.registrationId, hostId: args.hostId, workerCount: args.workerCount },
+      createdAt: args.createdAt,
+    },
+  });
+}
+
+// ── #1709: host operation outcomes ─────────────────────────────────────────
+
+/** A host operation's outcome (cor:agt:070:02: each outcome is also an event). */
+export const HOST_OPERATION_EVENT_TYPES = ['host.operation.succeeded', 'host.operation.failed'] as const;
+export type HostOperationEventType = (typeof HOST_OPERATION_EVENT_TYPES)[number];
+
+/**
+ * Append a host operation's outcome event, in the report's transaction. Ids
+ * and the operation's type only: never its arguments (branch and repo names)
+ * or the host's failure reason, which is free text the host wrote and stays
+ * on the operation row (cor:agt:050:11).
+ */
+export async function appendHostOperationEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; type: HostOperationEventType; operationId: string; hostId: string; operationType: string; workerId: string; createdAt: Date },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: args.type,
+      actorUserId: null,
+      actorWorkerId: null,
+      actorAgentId: null,
+      subjectWorkerId: args.workerId,
+      payload: { operationId: args.operationId, hostId: args.hostId, operationType: args.operationType },
       createdAt: args.createdAt,
     },
   });

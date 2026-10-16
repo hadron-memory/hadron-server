@@ -2,6 +2,12 @@ import Mustache from 'mustache';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { decryptNodeFields } from './nodeCrypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
+import {
+  DATA_HOST_MEMORY_SELECT,
+  declaredMemoryWideFields,
+  isMultiHumanChatHost,
+  multiHumanDataView,
+} from './memoryDataView.js';
 
 /** Shared literal partial grammar for rendering and automation consent. */
 export function templatePartialLocs(content: string): string[] {
@@ -20,6 +26,12 @@ export function templatePartialLocs(content: string): string[] {
  * For encrypted memories, this function only produces useful output if the
  * caller already has an active session key in the session key cache. Nodes
  * whose content/data are ciphertext-only (no key available) are skipped.
+ *
+ * `personId` is whose turn this compile is for (#910). In an app-class memory
+ * the default data node holds per-person values, and only `personId`'s own are
+ * read, on top of the explicitly memory-wide ones (`memoryDataView.ts`). Omit
+ * it when there is no attributable person: such a compile reads memory-wide
+ * values only. Single-human memories ignore it.
  */
 export async function compileTemplate(
   content: string,
@@ -27,6 +39,7 @@ export async function compileTemplate(
   memoryId: string,
   db: PrismaClient,
   accessFilter: Record<string, unknown>,
+  personId?: string | null,
 ): Promise<string> {
   if (!content.includes('{{')) return content;
 
@@ -38,7 +51,7 @@ export async function compileTemplate(
   const memory = db.memory?.findUnique
     ? await db.memory.findUnique({
         where: { id: memoryId },
-        select: { id: true, isEncrypted: true },
+        select: { ...DATA_HOST_MEMORY_SELECT, isEncrypted: true },
       })
     : null;
   const memEncInfo = memory ? { id: memory.id, isEncrypted: memory.isEncrypted } : null;
@@ -52,8 +65,15 @@ export async function compileTemplate(
   // 1. Build the view: node's own data
   const view: Record<string, unknown> = {};
 
-  // #1835: every bare lookup holds BOTH the includer memory and the caller's
-  // read filter. Spreading the filter here would overwrite memoryId.
+  // #910: the default data bag and {{data.…}} references both use the
+  // per-person view in a multi-human host.
+  const dataNodeView = async (stored: Record<string, unknown>) =>
+    memory && isMultiHumanChatHost(memory)
+      ? multiHumanDataView(stored, await declaredMemoryWideFields(db, memory), personId)
+      : stored;
+
+  // #1835: retain both the includer's memory and the caller's read filter.
+  // Spreading the filter here could overwrite the literal memoryId.
   // 2. Load memory's default data node (loc: "data")
   const defaultDataNode = await db.node.findFirst({
     where: { loc: 'data', memoryId, deletedAt: null, AND: [accessFilter] },
@@ -62,7 +82,7 @@ export async function compileTemplate(
   if (defaultDataNode) {
     if (memEncInfo?.isEncrypted) decryptNodeFields(defaultDataNode, memEncInfo);
     if (defaultDataNode.data && typeof defaultDataNode.data === 'object') {
-      Object.assign(view, defaultDataNode.data as Record<string, unknown>);
+      Object.assign(view, await dataNodeView(defaultDataNode.data as Record<string, unknown>));
     }
   }
 
@@ -94,7 +114,9 @@ export async function compileTemplate(
     if (refNode) {
       if (memEncInfo?.isEncrypted) decryptNodeFields(refNode, memEncInfo);
       if (refNode.data && typeof refNode.data === 'object') {
-        view[ref] = refNode.data;
+        view[ref] = ref === 'data'
+          ? await dataNodeView(refNode.data as Record<string, unknown>)
+          : refNode.data;
       }
     }
   }

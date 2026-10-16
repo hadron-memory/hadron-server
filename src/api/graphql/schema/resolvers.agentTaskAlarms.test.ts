@@ -8,6 +8,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
+import { Client } from 'pg';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -156,6 +157,85 @@ describe('cor:agt:060:08 — who may set a worker\'s availability', () => {
   });
 });
 
+describe('cor:agt:060:11 — the worker a stalled worker reports to may clear the stall (#1759)', () => {
+  // Liam reports to Rook directly; Rook reports to Ada. Victor's rulings
+  // (team chat #10319, corrected #10324): only the DIRECT reports-to worker,
+  // only to available, and only a mark the stall rule set (060:07).
+  let ada: { id: string };
+  const mark = (data: Record<string, unknown>) =>
+    db.workerAvailability.create({ data: { workerId: liam.id, state: 'unavailable', reason: 'stalled', setAt: new Date(), setBy: 'stall-rule', ...data } });
+  const clear = (w: { id: string }) => asWorker(w, () => setWorker(ctx(holder.id), { state: 'AVAILABLE', reason: null }));
+  const record = () => db.workerAvailability.findUniqueOrThrow({ where: { workerId: liam.id } });
+
+  beforeEach(async () => {
+    ada = await db.worker.create({ data: { appId: app.id, agentId, name: 'Ada', slug: 'ada', heldByUserId: holder.id }, select: { id: true } });
+    await db.worker.update({ where: { id: rook.id }, data: { reportsToWorkerId: ada.id } });
+    await db.worker.update({ where: { id: liam.id }, data: { reportsToWorkerId: rook.id } });
+  });
+
+  it('S2: Rook, whom Liam reports to, clears the stall mark; it is recorded as his', async () => {
+    await mark({});
+    await expect(clear(rook)).resolves.toMatchObject({
+      workerId: liam.id, state: 'available', reason: null, until: null, setBy: 'reports-to', setByWorkerId: rook.id, setByAgentId: agentId,
+    });
+    const [e] = await db.agentTeamEvent.findMany({ where: { type: 'availability.changed', subjectWorkerId: liam.id } });
+    expect(e).toMatchObject({ appId: app.id, actorWorkerId: rook.id, payload: { state: 'available', reason: null, until: null, setBy: 'reports-to' } });
+    expect(F.WorkerAvailability.setBy(await record())).toBe('REPORTS_TO');
+  });
+
+  it('S4: a mark the host, the holder or a manager set stays, whatever its reason', async () => {
+    for (const data of [
+      // #1709: a host's mark names its host, and is only ever out of tokens or host down (chk_worker_availability_shape).
+      { reason: 'out-of-tokens', setBy: 'host', setByHostId: 'orca1' },
+      { reason: 'host-down', setBy: 'host', setByHostId: 'orca1' },
+      { reason: 'stalled', setBy: 'holder', setByUserId: holder.id },
+      { reason: 'stalled', setBy: 'app-manager', setByUserId: admin.id },
+      { reason: 'other', setBy: 'worker', setByWorkerId: liam.id },
+      // The stall rule never writes another reason today; if it ever did, it is not a stall to clear.
+      { reason: 'other', setBy: 'stall-rule' },
+    ]) {
+      await db.workerAvailability.deleteMany();
+      await mark(data);
+      await expectCode(clear(rook), 'AVAILABILITY_NOT_PERMITTED');
+      expect(await record()).toMatchObject({ state: 'unavailable', ...data });
+    }
+  });
+
+  it('S5: Rook may not mark Liam unavailable, whether Liam is available or stalled', async () => {
+    await expectCode(asWorker(rook, () => setWorker(ctx(holder.id), {})), 'AVAILABILITY_NOT_PERMITTED');
+    expect(await db.workerAvailability.count()).toBe(0);
+    await mark({});
+    await expectCode(asWorker(rook, () => setWorker(ctx(holder.id), { reason: 'OTHER' })), 'AVAILABILITY_NOT_PERMITTED');
+    expect(await record()).toMatchObject({ state: 'unavailable', reason: 'stalled', setBy: 'stall-rule' });
+  });
+
+  it('the line is direct: Ada, higher up the chain, and an unrelated worker are refused', async () => {
+    await mark({});
+    const nobody = await db.worker.create({ data: { appId: app.id, agentId, name: 'Nia', slug: 'nia', heldByUserId: holder.id }, select: { id: true } });
+    await expectCode(clear(ada), 'AVAILABILITY_NOT_PERMITTED');
+    await expectCode(clear(nobody), 'AVAILABILITY_NOT_PERMITTED');
+    expect(await record()).toMatchObject({ state: 'unavailable', setBy: 'stall-rule' });
+    expect(await db.agentTeamEvent.count({ where: { type: 'availability.changed' } })).toBe(0);
+  });
+
+  it('there must be a stall mark to clear: no record, or one the stall rule already cleared, is refused', async () => {
+    await expectCode(clear(rook), 'AVAILABILITY_NOT_PERMITTED');
+    expect(await db.workerAvailability.count()).toBe(0);
+    await mark({ state: 'available', reason: null, setBy: 'stall-rule' });
+    await expectCode(clear(rook), 'AVAILABILITY_NOT_PERMITTED');
+    await db.workerAvailability.deleteMany();
+    await mark({ state: 'available', reason: null, setBy: 'lapse' });
+    await expectCode(clear(rook), 'AVAILABILITY_NOT_PERMITTED');
+  });
+
+  it('the line is read at the write: once Liam reports to someone else, Rook may no longer clear it', async () => {
+    await mark({});
+    await db.worker.update({ where: { id: liam.id }, data: { reportsToWorkerId: ada.id } });
+    await expectCode(clear(rook), 'AVAILABILITY_NOT_PERMITTED');
+    await expect(clear(ada)).resolves.toMatchObject({ state: 'available', setBy: 'reports-to', setByWorkerId: ada.id });
+  });
+});
+
 describe('cor:agt:060:09 — who may set a model family\'s availability', () => {
   it('S1: whoever manages the App pauses the claude family', async () => {
     await expect(setFamily(ctx(admin.id), {})).resolves.toMatchObject({ appId: app.id, family: 'claude', state: 'unavailable', setByUserId: admin.id });
@@ -238,6 +318,57 @@ describe('reading availability and stall windows (the App\'s task audience)', ()
     await expectCode(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { noProgressMinutes: 0 } }, ctx(admin.id)), 'BAD_USER_INPUT');
     await expectCode(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { noProgressMinutes: 10_081 } }, ctx(admin.id)), 'BAD_USER_INPUT');
     await expectCode(Q.agentTaskStallSchedule({}, { appRef: app.id }, ctx(outsider.id)), 'APP_NOT_FOUND');
+  });
+
+  it('#1763 (cor:agt:070:01): the host lapse count — default 3, a manager sets 2 to 10, null restores the default', async () => {
+    expect(await Q.agentTaskStallSchedule({}, { appRef: app.id }, ctx(member.id))).toMatchObject({ hostLapseCheckIns: 3 });
+    await expect(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { hostLapseCheckIns: 5 } }, ctx(admin.id)))
+      .resolves.toMatchObject({ hostLapseCheckIns: 5, noProgressMinutes: 60 });
+    // An omitted field keeps its value, both ways.
+    await expect(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { noProgressMinutes: 90 } }, ctx(admin.id)))
+      .resolves.toMatchObject({ hostLapseCheckIns: 5, noProgressMinutes: 90 });
+    for (const v of [2, 10]) {
+      await expect(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { hostLapseCheckIns: v } }, ctx(admin.id)))
+        .resolves.toMatchObject({ hostLapseCheckIns: v });
+    }
+    for (const v of [1, 11, 0, -3, 2.5, 3.0001]) {
+      await expectCode(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { hostLapseCheckIns: v } }, ctx(admin.id)), 'BAD_USER_INPUT');
+    }
+    await expectCode(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { hostLapseCheckIns: 4 } }, ctx(member.id)), 'APP_MANAGER_REQUIRED');
+    expect((await db.agentTaskStallSchedule.findUniqueOrThrow({ where: { appId: app.id } })).hostLapseCheckIns).toBe(10);
+    await expect(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { hostLapseCheckIns: null } }, ctx(admin.id)))
+      .resolves.toMatchObject({ hostLapseCheckIns: 3, noProgressMinutes: 90 });
+  });
+
+  it('#1763 (Anne P2, round 2): setting the lapse count waits for a lapse decision in flight, even with no schedule row', async () => {
+    expect(await db.agentTaskStallSchedule.count()).toBe(0);
+    const sweep = new Client({ connectionString: process.env.DATABASE_URL });
+    await sweep.connect();
+    try {
+      await sweep.query('BEGIN');
+      await sweep.query("SELECT pg_advisory_xact_lock_shared(hashtext('host-lapse:' || $1))", [app.id]);
+      let settled = false;
+      const set = M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { hostLapseCheckIns: 5 } }, ctx(admin.id))
+        .finally(() => { settled = true; });
+      await new Promise((r) => setTimeout(r, 300));
+      expect(settled).toBe(false);
+      await sweep.query('COMMIT');
+      await expect(set).resolves.toMatchObject({ hostLapseCheckIns: 5 });
+      // A windows-only change does not take the host-lapse lock.
+      await sweep.query('BEGIN');
+      await sweep.query("SELECT pg_advisory_xact_lock_shared(hashtext('host-lapse:' || $1))", [app.id]);
+      await expect(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { noProgressMinutes: 90 } }, ctx(admin.id)))
+        .resolves.toMatchObject({ noProgressMinutes: 90 });
+      await sweep.query('COMMIT');
+    } finally {
+      await sweep.end();
+    }
+  });
+
+  it('#1763: the database refuses a lapse count outside 2 to 10, whatever the writer', async () => {
+    for (const v of [1, 11]) {
+      await expect(db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: v } })).rejects.toThrow(/chk_agent_task_stall_schedule_range/);
+    }
   });
 
   it('#1731 (#7790): an owner-role AppMember sets the stall windows; demoted to member, it is refused', async () => {

@@ -27,6 +27,7 @@ import { isEmailUserRef, resolveUserRefOrEmail } from '../../../lib/entityRef/us
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { normalizeUrnForLookup, hasSchemePrefix } from '../../../lib/urn.js';
+import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from '../../../lib/mentionToken.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { nextFreeWorkerSlug } from '../../../lib/workerSlug.js';
 import {
@@ -241,19 +242,26 @@ export async function locateTeamAgent(
   teamAgentRef: string | null | undefined,
 ): Promise<TeamAgentRow> {
   if (teamAgentRef) {
-    const { id } = await resolveAgentRef(ctx.db, teamAgentRef);
     // The explicit ref must name an agent INSTALLED in this App — otherwise
     // the operation would read cast lists (and allocate against a register)
-    // from an agent the team App never adopted.
+    // from an agent the team App never adopted. #1946 (ruling A): an absent
+    // Agent gets the same answer as a not-installed one, and neither carries
+    // the Agent's id, so an App reader learns only what is installed here.
+    const notInstalled = () => new GraphQLError('teamAgentRef must name an Agent installed in this App.', {
+      extensions: { code: 'TEAM_AGENT_NOT_INSTALLED', appId },
+    });
+    let id: string;
+    try {
+      ({ id } = await resolveAgentRef(ctx.db, teamAgentRef));
+    } catch (e) {
+      if (e instanceof AgentNotFoundError) throw notInstalled();
+      throw e;
+    }
     const row = await ctx.db.appAgent.findUnique({
       where: { appId_agentId: { appId, agentId: id } },
       select: { agent: { select: { id: true, name: true, urn: true, systemMemoryId: true } } },
     });
-    if (!row) {
-      throw new GraphQLError('teamAgentRef must name an Agent installed in this App.', {
-        extensions: { code: 'TEAM_AGENT_NOT_INSTALLED', appId, agentId: id },
-      });
-    }
+    if (!row) throw notInstalled();
     return row.agent;
   }
   const installed = await ctx.db.appAgent.findMany({
@@ -318,9 +326,9 @@ type WorkerRow = {
  * `resolve<Entity>Ref` helper (cor:api:140) so the ref grammar has ONE
  * definition rather than a per-resolver copy that drifts.
  *
- * Identity only. The App-membership gate is the caller's job, and every caller
- * applies it to the RESOLVED row's `appId` — so a URN naming a worker in an App
- * the caller cannot see still refuses there, not here.
+ * Identity only, and never exported: callers go through
+ * `resolveReadableWorkerRef`, which adds the App read gate with denial and
+ * absence collapsed (#1742).
  */
 async function resolveWorkerRefRow(ctx: Context, workerRef: string): Promise<WorkerRow> {
   let id: string;
@@ -329,9 +337,7 @@ async function resolveWorkerRefRow(ctx: Context, workerRef: string): Promise<Wor
   } catch {
     // A malformed URN, an unresolvable App, and an absent worker collapse to
     // one refusal — no existence oracle.
-    throw new GraphQLError('Worker not found.', {
-      extensions: { code: 'WORKER_NOT_FOUND', workerRef },
-    });
+    throw workerNotFound(workerRef);
   }
   const worker = await ctx.db.worker.findUnique({
     where: { id },
@@ -349,12 +355,55 @@ async function resolveWorkerRefRow(ctx: Context, workerRef: string): Promise<Wor
       heldAt: true,
     },
   });
-  if (!worker) {
-    throw new GraphQLError('Worker not found.', {
-      extensions: { code: 'WORKER_NOT_FOUND', workerRef },
-    });
-  }
+  if (!worker) throw workerNotFound(workerRef);
   return worker;
+}
+
+/**
+ * The one refusal for a worker the caller may not know about: absent, or in an
+ * App they cannot read (#1742). Exported so other workerRef surfaces (#1937,
+ * session start) answer with this exact envelope instead of a second copy.
+ */
+export function workerNotFound(workerRef: string): GraphQLError {
+  return new GraphQLError('Worker not found.', {
+    extensions: { code: 'WORKER_NOT_FOUND', workerRef },
+  });
+}
+
+/**
+ * #1742 — resolve a workerRef AND gate the worker's App for reading, with a
+ * denial answered exactly like an absent worker (same code, message and
+ * extensions, from `workerNotFound`).
+ *
+ * Resolving first and gating second is safe only if the two refusals are
+ * indistinguishable. Before this, each caller gated the resolved row's App on
+ * its own and refused FORBIDDEN, so an outsider could guess
+ * `hrn:worker:<org>:<app>:<name>` and read existence off the error code. Every
+ * workerRef surface in this module now comes through here, so there is one
+ * collapse rather than one per resolver.
+ *
+ * What a caller gets past this gate, it may refuse however it likes: a reader
+ * of the App already sees the roster, so a staff mutation's FORBIDDEN tells
+ * them nothing new.
+ *
+ * NARROW catch, the #1019 convention (`resolveWorkerIdByNameGated` above):
+ * only the gate's expected FORBIDDEN collapses. A database failure inside the
+ * participation lookup propagates, because reporting an outage as a missing
+ * worker misleads exactly the caller who needs the truth.
+ */
+async function resolveReadableWorkerRef(
+  ctx: Context,
+  workerRef: string,
+): Promise<{ worker: WorkerRow; app: AppRow }> {
+  const worker = await resolveWorkerRefRow(ctx, workerRef);
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+  try {
+    await requireWorkerReadAccess(ctx, app);
+  } catch (e) {
+    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+    throw workerNotFound(workerRef);
+  }
+  return { worker, app };
 }
 
 /**
@@ -715,6 +764,20 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
   // cor:agt:020:02 blank-is-absent: a whitespace-only name is no name.
   const requestedName = (name ?? '').trim() || null;
   const override = (promptOverride ?? '').trim() === '' ? null : (promptOverride as string);
+  // #1870 (Holger, 2026-10-13, #10579): a worker whose MENTION TOKEN is a
+  // broadcast word would wake every registered destination on a reply to it,
+  // so casting refuses such names — by token (Vera #10580), not raw name:
+  // All, TEAM and All! all slug to 'all'/'team' and are refused, while a name
+  // that merely contains the word ("teamster") is not. A validation refusal
+  // like WORKER_NAME_REQUIRED; a worker already so named keeps the narrow
+  // reply-exception of #1867 instead (cor:agt:020:04).
+  const token = requestedName != null ? mentionTokenOf(requestedName) : null;
+  if (token != null && (BROADCAST_MENTION_TOKENS as readonly string[]).includes(token)) {
+    throw new GraphQLError(
+      `A worker named ${JSON.stringify(requestedName)} would mention-broadcast: its token @${token} routes a reply to every registered destination. Choose another name.`,
+      { extensions: { code: 'WORKER_NAME_RESERVED', token } },
+    );
+  }
 
   // 1. Resolve the App (cor:api:140 — PK or URN) and gate.
   const { id: appId } = await resolveAppRef(ctx.db, appRef);
@@ -729,18 +792,18 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
   // 2. Resolve the agent being cast — installed in this App at cast time.
   let agent: CastTarget['agent'];
   if (agentRef && agentRef.trim() !== '') {
-    // resolveAgentRef throws a plain AgentNotFoundError (which would read
-    // INTERNAL_SERVER_ERROR on the wire) — translate to the typed refusal,
-    // matching startSession's agentRef handling.
+    // #1946 (ruling A): an absent Agent and one not installed here are ONE
+    // answer, WORKER_AGENT_NOT_INSTALLED with no agentId, so the App's staff
+    // learn only what is installed in their own App.
+    const notInstalled = () => new GraphQLError(
+      'agentRef must name an Agent installed in this App — casting requires the agent on the roster at cast time.',
+      { extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId } },
+    );
     let id: string;
     try {
       ({ id } = await resolveAgentRef(ctx.db, agentRef.trim()));
     } catch (e) {
-      if (e instanceof AgentNotFoundError) {
-        throw new GraphQLError(`Agent not found: ${agentRef.trim()}`, {
-          extensions: { code: 'BAD_USER_INPUT' },
-        });
-      }
+      if (e instanceof AgentNotFoundError) throw notInstalled();
       throw e;
     }
     const row = await ctx.db.appAgent.findUnique({
@@ -751,12 +814,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
         },
       },
     });
-    if (!row || row.agent.deletedAt) {
-      throw new GraphQLError(
-        'agentRef must name an Agent installed in this App — casting requires the agent on the roster at cast time.',
-        { extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId, agentId: id } },
-      );
-    }
+    if (!row || row.agent.deletedAt) throw notInstalled();
     agent = row.agent;
   } else {
     if (!roleNorm) {
@@ -967,8 +1025,7 @@ export const workerMutations = {
     { workerRef }: { workerRef: string },
     ctx: Context,
   ) => {
-    const worker = await resolveWorkerRefRow(ctx, workerRef);
-    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+    const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
     await requireWorkerStaffAccess(ctx, app);
     await ctx.db.$transaction(async (tx) => {
       // #1726: the reportsTo graph lock BEFORE the worker row (the lock
@@ -1029,9 +1086,7 @@ export const workerMutations = {
     if (ctx.impersonation) {
       throw new GraphQLError('Impersonation sessions are read-only.', { extensions: { code: 'FORBIDDEN' } });
     }
-    const worker = await resolveWorkerRefRow(ctx, workerRef);
-    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
-    await requireWorkerReadAccess(ctx, app);
+    const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
     const to = reportsTo ? await resolveReportsToTarget(ctx, worker.appId, reportsTo) : null;
     const forbidden = () => new GraphQLError(
       'Only the worker this one reports to, a worker claiming an unclaimed one for itself, or whoever manages the App may change who it reports to.',
@@ -1158,17 +1213,15 @@ export const workerMutations = {
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
     }
-    const worker = await resolveWorkerRefRow(ctx, workerRef);
-    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
-
     // The READ gate runs FIRST, before the idempotent return below (PR #1052
     // review, Codex + Copilot P1). Without it this mutation was a read surface:
     // an unheld worker returned its row before any check, so anyone holding an
     // id or URN could confirm a foreign worker exists and collect its scalars —
     // through a mutation, while `Query.worker` would have refused them. A
     // shortcut placed above an authorization check is an authorization hole
-    // whatever the shortcut is for.
-    await requireWorkerReadAccess(ctx, app);
+    // whatever the shortcut is for. #1742: and a denial answers like an absent
+    // worker, so the gate is not itself an existence oracle.
+    const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
 
     if (!worker.heldByUserId) {
       // An expectation of a SPECIFIC holder is violated by there being none —
@@ -1401,8 +1454,7 @@ export const workerMutations = {
     args: { workerRef: string; promptOverride?: string | null },
     ctx: Context,
   ) => {
-    const worker = await resolveWorkerRefRow(ctx, args.workerRef);
-    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+    const { worker, app } = await resolveReadableWorkerRef(ctx, args.workerRef);
     await requireWorkerStaffAccess(ctx, app);
 
     if (worker.retiredAt) {
@@ -1473,8 +1525,7 @@ export const workerMutations = {
     { workerRef }: { workerRef: string },
     ctx: Context,
   ) => {
-    const worker = await resolveWorkerRefRow(ctx, workerRef);
-    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+    const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
     await requireWorkerStaffAccess(ctx, app);
 
     const sessions = await ctx.db.session.count({ where: { workerId: worker.id } });
@@ -1604,9 +1655,7 @@ export const workerQueries = {
       }
       return ctx.db.worker.findUniqueOrThrow({ where: { id: byName } });
     }
-    const worker = await resolveWorkerRefRow(ctx, ref);
-    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
-    await requireWorkerReadAccess(ctx, app);
+    const { worker } = await resolveReadableWorkerRef(ctx, ref);
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
 
@@ -1816,6 +1865,28 @@ async function queryWorkerActivity(
   scope: Prisma.Sql,
   now: Date,
 ): Promise<Map<string, WorkerActivity>> {
+  const rows = await ctx.db.$queryRaw<
+    { workerId: string; live: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null }[]
+  >(workerActivitySql(scope, now));
+  return new Map<string, WorkerActivity>(
+    rows.map((row) => [
+      row.workerId,
+      {
+        hasLiveSession: row.live,
+        lastActiveAt: row.lastActiveAt,
+        bound: row.bound,
+        bindingFamily: row.bindingFamily ?? null,
+      },
+    ]),
+  );
+}
+
+/**
+ * The SQL of `queryWorkerActivity`, exported so its PLAN can be pinned
+ * (#1903): its per-session activity probe took production down when it ran
+ * as a backward walk of usage_events_created_at_idx.
+ */
+export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
   // AGGREGATED IN THE DATABASE, one row per worker (PR #1086 review, Codex
   // P2). This SQL is a SECOND implementation of `lib/sessionActivity.ts`, and
   // that is deliberate: one derivation aggregates unbounded history inside
@@ -1853,9 +1924,7 @@ async function queryWorkerActivity(
                          WHEN 'AUTOMATION' THEN ${toNaiveUtc(cut.AUTOMATION)}::timestamp
                          WHEN 'EDGE'       THEN ${toNaiveUtc(cut.EDGE)}::timestamp
                        END))`;
-  const rows = await ctx.db.$queryRaw<
-    { workerId: string; live: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null }[]
-  >`
+  return Prisma.sql`
     SELECT s.worker_id AS "workerId",
            bool_or(${sessionLive}) AS "live",
            -- #1707: the BINDING is any open session, live or quiet; its family
@@ -1879,25 +1948,25 @@ async function queryWorkerActivity(
     FROM sessions s
     JOIN workers w ON w.id = s.worker_id
     LEFT JOIN LATERAL (
-      SELECT max(e.created_at) AS max_created
+      -- #1952: the "+ interval '0'" is load-bearing. A bare max(created_at)
+      -- lets the planner serve the max by walking usage_events_created_at_idx
+      -- backwards with a filter, which for a session with no (or ancient)
+      -- activity reads the whole index: the 2026-10-14 outage. Statistics in
+      -- which a few sessions dominate activity choose that walk even with the
+      -- index below present, and ORDER BY … LIMIT 1 is the same plan. No
+      -- created_at index can order this expression, so only session-keyed
+      -- paths remain. Cost: a session's activity rows are all read, bounded
+      -- per App. A stored last-activity column is #1957.
+      SELECT max(e.created_at + interval '0') AS max_created
       FROM usage_events e
       -- #1653 / DY-2: only events written while the session was live count.
+      -- #1903: served by the partial usage_events_session_activity_idx
+      -- (post-push.sql).
       WHERE e.session_id = s.id AND e.counts_as_activity
     ) ue ON true
     WHERE ${scope} AND s.deleted_at IS NULL
     GROUP BY s.worker_id
   `;
-  return new Map<string, WorkerActivity>(
-    rows.map((row) => [
-      row.workerId,
-      {
-        hasLiveSession: row.live,
-        lastActiveAt: row.lastActiveAt,
-        bound: row.bound,
-        bindingFamily: row.bindingFamily ?? null,
-      },
-    ]),
-  );
 }
 
 /** One aggregate query for the bounded #1344 page, never one per App/worker. */

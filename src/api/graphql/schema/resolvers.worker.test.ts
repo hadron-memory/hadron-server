@@ -292,6 +292,32 @@ describe('castWorker — confusable naming (#1677)', () => {
   });
 });
 
+describe('castWorker — broadcast-word names refused (#1870, cor:agt:020:02)', () => {
+  it('refuses a name whose MENTION TOKEN is a broadcast word, any spelling, and writes nothing', async () => {
+    // The refusal matches the token, not the raw name (#1870 brief, Vera
+    // #10580): All, TEAM and All! all slug to a broadcast token, so each
+    // would wake every registered destination on a tagless reply (#1867).
+    for (const name of ['All', 'TEAM', 'All!']) {
+      await expectCode(cast({ role: 'backend-engineer', name }), 'WORKER_NAME_RESERVED');
+    }
+    expect(await db.worker.count({ where: { appId: app.id } })).toBe(0);
+  });
+
+  it('a name that merely CONTAINS the word is allowed ("teamster")', async () => {
+    await expect(cast({ role: 'backend-engineer', name: 'teamster' })).resolves.toMatchObject({
+      name: 'teamster',
+    });
+  });
+
+  it('the preview refuses the same names — shared resolution, no drift (#964)', async () => {
+    const Q = (resolvers as unknown as { Query: Record<string, (p: unknown, a: unknown, c: Context) => Promise<unknown>> }).Query;
+    await expectCode(
+      Q.castWorkerPreview({}, { appRef: app.id, role: 'backend-engineer', name: 'All' }, ctx(admin.id)),
+      'WORKER_NAME_RESERVED',
+    );
+  });
+});
+
 describe('castWorker — agent resolution', () => {
   it('role picks the single installed agent whose personaRole matches', async () => {
     const worker = await cast({ role: 'backend-engineer', name: 'Zoe' });
@@ -333,11 +359,11 @@ describe('castWorker — agent resolution', () => {
 
   it('agentRef naming a soft-deleted installed agent refuses (ref resolution excludes tombstones)', async () => {
     // resolveAgentRef excludes soft-deleted rows by default, so the explicit
-    // ref fails BEFORE the install check — translated to the typed
-    // BAD_USER_INPUT (matching startSession's agentRef handling), and the
+    // ref fails BEFORE the install check. #1946 (ruling A): that answers as
+    // not installed (one answer for absent and not-installed, no id), and the
     // tombstone never casts either way.
     await db.agent.update({ where: { id: roleAgent.id }, data: { deletedAt: new Date() } });
-    await expectCode(cast({ agentRef: roleAgent.id, name: 'Zoe' }), 'BAD_USER_INPUT');
+    await expectCode(cast({ agentRef: roleAgent.id, name: 'Zoe' }), 'WORKER_AGENT_NOT_INSTALLED');
     expect(await db.worker.count({ where: { appId: app.id } })).toBe(0);
   });
 
@@ -831,7 +857,8 @@ describe('worker / workers queries', () => {
   });
 
   it('worker(ref) denies a non-member', async () => {
-    await expectCode(Q.worker({}, { ref: iris.id }, ctx(outsider.id)), 'FORBIDDEN');
+    // #1742: a denial answers like an absent worker, so the read is no existence oracle.
+    await expectCode(Q.worker({}, { ref: iris.id }, ctx(outsider.id)), 'WORKER_NOT_FOUND');
   });
 
   it('a pure App-key reads its OWN App staff; a foreign App key is denied', async () => {
@@ -840,7 +867,7 @@ describe('worker / workers queries', () => {
     const foreignApp = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` },
     });
-    await expectCode(Q.worker({}, { ref: iris.id }, ctx(undefined, foreignApp.id)), 'FORBIDDEN');
+    await expectCode(Q.worker({}, { ref: iris.id }, ctx(undefined, foreignApp.id)), 'WORKER_NOT_FOUND'); // #1742
   });
 
   it("impersonation reads are bounded to the support session's org (#876 class)", async () => {
@@ -858,7 +885,7 @@ describe('worker / workers queries', () => {
       roles: [],
       impersonation: { orgId: 'some-other-org' } as any,
     };
-    await expectCode(Q.worker({}, { ref: iris.id }, impOther), 'FORBIDDEN');
+    await expectCode(Q.worker({}, { ref: iris.id }, impOther), 'WORKER_NOT_FOUND'); // #1742
   });
 
   it('unknown ref → WORKER_NOT_FOUND', async () => {
@@ -1158,12 +1185,13 @@ describe('#1344 — heldWorkers across readable Apps', () => {
   it('a soft-deleted App\'s worker is refused by the id point read and by releaseWorker too (#1347 review)', async () => {
     const held = await createHeld(app.id, 'Deleted Point', admin.id);
     await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
-    await expectCode(Q.worker({}, { ref: held.id }, ctx(admin.id)), 'FORBIDDEN');
+    // #1742: refused as an absent worker, the same answer as a missing row.
+    await expectCode(Q.worker({}, { ref: held.id }, ctx(admin.id)), 'WORKER_NOT_FOUND');
     // releaseWorker runs the read gate before its idempotent return: an
     // unheld worker there would otherwise hand back its row.
     const unheld = await createHeld(app.id, 'Deleted Unheld', null);
-    await expectCode(M.releaseWorker({}, { workerRef: unheld.id }, ctx(admin.id)), 'FORBIDDEN');
-    await expectCode(M.releaseWorker({}, { workerRef: held.id }, ctx(admin.id)), 'FORBIDDEN');
+    await expectCode(M.releaseWorker({}, { workerRef: unheld.id }, ctx(admin.id)), 'WORKER_NOT_FOUND');
+    await expectCode(M.releaseWorker({}, { workerRef: held.id }, ctx(admin.id)), 'WORKER_NOT_FOUND');
     expect((await db.worker.findUniqueOrThrow({ where: { id: held.id } })).heldByUserId).toBe(admin.id);
   });
 
@@ -2250,11 +2278,13 @@ describe('#1050 — worker name holding', () => {
       where: { appId_userId: { appId: membership.appId, userId: membership.userId } },
     });
 
+    // #1937: a revoked member reads the App's staff no more than anyone else does, so the
+    // answer is the absent ref's, not a FORBIDDEN that says the worker exists.
     await expectCode(
       M.startSession(
         {}, { input: { id: generateId(), workerRef: w.id } }, ctx(gone.id, app.id),
       ),
-      'FORBIDDEN',
+      'WORKER_NOT_FOUND',
     );
     expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
   });
@@ -2327,7 +2357,8 @@ describe('#1050 — worker name holding', () => {
     // hole whatever the shortcut is for.
     const w = await cast({ agentRef: roleAgent.id, name: 'Iris' }, ctx(admin.id));
     expect((await db.worker.findUniqueOrThrow({ where: { id: w.id } })).heldByUserId).toBeNull();
-    await expectCode(M.releaseWorker({}, { workerRef: w.id }, ctx(outsider.id)), 'FORBIDDEN');
+    // #1742: and the refusal itself reads like an absent worker.
+    await expectCode(M.releaseWorker({}, { workerRef: w.id }, ctx(outsider.id)), 'WORKER_NOT_FOUND');
   });
 
   it('releasing an unheld worker is idempotent, not an error', async () => {

@@ -13,12 +13,19 @@
  * bound, else one a live host registration can launch it as (060:04). A worker kept bound after a finished
  * task (`closeSessionWhenDone: false`) is free and keeps its family.
  *
- * UNTIL T6 SHIPS, ONLY WORKERS WITH A LIVE SESSION ARE MATCHED (`matchable`,
- * `MATCH_UNBOUND_LAUNCHABLE`): an unbound or quiet worker has no way to be
- * reached yet, so matching it would only park the task. That restriction is
- * the matcher's; the family still follows the binding (#1723 review, Diego
- * P2-2). The roster still reports such a worker as free.
- * T6 also adds "no outstanding `worker.end` host operation" to free for work.
+ * WHO IS MATCHED (`matchable`, shipped with T6, #1709): a BOUND worker only
+ * while its session is LIVE (cor:agt:020:11) and has reported a family, since
+ * a quiet session has nobody driving it and matching it would only park the
+ * task; an UNBOUND worker when a live host registration can launch it, as one
+ * of the families that host lists (`MATCH_UNBOUND_LAUNCHABLE`; the assignment
+ * then issues a `worker.start`). That restriction is the matcher's; the family
+ * still follows the binding (#1723 review, Diego P2-2), and the roster still
+ * reports a quiet bound worker as free (`liveSession` tells them apart).
+ * #1709 (T6): a worker waiting on a session end (cor:agt:050:10: an open
+ * request whose session is still open, or an outstanding `worker.end`) is not
+ * matched either (`endingSession`), so new work never lands in a session the
+ * platform is about to end. Also the matcher's restriction, Proposed: free for
+ * work (060:05) is unchanged, and the roster still shows such a worker free.
  *
  * INTERIM until Holger rules (060:06 open questions, #1707): a never-assigned
  * worker ranks as least recent; ties break by name, then id; the oldest
@@ -48,9 +55,11 @@ import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { loadAvailabilityByFamily, type WorkerAvailabilityView } from './availability.js';
 import { appendTaskEvent, ASSIGNED_EVENT_TYPES, PLATFORM_ACTOR } from './events.js';
 import { loadLaunchableFamilies } from './hosts.js';
+import { launchForAssignment } from '../hostOperations/launch.js';
+import { PENDING_SESSION_END_SQL } from '../hostOperations/sessionEnd.js';
 
-/** T6 flips this once a host can start an unbound worker (see the file header). */
-export const MATCH_UNBOUND_LAUNCHABLE = false;
+/** On since T6 (#1709): a host can start an unbound worker, so the matcher assigns to one (see the file header). */
+export const MATCH_UNBOUND_LAUNCHABLE = true;
 /** Queued tasks considered per App per run, oldest first. */
 const QUEUE_PAGE = 500;
 const OPEN_STATUSES = ['pending', 'started'];
@@ -126,13 +135,15 @@ export type WorkerWorkState = {
   role: string | null;
   /** Bound: has an OPEN session — live or quiet (cor:agt:060:04 follows the binding). */
   bound: boolean;
-  /** Has a LIVE session (cor:agt:020:11): what matching requires until T6. */
+  /** Has a LIVE session (cor:agt:020:11): what matching requires of a BOUND worker. */
   live: boolean;
   /** The binding's family (its newest open session's); null when unbound or it reported none. */
   bindingFamily: string | null;
   lastActiveAt: Date | null;
   /** Families a live host registration can launch it as. */
   launchableFamilies: string[];
+  /** #1709: waiting on a session end (an open request, or an outstanding `worker.end`); not matched meanwhile. */
+  endingSession: boolean;
   /** The families it can run as now (060:04): its binding's when bound, else its launchable ones. */
   families: string[];
   availability: WorkerAvailabilityView;
@@ -156,13 +167,24 @@ export function familiesOf(w: { bound: boolean; bindingFamily: string | null; la
 }
 
 /**
- * May the matcher assign to this worker at all? Until T6, only a worker with a
- * LIVE session (#1707: an unbound or quiet worker has no way to be reached, so
- * a match would only park the task). After T6, also an unbound worker a host
- * can start. This is the matcher's restriction, kept apart from free for work.
+ * May the matcher assign to this worker at all? A bound worker only while its
+ * session is LIVE (#1707: a quiet one has nobody driving it, so a match would
+ * only park the task); an unbound worker always here, since free for work then
+ * requires a family a live host can launch it as (#1709, T6). Never one waiting
+ * on a session end. This is the matcher's restriction, kept apart from free for
+ * work.
  */
-export function matchable(w: { bound: boolean; live: boolean }): boolean {
+export function matchable(w: { bound: boolean; live: boolean; endingSession?: boolean }): boolean {
+  if (w.endingSession) return false;
   return w.live || (MATCH_UNBOUND_LAUNCHABLE && !w.bound);
+}
+
+/** #1709: the workers of `ids` waiting on a session end (see the file header). */
+async function loadEndingSession(db: Db, ids: string[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const rows = await db.$queryRaw<{ id: string }[]>`
+    SELECT w.id FROM workers w WHERE w.id IN (${Prisma.join(ids)}) AND ${PENDING_SESSION_END_SQL(Prisma.sql`w.id`)}`;
+  return new Set(rows.map((r) => r.id));
 }
 
 /** cor:agt:060:05 over one worker's inputs. Pure. */
@@ -199,7 +221,7 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
   });
   if (workers.length === 0) return [];
   const ids = workers.map((w) => w.id);
-  const [activity, launchable, open, lastAssigned] = await Promise.all([
+  const [activity, launchable, open, lastAssigned, ending] = await Promise.all([
     loadAppWorkerActivity({ db } as unknown as Context, appId, { now }),
     loadLaunchableFamilies(db, { appId }, now),
     db.agentTask.groupBy({
@@ -208,6 +230,7 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
       _count: { _all: true },
     }),
     loadLastAssignedAt(db, appId, ids),
+    loadEndingSession(db, ids),
   ]);
   const openBy = new Map(open.map((o) => [o.assigneeWorkerId as string, o._count._all]));
   const partial = workers.map((w) => {
@@ -217,7 +240,7 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
     const bindingFamily = bound ? a?.bindingFamily ?? null : null;
     const launchableFamilies = launchable.get(w.id) ?? [];
     return {
-      ...w, bound, live, bindingFamily, launchableFamilies, lastActiveAt: a?.lastActiveAt ?? null,
+      ...w, bound, live, bindingFamily, launchableFamilies, lastActiveAt: a?.lastActiveAt ?? null, endingSession: ending.has(w.id),
       families: familiesOf({ bound, bindingFamily, launchableFamilies }),
     };
   });
@@ -248,7 +271,8 @@ async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId
   if (openTaskCount > 0) return false;
   const activity = (await loadWorkersActivity({ db: tx } as unknown as Context, [workerId], now)).get(workerId);
   const bound = activity?.bound ?? false;
-  if (!matchable({ bound, live: activity?.hasLiveSession ?? false })) return false;
+  const endingSession = (await loadEndingSession(tx, [workerId])).has(workerId);
+  if (!matchable({ bound, live: activity?.hasLiveSession ?? false, endingSession })) return false;
   const launchable = bound ? [] : (await loadLaunchableFamilies(tx, { workerIds: [workerId] }, now)).get(workerId) ?? [];
   const families = familiesOf({ bound, bindingFamily: activity?.bindingFamily ?? null, launchableFamilies: launchable });
   if (!families.includes(family)) return false;
@@ -342,7 +366,11 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
         const outcome = await tryAssign(db, task, w.id, family, now, hooks);
         // Assigned, or no longer free: either way this worker is spent for this run.
         if (outcome !== 'task-gone') spent.add(w.id);
-        if (outcome === 'assigned') out.push({ taskId: task.id, workerId: w.id, family });
+        if (outcome === 'assigned') {
+          out.push({ taskId: task.id, workerId: w.id, family });
+          // #1709 (cor:agt:070:08): a matched worker with no live session is started through its host.
+          if (!w.live) await launchForAssignment(db, { appId, taskId: task.id, workerId: w.id }, now);
+        }
         if (outcome !== 'worker-not-free') break;
       }
     }

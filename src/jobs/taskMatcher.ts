@@ -4,33 +4,43 @@
  *
  *   1. write down every host registration that lapsed (`host.lost`,
  *      cor:agt:070:01);
- *   2. match every App's queued tasks to workers free for work
+ *   2. write down every worker availability whose `until` passed (#1766,
+ *      cor:agt:060:02), before matching, so the worker is matched in this
+ *      same pass;
+ *   3. match every App's queued tasks to workers free for work
  *      (cor:agt:060:06).
  *
  * The sweep backs up the event-driven runs (`matchAfterChange`: a task created
  * with no assignee, a task finished or cancelled, an availability change) and
  * catches what they don't see: a worker binding a session, a stall mark
- * clearing, an `until` lapsing. Overlapping runs, here or on another instance,
- * are safe: see the concurrency note in src/lib/agentTasks/matcher.ts.
+ * clearing, an `until` lapsing (recorded in step 2). Overlapping runs, here or
+ * on another instance, are safe: see the concurrency note in
+ * src/lib/agentTasks/matcher.ts, and step 2's guarded update.
  *
  * Off under NODE_ENV=test (tests drive `taskMatcherTick` with a controllable
  * clock) and when DISABLE_TASK_MATCHER=true, which also turns off the
- * event-driven runs.
+ * event-driven runs and the lapse recording.
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { matchQueuedTasks } from '../lib/agentTasks/matcher.js';
 import { sweepLostHosts } from '../lib/agentTasks/hosts.js';
+import { recordLapsedAvailability } from '../lib/agentTasks/availability.js';
 
-export type TaskMatcherTickResult = { lost: number; matched: number };
+export type TaskMatcherTickResult = { lost: number; lapsed: number; matched: number };
 
-/** One pass at `now`. Each step runs even when the other failed. */
+/** One pass at `now`. Each step runs even when an earlier one failed. */
 export async function taskMatcherTick(db: PrismaClient, now = new Date()): Promise<TaskMatcherTickResult> {
-  const result: TaskMatcherTickResult = { lost: 0, matched: 0 };
+  const result: TaskMatcherTickResult = { lost: 0, lapsed: 0, matched: 0 };
   try {
     result.lost = await sweepLostHosts(db, now);
   } catch (err) {
     console.error('[task-matcher] host lapse sweep failed:', err);
+  }
+  try {
+    result.lapsed = await recordLapsedAvailability(db, now);
+  } catch (err) {
+    console.error('[task-matcher] availability lapse sweep failed:', err);
   }
   try {
     result.matched = (await matchQueuedTasks(db, now)).length;

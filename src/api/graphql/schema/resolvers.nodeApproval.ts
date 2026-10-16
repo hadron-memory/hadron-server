@@ -1,4 +1,5 @@
 import { GraphQLError } from 'graphql';
+import type { ApprovalHashFields } from '../../../lib/approvalHash.js';
 import type { Context } from './resolvers.helpers.js';
 import {
   concealUnreadableDenial,
@@ -51,18 +52,11 @@ export async function mayMintNodes(ctx: Context, memoryId: string): Promise<void
   await requireMemoryWriteAccess(ctx, memoryId);
 }
 
-/** The session key of an encrypted memory, or `SESSION_EXPIRED`; null for a plaintext memory. */
-async function keyForMemory(ctx: Context, memoryId: string): Promise<EncryptionKey | null> {
+/** E1: no approval-derived hashes for encrypted memories, even with a cached key. */
+async function requirePlainApprovalMemory(ctx: Context, memoryId: string): Promise<null> {
   const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { isEncrypted: true } });
   if (!memory.isEncrypted) return null;
-  const key = sessionKeyCache.getByMemoryId(memoryId);
-  if (!key) {
-    throw new GraphQLError(
-      `SESSION_EXPIRED: memory ${memoryId} is encrypted but no active session key is available.`,
-      { extensions: { code: 'SESSION_EXPIRED', memoryId } },
-    );
-  }
-  return key;
+  throw new GraphQLError('Approval and integrity verification are not applicable to encrypted memories.', { extensions: { code: 'ENCRYPTED_MEMORY_NOT_APPLICABLE', memoryId } });
 }
 
 function nodeNotFound(nodeRef: string): GraphQLError {
@@ -106,7 +100,7 @@ async function receiptOf(ctx: Context, node: NodeApprovalRow) {
  */
 async function integrityOf(ctx: Context, memoryId: string, nodes: NodeApprovalRow[], key: EncryptionKey | null) {
   const snapshots = await loadApprovedSnapshots(ctx.db, nodes);
-  const foreign = [...new Set([...snapshots.values()]
+  const foreign = [...new Set([...snapshots.values()].flat()
     .map((s) => s.memoryId)
     .filter((id): id is string => id != null && id !== memoryId))];
   const encryptedForeign = new Set((await ctx.db.memory.findMany({
@@ -121,8 +115,9 @@ async function integrityOf(ctx: Context, memoryId: string, nodes: NodeApprovalRo
     return foreignKey ? approvalFieldsOf(snapshot, foreignKey) : null;
   };
   return nodes.map((node) => {
-    const snapshot = snapshots.get(node.id);
-    return checkNodeIntegrity(node, approvalFieldsOf(node, key), snapshot ? snapshotFields(snapshot) : null);
+    const evidence = (snapshots.get(node.id) ?? []).map(snapshotFields);
+    // A snapshot whose key is unavailable is treated as not retained, never hashed as ciphertext.
+    return checkNodeIntegrity(node, approvalFieldsOf(node, key), evidence.filter((f): f is ApprovalHashFields => f != null));
   });
 }
 
@@ -139,7 +134,7 @@ export const nodeApprovalQueries = {
   verifyNode: async (_: unknown, { nodeRef }: { nodeRef: string }, ctx: Context) => {
     const { id, memoryId } = await resolveLiveNode(ctx, nodeRef);
     if (!(await isMemoryReadableCached(ctx, memoryId))) throw nodeNotFound(nodeRef);
-    const key = await keyForMemory(ctx, memoryId);
+    const key = await requirePlainApprovalMemory(ctx, memoryId);
     // Pinned to the memory the read gate admitted, and live: a node moved into
     // another memory since the gate must not disclose that memory's loc or a
     // hash of its text (Atilla/Chip, PR #1592).
@@ -156,7 +151,7 @@ export const nodeApprovalQueries = {
   verifyMemoryNodes: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context) => {
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     if (!(await isMemoryReadableCached(ctx, memoryId))) throw new MemoryNotFoundError(memoryRef);
-    const key = await keyForMemory(ctx, memoryId);
+    const key = await requirePlainApprovalMemory(ctx, memoryId);
     // #1607 — comments are never approved, so they are outside the tamper
     // check entirely (cor:dmo:110:06), not reported as NOT_APPROVED.
     const nodes = await ctx.db.node.findMany({
@@ -197,11 +192,13 @@ export const nodeApprovalMutations = {
     // encrypted memory meets FORBIDDEN whether or not a key is cached
     // (@copilot, PR #1592). Re-checked inside the fenced transaction below.
     await mayApproveNodes(ctx, memoryId);
-    const key = await keyForMemory(ctx, memoryId);
+    await requirePlainApprovalMemory(ctx, memoryId);
+    // E1 intentionally never supplies a decryption key to the approval writer.
+    const key = null;
     try {
       const { node } = await withAuthorizedMemoryTx(
         ctx, memoryId, [],
-        (txCtx) => mayApproveNodes(txCtx, memoryId),
+        async (txCtx) => { await mayApproveNodes(txCtx, memoryId); await requirePlainApprovalMemory(txCtx, memoryId); },
         (tx) => approveNodeInTransaction(tx, id, {
           memoryId, approver: editorFromAuth(ctx), key, expectedRevision: revision,
         }),
@@ -223,10 +220,12 @@ export const nodeApprovalMutations = {
   approveMemoryNodes: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context) => {
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => mayApproveNodes(ctx, memoryId));
-    const key = await keyForMemory(ctx, memoryId);
+    await requirePlainApprovalMemory(ctx, memoryId);
+    // E1 intentionally never supplies a decryption key to the approval writer.
+    const key = null;
     const outcome = await withAuthorizedMemoryTx(
       ctx, memoryId, [],
-      (txCtx) => mayApproveNodes(txCtx, memoryId),
+      async (txCtx) => { await mayApproveNodes(txCtx, memoryId); await requirePlainApprovalMemory(txCtx, memoryId); },
       async (tx) => {
         // Lock in id order, so two bulk approvals cannot deadlock each other.
         // #1591: only unminted nodes are approved in bulk; a minted node's
@@ -316,10 +315,10 @@ function mintStatusOf(row: Required<Omit<MintParent, 'id'>> | null) {
 }
 
 type ApprovalParent = { id: string; revSeq: number; memoryId?: string } & Partial<Pick<NodeApprovalRow,
-  'approvedRevNo' | 'approvedBy' | 'approvedByInfo' | 'approvedAt' | 'approvalHash'>>;
+  'approvedRevNo' | 'contentRevSeq' | 'approvedBy' | 'approvedByInfo' | 'approvedAt' | 'approvalHash'>>;
 
 const APPROVAL_SELECT = {
-  approvedRevNo: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true,
+  approvedRevNo: true, contentRevSeq: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true,
 } as const;
 
 type StatusColumns = 'approval' | 'mint';
@@ -381,6 +380,85 @@ async function flushStatusColumns(ctx: Context, kind: StatusColumns, batch: Colu
   }
 }
 
+/**
+ * #1856 — one tick of keyed lookups for a request, flushed in ONE query. The same shape as
+ * {@link loadStatusColumns}: keyed on the request's Context, opened on the first key, flushed on the next
+ * macrotask, and DELETED at flush. Nothing survives the tick: a later call opens a fresh batch and reads
+ * the database again, so no answer is reused across ticks, let alone across requests (the issue's
+ * guard). A failed flush rejects every waiter; nothing falls back to a default.
+ */
+type TickBatch<V> = { pending: Map<string, Array<(v: V) => void>>; failures: Array<(e: unknown) => void> };
+
+function tickLoad<V>(
+  registry: WeakMap<Context, TickBatch<V>>,
+  ctx: Context,
+  key: string,
+  flush: (keys: string[]) => Promise<Map<string, V>>,
+  absent: V,
+): Promise<V> {
+  let batch = registry.get(ctx);
+  if (!batch) {
+    const fresh: TickBatch<V> = { pending: new Map(), failures: [] };
+    batch = fresh;
+    registry.set(ctx, fresh);
+    setImmediate(() => {
+      registry.delete(ctx);
+      flush([...fresh.pending.keys()]).then(
+        (found) => {
+          for (const [k, waiters] of fresh.pending) for (const resolve of waiters) resolve(found.has(k) ? found.get(k)! : absent);
+        },
+        (error) => {
+          for (const reject of fresh.failures) reject(error);
+        },
+      );
+    });
+  }
+  const target = batch;
+  return new Promise<V>((resolve, reject) => {
+    const waiters = target.pending.get(key) ?? [];
+    waiters.push(resolve);
+    target.pending.set(key, waiters);
+    target.failures.push(reject);
+  });
+}
+
+const encryptedBatches = new WeakMap<Context, TickBatch<boolean>>();
+
+/**
+ * Read the memory state rather than trusting decrypted parent projections. #1856: batched per request,
+ * so a page asking both status fields pays one memory query, plus one node query for the parents
+ * selected without their memoryId, instead of about two per node. Both steps run in the SAME flush, so a
+ * page that mixes the two parent shapes still pays one memory query. The flag is always the STORED
+ * `memory.isEncrypted`, never a field on the parent; a missing node or memory reads as not encrypted,
+ * exactly as the per-node lookups this replaces did.
+ */
+function encryptedStatusParent(ctx: Context, n: { id: string; memoryId?: string }): Promise<boolean> {
+  const key = n.memoryId ? `m:${n.memoryId}` : `n:${n.id}`;
+  return tickLoad(encryptedBatches, ctx, key, async (keys) => {
+    const nodeIds = keys.filter((k) => k.startsWith('n:')).map((k) => k.slice(2));
+    const memoryOfNode = new Map<string, string>();
+    if (nodeIds.length > 0) {
+      const rows = await ctx.db.node.findMany({ where: { id: { in: nodeIds } }, select: { id: true, memoryId: true } });
+      for (const r of rows) memoryOfNode.set(r.id, r.memoryId);
+    }
+    const memoryIds = new Set([
+      ...keys.filter((k) => k.startsWith('m:')).map((k) => k.slice(2)),
+      ...memoryOfNode.values(),
+    ]);
+    const encrypted = new Set<string>();
+    if (memoryIds.size > 0) {
+      const rows = await ctx.db.memory.findMany({ where: { id: { in: [...memoryIds] } }, select: { id: true, isEncrypted: true } });
+      for (const r of rows) if (r.isEncrypted === true) encrypted.add(r.id);
+    }
+    const out = new Map<string, boolean>();
+    for (const k of keys) {
+      const memoryId = k.startsWith('m:') ? k.slice(2) : memoryOfNode.get(k.slice(2));
+      out.set(k, memoryId !== undefined && encrypted.has(memoryId));
+    }
+    return out;
+  }, false);
+}
+
 export const nodeApprovalFieldResolvers = {
   Node: {
     /**
@@ -394,16 +472,30 @@ export const nodeApprovalFieldResolvers = {
      * from paying one transaction per row.
      */
     approvalStatus: async (n: ApprovalParent, args: unknown, ctx: Context) => {
-      const row = 'approvedRevNo' in n && n.approvedRevNo !== undefined
+      if (await encryptedStatusParent(ctx, n)) return { state: 'NOT_APPLICABLE', approval: null };
+      const row = 'approvedRevNo' in n && n.approvedRevNo !== undefined && n.contentRevSeq !== undefined
         ? n
         : await loadStatusColumns(ctx, 'approval', n.id, n.memoryId);
       const approval = row ? approvalRecordOf(row as Parameters<typeof approvalRecordOf>[0]) : null;
-      if (approval?.revision == null) return { state: approvalStateOf(null, n.revSeq), approval };
+      if (approval?.revision == null) return { state: 'NOT_APPROVED' as const, approval };
+      // Reconcile first: an out-of-band change moves the content boundary
+      // (#1611), so a reconcile that ran here makes the columns read above stale.
       const revision = await (typeResolvers.Node.revision as (p: unknown, a: unknown, c: Context) => Promise<number>)(n, args, ctx);
-      return { state: approvalStateOf(approval.revision, revision), approval };
+      const current = revision === n.revSeq
+        ? row
+        : await loadStatusColumns(ctx, 'approval', n.id, n.memoryId);
+      const currentApproval = current ? approvalRecordOf(current as Parameters<typeof approvalRecordOf>[0]) : approval;
+      return {
+        state: approvalStateOf({
+          approvedRevNo: currentApproval?.revision ?? null,
+          contentRevSeq: (current?.contentRevSeq as number | undefined) ?? Number.MAX_SAFE_INTEGER,
+        }),
+        approval: currentApproval,
+      };
     },
     /** #1591 — whether the node is minted, and the record of it. */
     mintStatus: async (n: MintParent & { memoryId?: string }, _: unknown, ctx: Context) => {
+      if (await encryptedStatusParent(ctx, n)) return mintStatusOf(null);
       const row = n.mintedAt !== undefined
         ? n
         : await loadStatusColumns(ctx, 'mint', n.id, n.memoryId);
