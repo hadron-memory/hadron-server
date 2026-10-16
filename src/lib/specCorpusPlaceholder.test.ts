@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../integrations/db/client.js';
+import { observeTransactionBackend, waitForAdvisoryWaiter } from '../test/advisoryWaiter.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
@@ -726,21 +727,19 @@ describe('reserve takes the address locks before the tombstone row (@codex P2 on
     }, { timeout: 20_000 });
     await lockHeld;
 
-    const reserving = reserve(draft.id, 'pas:220:01');
+    const observed = observeTransactionBackend(db);
+    const reserving = resolvers.Mutation.reserveSpecCitation(null, { memoryRef: draft.id, loc: 'pas:220:01' }, { ...as(admin.id), db: observed.db });
+    void reserving.catch(() => {});
     try {
-      await vi.waitFor(async () => {
-        const [{ count }] = await db.$queryRaw<Array<{ count: bigint }>>`
-          SELECT count(*)::bigint AS count FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
-          WHERE l.locktype = 'advisory' AND NOT l.granted AND a.datname = current_database()
-        `;
-        expect(Number(count)).toBeGreaterThan(0);
-      }, { timeout: 5_000, interval: 25 });
+      const pid = await observed.backendFor(reserving);
+      await waitForAdvisoryWaiter(db, { pid, key: { form: 'int-pair', first: draft.id, second: 'pas' } });
       // While reserve waits on the address, the tombstone row is NOT locked by it.
       const probe = await db.$transaction(async (tx) =>
         tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM nodes WHERE id = ${old.id} FOR UPDATE NOWAIT`);
       expect(probe).toHaveLength(1);
     } finally {
       release();
+      await Promise.allSettled([competitor, reserving]);
     }
     await competitor;
     const placeholder = await reserving;
