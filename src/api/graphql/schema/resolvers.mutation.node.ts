@@ -52,7 +52,7 @@ import {
 import { enqueueNodeEmbedding, pendingAtForRevival } from '../../../services/embedding/enqueue.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
-import { enforceNodeSchemaOnWrite, normalizeObjectType } from '../../../lib/enforceNodeSchema.js';
+import { enforceNodeSchemaOnWrite, normalizeObjectType, normalizeRole } from '../../../lib/enforceNodeSchema.js';
 import {
   encryptNodeFieldsWithKey,
   decryptNodeFields,
@@ -449,6 +449,17 @@ export async function writeNodeCore(
         const normalized: string | null =
           input.abstract.trim() === '' ? null : input.abstract;
         input = { ...input, abstract: normalized };
+      }
+
+      // #1219 (cor:dmo:060:02, ruling "A" via Vera) — an empty/whitespace role
+      // is the same as no role → null, beside objectType's #725 normalization.
+      // Applied HERE, before the first consumer (mergedGovernedState's
+      // before/after judgment below, the locked-row re-checks and the
+      // resurrection path all read input.role), so every write path and every
+      // governance judgment sees ONE spelling of "ungoverned". `undefined`
+      // stays undefined — omit-on-update preserves the existing role.
+      if (input.role !== undefined && input.role !== null) {
+        input = { ...input, role: normalizeRole(input.role) };
       }
 
       // Reject saves whose extraction-spec arrays would write into the

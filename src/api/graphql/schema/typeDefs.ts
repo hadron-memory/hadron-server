@@ -10503,11 +10503,12 @@ export const typeDefs = `#graphql
     """
     saveChatSummary(chatId: String!, summary: String!): Boolean!
     """
-    Rename a saved chat (user must own it)
+    Rename a saved chat with current write access to its host memory.
     """
     updateChatTitle(chatId: String!, title: String!): Boolean!
     """
-    Soft-delete a saved chat and all its messages
+    Soft-delete a saved chat and all its messages. Requires current write access
+    to its host memory.
     """
     deleteChat(chatId: String!): Boolean!
 
