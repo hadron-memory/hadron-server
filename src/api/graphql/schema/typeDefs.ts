@@ -3757,9 +3757,16 @@ export const typeDefs = `#graphql
     updatedBy: ID
   }
 
+  """
+  #1331 — who may write a node whose role this rule governs, ON TOP OF memory write access (never instead of it).
+  A write is judged against the role the node has BEFORE it and the role it has AFTER, so creating, editing, changing or clearing a role all need the level.
+  """
   enum NodeRoleWriters {
+    "Anyone who may write the memory. Grants no new access."
     ALL
+    "NOT BUILT yet (#1333): any write touching this role is refused (ROLE_WRITERS_UNSUPPORTED). Never read as ALL."
     OWNER
+    "The owning organization's ADMINs and OWNERs, and the owning user (ROLE_WRITER_LEVEL_REQUIRED otherwise)."
     ADMIN
   }
 
@@ -11107,13 +11114,19 @@ export const typeDefs = `#graphql
     updateWorker(workerRef: ID!, promptOverride: String): Worker!
 
     """
-    #974 — hard-delete a NEVER-USED miscast (cor:dmo:050:11's only removal
-    escape): refused with WORKER_IN_USE unless no session was ever bound and
-    the worker's working memory holds no content. Anything with history
-    retires instead — its name is bound to that history forever. Also removes
-    the empty working memory. Same authorization as castWorker.
+    #1162 — hard-delete a never-referenced miscast only.
+    hrn:node:hadronmemory.com:specs:cor:dmo:050:11
+    Empty normally ended and released stints are repairable; persisted
+    attribution, including tombstones/history, refuses WORKER_IN_USE.
+    The requester must explicitly verify no signed commit, trailer, PR,
+    comment, review or published artifact attributes work to this Worker.
+    Database counts cannot prove external absence: known or uncertain
+    external history means retire instead. Omitted or false confirmation
+    refuses WORKER_EXTERNAL_ATTRIBUTION_UNCONFIRMED. No external crawl.
+    Also removes empty ended stints and the empty working memory.
+    Same staffing authorization as castWorker.
     """
-    deleteWorker(workerRef: ID!): Boolean!
+    deleteWorker(workerRef: ID!, confirmNoExternalAttribution: Boolean): Boolean!
 
     """
     #960 — mint a roles:<role> definition in the Team Agent's system memory.
