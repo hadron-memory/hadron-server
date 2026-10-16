@@ -96,7 +96,7 @@ describe('App hard-delete retention', () => {
     const f = await fixture(true, userTenant);
     const own = await db.memory.create({ data: { name: 'Own', urn: 'retention.test:own', organizationId: f.org.id, appId: f.app.id, userMemoryOfAgentId: f.agent.id, userId: f.actor.id, class: 'private' } });
     const admin = kind === 'self' ? f.actor : await db.user.create({ data: { handle: 'deleter-admin', roles: ['ADMIN'] } });
-    await resolvers.Mutation.deleteUser({}, { userRef: f.actor.id }, { db, userId: admin.id, roles: ['ADMIN'] });
+    await resolvers.Mutation.deleteUser({}, { userRef: f.actor.id, reason: 'test erasure' }, { db, userId: admin.id, roles: ['ADMIN'] });
     await assertPreserved(f);
     expect(purgeCollectedAssetObjects).toHaveBeenCalled();
     for (const [collected] of vi.mocked(purgeCollectedAssetObjects).mock.calls) {

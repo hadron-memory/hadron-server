@@ -36,6 +36,7 @@ import {
   resolveAppleUser,
 } from './auth/index.js';
 import { issueLoginCode, redeemLoginCode } from './auth/authHandoff.js';
+import { startUserDeletionNoticeLoop } from './jobs/sendUserDeletionNotices.js';
 import { boundSessionPrivacyFilter } from './lib/auth/sessionPrivacy.js';
 import {
   createPendingLoginState,
@@ -1828,6 +1829,11 @@ export async function createServer(): Promise<Express> {
   // (cor:api:010:02), in bounded batches. Live proofs and sealed receipts stay.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
     startMergeConsentSweepLoop(db);
+  }
+
+  // #1647 — resume pending notices of admin-initiated account erasures (restart-safe outbox).
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_USER_DELETION_NOTICES !== 'true') {
+    startUserDeletionNoticeLoop(db);
   }
 
   // Background job: purge soft-deleted assets past their 24h recovery

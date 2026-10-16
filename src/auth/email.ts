@@ -20,6 +20,26 @@ function getResend(): Resend {
   return resend;
 }
 
+/** Is an outbound mail provider configured? (#1647: a notice with no sender is UNAVAILABLE, not retried.) */
+export function isEmailSenderConfigured(): boolean {
+  return !!process.env.RESEND_API_KEY;
+}
+
+/**
+ * #1647: tell a user an administrator erased their account. The text deliberately carries NO reason: the reason is an
+ * audit record, not something the notice discloses. Throws when the provider refuses, so the caller can count a try.
+ */
+export async function sendAccountDeletionNotice(to: string): Promise<void> {
+  const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
+  await getResend().emails.send({
+    from: fromAddress,
+    to,
+    subject: 'Your Hadron account was deleted',
+    html: '<p>A Hadron administrator deleted your account, and your data was erased.</p>' +
+      '<p>If you believe this was a mistake, contact Hadron support.</p>',
+  });
+}
+
 const RATE_LIMITED_BODY = { error: 'rate_limit_exceeded' };
 
 /**
