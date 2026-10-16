@@ -122,7 +122,7 @@ describe('#992 team-chat seq uniqueness', () => {
       }, { contextValue: ctx });
       expect(result.body.kind).toBe('single');
       if (result.body.kind === 'single') {
-        expect(result.body.singleResult.errors?.[0].extensions.code).toBe('TEAM_CHAT_SEQ_CONFLICT');
+        expect(result.body.singleResult.errors?.[0]?.extensions?.code).toBe('TEAM_CHAT_SEQ_CONFLICT');
         expect(JSON.stringify(result.body.singleResult)).not.toMatch(/P0992|ConnectorError|PostgresError|Prisma|SELECT|INSERT/);
       }
     } finally { await gql.stop(); }

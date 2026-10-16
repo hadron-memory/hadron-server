@@ -73,7 +73,9 @@ Soft delete/revive leaves the key intact. Hard deletion removes its key with the
 node; this does not create a production repair surface.
 
 A private per-memory MVCC fence tuple serializes membership decisions, including
-raw storage writers. Unlike an advisory lock alone, its version update aborts a
+raw storage writers. Its transaction-ID tag writes a tuple version only once per
+transaction (avoiding repeated HOT updates during bulk inserts); the lock lasts
+until commit. Unlike an advisory lock alone, that tuple write aborts a
 stale repeatable-read/serializable snapshot after a concurrent classification
 change. Ordinary unrelated Node paths do not take this fence. Team message
 inserts update one key; only classification/root changes rebuild a memory's keys.

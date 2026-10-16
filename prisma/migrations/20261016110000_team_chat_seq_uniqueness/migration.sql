@@ -50,7 +50,11 @@ BEGIN
     RAISE EXCEPTION 'Team chat membership snapshot is stale' USING ERRCODE = '40001';
   END IF;
   INSERT INTO team_chat_sequence_scopes(memory_id) VALUES(mid) ON CONFLICT DO NOTHING;
-  UPDATE team_chat_sequence_scopes SET version = version + 1 WHERE memory_id = mid;
+  -- One tuple version per transaction, not per row in a bulk insert. Repeated
+  -- HOT updates of the same tuple in one statement build a quadratic chain.
+  -- The first write keeps the row lock until commit; later rows need no write.
+  UPDATE team_chat_sequence_scopes SET version = txid_current()
+    WHERE memory_id = mid AND version IS DISTINCT FROM txid_current();
 END $$;
 
 CREATE OR REPLACE FUNCTION hadron_team_chat_seq_refresh(mid text) RETURNS void LANGUAGE plpgsql AS $$
