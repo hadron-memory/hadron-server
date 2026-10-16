@@ -52,6 +52,7 @@ import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
+import { miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx } from './authorizedTx.js';
@@ -165,18 +166,6 @@ export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promis
   }
   if (await isAppParticipant(ctx, app)) return;
   throw forbidden();
-}
-
-/** #1705 — does any agent task name this worker as its owner or assignee? */
-async function workerHasAgentTasks(
-  db: Pick<Context['db'], 'agentTask'>,
-  workerId: string,
-): Promise<boolean> {
-  const row = await db.agentTask.findFirst({
-    where: { OR: [{ ownerWorkerId: workerId }, { assigneeWorkerId: workerId }] },
-    select: { id: true },
-  });
-  return row !== null;
 }
 
 /**
@@ -1512,83 +1501,37 @@ export const workerMutations = {
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
 
-  /**
-   * deleteWorker — the ONLY removal escape (cor:dmo:050:11): the hard delete
-   * of a never-used miscast. "Never did anything" is checked, not asserted:
-   * no session was EVER bound (ended ones included — chat authorship and
-   * worklog records both require a bound session, so zero sessions implies
-   * zero references), and the working memory (if provisioned) holds no nodes
-   * and no assets. Anything else is WORKER_IN_USE — retire instead.
-   */
+  /** #1162 / cor:dmo:050:11: only an unreferenced, released miscast is removable. */
   deleteWorker: async (
     _: unknown,
-    { workerRef }: { workerRef: string },
+    { workerRef, confirmNoExternalAttribution }: { workerRef: string; confirmNoExternalAttribution?: boolean | null },
     ctx: Context,
   ) => {
     const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
     await requireWorkerStaffAccess(ctx, app);
-
-    const sessions = await ctx.db.session.count({ where: { workerId: worker.id } });
-    if (sessions > 0) {
+    // Auth first: the negative attestation must not open a roster oracle.
+    if (confirmNoExternalAttribution !== true) {
       throw new GraphQLError(
-        'This worker has driven sessions — its name is bound to that history forever. Retire it instead.',
-        { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
+        'Verify that no signed commit, trailer, PR, comment, review or published artifact attributes work to this worker, then explicitly confirm. Database checks cannot prove external absence. If history is known or uncertain, retire instead.',
+        { extensions: { code: 'WORKER_EXTERNAL_ATTRIBUTION_UNCONFIRMED' } },
       );
     }
-    // #1705 — owning or holding an agent task is doing something, too (and
-    // the task's worker reference must not dangle).
-    if (await workerHasAgentTasks(ctx.db, worker.id)) {
-      throw new GraphQLError(
-        'This worker owns or is assigned agent tasks. Retire it instead.',
-        { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
-      );
-    }
-    if (worker.memoryId) {
-      const [nodes, assets] = await Promise.all([
-        ctx.db.node.count({ where: { memoryId: worker.memoryId } }),
-        ctx.db.asset.count({ where: { memoryId: worker.memoryId } }),
-      ]);
-      if (nodes > 0 || assets > 0) {
-        throw new GraphQLError(
-          'This worker\'s working memory holds content — it did something. Retire it instead.',
-          { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
-        );
-      }
-    }
-    // Count-then-act: SERIALIZABLE so a session binding (or memory write)
-    // committing between the checks above and the delete cannot slip a
-    // referenced worker through (conventions:count-then-act-serializable-txn;
-    // the counts re-run inside the transaction).
-    await ctx.db.$transaction(
-      async (tx) => {
-        const inTxSessions = await tx.session.count({ where: { workerId: worker.id } });
-        if (inTxSessions > 0) {
-          throw new GraphQLError(
-            'This worker has driven sessions — its name is bound to that history forever. Retire it instead.',
-            { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
-          );
-        }
-        if (await workerHasAgentTasks(tx, worker.id)) {
-          throw new GraphQLError(
-            'This worker owns or is assigned agent tasks. Retire it instead.',
-            { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
-          );
-        }
-        await tx.worker.delete({ where: { id: worker.id } });
-        if (worker.memoryId) {
-          const nodes = await tx.node.count({ where: { memoryId: worker.memoryId } });
-          const assets = await tx.asset.count({ where: { memoryId: worker.memoryId } });
-          if (nodes > 0 || assets > 0) {
-            throw new GraphQLError(
-              'This worker\'s working memory holds content — it did something. Retire it instead.',
-              { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
-            );
-          }
-          await tx.memory.delete({ where: { id: worker.memoryId } });
-        }
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-    );
+    const refuse = () => new GraphQLError('This worker has persisted references or an unreleased stint. Retire it instead.', {
+      extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
+    });
+    if (await miscastHasReferences(ctx.db, worker)) throw refuse();
+    await ctx.db.$transaction(async (tx) => {
+      // Re-read after acquiring the identity lock; stale pre-wait eligibility
+      // never authorizes destruction. First-reference writer fencing is required
+      // as well as this SERIALIZABLE census (see #1162 inventory).
+      await tx.$queryRaw`SELECT id FROM workers WHERE id = ${worker.id} FOR UPDATE`;
+      const current = await tx.worker.findUnique({ where: { id: worker.id } });
+      if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
+      if (await miscastHasReferences(tx, current)) throw refuse();
+      await tx.session.deleteMany({ where: { workerId: worker.id } });
+      await tx.worker.delete({ where: { id: worker.id } });
+      if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     return true;
   },
 };
