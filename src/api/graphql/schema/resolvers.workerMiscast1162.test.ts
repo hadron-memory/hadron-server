@@ -1,6 +1,7 @@
 /** #1162: empty ended stints are repairable; persisted attribution is not. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
@@ -55,6 +56,55 @@ describe('#1162 never-referenced repair', () => {
     );
     expect(text).not.toMatch(/error|WORKER_IN_USE/i);
     expect(await db.worker.findUnique({ where: { id: worker.id } })).toBeNull();
+  });
+
+  it('keeps an open binding in use', async () => {
+    const worker = await cast();
+    await M.startSession({}, { input: { id: generateId(), appRef: appId, workerRef: worker.id, tool: 'test' } }, ctx);
+    await expect(remove(worker.id)).rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
+  });
+
+  it('MCP reports omitted and false external confirmation as errors', async () => {
+    const worker = await cast();
+    for (const confirmation of [undefined, false]) {
+      const result = await createTestableMcpServer({ userId: ctx.userId, roles: ['READER'] }).callTool(
+        'hadron_delete_worker', { workerRef: worker.id, confirmNoExternalAttribution: confirmation },
+      );
+      expect((result as { isError?: boolean }).isError).toBe(true);
+      expect(JSON.stringify(result)).toContain('WORKER_EXTERNAL_ATTRIBUTION_UNCONFIRMED');
+      expect(await db.worker.findUnique({ where: { id: worker.id } })).not.toBeNull();
+    }
+  });
+
+  it('a never-bound verified-empty casting remains removable', async () => {
+    const worker = await cast();
+    expect(await remove(worker.id)).toBe(true);
+    expect(await cast()).toMatchObject({ name: 'Miscast' });
+  });
+
+  it('does not erase a first no-FK reference committed while deletion waits', async () => {
+    const worker = await cast();
+    let release!: () => void;
+    let locked!: () => void;
+    const lockedPromise = new Promise<void>((resolve) => { locked = resolve; });
+    const releasePromise = new Promise<void>((resolve) => { release = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM workers WHERE id = ${worker.id} FOR UPDATE`;
+      locked();
+      await releasePromise;
+    }, { timeout: 20_000 });
+    await lockedPromise;
+    const deletion = remove(worker.id).then(() => 'deleted', () => 'refused');
+    try {
+      await waitForLockWaiters(db as any);
+      await db.node.create({ data: {
+        id: generateId(), memoryId: otherMemoryId, loc: 'first-reference', name: 'First work',
+        createdByWorkerId: worker.id,
+      } });
+    } finally { release(); }
+    await holder;
+    expect(await deletion).toBe('refused');
+    expect(await db.worker.findUnique({ where: { id: worker.id } })).not.toBeNull();
   });
 
   for (const field of ['createdByWorkerId', 'updatedByWorkerId'] as const) {
