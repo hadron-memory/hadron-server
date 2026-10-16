@@ -2348,9 +2348,16 @@ export async function getAccessibleMemoryIds(
  */
 export async function requireSessionWriteAccess(
   ctx: Context,
-  session: { appId: string | null; userId: string | null; launchOperationId: string | null },
+  session: { appId: string | null; userId: string | null; launchOperationId: string | null; memoryId: string | null },
 ): Promise<void> {
-  if (isPlatformAdmin(ctx)) return;
+  // #1647 (cor:acl:010:02, strict owner wins; Holger's A, #13061): a platform admin's authority stops at a session bound
+  // to ANOTHER user's personal/private memory, and stops TERMINALLY. The admin role confers nothing there, and neither
+  // does an attribution that role could otherwise fall back on (the admin's own session bound to someone else's memory
+  // is refused too). `memoryId` is REQUIRED so a caller that forgot to select it fails to compile.
+  if (isPlatformAdmin(ctx)) {
+    if (await boundToForeignStrictMemory(ctx, session.memoryId)) throw authorizationDenied();
+    return;
+  }
   // App branch: PURE App-key principals only (#932 Codex P1). A hybrid
   // principal — a user with an active-App selection, the MCP auth shape —
   // must NOT inherit App authority, or any co-member of an App could end
@@ -2368,6 +2375,14 @@ export async function requireSessionWriteAccess(
   }
   if (session.userId === ctx.userId && !ctx.impersonation) return;
   throw authorizationDenied();
+}
+
+/** Is the memory another user's personal/private one, which no admin role or impersonation reaches? */
+async function boundToForeignStrictMemory(ctx: Context, memoryId: string | null): Promise<boolean> {
+  if (!memoryId) return false;
+  const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { class: true, userId: true } });
+  if (!memory || (memory.class !== 'personal' && memory.class !== 'private')) return false;
+  return !isStrictOwner(ctx, memory.userId);
 }
 
 /** Prisma `where` clause that restricts sessions to the caller's scope. */

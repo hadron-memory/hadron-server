@@ -1,4 +1,5 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { foreignEdgeMemoryIds } from '../../../lib/foreignEdgeMemories.js';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
 import { decisionContainedError, isDecisionFamilyRole, refuseDecisionFamily, refuseUnderDecisionLog } from '../../../lib/decisions/index.js';
@@ -3109,6 +3110,10 @@ export const nodeMutations = {
                   { extensions: { code: 'CROSS_MEMORY_EDGES', count: crossMemEdges } },
                 );
               }
+            }            // #1647: acknowledging the cascade is not write authority over the other holdings it edits. The whole
+            // delete refuses (the transaction rolls back), with the generic write refusal.
+            for (const other of await foreignEdgeMemoryIds(tx, affectedIds, memoryId)) {
+              await requireMemoryWriteAccess(ctx, other);
             }
             // PendingEdge.targetId is intentionally NOT a foreign key, so the FK
             // cascade misses pending rows aimed at the deleted nodes — clean them

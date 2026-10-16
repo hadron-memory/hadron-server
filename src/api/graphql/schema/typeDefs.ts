@@ -9704,7 +9704,7 @@ export const typeDefs = `#graphql
     (identity fields nulled, handle replaced with a random deleted-...
     value) and soft-deleted; a deleted account can no longer authenticate.
     """
-    deleteUser(userRef: ID): Boolean!
+    deleteUser(userRef: ID, reason: String): Boolean!
 
     # Organization management
     createOrganization(name: String!, urn: String!): Organization!

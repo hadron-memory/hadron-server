@@ -439,7 +439,7 @@ async function resolveSessionAuthor(
 ): Promise<{ workerId: string; agentId: string | null; name: string; sessionId: string; workerAppId: string; crossApp: boolean; resume: boolean }> {
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
-    select: { id: true, appId: true, userId: true, workerId: true, agentId: true, endedAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true },
+    select: { id: true, appId: true, userId: true, workerId: true, agentId: true, endedAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true, memoryId: true },
   });
   if (!session) {
     throw new GraphQLError(`Session "${sessionRef}" not found.`, {

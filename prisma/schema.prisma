@@ -5860,6 +5860,49 @@ model AppKeyWakeRead {
   @@map("app_key_wake_reads")
 }
 
+/// #1647 (cor:aut:020:03): one row per erasure a platform admin performs on ANOTHER user's account. Written in the
+/// deletion's own SERIALIZABLE transaction, so the audit and the erasure commit or roll back together. User ids are
+/// plain columns, deliberately NOT foreign keys: the audit must outlive any cascade. Immutable (trigger in
+/// post-push.sql + the migration) and exposed on no read surface.
+model UserDeletionAudit {
+  id           String   @id @map("id")
+  actorUserId  String   @map("actor_user_id")
+  targetUserId String   @unique @map("target_user_id")
+  reason       String
+  completedAt  DateTime @default(now()) @map("completed_at")
+
+  notice UserDeletionNotice?
+
+  @@map("user_deletion_audits")
+}
+
+enum UserDeletionNoticeStatus {
+  PENDING
+  SENT
+  FAILED
+  UNAVAILABLE
+}
+
+/// #1647: the outbox for the deleted user's notice. Written in the deletion's transaction with the recipient address
+/// encrypted (tokenCrypto); a post-commit worker sends it and clears the ciphertext at a terminal state. The notice
+/// text never carries the audit reason.
+model UserDeletionNotice {
+  auditId             String                   @id @map("audit_id")
+  status              UserDeletionNoticeStatus @default(PENDING)
+  recipientCiphertext String?                  @map("recipient_ciphertext")
+  attempts            Int                      @default(0)
+  /// Exclusive send lease: while `leaseUntil` is in the future only the holder of `claimToken` is sending.
+  leaseUntil          DateTime?                @map("lease_until")
+  claimToken          String?                  @map("claim_token")
+  createdAt           DateTime                 @default(now()) @map("created_at")
+  updatedAt           DateTime                 @updatedAt @map("updated_at")
+
+  audit UserDeletionAudit @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("user_deletion_notices")
+}
+
 /// #1162: internal MVCC coordination, not authored history or a Worker FK.
 /// Writers and miscast deletion update this version in their own transaction.
 /// Retained after deletion to fence older snapshots; no public API.

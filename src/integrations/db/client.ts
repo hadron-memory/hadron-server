@@ -21,6 +21,8 @@ const MODELS_WITHOUT_ID = new Set<string>([
   'AgentImport',
   'AgentOrgGrant',
   'AppAgent',
+  // #1647 — the notice is keyed by its audit row.
+  'UserDeletionNotice',
   // Spec 049 Phase 2 — the ordered scope→memory join (composite PK).
   'ScopeMemory',
   'MemoryShare',

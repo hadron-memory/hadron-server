@@ -1,5 +1,7 @@
 import { detachAppOwnerMemories } from './detachAppOwnerMemories.js';
 import { randomBytes } from 'crypto';
+import { generateId } from '../../lib/id.js';
+import { encryptToken } from '../../lib/tokenCrypto.js';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { deleteToolConnection } from '../../lib/emailClient.js';
 import { deleteSecretsForOwner } from '../../lib/secrets.js';
@@ -36,6 +38,12 @@ export interface DeleteUserAccountArgs {
   targetUserId: string;
   /** The authenticated actor (self, or a platform admin deleting another user). */
   actorUserId: string;
+  /**
+   * #1647 (cor:aut:020:03): the validated reason (trimmed, 1-500 code points) for a platform admin erasing ANOTHER
+   * user. When present, the audit row and the notice intent commit in the deletion's own transaction. Self-service
+   * deletion passes none and writes neither.
+   */
+  reason?: string;
 }
 
 /**
@@ -114,8 +122,10 @@ async function assertUserGrantSnapshotFresh(
  */
 export async function deleteUserAccount(
   db: PrismaClient,
-  { targetUserId, actorUserId }: DeleteUserAccountArgs,
+  { targetUserId, actorUserId, reason }: DeleteUserAccountArgs,
 ): Promise<void> {
+  // One immutable op id per call, minted OUTSIDE the retry so a serialization retry reuses it.
+  const auditId = generateId();
   // Resolve org domains before opening the SERIALIZABLE transaction so every
   // authority anchor precedes its row locks. A fresh cross-connection check
   // after the anchors retries with the complete set if membership changed.
@@ -125,7 +135,7 @@ export async function deleteUserAccount(
       where: { userId: targetUserId, deletedAt: null },
       select: { organizationId: true },
     })).map((m) => m.organizationId).sort();
-    return runDeletionTxn(db, targetUserId, actorUserId, membershipScope);
+    return runDeletionTxn(db, targetUserId, actorUserId, membershipScope, reason === undefined ? null : { auditId, reason });
   });
   // Provider-sidecar teardown AFTER the commit: the tools hold their own
   // copy of the OAuth credential + change subscriptions, so deleting the
@@ -140,6 +150,13 @@ export async function deleteUserAccount(
   // with the cascade, so these keys are the last record of the bytes.
   // Post-commit and best-effort — a dead object store must log, not fail.
   void purgeCollectedAssetObjects(assetKeys, `deleteUserAccount(${targetUserId})`);
+  // #1647: hand the committed notice intent to the sender. Post-commit and best-effort; the recurring loop resumes
+  // anything this misses (a restart included). Tests drive `processUserDeletionNotices` with a stub sender instead.
+  if (reason !== undefined && process.env.NODE_ENV !== 'test') {
+    void import('../../jobs/sendUserDeletionNotices.js').then((m) => m.processUserDeletionNotices(db)).catch((err) => {
+      console.error('[user-deletion-notice] post-commit send failed:', err);
+    });
+  }
 }
 
 /**
@@ -153,6 +170,7 @@ async function runDeletionTxn(
   targetUserId: string,
   actorUserId: string,
   membershipScope: string[],
+  audit: { auditId: string; reason: string } | null,
 ): Promise<{
   toolConnections: Array<{ provider: string; toolConnectionId: string }>;
   /** Object-store keys of the deleted memories' assets — purged post-commit. */
@@ -397,6 +415,24 @@ async function runDeletionTxn(
       await tx.memoryConfigTemplate.deleteMany({ where: { ownerUserId: targetUserId } });
       await tx.pendingSetup.deleteMany({ where: { userId: targetUserId } });
       await deleteSecretsForOwner(tx, 'user', targetUserId);
+
+      // ── 3b. #1647: audit + notice intent, in THIS transaction ───────
+      // Read the address BEFORE the scrub nulls it. The audit and the intent commit with the erasure or not at all;
+      // the address is encrypted in the intent and never copied into the audit text.
+      if (audit) {
+        const before = await tx.user.findUnique({ where: { id: targetUserId }, select: { email: true } });
+        const email = before?.email?.trim();
+        await tx.userDeletionAudit.create({
+          data: { id: audit.auditId, actorUserId, targetUserId, reason: audit.reason, completedAt: now },
+        });
+        await tx.userDeletionNotice.create({
+          data: {
+            auditId: audit.auditId,
+            status: email ? 'PENDING' : 'UNAVAILABLE',
+            recipientCiphertext: email ? encryptToken(email) : null,
+          },
+        });
+      }
 
       // ── 4. Scrub + soft-delete the User row ─────────────────────────
       // Release the #692 pool principal (tombstone — the root name stays

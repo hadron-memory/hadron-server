@@ -699,5 +699,20 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 CREATE INDEX IF NOT EXISTS usage_events_session_activity_idx
   ON usage_events (session_id, created_at) WHERE counts_as_activity;
 
+-- #1647: the admin-erasure audit is append-only and its reason is trimmed, 1-500 code points
+-- (Prisma can model neither; the migration carries the same statements).
+ALTER TABLE user_deletion_audits DROP CONSTRAINT IF EXISTS chk_user_deletion_reason;
+ALTER TABLE user_deletion_audits ADD CONSTRAINT chk_user_deletion_reason
+  CHECK (reason = btrim(reason) AND char_length(reason) BETWEEN 1 AND 500);
+CREATE OR REPLACE FUNCTION hadron_user_deletion_audit_immutable() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'user_deletion_audits is append-only';
+END $$;
+DROP TRIGGER IF EXISTS user_deletion_audits_immutable ON user_deletion_audits;
+CREATE TRIGGER user_deletion_audits_immutable
+  BEFORE UPDATE OR DELETE ON user_deletion_audits
+  FOR EACH ROW EXECUTE FUNCTION hadron_user_deletion_audit_immutable();
+
 -- #1162: newly introduced typed Worker/session references fence hard deletion.
 \ir worker-reference-invariants.sql
