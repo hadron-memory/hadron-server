@@ -41,8 +41,14 @@ async function seed(loc = 'doc', extra: Record<string, unknown> = {}) {
   return resolvers.Mutation.createNode({}, { input: { memoryId, loc, name: 'before', ...extra } as never }, ctx());
 }
 async function snapshot(id: string) {
+  // #2010: createNode starts a detached embedding enqueue. This test owns
+  // schema/lock/write state, not that job's bookkeeping or its update clock.
+  // Keep every other node column and the complete revision history checked;
+  // leave the real enqueue running and allow its stamp at any point.
+  const { updatedAt: _updatedAt, embeddingPendingAt: _embeddingPendingAt, ...node } =
+    await db.node.findUniqueOrThrow({ where: { id } });
   return {
-    node: await db.node.findUniqueOrThrow({ where: { id } }),
+    node,
     revisions: await db.nodeRevision.findMany({ where: { nodeId: id }, orderBy: { revNo: 'asc' } }),
   };
 }

@@ -501,16 +501,10 @@ export const chatMutations = {
 
       // Compile the prompt with Mustache against the target memory's data.
       //
-      // Spec 017 D5 — retrieval-time enforcement. compileTemplate spreads
-      // the accessFilter AFTER the literal memoryId, so a permissive
-      // filter (the caller's full memory set) effectively broadens the
-      // ref lookup beyond the chat's holding memory. For SHARED chats
-      // we must constrain to the chat's allowedReadSet (excludes any
-      // personal memory) — see chat-scope.ts:chatScopeAccessFilter for
-      // the full rationale. PRIVATE chats keep the legacy
-      // memoryAccessFilter behavior: no regression for existing
-      // private-chat templates, which can rely on cross-memory refs
-      // within the caller's own access scope.
+      // Spec 017 D5: shared chats keep their allowedReadSet filter (no
+      // personal memories); private chats retain the caller's read filter.
+      // #1835 intersects either filter with targetMemoryId, so bare refs stay
+      // in the holding memory without weakening the chat's authority gate.
       let systemMessage = promptContent;
       if (promptContent.includes('{{')) {
         const access =
@@ -1034,8 +1028,8 @@ export const chatMutations = {
         // Spec 017 D5 — retrieval-time enforcement: for SHARED chats,
         // narrow the access filter to the chat's allowedReadSet so a
         // Mustache reference cannot resolve against the caller's
-        // personal memory. PRIVATE chats keep the legacy
-        // memoryAccessFilter behavior. See chat-scope.ts:
+        // personal memory. PRIVATE chats keep memoryAccessFilter; #1835
+        // intersects either filter with the holding memory. See chat-scope.ts:
         // chatScopeAccessFilter for the full rationale.
         const isShared = chatData.scope === 'shared';
         let access: Record<string, unknown>;
