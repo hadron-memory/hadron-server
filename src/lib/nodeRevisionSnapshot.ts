@@ -23,6 +23,7 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from './id.js';
 import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { isDecisionFamilyRole } from './decisions/index.js';
+import { computeApprovalHash } from './approvalHash.js';
 
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
@@ -260,9 +261,33 @@ export async function ensureCurrentNodeRevisionInTransaction(
     where: { id: node.id },
     // The fingerprint computed above included the stale stamp. Recompute it
     // from the cleared live state, or the next read sees a second false drift.
-    data: { ...clearNodeAuthorship(), revisionContentHash: revisionStateHashRefreshMarker() },
+    data: {
+      ...clearNodeAuthorship(),
+      revisionContentHash: revisionStateHashRefreshMarker(),
+      // #1611: an approval that still claims the text, but whose hash the found
+      // text no longer matches, was changed outside the revision system. The
+      // reconcile is not a supported content change, so it does not move the
+      // boundary by itself; do it here so the approval reads as no longer
+      // covering the text (never APPROVED) while verify, which also reads this
+      // reconcile snapshot, keeps reporting TAMPERED.
+      ...(await approvalContradictedBy(tx, node) ? { contentRevSeq: node.revSeq + 1 } : {}),
+    },
   });
   return node.revSeq + 1;
+}
+
+/**
+ * Whether `node` holds an approval that still claims its text (#1611) yet the
+ * text hashes differently. An encrypted memory has no approvals to contradict.
+ */
+async function approvalContradictedBy(
+  tx: Prisma.TransactionClient,
+  node: { memoryId: string; name: string; abstract: string | null; content: string | null; approvedRevNo: number | null; approvalHash: string | null; contentRevSeq: number },
+): Promise<boolean> {
+  if (node.approvedRevNo == null || node.approvalHash == null || node.contentRevSeq > node.approvedRevNo) return false;
+  const memory = await tx.memory.findUnique({ where: { id: node.memoryId }, select: { isEncrypted: true } });
+  if (!memory || memory.isEncrypted) return false;
+  return computeApprovalHash({ title: node.name, abstract: node.abstract, content: node.content }) !== node.approvalHash;
 }
 
 /** The live node's approval columns (#1591). */

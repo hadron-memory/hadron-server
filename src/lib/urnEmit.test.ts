@@ -200,9 +200,10 @@ describe('nodeUrnRoundTrips (#1172)', () => {
     // unvalidated join and flags it. An address must never be that string.
     expect(safeNodeUrnV2Result('acme.com:mmdata', 'review:').fellBack).toBe(true);
     expect(nodeUrnRoundTrips('acme.com:mmdata', 'review:')).toBe(false);
-    // The root node's empty loc has no v2 URN at all (a grammar gap, not a
-    // bad row) — so it has no address either, and silently.
+    // #1228: roots now use the memory slug. The legacy empty loc remains
+    // unaddressable; only the derived slug is an address.
     expect(nodeUrnRoundTrips('acme.com:mmdata', '')).toBe(false);
+    expect(nodeUrnRoundTrips('acme.com:mmdata', 'mmdata')).toBe(true);
     warn.mockRestore();
   });
 });

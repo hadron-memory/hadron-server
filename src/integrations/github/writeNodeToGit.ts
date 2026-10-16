@@ -117,7 +117,7 @@ export function nodePayloadHasCiphertext(node: Pick<NodeForGit, 'content' | 'abs
  * SEVERAL nodes (the move mirror) can batch them into one commit. Returns
  * false for a ciphertext-shaped payload without touching the filesystem.
  */
-export function writeNodeFile(localPath: string, node: NodeForGit): boolean {
+export function writeNodeFile(localPath: string, node: NodeForGit, memoryUrn?: string): boolean {
   // #1273: inspect the actual payload, independently of raced memory flags
   // or key probes. Refuse before writes OR legacy-path cleanup.
   if (nodePayloadHasCiphertext(node)) {
@@ -127,7 +127,7 @@ export function writeNodeFile(localPath: string, node: NodeForGit): boolean {
   // A node — leaf or parent — is one self-contained `<...loc>.md` (children
   // live in the sibling `<seg>/` folder); edges are inline in the frontmatter
   // `nodes:` array, no sidecar.
-  const mdPath = nodeFilePath(localPath, node.loc);
+  const mdPath = nodeFilePath(localPath, node.loc, memoryUrn);
 
   // Build frontmatter (shared builder — keeps this incremental path and the
   // bulk pushMemoryToGit path emitting the exact same fields, edges included).
@@ -166,8 +166,8 @@ export function writeNodeFile(localPath: string, node: NodeForGit): boolean {
   // Remove any leftover old-format files for this node (parent `README.md` +
   // edge sidecar dir) so a migrating repo reshapes cleanly and a stale sidecar
   // can't mask the inline edges on re-import. `git add -A` stages the
-  // deletions. Skipped for the empty-loc root, whose file IS README.md.
-  if (node.loc !== '') {
+  // deletions. Skipped for the root, whose file IS README.md.
+  if (node.loc !== '' && mdPath === nodeFilePath(localPath, node.loc)) {
     const legacy = orphanedLegacyPaths(localPath, node.loc);
     rmSync(legacy.readme, { force: true });
     rmSync(legacy.sidecar, { recursive: true, force: true });
@@ -199,11 +199,11 @@ export function writeNodeFile(localPath: string, node: NodeForGit): boolean {
  *
  * `loc` is never the empty-loc root here: a memory's root node cannot be moved.
  */
-export function removeNodeFile(localPath: string, loc: string, expectedNodeId: string): boolean {
+export function removeNodeFile(localPath: string, loc: string, expectedNodeId: string, memoryUrn?: string): boolean {
   if (loc === '') return false;
   const legacy = orphanedLegacyPaths(localPath, loc);
   let removed = false;
-  for (const path of [nodeFilePath(localPath, loc), legacy.readme]) {
+  for (const path of [nodeFilePath(localPath, loc, memoryUrn), legacy.readme]) {
     if (readNodeFileId(path) !== expectedNodeId) continue;
     rmSync(path, { force: true });
     removed = true;
@@ -236,7 +236,7 @@ export async function writeNodeToGit(
       commitSubject: `Update node ${node.loc}`,
       logPrefix: '[writeNodeToGit]',
     },
-    async ({ localPath }) => {
+    async ({ localPath, memoryUrn }) => {
       // The node.written subscriber supplies a loader. It must run AFTER the
       // checkout lock is acquired: a snapshot taken while waiting could land
       // after a newer write and roll the Git file backwards.
@@ -252,7 +252,7 @@ export async function writeNodeToGit(
         console.warn(`[git-mirror] Skipping stale encrypted snapshot for node ${latest.id}`);
         return false;
       }
-      return writeNodeFile(localPath, latest);
+      return writeNodeFile(localPath, latest, memoryUrn);
     },
   );
 }

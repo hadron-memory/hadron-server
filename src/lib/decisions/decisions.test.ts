@@ -64,7 +64,7 @@ function rowOf(d: DecisionData, opts: { revSeq?: number; approvedRevNo?: number 
   const revSeq = opts.revSeq ?? 1;
   const approvedRevNo = opts.approvedRevNo === undefined ? null : opts.approvedRevNo;
   return {
-    id: 'n1', memoryId: 'm1', loc: `decisions:${d.code}`, name, abstract, content, isPlaceholder: false, revSeq,
+    id: 'n1', memoryId: 'm1', loc: `decisions:${d.code}`, name, abstract, content, isPlaceholder: false, revSeq, contentRevSeq: revSeq,
     approvedRevNo, approvedBy: approvedRevNo == null ? null : opts.approvedBy ?? 'holger', approvedByInfo: null,
     approvedAt: approvedRevNo == null ? null : new Date(),
     approvalHash: approvedRevNo == null ? null : computeApprovalHash({ title: name, abstract, content }),

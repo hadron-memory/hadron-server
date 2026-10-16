@@ -1295,6 +1295,14 @@ model Node {
   /// A revisioned edit snapshots the pre-edit state at this number, then
   /// atomically advances the live row to the next number.
   revSeq             Int       @default(1) @map("rev_seq")
+  /// #1611 (cor:dmo:120:04) — the revision at which the approval-hashed fields
+  /// (title, abstract, content under approval-hash v1) last changed through a
+  /// SANCTIONED writer; maintained by the `nodes_initialize_revision_content_hash`
+  /// trigger on the same 'refresh' marker as `revisionContentHash`. An approval
+  /// recorded at `approvedRevNo` is still valid iff `contentRevSeq <= approvedRevNo`:
+  /// metadata-only revisions advance `revSeq` but not this. A write outside the
+  /// revision system never moves it, so such a change stays TAMPERED.
+  contentRevSeq      Int       @default(1) @map("content_rev_seq")
   /// #1323: host-independent MD5 of the complete at-rest revisioned state.
   /// Internal safeguard only (never an artifact fingerprint): an exposed read
   /// reconciles a mismatch by taking a server-authored revision. Included
@@ -1303,8 +1311,8 @@ model Node {
   /// #1591 — the node's LATEST approval, kept here rather than only on a
   /// NodeRevision row because the live revision has no row (rows are pre-edit
   /// snapshots) and rows are prunable and deletable. The current revision is
-  /// approved iff `approvedRevNo = revSeq`; an older number means it was
-  /// edited since. `approvedBy` is a User.id when one is known, with no FK so a
+  /// approved iff `approvedRevNo >= contentRevSeq` (#1611); a lower number
+  /// means its content changed since. `approvedBy` is a User.id when one is known, with no FK so a
   /// user deletion cannot rewrite who approved; otherwise `approvedByInfo`
   /// holds the principal (the NodeRevision.editedByInfo convention).
   /// `approvalHash` is the full SHA-256 of approval hash v1
