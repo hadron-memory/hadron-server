@@ -4,7 +4,7 @@ import { registerAgentDefinitionTools } from './agentDefinitionTools.js';
 import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, resolveInheritedEdges, retainEffective, stillInherited, type InheritedFrom } from '../lib/effectiveSystemMemory.js';
 import { chatByline } from './chatByline.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
-import { appPrincipalMayWriteSession } from '../lib/sessionOwnership.js';
+import { appPrincipalSessionWriteAllowed } from '../lib/sessionOwnership.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentGovernedError, isCommentGovernedError } from '../lib/comments/index.js';
@@ -9079,7 +9079,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // none — so the two cannot drift again.
       const mayEnd = auth.userId
         ? session.userId === auth.userId
-        : await appPrincipalMayWriteSession(db, auth, session);
+        : await appPrincipalSessionWriteAllowed(db, auth, session); // #1969: a host key's refusal is recorded
       if (!mayEnd) {
         return textResult(`Forbidden: session "${id}" belongs to a different App or user.`);
       }

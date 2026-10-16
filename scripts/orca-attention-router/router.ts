@@ -1015,6 +1015,10 @@ const spinnerTimer = (s: string): boolean => /[（(]\d/.test(s) && /\d\s*[mh]?\s
  *    '⏺ Done.', the '※ recap:' block, '/clear to save N tokens'.
  *  - Codex fresh: the 'OpenAI Codex (v...)' banner and its 'Update
  *    available!' box. Codex done: 'Worked for '.
+ *  - Codex content-suppressed turns (#1983): when the last output was
+ *    withheld (the cybersecurity-care notice box), NO 'Worked for' footer
+ *    is drawn — the notice header itself is the completed-turn chrome.
+ *    Live captures: Riana + Chip, 2026-10-15.
  */
 const IDLE_MARKERS: readonly RegExp[] = [
   /· done/, /^⏺ Done/, /^Done\./, /^✻ \w+ for \d+[ms]/, /^✻ Compacted while idle/,
@@ -1022,17 +1026,26 @@ const IDLE_MARKERS: readonly RegExp[] = [
   /Claude Code v\d/, /glm-[\d.]/,
   /OpenAI Codex \(v/, /Update available!/, /Worked for /,
   /Update installed/,
+  // The content-suppression notice header (#1983): a suppressed turn draws
+  // no footer, so the header is the completion evidence. Its BODY lines are
+  // deliberately NOT markers — they prove idle only as members of an
+  // identified notice block (see recapBlockSkip); standalone they are
+  // ordinary output and hold (Andi's #1985 delta P2).
+  /ⓘ This content can’t be shown/,
 ];
 
 /**
  * Chrome that may surround a strong marker without explaining it away: a
  * historical submitted-prompt echo (Claude renders past prompts with a
- * leading `❯`), and the banner layout lines around a launch logo (box-art
- * glyphs plus the worktree path) or Codex's `permissions:`/path lines.
- * Weak evidence on its own — it never substitutes for a strong marker.
+ * leading `❯`), the banner layout lines around a launch logo (box-art
+ * glyphs plus the worktree path) or Codex's `permissions:`/path lines, and
+ * the collapsed-output indicators (`+ Show details`, `+ N lines (^t to
+ * expand)`) that sit between a turn's output and its footer or notice
+ * header (#1983 — weak on their own: a weak-only window still holds).
  */
 const isWeakChrome = (s: string): boolean =>
-  /^❯ /.test(s) || /^[▐▛█▝▜▀│╭╮╰╯ ]*[~❯]/.test(s) || /^permissions: /.test(s);
+  /^❯ /.test(s) || /^[▐▛█▝▜▀│╭╮╰╯ ]*[~❯]/.test(s) || /^permissions: /.test(s)
+  || /^\+ (Show details|\d+ lines)/.test(s);
 
 /**
  * The recap block — a completed turn's OWN summary chrome, positionally NEWER
@@ -1040,10 +1053,12 @@ const isWeakChrome = (s: string): boolean =>
  * footer ABOVE the block: Codex `Worked for …` above `↳ Recap:`, Claude
  * `✻ … · done` above `※ recap:`). Membership is STRUCTURAL, not a flat indent
  * floor: a line is continuation only inside a block, opened by a header line
- * and extending while each RAW line indents strictly deeper than that header
- * (Codex 2→12, Claude 2→4; both agents draw current status chrome at ≤2, so
- * a new status ends the block and is judged). A deep indent with NO header
- * above it is never skipped — an old marker must not rescue a
+ * and extending while each RAW line indents at least as deep as that header
+ * (Codex recap 2→12, Claude recap 2→4, Codex notice tails 2→2 — #1983: a
+ * content-suppressed turn draws NO footer, so its notice block is judged at
+ * the header; both agents draw current status chrome at ≤2 or at column 0,
+ * so a new status ends the block and is judged). A deep indent with NO
+ * header above it is never skipped — an old marker must not rescue a
  * drifted/indented current status (Andi's P2, #1976 review: the flat ≥8 rule
  * proved idle over `Worked for` + an 8/12-space unrecognized status).
  * Returns skip flags aligned with the window; judged on RAW lines (squash
@@ -1052,21 +1067,48 @@ const isWeakChrome = (s: string): boolean =>
  * pass through it to reach the footer (Claude's `※ recap:` already matches
  * /recap:/ and skips for free).
  */
+/**
+ * Body shapes of the content-suppression notice box (#1983/#1985): matched on
+ * the SQUASHED line (leading indent erased). They are NEVER standalone
+ * evidence — a bare `Learn more: <url>` in ordinary output holds — and count
+ * only as contiguous members of an identified notice block (header directly
+ * above, nothing newer in between), per Ada's #12876 ruling on Andi's delta
+ * P2. Mid-sentence prose wraps that match none of these shapes break the
+ * block and hold — fail-closed.
+ */
+const NOTICE_BODY: readonly RegExp[] = [
+  /^We take extra care/, /^authorized security work/, /^get broader access\./,
+  /^Learn more: https:/, /^Apply for Daybreak:/,
+  /^https:\/\/openai\.com\/form\//, /^openai\.com\/form\//,
+];
+
 const recapBlockSkip = (rawWindow: string[]): boolean[] => {
   const skip = rawWindow.map(() => false);
   for (let j = 0; j < rawWindow.length; j++) {
     const header = /^(\s*)(?:↳ Recap:|※ recap:)/.exec(rawWindow[j]);
-    if (!header) continue;
-    skip[j] = true;
-    const base = header[1].length;
-    for (let k = j + 1; k < rawWindow.length; k++) {
-      // \s* (never null — a column-zero line has indent 0): the extension
-      // ENDS at such a line instead of dereferencing null and throwing
-      // before the busy sweep (Andi round 2, Chip's runtime matrix — Codex
-      // tool lines like `• Ran …` are column-zero and render after a
-      // previous turn's recap whenever a new turn starts).
-      if (/^(\s*)/.exec(rawWindow[k])![1].length > base) skip[k] = true;
-      else break; // a line at/below the header's indent is new chrome, not continuation
+    const notice = header ? null : /^(\s*)ⓘ This content can’t be shown/.exec(rawWindow[j]);
+    if (!header && !notice) continue;
+    if (header) {
+      skip[j] = true; // the scan passes THROUGH a recap header to its older footer
+      const base = header[1].length;
+      for (let k = j + 1; k < rawWindow.length; k++) {
+        // STRICTLY deeper than the header, as #1976 shipped: at-or-deeper
+        // swallowed a newer same-indent current status after a header and
+        // SENT — Andi's #1985 blind P2.
+        if (/^(\s*)/.exec(rawWindow[k])![1].length > base) skip[k] = true;
+        else break; // a line at/below the header's indent is new chrome, not continuation
+      }
+    } else {
+      // A notice header is NOT skipped (a suppressed turn has no footer —
+      // the header is the evidence the scan stops and judges), but its
+      // body lines below are skipped so the scan REACHES the header —
+      // and only while they are contiguously the notice's own shapes
+      // (#12876: anything else in between is newer chrome; the block ends
+      // and that line is judged).
+      for (let k = j + 1; k < rawWindow.length; k++) {
+        if (NOTICE_BODY.some((re) => re.test(squash(rawWindow[k])))) skip[k] = true;
+        else break;
+      }
     }
   }
   return skip;
