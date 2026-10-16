@@ -337,6 +337,14 @@ describe('#1783 — aggregatePlaintextWindow edge semantics', () => {
   });
 
   it('the frontier row is one a target actually COUNTED, as the row walk had it (duplicate seqs)', async () => {
+    // #992: exercise legal legacy ties on a named Channel, preserving the
+    // frontier assertions without creating forbidden team-chat duplicates.
+    const legacyLoc = 'chats:legacy';
+    const root = await db.channel.findUniqueOrThrow({ where: { id: channel.id } });
+    await db.node.update({ where: { id: root.chatRootNodeId }, data: { loc: legacyLoc } });
+    await db.channel.update({ where: { id: channel.id }, data: { loc: legacyLoc } });
+    channel = { ...channel, loc: legacyLoc };
+
     // Two rows at seq 5 (a pre-#919 artifact): the higher loc is the target's own post, which the
     // walk skipped, so the counted frontier is the lower-loc row.
     await put(4, { mentions: [] });

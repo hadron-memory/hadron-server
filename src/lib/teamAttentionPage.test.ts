@@ -503,6 +503,14 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
   });
 
   it('duplicate seq at the frozen max is fully scanned (finding 4)', async () => {
+    // #992 forbids new duplicate seqs in the canonical team chat. Preserve
+    // this scan regression on an ordinary named Channel, where legacy ties
+    // remain legal; every assertion below is unchanged.
+    const legacyLoc = 'chats:legacy';
+    await db.node.update({ where: { id: channel.chatRootNodeId }, data: { loc: legacyLoc } });
+    await db.channel.update({ where: { id: channel.id }, data: { loc: legacyLoc } });
+    channel = { ...channel, loc: legacyLoc };
+
     // Two message rows sharing seq=1 (the legacy duplicate-seq shape): the
     // relevant mention rides the row with the LARGER id. Envelopes encrypt
     // exactly as appendChatMessage would in this encrypted memory.
@@ -511,7 +519,7 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
       const enc = encryptNodeFields({ content: null, data: { mentions } }, memEnc);
       await db.node.create({
         data: {
-          id, memoryId: channel.memoryId, loc: `chats:team:messages:${id}`,
+          id, memoryId: channel.memoryId, loc: `${channel.loc}:messages:${id}`,
           name: id, nodeType: 'chat-message', seq: 1, content: 'dup', messageChannelId: channel.id,
           data: (enc.data ?? null) as object,
         },
