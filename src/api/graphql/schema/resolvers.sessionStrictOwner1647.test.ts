@@ -153,3 +153,21 @@ describe('POST /sessions/:id/outcome, the shared write gate for App keys (#1647)
     expect((await db.session.findUniqueOrThrow({ where: { id: sharedSession } })).outcome).toBeNull();
   });
 });
+
+describe('Memory.shares, strict owner only (#1647)', () => {
+  it('shows the full share list to the strict owner alone: no admin, org admin, impersonation or co-grantee', async () => {
+    const g1 = await db.user.create({ data: { id: generateId(), handle: `g1-${generateId().slice(-6)}`, roles: ['READER'] } });
+    const g2 = await db.user.create({ data: { id: generateId(), handle: `g2-${generateId().slice(-6)}`, roles: ['READER'] } });
+    const mem = await mkMemory('personal', owner.id, 'shared-out');
+    for (const g of [g1, g2]) {
+      await db.memoryShare.create({ data: { memoryId: mem.id, granteeId: g.id, grantorId: owner.id, role: 'reader' } });
+    }
+    const shares = (resolvers as any).Memory.shares as (g: unknown, a: unknown, c: Context) => Promise<unknown[]>;
+    const read = (c: Partial<Context>) => shares({ id: mem.id, class: 'personal', userId: owner.id }, {}, ctx(c));
+
+    expect(await read({ userId: owner.id })).toHaveLength(2);
+    expect(await read({ userId: admin.id, roles: ['ADMIN'] })).toEqual([]);
+    expect(await read({ userId: g1.id })).toEqual([]); // a co-grantee never sees the others
+    expect(await read({ userId: owner.id, impersonation: { orgId: generateId() } as never })).toEqual([]);
+  });
+});

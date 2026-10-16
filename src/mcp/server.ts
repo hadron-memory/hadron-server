@@ -91,6 +91,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
+import { foreignEdgeMemoryIds } from '../lib/foreignEdgeMemories.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
@@ -1635,6 +1636,32 @@ function inheritedReadRow<T extends ReadProjectionNode>(node: T): T {
   };
 }
 
+/**
+ * #1647 (cor:api:140:03, concealment): a readable near endpoint does not authorize returning an unreadable far
+ * endpoint's metadata. Drops edges whose far node lives in another memory the caller cannot read, as if absent, so the
+ * far URN, id and name never reach the projection. Same-memory edges ride the near node's own gate.
+ */
+async function concealUnreadableEdgeEnds<N extends {
+  memoryId: string;
+  outgoingEdges: Array<{ target: { memoryId: string } }>;
+  incomingEdges: Array<{ source: { memoryId: string } }>;
+}>(auth: AuthContext | undefined, node: N): Promise<N> {
+  const foreign = new Set<string>();
+  for (const e of node.outgoingEdges) if (e.target.memoryId !== node.memoryId) foreign.add(e.target.memoryId);
+  for (const e of node.incomingEdges) if (e.source.memoryId !== node.memoryId) foreign.add(e.source.memoryId);
+  if (foreign.size === 0) return node;
+  const readable = new Set<string>();
+  if (auth) {
+    for (const id of foreign) if (await canReadMemory(db, auth, id, EXPLICIT_REF)) readable.add(id);
+  }
+  const ok = (memoryId: string) => memoryId === node.memoryId || readable.has(memoryId);
+  return {
+    ...node,
+    outgoingEdges: node.outgoingEdges.filter((e) => ok(e.target.memoryId)),
+    incomingEdges: node.incomingEdges.filter((e) => ok(e.source.memoryId)),
+  };
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
@@ -1675,6 +1702,7 @@ async function renderNodeReadProjection(
       incomingEdges: incoming.map(({ edge, endpoint }) => ({ ...edge, source: endpoint })),
     } as typeof node;
   }
+  node = await concealUnreadableEdgeEnds(opts.auth, node);
   const revision = node.revSeq;
   const memoryUrnOf = opts.memoryUrnOf ?? memoizedMemoryUrnLookup();
   const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId, memoryUrnOf);
@@ -5320,7 +5348,7 @@ export function createMcpServerInstance(
         next = children[idx + 1];
       }
 
-      const node = await db.node.findUnique({
+      const nextRow = await db.node.findUnique({
         where: { id: next.id },
         include: {
           // #180 Bug 2: hide edges whose other end is tombstoned.
@@ -5334,7 +5362,8 @@ export function createMcpServerInstance(
           },
         },
       });
-      if (!node) return textResult('Node not found.');
+      if (!nextRow) return textResult('Node not found.');
+      const node = await concealUnreadableEdgeEnds(auth, nextRow); // #1647
 
       // #1061 — this tool returns the node's full content, exactly as
       // hadron_get_node does, so it records the same single read. Its GraphQL
@@ -7406,6 +7435,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       type DeleteResult =
         | { refused: 'descendants'; count: number }
         | { refused: 'crossMem'; count: number }
+        | { refused: 'crossMemAccess' }
         | { refused: 'changed' }
         | { refused: 'access' }
         | { refused: 'mintedSpec'; message: string }
@@ -7503,6 +7533,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
             if (crossMemEdges > 0) {
               return { refused: 'crossMem', count: crossMemEdges };
             }
+          }          // #1647: acknowledging the cascade is not write authority over the other holdings it edits. Refused atomically.
+          for (const other of await foreignEdgeMemoryIds(tx, affectedIds, memory.id)) {
+            if (!(await canWriteToMemory(tx as typeof db, auth, other, EXPLICIT_REF))) return { refused: 'crossMemAccess' };
           }
 
           // PendingEdge target-side cleanup — NOT a FK, so the cascade
@@ -7550,6 +7583,11 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       if ('refused' in result) {
         if (result.refused === 'access') {
           return textResult(`Node "${rawUrn}" not found.`);
+        }
+        if (result.refused === 'crossMemAccess') {
+          return textResult(
+            'Hard-delete refused: it would remove edges held by a memory you cannot write. Nothing was deleted.',
+          );
         }
         if (result.refused === 'changed') {
           return textResult(`Node "${rawUrn}" moved while this delete waited; re-read it and retry.`);
