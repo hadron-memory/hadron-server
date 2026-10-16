@@ -1,9 +1,14 @@
 /** #1228: root README identity survives its move to the memory slug. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'path';
-import { mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { db } from '../db/client.js';
 import { cleanDb, createDbOrgAndGraph, makeTmpDir } from '../../test/helpers.js';
+import { mirrorNodeMoveToGit } from './mirrorNodeMove.js';
+import { pushMemoryToGit } from './pushMemoryToGit.js';
+import { removeNodeFile, writeNodeToGit } from './writeNodeToGit.js';
+import { nodeFilePath } from './nodeFrontmatter.js';
+import { rootLocForMemory } from '../localFs/loadNodeFromFs.js';
 import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import { validateLoc } from '../../lib/validateLoc.js';
@@ -11,7 +16,7 @@ import { nodeUrnRoundTrips } from '../../lib/urnEmit.js';
 import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
 
 vi.mock('child_process', () => ({ execFile: vi.fn((...args: unknown[]) => {
-  (args.at(-1) as Function)(null, '', '');
+  (args.at(-1) as Function)(null, { stdout: '', stderr: '' });
 }) }));
 vi.mock('./githubApp.js', () => ({
   getInstallationToken: vi.fn(async () => 'fake-token'),
@@ -65,9 +70,9 @@ describe('#1228 root README', () => {
     expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
     expect(await db.node.count({ where: { memoryId: graph.id, loc: 'root-memory' } })).toBe(1);
   });
-  it('refuses a missing live root id before any legacy root can be replaced', async () => {
+  it.each(['', 'unknown1228'])('refuses a missing or mismatched live root id (%s) before replacement', async (fileId) => {
     const root = await legacyRoot();
-    readme('unknown1228');
+    readme(fileId);
     expect((await syncGraphFromGithub(graph)).error).toContain('root README must carry');
     expect(await db.node.findUniqueOrThrow({ where: { id: root.id } })).toMatchObject({ loc: '' });
     expect(await db.node.count({ where: { memoryId: graph.id } })).toBe(1);
@@ -89,4 +94,90 @@ describe('#1228 root README', () => {
     readme();
     await expect(loadGraphFromFs(repoRoot(), 'org:app:agent:shared', 'test/repo')).rejects.toThrow('single-atom memory slug');
   });
+  it('keeps an unreadable legacy root rather than deleting it under its new slug', async () => {
+    await legacyRoot();
+    readme();
+    writeFileSync(join(repoRoot(), 'README.md'), '---\nname: [broken\n---\nRoot');
+    expect((await syncGraphFromGithub(graph)).error).toContain('nothing was written');
+    expect(await db.node.findUniqueOrThrow({ where: { id: rootId } })).toMatchObject({ loc: '' });
+  });
+  it.each(['', '.hadron'])('writes the migrated root back to its %s README, never a second slug file', async (prefix) => {
+    await legacyRoot();
+    readme(rootId, prefix);
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    const row = await db.node.findUniqueOrThrow({ where: { id: rootId } });
+    const payload = { ...row, tags: [], outgoingEdges: [] };
+    mkdirSync(join(repoRoot(), '.git'), { recursive: true });
+    await writeNodeToGit({ ...payload, content: 'Updated root' }, 'test/repo', null, graph.id);
+    expect(existsSync(join(repoRoot(), 'root-memory.md'))).toBe(false);
+    expect(readFileSync(join(repoRoot(), prefix, 'README.md'), 'utf8')).toContain('Updated root');
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect(await db.node.findUniqueOrThrow({ where: { id: rootId } })).toMatchObject({ loc: 'root-memory', content: 'Updated root' });
+    expect(await db.node.count({ where: { memoryId: graph.id } })).toBe(1);
+  });
+  it('uses the renamed memory slug on the next sync while retaining the README id', async () => {
+    await legacyRoot(); readme();
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    graph = await db.memory.update({ where: { id: graph.id }, data: { urn: 'test-org:new-name' }, include: { organization: true } });
+    const dir = join(graphsPath, 'test-org', 'new-name'); mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'README.md'), `---\nid: ${rootId}\nname: Root\n---\nRoot body`);
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect(await db.node.findUniqueOrThrow({ where: { id: rootId } })).toMatchObject({ loc: 'new-name' });
+    expect(nodeFilePath(dir, 'new-name', graph.urn)).toBe(join(dir, 'README.md'));
+  });
+  it.each(['hrn:mem:test-org:root-memory', 'test-org::root-memory'])('normalizes accepted simple memory identity %s', (urn) => {
+    expect(rootLocForMemory(urn)).toBe('root-memory');
+  });
+
+  it('bulk-exports the root with its id into README and syncs it without duplication', async () => {
+    await legacyRoot(); readme();
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect((await pushMemoryToGit(graph.id)).error).toBeUndefined();
+    expect(readFileSync(join(repoRoot(), 'README.md'), 'utf8')).toContain(rootId);
+    expect(existsSync(join(repoRoot(), 'root-memory.md'))).toBe(false);
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect(await db.node.count({ where: { memoryId: graph.id } })).toBe(1);
+  });
+  it('removes a vacated slug-root README only when its id matches', () => {
+    readme();
+    expect(removeNodeFile(repoRoot(), 'root-memory', 'different-id', graph.urn)).toBe(false);
+    expect(existsSync(join(repoRoot(), 'README.md'))).toBe(true);
+    expect(removeNodeFile(repoRoot(), 'root-memory', rootId, graph.urn)).toBe(true);
+    expect(existsSync(join(repoRoot(), 'README.md'))).toBe(false);
+  });
+  it('rolls back root relocation, history and edge changes if an incident edge rekey collides', async () => {
+    await legacyRoot(); readme();
+    const child = await db.node.create({ data: { memoryId: graph.id, loc: 'child', name: 'Child' } });
+    await db.edge.create({ data: { memoryId: graph.id, sourceId: child.id, targetId: rootId, loc: 'child:uses:', name: 'uses' } });
+    await db.edge.create({ data: { memoryId: graph.id, sourceId: rootId, targetId: child.id, loc: 'child:uses:root-memory', name: 'other' } });
+    expect((await syncGraphFromGithub(graph)).error).toBeDefined();
+    expect(await db.node.findUniqueOrThrow({ where: { id: rootId } })).toMatchObject({ loc: '' });
+    expect(await db.nodeRevision.count({ where: { nodeId: rootId } })).toBe(0);
+    expect(await db.edge.count({ where: { memoryId: graph.id, loc: 'child:uses:' } })).toBe(1);
+  });
+
+  it('refuses a second repo file at the root slug before it can overwrite the README', async () => {
+    await legacyRoot(); readme();
+    writeFileSync(join(repoRoot(), 'root-memory.md'), '---\nname: Occupant\n---\nOther body');
+    expect((await syncGraphFromGithub(graph)).error).toContain('occupied by another repository file');
+    expect(await db.node.findUniqueOrThrow({ where: { id: rootId } })).toMatchObject({ loc: '', content: 'Root body' });
+  });
+
+  it('mirrors moves into and out of the slug-root using the correct files', async () => {
+    await legacyRoot(); readme();
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    mkdirSync(join(repoRoot(), '.git'), { recursive: true });
+    await db.node.update({ where: { id: rootId }, data: { loc: 'moved-root' } });
+    await mirrorNodeMoveToGit(db, { srcMemoryId: graph.id, destMemoryId: graph.id, moved: [{ id: rootId, previousLoc: 'root-memory' }] });
+    expect(existsSync(join(repoRoot(), 'README.md'))).toBe(false);
+    expect(existsSync(join(repoRoot(), 'moved-root.md'))).toBe(true);
+    await db.node.update({ where: { id: rootId }, data: { loc: 'root-memory' } });
+    await mirrorNodeMoveToGit(db, { srcMemoryId: graph.id, destMemoryId: graph.id, moved: [{ id: rootId, previousLoc: 'moved-root' }] });
+    expect(existsSync(join(repoRoot(), 'README.md'))).toBe(true);
+    expect(existsSync(join(repoRoot(), 'moved-root.md'))).toBe(false);
+    expect(existsSync(join(repoRoot(), 'root-memory.md'))).toBe(false);
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect(await db.node.count({ where: { memoryId: graph.id } })).toBe(1);
+  });
+
 });

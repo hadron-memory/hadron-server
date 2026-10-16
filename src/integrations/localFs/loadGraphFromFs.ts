@@ -1,7 +1,7 @@
 import { readdirSync, existsSync } from 'fs';
 import { join, relative, sep } from 'path';
 import type { Node } from '../../index.d.js';
-import { InvalidNodeLocError, loadNodeFromFs, locForNodeSource } from './loadNodeFromFs.js';
+import { InvalidNodeLocError, InvalidRootMemoryError, loadNodeFromFs, locForNodeSource } from './loadNodeFromFs.js';
 
 interface FsGraph {
   name: string;
@@ -74,8 +74,9 @@ export const loadGraphFromFs = async (
   graphPath: string,
   graphName: string,
   ownerRepo: string,
-): Promise<{ graph: FsGraph; edges: GraphEdge[]; skippedInvalidLoc: SkippedFile[]; unreadable: UnreadableFile[] }> => {
+): Promise<{ graph: FsGraph; edges: GraphEdge[]; skippedInvalidLoc: SkippedFile[]; unreadable: UnreadableFile[]; rootNode?: Partial<Node> }> => {
   const nodes: Partial<Node>[] = [];
+  let rootNode: Partial<Node> | undefined;
   const edges: GraphEdge[] = [];
   // Files skipped for an unusable path (#1224). The caller must keep the rows
   // they name ALIVE: sync is repo-wins, so a row absent from the loaded graph
@@ -132,7 +133,7 @@ export const loadGraphFromFs = async (
   // Load all discovered nodes
   for (const source of nodeSources) {
     try {
-      const result = await loadNodeFromFs(source, graphPath, ownerRepo);
+      const result = await loadNodeFromFs(source, graphPath, ownerRepo, graphName);
       // Refuse the whole graph before sync can write or run repo-wins cleanup.
       // A per-file skip would turn a missing name into deletion of its old row.
       if (result.metadataIsMapping && (typeof result.node.name !== 'string' || !result.node.name.trim())) {
@@ -140,6 +141,11 @@ export const loadGraphFromFs = async (
         throw new InvalidNodeNameError(relative(graphPath, metadataPath).split(sep).join('/'));
       }
       nodes.push(result.node);
+      const sourcePath = relative(graphPath, source).split(sep).join('/');
+      if (['', '.hadron', 'README.md', '.hadron/README.md'].includes(sourcePath)) {
+        if (rootNode) throw new InvalidRootMemoryError('Git sync has more than one root page.');
+        rootNode = result.node;
+      }
 
       for (const edge of result.edges) {
         edges.push({
@@ -155,7 +161,7 @@ export const loadGraphFromFs = async (
         });
       }
     } catch (err) {
-      if (err instanceof InvalidNodeNameError) throw err;
+      if (err instanceof InvalidNodeNameError || err instanceof InvalidRootMemoryError) throw err;
       if (err instanceof InvalidNodeLocError) {
         // Recorded even WITHOUT an id: an id-less skip is the case the caller
         // most needs to hear about, because it is the one it cannot protect.
@@ -164,11 +170,15 @@ export const loadGraphFromFs = async (
         const metadataPath = source.endsWith('.md') ? source : join(source, '.node', 'node.yaml');
         unreadable.push({
           file: relative(graphPath, metadataPath).split(sep).join('/'),
-          loc: locForNodeSource(source, graphPath),
+          loc: locForNodeSource(source, graphPath, graphName),
         });
       }
       console.warn(`Failed to load node at ${source}:`, (err as Error).message);
     }
+  }
+
+  if (rootNode && nodes.some((node) => node !== rootNode && node.loc === rootNode.loc)) {
+    throw new InvalidRootMemoryError('Git root README slug is occupied by another repository file; move that file before sync.');
   }
 
   return {
@@ -180,5 +190,6 @@ export const loadGraphFromFs = async (
     edges,
     skippedInvalidLoc,
     unreadable,
+    ...(rootNode ? { rootNode } : {}),
   };
 };
