@@ -427,15 +427,19 @@ describe('encryptMemory — locked conversion (#1346)', () => {
   });
 
   it('pages more than 200 old snapshots and encrypts tombstone history', async () => {
-    const snapshotCount = 205;
+    // encryptMemory pages 200 snapshots. Keep exactly one beyond that boundary
+    // (#1999), with tombstone history on the second page; no timeout increase.
+    const snapshotCount = 201;
     const deleted = await db.node.create({
       data: {
         id: generateId(), memoryId, loc: 'deleted-history', name: 'deleted history',
         content: 'deleted live', deletedAt: new Date(),
       },
     });
-    const history = Array.from({ length: snapshotCount }, (_, index) => ({
-      id: generateId(), nodeId: index === snapshotCount - 1 ? deleted.id : nodeId,
+    // UUIDv7's random suffix does not order IDs generated in the same millisecond.
+    const snapshotIds = Array.from({ length: snapshotCount }, () => generateId()).sort();
+    const history = snapshotIds.map((id, index) => ({
+      id, nodeId: index === snapshotCount - 1 ? deleted.id : nodeId,
       memoryId, loc: index === snapshotCount - 1 ? 'deleted-history' : 'entry-1',
       name: 'history', content: `historical ${index}`,
     }));
