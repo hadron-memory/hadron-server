@@ -1,3 +1,4 @@
+import { InvalidRootMemoryError, rootLocForMemory } from '../localFs/loadNodeFromFs.js';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { parse } from 'yaml';
@@ -241,8 +242,19 @@ function locToSegments(loc: string): string[] {
  *
  * Throws on a malformed loc (empty / `.` / `..` segment) — see `locToSegments`.
  */
-export function nodeFilePath(localPath: string, loc: string): string {
-  if (loc === '') return join(localPath, 'README.md');
+export function nodeFilePath(localPath: string, loc: string, memoryUrn?: string): string {
+  // Compound legacy memories can still export ordinary non-root nodes;
+  // only a valid single slug identifies a root README (#1228).
+  let rootLoc: string | undefined;
+  if (memoryUrn) {
+    try { rootLoc = rootLocForMemory(memoryUrn); } catch (err) {
+      if (!(err instanceof InvalidRootMemoryError)) throw err;
+    }
+  }
+  if (loc === '' || loc === rootLoc) {
+    const hadronRoot = join(localPath, '.hadron', 'README.md');
+    return existsSync(hadronRoot) ? hadronRoot : join(localPath, 'README.md');
+  }
   return join(localPath, ...locToSegments(loc)) + '.md';
 }
 
