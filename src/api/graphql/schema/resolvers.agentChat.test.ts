@@ -630,8 +630,8 @@ describe('chatHistory', () => {
     // rather than Forbidden — the chat-loc lookup filters to the caller's
     // entitled set before selecting, so an unentitled node is invisible, not
     // merely refused. That also removes an existence oracle for chat ids. A
-    // caller who IS entitled but not authorized (e.g. an AppMember who did not
-    // author the chat) still gets Forbidden — see below.
+    // caller who IS entitled but not authorized (e.g. a reader without write
+    // access) still gets Forbidden — see below.
     await expect(
       resolvers.Query.chatHistory({}, { chatId: start.chatId }, userCtx(otherUser.id)),
     ).rejects.toThrow(/not found/i);
@@ -732,8 +732,8 @@ describe('chatHistory', () => {
     // rather than Forbidden — the chat-loc lookup filters to the caller's
     // entitled set before selecting, so an unentitled node is invisible, not
     // merely refused. That also removes an existence oracle for chat ids. A
-    // caller who IS entitled but not authorized (e.g. an AppMember who did not
-    // author the chat) still gets Forbidden — see below.
+    // caller who IS entitled but not authorized (e.g. a reader without write
+    // access) still gets Forbidden — see below.
     await expect(
       resolvers.Query.chatHistory({}, { chatId: start.chatId }, userCtx(otherUser.id)),
     ).rejects.toThrow(/not found/i);
@@ -838,8 +838,8 @@ describe('chat ownership mutations', () => {
     // rather than Forbidden — the chat-loc lookup filters to the caller's
     // entitled set before selecting, so an unentitled node is invisible, not
     // merely refused. That also removes an existence oracle for chat ids. A
-    // caller who IS entitled but not authorized (e.g. an AppMember who did not
-    // author the chat) still gets Forbidden — see below.
+    // caller who IS entitled but not authorized (e.g. a reader without write
+    // access) still gets Forbidden — see below.
     await expect(
       resolvers.Mutation.updateChatTitle(
         {},
@@ -893,8 +893,8 @@ describe('chat ownership mutations', () => {
     // rather than Forbidden — the chat-loc lookup filters to the caller's
     // entitled set before selecting, so an unentitled node is invisible, not
     // merely refused. That also removes an existence oracle for chat ids. A
-    // caller who IS entitled but not authorized (e.g. an AppMember who did not
-    // author the chat) still gets Forbidden — see below.
+    // caller who IS entitled but not authorized (e.g. a reader without write
+    // access) still gets Forbidden — see below.
     await expect(
       resolvers.Mutation.deleteChat({}, { chatId: start.chatId }, userCtx(otherUser.id)),
     ).rejects.toThrow(/not found/i);
@@ -1555,8 +1555,8 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     // than Forbidden — the chat-loc lookup filters to the caller's entitled set
     // before selecting, so an unentitled node is invisible, not merely refused.
     // That also removes an existence oracle for chat ids. A caller who IS
-    // entitled but not authorized (e.g. a participant who did not author the
-    // chat) still gets Forbidden — see below.
+    // entitled but not authorized (e.g. a reader without write access) still
+    // gets Forbidden — see below.
     await expect(
       resolvers.Query.chatHistory(
         {}, { chatId: shared.chatId }, userCtx(stranger.id),
@@ -1587,21 +1587,13 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     expect(history.length).toBeGreaterThan(0);
   });
 
-  it("deleteChat: only the chat author can delete a shared chat, not any AppMember", async () => {
+  it("deleteChat: a non-author App participant can delete a shared chat (#1991)", async () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
     const shared = await resolvers.Mutation.startChat(
       {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
     );
-    // otherUser is an AppMember but not the chat author → cannot delete.
-    await expect(
-      resolvers.Mutation.deleteChat({}, { chatId: shared.chatId }, userCtx(otherUser.id)),
-    ).rejects.toThrow('Forbidden');
-    // adminUser (the author) → can delete.
-    const result = await resolvers.Mutation.deleteChat(
-      {}, { chatId: shared.chatId }, userCtx(adminUser.id),
-    );
-    expect(result).toBe(true);
+    await expect(resolvers.Mutation.deleteChat({}, { chatId: shared.chatId }, userCtx(otherUser.id))).resolves.toBe(true);
   });
 });
 
@@ -1727,6 +1719,31 @@ describe('#1717 — chat-by-loc writes', () => {
     updateChatTitle: () => resolvers.Mutation.updateChatTitle({}, { chatId, title: 'renamed' }, userCtx(userId)),
     deleteChat: () => resolvers.Mutation.deleteChat({}, { chatId }, userCtx(userId)),
   });
+
+  it.each([
+    ['updateChatTitle', false], ['deleteChat', false],
+    ['updateChatTitle', true], ['deleteChat', true],
+  ] as const)(
+    '#1991: %s gives typed FORBIDDEN without write access (legacy creator: %s)',
+    async (op, legacy) => {
+      await member(adminUser.id);
+      const { chatId, root, memoryId } = await sharedChat(adminUser.id);
+      // READER retains visibility, but no participation/write grant. The old
+      // memory-creator fallback must not confer authority on an unstamped chat.
+      await db.orgMember.updateMany({ where: { organizationId: orgA.id, userId: otherUser.id }, data: { role: 'READER' } });
+      if (legacy) {
+        await db.memory.update({ where: { id: memoryId }, data: { createdBy: otherUser.id } });
+        await db.node.update({ where: { id: root.id }, data: { createdBy: null } });
+      } else {
+        // Historical authorship keeps the root in the candidate set, but
+        // must not grant write after participation was lost.
+        await db.node.update({ where: { id: root.id }, data: { createdBy: otherUser.id } });
+      }
+      const before = await snapshot(root.id);
+      await expect(writes(chatId, otherUser.id)[op]()).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+      expect(await snapshot(root.id)).toEqual(before);
+    },
+  );
 
   it.each(['updateChatTitle', 'deleteChat'] as const)(
     '#1991: %s admits a non-creator with current host-memory write access',
@@ -1862,16 +1879,17 @@ describe('#1717 — chat-by-loc writes', () => {
     },
   );
 
-  // Diego on #1725 (delta at 40e62306): rename and delete keep an extra
-  // author-or-admin condition beyond write access. A platform admin who is
-  // also an ordinary participant, but not the author, loses the admin role
-  // while the write waits — the participant grant alone must not carry it.
+  // #1991: without any participation grant, the current platform role is
+  // the only authority. Revoking it during the wait must still refuse.
   it.each(['updateChatTitle', 'deleteChat'] as const)(
     '%s is refused when the admin role is revoked while it waits for its lock',
     async (op) => {
       await member(adminUser.id);
       await member(otherUser.id);
       const { chatId, root } = await sharedChat(otherUser.id);
+      const app = await db.app.findFirstOrThrow({ where: { urn: appUrn() } });
+      await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: adminUser.id } } });
+      await db.orgMember.updateMany({ where: { organizationId: orgA.id, userId: adminUser.id }, data: { deletedAt: new Date() } });
       const before = await snapshot(root.id);
       const asAdmin = userCtx(adminUser.id, { roles: ['ADMIN'] });
       const run = op === 'updateChatTitle'
@@ -1896,6 +1914,9 @@ describe('#1717 — chat-by-loc writes', () => {
     await member(adminUser.id);
     await member(otherUser.id);
     const { chatId, root } = await sharedChat(otherUser.id);
+    const app = await db.app.findFirstOrThrow({ where: { urn: appUrn() } });
+    await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: adminUser.id } } });
+    await db.orgMember.updateMany({ where: { organizationId: orgA.id, userId: adminUser.id }, data: { deletedAt: new Date() } });
     const asAdmin = userCtx(adminUser.id, { roles: ['ADMIN'] });
     await resolvers.Mutation.updateChatTitle({}, { chatId, title: 'by admin' }, asAdmin);
     expect(((await db.node.findUniqueOrThrow({ where: { id: root.id } })).data as Record<string, unknown>).title).toBe('by admin');
