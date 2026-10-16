@@ -4,12 +4,14 @@
  * Metadata-only revisions keep it; the approved revision stays the revision
  * the approval was recorded at; a change outside the write path is TAMPERED.
  */
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import type { NodeApprovalState } from './nodeApproval.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { createTestableMcpServer } from '../mcp/server.js';
 import { specCorpusMintMutations } from '../api/graphql/schema/resolvers.specCorpus.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -74,7 +76,7 @@ describe('metadata-only revisions keep an approval (cor:dmo:120:04)', () => {
       expect(await filterLocs('APPROVED')).toEqual(['a:1']);
       expect(await filterLocs('SUPERSEDED')).toEqual([]);
       const dry = await specCorpusMintMutations.mintMemoryNodes(null, { memoryRef: memory.id, dryRun: true }, as());
-      expect(dry.blockers.filter((b: { kind: string }) => b.kind === 'NOT_APPROVED' || b.kind === 'TAMPERED')).toEqual([]);
+      expect(dry.blockers.filter((b: { kind: string; loc: string }) => b.loc === 'a:1' && (b.kind === 'NOT_APPROVED' || b.kind === 'TAMPERED'))).toEqual([]);
     });
   }
 
@@ -222,5 +224,54 @@ describe('tampering stays TAMPERED, never relabeled (cor:dmo:120:05)', () => {
     await update(n.id, { content: 'supported' });
     const after = await boundary();
     expect(after.c).toBe(after.r);
+  });
+});
+
+describe('other supported writers move the boundary exactly when the hashed text changes', () => {
+  it('hadron_update_node: a tags-only update keeps the approval, a content update supersedes', async () => {
+    const mcp = createTestableMcpServer({ userId: admin.id, roles: [], clientId: `user:${admin.id}` });
+    const n = await node('a:1');
+    await approve(n.id);
+    await mcp.callToolText('hadron_update_node', { urn: `hrn:node:${memory.urn}:a:1`, tags: ['via-mcp'] });
+    expect((await rowOf(n.id)).revSeq).toBeGreaterThan(1);
+    expect((await statusOf(n.id)).state).toBe('APPROVED');
+    await mcp.callToolText('hadron_update_node', { urn: `hrn:node:${memory.urn}:a:1`, content: 'changed over MCP' });
+    expect((await statusOf(n.id)).state).toBe('SUPERSEDED');
+  });
+
+  it('a raw metadata edit reconciled by a read keeps the approval; a raw text edit reconciled by a read stays TAMPERED', async () => {
+    const meta = await node('a:1');
+    const text = await node('a:2');
+    await approve(meta.id);
+    await approve(text.id);
+    await db.node.update({ where: { id: meta.id }, data: { tags: ['raw'] } });
+    await db.node.update({ where: { id: text.id }, data: { content: 'raw rewrite' } });
+    // Reading the status reconciles each drifted node into a new revision.
+    expect((await statusOf(meta.id)).state).toBe('APPROVED');
+    expect((await statusOf(text.id)).state).toBe('SUPERSEDED');
+    expect((await verify(meta.id)).state).toBe('INTACT');
+    expect((await verify(text.id)).state).toBe('TAMPERED');
+    // A later supported edit of the tampered node does not launder it.
+    await update(text.id, { content: 'a human edit' });
+    expect((await verify(text.id)).state).toBe('TAMPERED');
+  });
+});
+
+describe('legacy rows: the migration backfill is conservative (#1611)', () => {
+  it('an approved node past its approval stays SUPERSEDED, a current approval stays APPROVED, a tampered one stays TAMPERED', async () => {
+    const sql = readFileSync(new URL('../../prisma/migrations/20261016090000_node_content_revision_boundary/migration.sql', import.meta.url), 'utf8');
+    const backfill = /UPDATE "nodes"[\s\S]*?;/.exec(sql)![0];
+    const past = await node('l:1');
+    const current = await node('l:2');
+    const tampered = await node('l:3');
+    for (const n of [past, current, tampered]) await approve(n.id);
+    // Legacy state: revisions moved on with no boundary column to say why.
+    await db.$executeRaw`UPDATE nodes SET rev_seq = 3, content_rev_seq = 1 WHERE id = ${past.id}`;
+    await db.node.update({ where: { id: tampered.id }, data: { content: 'legacy raw edit' } });
+    await db.$executeRawUnsafe(backfill);
+    expect((await rowOf(past.id)).contentRevSeq).toBe(3);
+    expect((await statusOf(past.id)).state).toBe('SUPERSEDED');
+    expect((await statusOf(current.id)).state).toBe('APPROVED');
+    expect((await verify(tampered.id)).state).toBe('TAMPERED');
   });
 });
