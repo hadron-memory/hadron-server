@@ -29,6 +29,8 @@ import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
 
 /** The prepared checkout handed to a mutate callback. */
 export interface MirrorRepo {
+  /** Current memory identity, used for the root README loc (#1228). */
+  memoryUrn: string;
   /** Absolute path of the memory's local clone, already on the write branch. */
   localPath: string;
   /** The write branch the mutation will be committed to. */
@@ -221,7 +223,7 @@ export async function withMirrorCheckout(
             return 'skipped';
           }
         }
-        const shouldCommit = await mutate({ localPath, branch });
+        const shouldCommit = await mutate({ localPath, branch, memoryUrn: memory.urn });
         if (shouldCommit === false) {
           await restoreRemote(localPath, memory.source);
           return 'skipped';
