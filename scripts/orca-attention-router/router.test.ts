@@ -115,7 +115,7 @@ const CODEX_UNKNOWN_INDENT_NO_MARKER = [
   '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/riana · Start worker session…',
   '  ? for shortcuts',
 ];
-const CODEX_UNKNOWN_NOTICE_RIANA = [
+const CODEX_IDLE_NOTICE_RIANA = [
   '• Ran hadron node create --help; ls /tmp/riana*1883* /tmp/riana*1877* | head -20',
   '    + 109 lines (^t to expand)',
   '  ⓘ This content can’t be shown',
@@ -125,6 +125,20 @@ const CODEX_UNKNOWN_NOTICE_RIANA = [
   '  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access-for-cyber/',
   '› Ask Codex to do anything',
   '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/riana · Start worker session…',
+  '  ? for shortcuts',
+];
+/** Chip's verbatim capture, same class (#1983): a suppressed turn with no
+ * output at all — `└ (no output)` + the notice box, NO Worked-for footer. */
+const CODEX_IDLE_NOTICE_CHIP = [
+  '  └ (no output)',
+  '    + Show details',
+  '  ⓘ This content can’t be shown',
+  '  We take extra care with some cybersecurity requests. If you’re doing authorized security work, apply for Daybreak to',
+  '  get broader access.',
+  '  Learn more: https://help.openai.com/en/articles/20001326',
+  '  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access-for-cyber/',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/chip-t1 · Catch up Chip QA session',
   '  ? for shortcuts',
 ];
 /** Andi's P2 negative controls (#1976 review, 2026-10-15): a deep indent with
@@ -321,7 +335,7 @@ class FakeCLIs {
       }
       // attendeeRegister: the winning row for the team Channel.
       const w = argv[argv.indexOf('-F') + 1].replace(/^w=/, '');
-      const ids = this.mentionOnly ?? new Set(['w-eli', 'w-baloo', 'w-ada', 'w-diego', 'w-gene', 'w-xavier', 'w-atilla', 'w-riana', 'w-andi', 'w-yuri']);
+      const ids = this.mentionOnly ?? new Set(['w-eli', 'w-baloo', 'w-ada', 'w-diego', 'w-gene', 'w-xavier', 'w-atilla', 'w-riana', 'w-andi', 'w-yuri', 'w-chip']);
       const row = this.registerRow?.(w) ?? { namedBy: 'WORKER', channel: { id: CHANNEL }, entry: { mentionOnly: ids.has(w) } };
       return out({ data: { attendeeRegister: [row] } });
     }
@@ -712,14 +726,154 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     expect(fake.sent).toEqual([]);
   });
 
-  it('a notice-box tail (2-space indent, no marker) stays unrecognized and HOLDS (#1968, Riana captured 2026-10-15)', () => {
+  it('a content-suppressed turn (notice box, NO Worked-for footer) is completed chrome and DELIVERS (#1983, Riana captured 2026-10-15)', () => {
     const c = cfg(['w-riana', 'Riana']);
     fake.terminal('riana', 'codex', undefined, false);
     fake.attention.workers = [worker('w-riana', 'Riana')];
-    fake.screens.set('term_riana', { tail: CODEX_UNKNOWN_NOTICE_RIANA });
+    fake.screens.set('term_riana', { tail: CODEX_IDLE_NOTICE_RIANA });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Riana'], adopted: true });
+  });
+
+  it('a suppressed turn with NO output at all — └ (no output) + the notice — DELIVERS (#1983, Chip captured 2026-10-15)', () => {
+    const c = cfg(['w-chip', 'Chip']);
+    fake.terminal('chip', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-chip', 'Chip')];
+    fake.screens.set('term_chip', { tail: CODEX_IDLE_NOTICE_CHIP });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Chip'], adopted: true });
+  });
+
+  it('a pinned busy line ABOVE a notice box still wins — the sweep runs before the marker judgment (#1983)', () => {
+    const c = cfg(['w-chip', 'Chip']);
+    fake.terminal('chip', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-chip', 'Chip')];
+    fake.screens.set('term_chip', {
+      // the notice header is at index 2 and the prompt at 7: insert the busy
+      // line directly above the placeholder
+      tail: [...CODEX_IDLE_NOTICE_CHIP.slice(0, 7), '  • Working (6s • esc to interrupt)', ...CODEX_IDLE_NOTICE_CHIP.slice(7)],
+    });
     const out = poll(c);
     expect(out.nudged).toEqual([]);
-    expect(out.held.Riana).toContain('unrecognized chrome');
+    expect(out.held.Chip).toContain('a running turn is drawn above the prompt');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a newer SAME-INDENT unknown status after a RECAP header is judged, not swallowed — holds (Andi P2, #1985 review)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  Worked for 1m 4s • 4:04 PM',
+        '  ↳ Recap: The task is to read Hadron team chat unfiltered,',
+        '            mentions, and mark it read.',
+        '  an unrecognized current status at the header indent',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a newer SAME-INDENT unknown status after the NOTICE header is judged, not swallowed — holds (Andi P2, #1985 review)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  ⓘ This content can’t be shown',
+        '  We take extra care with some cybersecurity requests.',
+        '  an unrecognized current status at the header indent',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a BARE Learn-more URL with no notice above is ordinary output and HOLDS (Andi delta P2, #1985 review round 2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  Worked for 2m 6s • 16:32',
+        '  Learn more: https://example.com/documentation',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a BARE Apply label with no notice above is ordinary output and HOLDS (Andi delta P2, #1985 review round 2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  Worked for 2m 6s • 16:32',
+        '  Apply for Daybreak: https://openai.com/form/enterprise-trusted-access/',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a BARE wrapped notice URL fragment with no notice above HOLDS (Andi delta P2, #1985 review round 2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  Worked for 2m 6s • 16:32',
+        '  openai.com/form/enterprise-trusted-access-for-cyber/',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a status line BETWEEN the notice header and its body ends the block — the status is judged and HOLDS (nothing newer in between, #12876)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', {
+      tail: [
+        '  ⓘ This content can’t be shown',
+        '  an unrecognized current status arrived after the header',
+        '  Learn more: https://help.openai.com/en/articles/20001326',
+        '› Ask Codex to do anything',
+        '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/andi · Static review…',
+        '  ? for shortcuts',
+      ],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
     expect(fake.sent).toEqual([]);
   });
 

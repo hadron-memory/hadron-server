@@ -32,7 +32,7 @@ pnpm run dev            # http://localhost:4000
 |----------|---------|-------------|
 | `DATABASE_URL` | — | Prisma connection string |
 | `DB_PROVIDER` | `postgresql` | Leave unset. PostgreSQL is the only supported database (see below). |
-| `JWT_SECRET` | — | HS256 signing secret (≥ 32 chars) |
+| `JWT_SECRET` | — | HS256 signing secret. Production refuses to boot when it is missing or under 32 UTF-8 bytes (#421) |
 | `HADRON_ENCRYPTION_KEY` | — | AES-256-GCM key for encrypting secrets at rest (32 bytes, hex) |
 | `GRAPHS_PATH` | `./graphs` | Root directory for cloned graph repos |
 | `PORT` | `4000` | HTTP listen port |

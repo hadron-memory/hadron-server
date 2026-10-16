@@ -53,6 +53,7 @@ import {
   resolveAuthContext,
 } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
+import { assertProductionSigningSecret } from './auth/signingSecret.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
 import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
@@ -167,6 +168,8 @@ const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
 };
 
 export async function createServer(): Promise<Express> {
+  // #421: before anything else, so a weak signing secret never serves.
+  assertProductionSigningSecret();
   // AM Q13: absent leaves team record operations unavailable; an invalid
   // configured keyring refuses boot without echoing secret values.
   readTeamRecordKeys();
