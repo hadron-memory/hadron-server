@@ -1,3 +1,4 @@
+import { workerReferenceError } from '../../lib/workerReferenceError.js';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { currentActor } from '../../lib/requestActor.js';
@@ -14,11 +15,14 @@ import { ATTRIBUTED_NODE_FIELDS } from '../../lib/nodeRevisionSnapshot.js';
 // durable-login-state: PendingLoginState (the OAuth `state` is the PK).
 const MODELS_WITHOUT_ID = new Set<string>([
   'AgentSubscription',
+  'WorkerReferenceFence',
   'ManualAutomationPin',
   'AppMember',
   'AgentImport',
   'AgentOrgGrant',
   'AppAgent',
+  // #1647 — the notice is keyed by its audit row.
+  'UserDeletionNotice',
   // Spec 049 Phase 2 — the ordered scope→memory join (composite PK).
   'ScopeMemory',
   'MemoryShare',
@@ -178,6 +182,14 @@ export const db = basePrisma.$extends({
         stampNodeUpdate(args.data as NodeData);
         return query(args);
       },
+    },
+  },
+}).$extends({
+  query: {
+    // Model and raw-query writes share the same typed trigger-error boundary.
+    async $allOperations({ args, query }) {
+      try { return await query(args); }
+      catch (error) { throw workerReferenceError(error) ?? error; }
     },
   },
 }) as unknown as PrismaClient;

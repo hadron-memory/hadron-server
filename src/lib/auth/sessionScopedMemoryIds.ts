@@ -44,6 +44,7 @@
  * intersection with a set that was never meant to cover them.
  */
 
+import { LINK_CAP_MEMORY_SELECT, agentLinkTenant, cappedLinkLevel } from './agentMemoryLinkCap.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isAgentInstalledAndLicensed, isGrantedAgentMemoryRole } from '../appAgent.js';
 import { isActiveAgentSubscription } from '../agentSubscription.js';
@@ -138,10 +139,13 @@ export async function sessionScopedMemoryIds(
     const agentLink = !foreignAppScoped && !tiedToApp && !isAgentsOwnMemory && session.agentId !== null
       ? await db.agentMemoryItem.findFirst({
           where: { agentId: session.agentId, memoryId: mem.id, deletedAt: null },
-          select: { role: true },
+          select: { role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
         })
       : null;
+    // #1349: the link admits the memory only as far as the Agent's tenant
+    // reaches it on its own (cor:dmo:050:09) — a limit, never a grant.
     const isAgentLinked = agentLink !== null && isGrantedAgentMemoryRole(agentLink.role) &&
+      cappedLinkLevel({ ...(await agentLinkTenant(db, session.agentId!)), appId }, agentLink.memory, agentLink.role) !== null &&
       (await hasLicensedInstall());
     if ((tiedToApp || isAgentsOwnMemory || isAgentLinked) && (await identityMemoryLicensed(db, session, mem))) {
       ids.push(mem.id);

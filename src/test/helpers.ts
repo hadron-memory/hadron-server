@@ -1,3 +1,4 @@
+import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { generateId } from '../lib/id.js';
 import { join } from 'path';
@@ -30,7 +31,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // #1631: test-only cleanup bypasses row-delete guards, before deleting owners.
   // #1632: signature records reference passkeys and requests; both refuse a row
   // DELETE while their node exists, so they are truncated with them.
-  await db.$executeRawUnsafe('TRUNCATE TABLE node_signatures, signing_requests, passkey_credentials');
+  await db.$executeRawUnsafe('TRUNCATE TABLE node_signatures, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits CASCADE');
   // Pending first-party login states (FK-free; keyed on the OAuth state).
   await db.pendingLoginState.deleteMany();
   // #1079 — the URN alias map. Deliberately FK-FREE: it must outlive the row it
@@ -565,4 +566,16 @@ export async function chatNodeByLocOrThrow(
   const node = await chatNodeByLoc(db, chatId, opts);
   if (!node) throw new Error(`No chat node at loc "${chatId}"`);
   return node;
+}
+
+/** #1162: attribution fixtures must name a real Worker, not an invented audit id. */
+export async function createDbWorkerAttribution(db: PrismaClient, userId: string, workerId: string, sessionId?: string): Promise<void> {
+  const suffix = generateId();
+  const membership = await db.orgMember.findFirst({ where: { userId, ...LIVE_ORG_MEMBERSHIP } });
+  const ownership = membership ? { organizationId: membership.organizationId } : { ownerUserId: userId };
+  const agent = await db.agent.create({ data: { ...ownership, name: 'Attribution fixture', urn: `fixture-${suffix}.example:role` } });
+  const app = await db.app.create({ data: { ...ownership, name: 'Attribution fixture', urn: `fixture-${suffix}.example:app` } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  await db.worker.create({ data: { id: workerId, appId: app.id, agentId: agent.id, name: 'Fixture', slug: 'fixture' } });
+  if (sessionId) await db.session.create({ data: { id: sessionId, workerId, userId, appId: app.id } });
 }

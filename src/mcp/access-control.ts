@@ -34,6 +34,7 @@ import { isAppSelectableBy, resolveUserApps } from '../auth/user-app-resolution.
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
 import { getOrgWritableMemoryIds } from '../lib/auth/orgWritableMemory.js';
 import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
+import { LINK_CAP_MEMORY_SELECT, cappedLinkLevel, type LinkCapMemory } from '../lib/auth/agentMemoryLinkCap.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
 
@@ -127,7 +128,7 @@ export async function getAppMemoryAccess(
                   memoryId: true,
                   role: true,
                   memory: { select: {
-                    class: true, ownerUserId: true, appId: true, userMemoryOfAgentId: true,
+                    ...LINK_CAP_MEMORY_SELECT,
                     workerOf: { select: { id: true } },
                   } },
                 },
@@ -204,10 +205,7 @@ type AppAccessRow = {
       memoryItems: Array<{
         memoryId: string;
         role: string | null;
-        memory: {
-          class: string; ownerUserId: string | null; appId: string | null;
-          userMemoryOfAgentId: string | null; workerOf: Array<{ id: string }>;
-        } | null;
+        memory: (LinkCapMemory & { workerOf: Array<{ id: string }> }) | null;
       }>;
     } | null;
   }>;
@@ -373,10 +371,16 @@ function getPrimaryAgentAccess(
       !(item.memory.class === 'app' && item.memory.workerOf.length > 0) &&
       (item.memory.appId == null || item.memory.appId === app.id) &&
       !foreignUserOwned(item.memory.ownerUserId))
-    .map((item) => ({
-      memoryId: item.memoryId,
-      role: (item as { role?: string | null }).role ?? 'read',
-    }));
+    .flatMap((item) => {
+      // #1349: the item is a limit, never a grant — honoured only up to what
+      // the Agent's tenant reaches in the memory on its own (cor:dmo:050:09).
+      const level = cappedLinkLevel(
+        { organizationId: primary.organizationId, ownerUserId: primary.ownerUserId, appId: app.id, userId: app.ownerUserId },
+        item.memory!,
+        item.role,
+      );
+      return level === null ? [] : [{ memoryId: item.memoryId, role: level === 'READ_WRITE' ? 'read-write' : 'read' }];
+    });
 
   return foldAgentIntoAccessMap({ systemMemoryId, memoryItems });
 }

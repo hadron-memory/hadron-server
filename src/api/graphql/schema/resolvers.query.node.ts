@@ -2297,8 +2297,9 @@ export const nodeQueries = {
       const installedAccess = await getAppMemoryAccess(ctx.db, resolvedAppId, {
         allAgents: orgAuthorized, includeTeamSpace: false, callerUserId: ctx.userId ?? null,
       });
+      // #1647: carry impersonation into the read filter, or a support session regains direct-owner identity privilege.
       const scopedAuth = {
-        userId: ctx.userId, appId: resolvedAppId, roles: ctx.roles,
+        userId: ctx.userId, appId: resolvedAppId, roles: ctx.roles, impersonation: ctx.impersonation,
       } as AuthContext;
       const agentMemoryIds = [...await filterReadableMemoryIds(
         ctx.db as never, scopedAuth, installedAccess.keys(), { access: installedAccess },

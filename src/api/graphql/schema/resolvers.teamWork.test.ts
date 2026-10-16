@@ -922,6 +922,7 @@ describe('teamWorkItems — the workerRef filter (#1035)', () => {
       where: { loc: WORKLOG_LOC, memory: { appId: app.id, class: 'app' } },
       select: { memoryId: true },
     });
+    await db.session.create({ data: { id: 'someone-elses', workerId: foreign.id, appId: elsewhere.id, userId: contrib.id } });
     // A conforming worklog record written through the generic node surface,
     // carrying a FOREIGN workerId.
     await db.node.create({

@@ -1,5 +1,6 @@
 // typeResolvers — GraphQL type-level field resolvers extracted from resolvers.ts
 // (split step 3). No behavior change.
+import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import {
@@ -1297,12 +1298,11 @@ export const typeResolvers = {
     },
     // 023-app-shape US3: cross-user grants on this Memory. Empty for
     // non-personal-class memories. Visible to (a) the principal
-    // (memory.userId), (b) an OrgMember of the memory's owning org
-    // with ADMIN/OWNER role, or (c) a platform ADMIN/OWNER.
+    // (memory.userId) alone since #1647: no org-admin or platform-admin branch.
     // Grantees can read their own shares via User.memorySharesGranted
     // (out of scope here; can be added if a portal page needs it).
     shares: async (
-      g: { id: string; class?: string; userId?: string | null; organizationId?: string | null },
+      g: { id: string; class?: string; userId?: string | null },
       _: unknown,
       ctx: Context,
     ) => {
@@ -1314,43 +1314,20 @@ export const typeResolvers = {
       // returning `[]` for a real personal memory (mirrors `members` above).
       let cls = g.class;
       let uId = g.userId;
-      let orgId = g.organizationId;
-      if (cls === undefined || uId === undefined || orgId === undefined) {
+      if (cls === undefined || uId === undefined) {
         const m = await ctx.db.memory.findUnique({
           where: { id: g.id },
-          select: { class: true, userId: true, organizationId: true },
+          select: { class: true, userId: true },
         });
         if (!m) return [];
         cls = m.class;
         uId = m.userId;
-        orgId = m.organizationId;
       }
       if (cls !== 'personal') return [];
-      const isPrincipal = ctx.userId !== undefined && ctx.userId === uId;
-      const isPlatformAdmin =
-        ctx.roles?.includes('ADMIN') === true || ctx.roles?.includes('OWNER') === true;
-      if (!isPrincipal && !isPlatformAdmin) {
-        // Verify the caller is an ADMIN/OWNER of the memory's owning
-        // org. The earlier `ctx.organizationId === g.organizationId`
-        // shortcut was incomplete — most callers don't have
-        // organizationId scoped per-request, which would have made
-        // non-platform org admins fall through to an empty list.
-        if (!ctx.userId) return [];
-        // A user-owned memory (no organizationId) has no org-admin fallback —
-        // only the principal (checked above) can read its shares.
-        if (!orgId) return [];
-        const member = await ctx.db.orgMember.findFirst({
-          where: { organizationId: orgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
-          select: { role: true, deletedAt: true },
-        });
-        if (
-          !member ||
-          member.deletedAt ||
-          (member.role !== 'ADMIN' && member.role !== 'OWNER')
-        ) {
-          return [];
-        }
-      }
+      // #1647 (cor:acl:010:02, strict owner wins): the full share list names every co-grantee, so only the memory's
+      // strict owner reads it. No platform-admin or org-admin branch, no impersonation; a grantee reads their OWN row
+      // through `myShare` and never learns of the others.
+      if (!isStrictOwner(ctx, uId)) return [];
       return ctx.db.memoryShare.findMany({
         where: { memoryId: g.id },
         orderBy: { createdAt: 'asc' },

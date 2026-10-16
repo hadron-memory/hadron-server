@@ -436,10 +436,10 @@ async function resolveSessionAuthor(
   app: AppRow | null,
   hostMemoryId: string,
   sessionRef: string,
-): Promise<{ workerId: string; name: string; sessionId: string; workerAppId: string; crossApp: boolean; resume: boolean }> {
+): Promise<{ workerId: string; agentId: string | null; name: string; sessionId: string; workerAppId: string; crossApp: boolean; resume: boolean }> {
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
-    select: { id: true, appId: true, userId: true, workerId: true, endedAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true },
+    select: { id: true, appId: true, userId: true, workerId: true, agentId: true, endedAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true, memoryId: true },
   });
   if (!session) {
     throw new GraphQLError(`Session "${sessionRef}" not found.`, {
@@ -565,7 +565,7 @@ async function resolveSessionAuthor(
   } else if (await mayStillDriveWorkerApp(ctx, worker.appId)) {
     await touchLiveSession(ctx.db, session.id);
   }
-  return { workerId: worker.id, name: worker.name, sessionId: session.id, workerAppId: worker.appId, crossApp, resume: lapsed };
+  return { workerId: worker.id, agentId: session.agentId, name: worker.name, sessionId: session.id, workerAppId: worker.appId, crossApp, resume: lapsed };
 }
 
 /**
@@ -915,6 +915,7 @@ async function postToChannelRoot(
   const { body, replyToSeq, sessionRef } = args;
   let envelope: Record<string, unknown>;
   let authorLabel: string;
+  let authorAgentId: string | null = null;
   // #1617 B: the lapsed session this post resumes, inside its append transaction.
   let resumeSessionId: string | null = null;
   if (opts.system) {
@@ -924,6 +925,7 @@ async function postToChannelRoot(
     const author = await resolveSessionAuthor(ctx, app, root.memoryId, sessionRef);
     if (author.resume) resumeSessionId = author.sessionId;
     authorLabel = author.name;
+    authorAgentId = author.agentId;
     envelope = {
       authorWorkerId: author.workerId,
       authorName: author.name,
@@ -1102,6 +1104,10 @@ async function postToChannelRoot(
         // to it forever (Andi #3280: fixtures stamping this field masked
         // the production path).
         messageChannelId: incarnation.id,
+        // #1162: explicit sessionRef attribution must survive ciphertext and
+        // must not inherit a different/absent ambient request Worker.
+        createdByWorkerId: typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null,
+        createdByAgentId: authorAgentId,
         // #914: the SENDER's user id — for worker posts, the human driver.
         createdBy,
       },

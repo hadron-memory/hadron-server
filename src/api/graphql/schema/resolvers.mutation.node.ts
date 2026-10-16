@@ -1,4 +1,5 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { foreignEdgeMemoryIds } from '../../../lib/foreignEdgeMemories.js';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
 import { decisionContainedError, isDecisionFamilyRole, refuseDecisionFamily, refuseUnderDecisionLog } from '../../../lib/decisions/index.js';
@@ -52,7 +53,7 @@ import {
 import { enqueueNodeEmbedding, pendingAtForRevival } from '../../../services/embedding/enqueue.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
-import { enforceNodeSchemaOnWrite, normalizeObjectType } from '../../../lib/enforceNodeSchema.js';
+import { enforceNodeSchemaOnWrite, normalizeObjectType, normalizeRole } from '../../../lib/enforceNodeSchema.js';
 import {
   encryptNodeFieldsWithKey,
   decryptNodeFields,
@@ -449,6 +450,17 @@ export async function writeNodeCore(
         const normalized: string | null =
           input.abstract.trim() === '' ? null : input.abstract;
         input = { ...input, abstract: normalized };
+      }
+
+      // #1219 (cor:dmo:060:02, ruling "A" via Vera) — an empty/whitespace role
+      // is the same as no role → null, beside objectType's #725 normalization.
+      // Applied HERE, before the first consumer (mergedGovernedState's
+      // before/after judgment below, the locked-row re-checks and the
+      // resurrection path all read input.role), so every write path and every
+      // governance judgment sees ONE spelling of "ungoverned". `undefined`
+      // stays undefined — omit-on-update preserves the existing role.
+      if (input.role !== undefined && input.role !== null) {
+        input = { ...input, role: normalizeRole(input.role) };
       }
 
       // Reject saves whose extraction-spec arrays would write into the
@@ -3098,6 +3110,10 @@ export const nodeMutations = {
                   { extensions: { code: 'CROSS_MEMORY_EDGES', count: crossMemEdges } },
                 );
               }
+            }            // #1647: acknowledging the cascade is not write authority over the other holdings it edits. The whole
+            // delete refuses (the transaction rolls back), with the generic write refusal.
+            for (const other of await foreignEdgeMemoryIds(tx, affectedIds, memoryId)) {
+              await requireMemoryWriteAccess(ctx, other);
             }
             // PendingEdge.targetId is intentionally NOT a foreign key, so the FK
             // cascade misses pending rows aimed at the deleted nodes — clean them

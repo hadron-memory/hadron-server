@@ -1,3 +1,4 @@
+import { GraphQLError } from 'graphql';
 import { writeResumeClaim, type ResumeCandidate } from '../lib/resumeClaims.js';
 import { registerAutomationPinTools } from './automationPinTools.js';
 import { registerAgentDefinitionTools } from './agentDefinitionTools.js';
@@ -77,7 +78,7 @@ import { findLiveUrnAliasTargets, dedupeById } from '../lib/urnAlias.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
 import { NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
-import { normalizeObjectType, validateNodeSchemaOnWrite } from '../lib/enforceNodeSchema.js';
+import { normalizeObjectType, normalizeRole, validateNodeSchemaOnWrite } from '../lib/enforceNodeSchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 import { archiveTombstone } from '../lib/tombstoneArchive.js';
@@ -92,6 +93,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
+import { foreignEdgeMemoryIds } from '../lib/foreignEdgeMemories.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
@@ -1638,6 +1640,32 @@ function inheritedReadRow<T extends ReadProjectionNode>(node: T): T {
   };
 }
 
+/**
+ * #1647 (cor:api:140:03, concealment): a readable near endpoint does not authorize returning an unreadable far
+ * endpoint's metadata. Drops edges whose far node lives in another memory the caller cannot read, as if absent, so the
+ * far URN, id and name never reach the projection. Same-memory edges ride the near node's own gate.
+ */
+async function concealUnreadableEdgeEnds<N extends {
+  memoryId: string;
+  outgoingEdges: Array<{ target: { memoryId: string } }>;
+  incomingEdges: Array<{ source: { memoryId: string } }>;
+}>(auth: AuthContext | undefined, node: N): Promise<N> {
+  const foreign = new Set<string>();
+  for (const e of node.outgoingEdges) if (e.target.memoryId !== node.memoryId) foreign.add(e.target.memoryId);
+  for (const e of node.incomingEdges) if (e.source.memoryId !== node.memoryId) foreign.add(e.source.memoryId);
+  if (foreign.size === 0) return node;
+  const readable = new Set<string>();
+  if (auth) {
+    for (const id of foreign) if (await canReadMemory(db, auth, id, EXPLICIT_REF)) readable.add(id);
+  }
+  const ok = (memoryId: string) => memoryId === node.memoryId || readable.has(memoryId);
+  return {
+    ...node,
+    outgoingEdges: node.outgoingEdges.filter((e) => ok(e.target.memoryId)),
+    incomingEdges: node.incomingEdges.filter((e) => ok(e.source.memoryId)),
+  };
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
@@ -1678,6 +1706,7 @@ async function renderNodeReadProjection(
       incomingEdges: incoming.map(({ edge, endpoint }) => ({ ...edge, source: endpoint })),
     } as typeof node;
   }
+  node = await concealUnreadableEdgeEnds(opts.auth, node);
   const revision = node.revSeq;
   const memoryUrnOf = opts.memoryUrnOf ?? memoizedMemoryUrnLookup();
   const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId, memoryUrnOf);
@@ -5331,7 +5360,7 @@ export function createMcpServerInstance(
         next = children[idx + 1];
       }
 
-      const node = await db.node.findUnique({
+      const nextRow = await db.node.findUnique({
         where: { id: next.id },
         include: {
           // #180 Bug 2: hide edges whose other end is tombstoned.
@@ -5345,7 +5374,8 @@ export function createMcpServerInstance(
           },
         },
       });
-      if (!node) return textResult('Node not found.');
+      if (!nextRow) return textResult('Node not found.');
+      const node = await concealUnreadableEdgeEnds(auth, nextRow); // #1647
 
       // #1061 — this tool returns the node's full content, exactly as
       // hadron_get_node does, so it records the same single read. Its GraphQL
@@ -5792,7 +5822,11 @@ export function createMcpServerInstance(
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('Outgoing edges (replaces the full set on the source node)'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+      // #1219 — this tool is an inline parity writer, NOT a writeNodeCore
+      // delegate (#206), so the core's role normalization does not reach it:
+      // normalize here, before the governance probe and the payload build.
+      const role = normalizeRole(rawRole);
       // Spec 022: enforce qualification at the API boundary. Relative-form
       // URNs (e.g., `review:sort-imports` without org+memory) reject here
       // before any DB lookup runs.
@@ -6363,7 +6397,10 @@ export function createMcpServerInstance(
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
     },
-    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+      // #1219 — inline parity writer, not a writeNodeCore delegate (#206):
+      // normalize before mergedGovernedState, the door replay and the payload.
+      const role = normalizeRole(rawRole);
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -7431,6 +7468,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       type DeleteResult =
         | { refused: 'descendants'; count: number }
         | { refused: 'crossMem'; count: number }
+        | { refused: 'crossMemAccess' }
         | { refused: 'changed' }
         | { refused: 'access' }
         | { refused: 'mintedSpec'; message: string }
@@ -7528,6 +7566,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
             if (crossMemEdges > 0) {
               return { refused: 'crossMem', count: crossMemEdges };
             }
+          }          // #1647: acknowledging the cascade is not write authority over the other holdings it edits. Refused atomically.
+          for (const other of await foreignEdgeMemoryIds(tx, affectedIds, memory.id)) {
+            if (!(await canWriteToMemory(tx as typeof db, auth, other, EXPLICIT_REF))) return { refused: 'crossMemAccess' };
           }
 
           // PendingEdge target-side cleanup — NOT a FK, so the cascade
@@ -7575,6 +7616,11 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       if ('refused' in result) {
         if (result.refused === 'access') {
           return textResult(`Node "${rawUrn}" not found.`);
+        }
+        if (result.refused === 'crossMemAccess') {
+          return textResult(
+            'Hard-delete refused: it would remove edges held by a memory you cannot write. Nothing was deleted.',
+          );
         }
         if (result.refused === 'changed') {
           return textResult(`Node "${rawUrn}" moved while this delete waited; re-read it and retry.`);
@@ -10791,6 +10837,31 @@ function ageOf(at: Date, now: Date = new Date()): string {
         );
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'reading the worker failed'}`);
+      }
+    },
+  );
+
+  // #1162: one eligibility implementation across transports.
+  server.tool(
+    'hadron_delete_worker',
+    'Remove a never-used miscast only. Empty ended and released stints alone do not count as work. Any persisted reference blocks deletion; retire workers with history. You must first verify no signed commit, trailer, PR, comment, review or published artifact attributes work to this identity and explicitly confirm. Database checks cannot establish external absence; known or uncertain history means retire. This does not scan external hosts.',
+    {
+      workerRef: z.string().describe('The worker id or URN.'),
+      confirmNoExternalAttribution: z.boolean().optional().describe('Explicit requester verification of no external attribution. Omitted or false refuses; ordinary yes/confirmation is insufficient.'),
+    },
+    async ({ workerRef, confirmNoExternalAttribution }) => {
+      const ctx: Context = {
+        db, userId: auth.userId ?? undefined, appId: auth.appId ?? undefined,
+        clientId: auth.clientId ?? undefined, apiKeyId: auth.apiKeyId ?? undefined,
+        sessionId: auth.sessionId ?? undefined, organizationId: auth.organizationId ?? undefined,
+        roles: auth.roles as Context['roles'],
+      };
+      try {
+        await resolvers.Mutation.deleteWorker({}, { workerRef, confirmNoExternalAttribution }, ctx);
+        return textResult('Deleted the verified unused miscast and its empty working memory.');
+      } catch (error) {
+        if (!(error instanceof GraphQLError)) throw error;
+        return { ...textResult(`${error.extensions.code ?? 'ERROR'}: ${error.message}`), isError: true };
       }
     },
   );

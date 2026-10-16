@@ -3856,10 +3856,9 @@ model UserApiKey {
   /// the actor. For self-service v1 this equals `userId`; the column
   /// exists for future admin-issued paths (where actor != owner).
   createdBy  String?   @map("created_by")
-  /// Issuance-path discriminator: `'portal'` for createUserApiKey
-  /// GraphQL mutation; `'oauth:<client_id>'` for /oauth/token-issued
-  /// tokens. Distinct from `createdBy` so the audit-actor convention
-  /// is preserved.
+  /// Issuance identity: portal for direct sign-in, oauth:<client_id> for
+  /// OAuth issuance, inherited from an authenticated minting key. Nullable
+  /// historical provenance remains unknown. Distinct from the User actor.
   issuedVia  String?   @map("issued_via")
   /// Immutable OAuth scopes copied from the authorization code at token
   /// redemption. Empty means an unrestricted portal/legacy user key. There is
@@ -3868,9 +3867,16 @@ model UserApiKey {
   lastUsedAt DateTime? @map("last_used_at")
   revokedAt  DateTime? @map("revoked_at")
 
+  /// Authenticated credential that minted this key (#1253). Null means
+  /// direct issuance or unknown legacy ancestry; never inferred/backfilled.
+  mintedByKeyId String? @map("minted_by_key_id")
+  mintedByKey UserApiKey? @relation("UserKeyLineage", fields: [mintedByKeyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  mintedKeys UserApiKey[] @relation("UserKeyLineage")
+
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([mintedByKeyId])
   @@map("user_api_keys")
 }
 
@@ -5852,4 +5858,58 @@ model AppKeyWakeRead {
 
   @@index([appKeyId, readAt])
   @@map("app_key_wake_reads")
+}
+
+/// #1647 (cor:aut:020:03): one row per erasure a platform admin performs on ANOTHER user's account. Written in the
+/// deletion's own SERIALIZABLE transaction, so the audit and the erasure commit or roll back together. User ids are
+/// plain columns, deliberately NOT foreign keys: the audit must outlive any cascade. Immutable (trigger in
+/// post-push.sql + the migration) and exposed on no read surface.
+model UserDeletionAudit {
+  id           String   @id @map("id")
+  actorUserId  String   @map("actor_user_id")
+  targetUserId String   @unique @map("target_user_id")
+  reason       String
+  completedAt  DateTime @default(now()) @map("completed_at")
+
+  notice UserDeletionNotice?
+
+  @@map("user_deletion_audits")
+}
+
+enum UserDeletionNoticeStatus {
+  PENDING
+  SENT
+  FAILED
+  UNAVAILABLE
+}
+
+/// #1647: the outbox for the deleted user's notice. Written in the deletion's transaction with the recipient address
+/// encrypted (tokenCrypto); a post-commit worker sends it and clears the ciphertext at a terminal state. The notice
+/// text never carries the audit reason.
+model UserDeletionNotice {
+  auditId             String                   @id @map("audit_id")
+  status              UserDeletionNoticeStatus @default(PENDING)
+  recipientCiphertext String?                  @map("recipient_ciphertext")
+  attempts            Int                      @default(0)
+  /// Exclusive send lease: while `leaseUntil` is in the future only the holder of `claimToken` is sending.
+  leaseUntil          DateTime?                @map("lease_until")
+  claimToken          String?                  @map("claim_token")
+  createdAt           DateTime                 @default(now()) @map("created_at")
+  updatedAt           DateTime                 @updatedAt @map("updated_at")
+
+  audit UserDeletionAudit @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("user_deletion_notices")
+}
+
+/// #1162: internal MVCC coordination, not authored history or a Worker FK.
+/// Writers and miscast deletion update this version in their own transaction.
+/// Retained after deletion to fence older snapshots; no public API.
+/// The key is an immutable Worker id.
+model WorkerReferenceFence {
+  subjectId String @id @map("subject_id")
+  version   BigInt @default(0)
+
+  @@map("worker_reference_fences")
 }

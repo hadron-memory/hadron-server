@@ -203,7 +203,7 @@ export const orgMutations = {
      */
     deleteUser: async (
       _: unknown,
-      { userRef }: { userRef?: string | null },
+      { userRef, reason }: { userRef?: string | null; reason?: string | null },
       ctx: Context,
     ) => {
       // A user credential is REQUIRED — an App key has no "me" and no
@@ -238,8 +238,21 @@ export const orgMutations = {
         }
       }
       if (!platformAdmin && targetUserId !== ctx.userId) throw forbidden();
+      // #1647 (cor:aut:020:03): erasing ANOTHER user's account takes a reason — trimmed, 1-500 Unicode code points.
+      // Judged only AFTER the uniform FORBIDDEN above, so a non-admin never learns anything about reason or target.
+      let auditReason: string | undefined;
+      if (targetUserId !== ctx.userId) {
+        const trimmed = (reason ?? '').trim();
+        const length = [...trimmed].length;
+        if (length < 1 || length > 500) {
+          throw new GraphQLError('A reason of 1-500 characters is required to delete another user.', {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
+        auditReason = trimmed;
+      }
       try {
-        await deleteUserAccount(ctx.db, { targetUserId, actorUserId: ctx.userId });
+        await deleteUserAccount(ctx.db, { targetUserId, actorUserId: ctx.userId, reason: auditReason });
       } catch (error) {
         if (error instanceof SoleOrgOwnerError) {
           throw new GraphQLError(error.message, {

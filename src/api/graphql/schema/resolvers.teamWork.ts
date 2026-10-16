@@ -464,7 +464,7 @@ async function resolveWorkSession(
 ): Promise<{ sessionId: string; workerName: string; workerId: string | null; llmModel: string | null }> {
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
-    select: { id: true, appId: true, userId: true, workerId: true, deletedAt: true, llmModel: true, launchOperationId: true },
+    select: { id: true, appId: true, userId: true, workerId: true, deletedAt: true, llmModel: true, launchOperationId: true, memoryId: true },
   });
   if (!session || session.deletedAt) {
     throw new GraphQLError(`Session "${sessionRef}" not found.`, {

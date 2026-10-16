@@ -3270,10 +3270,16 @@ export const typeDefs = `#graphql
     lastUsedAt: DateTime
     revokedAt: DateTime
     """
-    Issuance path: portal (createUserApiKey) or oauth:<client_id>
-    (POST /oauth/token). Powers source labels in the revocation UI.
+    Issuance identity: portal for direct sign-in issuance, or oauth:<client_id>
+    for OAuth issuance. A key minted by a key inherits that credential's
+    issuance identity. Powers source labels in the revocation UI.
     """
     issuedVia: String
+    """
+    Authenticated key that minted this key. Null for direct issuance or
+    unknown legacy ancestry; historical parents are never inferred.
+    """
+    mintedByKeyId: ID
     """
     Immutable OAuth scopes bound to this credential. Empty means an
     unrestricted portal/legacy key rather than an OAuth-scoped key.
@@ -9698,7 +9704,7 @@ export const typeDefs = `#graphql
     (identity fields nulled, handle replaced with a random deleted-...
     value) and soft-deleted; a deleted account can no longer authenticate.
     """
-    deleteUser(userRef: ID): Boolean!
+    deleteUser(userRef: ID, reason: String): Boolean!
 
     # Organization management
     createOrganization(name: String!, urn: String!): Organization!
@@ -10497,11 +10503,12 @@ export const typeDefs = `#graphql
     """
     saveChatSummary(chatId: String!, summary: String!): Boolean!
     """
-    Rename a saved chat (user must own it)
+    Rename a saved chat with current write access to its host memory.
     """
     updateChatTitle(chatId: String!, title: String!): Boolean!
     """
-    Soft-delete a saved chat and all its messages
+    Soft-delete a saved chat and all its messages. Requires current write access
+    to its host memory.
     """
     deleteChat(chatId: String!): Boolean!
 
@@ -11108,13 +11115,19 @@ export const typeDefs = `#graphql
     updateWorker(workerRef: ID!, promptOverride: String): Worker!
 
     """
-    #974 — hard-delete a NEVER-USED miscast (cor:dmo:050:11's only removal
-    escape): refused with WORKER_IN_USE unless no session was ever bound and
-    the worker's working memory holds no content. Anything with history
-    retires instead — its name is bound to that history forever. Also removes
-    the empty working memory. Same authorization as castWorker.
+    #1162 — hard-delete a never-referenced miscast only.
+    hrn:node:hadronmemory.com:specs:cor:dmo:050:11
+    Empty normally ended and released stints are repairable; persisted
+    attribution, including tombstones/history, refuses WORKER_IN_USE.
+    The requester must explicitly verify no signed commit, trailer, PR,
+    comment, review or published artifact attributes work to this Worker.
+    Database counts cannot prove external absence: known or uncertain
+    external history means retire instead. Omitted or false confirmation
+    refuses WORKER_EXTERNAL_ATTRIBUTION_UNCONFIRMED. No external crawl.
+    Also removes empty ended stints and the empty working memory.
+    Same staffing authorization as castWorker.
     """
-    deleteWorker(workerRef: ID!): Boolean!
+    deleteWorker(workerRef: ID!, confirmNoExternalAttribution: Boolean): Boolean!
 
     """
     #960 — mint a roles:<role> definition in the Team Agent's system memory.
@@ -11706,12 +11719,11 @@ export const typeDefs = `#graphql
 
     """
     025-oauth-for-mcp FR-004: revoke a user-scoped API key owned by
-    the calling User. Returns the updated UserApiKey so the portal
-    can render the new revokedAt without a refetch (PR-137 review
-    delta D3 — was Boolean). Idempotent for already-revoked keys;
-    rejected with FORBIDDEN if the key belongs to another user;
-    NOT_FOUND if id does not exist; UNAUTHENTICATED for AppKey-
-    resolved callers.
+    the calling User, together with every recorded descendant. Unrelated
+    roots and siblings stay live; unknown legacy parents are not inferred.
+    Returns the named UserApiKey with its revokedAt. Idempotent for
+    already-revoked keys. NOT_FOUND for both unknown and foreign keys;
+    UNAUTHENTICATED for AppKey-resolved callers.
     """
     revokeUserApiKey(id: ID!): UserApiKey!
 
