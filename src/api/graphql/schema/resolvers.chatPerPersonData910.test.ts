@@ -144,16 +144,17 @@ describe('#910 — per-person extraction in an app-class host', () => {
     const a = await startShared(alice.id);
     const b = await startShared(bob.id);
     await extract(alice.id, a.chatId, { region: 'EU' });
-    await Promise.all([
-      extract(alice.id, a.chatId, { industry: 'A-construction' }),
-      extract(bob.id, b.chatId, { industry: 'B-farming' }),
-      extract(alice.id, a.chatId, { size: 'A-12' }),
-      extract(bob.id, b.chatId, { size: 'B-40' }),
-    ]);
+    // Ten turns at once, each adding its own field: without serialization on
+    // the `data` loc, a read-modify-write loses someone's bucket entry.
+    const fields = ['f0', 'f1', 'f2', 'f3', 'f4'];
+    await Promise.all(fields.flatMap((f) => [
+      extract(alice.id, a.chatId, { [f]: `A-${f}` }),
+      extract(bob.id, b.chatId, { [f]: `B-${f}` }),
+    ]));
     const { data } = await dataNodeOf(a.chatId);
     const users = data?.users as Record<string, Record<string, unknown>>;
-    expect(users[alice.id]).toEqual({ industry: 'A-construction', size: 'A-12' });
-    expect(users[bob.id]).toEqual({ industry: 'B-farming', size: 'B-40' });
+    expect(users[alice.id]).toEqual(Object.fromEntries(fields.map((f) => [f, `A-${f}`])));
+    expect(users[bob.id]).toEqual(Object.fromEntries(fields.map((f) => [f, `B-${f}`])));
     expect(data?.region).toBe('EU');
   });
 

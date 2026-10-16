@@ -9,11 +9,23 @@
  * and the active session has no key, every read returns
  * `{ ok: false, error: { reason: 'key_unavailable' } }` so the
  * evaluator surfaces MEMORY_ENCRYPTED_NO_KEY.
+ *
+ * #910: `personId` is whose turn the conditions run for. In an app-class
+ * memory the root `data` node holds per-person values, and a condition reads
+ * only `personId`'s own on top of the explicitly memory-wide ones — the same
+ * view `compileTemplate` builds (`memoryDataView.ts`). Omitted, it reads the
+ * memory-wide values only.
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { decryptNodeFields } from '../nodeCrypto.js';
 import { sessionKeyCache } from '../sessionKeyCache.js';
+import {
+  DATA_HOST_MEMORY_SELECT,
+  declaredMemoryWideFields,
+  isMultiHumanChatHost,
+  multiHumanDataView,
+} from '../memoryDataView.js';
 import type { MemoryLayerHandle } from './scope-resolver.js';
 
 export async function buildPrismaMemoryLayer(
@@ -21,10 +33,11 @@ export async function buildPrismaMemoryLayer(
   layerName: string,
   memoryId: string,
   sourceLoc: string,
+  personId?: string | null,
 ): Promise<MemoryLayerHandle> {
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
-    select: { id: true, isEncrypted: true, urn: true },
+    select: { ...DATA_HOST_MEMORY_SELECT, isEncrypted: true, urn: true },
   });
   const isEncrypted = memory?.isEncrypted ?? false;
   const memoryUrn = memory?.urn ?? memoryId;
@@ -64,9 +77,14 @@ export async function buildPrismaMemoryLayer(
       decryptNodeFields(n, { id: memoryId, isEncrypted: true });
     }
   }
-  const orderedData: Array<Record<string, unknown> | null> = ancestors.map((loc) => {
+  const declared = memory && isMultiHumanChatHost(memory)
+    ? await declaredMemoryWideFields(db, memory)
+    : null;
+  const orderedData: Array<Record<string, unknown> | null> = ancestors.map((loc, i) => {
     const n = nodes.find((x) => x.loc === loc);
-    return (n?.data as Record<string, unknown> | null) ?? null;
+    const data = (n?.data as Record<string, unknown> | null) ?? null;
+    // Index 0 is the root `data` node; the stage ancestors are authored, not extracted into.
+    return i === 0 && declared && data ? multiHumanDataView(data, declared, personId) : data;
   });
 
   return {
