@@ -16,6 +16,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import express from 'express';
+import { SignJWT } from 'jose';
 import type { Server } from 'node:http';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
@@ -110,6 +111,24 @@ describe('two-factor URL (uniform 404)', () => {
     expect((await fetch(`${base}/hooks/${secret}/notify`)).status).toBe(404);
     const foreign = await mintWebhookPlatformToken(generateId());
     expect((await fetch(`${base}/hooks/${secret}/notify?hpt=${foreign}`)).status).toBe(404);
+  });
+
+  it('#421 404 on an hpt with another algorithm, the wrong use, or an expired lifetime', async () => {
+    const key = new TextEncoder().encode(process.env.JWT_SECRET!);
+    const forge = (claims: Record<string, unknown>, alg = 'HS256', exp: string = '1h') =>
+      new SignJWT(claims).setProtectedHeader({ alg }).setIssuedAt().setExpirationTime(exp).sign(key);
+    // Control: the same forge with the right claims is accepted.
+    const control = await forge({ wh: webhookId, use: 'webhook' });
+    expect((await fetch(`${base}/hooks/${secret}/notify?hpt=${control}`)).status).toBe(202);
+
+    for (const bad of [
+      await forge({ wh: webhookId, use: 'webhook' }, 'HS384'),
+      await forge({ wh: webhookId, use: 'webhook' }, 'HS512'),
+      await forge({ wh: webhookId, use: 'login' }),
+      await forge({ wh: webhookId, use: 'webhook' }, 'HS256', '-1s'),
+    ]) {
+      expect((await fetch(`${base}/hooks/${secret}/notify?hpt=${bad}`)).status).toBe(404);
+    }
   });
 
   it('404 when the webhook is disabled', async () => {

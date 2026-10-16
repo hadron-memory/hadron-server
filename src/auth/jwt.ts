@@ -24,6 +24,9 @@ export interface HadronJwtPayload extends JWTPayload {
 const JWT_ISSUER = 'hadron-server';
 const JWT_AUDIENCE = 'hadron';
 const JWT_EXPIRY = process.env.JWT_EXPIRY || '7d';
+/// #421: signJwt only emits HS256; jose would accept any HS* on this key
+/// unless the verifier pins one.
+const JWT_ALGORITHMS = ['HS256'];
 
 function getSecret(): Uint8Array {
   const secret = process.env.JWT_SECRET;
@@ -53,6 +56,7 @@ export async function verifyJwt(token: string): Promise<HadronJwtPayload> {
   const { payload } = await jwtVerify(token, getSecret(), {
     issuer: JWT_ISSUER,
     audience: JWT_AUDIENCE,
+    algorithms: JWT_ALGORITHMS,
   });
   return payload as unknown as HadronJwtPayload;
 }
