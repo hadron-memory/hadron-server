@@ -422,7 +422,7 @@ export const hostOperationMutations = {
     _: unknown,
     { input }: { input: { appRef: string; hostId: string; worker: string; type: string; args?: Record<string, unknown> | null } },
     ctx: Context,
-  ) => {
+  ) => recordingRefusal(ctx, 'issue', null, async () => {
     if (!input) throw badInput('input is required.');
     if (appKeyCaller(ctx)) throw taskError('FORBIDDEN', 'An App key does not issue host operations.');
     // The type and the shape of the arguments first: a refusal here depends only on the caller's own input.
@@ -504,7 +504,7 @@ export const hostOperationMutations = {
       });
     });
     return ctx.db.hostOperation.findUniqueOrThrow({ where: { id } });
-  },
+  }),
 };
 
 /**

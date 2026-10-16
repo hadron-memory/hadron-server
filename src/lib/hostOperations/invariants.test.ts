@@ -47,7 +47,7 @@ beforeEach(async () => {
 describe('the invariants file', () => {
   it('the migration carries a byte-identical copy, and post-push includes it after the file whose token function it uses', () => {
     const source = readFileSync(new URL('../../../prisma/host-operation-invariants.sql', import.meta.url), 'utf8');
-    const migration = readFileSync(new URL('../../../prisma/migrations/20261015120000_host_key_use_session_action/migration.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261016050000_host_key_use_issue_action/migration.sql', import.meta.url), 'utf8');
     expect(migration.endsWith(`\n${source}`)).toBe(true);
     const post = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
     const at = post.indexOf('\\ir host-operation-invariants.sql');
