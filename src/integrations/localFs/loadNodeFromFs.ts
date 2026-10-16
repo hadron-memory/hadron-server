@@ -286,11 +286,12 @@ export const loadNodeFromFs = async (
   source: string,
   graphRoot: string,
   ownerRepo: string,
+  memoryUrn?: string,
 ): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge>; metadataIsMapping: boolean }> => {
   if (source.endsWith('.md')) {
-    return loadFrontmatterNode(source, graphRoot, ownerRepo);
+    return loadFrontmatterNode(source, graphRoot, ownerRepo, memoryUrn);
   }
-  return loadLegacyNode(source, graphRoot, ownerRepo);
+  return loadLegacyNode(source, graphRoot, ownerRepo, memoryUrn);
 };
 
 /**
@@ -300,6 +301,7 @@ async function loadFrontmatterNode(
   mdPath: string,
   graphRoot: string,
   ownerRepo: string,
+  memoryUrn?: string,
 ): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge>; metadataIsMapping: boolean }> {
   // Normalize CRLF to LF before splitting (#280). The LF-only split used to
   // reject a CRLF file (a Windows author, or git core.autocrlf on the clone
@@ -316,7 +318,7 @@ async function loadFrontmatterNode(
 
   const meta = parseNodeYaml(fmMatch[1], `frontmatter in ${mdPath}`);
   const content = fmMatch[2]?.trim() || null;
-  const loc = deriveValidatedLoc(mdPath, graphRoot, true, meta.id);
+  const loc = deriveValidatedLoc(mdPath, graphRoot, true, meta.id, memoryUrn);
 
   // Sidecar edges take precedence over frontmatter `nodes:` array
   const sidecarEdges = loadSidecarEdges(mdPath);
@@ -366,6 +368,7 @@ async function loadLegacyNode(
   dirPath: string,
   graphRoot: string,
   ownerRepo: string,
+  memoryUrn?: string,
 ): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge>; metadataIsMapping: boolean }> {
   const yamlPath = join(dirPath, '.node', 'node.yaml');
   const mdPath = join(dirPath, '.node', 'topic.md');
@@ -376,7 +379,7 @@ async function loadLegacyNode(
   // handling only the frontmatter loader would leave the older of the two
   // formats as the unguarded writer, which is this issue's own shape (#1221
   // hit exactly that with the governed signals).
-  const loc = deriveValidatedLoc(dirPath, graphRoot, false, meta.id);
+  const loc = deriveValidatedLoc(dirPath, graphRoot, false, meta.id, memoryUrn);
 
   const edges = (meta.nodes ?? [])
     .filter((e) => !!e.id)
@@ -475,38 +478,18 @@ function parseNodeYaml(text: string, what: string): NodeYaml & { nodes?: EdgeEnt
  * opt in. That is the fix the issue asks for: the guard used to sit with the
  * writers somebody enumerated, and the writer nobody enumerated did without.
  *
- * **The graph root is exempt, deliberately and measurably.** `deriveLoc` maps
- * a repo's top-level `README.md` to `''`, and `validateLoc` rejects `''` as
- * `empty` — so the empty loc is not a badly-named file, it is the mirror's
- * root address, a shape the API's grammar cannot express. Measured on
- * production before writing this (issue comment, 2026-09-20): of 10 live
- * nodes whose loc `validateLoc` rejects, the classes are perfectly disjoint —
- * 7 `empty` written by the mirror (the roots of `micromentor.org:mmdata`,
- * `hadronmemory.com:core` and three `baragaun.com` memories) and 3
- * `invalid-charset` that came through an API path years ago. Validating the
- * root would refuse all five live roots, and a per-node skip is WORSE than a
- * refusal here: sync is repo-wins and destructive, so a skipped root is a
- * deleted root.
- *
- * So the charset half is a clean tightening — zero live rows violate it — and
- * the root is a separate, open question: *does the graph root have an
- * address?* Holger ruled 2026-09-20 to ship the charset now and answer the
- * root separately (#1228). **This exemption is expected to be temporary; it
- * goes when #1228 gives the root a real loc.** Do not widen it to mean "empty
- * atoms are fine" — it is one whole loc, at the root, and nowhere else.
- *
- * @throws {InvalidNodeLocError} when the derived loc is not the root and not
- *   a valid loc. `loadGraphFromFs` catches it per node, so one badly-named
- *   file cannot stop a memory syncing.
+ * The root uses the memory slug (#1228, cor:int:010:01), with no empty-loc
+ * exemption. Root identity errors abort the graph load, never skip a file
+ * before destructive repo-wins cleanup.
  */
 function deriveValidatedLoc(
   path: string,
   graphRoot: string,
   isMdFile: boolean,
   fileId: string | undefined,
+  memoryUrn?: string,
 ): string {
-  const loc = deriveLoc(path, graphRoot, isMdFile);
-  if (loc === '') return loc; // the graph root — see above
+  const loc = deriveLoc(path, graphRoot, isMdFile, memoryUrn);
   try {
     validateLoc(loc);
   } catch (err) {
@@ -528,14 +511,14 @@ function deriveValidatedLoc(
  * so Git sync uses it to tell whether an unreadable file is hiding an existing
  * node, which repo-wins cleanup would otherwise hard-delete.
  */
-export function locForNodeSource(source: string, graphRoot: string): string {
-  return deriveLoc(source, graphRoot, source.endsWith('.md'));
+export function locForNodeSource(source: string, graphRoot: string, memoryUrn?: string): string {
+  return deriveLoc(source, graphRoot, source.endsWith('.md'), memoryUrn);
 }
 
 /**
  * Derive a colon-delimited loc from a file/directory path relative to graphRoot.
  */
-function deriveLoc(path: string, graphRoot: string, isMdFile: boolean): string {
+function deriveLoc(path: string, graphRoot: string, isMdFile: boolean, memoryUrn?: string): string {
   let relPath: string;
 
   if (isMdFile) {
@@ -557,7 +540,29 @@ function deriveLoc(path: string, graphRoot: string, isMdFile: boolean): string {
     relPath = relPath.slice('.hadron'.length + 1);
   }
 
-  return relPath.split(sep).join(':');
+  return relPath === '' ? rootLocForMemory(memoryUrn) : relPath.split(sep).join(':');
+}
+
+/** A root identity failure must refuse the graph, not feed repo-wins cleanup. */
+export class InvalidRootMemoryError extends Error {}
+
+/**
+ * The root README represents its memory (cor:int:010:01 / cor:urn:010:01).
+ * Unlike ordinary path locs this depends on the memory's slug: renaming the
+ * memory moves the root again on its next id-first sync, including edge locs.
+ * Compound legacy identities refuse rather than guess a single slug (#1228).
+ */
+export function rootLocForMemory(memoryUrn: string | undefined): string {
+  const bare = memoryUrn?.replace(/^(?:hrn|urn):(?:mem|memory):/, '').replace(/::/g, ':');
+  const atoms = bare?.split(':');
+  if (!atoms || atoms.length !== 2 || !atoms[0] || !atoms[1]) {
+    throw new InvalidRootMemoryError('Git root README requires a single-atom memory slug.');
+  }
+  try { validateLoc(atoms[1]); } catch (err) {
+    if (!(err instanceof InvalidLocError)) throw err;
+    throw new InvalidRootMemoryError('Git root README requires a single-atom memory slug.');
+  }
+  return atoms[1];
 }
 
 /**
