@@ -159,3 +159,24 @@ describe('#1253 lifecycle and principal controls', () => {
     expect(await db.userApiKey.count()).toBe(2);
   });
 });
+
+it('#1253 keeps impersonation from minting or revoking credentials', async () => {
+  const parent = await root();
+  const impersonated: Context = { ...ctx(), impersonation: {
+    sessionId: generateId(), actorUserId: generateId(), orgId: generateId(),
+    expiresAt: new Date(Date.now() + 60000),
+  } };
+  await expect(resolvers.Mutation.createUserApiKey(undefined, {}, impersonated))
+    .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  await expect(resolvers.Mutation.revokeUserApiKey(undefined, { id: parent.userApiKey.id }, impersonated))
+    .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  expect(await db.userApiKey.count()).toBe(1);
+  expect((await authenticate(parent.rawKey)).userId).toBe(userId);
+});
+
+it('#1253 self-FK permits a whole-user hard-delete cascade', async () => {
+  const parent = await root();
+  await child(parent.rawKey);
+  await db.user.delete({ where: { id: userId } });
+  expect(await db.userApiKey.count()).toBe(0);
+});
