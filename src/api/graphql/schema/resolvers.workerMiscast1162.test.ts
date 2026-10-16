@@ -112,6 +112,34 @@ describe('#1162 never-referenced repair', () => {
     expect(await db.worker.findUnique({ where: { id: worker.id } })).not.toBeNull();
   });
 
+  it('refuses a REPEATABLE READ first reference after its snapshot Worker is deleted', async () => {
+    const worker = await cast();
+    const nodeId = generateId();
+    let snapshotReady!: () => void;
+    let write!: () => void;
+    const ready = new Promise<void>(resolve => { snapshotReady = resolve; });
+    const proceed = new Promise<void>(resolve => { write = resolve; });
+    const writer = db.$transaction(async tx => {
+      // Establish an old snapshot without taking a Worker-row lock.
+      expect(await tx.worker.findUnique({ where: { id: worker.id } })).not.toBeNull();
+      snapshotReady();
+      await proceed;
+      await tx.node.create({ data: {
+        id: nodeId, memoryId: otherMemoryId, loc: 'stale-snapshot', name: 'Stale writer',
+        createdByWorkerId: worker.id,
+      } });
+    }, { isolationLevel: 'RepeatableRead', timeout: 20_000 }).then(
+      () => 'committed', () => 'refused',
+    );
+    await ready;
+    try {
+      expect(await remove(worker.id)).toBe(true);
+      expect(await db.worker.findUnique({ where: { id: worker.id } })).toBeNull();
+    } finally { write(); }
+    expect(await writer).toBe('refused');
+    expect(await db.node.findUnique({ where: { id: nodeId } })).toBeNull();
+  });
+
   it('returns a typed rejection naming the missing Worker and writer', async () => {
     const missing = generateId();
     await expect(db.node.create({ data: {
