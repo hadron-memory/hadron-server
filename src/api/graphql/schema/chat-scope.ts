@@ -18,6 +18,7 @@
  *     `shared` chat is requested without a resolvable App context.
  */
 
+import { LINK_CAP_MEMORY_SELECT, agentLinkTenant, cappedLinkLevel } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
@@ -74,13 +75,17 @@ export async function sharedChatKnowledgeMemoryIds(
       // userMemoryOfAgentId still makes it per-user, never shared-chat context.
       memory: { class: 'knowledge', deletedAt: null, userMemoryOfAgentId: null },
     },
-    select: { memoryId: true, role: true, memory: { select: { appId: true, ownerUserId: true } } },
+    select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
   });
+  // #1349: an item grounds the chat only as far as the Agent's tenant reaches
+  // the memory on its own (cor:dmo:050:09) — a link is a limit, never a grant.
+  const tenant = { ...(await agentLinkTenant(db, agentId)), appId, userId: callerUserId };
   return items
     .filter(({ role, memory }) =>
       isGrantedAgentMemoryRole(role) &&
       (memory.appId == null || memory.appId === appId) &&
-      (memory.ownerUserId == null || memory.ownerUserId === callerUserId),
+      (memory.ownerUserId == null || memory.ownerUserId === callerUserId) &&
+      cappedLinkLevel(tenant, memory, role) !== null,
     )
     .map(({ memoryId }) => memoryId);
 }
