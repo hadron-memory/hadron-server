@@ -90,6 +90,7 @@ async function makeMemory(suffix: string, vectorIndexEnabled = true): Promise<st
 interface DueNode {
   id: string;
   memoryId: string;
+  loc: string;
   abstract: string;
 }
 
@@ -106,7 +107,7 @@ async function makeDueNode(memoryId: string, loc: string, stamp: Date): Promise<
       embeddingPendingAt: stamp,
     },
   });
-  return { id: n.id, memoryId, abstract };
+  return { id: n.id, memoryId, loc, abstract };
 }
 
 /** Vector rows per memory — "embedded" as the DB sees it. */
@@ -252,7 +253,7 @@ describe('#887 Slice 1 — the convoy (red on global FIFO)', () => {
     for (const [memId, prefix] of [[memA, 'a'], [memB, 'b'], [memC, 'c']] as const) {
       const served = callIndexesForMemory(calls, nodes, memId)
         .map((i) => nodes.find((n) => n.abstract === calls[i])!.loc);
-      const suffixes = served.map((loc) => Number(loc.slice(prefix.length + 1)));
+      const suffixes = served.map((loc) => Number(loc.slice(prefix.length)));
       expect(
         suffixes.every((s, k) => k === 0 || suffixes[k - 1] < s),
         `${prefix}: oldest-due-first within memory`,
