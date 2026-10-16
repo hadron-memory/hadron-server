@@ -303,6 +303,51 @@ describe('#910 — routing reads the same per-person view', () => {
   });
 });
 
+describe('#910 — the default data node is always the compiled memory\'s own (Cooper on #1990)', () => {
+  it("another readable memory's data node never stands in for the chat memory's own", async () => {
+    // A team-readable knowledge memory with its own `data` node, created
+    // FIRST so an unscoped findFirst over the caller's readable set finds it.
+    const team = await db.memory.create({
+      data: {
+        id: generateId(), name: 'team-910', urn: `${org.urn}:team-910`,
+        organizationId: org.id, class: 'knowledge', visibility: 'ORGANIZATION',
+      } as never,
+    });
+    await db.node.create({
+      data: { id: generateId(), memoryId: team.id, loc: 'data', name: 'data', nodeType: 'info', data: { industry: 'TEAM-motto' } },
+    });
+    for (const [user, value] of [[alice, 'A-own'], [bob, 'B-own']] as const) {
+      const chat = await resolvers.Mutation.startChat({}, { agentId: agent.id }, ctxFor(user.id));
+      await extract(user.id, chat.chatId, { industry: value });
+      const prompt = await promptFor(user.id, chat.chatId);
+      expect(prompt).toContain(`industry=${value};`);
+      expect(prompt).not.toContain('TEAM-motto');
+    }
+  });
+
+  it('a {{data.…}} reference also reads the compiled memory\'s own node', async () => {
+    const other = await db.memory.create({
+      data: {
+        id: generateId(), name: 'other-910', urn: `${org.urn}:other-910`,
+        organizationId: org.id, class: 'knowledge', visibility: 'ORGANIZATION',
+      } as never,
+    });
+    const own = await db.memory.create({
+      data: {
+        id: generateId(), name: 'own-910', urn: `${org.urn}:own-910`,
+        organizationId: org.id, class: 'knowledge', visibility: 'ORGANIZATION',
+      } as never,
+    });
+    for (const [m, v] of [[other, 'OTHER'], [own, 'OWN']] as const) {
+      await db.node.create({ data: { id: generateId(), memoryId: m.id, loc: 'data', name: 'data', nodeType: 'info', data: { x: v } } });
+    }
+    const filter = { memoryId: { in: [other.id, own.id] } };
+    expect(await compileTemplate('{{x}}|{{data.x}}', null, own.id, db, filter)).toBe('OWN|OWN');
+    // The access filter still gates: an unreadable own memory yields nothing.
+    expect(await compileTemplate('{{x}}|{{data.x}}', null, own.id, db, { memoryId: { in: [other.id] } })).toBe('|');
+  });
+});
+
 describe('#910 — single-human hosts keep the flat bag', () => {
   it('a personal-memory chat still folds extraction flat and reads it back whole', async () => {
     const chat = await resolvers.Mutation.startChat({}, { agentId: agent.id }, ctxFor(alice.id));
