@@ -9,8 +9,8 @@
  *
  * Used by writeNodeCore, mergeNodes, restoreNodeRevision, and mergeMemories.
  * (replaceSubtree used it too until #454 retired that mutation to a no-write
- * refusal.) (The MCP create/update tools surface violations as tool-error
- * text, so they call the pure validator directly rather than this GraphQL seam.)
+ * refusal.) MCP create/update share validateNodeSchemaOnWrite below and map
+ * its transport-neutral violation to their existing tool-error text.
  */
 import { GraphQLError } from 'graphql';
 import type { PrismaClient } from '../generated/prisma/index.js';
@@ -58,19 +58,29 @@ export async function enforceNodeSchemaOnWrite(
   objectType: string | null | undefined,
   properties: unknown,
 ): Promise<void> {
-  const norm = normalizeObjectType(objectType);
-  if (norm == null) return; // ordinary node — nothing to enforce
-  const row = await db.memory.findUnique({ where: { id: memoryId }, select: { schema: true } });
   try {
-    validateNodeAgainstSchema(
-      row?.schema as unknown as MemorySchema | null,
-      norm,
-      (properties ?? null) as Record<string, unknown> | null,
-    );
+    await validateNodeSchemaOnWrite(db, memoryId, objectType, properties);
   } catch (e) {
     if (e instanceof NodeSchemaViolation) {
       throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
     }
     throw e;
   }
+}
+
+/** #1186 / cor:dmo:020:05: transport-neutral validation from the caller's
+ * locked resulting state. MCP maps NodeSchemaViolation to its existing text. */
+export async function validateNodeSchemaOnWrite(
+  db: MemorySchemaReader,
+  memoryId: string,
+  objectType: string | null | undefined,
+  properties: unknown,
+): Promise<void> {
+  const norm = normalizeObjectType(objectType);
+  if (norm == null) return;
+  const row = await db.memory.findUnique({ where: { id: memoryId }, select: { schema: true } });
+  validateNodeAgainstSchema(
+    row?.schema as unknown as MemorySchema | null, norm,
+    (properties ?? null) as Record<string, unknown> | null,
+  );
 }

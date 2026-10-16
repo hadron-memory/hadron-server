@@ -75,9 +75,7 @@ import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
 import { findLiveUrnAliasTargets, dedupeById } from '../lib/urnAlias.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
-import { validateNodeAgainstSchema, NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
-import { normalizeObjectType, normalizeRole } from '../lib/enforceNodeSchema.js';
-import type { MemorySchema } from '../lib/memorySchema.js';
+import { normalizeObjectType, normalizeRole, validateNodeSchemaOnWrite } from '../lib/enforceNodeSchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 import { archiveTombstone } from '../lib/tombstoneArchive.js';
@@ -1398,6 +1396,8 @@ type ReadProjectionNode = {
   authoredAt: Date | null;
   /** #1591 — the latest approval on record. */
   approvedRevNo: number | null;
+  /** #1611 — the revision the approval-hashed fields last changed at. */
+  contentRevSeq: number;
   approvedBy: string | null;
   approvedByInfo: string | null;
   approvedAt: Date | null;
@@ -1781,13 +1781,14 @@ async function renderNodeReadProjection(
     // userUrn is null for a grandfathered, non-URN-legal handle (@copilot, PR #1592).
     const approver = (handle ? userUrn(handle) : null) ?? node.approvedByInfo ?? 'a former user';
     const record = `r${node.approvedRevNo} by ${approver} at ${node.approvedAt.toISOString()}`;
-    approvalLine = node.approvedRevNo === revision
-      ? `Approval: approved ${record}`
+    // #1611: valid until the hashed text changes; metadata-only revisions keep it.
+    approvalLine = node.contentRevSeq <= node.approvedRevNo
+      ? `Approval: approved ${record}${node.approvedRevNo === revision ? '' : ` (text unchanged through r${revision})`}`
       : `Approval: not approved (r${revision}; last approved ${record})`;
   }
 
   if (inheritedFrom) {
-    approvalLine = node.approvedRevNo != null && node.approvedRevNo === revision
+    approvalLine = node.approvedRevNo != null && node.contentRevSeq <= node.approvedRevNo
       ? `Approval: approved r${node.approvedRevNo}`
       : `Approval: not approved (r${revision})`;
   }
@@ -5993,24 +5994,10 @@ export function createMcpServerInstance(
         where: { id: memoryId },
         select: { isEncrypted: true, schema: true },
       });
-      // #725 — enforce the property schema on the RESULTING node state (input
-      // overrides, else the existing value). An empty/whitespace objectType is
-      // normalized to null (no collection). Only a collection member on a
-      // schema'd memory is checked; a violation is a tool error (text), not a crash.
+      // Payload diff hint only. #1186 validates resulting schema fields from
+      // the locked row in snapshotOverwrittenNode, never from this probe.
       const resultObjectType =
         objectType !== undefined ? (objectType.trim() || null) : (existing?.objectType ?? null);
-      if (resultObjectType != null) {
-        const resultProps = (properties !== undefined ? properties : existing?.properties) as
-          | Record<string, unknown>
-          | null
-          | undefined;
-        try {
-          validateNodeAgainstSchema(memEncRow?.schema as unknown as MemorySchema | null, resultObjectType, resultProps ?? null);
-        } catch (e) {
-          if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
-          throw e;
-        }
-      }
       let storedContent = content ?? null;
       let storedAbstract = normalizedAbstract;
       let storedData = (nodeData ?? undefined) as unknown;
@@ -6112,18 +6099,24 @@ export function createMcpServerInstance(
           where: { loc_memoryId: { loc, memoryId } },
           select: { id: true },
         });
-        if (!prior) return null;
-        // Row lock + drift reconciled as its own revision before this snapshot
-        // (@copilot, PR #1339), then the authoritative re-read.
-        await ensureCurrentNodeRevisionInTransaction(tx, prior.id, { expectedMemoryId: memoryId });
-        const pre = await tx.node.findUnique({ where: { id: prior.id } });
-        if (!pre) return null;
-        // Found by (loc, memory), locked by id (@copilot, PR #1339).
-        if (pre.loc !== loc || pre.memoryId !== memoryId) {
+        if (prior) await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${prior.id} FOR UPDATE`;
+        let pre = prior ? await tx.node.findUnique({ where: { id: prior.id } }) : null;
+        if (pre && (pre.loc !== loc || pre.memoryId !== memoryId)) {
           throw new NodeMovedDuringWriteError(
             `[write_conflict] the node at "${loc}" moved while this write waited — re-read and retry.`,
           );
         }
+        if (pre && !pre.deletedAt) throw LIVE_LOC_CONFLICT;
+        // #1186: use the locked tombstone, or the new-row input when absent,
+        // before reconciliation/snapshot can produce any revision side effect.
+        await validateNodeSchemaOnWrite(
+          tx, memoryId,
+          objectType !== undefined ? (objectType.trim() || null) : pre?.objectType,
+          properties !== undefined ? properties : pre?.properties,
+        );
+        if (!pre) return null;
+        await ensureCurrentNodeRevisionInTransaction(tx, pre.id, { expectedMemoryId: memoryId });
+        pre = await tx.node.findUniqueOrThrow({ where: { id: pre.id } });
         await createNodeRevision(tx, {
           id: generateId(),
           ...buildNodeRevisionSnapshot(pre, editorFromAuth(auth), {
@@ -6268,6 +6261,7 @@ export function createMcpServerInstance(
           return written;
         });
       } catch (e) {
+        if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
         if (e === LIVE_LOC_CONFLICT) {
           return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
@@ -6489,22 +6483,7 @@ export function createMcpServerInstance(
         where: { id: existing.memoryId },
         select: { isEncrypted: true, schema: true },
       });
-      // #725 — enforce the property schema on the RESULTING node state (empty
-      // objectType normalized to null).
-      const updResultObjectType =
-        objectType !== undefined ? (objectType.trim() || null) : (existing.objectType ?? null);
-      if (updResultObjectType != null) {
-        const updResultProps = (properties !== undefined ? properties : existing.properties) as
-          | Record<string, unknown>
-          | null
-          | undefined;
-        try {
-          validateNodeAgainstSchema(updMemEnc?.schema as unknown as MemorySchema | null, updResultObjectType, updResultProps ?? null);
-        } catch (e) {
-          if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
-          throw e;
-        }
-      }
+      // #1186: resulting-state schema validation runs under the row lock.
       const updKey = updMemEnc?.isEncrypted
         ? sessionKeyCache.getByMemoryId(existing.memoryId)
         : null;
@@ -6629,10 +6608,8 @@ export function createMcpServerInstance(
             // Same order as the GraphQL update path.
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${existing.id} FOR UPDATE`;
             await assertMemoryEncryptionStateForWrite(tx, memory.id, updMemEnc?.isEncrypted ?? false, auth);
-            // Unreconciled drift becomes its OWN revision before this edit's,
-            // as on the GraphQL path — never folded into the edit.
-            await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: memory.id });
-            const current = await tx.node.findUnique({
+            // Read the locked row before validation and drift reconciliation.
+            let current = await tx.node.findUnique({
               where: { id: existing.id },
             });
             // The address lock above guards (memory, loc), but this write goes
@@ -6645,6 +6622,15 @@ export function createMcpServerInstance(
                 `[write_conflict] ${rawUrn} moved, was deleted or changed memory while this update waited — re-read it and retry.`,
               );
             }
+            // #1186 / cor:dmo:020:05 — omitted fields come from the locked
+            // row, not the probe, and a refusal leaves no reconciliation.
+            await validateNodeSchemaOnWrite(
+              tx, memory.id,
+              objectType !== undefined ? (objectType.trim() || null) : current.objectType,
+              properties !== undefined ? properties : current.properties,
+            );
+            await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: memory.id });
+            current = await tx.node.findUniqueOrThrow({ where: { id: existing.id } });
             // #1468 — dropping the spec marker would make a minted spec deletable.
             await assertNoMintedSpecUnmark(tx, memory.id, [{ id: current.id, tags, role }], 'update');
             // #937 — bind a client-side read/modify/write to the Revision it
@@ -6699,6 +6685,7 @@ export function createMcpServerInstance(
             }
           });
         } catch (e) {
+          if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
           if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
           if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);

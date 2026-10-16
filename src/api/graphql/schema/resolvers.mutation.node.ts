@@ -674,15 +674,8 @@ export async function writeNodeCore(
       // to null so it is stored as an ordinary node and can't bypass the
       // declared-collection check as a non-null discriminator.
       input.objectType = normalizeObjectType(input.objectType);
-      // #725 — enforce the memory's property schema through the shared seam
-      // BEFORE any write side effect (incl. the revision snapshot below), on the
-      // RESULTING node state (input overrides, else the existing value).
-      await enforceNodeSchemaOnWrite(
-        ctx.db,
-        input.memoryId,
-        input.objectType !== undefined ? input.objectType : existing?.objectType,
-        input.properties !== undefined ? input.properties : existing?.properties,
-      );
+      // #1186: schema validation belongs to each locked write arm below;
+      // the preliminary probe cannot supply preserve-on-omit values.
 
       // The fields this write will change, in the shape diffNodeChanges wants.
       // Hoisted out of the snapshot block below because the create/upsert path
@@ -1138,6 +1131,14 @@ export async function writeNodeCore(
             let current = await assertTargetStillWritable(tx);
             if (!current) return { conflict: false, node: null };
 
+            // #1186 / cor:dmo:020:05 — reject invalid RESULTING state before
+            // drift reconciliation can commit history for a refused write.
+            await enforceNodeSchemaOnWrite(
+              tx, input.memoryId,
+              input.objectType !== undefined ? input.objectType : current.objectType,
+              input.properties !== undefined ? input.properties : current.properties,
+            );
+
             // Unreconciled drift (a raw writer changed tracked state without
             // advancing revSeq) is reconciled as its OWN revision BEFORE the
             // guard and the edit, exactly as an exposed read would have done.
@@ -1400,6 +1401,28 @@ export async function writeNodeCore(
                 extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
               });
             }
+
+            // #1186: a tombstone may have appeared or changed since the probe.
+            // Lock/re-read it before deriving omitted collection fields, and
+            // validate before reconciliation/snapshot/revival side effects.
+            if (authoritative) {
+              await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${authoritative.id} FOR UPDATE`;
+              authoritative = await tx.node.findUniqueOrThrow({ where: { id: authoritative.id } });
+              if (authoritative.loc !== input.loc || authoritative.memoryId !== input.memoryId) {
+                throw movedConflict(authoritative.memoryId, authoritative.loc);
+              }
+              if (mode === 'create' && !authoritative.deletedAt) {
+                const err = new NodeLocConflictError(input.loc, input.memoryId);
+                throw new GraphQLError(err.message, {
+                  extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
+                });
+              }
+            }
+            await enforceNodeSchemaOnWrite(
+              tx, input.memoryId,
+              input.objectType !== undefined ? input.objectType : authoritative?.objectType,
+              input.properties !== undefined ? input.properties : authoritative?.properties,
+            );
 
             // #1183 — snapshot the row this write will actually overwrite, from
             // the authoritative read and inside this transaction, so it commits

@@ -2,6 +2,12 @@ import Mustache from 'mustache';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { decryptNodeFields } from './nodeCrypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
+import {
+  DATA_HOST_MEMORY_SELECT,
+  declaredMemoryWideFields,
+  isMultiHumanChatHost,
+  multiHumanDataView,
+} from './memoryDataView.js';
 
 /** Shared literal partial grammar for rendering and automation consent. */
 export function templatePartialLocs(content: string): string[] {
@@ -20,6 +26,12 @@ export function templatePartialLocs(content: string): string[] {
  * For encrypted memories, this function only produces useful output if the
  * caller already has an active session key in the session key cache. Nodes
  * whose content/data are ciphertext-only (no key available) are skipped.
+ *
+ * `personId` is whose turn this compile is for (#910). In an app-class memory
+ * the default data node holds per-person values, and only `personId`'s own are
+ * read, on top of the explicitly memory-wide ones (`memoryDataView.ts`). Omit
+ * it when there is no attributable person: such a compile reads memory-wide
+ * values only. Single-human memories ignore it.
  */
 export async function compileTemplate(
   content: string,
@@ -27,6 +39,7 @@ export async function compileTemplate(
   memoryId: string,
   db: PrismaClient,
   accessFilter: Record<string, unknown>,
+  personId?: string | null,
 ): Promise<string> {
   if (!content.includes('{{')) return content;
 
@@ -38,7 +51,7 @@ export async function compileTemplate(
   const memory = db.memory?.findUnique
     ? await db.memory.findUnique({
         where: { id: memoryId },
-        select: { id: true, isEncrypted: true },
+        select: { ...DATA_HOST_MEMORY_SELECT, isEncrypted: true },
       })
     : null;
   const memEncInfo = memory ? { id: memory.id, isEncrypted: memory.isEncrypted } : null;
@@ -52,15 +65,37 @@ export async function compileTemplate(
   // 1. Build the view: node's own data
   const view: Record<string, unknown> = {};
 
+  // #910: in a multi-human host the default data node is only ever read
+  // through the per-person view — as the default bag here AND as a
+  // `{{data.…}}` cross-node reference below (George on #1990).
+  const dataNodeView = async (stored: Record<string, unknown>) =>
+    memory && isMultiHumanChatHost(memory)
+      ? multiHumanDataView(stored, await declaredMemoryWideFields(db, memory), personId)
+      : stored;
+
+  // The default data node is THIS memory's own. `accessFilter` is usually
+  // `{ memoryId: { in: [...readable] } }`, so spreading it after `memoryId`
+  // replaced the scope and let findFirst pick another readable memory's
+  // `data` node (Cooper on #1990). It still gates, conjoined.
+  const ownDataNodeWhere = {
+    loc: 'data',
+    deletedAt: null,
+    ...accessFilter,
+    AND: [
+      ...(accessFilter.AND === undefined ? [] : Array.isArray(accessFilter.AND) ? accessFilter.AND : [accessFilter.AND]),
+      { memoryId },
+    ],
+  };
+
   // 2. Load memory's default data node (loc: "data")
   const defaultDataNode = await db.node.findFirst({
-    where: { loc: 'data', memoryId, deletedAt: null, ...accessFilter },
+    where: ownDataNodeWhere,
     select: { data: true, content: true, memoryId: true },
   });
   if (defaultDataNode) {
     if (memEncInfo?.isEncrypted) decryptNodeFields(defaultDataNode, memEncInfo);
     if (defaultDataNode.data && typeof defaultDataNode.data === 'object') {
-      Object.assign(view, defaultDataNode.data as Record<string, unknown>);
+      Object.assign(view, await dataNodeView(defaultDataNode.data as Record<string, unknown>));
     }
   }
 
@@ -86,13 +121,15 @@ export async function compileTemplate(
 
   for (const ref of refs) {
     const refNode = await db.node.findFirst({
-      where: { loc: ref, memoryId, deletedAt: null, ...accessFilter },
+      where: ref === 'data' ? ownDataNodeWhere : { loc: ref, memoryId, deletedAt: null, ...accessFilter },
       select: { data: true, content: true, memoryId: true },
     });
     if (refNode) {
       if (memEncInfo?.isEncrypted) decryptNodeFields(refNode, memEncInfo);
       if (refNode.data && typeof refNode.data === 'object') {
-        view[ref] = refNode.data;
+        view[ref] = ref === 'data'
+          ? await dataNodeView(refNode.data as Record<string, unknown>)
+          : refNode.data;
       }
     }
   }

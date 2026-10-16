@@ -53,7 +53,8 @@ export async function mintWebhookPlatformToken(webhookId: string): Promise<strin
 async function verifyWebhookPlatformToken(hpt: string, webhookId: string): Promise<boolean> {
   const secret = jwtSecret(); // config errors surface, not swallowed
   try {
-    const { payload } = await jwtVerify(hpt, secret);
+    // #421: minted HS256 only; pinned so no other HS* on this key verifies.
+    const { payload } = await jwtVerify(hpt, secret, { algorithms: ['HS256'] });
     return payload.use === 'webhook' && payload.wh === webhookId;
   } catch {
     return false;
