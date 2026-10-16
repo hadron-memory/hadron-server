@@ -1,9 +1,11 @@
 /** #1162: empty ended stints are repairable; persisted attribution is not. */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { generateDataKey } from '../../../lib/crypto.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -28,6 +30,8 @@ beforeEach(async () => {
   appId = app.id;
   await db.appAgent.create({ data: { appId, agentId } });
 });
+
+afterEach(() => sessionKeyCache.clear());
 
 const cast = () => M.castWorker({}, { appRef: appId, agentRef: agentId, name: 'Miscast' }, ctx);
 // Proposed input under scope review. This fixture explicitly attests synthetic
@@ -218,6 +222,26 @@ describe('#1162 never-referenced repair', () => {
     await M.endSession({}, { id: session.id }, ctx);
     await M.releaseWorker({}, { workerRef: worker.id }, ctx);
     await expect(remove(worker.id)).rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
+  });
+
+  it('preserves encrypted cross-App chat authored by an explicit sessionRef without ambient attribution', async () => {
+    const sourceApp = await db.app.findUniqueOrThrow({ where: { id: appId } });
+    const other = await db.app.create({ data: { organizationId: sourceApp.organizationId, name: 'Other team', urn: 'repair1162.com:encrypted' } });
+    await db.appAgent.create({ data: { appId: other.id, agentId } });
+    await M.createTeamChatMessage({}, { appRef: other.id, body: 'Human setup' }, ctx);
+    const root = await db.node.findFirstOrThrow({
+      // loc-scope-ok: the fixture App and class scope this chat root.
+      where: { loc: 'chats:team', memory: { appId: other.id, class: 'app' } },
+    });
+    sessionKeyCache.set('repair-cipher-key', root.memoryId, generateDataKey());
+    await db.memory.update({ where: { id: root.memoryId }, data: { isEncrypted: true } });
+    const worker = await cast();
+    const session = await M.startSession({}, { input: { id: generateId(), appRef: appId, workerRef: worker.id, tool: 'test' } }, ctx);
+    const message = await M.createTeamChatMessage({}, { appRef: other.id, body: 'Encrypted authored work', sessionRef: session.id }, ctx);
+    await M.endSession({}, { id: session.id }, ctx);
+    await M.releaseWorker({}, { workerRef: worker.id }, ctx);
+    await expect(remove(worker.id)).rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: message.nodeId } })).createdByWorkerId).toBe(worker.id);
   });
 
   for (const field of ['createdByWorkerId', 'updatedByWorkerId'] as const) {
