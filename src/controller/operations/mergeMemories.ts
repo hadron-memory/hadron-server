@@ -269,6 +269,33 @@ async function runMerge(
   const classifyPage = Math.max(1, Math.floor(args.classifyPageSize ?? CLASSIFY_PAGE));
   const withEdges = fields.has('EDGES');
 
+  /** #409 / cor:api:190:02: rebuild moved vectors under the destination policy.
+   * Runs with the moved Node and Memory locks held, before relocation commits;
+   * the fresh marker also fences an old source worker, even in the same ms.
+   */
+  const resetRelocatedVectors = async (tx: Prisma.TransactionClient, ids: string[]) => {
+    if (ids.length === 0) return;
+    const destination = await tx.memory.findUniqueOrThrow({
+      where: { id: targetMemoryId }, select: { vectorIndexEnabled: true },
+    });
+    const stamp = new Date();
+    const sameStamp = destination.vectorIndexEnabled
+      ? await tx.node.findMany({ where: { id: { in: ids }, embeddingPendingAt: stamp }, select: { id: true } })
+      : [];
+    await tx.nodeEmbedding.deleteMany({ where: { nodeId: { in: ids } } });
+    await tx.node.updateMany({
+      where: { id: { in: ids } },
+      data: {
+        embeddingPendingAt: destination.vectorIndexEnabled ? stamp : null,
+        embeddingFailedAt: null, embeddingError: null, embeddingAttempts: 0,
+      },
+    });
+    if (sameStamp.length) await tx.node.updateMany({
+      where: { id: { in: sameStamp.map((n) => n.id) } },
+      data: { embeddingPendingAt: new Date(stamp.getTime() - 1) },
+    });
+  };
+
   /** Hold both flags through a batch so encryptMemory cannot flip mid-write. */
   const lockMergeMemoryRows = async (
     tx: Prisma.TransactionClient,
@@ -591,6 +618,7 @@ async function runMerge(
               },
             });
           }
+          await resetRelocatedVectors(tx, relocationIds);
           // #1664 — the batch's threads move in the same transaction as their targets.
           // #1684 — its final member set, read under the carry's locks, is
           // rechecked against the target's TOTAL occupancy before it moves.
@@ -606,6 +634,7 @@ async function runMerge(
             if (occupied.length > 0) {
               throw new Error(`merge target loc ${occupied[0].loc} is occupied by a node; a comment cannot move there; retry the merge`);
             }
+            await resetRelocatedVectors(tx, threadIds);
           });
           return rows.length;
         }, BATCH_TX_OPTS);
