@@ -1728,6 +1728,21 @@ describe('#1717 — chat-by-loc writes', () => {
     deleteChat: () => resolvers.Mutation.deleteChat({}, { chatId }, userCtx(userId)),
   });
 
+  it.each(['updateChatTitle', 'deleteChat'] as const)(
+    '#1991: %s admits a non-creator with current host-memory write access',
+    async (op) => {
+      await member(adminUser.id);
+      await member(otherUser.id);
+      const { chatId, root } = await sharedChat(adminUser.id);
+      // The same participant can already post; provenance must not narrow it.
+      await resolvers.Mutation.sendChatMessage({}, { chatId, userMessage: 'participant control' }, userCtx(otherUser.id));
+      await expect(writes(chatId, otherUser.id)[op]()).resolves.toBe(true);
+      const after = await snapshot(root.id);
+      if (op === 'updateChatTitle') expect((after.data as Record<string, unknown>).title).toBe('renamed');
+      else expect(after.deletedAt).not.toBeNull();
+    },
+  );
+
   it.each([
     ['an ordinary node the caller authored', 'notes:plan', {}],
     ['a governed review at a chat-shaped loc', 'chats:202610091200-deadbeef-review', { role: 'review' }],
