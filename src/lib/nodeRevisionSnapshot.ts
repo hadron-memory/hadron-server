@@ -22,6 +22,7 @@ import { Prisma, type NodeAuthorshipKind } from '../generated/prisma/index.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from './id.js';
 import { clearNodeAuthorship } from './nodeAuthorship.js';
+import { normalizeRole } from './enforceNodeSchema.js';
 import { isDecisionFamilyRole } from './decisions/index.js';
 
 /**
@@ -569,7 +570,10 @@ export function restorableNodeFields(revision: {
     // still marked `role: 'review'`, so the restore silently disagrees with the
     // revision it claims to reproduce. A field in the curated subset has to
     // round-trip both ways or it is decoration.
-    role: revision.role,
+    // #1219: a historical '' (stored before the normalization) is the one
+    // exception — restoring it RAW would resurrect a shape no write path can
+    // produce anymore, so it restores as what it always meant: no role.
+    role: normalizeRole(revision.role) ?? null,
     llmModel: revision.llmModel,
     aiAgent: revision.aiAgent,
     authorshipKind: revision.authorshipKind,
