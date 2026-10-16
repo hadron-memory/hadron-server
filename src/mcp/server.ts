@@ -1,3 +1,4 @@
+import { GraphQLError } from 'graphql';
 import { writeResumeClaim, type ResumeCandidate } from '../lib/resumeClaims.js';
 import { registerAutomationPinTools } from './automationPinTools.js';
 import { registerAgentDefinitionTools } from './agentDefinitionTools.js';
@@ -10791,6 +10792,31 @@ function ageOf(at: Date, now: Date = new Date()): string {
         );
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'reading the worker failed'}`);
+      }
+    },
+  );
+
+  // #1162: one eligibility implementation across transports.
+  server.tool(
+    'hadron_delete_worker',
+    'Remove a never-used miscast only. Empty ended and released stints alone do not count as work. Any persisted reference blocks deletion; retire workers with history. You must first verify no signed commit, trailer, PR, comment, review or published artifact attributes work to this identity and explicitly confirm. Database checks cannot establish external absence; known or uncertain history means retire. This does not scan external hosts.',
+    {
+      workerRef: z.string().describe('The worker id or URN.'),
+      confirmNoExternalAttribution: z.boolean().optional().describe('Explicit requester verification of no external attribution. Omitted or false refuses; ordinary yes/confirmation is insufficient.'),
+    },
+    async ({ workerRef, confirmNoExternalAttribution }) => {
+      const ctx: Context = {
+        db, userId: auth.userId ?? undefined, appId: auth.appId ?? undefined,
+        clientId: auth.clientId ?? undefined, apiKeyId: auth.apiKeyId ?? undefined,
+        sessionId: auth.sessionId ?? undefined, organizationId: auth.organizationId ?? undefined,
+        roles: auth.roles as Context['roles'],
+      };
+      try {
+        await resolvers.Mutation.deleteWorker({}, { workerRef, confirmNoExternalAttribution }, ctx);
+        return textResult('Deleted the verified unused miscast and its empty working memory.');
+      } catch (error) {
+        if (!(error instanceof GraphQLError)) throw error;
+        return { ...textResult(`${error.extensions.code ?? 'ERROR'}: ${error.message}`), isError: true };
       }
     },
   );
