@@ -5,6 +5,7 @@ import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { generateDataKey } from '../../../lib/crypto.js';
+import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -224,6 +225,26 @@ describe('#1162 never-referenced repair', () => {
     await expect(remove(worker.id)).rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
   });
 
+  it('refuses unreadable legacy ciphertext and checks it when an existing key is present', async () => {
+    const worker = await cast();
+    const key = generateDataKey();
+    const data = encryptNodeFieldsWithKey({ data: { authorWorkerId: worker.id } }, key).data;
+    await db.node.create({ data: { memoryId: otherMemoryId, loc: 'legacy-cipher', name: 'Legacy', data: data as never } });
+    await expect(remove(worker.id)).rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
+    sessionKeyCache.set('legacy-test-key', otherMemoryId, key);
+    await expect(remove(worker.id)).rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
+  });
+
+  it('does not count readable ciphertext belonging only to another identity as this Worker use', async () => {
+    const worker = await cast();
+    const other = await M.castWorker({}, { appRef: appId, agentRef: agentId, name: 'Other' }, ctx);
+    const key = generateDataKey();
+    const data = encryptNodeFieldsWithKey({ data: { authorWorkerId: other.id } }, key).data;
+    await db.node.create({ data: { memoryId: otherMemoryId, loc: 'other-cipher', name: 'Other', data: data as never } });
+    sessionKeyCache.set('other-test-key', otherMemoryId, key);
+    expect(await remove(worker.id)).toBe(true);
+  });
+
   it('preserves encrypted cross-App chat authored by an explicit sessionRef without ambient attribution', async () => {
     const sourceApp = await db.app.findUniqueOrThrow({ where: { id: appId } });
     const other = await db.app.create({ data: { organizationId: sourceApp.organizationId, name: 'Other team', urn: 'repair1162.com:encrypted' } });
@@ -240,6 +261,7 @@ describe('#1162 never-referenced repair', () => {
     const message = await M.createTeamChatMessage({}, { appRef: other.id, body: 'Encrypted authored work', sessionRef: session.id }, ctx);
     await M.endSession({}, { id: session.id }, ctx);
     await M.releaseWorker({}, { workerRef: worker.id }, ctx);
+    sessionKeyCache.clear(); // new explicit stamps protect even when the body is locked
     await expect(remove(worker.id)).rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
     expect((await db.node.findUniqueOrThrow({ where: { id: message.nodeId } })).createdByWorkerId).toBe(worker.id);
   });

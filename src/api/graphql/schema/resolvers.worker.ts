@@ -1516,7 +1516,7 @@ export const workerMutations = {
         { extensions: { code: 'WORKER_EXTERNAL_ATTRIBUTION_UNCONFIRMED' } },
       );
     }
-    const refuse = () => new GraphQLError('This worker has persisted references or an unreleased stint. Retire it instead.', {
+    const refuse = () => new GraphQLError('This worker has persisted references, an unreleased stint, or encrypted attribution that cannot be verified. Retire it instead.', {
       extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
     });
     if (await miscastHasReferences(ctx.db, worker)) throw refuse();

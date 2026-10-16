@@ -1,3 +1,4 @@
+import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { generateId } from '../lib/id.js';
 import { join } from 'path';
@@ -570,7 +571,7 @@ export async function chatNodeByLocOrThrow(
 /** #1162: attribution fixtures must name a real Worker, not an invented audit id. */
 export async function createDbWorkerAttribution(db: PrismaClient, userId: string, workerId: string, sessionId?: string): Promise<void> {
   const suffix = generateId();
-  const membership = await db.orgMember.findFirst({ where: { userId, deletedAt: null } });
+  const membership = await db.orgMember.findFirst({ where: { userId, ...LIVE_ORG_MEMBERSHIP } });
   const ownership = membership ? { organizationId: membership.organizationId } : { ownerUserId: userId };
   const agent = await db.agent.create({ data: { ...ownership, name: 'Attribution fixture', urn: `fixture-${suffix}.example:role` } });
   const app = await db.app.create({ data: { ...ownership, name: 'Attribution fixture', urn: `fixture-${suffix}.example:app` } });

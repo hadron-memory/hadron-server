@@ -1,4 +1,6 @@
 /** #1162 / cor:dmo:050:11: private, immutable-id census, including tombstones. */
+import { decryptJson } from './crypto.js';
+import { sessionKeyCache } from './sessionKeyCache.js';
 import { Prisma } from '../generated/prisma/index.js';
 
 type Reader = Pick<Prisma.TransactionClient, '$queryRaw' | 'session' | 'node' | 'asset'>;
@@ -20,6 +22,36 @@ async function jsonReferences(db: Reader, table: string, column: string, ids: st
   const rows = await db.$queryRaw<Array<{ present: boolean }>>(Prisma.sql`
     SELECT EXISTS (SELECT 1 FROM ${quoted(table)} WHERE ${Prisma.join(predicates, ' OR ')}) AS present`);
   return rows[0].present;
+}
+
+/** Ciphertext is not an empty JSON envelope. Legacy data may lack the
+ * explicit author stamp, so verify with an already resident key or fail closed.
+ * Nothing decrypts for the caller and no new key is acquired. */
+async function encryptedHistoryMayReference(db: Reader, worker: { id: string }, sessionIds: string[]): Promise<boolean> {
+  const [identity] = await db.$queryRaw<Array<{ createdAt: Date }>>`SELECT created_at AS "createdAt" FROM workers WHERE id = ${worker.id}`;
+  if (!identity) return true;
+  const since = identity.createdAt.toISOString();
+  const rows = await db.$queryRaw<Array<{ memoryId: string; data: unknown }>>(Prisma.sql`
+    SELECT memory_id AS "memoryId", data FROM nodes
+    WHERE data ? '__enc' AND (created_at >= ${since}::timestamp OR updated_at >= ${since}::timestamp)
+    UNION ALL
+    SELECT COALESCE(r.memory_id, n.memory_id) AS "memoryId", r.data FROM node_revisions r
+      JOIN nodes n ON n.id = r.node_id
+    WHERE r.data ? '__enc' AND r.created_at >= ${since}::timestamp`);
+  const identities = new Set([worker.id, ...sessionIds]);
+  const contains = (value: unknown): boolean => {
+    if (typeof value === 'string') return identities.has(value);
+    if (Array.isArray(value)) return value.some(contains);
+    return !!value && typeof value === 'object' && Object.values(value).some(contains);
+  };
+  for (const row of rows) {
+    const ciphertext = (row.data as { __enc?: unknown } | null)?.__enc;
+    const key = sessionKeyCache.getByMemoryId(row.memoryId);
+    if (!key || typeof ciphertext !== 'string' || ciphertext.length === 0) return true;
+    try { const decoded = decryptJson(ciphertext, key); if (decoded === null || contains(decoded)) return true; }
+    catch { return true; } // cannot establish never-used from unreadable history
+  }
+  return false;
 }
 
 /** Call only after staffing authorization; never return this census to callers. */
@@ -49,6 +81,7 @@ export async function miscastHasReferences(db: Reader, worker: { id: string; mem
   for (const [table, column] of JSON_REFERENCES) {
     if (await jsonReferences(db, table, column, [worker.id, ...sessionIds])) return true;
   }
+  if (await encryptedHistoryMayReference(db, worker, sessionIds)) return true;
   const commentRows = await db.$queryRaw<Array<{ present: boolean }>>(Prisma.sql`
     SELECT EXISTS (SELECT 1 FROM comment_meta WHERE author_key = ${`w:${worker.id}`} OR retracted_by = ${`w:${worker.id}`}
       OR resolved_by = ${`w:${worker.id}`} OR thread_deleted_by = ${`w:${worker.id}`}) AS present`);
