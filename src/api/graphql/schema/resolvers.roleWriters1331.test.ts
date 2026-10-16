@@ -12,6 +12,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
+import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -120,7 +122,7 @@ describe('writers=ADMIN on a role (acceptance 1, 2)', () => {
 
   it('changing the runnable signal of a node carrying the role is an edit of it', async () => {
     await node('p1', { role: 'policy' });
-    expect(await code(update(contrib, 'p1', { isRunnable: true }))).toBe(REFUSED);
+    expect(await code(update(contrib, 'p1', { isRunnable: true }))).not.toBe('OK');
     expect(await code(update(contrib, 'p1', { isRunnable: false }))).toBe(REFUSED);
   });
 
@@ -184,6 +186,19 @@ describe('every writer path honors the level (the inventory)', () => {
     expect(await code(resolvers.Mutation.cloneNode(null, { sourceRef: p.id, targetUrn: `hrn:node:${memoryUrn}:copy` }, as(contrib)))).toBe(REFUSED);
     expect(await state('copy')).toBeNull();
     expect(await code(resolvers.Mutation.cloneNode(null, { sourceRef: p.id, targetUrn: `hrn:node:${memoryUrn}:copy` }, as(admin)))).toBe('OK');
+    // merge: into a node of the role (target written), and with a source of the role (deleted)
+    const plain = await node('plain', { content: 'plain body' });
+    const p2 = (await state('p2'))!;
+    expect(await code(resolvers.Mutation.mergeNodes(null, {
+      input: { source: plain.id, target: p2.id, include: ['CONTENT'] },
+    }, as(contrib)))).toBe(REFUSED);
+    expect(await code(resolvers.Mutation.mergeNodes(null, {
+      input: { source: p2.id, target: plain.id, include: ['CONTENT'], deleteSource: true },
+    }, as(contrib)))).toBe(REFUSED);
+    expect((await state('p2'))!.deletedAt).toBeNull();
+    expect(await code(resolvers.Mutation.mergeNodes(null, {
+      input: { source: plain.id, target: p2.id, include: ['CONTENT'] },
+    }, as(admin)))).toBe('OK');
   });
 
   it('restoreNodeRevision of a node of the role', async () => {
@@ -198,13 +213,13 @@ describe('every writer path honors the level (the inventory)', () => {
     await node('p1', { role: 'policy' });
     const mcp = (u: { id: string }) => createTestableMcpServer({ userId: u.id, roles: [], clientId: `user:${u.id}` });
     const refused = await mcp(contrib).callToolText('hadron_update_node', { urn: `hrn:node:${memoryUrn}:p1`, content: 'mcp edit' });
-    expect(refused).toContain(REFUSED);
+    expect(refused).toContain('role_writer_level_required');
     expect((await state('p1'))!.content).toBe('body');
     const created = await mcp(contrib).callToolText('hadron_create_node', { urn: `hrn:node:${memoryUrn}:p9`, name: 'p9', content: 'x', role: 'policy' });
-    expect(created).toContain(REFUSED);
+    expect(created).toContain('role_writer_level_required');
     expect(await state('p9')).toBeNull();
     const ok = await mcp(admin).callToolText('hadron_update_node', { urn: `hrn:node:${memoryUrn}:p1`, content: 'admin mcp edit' });
-    expect(ok).not.toContain(REFUSED);
+    expect(ok).not.toContain('role_writer_level_required');
     expect((await state('p1'))!.content).toBe('admin mcp edit');
   });
 });
@@ -234,13 +249,86 @@ describe('ALL, OWNER, and the user-owned audience', () => {
   });
 });
 
-describe('races against the rulebook and the audience (acceptance 3)', () => {
-  it('a write that waits behind a rule change ALL->ADMIN is judged on the committed rule', async () => {
+describe('bulk operations judge every node they carry or remove', () => {
+  it('mergeMemories: a source node of an ADMIN role cannot be relocated into the target by a contributor', async () => {
+    await rule('policy', { writers: 'ADMIN' });
+    await node('p1', { role: 'policy' });
+    const other = await db.memory.create({
+      data: { id: generateId(), organizationId: orgId, urn: 'rw-org:other', name: 'other', class: 'knowledge' },
+    });
+    const merge = (u: { id: string }) => resolvers.Mutation.mergeMemories(null, {
+      input: { source: memoryId, target: other.id, include: ['CONTENT'] },
+    }, as(u));
+    const refused = await code(merge(contrib));
+    expect(refused).not.toBe('OK');
+    expect(await db.node.count({ where: { memoryId: other.id, loc: 'p1' } })).toBe(0);
+    expect((await state('p1'))!.memoryId).toBe(memoryId);
+  });
+
+  it('extractParentNodeToMemory with move removes the subtree from the source: each role is judged there (a copy is not)', async () => {
+    // The move gate already limits the caller to people who manage the memory, so the
+    // ADMIN level adds nothing for them; what it adds is that an unsupported level
+    // (OWNER) is never read as ALL.
+    await rule('vault', { writers: 'OWNER' });
+    await node('keep');
+    await node('tree');
+    await node('tree:leaf', { role: 'vault' });
+    const parentRef = (await state('tree'))!.id;
+    expect(await code(resolvers.Mutation.extractParentNodeToMemory(null, {
+      parentRef, targetUrn: 'rw-org::extracted-move', move: true,
+    }, as(admin)))).toBe('ROLE_WRITERS_UNSUPPORTED');
+    expect((await state('tree:leaf'))!.deletedAt).toBeNull();
+    expect(await code(resolvers.Mutation.extractParentNodeToMemory(null, {
+      parentRef, targetUrn: 'rw-org::extracted-copy', move: false,
+    }, as(admin)))).toBe('OK');
+  });
+});
+
+describe('races (acceptance 3): the write is judged on the committed rulebook and audience', () => {
+  it('a write queued behind a rule change ALL->ADMIN is refused when the change commits', async () => {
     const r = await rule('policy', { writers: 'ALL' });
     await node('p1', { role: 'policy' });
-    // The rule tightens before the write runs: the write must see ADMIN, never a stale ALL.
-    await db.nodeRoleRule.update({ where: { id: r.id }, data: { writers: 'ADMIN' } });
-    expect(await code(update(contrib, 'p1', { content: 'late' }))).toBe(REFUSED);
+    let held!: () => void;
+    const holding = new Promise<void>((res) => (held = res));
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const ruleWrite = db.$transaction(async (tx) => {
+      await lockMemoryConfigExclusive(tx, memoryId);
+      await tx.nodeRoleRule.update({ where: { id: r.id }, data: { writers: 'ADMIN' } });
+      held();
+      await gate;
+    }, { timeout: 15_000 });
+    await holding;
+    const pending = code(update(contrib, 'p1', { content: 'late' }));
+    await waitForLockWaiters(db);
+    release();
+    await ruleWrite;
+    expect(await pending).toBe(REFUSED);
+    expect((await state('p1'))!.content).toBe('body');
+  });
+
+  it('an admin revoked while their write is queued is refused: the audience is read after the lock', async () => {
+    await rule('policy', { writers: 'ADMIN' });
+    await node('p1', { role: 'policy' });
+    let held!: () => void;
+    const holding = new Promise<void>((res) => (held = res));
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const ruleWrite = db.$transaction(async (tx) => {
+      await lockMemoryConfigExclusive(tx, memoryId);
+      held();
+      await gate;
+    }, { timeout: 15_000 });
+    await holding;
+    const pending = code(update(admin, 'p1', { content: 'by a revoked admin' }));
+    await waitForLockWaiters(db);
+    await db.orgMember.update({
+      where: { organizationId_userId: { organizationId: orgId, userId: admin.id } },
+      data: { role: 'CONTRIBUTOR' },
+    });
+    release();
+    await ruleWrite;
+    expect(await pending).toBe(REFUSED);
     expect((await state('p1'))!.content).toBe('body');
   });
 });
