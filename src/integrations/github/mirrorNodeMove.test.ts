@@ -18,7 +18,7 @@ vi.mock('./gitMirrorCheckout.js', () => ({
   // Run the caller's mutation against a fixed fake checkout so the assertions
   // are about WHICH files a move reshapes, not about git.
   withMirrorCheckout: vi.fn(async (opts: any, mutate: any) => {
-    await mutate({ localPath: `/repo/${opts.memoryId}`, branch: 'hadron-updates' });
+    await mutate({ localPath: `/repo/${opts.memoryId}`, branch: 'hadron-updates', memoryUrn: 'test-org:root-memory' });
     return 'mirrored';
   }),
 }));
@@ -211,7 +211,7 @@ describe('mirrorNodeMoveToGit — same memory', () => {
     const gate = new Promise<void>((resolve) => { release = resolve; });
     vi.mocked(withMirrorCheckout).mockImplementationOnce(async (opts, mutate) => {
       await gate;
-      await mutate({ localPath: `/repo/${opts.memoryId}`, branch: 'hadron-updates' });
+      await mutate({ localPath: `/repo/${opts.memoryId}`, branch: 'hadron-updates', memoryUrn: 'test-org:root-memory' });
       return 'mirrored';
     });
 
