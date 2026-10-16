@@ -212,8 +212,8 @@ describe('#415 through GraphQL findNodes and delegated MCP hadron_find_nodes (no
     try {
       gql = findNodes({ query: PATTERN, mode: 'regex' });
       tool = mcp({ query: PATTERN, mode: 'regex', memoryUrn: memUrn });
-      const g = await settleWithin(gql, UNBOUNDED_AFTER_MS);
-      const t = await settleWithin(tool, UNBOUNDED_AFTER_MS);
+      const g = await settleWithin(gql!, UNBOUNDED_AFTER_MS);
+      const t = await settleWithin(tool!, UNBOUNDED_AFTER_MS);
 
       expect(g.kind).toBe('err');
       if (g.kind === 'err') {
