@@ -204,6 +204,50 @@ describe('#910 — per-person extraction in an app-class host', () => {
     expect(probe).toBe('|');
   });
 
+  it('a cross-node {{data.…}} reference reads the same filtered view, never the raw bag', async () => {
+    const a = await startShared(alice.id);
+    await extract(alice.id, a.chatId, { industry: 'A-construction' });
+    const { memoryId } = await dataNodeOf(a.chatId);
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'data', memoryId } },
+      data: { data: { ...(await dataNodeOf(a.chatId)).data, legacyField: 'LEGACY-someone' } as never },
+    });
+    const tpl = `{{data.users.${alice.id}.industry}}|{{data.legacyField}}|{{data.industry}}`;
+    expect(await compileTemplate(tpl, null, memoryId, db, {}, bob.id)).toBe('||');
+    expect(await compileTemplate(tpl, null, memoryId, db, {})).toBe('||');
+    expect(await compileTemplate(tpl, null, memoryId, db, {}, alice.id)).toBe('||A-construction');
+  });
+
+  it('a field listed in memoryWideKeys is filed memory-wide on write, as it is read', async () => {
+    const a = await startShared(alice.id);
+    const b = await startShared(bob.id);
+    const { memoryId } = await dataNodeOf(a.chatId);
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId, loc: 'data', name: 'data', nodeType: 'info',
+        data: { tier: 'OLD', memoryWideKeys: ['tier'] },
+      },
+    });
+    await extract(alice.id, a.chatId, { tier: 'NEW' });
+    const { data } = await dataNodeOf(b.chatId);
+    expect(data?.tier).toBe('NEW');
+    expect(data?.users).toBeUndefined();
+    expect(await compileTemplate('t={{tier}}', null, memoryId, db, {}, bob.id)).toBe('t=NEW');
+    expect(await compileTemplate('t={{tier}}', null, memoryId, db, {}, alice.id)).toBe('t=NEW');
+  });
+
+  it('a field declared memory-wide at one level and personal at another stays personal', async () => {
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'conversations:intake:scope', memoryId: systemMemoryId } },
+      data: { data: { promptRef: 'prompts:intake:scope', extractionSpec: [{ field: 'memory.industry' }] } },
+    });
+    const a = await startShared(alice.id);
+    await extract(alice.id, a.chatId, { industry: 'A-construction' });
+    const { data } = await dataNodeOf(a.chatId);
+    expect(data).not.toHaveProperty('industry');
+    expect((data?.users as Record<string, unknown>)[alice.id]).toEqual({ industry: 'A-construction' });
+  });
+
   it('a turn with no attributable person writes no personal value and reads none', async () => {
     const a = await startShared(alice.id);
     await extract(alice.id, a.chatId, { industry: 'A-construction' });
@@ -235,6 +279,22 @@ describe('#910 — routing reads the same per-person view', () => {
 
     const asAlice = await buildPrismaMemoryLayer(db, 'user-memory', memoryId, '', alice.id);
     expect(await asAlice.read('industry')).toEqual({ ok: true, value: 'A-construction' });
+
+    // A source at or under `data` repeats the root as an ancestor; every
+    // occurrence reads the filtered view.
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'data', memoryId } },
+      data: { data: { ...(await dataNodeOf(a.chatId)).data, legacyField: 'LEGACY-someone' } as never },
+    });
+    for (const sourceLoc of ['data', 'data:child']) {
+      for (const person of [bob.id, null]) {
+        const layer = await buildPrismaMemoryLayer(db, 'user-memory', memoryId, sourceLoc, person);
+        expect(await layer.read(`users.${alice.id}.industry`)).toEqual({ ok: true, value: undefined });
+        expect(await layer.read('industry')).toEqual({ ok: true, value: undefined });
+        expect(await layer.read('legacyField')).toEqual({ ok: true, value: undefined });
+        expect(await layer.read('region')).toEqual({ ok: true, value: 'EU' });
+      }
+    }
 
     // The runner has no person: memory-wide values only.
     const asNobody = await buildPrismaMemoryLayer(db, 'edge-memory', memoryId, '');
