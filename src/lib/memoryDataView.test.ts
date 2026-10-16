@@ -37,6 +37,14 @@ describe('mergeTurnExtraction (#910)', () => {
     });
   });
 
+  it('files a field listed in memoryWideKeys flat, exactly as the read classifies it', () => {
+    const next = mergeTurnExtraction(
+      { tier: 'OLD', [MEMORY_WIDE_KEYS_KEY]: ['tier'] }, { tier: 'NEW' }, new Set(), 'alice',
+    );
+    expect(next).toEqual({ tier: 'NEW', [MEMORY_WIDE_KEYS_KEY]: ['tier'] });
+    expect(multiHumanDataView(next, new Set(), 'bob')).toEqual({ tier: 'NEW' });
+  });
+
   it('drops personal values when no person is attributable, but keeps memory-wide ones', () => {
     const next = mergeTurnExtraction({}, { industry: 'A', region: 'EU' }, declared, null);
     expect(next).toEqual({ region: 'EU' });

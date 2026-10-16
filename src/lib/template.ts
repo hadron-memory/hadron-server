@@ -65,6 +65,14 @@ export async function compileTemplate(
   // 1. Build the view: node's own data
   const view: Record<string, unknown> = {};
 
+  // #910: in a multi-human host the default data node is only ever read
+  // through the per-person view — as the default bag here AND as a
+  // `{{data.…}}` cross-node reference below (George on #1990).
+  const dataNodeView = async (stored: Record<string, unknown>) =>
+    memory && isMultiHumanChatHost(memory)
+      ? multiHumanDataView(stored, await declaredMemoryWideFields(db, memory), personId)
+      : stored;
+
   // 2. Load memory's default data node (loc: "data")
   const defaultDataNode = await db.node.findFirst({
     where: { loc: 'data', memoryId, deletedAt: null, ...accessFilter },
@@ -73,10 +81,7 @@ export async function compileTemplate(
   if (defaultDataNode) {
     if (memEncInfo?.isEncrypted) decryptNodeFields(defaultDataNode, memEncInfo);
     if (defaultDataNode.data && typeof defaultDataNode.data === 'object') {
-      const stored = defaultDataNode.data as Record<string, unknown>;
-      Object.assign(view, memory && isMultiHumanChatHost(memory)
-        ? multiHumanDataView(stored, await declaredMemoryWideFields(db, memory), personId)
-        : stored);
+      Object.assign(view, await dataNodeView(defaultDataNode.data as Record<string, unknown>));
     }
   }
 
@@ -108,7 +113,9 @@ export async function compileTemplate(
     if (refNode) {
       if (memEncInfo?.isEncrypted) decryptNodeFields(refNode, memEncInfo);
       if (refNode.data && typeof refNode.data === 'object') {
-        view[ref] = refNode.data;
+        view[ref] = ref === 'data'
+          ? await dataNodeView(refNode.data as Record<string, unknown>)
+          : refNode.data;
       }
     }
   }

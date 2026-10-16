@@ -80,11 +80,13 @@ export async function buildPrismaMemoryLayer(
   const declared = memory && isMultiHumanChatHost(memory)
     ? await declaredMemoryWideFields(db, memory)
     : null;
-  const orderedData: Array<Record<string, unknown> | null> = ancestors.map((loc, i) => {
+  const orderedData: Array<Record<string, unknown> | null> = ancestors.map((loc) => {
     const n = nodes.find((x) => x.loc === loc);
     const data = (n?.data as Record<string, unknown> | null) ?? null;
-    // Index 0 is the root `data` node; the stage ancestors are authored, not extracted into.
-    return i === 0 && declared && data ? multiHumanDataView(data, declared, personId) : data;
+    // Every occurrence of the root `data` node reads the filtered view — a
+    // source at or under `data` lists it again among its ancestors (George on
+    // #1990). Other ancestors are authored, not extracted into.
+    return loc === 'data' && declared && data ? multiHumanDataView(data, declared, personId) : data;
   });
 
   return {

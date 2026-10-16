@@ -148,6 +148,24 @@ async function hostAgentSystemMemoryId(
   return agent?.systemMemoryId ?? null;
 }
 
+/**
+ * The flat fields that are memory-wide on this node: declared by the Agent's
+ * specs, or listed in `memoryWideKeys`. The ONE classification both the read
+ * view and the write fold use, so a field is never filed under one rule and
+ * read under the other. Reserved storage keys are never memory-wide.
+ */
+function memoryWideFields(
+  data: Record<string, unknown>,
+  declaredMemoryWide: ReadonlySet<string>,
+): Set<string> {
+  const listed = Array.isArray(data[MEMORY_WIDE_KEYS_KEY])
+    ? (data[MEMORY_WIDE_KEYS_KEY] as unknown[]).filter((k): k is string => typeof k === 'string')
+    : [];
+  const memoryWide = new Set([...declaredMemoryWide, ...listed]);
+  for (const key of RESERVED_KEYS) memoryWide.delete(key);
+  return memoryWide;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -168,10 +186,7 @@ export function multiHumanDataView(
   personId: string | null | undefined,
 ): Record<string, unknown> {
   const data = asRecord(stored);
-  const listed = Array.isArray(data[MEMORY_WIDE_KEYS_KEY])
-    ? (data[MEMORY_WIDE_KEYS_KEY] as unknown[]).filter((k): k is string => typeof k === 'string')
-    : [];
-  const memoryWide = new Set([...declaredMemoryWide, ...listed]);
+  const memoryWide = memoryWideFields(data, declaredMemoryWide);
   const view: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
     if (RESERVED_KEYS.has(key) || !memoryWide.has(key)) continue;
@@ -220,9 +235,11 @@ export function mergeTurnExtraction(
   speakerId: string | null | undefined,
 ): Record<string, unknown> {
   const next: Record<string, unknown> = { ...asRecord(stored) };
+  // Filed under the same classification the read applies: declared OR listed.
+  const memoryWide = memoryWideFields(next, declaredMemoryWide);
   const personal: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(extracted)) {
-    if (declaredMemoryWide.has(key) && !RESERVED_KEYS.has(key)) next[key] = value;
+    if (memoryWide.has(key)) next[key] = value;
     else personal[key] = value;
   }
   if (speakerId && Object.keys(personal).length > 0) {
