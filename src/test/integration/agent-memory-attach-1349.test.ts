@@ -977,31 +977,22 @@ describe("#1349 — the caller must hold it in their OWN right (@codex, PR #1357
   });
 });
 
-describe('#1349 — containment: pre-existing rows are STILL LIVE (residual exposure)', () => {
-  // These two pin the EXPOSURE, not a desired behaviour, and they are the
-  // reason this PR is `Refs #1349`, not `Closes`. The write gate above stops
-  // new over-grants; it cannot reach a row minted before it, because every
-  // access fold (foldAgentIntoAccessMap, the App branch of
-  // getAccessibleMemoryIds, sessionScopedMemoryIds, resolveAssetTargetMemoryId,
-  // chat target selection, scopes) trusts the stored row.
-  //
-  // Containment is a SEPARATE decision, deliberately deferred until a read-only
-  // production audit sizes it (Holger's ruling, 2026-09-25 — the audit is
-  // approved, its operator not yet named). Asserting the current behaviour
-  // rather than skipping keeps the residual exposure visible in the suite and
-  // makes these tests FAIL THE MOMENT containment ships — at which point invert
-  // them to the secure expectation (`toBeNull()` / `toBe(false)`) and close the
-  // issue. A green suite here means "not yet contained", never "safe".
-  it('a pre-existing read row to an unreachable memory STILL grants read — pending containment', async () => {
+describe('#1349 — containment: pre-existing rows grant nothing beyond the memory\'s own rules', () => {
+  // These two pinned the residual EXPOSURE until Slice 1's read/write-time
+  // containment shipped: every fold now caps a stored row by what the Agent's
+  // tenant reaches on its own (src/lib/auth/agentMemoryLinkCap.ts;
+  // cor:dmo:050:09, a link is a limit, never a grant). The full matrix is
+  // agent-memory-containment-1349.test.ts.
+  it('a pre-existing read row to an unreachable memory grants no read', async () => {
     const { agentId, appKey } = await agentWithApp(attackerOrgId, 'legacy-read');
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId, memoryId: mem.orgKnowledge!.id, role: 'read' } });
-    expect(await readsContent(appKey, 'orgKnowledge')).toBe('orgKnowledge SECRET');
+    expect(await readsContent(appKey, 'orgKnowledge')).toBeNull();
   });
 
-  it('a pre-existing read-write row to an unreachable memory STILL grants write — pending containment', async () => {
+  it('a pre-existing read-write row to an unreachable memory grants no write', async () => {
     const { agentId, appKey } = await agentWithApp(attackerOrgId, 'legacy-rw');
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId, memoryId: mem.orgKnowledge!.id, role: 'read-write' } });
-    expect(await writes(appKey, 'orgKnowledge')).toBe(true);
+    expect(await writes(appKey, 'orgKnowledge')).toBe(false);
   });
 });
 

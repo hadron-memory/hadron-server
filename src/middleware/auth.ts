@@ -460,9 +460,9 @@ async function resolveUserApiKey(
  *                    USER_API_KEY_LABEL_MAX_LEN, OAuth path constructs
  *                    a `"OAuth: <clientName>"` label)
  *   - `createdBy`  — actor User.id (REV-2; usually equals `userId`)
- *   - `issuedVia`  — path discriminator (REV-2; `'portal'` for the
- *                    portal mutation, `'oauth:<clientId>'` for the
- *                    OAuth token endpoint)
+ *   - `issuedVia`  — issuance identity: portal for sign-in, oauth:<clientId>
+ *                    for OAuth; inherited (including unknown/null) from
+ *                    an authenticated parent on key-authenticated minting
  *   - `oauthScopes` — immutable OAuth grant copied from AuthCode;
  *                     omitted/empty for portal and legacy keys
  */
@@ -470,8 +470,10 @@ export interface MintUserApiKeyInput {
   userId: string;
   label: string | null;
   createdBy: string;
-  issuedVia: string;
+  issuedVia: string | null;
   oauthScopes?: readonly OAuthScope[];
+  /** Server-derived authenticated parent; root issuance leaves it null. */
+  mintedByKeyId?: string;
 }
 
 export interface MintUserApiKeyResult {
@@ -511,6 +513,7 @@ export async function mintUserApiKeyInTx(
       label: input.label,
       createdBy: input.createdBy,
       issuedVia: input.issuedVia,
+      mintedByKeyId: input.mintedByKeyId ?? null,
       oauthScopes: input.oauthScopes ? [...input.oauthScopes] : [],
     },
   });

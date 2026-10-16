@@ -1,3 +1,4 @@
+import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { systemMemoryReadGrants } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 // Helpers extracted from resolvers.ts (Step 1 of the resolver split).
@@ -3652,10 +3653,17 @@ export async function resolveAssetTargetMemoryId(
   if (userMemory) return { memoryId: userMemory.id };
 
   // Fallback: first agent-attached memory (single-user agent case).
-  const agentMemory = await db.agentMemoryItem.findFirst({
-    where: { agentId, deletedAt: null, role: 'read-write' },
-    select: { memoryId: true },
+  // #1349: only a link the agent's own tenant can WRITE on its own
+  // (cor:dmo:050:09 — a link is a limit, never a grant), so a legacy
+  // read-write link to another tenant's memory is never an upload target.
+  const agent = await db.agent.findUnique({ where: { id: agentId }, select: { organizationId: true, ownerUserId: true } });
+  const tenant = { organizationId: agent?.organizationId ?? null, ownerUserId: agent?.ownerUserId ?? null, userId };
+  const writableLinks = await db.agentMemoryItem.findMany({
+    where: { agentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } },
+    orderBy: { createdAt: 'asc' },
+    select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
   });
+  const agentMemory = writableLinks.find((item) => linkWriteTargetAdmits(tenant, item.memory, item.role));
   if (agentMemory) return { memoryId: agentMemory.memoryId };
 
   throw new Error('NO_TARGET_MEMORY: no writable memory available for this agent');

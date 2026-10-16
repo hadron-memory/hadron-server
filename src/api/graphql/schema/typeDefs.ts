@@ -3270,10 +3270,16 @@ export const typeDefs = `#graphql
     lastUsedAt: DateTime
     revokedAt: DateTime
     """
-    Issuance path: portal (createUserApiKey) or oauth:<client_id>
-    (POST /oauth/token). Powers source labels in the revocation UI.
+    Issuance identity: portal for direct sign-in issuance, or oauth:<client_id>
+    for OAuth issuance. A key minted by a key inherits that credential's
+    issuance identity. Powers source labels in the revocation UI.
     """
     issuedVia: String
+    """
+    Authenticated key that minted this key. Null for direct issuance or
+    unknown legacy ancestry; historical parents are never inferred.
+    """
+    mintedByKeyId: ID
     """
     Immutable OAuth scopes bound to this credential. Empty means an
     unrestricted portal/legacy key rather than an OAuth-scoped key.
@@ -11713,12 +11719,11 @@ export const typeDefs = `#graphql
 
     """
     025-oauth-for-mcp FR-004: revoke a user-scoped API key owned by
-    the calling User. Returns the updated UserApiKey so the portal
-    can render the new revokedAt without a refetch (PR-137 review
-    delta D3 — was Boolean). Idempotent for already-revoked keys;
-    rejected with FORBIDDEN if the key belongs to another user;
-    NOT_FOUND if id does not exist; UNAUTHENTICATED for AppKey-
-    resolved callers.
+    the calling User, together with every recorded descendant. Unrelated
+    roots and siblings stay live; unknown legacy parents are not inferred.
+    Returns the named UserApiKey with its revokedAt. Idempotent for
+    already-revoked keys. NOT_FOUND for both unknown and foreign keys;
+    UNAUTHENTICATED for AppKey-resolved callers.
     """
     revokeUserApiKey(id: ID!): UserApiKey!
 
