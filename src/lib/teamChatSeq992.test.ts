@@ -1,5 +1,8 @@
 /** #992: the durable team-chat seq key, through the canonical storage writer. */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+
+vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
@@ -61,6 +64,51 @@ describe('#992 team-chat seq uniqueness', () => {
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     const loser = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
     expect(loser.reason).toMatchObject({ extensions: { code: 'TEAM_CHAT_SEQ_CONFLICT' } });
+  });
+
+  it('rolls back the whole append when its canonical insert conflicts', async () => {
+    const original = await store(4, 'first');
+    const before = await state();
+    await expect(appendChatMessage(db,
+      { id: channel.chatRootNodeId, memoryId: memory.id, loc: channel.loc },
+      { id: memory.id, isEncrypted: false }, async ({ tx }) => {
+        // A reply/envelope side effect staged before the insert must roll back
+        // too. This deliberately broken storage callback bypasses allocation,
+        // which is exactly why the independent DB key is needed.
+        await tx.node.update({ where: { id: original.id }, data: { data: { mentions: ['wrong'] } } });
+        return tx.node.create({ data: {
+          memoryId: memory.id, loc: `${channel.loc}:messages:bad-append`, name: 'bad',
+          nodeType: 'chat-message', seq: 4, content: 'duplicate', messageChannelId: channel.id,
+        } });
+      }, { asChannel: true })).rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_SEQ_CONFLICT' } });
+    expect(await state()).toEqual(before);
+    expect((await db.node.findUniqueOrThrow({ where: { id: original.id } })).data).toEqual({ mentions: [] });
+  });
+
+  it('refuses an update into an occupied seq and permits revival of the original identity', async () => {
+    const first = await store(10, 'first', { deletedAt: new Date() });
+    const second = await store(11, 'second');
+    await expect(db.node.update({ where: { id: second.id }, data: { seq: 10 } }))
+      .rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_SEQ_CONFLICT' } });
+    await expect(db.node.update({ where: { id: first.id }, data: { deletedAt: null } })).resolves.toMatchObject({ seq: 10 });
+    expect((await db.node.findUniqueOrThrow({ where: { id: second.id } })).seq).toBe(11);
+  });
+
+  it('rejects a duplicate on the real pre-Channel clone/import path', async () => {
+    // Historical imports could write before the Channel reserved the root.
+    // Removing only the synthetic fixture's Channel recreates that window.
+    await db.channel.delete({ where: { id: channel.id } });
+    const user = await db.user.create({ data: { githubId: 992, githubUsername: 'seq992-importer' } });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: user.id, role: 'ADMIN' } });
+    const source = await db.memory.create({ data: { organizationId: orgId, class: 'knowledge', name: 'archive', urn: `seq992:archive-${generateId()}` } });
+    const message = await db.node.create({ data: { memoryId: source.id, loc: 'archive:message', name: 'archive', nodeType: 'chat-message', seq: 6, content: 'archive' } });
+    const targetMemory = await db.memory.findUniqueOrThrow({ where: { id: memory.id } });
+    const ctx: Context = { db, userId: user.id, roles: ['READER'] };
+    const M = resolvers.Mutation as any;
+    await M.cloneNode({}, { sourceRef: message.id, targetUrn: `hrn:node:${targetMemory.urn}:chats:team:messages:original` }, ctx);
+    await expect(M.cloneNode({}, { sourceRef: message.id, targetUrn: `hrn:node:${targetMemory.urn}:chats:team:messages:duplicate` }, ctx))
+      .rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_SEQ_CONFLICT' } });
+    expect(await db.node.count({ where: { memoryId: memory.id, nodeType: 'chat-message', seq: 6 } })).toBe(1);
   });
 
   it('permits equal seq in different team chats', async () => {
