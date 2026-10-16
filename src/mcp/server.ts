@@ -23,6 +23,7 @@ import {
   RoleGovernedError,
   GOVERNED_KINDS,
 } from '../lib/governedRole.js';
+import { assertRoleWritersForNodes, assertRoleWritersForWrite, roleWriterRefusalText } from '../lib/nodeRoleWriters.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import {
@@ -3970,9 +3971,14 @@ export function createMcpServerInstance(
           // insert trigger; a tombstone is left as the upsert leaves it.
           const prior = await tx.node.findUnique({
             where: { loc_memoryId: { loc, memoryId } },
-            select: { id: true, deletedAt: true },
+            select: { id: true, deletedAt: true, role: true },
           });
           let sectionChanged = false;
+          // #1331 — an existing section keeps its role through this write, so the
+          // role's writer level applies to the edit (and to reviving a tombstone).
+          if (prior) {
+            await assertRoleWritersForWrite(tx, auth, memoryId, { priorRole: prior.role, nextRole: prior.role });
+          }
           if (prior && !prior.deletedAt) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
             await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted, auth);
@@ -4023,6 +4029,8 @@ export function createMcpServerInstance(
         if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        const writerRefusal = roleWriterRefusalText(e);
+        if (writerRefusal) return textResult(writerRefusal);
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
           return textResult(`[spec_minted_permanent] ${e.message}`);
         }
@@ -6221,6 +6229,11 @@ export function createMcpServerInstance(
             priorRole: pre?.role ?? null,
             runnableAfter: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
           });
+          // #1331 — the writer level of the role before AND after, on the locked tombstone.
+          await assertRoleWritersForWrite(tx, auth, memoryId, {
+            priorRole: pre?.role ?? null,
+            nextRole: role === undefined ? (pre?.role ?? null) : role,
+          });
           // #1460 — the locked tombstone can retain vectors from its old
           // plaintext. Purge both kinds before the upsert makes it searchable.
           if (pre?.deletedAt) {
@@ -6263,6 +6276,8 @@ export function createMcpServerInstance(
           return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
         if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+        const writerRefusal = roleWriterRefusalText(e);
+        if (writerRefusal) return textResult(writerRefusal);
         if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
         if (e instanceof EdgeLocConflictError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
@@ -6645,6 +6660,11 @@ export function createMcpServerInstance(
               priorRole: current.role,
               runnableAfter: mergedGovernedState(current, { role, isRunnable }).isRunnable,
             });
+            // #1331 — the writer level of the role before AND after, on the locked row.
+            await assertRoleWritersForWrite(tx, auth, memory.id, {
+              priorRole: current.role,
+              nextRole: role === undefined ? current.role : role,
+            });
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
             if (Object.keys(data).length === 0 && resolvedEdges === null) return;
@@ -6687,6 +6707,8 @@ export function createMcpServerInstance(
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
           if (e instanceof EdgeLocConflictError) return textResult(e.message);
           if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+          const writerRefusal = roleWriterRefusalText(e);
+          if (writerRefusal) return textResult(writerRefusal);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
             return textResult(`[spec_minted_permanent] ${e.message}`);
           }
@@ -7812,6 +7834,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               const targetUrn = await nodeUrn(toLoc, toMemory.id);
               return { refused: 'urn-exists', targetUrn };
             }
+            // #1331 — overwriting evicts the occupant: its role's writer level applies.
+            if (existingTarget && !existingTarget.deletedAt) {
+              await assertRoleWritersForNodes(tx, auth, [existingTarget], { from: toMemory.id });
+            }
             if (existingTarget) {
               if (!existingTarget.deletedAt) {
                 await tx.node.update({
@@ -7848,6 +7874,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               editor: editorFromAuth(auth),
               renameSourceLeaf: renameToLeaf === true,
               authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, auth, memoryId),
+              principal: auth,
             });
             relocated = subtreeResult.moved;
             linkWarnings = subtreeResult.linkWarnings;
@@ -7919,6 +7946,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (e instanceof SubtreeMoveSourceChangedError) {
           return textResult('The node was moved concurrently; re-read it and retry.');
         }
+        const writerRefusal = roleWriterRefusalText(e);
+        if (writerRefusal) return textResult(writerRefusal);
         if (
           e instanceof CrossMemoryMoveUnsupportedError ||
           e instanceof SubtreeMoveSchemaViolationError

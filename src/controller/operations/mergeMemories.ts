@@ -1,3 +1,4 @@
+import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
 import { hardDeleteThreadsOfTargets } from '../../lib/comments/lifecycle.js';
@@ -113,6 +114,12 @@ export interface MergeMemoryArgs {
   /** Audit attribution for version/edit/update columns (#620: user PK vs
    *  fallback principal info are captured separately). */
   editor: SnapshotEditor;
+  /**
+   * #1331 — the caller, for the role writer level of every node the merge writes,
+   * relocates or removes (judged in the memory it leaves and the one it enters).
+   * Omitted only by server-authored callers.
+   */
+  principal?: RoleWriterPrincipal;
   /** Nodes folded / edges drained per inner transaction. Test seam; defaults to MERGE_BATCH_SIZE. */
   batchSize?: number;
   /** Source nodes scanned per classify+relocate page. Test seam; defaults to CLASSIFY_PAGE. */
@@ -522,6 +529,9 @@ async function runMerge(
           // protocol. This first gate acquires them and gives a fast refusal;
           // the second gate below rechecks the authoritative post-loc-lock rows.
           await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
+          if (args.principal) {
+            await assertRoleWritersForNodes(tx, args.principal, rows, { from: sourceMemoryId, to: targetMemoryId });
+          }
           await acquireLockSet(
             tx,
             ids.flatMap((id) => {
@@ -564,6 +574,9 @@ async function runMerge(
           // Reentrant memory locks; fresh governed/protected facts for the rows
           // now serialized by their source + destination address locks.
           await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
+          if (args.principal) {
+            await assertRoleWritersForNodes(tx, args.principal, rows, { from: sourceMemoryId, to: targetMemoryId });
+          }
           // #1323 (@codex P1, PR #1339): reconcile unrevisioned drift as each
           // row's OWN revision before its relocation snapshot, under the row
           // lock, in id order (one global order, so two multi-row operations
@@ -736,6 +749,10 @@ async function runMerge(
       // inside this transaction, under the Channel-memory locks. The Phase-1
       // preflight cannot cover a fold that runs transactions later.
       await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], [...srcRows, ...tgtRows], 'merge');
+      if (args.principal) {
+        await assertRoleWritersForNodes(tx, args.principal, srcRows, { from: sourceMemoryId, to: targetMemoryId });
+        await assertRoleWritersForNodes(tx, args.principal, tgtRows, { from: targetMemoryId });
+      }
       const foldedIds: string[] = []; // source rows actually folded → safe to delete
 
       // -- Fold fields (per colliding node). --
