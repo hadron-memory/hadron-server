@@ -87,8 +87,8 @@ const pendingGuard = (expected: PendingAtGuard) =>
  * never briefly carried no abstract vector. A single upserting statement has no
  * such window to protect: the row is never deleted, only overwritten in place.
  *
- * @returns whether a row was written — `false` means the latest-wins guard
- *   rejected it because a newer edit has since claimed the node.
+ * @returns whether a row was written — `false` means the node moved memory
+ *   or the latest-wins guard rejected an older content version.
  */
 export async function upsertAbstractVector(
   db: PrismaClient,
@@ -101,6 +101,8 @@ export async function upsertAbstractVector(
   // vector's unique/FK constraint and insert stale bytes AFTER revival's
   // transactional delete. The row lock makes the guard re-check the committed
   // marker after waiting. NO KEY UPDATE admits the INSERT's FK KEY SHARE lock.
+  // #409: memory identity is a second guard: an old null marker also matches
+  // null after a move into an unindexed memory, but the source is no longer valid.
   const written = await db.$executeRaw(Prisma.sql`
     INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, embedding, created_at)
     SELECT ${generateId()}, ${row.nodeId}, ${row.memoryId}, 'abstract', ${row.provider}, ${row.model}, ${row.dim}, ${toVectorLiteral(row.embedding)}::vector, now()
@@ -178,8 +180,8 @@ export interface ChunkVectorRow {
  * (`embedNode` routes the content-cleared case through
  * {@link deleteNodeChunkVectors}, which now takes the same lock and guard.)
  *
- * @returns whether the rebuild ran — `false` means the latest-wins guard
- *   rejected it because a newer edit has since claimed the node.
+ * @returns whether the rebuild ran — `false` means the populated batch's
+ *   memory no longer matches the node, or the content-version guard refused it.
  *
  * ## Why the row lock (#1025)
  *
