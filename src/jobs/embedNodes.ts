@@ -11,6 +11,7 @@
  */
 
 import { COMMENT_NODE_TYPE } from '../lib/comments/index.js';
+import { Prisma } from '../generated/prisma/index.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { EmbeddingClient } from '../lib/embedding/index.js';
 import {
@@ -400,11 +401,123 @@ export interface DrainResult {
   skipped: number;
 }
 
+// ── Fair batch selection (#887 Slice 1) ─────────────────────────────────────
+//
+// The queue used to drain in strict global `embeddingPendingAt ASC` order, so
+// one memory's old backlog (bulk import, backfill, a retryFailedEmbeddings
+// re-drive) formed a head-of-line convoy that filled every batch ahead of
+// other memories' due fresh writes. Selection is now round-robin across
+// memories with due work: each round takes the OLDEST unselected due node of
+// every remaining memory (DISTINCT ON (memory_id)), rounds repeat until the
+// batch fills, and the cycle's start rotates to just after the last memory
+// that received a slot — so successive batches keep advancing around the
+// memories even when there are more due memories than batch slots (a fixed
+// first-page subset cannot starve the rest: every eligible memory is served
+// within ⌈M / batchSize⌉ batches). Within a memory the order is
+// oldest-due-first with a deterministic id tie-break, and future-dated
+// backed-off rows are never selected to manufacture fairness — the due
+// filter is unchanged (#882).
+//
+// The rotation cursor is process-local. Every batch-selection entry path
+// goes through drainEmbeddingQueue — the periodic sweep
+// (startEmbeddingWorkerLoop) and the bus drain ping (handleEmbedWake with an
+// empty payload) — so one cursor serves both. A direct `{ nodeId }` wake is
+// NOT a batch selection (it embeds one named node off its own marker) and
+// does not participate. Overlapping drains in one process (sweep tick racing
+// a ping) may interleave cursor writes and wobble the rotation point, but it
+// still only ever moves through memories that were actually served — never
+// holds still for a waiting memory. Multi-process deployments each rotate
+// independently; concurrent duplicate selections resolve to skips through
+// embedNode's latest-wins marker guards, exactly as before.
+
+let drainRotationMemoryId: string | null = null;
+
+interface DuePick {
+  id: string;
+  memory_id: string;
+}
+
+/**
+ * Select up to `batchSize` due node ids, round-robin across memories (see
+ * the block comment above). Pure selection: markers, ordering guarantees
+ * within a memory, and the due-stamp filter are all that matter here — the
+ * embed loop below owns outcomes.
+ */
+async function selectFairDueBatch(db: PrismaClient, batchSize: number): Promise<string[]> {
+  // Bind the due-stamp bound as an ISO-UTC STRING, never a JS Date: the
+  // column is `timestamp` (UTC wall time, as Prisma's ORM writes it), and a
+  // Date binds as timestamptz — PG then converts it through the SESSION
+  // timezone (e.g. Europe/Berlin) before comparing, a two-hour skew that
+  // would admit future-dated backoff rows. The string casts to `timestamp`
+  // keeping its UTC wall time, independent of the session timezone.
+  const nowUtc = new Date().toISOString();
+  const selected: string[] = [];
+  const excluded = new Set<string>();
+  let lastServed = drainRotationMemoryId;
+
+  while (selected.length < batchSize) {
+    const remaining = batchSize - selected.length;
+    const excludeSql = excluded.size
+      ? Prisma.sql` AND id NOT IN (${Prisma.join([...excluded])})`
+      : Prisma.empty;
+
+    const round = (memoryFilter: Prisma.Sql, limit: number) =>
+      db.$queryRaw<DuePick[]>(Prisma.sql`
+        SELECT DISTINCT ON (memory_id) id, memory_id
+        FROM nodes
+        WHERE embedding_pending_at <= ${nowUtc}::timestamp${memoryFilter}${excludeSql}
+        ORDER BY memory_id, embedding_pending_at ASC, id ASC
+        LIMIT ${limit}
+      `);
+
+    // One round: the oldest unselected due node of each remaining memory,
+    // starting the cycle just after the last memory served (wrapping around
+    // the memory_id ring when the after-cursor half comes up short).
+    let rows: DuePick[];
+    if (lastServed === null) {
+      rows = await round(Prisma.empty, remaining);
+    } else {
+      rows = await round(Prisma.sql` AND memory_id > ${lastServed}`, remaining);
+      if (rows.length < remaining) {
+        rows = rows.concat(
+          await round(Prisma.sql` AND memory_id <= ${lastServed}`, remaining - rows.length),
+        );
+      }
+    }
+    if (rows.length === 0) break; // no memory has unselected due work left
+
+    for (const r of rows) {
+      if (selected.length >= batchSize) break;
+      selected.push(r.id);
+      excluded.add(r.id);
+      lastServed = r.memory_id;
+    }
+
+    // Single-memory fast path: one row per round is all the round-robin can
+    // produce when exactly one memory has due work — no other memory awaits
+    // service, so fill the rest of the batch in plain oldest-first order.
+    if (rows.length === 1 && selected.length < batchSize) {
+      const fill = await db.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT id FROM nodes
+        WHERE embedding_pending_at <= ${nowUtc}::timestamp AND id NOT IN (${Prisma.join([...excluded])})
+        ORDER BY embedding_pending_at ASC, id ASC
+        LIMIT ${batchSize - selected.length}
+      `);
+      selected.push(...fill.map((f) => f.id));
+      break;
+    }
+  }
+
+  if (selected.length > 0) drainRotationMemoryId = lastServed;
+  return selected;
+}
+
 /**
  * Drain a batch of marked nodes (the sweep). `embeddingPendingAt` is the work
  * signal; a row whose stamp is future-dated is a backed-off retry that is not
- * yet due (#882) — the `lte: now` filter excludes it (and, being a comparison,
- * never matches NULL).
+ * yet due (#882) — the `lte: now` filter in the selection excludes it (and,
+ * being a comparison, never matches NULL). Selection is round-robin across
+ * memories (#887 Slice 1) — see selectFairDueBatch.
  */
 export async function drainEmbeddingQueue(
   db: PrismaClient,
@@ -414,16 +527,11 @@ export async function drainEmbeddingQueue(
   const batchSize = opts.batchSize ?? 25;
   const client = opts.client ?? getEmbeddingClient();
 
-  const pending = await db.node.findMany({
-    where: { embeddingPendingAt: { lte: new Date() } },
-    orderBy: { embeddingPendingAt: 'asc' },
-    take: batchSize,
-    select: { id: true },
-  });
+  const pending = await selectFairDueBatch(db, batchSize);
 
   const result: DrainResult = { embedded: 0, failed: 0, skipped: 0 };
-  for (const n of pending) {
-    const outcome = await embedNode(db, n.id, undefined, client, {
+  for (const nodeId of pending) {
+    const outcome = await embedNode(db, nodeId, undefined, client, {
       retryBaseMs: opts.retryBaseMs,
       retryMaxMs: opts.retryMaxMs,
     });

@@ -18,6 +18,7 @@ import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../li
 import {
   assertGovernedWrite,
   assertRoleDeclaredForWrite,
+  lockMemoryConfigShared,
   mergedGovernedState,
   governedKindsOf,
   GOVERNED_KINDS,
@@ -25,6 +26,7 @@ import {
   type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
+import { assertRoleWritersForWrite, roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../../lib/specCorpus.js';
 import { carryGovernedSignals } from '../../../lib/governedSignals.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
@@ -1167,6 +1169,12 @@ export async function writeNodeCore(
               },
               { platformWrite: opts?.platformWrite },
             );
+            // #1331 — the writer level of the role before AND after, on the locked row.
+            await assertRoleWritersForWrite(
+              tx, ctx, input.memoryId,
+              { priorRole: current.role, nextRole: input.role === undefined ? current.role : input.role },
+              { platformWrite: opts?.platformWrite },
+            );
 
             // The snapshot uses the at-rest row, but the caller supplied
             // plaintext. Diff a decrypted COPY so an identical encrypted save
@@ -1468,6 +1476,12 @@ export async function writeNodeCore(
                 priorRole: authoritative?.role ?? null,
                 runnableAfter: mergedGovernedState(authoritative, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
               },
+              { platformWrite: opts?.platformWrite },
+            );
+            // #1331 — the writer level of the role before AND after, on the locked row.
+            await assertRoleWritersForWrite(
+              tx, ctx, input.memoryId,
+              { priorRole: authoritative?.role ?? null, nextRole: input.role === undefined ? (authoritative?.role ?? null) : input.role },
               { platformWrite: opts?.platformWrite },
             );
 
@@ -2095,6 +2109,7 @@ export const nodeMoveOps = {
               requireUnminted,
               authorizeLockedMemory: (memoryId) =>
                 requireMemoryWriteAccess(withoutRequestCaches(ctx, tx), memoryId),
+              principal: ctx,
             });
             relocated = result.moved;
             linkWarnings = result.linkWarnings;
@@ -2544,6 +2559,19 @@ export const nodeMutations = {
       }
       const plans: Plan[] = [];
 
+      // #1331 — a row whose role needs a writer level the caller lacks is SKIPPED
+      // like any other governed row: a skip writes nothing, and failing a batch
+      // on one such row would make the tool unusable on a memory that has one.
+      // Judged again under the lock in the write pass.
+      for (let i = scannedNodes.length - 1; i >= 0; i--) {
+        const row = scannedNodes[i]!;
+        if (!row.role) continue;
+        if (await roleWritersRefusal(ctx.db, ctx, row.memoryId, { priorRole: row.role, nextRole: row.role })) {
+          skipCounts.governed += 1;
+          scannedNodes.splice(i, 1);
+        }
+      }
+
       for (const raw of scannedNodes) {
         const memEnc = await getMemEnc(raw.memoryId);
         if (memEnc.isEncrypted && !sessionKeyCache.getByMemoryId(memEnc.id)) {
@@ -2732,6 +2760,22 @@ export const nodeMutations = {
         }
         for (const id of [...planMemory.keys()].sort()) {
           await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
+        }
+        // #1331 — the writer level of each planned row's role, on the LOCKED row
+        // and the committed rulebook; a row the caller may no longer write (the
+        // rule tightened, or its role changed, since selection) is dropped.
+        for (const memoryId of [...plannedEncryption.keys()].sort()) await lockMemoryConfigShared(tx, memoryId);
+        const lockedRoles = new Map((await tx.node.findMany({
+          where: { id: { in: [...planMemory.keys()] } }, select: { id: true, role: true },
+        })).map((r) => [r.id, r.role] as const));
+        for (let i = plans.length - 1; i >= 0; i--) {
+          const plan = plans[i]!;
+          const role = lockedRoles.get(plan.raw.id) ?? null;
+          if (role && await roleWritersRefusal(tx, ctx, plan.raw.memoryId, { priorRole: role, nextRole: role })) {
+            skipCounts.governed += 1;
+            planMemory.delete(plan.raw.id);
+            plans.splice(i, 1);
+          }
         }
         // #1468 — a tag replace must not strip the spec marker off a minted
         // spec; one refusal refuses the whole batch, like every check here.
@@ -3949,6 +3993,12 @@ export const nodeMutations = {
             extensions: { code: 'NODE_WRITE_CONFLICT' },
           });
         }
+        // #1331 — the target is written, and a source that is deleted or whose edges
+        // are re-pointed is written too: each role's writer level, on the locked rows.
+        await assertRoleWritersForWrite(tx, ctx, target.memoryId, { priorRole: lockedTarget.role, nextRole: lockedTarget.role });
+        if (takesSource) {
+          await assertRoleWritersForWrite(tx, ctx, source.memoryId, { priorRole: lockedSource.role, nextRole: lockedSource.role });
+        }
         // #1682 review (Baloo P2) — the AUTHORITATIVE live-thread refusal, under
         // the source lock and before any write. The pre-lock count above is only
         // a fast answer: posting a comment never changes its target's revision
@@ -4301,6 +4351,15 @@ export const nodeMutations = {
         undefined,
         { context: 'restore' },
       );
+      // #1331 — a restore replays history, role included: the writer level of the
+      // role before AND after (fast refusal; the authoritative check is under the lock below).
+      {
+        const restoredRole = (restoreFields as { role?: string | null }).role;
+        const refusal = await roleWritersRefusal(ctx.db, ctx, node.memoryId, {
+          priorRole: node.role, nextRole: restoredRole === undefined ? node.role : restoredRole,
+        });
+        if (refusal) throw refusal;
+      }
 
       // #725/#737 — a restored snapshot must satisfy the CURRENT schema. Validate
       // the resulting objectType/properties (restored value, else the node's
@@ -4392,6 +4451,13 @@ export const nodeMutations = {
           undefined,
           { context: 'restore' },
         );
+        // #1331 — the writer level of the role before AND after, on the locked row.
+        {
+          const restoredRole = (restoreFields as { role?: string | null }).role;
+          await assertRoleWritersForWrite(tx, ctx, current.memoryId, {
+            priorRole: current.role, nextRole: restoredRole === undefined ? current.role : restoredRole,
+          });
+        }
         // #1330 — deliberately NO strict-sub-role check (`assertRoleDeclaredForWrite`):
         // a restore copies history, it does not author a role. A revision whose
         // role a since-tightened rulebook no longer declares still restores

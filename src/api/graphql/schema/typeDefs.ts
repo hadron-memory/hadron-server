@@ -3751,9 +3751,16 @@ export const typeDefs = `#graphql
     updatedBy: ID
   }
 
+  """
+  #1331 — who may write a node whose role this rule governs, ON TOP OF memory write access (never instead of it).
+  A write is judged against the role the node has BEFORE it and the role it has AFTER, so creating, editing, changing or clearing a role all need the level.
+  """
   enum NodeRoleWriters {
+    "Anyone who may write the memory. Grants no new access."
     ALL
+    "NOT BUILT yet (#1333): any write touching this role is refused (ROLE_WRITERS_UNSUPPORTED). Never read as ALL."
     OWNER
+    "The owning organization's ADMINs and OWNERs, and the owning user (ROLE_WRITER_LEVEL_REQUIRED otherwise)."
     ADMIN
   }
 
