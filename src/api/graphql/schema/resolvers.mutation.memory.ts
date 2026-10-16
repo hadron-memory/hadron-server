@@ -468,6 +468,7 @@ export const memoryMutations = {
           fields,
           deleteSourceMem,
           editor,
+          principal: ctx,
         });
       } catch (e) {
         // Surface the same typed error mergeNodes does, with the offending loc.
@@ -1692,6 +1693,7 @@ export const memoryMutations = {
         vectorIndexEnabled,
         move,
         actorId: ctx.userId ?? ctx.clientId ?? null,
+        principal: ctx,
       });
 
       // The extract carries the subtree's content but no vectors; stamp every

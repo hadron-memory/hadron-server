@@ -1911,15 +1911,15 @@ export const typeDefs = `#graphql
     note: String
   }
 
-  "#1591 — whether a node's current revision is approved."
+  "#1591 — whether a node's approval still covers its current text (#1611: title, abstract and content under approval-hash v1; a metadata-only revision keeps it)."
   enum NodeApprovalState {
     "Approval is not applicable in an encrypted memory."
     NOT_APPLICABLE
     "Never approved."
     NOT_APPROVED
-    "The current revision is approved."
+    "The approval covers the current text: it was recorded at the revision in NodeApproval.revision, which can be older than Node.revision when only metadata (tags, properties, role, description, alias, loc, edges) changed since."
     APPROVED
-    "Approved once, edited since: the approval covers an older revision."
+    "Approved once, then the title, abstract or content changed (or the text no longer hashes to the approval, see verifyNode's TAMPERED)."
     SUPERSEDED
   }
 
@@ -3751,9 +3751,16 @@ export const typeDefs = `#graphql
     updatedBy: ID
   }
 
+  """
+  #1331 — who may write a node whose role this rule governs, ON TOP OF memory write access (never instead of it).
+  A write is judged against the role the node has BEFORE it and the role it has AFTER, so creating, editing, changing or clearing a role all need the level.
+  """
   enum NodeRoleWriters {
+    "Anyone who may write the memory. Grants no new access."
     ALL
+    "NOT BUILT yet (#1333): any write touching this role is refused (ROLE_WRITERS_UNSUPPORTED). Never read as ALL."
     OWNER
+    "The owning organization's ADMINs and OWNERs, and the owning user (ROLE_WRITER_LEVEL_REQUIRED otherwise)."
     ADMIN
   }
 

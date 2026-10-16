@@ -1,4 +1,5 @@
 import { GraphQLError } from 'graphql';
+import type { ApprovalHashFields } from '../../../lib/approvalHash.js';
 import type { Context } from './resolvers.helpers.js';
 import {
   concealUnreadableDenial,
@@ -99,7 +100,7 @@ async function receiptOf(ctx: Context, node: NodeApprovalRow) {
  */
 async function integrityOf(ctx: Context, memoryId: string, nodes: NodeApprovalRow[], key: EncryptionKey | null) {
   const snapshots = await loadApprovedSnapshots(ctx.db, nodes);
-  const foreign = [...new Set([...snapshots.values()]
+  const foreign = [...new Set([...snapshots.values()].flat()
     .map((s) => s.memoryId)
     .filter((id): id is string => id != null && id !== memoryId))];
   const encryptedForeign = new Set((await ctx.db.memory.findMany({
@@ -114,8 +115,9 @@ async function integrityOf(ctx: Context, memoryId: string, nodes: NodeApprovalRo
     return foreignKey ? approvalFieldsOf(snapshot, foreignKey) : null;
   };
   return nodes.map((node) => {
-    const snapshot = snapshots.get(node.id);
-    return checkNodeIntegrity(node, approvalFieldsOf(node, key), snapshot ? snapshotFields(snapshot) : null);
+    const evidence = (snapshots.get(node.id) ?? []).map(snapshotFields);
+    // A snapshot whose key is unavailable is treated as not retained, never hashed as ciphertext.
+    return checkNodeIntegrity(node, approvalFieldsOf(node, key), evidence.filter((f): f is ApprovalHashFields => f != null));
   });
 }
 
@@ -313,10 +315,10 @@ function mintStatusOf(row: Required<Omit<MintParent, 'id'>> | null) {
 }
 
 type ApprovalParent = { id: string; revSeq: number; memoryId?: string } & Partial<Pick<NodeApprovalRow,
-  'approvedRevNo' | 'approvedBy' | 'approvedByInfo' | 'approvedAt' | 'approvalHash'>>;
+  'approvedRevNo' | 'contentRevSeq' | 'approvedBy' | 'approvedByInfo' | 'approvedAt' | 'approvalHash'>>;
 
 const APPROVAL_SELECT = {
-  approvedRevNo: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true,
+  approvedRevNo: true, contentRevSeq: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true,
 } as const;
 
 type StatusColumns = 'approval' | 'mint';
@@ -471,13 +473,25 @@ export const nodeApprovalFieldResolvers = {
      */
     approvalStatus: async (n: ApprovalParent, args: unknown, ctx: Context) => {
       if (await encryptedStatusParent(ctx, n)) return { state: 'NOT_APPLICABLE', approval: null };
-      const row = 'approvedRevNo' in n && n.approvedRevNo !== undefined
+      const row = 'approvedRevNo' in n && n.approvedRevNo !== undefined && n.contentRevSeq !== undefined
         ? n
         : await loadStatusColumns(ctx, 'approval', n.id, n.memoryId);
       const approval = row ? approvalRecordOf(row as Parameters<typeof approvalRecordOf>[0]) : null;
-      if (approval?.revision == null) return { state: approvalStateOf(null, n.revSeq), approval };
+      if (approval?.revision == null) return { state: 'NOT_APPROVED' as const, approval };
+      // Reconcile first: an out-of-band change moves the content boundary
+      // (#1611), so a reconcile that ran here makes the columns read above stale.
       const revision = await (typeResolvers.Node.revision as (p: unknown, a: unknown, c: Context) => Promise<number>)(n, args, ctx);
-      return { state: approvalStateOf(approval.revision, revision), approval };
+      const current = revision === n.revSeq
+        ? row
+        : await loadStatusColumns(ctx, 'approval', n.id, n.memoryId);
+      const currentApproval = current ? approvalRecordOf(current as Parameters<typeof approvalRecordOf>[0]) : approval;
+      return {
+        state: approvalStateOf({
+          approvedRevNo: currentApproval?.revision ?? null,
+          contentRevSeq: (current?.contentRevSeq as number | undefined) ?? Number.MAX_SAFE_INTEGER,
+        }),
+        approval: currentApproval,
+      };
     },
     /** #1591 — whether the node is minted, and the record of it. */
     mintStatus: async (n: MintParent & { memoryId?: string }, _: unknown, ctx: Context) => {
