@@ -27,6 +27,18 @@ export function normalizeObjectType(v: string | null | undefined): string | null
   return v;
 }
 
+/**
+ * #1219 (cor:dmo:060:02, Holger ruling "A" via Vera): an empty/whitespace role
+ * means "no role" → null, the same contract objectType has — one spelling of
+ * "ungoverned", so a `WHERE role IS NULL` audit (the #1216 backfill class)
+ * never skips a node every reader sees as role-less. `undefined` is PRESERVED
+ * (omit-on-update = leave unchanged), exactly as normalizeObjectType.
+ */
+export function normalizeRole(v: string | null | undefined): string | null | undefined {
+  if (typeof v === 'string' && v.trim() === '') return null;
+  return v;
+}
+
 /** DB handle that can read a memory's schema — a PrismaClient or a transaction client. */
 type MemorySchemaReader = Pick<PrismaClient, 'memory'>;
 
