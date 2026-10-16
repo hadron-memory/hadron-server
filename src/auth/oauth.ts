@@ -558,7 +558,7 @@ export function renderConsent(params: ConsentParams): string {
       ? 'It can read and change everything in your Hadron account through every interface, and it can create further API keys of its own.'
       : 'Hadron will refuse this token at GraphQL and other account interfaces. It cannot create further API keys.',
     grantSub: accountGrant
-      ? 'Approve only applications you trust with your whole account. Revoking this token does not automatically revoke keys the application created with it — check your account\'s API keys as well.'
+      ? 'Approve only applications you trust with your whole account. Revoking this token also revokes keys created with it and their descendants. Historical keys with no recorded parent are not included.'
       : 'Approve only if you want this application to use Hadron\'s MCP tools on your behalf.',
   });
 }

@@ -14,11 +14,15 @@ The existing revoke mutation holds the user's authority anchor exclusively. One 
 
 The lock spans traversal and update. A concurrent mint holding the shared anchor commits before revocation enters, so its child is included. A mint queued behind revocation rechecks its specific credential after the anchor wait and refuses. No new credential cache exists: GraphQL resolves credentials per request; MCP already reauthenticates each request on an open transport. User deletion already takes the same anchor and revokes every owned key.
 
+The existing OAuth account-consent warning now describes recorded-subtree revocation and the unknown-legacy-parent exception; its old non-cascade warning would otherwise contradict this fix. Layout, approval flow and MCP-only disclosure are unchanged.
+
 ## Evidence and acceptance
 
 Red checkpoint b2179655 on main f693a50e: four expected failures (parent, OAuth issuance, root cascade, intermediate cascade), two controls pass. Tests call real resolvers and resolveAuthContext with synthetic credentials in per-run test databases.
 
 Added coverage: deep/branching ancestry; independent legacy root; intermediate-only revoke; repeated revoke with stable timestamps; OAuth client distinction and unknown issuance; hashed-only storage; revoked/missing/foreign parent identities; live persisted narrow/unsupported scope refusal; user deletion; migration executed against legacy table shape in a rollback-only transaction; actual localhost GraphQL schema and existing MCP session requests; wire-level parent forgery refused. Race barriers match the exact blocker backend in the current test database, with bounded waits and cleanup.
+
+Consent disclosure also has red-first c2d7f6ce (one failure, five controls pass), then a focused rendered-HTML check of the corrected warning and legacy exception.
 
 The HTTP test mints a chain through GraphQL, opens MCP sessions before revocation, revokes through GraphQL, then observes descendant GraphQL refusal and MCP 401. Its independent root continues on both. The suite's existing credential, OAuth, bootstrap, impersonation and deletion tests supply adjacent controls. Author tests are not independent fresh-stack QA.
 
