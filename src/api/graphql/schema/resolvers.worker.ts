@@ -1520,18 +1520,32 @@ export const workerMutations = {
       extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
     });
     if (await miscastHasReferences(ctx.db, worker)) throw refuse();
-    await ctx.db.$transaction(async (tx) => {
-      // Re-read after acquiring the identity lock; stale pre-wait eligibility
-      // never authorizes destruction. First-reference writer fencing is required
-      // as well as this SERIALIZABLE census (see #1162 inventory).
-      await tx.$queryRaw`SELECT id FROM workers WHERE id = ${worker.id} FOR UPDATE`;
-      const current = await tx.worker.findUnique({ where: { id: worker.id } });
-      if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
-      if (await miscastHasReferences(tx, current)) throw refuse();
-      await tx.session.deleteMany({ where: { workerId: worker.id } });
-      await tx.worker.delete({ where: { id: worker.id } });
-      if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    try {
+      await ctx.db.$transaction(async (tx) => {
+        // Re-read after acquiring the identity lock; stale pre-wait eligibility
+        // never authorizes destruction. The private MVCC fence
+        // and SERIALIZABLE census jointly reject pre-wait snapshots.
+        await tx.$queryRaw`SELECT id FROM workers WHERE id = ${worker.id} FOR UPDATE`;
+        await tx.$executeRaw`INSERT INTO worker_reference_fences(subject_id) VALUES (${worker.id})
+          ON CONFLICT (subject_id) DO UPDATE SET version = worker_reference_fences.version + 1`;
+        const current = await tx.worker.findUnique({ where: { id: worker.id } });
+        if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
+        if (await miscastHasReferences(tx, current)) throw refuse();
+        await tx.session.deleteMany({ where: { workerId: worker.id } });
+        await tx.worker.delete({ where: { id: worker.id } });
+        if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      // The fence deliberately makes a stale SERIALIZABLE snapshot abort.
+      // Raw statements report 40001/40P01 as P2010; model writes use P2034.
+      if (error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === 'P2034' || (error.code === 'P2010' && ['40001', '40P01'].includes(String(error.meta?.code))))) {
+        throw new GraphQLError('Worker references changed concurrently. Retry the verified-unused repair, or retire instead.', {
+          extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
+        });
+      }
+      throw error;
+    }
     return true;
   },
 };

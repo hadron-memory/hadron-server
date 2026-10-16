@@ -89,12 +89,12 @@ describe('#1162 never-referenced repair', () => {
     const lockedPromise = new Promise<void>((resolve) => { locked = resolve; });
     const releasePromise = new Promise<void>((resolve) => { release = resolve; });
     const holder = db.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM workers WHERE id = ${worker.id} FOR UPDATE`;
+      await tx.$queryRaw`SELECT id FROM workers WHERE id = ${worker.id} FOR KEY SHARE`;
       locked();
       await releasePromise;
     }, { timeout: 20_000 });
     await lockedPromise;
-    const deletion = remove(worker.id).then(() => 'deleted', () => 'refused');
+    const deletion = remove(worker.id).then(() => 'deleted', (error: unknown) => (error as { extensions?: { code?: string } }).extensions?.code ?? 'unexpected');
     try {
       await waitForLockWaiters(db as any);
       await db.node.create({ data: {
@@ -103,8 +103,121 @@ describe('#1162 never-referenced repair', () => {
       } });
     } finally { release(); }
     await holder;
-    expect(await deletion).toBe('refused');
+    expect(await deletion).toBe('WORKER_IN_USE');
     expect(await db.worker.findUnique({ where: { id: worker.id } })).not.toBeNull();
+  });
+
+  it('returns a typed rejection naming the missing Worker and writer', async () => {
+    const missing = generateId();
+    await expect(db.node.create({ data: {
+      id: generateId(), memoryId: otherMemoryId, loc: 'dangling', name: 'Dangling', createdByWorkerId: missing,
+    } })).rejects.toMatchObject({ extensions: {
+      code: 'WORKER_REFERENCE_NOT_FOUND', workerRef: missing, writer: 'nodes', referenceKind: 'worker',
+    } });
+  });
+
+  it('keeps legacy dangling attribution unchanged during an import upsert', async () => {
+    const missing = generateId();
+    const nodeId = generateId();
+    // Simulate a row predating this migration, on this test's private DB only.
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE nodes DISABLE TRIGGER worker_reference_fence_1162');
+      await tx.node.create({ data: { id: nodeId, memoryId: otherMemoryId, loc: 'legacy', name: 'Legacy', createdByWorkerId: missing } });
+      await tx.$executeRawUnsafe('ALTER TABLE nodes ENABLE TRIGGER worker_reference_fence_1162');
+    });
+    const kept = await db.node.upsert({ where: { id: nodeId },
+      create: { id: nodeId, memoryId: otherMemoryId, loc: 'legacy', name: 'Imported', createdByWorkerId: missing },
+      update: { name: 'Imported', createdByWorkerId: missing },
+    });
+    expect(kept.createdByWorkerId).toBe(missing);
+    const worker = await cast();
+    const imported = await db.node.create({ data: { id: generateId(), memoryId: otherMemoryId, loc: 'imported', name: 'Imported', createdByWorkerId: worker.id } });
+    expect(imported.createdByWorkerId).toBe(worker.id);
+  });
+
+  for (const kind of ['chat', 'worklog', 'memory', 'bind'] as const) {
+    it(`fences a first ${kind} reference committed while deletion waits`, async () => {
+      const worker = await cast();
+      let release!: () => void;
+      let locked!: () => void;
+      const ready = new Promise<void>((resolve) => { locked = resolve; });
+      const done = new Promise<void>((resolve) => { release = resolve; });
+      const holder = db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM workers WHERE id = ${worker.id} FOR KEY SHARE`;
+        locked(); await done;
+      }, { timeout: 20_000 });
+      await ready;
+      const deletion = remove(worker.id).then(() => 'deleted', (error: unknown) => (error as { extensions?: { code?: string } }).extensions?.code ?? 'unexpected');
+      try {
+        await waitForLockWaiters(db as any);
+        if (kind === 'bind') {
+          await db.session.create({ data: { id: generateId(), appId, workerId: worker.id } });
+        } else {
+          await db.node.create({ data: {
+            id: generateId(), memoryId: kind === 'memory' ? worker.memoryId : otherMemoryId,
+            loc: 'racing', name: 'Racing reference',
+            ...(kind === 'chat' ? { data: { authorWorkerId: worker.id } } : {}),
+            ...(kind === 'worklog' ? { properties: { workerId: worker.id } } : {}),
+          } });
+        }
+      } finally { release(); }
+      await holder;
+      expect(await deletion).toBe('WORKER_IN_USE');
+      expect(await db.worker.findUnique({ where: { id: worker.id } })).not.toBeNull();
+    });
+  }
+
+  it('rejects a first reference whose Worker was deleted while the writer waited', async () => {
+    const worker = await cast();
+    let release!: () => void;
+    let locked!: () => void;
+    const ready = new Promise<void>((resolve) => { locked = resolve; });
+    const done = new Promise<void>((resolve) => { release = resolve; });
+    // Stage the winning delete transaction at the same two locks the resolver
+    // takes; actual PostgreSQL triggers and the waiting publisher remain live.
+    const deletion = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM workers WHERE id = ${worker.id} FOR UPDATE`;
+      await tx.$executeRaw`INSERT INTO worker_reference_fences(subject_id) VALUES (${worker.id})
+        ON CONFLICT (subject_id) DO UPDATE SET version = worker_reference_fences.version + 1`;
+      locked(); await done;
+      await tx.worker.delete({ where: { id: worker.id } });
+    }, { timeout: 20_000 });
+    await ready;
+    const publication = db.node.create({ data: {
+      id: generateId(), memoryId: otherMemoryId, loc: 'late-publication', name: 'Late work', createdByWorkerId: worker.id,
+    } }).then(() => null, (error: unknown) => error);
+    try { await waitForLockWaiters(db as any); } finally { release(); }
+    await deletion;
+    expect(await publication).toMatchObject({ extensions: { code: 'WORKER_REFERENCE_NOT_FOUND', workerRef: worker.id, writer: 'nodes' } });
+    expect(await db.node.count({ where: { memoryId: otherMemoryId, loc: 'late-publication' } })).toBe(0);
+  });
+
+  it('preserves authored revision history outside the working memory', async () => {
+    const worker = await cast();
+    const node = await db.node.create({ data: { memoryId: otherMemoryId, loc: 'revised', name: 'Revised' } });
+    await db.nodeRevision.create({ data: {
+      nodeId: node.id, memoryId: otherMemoryId, loc: node.loc, name: node.name,
+      tags: [], changes: [], editedByWorkerId: worker.id,
+    } });
+    await expect(remove(worker.id)).rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
+  });
+
+  it('preserves tombstoned assets in working memory', async () => {
+    const worker = await cast();
+    await db.asset.create({ data: {
+      memoryId: worker.memoryId, filename: 'work.txt', mimeType: 'text/plain', sizeBytes: 1,
+      storageKey: generateId(), deletedAt: new Date(),
+    } });
+    await expect(remove(worker.id)).rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
+  });
+
+  it('preserves a known PR attribution on an ended released session despite confirmation', async () => {
+    const worker = await cast();
+    const session = await M.startSession({}, { input: { id: generateId(), appRef: appId, workerRef: worker.id, tool: 'test' } }, ctx);
+    await db.session.update({ where: { id: session.id }, data: { prNumber: 1162 } });
+    await M.endSession({}, { id: session.id }, ctx);
+    await M.releaseWorker({}, { workerRef: worker.id }, ctx);
+    await expect(remove(worker.id)).rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
   });
 
   for (const field of ['createdByWorkerId', 'updatedByWorkerId'] as const) {

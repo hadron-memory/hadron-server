@@ -12,7 +12,7 @@ export const workerReferenceInventory = Prisma.dmmf.datamodel.models.flatMap((mo
 const JSON_REFERENCES = [
   ['nodes', 'data'], ['nodes', 'properties'],
   ['node_revisions', 'data'], ['node_revisions', 'properties'],
-  ['agent_team_events', 'chain'], ['agent_team_events', 'payload'], ['host_operations', 'args'],
+  ['agent_team_events', 'chain'], ['agent_team_events', 'payload'], ['host_operations', 'args'], ['agent_tasks', 'requirements'],
 ] as const;
 
 async function jsonReferences(db: Reader, table: string, column: string, ids: string[]): Promise<boolean> {

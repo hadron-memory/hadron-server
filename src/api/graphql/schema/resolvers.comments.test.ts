@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createDbWorkerAttribution } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { runAsActor } from '../../../lib/requestActor.js';
@@ -147,6 +147,7 @@ describe('one open thread per author (cor:dmo:110:05)', () => {
     // Another author has their own allowance.
     await comment(target.id, 'mine', admin.id);
     // A worker bound by the same user has its own allowance too.
+    await createDbWorkerAttribution(db, writer.id, 'worker-1');
     const byWorker = await runAsActor({ workerId: 'worker-1', agentId: 'agent-1' }, () => comment(target.id, 'as worker'));
     expect(byWorker.authorKey).toBe('w:worker-1');
     // An unnamed agent acting for the user has its own allowance.
@@ -291,6 +292,7 @@ describe('reads', () => {
     expect(C.viewerIsAuthor(byUser, {}, as(admin.id))).toBe(false);
     expect(await C.provenanceUser(byUser, {}, as())).toBeNull();
 
+    await createDbWorkerAttribution(db, writer.id, 'worker-9');
     const byWorker = await runAsActor({ workerId: 'worker-9', agentId: null }, () => comment(target.id, 'w'));
     expect(await C.author(byWorker, {}, as())).toMatchObject({ kind: 'WORKER', user: null });
     // The binding user is provenance — for memory writers only (DAB).
