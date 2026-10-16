@@ -62,7 +62,7 @@ describe('cross-memory cascade needs write authority over the other holding (#16
     const carol = await db.user.create({ data: { id: generateId(), handle: `carol1647-${generateId().slice(-6)}`, roles: ['READER'] } });
     const cm = await db.memory.create({ data: { id: generateId(), ownerUserId: carol.id, userId: carol.id, class: 'personal', name: 'carol', urn: 'c1647.test:carol' } });
     const cn = await db.node.create({ data: { memoryId: cm.id, loc: 'mine', name: 'Carol Node' } });
-    const bobNode = await db.node.findFirstOrThrow({ where: { loc: 'p:c1' } });
+    const bobNode = await db.node.findFirstOrThrow({ where: { loc: 'p:c1', memoryId: near.id } });
     const edge = await db.edge.create({ data: { memoryId: cm.id, sourceId: cn.id, targetId: bobNode.id, name: 'points', loc: 'mine:points:p:c1' } });
     return { edge, bobNode };
   }
