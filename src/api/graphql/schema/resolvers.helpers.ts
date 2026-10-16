@@ -1,4 +1,4 @@
-import { LINK_CAP_MEMORY_SELECT, cappedLinkLevel } from '../../../lib/auth/agentMemoryLinkCap.js';
+import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { systemMemoryReadGrants } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 // Helpers extracted from resolvers.ts (Step 1 of the resolver split).
@@ -3648,7 +3648,7 @@ export async function resolveAssetTargetMemoryId(
     orderBy: { createdAt: 'asc' },
     select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
   });
-  const agentMemory = writableLinks.find((item) => cappedLinkLevel(tenant, item.memory, item.role) === 'READ_WRITE');
+  const agentMemory = writableLinks.find((item) => linkWriteTargetAdmits(tenant, item.memory, item.role));
   if (agentMemory) return { memoryId: agentMemory.memoryId };
 
   throw new Error('NO_TARGET_MEMORY: no writable memory available for this agent');

@@ -979,7 +979,7 @@ describe("#1349 — the caller must hold it in their OWN right (@codex, PR #1357
 
 describe('#1349 — containment: pre-existing rows grant nothing beyond the memory\'s own rules', () => {
   // These two pinned the residual EXPOSURE until Slice 1's read/write-time
-  // containment shipped: every fold now caps a stored row by what the App's
+  // containment shipped: every fold now caps a stored row by what the Agent's
   // tenant reaches on its own (src/lib/auth/agentMemoryLinkCap.ts;
   // cor:dmo:050:09, a link is a limit, never a grant). The full matrix is
   // agent-memory-containment-1349.test.ts.

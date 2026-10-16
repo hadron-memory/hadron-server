@@ -69,6 +69,8 @@ export interface LinkCapMemory {
   class: string;
   organizationId: string | null;
   ownerUserId: string | null;
+  /** The owning user of a personal/private memory. */
+  userId?: string | null;
   appId: string | null;
   userMemoryOfAgentId: string | null;
   visibility: string | null;
@@ -83,6 +85,7 @@ export const LINK_CAP_MEMORY_SELECT = {
   class: true,
   organizationId: true,
   ownerUserId: true,
+  userId: true,
   appId: true,
   userMemoryOfAgentId: true,
   visibility: true,
@@ -138,6 +141,30 @@ export function cappedLinkLevel(
   if (reach === undefined) return linked;
   if (reach === null) return null;
   return linked === 'READ_WRITE' && reach === 'READ_WRITE' ? 'READ_WRITE' : 'READ_ONLY';
+}
+
+/**
+ * Whether a link may make `memory` a WRITE target for a fold that has no
+ * downstream gate of its own (the legacy startChat target, the asset upload
+ * target). {@link cappedLinkLevel} passes personal, private and app through
+ * because the access map's consumers strict-gate them afterwards; a write
+ * target picked straight from the links has no such gate (Colin on #2002), so
+ * it applies the owner rules here: a personal or private memory only for its
+ * own user (`tenant.userId`), an app-class memory only for its own App
+ * (`tenant.appId`), and everything else only at a capped READ_WRITE.
+ */
+export function linkWriteTargetAdmits(
+  tenant: LinkTenant,
+  memory: LinkCapMemory,
+  role: string | null | undefined,
+): boolean {
+  if (cappedLinkLevel(tenant, memory, role) !== 'READ_WRITE') return false;
+  if (memory.class === 'personal' || memory.class === 'private') {
+    const owner = memory.ownerUserId ?? memory.userId ?? null;
+    return owner !== null && tenant.userId != null && owner === tenant.userId;
+  }
+  if (memory.class === 'app') return memory.appId !== null && tenant.appId != null && memory.appId === tenant.appId;
+  return true;
 }
 
 /** Load an Agent's tenant. A missing Agent has none, so every capped item confers only PUBLIC reads. */

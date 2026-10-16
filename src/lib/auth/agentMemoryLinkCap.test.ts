@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cappedLinkLevel, independentReach, type LinkCapMemory } from './agentMemoryLinkCap.js';
+import { cappedLinkLevel, independentReach, linkWriteTargetAdmits, type LinkCapMemory } from './agentMemoryLinkCap.js';
 
 const tenant = { organizationId: 'home', ownerUserId: null };
 const knowledge = (over: Partial<LinkCapMemory> = {}): LinkCapMemory => ({
@@ -39,5 +39,27 @@ describe('cappedLinkLevel (#1349) — a link is a limit, never a grant', () => {
     }
     expect(independentReach({ ...tenant, appId: 'x' }, knowledge({ appId: 'x' }))).toBeUndefined();
     expect(independentReach({ ...tenant, appId: 'y' }, knowledge({ appId: 'x' }))).toBeNull();
+  });
+});
+
+describe('linkWriteTargetAdmits (#1349, Colin on #2002) — a write target picked from links', () => {
+  const personal = knowledge({ class: 'personal', organizationId: null, ownerUserId: 'u1', userId: 'u1' });
+  it('a personal or private memory only for its own user', () => {
+    expect(linkWriteTargetAdmits(tenant, personal, 'read-write')).toBe(false);
+    expect(linkWriteTargetAdmits({ ...tenant, userId: 'u2' }, personal, 'read-write')).toBe(false);
+    expect(linkWriteTargetAdmits({ ...tenant, userId: 'u1' }, personal, 'read-write')).toBe(true);
+    expect(linkWriteTargetAdmits({ ...tenant, userId: 'u1' }, { ...personal, class: 'private' }, 'read-write')).toBe(true);
+    expect(linkWriteTargetAdmits({ ...tenant, userId: 'u1' }, personal, 'read')).toBe(false);
+  });
+  it('an app-class memory only for its own App', () => {
+    const appMem = knowledge({ class: 'app', appId: 'x' });
+    expect(linkWriteTargetAdmits(tenant, appMem, 'read-write')).toBe(false);
+    expect(linkWriteTargetAdmits({ ...tenant, appId: 'y' }, appMem, 'read-write')).toBe(false);
+    expect(linkWriteTargetAdmits({ ...tenant, appId: 'x' }, appMem, 'read-write')).toBe(true);
+  });
+  it('knowledge only at a capped READ_WRITE', () => {
+    expect(linkWriteTargetAdmits(tenant, knowledge({ organizationId: 'home' }), 'read-write')).toBe(true);
+    expect(linkWriteTargetAdmits(tenant, knowledge({ visibility: 'PUBLIC' }), 'read-write')).toBe(false);
+    expect(linkWriteTargetAdmits(tenant, knowledge(), 'read-write')).toBe(false);
   });
 });
