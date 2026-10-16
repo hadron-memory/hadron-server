@@ -1010,6 +1010,8 @@ model Memory {
   config MemoryConfig?
 
   @@map("memories")
+  teamChatSequenceScope TeamChatSequenceScope?
+
 }
 
 /// A user-uploaded file (document, image) bound to a Memory. Bytes
@@ -1398,6 +1400,9 @@ model Node {
   descriptionNodeOfTemplateRules MemoryConfigTemplateRule[] @relation("TemplateRuleDescriptionNode")
 
   @@map("nodes")
+  teamChatSequenceKey TeamChatSequenceKey? @relation("TeamChatSequenceMessage")
+  teamChatSequenceRootKeys TeamChatSequenceKey[] @relation("TeamChatSequenceRoot")
+
 }
 
 /// 033-rag-vector-retrieval: what a memory's vector index is built from
@@ -5844,4 +5849,25 @@ model AppKeyWakeRead {
 
   @@index([appKeyId, readAt])
   @@map("app_key_wake_reads")
+}
+
+/// #992: private MVCC fence for canonical team-chat membership transitions.
+/// Updating this tuple after a wait forces stale RR/SERIALIZABLE writers to abort.
+model TeamChatSequenceScope {
+  memoryId String @id @map("memory_id")
+  version BigInt @default(0)
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  @@map("team_chat_sequence_scopes")
+}
+
+/// #992: DB-maintained key, never trusted from a caller or messageChannelId.
+/// Tombstoned messages retain their key; ordinary transcripts have no row here.
+model TeamChatSequenceKey {
+  nodeId String @id @map("node_id")
+  rootId String @map("root_id")
+  seq Int
+  node Node @relation("TeamChatSequenceMessage", fields: [nodeId], references: [id], onDelete: Cascade)
+  root Node @relation("TeamChatSequenceRoot", fields: [rootId], references: [id], onDelete: Cascade)
+  @@unique([rootId, seq], map: "team_chat_sequence_root_seq_key")
+  @@map("team_chat_sequence_keys")
 }

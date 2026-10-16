@@ -1,5 +1,10 @@
 /** #992: the durable team-chat seq key, through the canonical storage writer. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { Client } from 'pg';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from '../api/graphql/schema/typeDefs.js';
+import { teamChatSeqCandidatesSql, teamChatSeqPreflightSql } from './teamChatSeqPreflight.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -109,6 +114,19 @@ describe('#992 team-chat seq uniqueness', () => {
     await expect(M.cloneNode({}, { sourceRef: message.id, targetUrn: `hrn:node:${targetMemory.urn}:chats:team:messages:duplicate` }, ctx))
       .rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_SEQ_CONFLICT' } });
     expect(await db.node.count({ where: { memoryId: memory.id, nodeType: 'chat-message', seq: 6 } })).toBe(1);
+    const gql = new ApolloServer<Context>({ typeDefs, resolvers });
+    try {
+      const result = await gql.executeOperation({
+        query: 'mutation($source: ID!, $target: String!) { cloneNode(sourceRef: $source, targetUrn: $target) { id } }',
+        variables: { source: message.id, target: `hrn:node:${targetMemory.urn}:chats:team:messages:wire-duplicate` },
+      }, { contextValue: ctx });
+      expect(result.body.kind).toBe('single');
+      if (result.body.kind === 'single') {
+        expect(result.body.singleResult.errors?.[0].extensions.code).toBe('TEAM_CHAT_SEQ_CONFLICT');
+        expect(JSON.stringify(result.body.singleResult)).not.toMatch(/P0992|ConnectorError|PostgresError|Prisma|SELECT|INSERT/);
+      }
+    } finally { await gql.stop(); }
+
   });
 
   it('permits equal seq in different team chats', async () => {
@@ -136,5 +154,130 @@ describe('#992 team-chat seq uniqueness', () => {
     const out = await Promise.all([append('a'), append('b'), append('c')]);
     expect(out.map((r) => r.seq).sort((a, b) => a - b)).toEqual([31, 32, 33]);
     expect((await state()).root.data).toMatchObject({ messageCount: 33 });
+  });
+});
+
+
+describe('#992 canonical classification transitions', () => {
+  it('does not trust projection, envelope or a named Channel, and retains a tombstoned root', async () => {
+    await store(15, 'first', { messageChannelId: null, data: { __enc: 'ciphertext' } });
+    await db.node.update({ where: { id: channel.chatRootNodeId }, data: { deletedAt: new Date() } });
+    await expect(store(15, 'second', { messageChannelId: null })).rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_SEQ_CONFLICT' } });
+    await store(15, 'named-a', { loc: 'channels:other:messages:a', messageChannelId: channel.id });
+    await store(15, 'named-b', { loc: 'channels:other:messages:b', messageChannelId: channel.id });
+  });
+
+  it('leaves an actual named Channel outside the team-only key', async () => {
+    const named = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:legacy', name: 'legacy', createdBy: null });
+    for (const suffix of ['a', 'b']) await store(19, suffix, {
+      loc: `chats:legacy:messages:${suffix}`, messageChannelId: named.channel.id,
+    });
+    expect(await db.teamChatSequenceKey.count({ where: { rootId: named.rootId } })).toBe(0);
+    expect(await db.$queryRawUnsafe(teamChatSeqPreflightSql)).toEqual([]);
+  });
+
+  it.each(['worker', 'session', 'other-owner'] as const)('does not constrain a %s app-class memory merely called chats:team', async (kind) => {
+    const mem = await db.memory.findUniqueOrThrow({ where: { id: memory.id } });
+    const agent = await db.agent.create({ data: { organizationId: orgId, name: 'agent', urn: `seq992:agent-${generateId()}` } });
+    if (kind === 'worker') {
+      await db.worker.create({ data: { appId: mem.appId!, agentId: agent.id, name: 'Worker', slug: 'worker', memoryId: memory.id } });
+    } else if (kind === 'session') {
+      await db.memory.update({ where: { id: memory.id }, data: { userMemoryOfAgentId: agent.id } });
+    } else {
+      const owner = await db.user.create({ data: { handle: 'other-owner' } });
+      await db.memory.update({ where: { id: memory.id }, data: { organizationId: null, ownerUserId: owner.id } });
+    }
+    await store(20, 'excluded-a');
+    await store(20, 'excluded-b');
+    expect(await db.teamChatSequenceKey.count()).toBe(0);
+    // Restore a collision-free fixture before cleanDb deletes Worker links.
+    await db.node.deleteMany({ where: { memoryId: memory.id, nodeType: 'chat-message' } });
+  });
+
+  it('refuses a move or kind change into an occupied canonical key', async () => {
+    await store(6, 'first');
+    const ordinary = await store(6, 'ordinary', { loc: 'chats:ordinary:messages:x' });
+    await expect(db.node.update({ where: { id: ordinary.id }, data: { loc: 'chats:team:messages:moved' } }))
+      .rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_SEQ_CONFLICT' } });
+    const summary = await store(6, 'summary', { nodeType: 'abstract' });
+    await expect(db.node.update({ where: { id: summary.id }, data: { nodeType: 'chat-message' } }))
+      .rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_SEQ_CONFLICT' } });
+  });
+
+  it('refuses adopting collisions when a memory becomes team space', async () => {
+    await db.memory.update({ where: { id: memory.id }, data: { class: 'knowledge' } });
+    await store(4, 'legacy-a');
+    await store(4, 'legacy-b');
+    await expect(db.memory.update({ where: { id: memory.id }, data: { class: 'app' } }))
+      .rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_SEQ_CONFLICT' } });
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).class).toBe('knowledge');
+  });
+
+  it('refuses adopting collisions when a root becomes a chat', async () => {
+    await db.node.update({ where: { id: channel.chatRootNodeId }, data: { nodeType: 'info' } });
+    await store(4, 'legacy-a');
+    await store(4, 'legacy-b');
+    await expect(db.node.update({ where: { id: channel.chatRootNodeId }, data: { nodeType: 'chat' } }))
+      .rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_SEQ_CONFLICT' } });
+  });
+
+  it('aborts a stale repeatable-read classifier after a membership transition', async () => {
+    await db.memory.update({ where: { id: memory.id }, data: { class: 'knowledge' } });
+    const client = new Client({ connectionString: process.env.DATABASE_URL });
+    await client.connect();
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+      await client.query('SELECT id FROM memories WHERE id = $1', [memory.id]);
+      await db.memory.update({ where: { id: memory.id }, data: { class: 'app' } });
+      await expect(client.query(`INSERT INTO nodes(id,memory_id,loc,name,node_type,seq) VALUES($1,$2,'chats:team:messages:stale','stale','chat-message',1)`, [generateId(), memory.id]))
+        .rejects.toMatchObject({ code: '40001' });
+    } finally { await client.query('ROLLBACK'); await client.end(); }
+  });
+});
+
+describe('#992 migration and read-only collision preflight', () => {
+  it('ships exactly one classifier and one invariant source', () => {
+    const sql = readFileSync('prisma/team-chat-seq-invariants.sql', 'utf8');
+    expect(sql.split('-- BEGIN CANONICAL CLASSIFIER\n')[1].split(';\n-- END CANONICAL CLASSIFIER')[0])
+      .toBe(teamChatSeqCandidatesSql.trimEnd());
+    expect(readFileSync('prisma/migrations/20261016110000_team_chat_seq_uniqueness/migration.sql', 'utf8')).toBe(sql);
+  });
+
+  it('reports live/tombstone ids, refuses atomically, then installs after synthetic selected repair', async () => {
+    const first = await store(3, '003-academy-iris', { deletedAt: new Date() });
+    const citation = await db.node.create({ data: { memoryId: memory.id, loc: 'citations:original', name: 'kept', content: 'references archived seq 3' } });
+    const client = new Client({ connectionString: process.env.DATABASE_URL });
+    await client.connect();
+    const sql = readFileSync('prisma/team-chat-seq-invariants.sql', 'utf8');
+    try {
+      // Recreate the historical unconstrained import, only in this worker's
+      // disposable DB. Nothing here is an operator/production repair path.
+      await client.query('ALTER TABLE nodes DISABLE TRIGGER team_chat_seq_node_before');
+      await client.query('ALTER TABLE nodes DISABLE TRIGGER team_chat_seq_node_after');
+      const duplicate = await store(3, 'postmigration-duplicate');
+      const before = await db.node.findMany({ where: { memoryId: memory.id }, orderBy: { id: 'asc' } });
+      await client.query('BEGIN READ ONLY');
+      const report = await client.query(teamChatSeqPreflightSql);
+      await client.query('COMMIT');
+      expect(report.rows).toHaveLength(1);
+      expect(report.rows[0]).toMatchObject({ root_id: channel.chatRootNodeId, seq: 3 });
+      expect(report.rows[0].messages.map((m: { id: string }) => m.id).sort()).toEqual([first.id, duplicate.id].sort());
+      await expect(client.query(sql)).rejects.toMatchObject({ code: 'P0993' });
+      await client.query('ROLLBACK');
+      expect(await db.node.findMany({ where: { memoryId: memory.id }, orderBy: { id: 'asc' } })).toEqual(before);
+      // Apply the owner's selected disposition ONLY to synthetic fixtures:
+      // hard-delete the offending post, keep the archive and citation identity.
+      await db.node.delete({ where: { id: duplicate.id } });
+      expect((await client.query(teamChatSeqPreflightSql)).rows).toEqual([]);
+      await client.query(sql);
+      expect((await db.node.findUniqueOrThrow({ where: { id: first.id } })).loc).toBe('chats:team:messages:003-academy-iris');
+      expect((await db.node.findUniqueOrThrow({ where: { id: citation.id } })).content).toBe('references archived seq 3');
+      await expect(store(3, 'retry')).rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_SEQ_CONFLICT' } });
+    } finally {
+      await client.query('ROLLBACK');
+      await client.query('ALTER TABLE nodes ENABLE TRIGGER team_chat_seq_node_before');
+      await client.query('ALTER TABLE nodes ENABLE TRIGGER team_chat_seq_node_after');
+      await client.end();
+    }
   });
 });

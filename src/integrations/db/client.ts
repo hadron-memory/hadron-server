@@ -1,3 +1,4 @@
+import { withTeamChatSeqRefusal } from '../../lib/teamChatSeqError.js';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { currentActor } from '../../lib/requestActor.js';
@@ -13,6 +14,7 @@ import { ATTRIBUTED_NODE_FIELDS } from '../../lib/nodeRevisionSnapshot.js';
 // 667-webfetch-polling: WebFetchPollBinding (jobId is the PK).
 // durable-login-state: PendingLoginState (the OAuth `state` is the PK).
 const MODELS_WITHOUT_ID = new Set<string>([
+  'TeamChatSequenceScope', 'TeamChatSequenceKey',
   'AgentSubscription',
   'ManualAutomationPin',
   'AppMember',
@@ -178,6 +180,12 @@ export const db = basePrisma.$extends({
         stampNodeUpdate(args.data as NodeData);
         return query(args);
       },
+    },
+  },
+}).$extends({
+  query: {
+    async $allOperations({ args, query }) {
+      return withTeamChatSeqRefusal(() => query(args));
     },
   },
 }) as unknown as PrismaClient;

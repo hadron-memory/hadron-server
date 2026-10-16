@@ -234,6 +234,13 @@ describe('worker-owned ordinary reads', () => {
   });
 
   it('a partial page ending inside a legacy duplicate seq stops one short (#1362 review)', async () => {
+    // #992: legacy ties remain legal in ordinary named Channels; canonical
+    // team-chat inserts now refuse them. Keep the cursor assertions below.
+    const legacyLoc = 'chats:legacy';
+    await db.node.update({ where: { id: channel.chatRootNodeId }, data: { loc: legacyLoc } });
+    await db.channel.update({ where: { id: channel.id }, data: { loc: legacyLoc } });
+    channel = { ...channel, loc: legacyLoc };
+
     await post('one');
     await post('two, first of a pre-#919 duplicate pair');
     // The backfilled sibling: same seq, written outside the allocator.

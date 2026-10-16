@@ -682,3 +682,6 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- (ops:alpha:incident-2026-10-14-pool-exhaustion-liveness-query).
 CREATE INDEX IF NOT EXISTS usage_events_session_activity_idx
   ON usage_events (session_id, created_at) WHERE counts_as_activity;
+
+-- #992: the canonical team-chat seq key (includes tombstones).
+\ir team-chat-seq-invariants.sql
