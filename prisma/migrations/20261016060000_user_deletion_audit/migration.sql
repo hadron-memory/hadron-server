@@ -16,6 +16,8 @@ CREATE TABLE "user_deletion_notices" (
     "status" "UserDeletionNoticeStatus" NOT NULL DEFAULT 'PENDING',
     "recipient_ciphertext" TEXT,
     "attempts" INTEGER NOT NULL DEFAULT 0,
+    "lease_until" TIMESTAMP(3),
+    "claim_token" TEXT,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL,
 

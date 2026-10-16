@@ -16,7 +16,7 @@
  *   - App-key caller → UNAUTHENTICATED.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Request } from 'express';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
@@ -359,7 +359,7 @@ describe('Mutation.deleteUser — authorization', () => {
 });
 
 // ── #1647 (cor:aut:020:03): reason, audit, notification ────────────────
-import { processUserDeletionNotices, MAX_NOTICE_ATTEMPTS } from '../../../jobs/sendUserDeletionNotices.js';
+import { processUserDeletionNotices, MAX_NOTICE_ATTEMPTS, NOTICE_LEASE_MS } from '../../../jobs/sendUserDeletionNotices.js';
 import { decryptToken } from '../../../lib/tokenCrypto.js';
 
 describe('deleteUser reason + audit + notice (#1647)', () => {
@@ -507,5 +507,91 @@ describe('deleteUser reason + audit + notice (#1647)', () => {
       const after = await db.userDeletionNotice.findMany();
       expect(after.every((n) => n.status === 'UNAVAILABLE' && n.recipientCiphertext === null)).toBe(true);
     });
+  });
+});
+
+describe('notice outbox claim / lease (#1647 fix head)', () => {
+  const t0 = new Date('2026-10-16T06:00:00.000Z');
+  const later = (ms: number) => () => new Date(t0.getTime() + ms);
+  async function pendingNotice() {
+    const admin = await makeUser({ roles: ['ADMIN'] });
+    const victim = await makeUser();
+    await resolvers.Mutation.deleteUser({}, { userRef: victim.id, reason: 'r' }, userCtx(admin));
+    return db.userDeletionNotice.findFirstOrThrow();
+  }
+  const deferred = () => {
+    let resolve!: () => void; let reject!: (e: Error) => void;
+    const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  };
+
+  it('no pass reclaims a notice while another pass has a send in flight', async () => {
+    await pendingNotice();
+    const held = deferred();
+    let calls = 0;
+    const sender = { configured: () => true, send: () => { calls += 1; return held.promise; } };
+    const first = processUserDeletionNotices(db, sender, () => t0);
+    await vi.waitFor(() => expect(calls).toBe(1));
+    await processUserDeletionNotices(db, sender, later(1000)); // overlapping pass, lease live
+    await processUserDeletionNotices(db, sender, later(2000));
+    expect(calls).toBe(1);
+    held.resolve();
+    await first;
+    expect((await db.userDeletionNotice.findFirstOrThrow()).status).toBe('SENT');
+  });
+
+  it('a crashed final try is FAILED after the lease, never a 4th send', async () => {
+    const n = await pendingNotice();
+    await db.userDeletionNotice.update({ where: { auditId: n.auditId }, data: { attempts: MAX_NOTICE_ATTEMPTS, leaseUntil: t0, claimToken: 'dead' } });
+    let calls = 0;
+    await processUserDeletionNotices(db, { configured: () => true, send: async () => { calls += 1; } }, later(60 * 60 * 1000));
+    const row = await db.userDeletionNotice.findFirstOrThrow();
+    expect(calls).toBe(0);
+    expect(row.status).toBe('FAILED');
+    expect(row.recipientCiphertext).toBeNull();
+  });
+
+  it('a live lease on the last try is left alone (no early FAILED while the 3rd send is in flight)', async () => {
+    const n = await pendingNotice();
+    await db.userDeletionNotice.update({ where: { auditId: n.auditId }, data: { attempts: MAX_NOTICE_ATTEMPTS, leaseUntil: new Date(t0.getTime() + 60_000), claimToken: 'live' } });
+    await processUserDeletionNotices(db, { configured: () => true, send: async () => {} }, () => t0);
+    expect((await db.userDeletionNotice.findFirstOrThrow()).status).toBe('PENDING');
+  });
+
+  it("a late success is not overwritten by a newer claim's failure", async () => {
+    await pendingNotice();
+    const heldA = deferred();
+    let aCalls = 0;
+    const slow = { configured: () => true, send: () => { aCalls += 1; return heldA.promise; } };
+    const a = processUserDeletionNotices(db, slow, () => t0); // claim 1, then hangs
+    await vi.waitFor(() => expect(aCalls).toBe(1));
+    // The lease lapses; a second pass claims try 2 and fails.
+    await processUserDeletionNotices(db, { configured: () => true, send: async () => { throw new Error('boom'); } }, later(NOTICE_LEASE_MS + 1000));
+    expect((await db.userDeletionNotice.findFirstOrThrow()).status).toBe('PENDING');
+    heldA.resolve(); // the first send finally acknowledges
+    await a;
+    const row = await db.userDeletionNotice.findFirstOrThrow();
+    expect(row.status).toBe('SENT');
+    expect(row.recipientCiphertext).toBeNull();
+  });
+
+  it("an older claim's failure cannot fail or release a newer claim", async () => {
+    await pendingNotice();
+    const heldA = deferred();
+    let aCalls = 0;
+    const a = processUserDeletionNotices(db, { configured: () => true, send: () => { aCalls += 1; return heldA.promise; } }, () => t0);
+    await vi.waitFor(() => expect(aCalls).toBe(1));
+    const heldB = deferred();
+    let bCalls = 0;
+    const b = processUserDeletionNotices(db, { configured: () => true, send: () => { bCalls += 1; return heldB.promise; } }, later(NOTICE_LEASE_MS + 1000));
+    await vi.waitFor(() => expect(bCalls).toBe(1));
+    heldA.reject(new Error('stale failure')); // A fails while B's claim is live
+    await a;
+    const mid = await db.userDeletionNotice.findFirstOrThrow();
+    expect(mid.status).toBe('PENDING');
+    expect(mid.leaseUntil).not.toBeNull(); // B's lease intact
+    heldB.resolve();
+    await b;
+    expect((await db.userDeletionNotice.findFirstOrThrow()).status).toBe('SENT');
   });
 });

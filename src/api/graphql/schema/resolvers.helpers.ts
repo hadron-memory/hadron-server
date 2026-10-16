@@ -2349,10 +2349,14 @@ export async function requireSessionWriteAccess(
   ctx: Context,
   session: { appId: string | null; userId: string | null; launchOperationId: string | null; memoryId: string | null },
 ): Promise<void> {
-  // #1647 (cor:acl:010:02, strict owner wins): a platform admin's override stops at a session bound to ANOTHER user's
-  // personal/private memory. The admin then falls through to the ordinary branches below (their own session, or the
-  // App's), exactly like any other caller. `memoryId` is REQUIRED so a caller that forgot to select it fails to compile.
-  if (isPlatformAdmin(ctx) && !(await boundToForeignStrictMemory(ctx, session.memoryId))) return;
+  // #1647 (cor:acl:010:02, strict owner wins; Holger's A, #13061): a platform admin's authority stops at a session bound
+  // to ANOTHER user's personal/private memory, and stops TERMINALLY. The admin role confers nothing there, and neither
+  // does an attribution that role could otherwise fall back on (the admin's own session bound to someone else's memory
+  // is refused too). `memoryId` is REQUIRED so a caller that forgot to select it fails to compile.
+  if (isPlatformAdmin(ctx)) {
+    if (await boundToForeignStrictMemory(ctx, session.memoryId)) throw authorizationDenied();
+    return;
+  }
   // App branch: PURE App-key principals only (#932 Codex P1). A hybrid
   // principal — a user with an active-App selection, the MCP auth shape —
   // must NOT inherit App authority, or any co-member of an App could end

@@ -31,13 +31,24 @@ export function isEmailSenderConfigured(): boolean {
  */
 export async function sendAccountDeletionNotice(to: string): Promise<void> {
   const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
-  await getResend().emails.send({
+  const result = await getResend().emails.send({
     from: fromAddress,
     to,
     subject: 'Your Hadron account was deleted',
     html: '<p>A Hadron administrator deleted your account, and your data was erased.</p>' +
       '<p>If you believe this was a mistake, contact Hadron support.</p>',
   });
+  assertProviderAck(result);
+}
+
+/**
+ * The Resend SDK RESOLVES a failure (HTTP 422, network) as `{ data: null, error }` instead of throwing, so a bare
+ * `await send()` reads a refused message as delivered. Only a result carrying data is an acknowledgement.
+ */
+export function assertProviderAck(result: { data?: unknown; error?: { message?: string } | null } | null | undefined): void {
+  if (!result || result.error || !result.data) {
+    throw new Error(`mail provider did not acknowledge: ${result?.error?.message ?? 'no data'}`);
+  }
 }
 
 const RATE_LIMITED_BODY = { error: 'rate_limit_exceeded' };

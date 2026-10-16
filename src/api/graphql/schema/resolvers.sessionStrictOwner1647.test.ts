@@ -34,6 +34,7 @@ let personalSession: string;
 let privateSession: string;
 let sharedSession: string;
 let adminOwnSession: string;
+let adminUnboundSession: string;
 
 async function mkMemory(cls: 'personal' | 'private' | 'knowledge', userId: string | null, tag: string) {
   return db.memory.create({
@@ -67,6 +68,7 @@ beforeEach(async () => {
   privateSession = await mk(owner.id, priv.id);
   sharedSession = await mk(owner.id, shared.id);
   adminOwnSession = await mk(admin.id, personal.id);
+  adminUnboundSession = await mk(admin.id, null);
 });
 
 const outcome = (id: string, token: string) =>
@@ -97,9 +99,19 @@ describe('requireSessionWriteAccess, strict owner (#1647)', () => {
     expect((await db.session.findUniqueOrThrow({ where: { id: sharedSession } })).branch).toBe('x');
   });
 
-  it('lets the strict owner and the admin on their own session through', async () => {
+  it('lets the strict owner and the admin on their own UNBOUND session through', async () => {
     await M.updateSession({}, { id: personalSession, branch: 'o' }, ctx({ userId: owner.id }));
-    await M.updateSession({}, { id: adminOwnSession, branch: 'a' }, ctx({ userId: admin.id, roles: ['ADMIN'] }));
+    await M.updateSession({}, { id: adminUnboundSession, branch: 'a' }, ctx({ userId: admin.id, roles: ['ADMIN'] }));
+  });
+
+  it("refuses the admin even on a session attributed to them but bound to another user's personal memory", async () => {
+    await expect(
+      M.updateSession({}, { id: adminOwnSession, branch: 'a' }, ctx({ userId: admin.id, roles: ['ADMIN'] })),
+    ).rejects.toThrow();
+    await expect(M.endSession({}, { id: adminOwnSession }, ctx({ userId: admin.id, roles: ['ADMIN'] }))).rejects.toThrow();
+    expect(await outcome(adminOwnSession, adminJwt)).toBe(403);
+    const row = await db.session.findUniqueOrThrow({ where: { id: adminOwnSession } });
+    expect([row.branch, row.endedAt, row.outcome]).toEqual([null, null, null]);
   });
 });
 
