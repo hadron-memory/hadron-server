@@ -1398,6 +1398,8 @@ type ReadProjectionNode = {
   authoredAt: Date | null;
   /** #1591 — the latest approval on record. */
   approvedRevNo: number | null;
+  /** #1611 — the revision the approval-hashed fields last changed at. */
+  contentRevSeq: number;
   approvedBy: string | null;
   approvedByInfo: string | null;
   approvedAt: Date | null;
@@ -1808,13 +1810,14 @@ async function renderNodeReadProjection(
     // userUrn is null for a grandfathered, non-URN-legal handle (@copilot, PR #1592).
     const approver = (handle ? userUrn(handle) : null) ?? node.approvedByInfo ?? 'a former user';
     const record = `r${node.approvedRevNo} by ${approver} at ${node.approvedAt.toISOString()}`;
-    approvalLine = node.approvedRevNo === revision
-      ? `Approval: approved ${record}`
+    // #1611: valid until the hashed text changes; metadata-only revisions keep it.
+    approvalLine = node.contentRevSeq <= node.approvedRevNo
+      ? `Approval: approved ${record}${node.approvedRevNo === revision ? '' : ` (text unchanged through r${revision})`}`
       : `Approval: not approved (r${revision}; last approved ${record})`;
   }
 
   if (inheritedFrom) {
-    approvalLine = node.approvedRevNo != null && node.approvedRevNo === revision
+    approvalLine = node.approvedRevNo != null && node.contentRevSeq <= node.approvedRevNo
       ? `Approval: approved r${node.approvedRevNo}`
       : `Approval: not approved (r${revision})`;
   }
