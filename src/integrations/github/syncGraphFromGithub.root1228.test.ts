@@ -190,4 +190,13 @@ describe('#1228 root README', () => {
     expect(copy.content).toBe('Copy body');
   });
 
+  it.each(['', '.hadron'])('gives a legacy %s/.node root the same valid slug', async (prefix) => {
+    const dir = join(repoRoot(), prefix, '.node'); mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'node.yaml'), `id: ${rootId}\nname: Root\n`);
+    writeFileSync(join(dir, 'topic.md'), 'Legacy root');
+    const loaded = await loadGraphFromFs(repoRoot(), graph.urn, 'test/repo');
+    expect(loaded.rootNode).toMatchObject({ id: rootId, loc: 'root-memory' });
+    expect(loaded.skippedInvalidLoc).toEqual([]);
+  });
+
 });

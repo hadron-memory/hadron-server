@@ -181,6 +181,11 @@ export const loadGraphFromFs = async (
     throw new InvalidRootMemoryError('Git root README slug is occupied by another repository file; move that file before sync.');
   }
 
+  // #1228: Git sync assigns a duplicated frontmatter id to its first file.
+  // The root README must claim its live identity before any copied file,
+  // independent of filesystem enumeration order.
+  if (rootNode) nodes.splice(0, nodes.length, rootNode, ...nodes.filter((node) => node !== rootNode));
+
   return {
     graph: {
       name: graphName,
