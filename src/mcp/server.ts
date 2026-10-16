@@ -75,6 +75,7 @@ import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
 import { findLiveUrnAliasTargets, dedupeById } from '../lib/urnAlias.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
+import { NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
 import { normalizeObjectType, normalizeRole, validateNodeSchemaOnWrite } from '../lib/enforceNodeSchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
