@@ -25,7 +25,7 @@ async function seed(loc = 'relocate', nodeType = 'info') {
     chunkIndex: 0, charStart: 0, charEnd: 21, chunkText: 'source secret payload', embedding: q }]);
   return node;
 }
-const rawMerge = () => mergeMemoryGraph(db, { sourceMemoryId: source.id, targetMemoryId: target.id,
+const rawMerge = (database = db) => mergeMemoryGraph(database, { sourceMemoryId: source.id, targetMemoryId: target.id,
   fields: new Set(['CONTENT']), deleteSourceMem: false, editor: { userId: actorId, info: null } });
 const vectorOpts = () => ({ memoryIds: [source.id], queryEmbedding: q, limit: 10 });
 
@@ -105,6 +105,58 @@ describe('#409 merge vector isolation', () => {
     expect(await vectorSearchNodes(db, opts), 'node candidate join must enforce memory equality').toEqual([]);
     expect(windows).toEqual([true, true]);
   });
+
+  it('carries comment vectors under the same destination indexing policy', async () => {
+    const comment = await seed('thread', 'comment');
+    await rawMerge();
+    expect((await db.node.findUniqueOrThrow({ where: { id: comment.id } })).memoryId).toBe(target.id);
+    expect(await db.nodeEmbedding.count({ where: { nodeId: comment.id } })).toBe(0);
+    expect((await db.node.findUniqueOrThrow({ where: { id: comment.id } })).embeddingPendingAt).toBeNull();
+  });
+
+  it.each(['abstract', 'chunk'])('rejects a source %s writer whose old marker was null', async (kind) => {
+    const node = await seed();
+    await db.node.update({ where: { id: node.id }, data: { embeddingPendingAt: null } });
+    await rawMerge(); // An unindexed destination also has null: marker equality alone is insufficient.
+    const row = { nodeId: node.id, memoryId: source.id, provider: 'old', model: 'old', dim: 768, embedding: q };
+    const wrote = kind === 'abstract' ? await upsertAbstractVector(db, row, null)
+      : await upsertChunkVectors(db, node.id, [{ ...row, chunkIndex: 0, charStart: 0, charEnd: 3, chunkText: 'old' }], null);
+    expect(wrote, 'a source worker cannot insert into its former memory even when both markers are null').toBe(false);
+  });
+
+  it.each(['abstract', 'chunk'])('fences a source %s statement overlapping the relocation transaction', async (kind) => {
+    const node = await seed();
+    let release!: () => void; let signal!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const purged = new Promise<void>((resolve) => { signal = resolve; });
+    const merger = db.$extends({ query: { nodeEmbedding: { async deleteMany({ args, query }) {
+      const result = await query(args);
+      signal(); await held;
+      return result;
+    } } } }) as unknown as typeof db;
+    const merging = rawMerge(merger);
+    await purged;
+    const row = { nodeId: node.id, memoryId: source.id, provider: 'old', model: 'old', dim: 768, embedding: q };
+    const stale = kind === 'abstract' ? upsertAbstractVector(db, row, oldStamp)
+      : upsertChunkVectors(db, node.id, [{ ...row, chunkIndex: 0, charStart: 0, charEnd: 3, chunkText: 'old' }], oldStamp);
+    let waitError: unknown;
+    try {
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        const [row] = await db.$queryRaw<Array<{ waiting: bigint }>>`
+          SELECT count(*)::bigint AS waiting FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND (query LIKE '%INSERT INTO node_embeddings%' OR query LIKE '%FOR NO KEY UPDATE%')`;
+        if (row.waiting > 0n) break;
+        if (Date.now() > deadline) throw new Error('old vector writer did not block on the merge');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    } catch (error) { waitError = error; } finally { release(); }
+    await merging;
+    expect(await stale).toBe(false);
+    if (waitError) throw waitError;
+    expect(await db.nodeEmbedding.count({ where: { nodeId: node.id } })).toBe(0);
+  }, 15000);
 
   it('a refused encrypted merge leaves node and vectors untouched', async () => {
     const node = await seed();
