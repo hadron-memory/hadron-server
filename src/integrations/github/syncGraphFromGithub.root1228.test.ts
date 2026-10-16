@@ -180,4 +180,14 @@ describe('#1228 root README', () => {
     expect(await db.node.count({ where: { memoryId: graph.id } })).toBe(1);
   });
 
+  it('lets the README claim its live id before an alphabetically earlier copied file', async () => {
+    await legacyRoot(); readme();
+    writeFileSync(join(repoRoot(), 'A-copy.md'), `---\nid: ${rootId}\nname: Copy\n---\nCopy body`);
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect(await db.node.findUniqueOrThrow({ where: { id: rootId } })).toMatchObject({ loc: 'root-memory', name: 'Root' });
+    const copy = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'A-copy', memoryId: graph.id } } });
+    expect(copy.id).not.toBe(rootId);
+    expect(copy.content).toBe('Copy body');
+  });
+
 });
