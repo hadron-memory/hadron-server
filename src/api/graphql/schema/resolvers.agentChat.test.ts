@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLoc, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -1587,21 +1588,143 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     expect(history.length).toBeGreaterThan(0);
   });
 
-  it("deleteChat: only the chat author can delete a shared chat, not any AppMember", async () => {
+  it("deleteChat: any AppMember with current write access to the host memory can delete a shared chat (#1991, cor:acl:030:01)", async () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
     const shared = await resolvers.Mutation.startChat(
       {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
     );
-    // otherUser is an AppMember but not the chat author → cannot delete.
-    await expect(
-      resolvers.Mutation.deleteChat({}, { chatId: shared.chatId }, userCtx(otherUser.id)),
-    ).rejects.toThrow('Forbidden');
-    // adminUser (the author) → can delete.
+    // otherUser did not author the chat but holds current write access to
+    // the app-class host memory (participation) — the pre-#1991 author-only
+    // arm refused them, which contradicted cor:acl:030:01: the chat's stored
+    // creator is provenance, not a gate.
     const result = await resolvers.Mutation.deleteChat(
-      {}, { chatId: shared.chatId }, userCtx(adminUser.id),
+      {}, { chatId: shared.chatId }, userCtx(otherUser.id),
     );
     expect(result).toBe(true);
+    // …and the chat is actually gone.
+    const root = await chatNodeByLoc(db, shared.chatId, { includeDeleted: true });
+    expect(root?.deletedAt).not.toBeNull();
+  });
+});
+
+describe('#1991 — rename/delete fall through the memory-write gate (cor:acl:030:01)', () => {
+  // The chat's stored creator is provenance, not a gate: renaming or
+  // deleting a chat is writing its host memory, decided by the same
+  // requireMemoryWriteAccess predicate the message path already uses. The
+  // pre-#1991 author-or-admin arm (and its legacy memory-creator fallback)
+  // contradicted that and over-refused exactly the participants who could
+  // post to the chat.
+
+  const makeAppMember = async (appUrn: string, userId: string) => {
+    const app = await db.app.findFirstOrThrow({ where: { urn: appUrn } });
+    await db.appMember.create({ data: { appId: app.id, userId, role: 'member' } });
+  };
+
+  const startShared = (creatorId: string) =>
+    resolvers.Mutation.startChat({}, { agentId: agent.id, scope: 'shared' }, userCtx(creatorId));
+
+  const typedForbidden = (e: unknown) =>
+    e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN';
+
+  it('the creator (still holding write access) renames and deletes', async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    const shared = await startShared(adminUser.id);
+    expect(await resolvers.Mutation.updateChatTitle(
+      {}, { chatId: shared.chatId, title: 'renamed by creator' }, userCtx(adminUser.id),
+    )).toBe(true);
+    const renamed = await chatNodeByLocOrThrow(db, shared.chatId);
+    expect((renamed.data as { title?: string } | null)?.title).toBe('renamed by creator');
+    expect(await resolvers.Mutation.deleteChat(
+      {}, { chatId: shared.chatId }, userCtx(adminUser.id),
+    )).toBe(true);
+    expect(await chatNodeByLoc(db, shared.chatId, { includeDeleted: true })).toMatchObject({ deletedAt: expect.any(Date) });
+  });
+
+  it('a non-creator participant with current write access renames the shared chat (the #1991 red)', async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+    const shared = await startShared(adminUser.id);
+    // The premise of the defect, proven in the same test: otherUser can POST
+    // to this chat today (the write fallthrough the message path uses), yet
+    // the pre-#1991 author-only arm refused them the rename of the very chat
+    // they can write to.
+    await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: shared.chatId, userMessage: 'peer post' }, userCtx(otherUser.id),
+    );
+    expect(await resolvers.Mutation.updateChatTitle(
+      {}, { chatId: shared.chatId, title: 'renamed by peer' }, userCtx(otherUser.id),
+    )).toBe(true);
+    const root = await chatNodeByLocOrThrow(db, shared.chatId);
+    expect((root.data as { title?: string } | null)?.title).toBe('renamed by peer');
+  });
+
+  it('the creator whose access lapsed is refused with typed FORBIDDEN — provenance is not a grant', async () => {
+    const lapsed = await db.user.create({
+      data: { githubId: 19911, githubUsername: 'lapsed-creator', roles: ['READER'] },
+    });
+    await db.orgMember.create({ data: { organizationId: orgA.id, userId: lapsed.id, role: 'CONTRIBUTOR' } });
+    await makeAppMember(`${orgA.urn}:research-app`, lapsed.id);
+    const shared = await startShared(lapsed.id);
+    // Membership lapses on both axes — App and org. The chat-loc lookup's
+    // createdBy arm still surfaces the chat (it narrows candidates, it never
+    // grants), so the refusal comes from the write gate itself, typed —
+    // not from not-found, and not a bare INTERNAL_SERVER_ERROR. Already true
+    // before #1991 (the #1717 write pre-check runs ahead of the author arm);
+    // pinned here so the removal of the author arm cannot change it.
+    await db.appMember.deleteMany({ where: { userId: lapsed.id } });
+    await db.orgMember.deleteMany({ where: { userId: lapsed.id } });
+    await expect(resolvers.Mutation.updateChatTitle(
+      {}, { chatId: shared.chatId, title: 'stale creator' }, userCtx(lapsed.id),
+    )).rejects.toSatisfy(typedForbidden);
+    await expect(resolvers.Mutation.deleteChat(
+      {}, { chatId: shared.chatId }, userCtx(lapsed.id),
+    )).rejects.toSatisfy(typedForbidden);
+    expect(await chatNodeByLocOrThrow(db, shared.chatId)).toMatchObject({ deletedAt: null });
+  });
+
+  it('the legacy memory-creator fallback is gone: a createdBy-less chat root admits only current write access', async () => {
+    const legacyCreator = await db.user.create({
+      data: { githubId: 19912, githubUsername: 'legacy-creator', roles: ['READER'] },
+    });
+    const legacyMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:legacy1991`,
+        name: 'legacy1991', class: 'knowledge', createdBy: legacyCreator.id,
+      } as never,
+    });
+    // A pre-feature chat root: no createdBy, in a memory its creator made.
+    // The memory's createdBy is provenance one level back. The pre-#1991
+    // legacy arm in the author gate would have admitted its holder, but the
+    // #1717 write pre-check (which runs FIRST on both mutations) already
+    // refused them — the arm was unreachable dead code, removed with its
+    // gate. This pin holds the line: with the arm gone, the refusal is the
+    // shared predicate's typed FORBIDDEN, before and after.
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: legacyMem.id, loc: 'chats:legacy1991',
+        name: 'chats:legacy1991', data: { title: 'legacy title' } as never,
+      },
+    });
+    await expect(resolvers.Mutation.updateChatTitle(
+      {}, { chatId: 'chats:legacy1991', title: 'legacy rename' }, userCtx(legacyCreator.id),
+    )).rejects.toSatisfy(typedForbidden);
+    await expect(resolvers.Mutation.deleteChat(
+      {}, { chatId: 'chats:legacy1991' }, userCtx(legacyCreator.id),
+    )).rejects.toSatisfy(typedForbidden);
+    expect(await chatNodeByLocOrThrow(db, 'chats:legacy1991')).toMatchObject({ deletedAt: null });
+  });
+
+  it("a platform admin who is neither creator nor participant still renames — the predicate's own bypass", async () => {
+    await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
+    const shared = await startShared(otherUser.id);
+    // adminUser carries platform ADMIN and never joined the App. Before
+    // #1991 the old arm's role bypass admitted them; after it, the
+    // memory-write predicate's org-owned ADMIN/OWNER bypass does — same
+    // outcome, one shared rule instead of a chat-local copy.
+    expect(await resolvers.Mutation.updateChatTitle(
+      {}, { chatId: shared.chatId, title: 'admin rename' }, adminCtx(),
+    )).toBe(true);
   });
 });
 
