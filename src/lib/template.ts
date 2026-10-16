@@ -73,9 +73,23 @@ export async function compileTemplate(
       ? multiHumanDataView(stored, await declaredMemoryWideFields(db, memory), personId)
       : stored;
 
+  // The default data node is THIS memory's own. `accessFilter` is usually
+  // `{ memoryId: { in: [...readable] } }`, so spreading it after `memoryId`
+  // replaced the scope and let findFirst pick another readable memory's
+  // `data` node (Cooper on #1990). It still gates, conjoined.
+  const ownDataNodeWhere = {
+    loc: 'data',
+    deletedAt: null,
+    ...accessFilter,
+    AND: [
+      ...(accessFilter.AND === undefined ? [] : Array.isArray(accessFilter.AND) ? accessFilter.AND : [accessFilter.AND]),
+      { memoryId },
+    ],
+  };
+
   // 2. Load memory's default data node (loc: "data")
   const defaultDataNode = await db.node.findFirst({
-    where: { loc: 'data', memoryId, deletedAt: null, ...accessFilter },
+    where: ownDataNodeWhere,
     select: { data: true, content: true, memoryId: true },
   });
   if (defaultDataNode) {
@@ -107,7 +121,7 @@ export async function compileTemplate(
 
   for (const ref of refs) {
     const refNode = await db.node.findFirst({
-      where: { loc: ref, memoryId, deletedAt: null, ...accessFilter },
+      where: ref === 'data' ? ownDataNodeWhere : { loc: ref, memoryId, deletedAt: null, ...accessFilter },
       select: { data: true, content: true, memoryId: true },
     });
     if (refNode) {
