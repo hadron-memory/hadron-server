@@ -911,7 +911,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await db.appMember.create({ data: { appId: app.id, userId, role } });
   }
 
-  it('grounds a shared chat only in knowledge for its selected App', async () => {
+  it('keeps bare shared-chat prompt refs local even when foreign knowledge is authorized', async () => {
     const appY = await db.app.findFirstOrThrow({ where: { urn: `${orgA.urn}:research-app` } });
     const appX = await db.app.create({
       data: {
@@ -965,11 +965,20 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     const start = await resolvers.Mutation.startChat(
       {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
     );
-    expect(start.systemMessage).toBe(' | Y ONLY | GLOBAL | OWNER ONLY |  | ');
+    // #1835: readable knowledge is a retrieval context, not a bare-loc
+    // namespace. No foreign partial is borrowed before a local target exists.
+    expect(start.systemMessage).toBe(' |  |  |  |  | ');
+    const chatRoot = await chatNodeByLocOrThrow(db, start.chatId);
+    await db.node.create({ data: { memoryId: chatRoot.memoryId, loc: 'y-secret', name: 'Local Y', content: 'LOCAL Y' } });
+    await db.node.create({ data: { memoryId: chatRoot.memoryId, loc: 'global-note', name: 'Local global', content: 'LOCAL GLOBAL' } });
+    const startedAgain = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    expect(startedAgain.systemMessage).toBe(' | LOCAL Y | LOCAL GLOBAL |  |  | ');
     const sent = await resolvers.Mutation.sendChatMessage(
       {}, { chatId: start.chatId, userMessage: 'hello' }, userCtx(otherUser.id),
     );
-    expect(sent.systemMessage).toBe(' | Y ONLY | GLOBAL |  |  | ');
+    expect(sent.systemMessage).toBe(' | LOCAL Y | LOCAL GLOBAL |  |  | ');
   });
 
   it('does not restore an uninstalled Agent when sending to its retained shared chat', async () => {
