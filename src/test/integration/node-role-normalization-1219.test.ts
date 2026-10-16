@@ -33,6 +33,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { writeNodeCore } from '../../api/graphql/schema/resolvers.mutation.node.js';
+import { createTestableMcpServer } from '../../mcp/server.js';
 import { generateId } from '../../lib/id.js';
 
 // The write core fires writeNodeToGit asynchronously; pin to a no-op so the
@@ -140,5 +141,78 @@ describe('#1219 Node.role empty normalization (cor:dmo:060:02, ruling A)', () =>
       fx.ctx,
     );
     expect((await persisted('ot-empty')).objectType).toBeNull();
+  });
+
+  it('governed control: clearing a governed role with "" is refused exactly like null (unchanged)', async () => {
+    // A pre-governed row written directly (the generic surface refuses to create
+    // one): '' must not open a new un-govern path, same as before the fix.
+    const id = generateId();
+    await db.node.create({
+      data: { id, memoryId: fx.memory.id, loc: 'r-gov', name: 'Governed', role: 'spec.rule', nodeType: 'record' },
+    });
+    await expect(
+      resolvers.Mutation.updateNode({}, { input: { id, role: '' } }, fx.ctx),
+    ).rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED' } });
+    expect((await persisted('r-gov')).role).toBe('spec.rule');
+  });
+
+  it('restoreNodeRevision: a historical empty role restores as null, not ""', async () => {
+    // A revision captured before the fix could store ''. Restoring it must not
+    // resurrect the illegal shape.
+    const id = generateId();
+    await resolvers.Mutation.createNode(
+      {},
+      { input: { id, memoryId: fx.memory.id, loc: 'r-hist', name: 'History', role: 'first' } },
+      fx.ctx,
+    );
+    await resolvers.Mutation.updateNode(
+      {},
+      { input: { id, role: 'second' } },
+      fx.ctx,
+    );
+    // Revisions snapshot the PRE-write state, so one more write is what puts
+    // the 'second' state into history.
+    await resolvers.Mutation.updateNode(
+      {},
+      { input: { id, role: 'third' } },
+      fx.ctx,
+    );
+    const revs = await db.nodeRevision.findMany({ where: { nodeId: id } });
+    const second = revs.find((r) => r.role === 'second');
+    if (!second) throw new Error('second revision not snapshotted');
+    await db.nodeRevision.update({ where: { id: second.id }, data: { role: '' } });
+    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: second.id }, fx.ctx);
+    expect((await persisted('r-hist')).role).toBeNull();
+  });
+});
+
+describe('#1219 MCP: hadron_create_node / hadron_update_node (inline parity writers, #206)', () => {
+  // The MCP node tools are NOT writeNodeCore delegates — they are inline
+  // parity writers, so the writeNodeCore normalization does not reach them
+  // (Xavier #13258 / Celine #13261, the P2 of the first head). These pins
+  // drive the REAL handlers.
+  const mcp = () =>
+    createTestableMcpServer({ userId: (fx.ctx as { userId: string }).userId, roles: ['ADMIN'] });
+
+  it('create: an empty or whitespace role stores null, not verbatim', async () => {
+    await mcp().callToolText('hadron_create_node', { urn: `hrn:node:${fx.memory.urn}:m-empty`, name: 'M empty', role: '' });
+    await mcp().callToolText('hadron_create_node', { urn: `hrn:node:${fx.memory.urn}:m-ws`, name: 'M ws', role: '   ' });
+    expect((await persisted('m-empty')).role).toBeNull();
+    expect((await persisted('m-ws')).role).toBeNull();
+  });
+
+  it('create: a real role is stored verbatim, and omit leaves it unset', async () => {
+    await mcp().callToolText('hadron_create_node', { urn: `hrn:node:${fx.memory.urn}:m-real`, name: 'M real', role: 'anchor' });
+    await mcp().callToolText('hadron_create_node', { urn: `hrn:node:${fx.memory.urn}:m-omit`, name: 'M omit' });
+    expect((await persisted('m-real')).role).toBe('anchor');
+    expect((await persisted('m-omit')).role).toBeNull();
+  });
+
+  it('update: an empty role CLEARS; omit PRESERVES', async () => {
+    await mcp().callToolText('hadron_create_node', { urn: `hrn:node:${fx.memory.urn}:m-clr`, name: 'M clr', role: 'anchor' });
+    await mcp().callToolText('hadron_update_node', { urn: `hrn:node:${fx.memory.urn}:m-clr`, name: 'M clr' });
+    expect((await persisted('m-clr')).role).toBe('anchor');
+    await mcp().callToolText('hadron_update_node', { urn: `hrn:node:${fx.memory.urn}:m-clr`, role: '' });
+    expect((await persisted('m-clr')).role).toBeNull();
   });
 });
