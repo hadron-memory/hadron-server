@@ -53,6 +53,7 @@
  * shape. `source` MUST be the full live node row (all revisioned fields loaded).
  */
 
+import { assertRoleWritersForNodes, type RoleWriterPrincipal } from './nodeRoleWriters.js';
 import { COMMENT_NODE_TYPE, COMMENTABLE_CLASSES, commentError, commentGovernedError } from './comments/index.js';
 import { decisionContainedError, isDecisionFamilyRole, refuseUnderDecisionLog } from './decisions/index.js';
 import { deriveEdgeLoc } from './edgeLoc.js';
@@ -295,6 +296,12 @@ export async function moveNodeSubtree(
     requireUnminted?: boolean;
     /** Recheck caller write authority after both Memory rows are locked. */
     authorizeLockedMemory?: (memoryId: string) => Promise<void>;
+    /**
+     * #1331 — the caller, for the role writer level of every moved node (judged on the
+     * LOCKED subtree, in the memory it leaves and the one it enters). Omitted only by
+     * server-authored callers.
+     */
+    principal?: RoleWriterPrincipal;
   },
 ): Promise<MoveNodeSubtreeResult> {
   const { source, destLoc, editor, renameSourceLeaf } = opts;
@@ -378,6 +385,9 @@ export async function moveNodeSubtree(
     await assertNoMintedSpecRemoval(tx, srcMemoryId, lockedIds, 'move out of its corpus');
   }
   const subtree: SnapshotSourceNode[] = [lockedSource, ...descendants];
+  if (opts.principal) {
+    await assertRoleWritersForNodes(tx, opts.principal, subtree, { from: srcMemoryId, to: destMemoryId });
+  }
   // Rebase a source-subtree loc onto the destination: source.loc → destLoc,
   // source.loc:x → destLoc:x. slice(source.loc.length) is '' for the source
   // node and ':x…' for a descendant.
