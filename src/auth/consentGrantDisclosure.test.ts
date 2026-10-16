@@ -34,7 +34,9 @@ describe('#1261 — consent copy matches the effective OAuth grant', () => {
     const html = renderConsent({ ...consentBase, oauthScopes: ['account'] });
     expect(html).toContain('same account access you do');
     expect(html).toContain('create further API keys of its own');
-    expect(html).toContain('Revoking this token does not automatically revoke keys');
+    expect(html).toContain('Revoking this token also revokes keys created with it and their descendants');
+    expect(html).not.toContain('does not automatically revoke');
+    expect(html).toContain('Historical keys with no recorded parent are not included');
   });
 
   it('treats a combined grant as broad account authority', () => {
