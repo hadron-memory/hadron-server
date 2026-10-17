@@ -241,22 +241,25 @@ export function isSessionLive(
     updatedAt?: Date | null;
     autoExpiredAt?: Date | null;
     endedAt?: Date | null;
+    expiresAt?: Date | null;
   },
   lastEventAt: Date | null | undefined,
   now: Date,
 ): boolean {
+  // R5 / cor:agt:020:03: the promise ends the session at equality, before any reap.
+  if (session.expiresAt && now.getTime() >= session.expiresAt.getTime()) return false;
   const lapsesAt = sessionLapsesAt(session, lastEventAt);
   return lapsesAt !== null && lapsesAt.getTime() >= now.getTime();
 }
 
 /**
- * The LAST instant an open session still reads live unless something drives
- * it first (#1617): its activity instant plus its type's idle window. The
- * predicate is inclusive, so the session is live at this instant and lapsed
- * after it. Null for an ended session, which is not live whatever the clock
- * says.
+ * The earlier of the idle deadline and a promised hard expiry (#1036,
+ * cor:agt:020:03). The idle deadline is inclusive; a hard expiry is exclusive
+ * (R5: now >= expiresAt is expired), even when both deadlines coincide.
+ * Null for an ended session. Driving a session can move the idle deadline
+ * but never its promised expiry.
  *
- * {@link isSessionLive} is defined in terms of this, so the deadline a reader
+ * {@link isSessionLive} also checks the expiry's exclusive boundary, so the deadline a reader
  * is SHOWN (`Session.lapsesAt`, `hadron_whoami`) and the predicate the post and
  * bind gates ENFORCE are one computation (`cor:agt:020:11`). A value in the
  * past means the session has already lapsed.
@@ -268,11 +271,13 @@ export function sessionLapsesAt(
     updatedAt?: Date | null;
     autoExpiredAt?: Date | null;
     endedAt?: Date | null;
+    expiresAt?: Date | null;
   },
   lastEventAt: Date | null | undefined,
 ): Date | null {
   if (session.endedAt) return null;
-  return new Date(sessionActivityAt(session, lastEventAt).getTime() + idleWindowMsFor(session.type));
+  const idleDeadline = sessionActivityAt(session, lastEventAt).getTime() + idleWindowMsFor(session.type);
+  return new Date(Math.min(idleDeadline, session.expiresAt?.getTime() ?? Infinity));
 }
 
 /**
@@ -288,7 +293,8 @@ export function sessionLapsesAt(
  * it owns and may still drive it; this does no authorization of its own. It
  * keeps a live session alive and never revives a lapsed one: callers run it
  * only after their liveness check passes, and the `endedAt: null` guard means
- * a touch racing `endSession` updates nothing.
+ * a touch racing `endSession` updates nothing. A promised hard expiry also
+ * bounds the write (#1036); no reap is needed.
  *
  * Bookkeeping, never a failure: an error is logged and swallowed, so a
  * caller's post or read cannot fail because liveness bookkeeping did.
@@ -298,9 +304,10 @@ export async function touchLiveSession(
   sessionId: string,
 ): Promise<void> {
   try {
+    const now = new Date();
     await db.session.updateMany({
-      where: { id: sessionId, endedAt: null, deletedAt: null },
-      data: { updatedAt: new Date() },
+      where: { id: sessionId, endedAt: null, deletedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+      data: { updatedAt: now },
     });
   } catch (err) {
     console.warn('[touchLiveSession] heartbeat failed:', err);
@@ -329,8 +336,8 @@ export async function preserveHeartbeatIfLapsed(
 ): Promise<{ updatedAt?: Date | null }> {
   const current = (await db.session.findUnique({
     where: { id: sessionId },
-    select: { type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
-  })) as { type: SessionType; startedAt: Date; updatedAt: Date | null; autoExpiredAt: Date | null; endedAt: Date | null } | null;
+    select: { type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
+  })) as { type: SessionType; startedAt: Date; updatedAt: Date | null; autoExpiredAt: Date | null; endedAt: Date | null; expiresAt: Date | null } | null;
   if (!current || current.endedAt) return {};
   const lastEvent = (await loadLastEventBySession(db, [sessionId])).get(sessionId);
   return isSessionLive(current, lastEvent, new Date()) ? {} : { updatedAt: current.updatedAt };
@@ -377,6 +384,7 @@ export const OPEN_SESSION_SCAN_CAP = 200;
 export function recentlyTouchedFilter(now: Date) {
   const cutoffs = idleCutoffs(now);
   return {
+    AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] }],
     OR: SESSION_TYPES.map((type) => ({
       type,
       OR: [

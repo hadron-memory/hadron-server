@@ -1667,24 +1667,25 @@ export const typeDefs = `#graphql
     endedAt: DateTime
     autoExpiredAt: DateTime
     """
-    hadron-cli#791 / cor:agt:020:11: whether THIS session is live: not ended,
+    hadron-cli#791 / hrn:node:hadronmemory.com:specs:cor:agt:020:11:
+    whether THIS session is live: not ended
+    or hard-expired (hrn:node:hadronmemory.com:specs:cor:agt:020:03),
     AND driven inside its type's idle window (activity is the latest of
     startedAt, the heartbeat updatedAt, and the latest attributed usage
     event, capped at endedAt). The same derived predicate as startSession's
     WORKER_TAKEN gate and Worker.hasLiveSession, so the three always agree.
-    An open session that is not live has LAPSED: nobody drove it inside the
+    An unexpired open session that is not live has LAPSED: nobody drove it inside the
     window, so another driver may bind its worker; it is not ended, and can
     still be ended with a handoff. False for an ended or deleted session.
     """
     isLive: Boolean!
     """
-    #1617: the LAST instant this session still reads live unless something
-    drives it first: its last activity plus its type's idle window. The
-    predicate is inclusive, so the session is live AT this instant and lapsed
-    after it; an instant in the past means it has already LAPSED. Any
-    attributed read, post or mark-read through a live session renews it.
-    Derived from the same computation as isLive, so the two always agree.
-    Null for an ended or deleted session.
+    #1617 / #1036: the earlier of last activity plus the type's idle window
+    and a promised expiresAt (hrn:node:hadronmemory.com:specs:cor:agt:020:03).
+    The idle deadline is inclusive; a hard expiry is exclusive: the session
+    is expired at now >= expiresAt, even before the reaper runs. Driving it
+    can renew its idle deadline, never its promised expiry. Null for an
+    ended or deleted session.
     """
     lapsesAt: DateTime
     events: [UsageEvent!]!

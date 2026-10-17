@@ -3,7 +3,11 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { isSessionLive, sessionLapsesAt, touchLiveSession } from '../../../lib/sessionActivity.js';
+import { isSessionLive, sessionLapsesAt, touchLiveSession, preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
+import { loadWorkersActivity } from './resolvers.worker.js';
+import { liveWorkerSessionsOf } from '../../../lib/resumeClaims.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
+import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { resolvers, type Context } from './resolvers.js';
 
 const M = resolvers.Mutation as any;
@@ -60,6 +64,42 @@ describe('#1036 no-reap hard expiry', () => {
     expect(after.autoExpiredAt).toBeNull();
     expect((await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).heldByUserId).toBe(holder.id);
   });
+  it.each([-1, 0, 1])('SQL roster and binding pool agree at expiry %+d ms', async (offset) => {
+    const row = await session();
+    vi.setSystemTime(expiry.getTime() + offset);
+    expect((await loadWorkersActivity(ctx(), [worker.id], new Date())).get(worker.id)?.hasLiveSession).toBe(offset < 0);
+    expect((await liveWorkerSessionsOf(db, holder.id, new Date())).map((s) => s.id)).toEqual(offset < 0 ? [row.id] : []);
+  });
+  it('expired candidates cannot fill a capped live-binding scan', async () => {
+    const row = await session({ expiresAt: null, startedAt: new Date(expiry.getTime() - 2 * H) });
+    await db.session.createMany({ data: Array.from({ length: 201 }, () => ({
+      id: generateId(), appId: app.id, workerId: worker.id, userId: holder.id,
+      type: 'DEVELOPER' as const, startedAt: new Date(expiry.getTime() - H), updatedAt: expiry, expiresAt: expiry,
+    })) });
+    expect((await liveWorkerSessionsOf(db, holder.id, new Date())).map((s) => s.id)).toEqual([row.id]);
+  });
+  it('late metadata updates preserve the expired heartbeat', async () => {
+    const row = await session();
+    expect(await preserveHeartbeatIfLapsed(db as never, row.id)).toEqual({ updatedAt: row.updatedAt });
+  });
+  it.each([false, true])('MCP post refuses expiry with no heartbeat (channel=%s)', async (channelPath) => {
+    const row = await session();
+    const memory = await db.memory.create({ data: { organizationId: (await db.app.findUniqueOrThrow({ where: { id: app.id } })).organizationId,
+      appId: app.id, name: 'shared', urn: `expiry-shared-${generateId()}`, class: 'app' } });
+    const channel = (await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:team', name: 'team', createdBy: holder.id, asDefaultOfAppId: app.id })).channel;
+    const tool = createTestableMcpServer({ userId: holder.id, roles: ['READER'], clientId: `user:${holder.id}` });
+    const out = await tool.callToolText('hadron_team_chat_post', { session: row.id, app: app.id, body: 'must refuse', ...(channelPath ? { channel: channel.id } : {}) });
+    expect(out).toMatch(/expired at its promised deadline/);
+    expect((await db.session.findUniqueOrThrow({ where: { id: row.id } })).updatedAt).toEqual(row.updatedAt);
+  });
+  it('MCP whoami reports hard expiry, not a resumable idle lapse', async () => {
+    const row = await session();
+    const tool = createTestableMcpServer({ userId: holder.id, roles: ['READER'], clientId: `user:${holder.id}` });
+    const out = await tool.callToolText('hadron_whoami', {});
+    expect(out).toContain(row.id);
+    expect(out).toContain('liveness: EXPIRED');
+    expect(out).not.toContain('RESUMES it');
+  });
   it('just before expiry a post succeeds', async () => {
     const row = await session();
     vi.setSystemTime(expiry.getTime() - 1);
@@ -87,7 +127,7 @@ describe('#1036 no-reap hard expiry', () => {
     await expect(post(row.id, other.id)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
   });
   it.each([true, false])('ended refusal states only stored evidence (reaped=%s) and a no-force remedy', async (reaped) => {
-    const row = await session({ expiresAt: null, endedAt: expiry, autoExpiredAt: reaped ? expiry : null, summary: 'superseded by somebody' });
+    const row = await session({ expiresAt: new Date(expiry.getTime() - H), endedAt: new Date(expiry.getTime() - 2 * H), autoExpiredAt: reaped ? expiry : null, summary: 'superseded by somebody' });
     let error: any;
     try { await post(row.id); } catch (e) { error = e; }
     expect(error?.extensions.code).toBe('SESSION_ENDED');
