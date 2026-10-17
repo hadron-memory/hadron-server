@@ -392,7 +392,8 @@ describe('#1540 — authoring through a live session keeps it live', () => {
       await hold();
       const session = await lapsedSession();
       await db.session.update({ where: { id: session.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
-      await expect(post(session.id, 'past my deadline')).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+      // #1036 / R5: this is a promised end, not a resumable idle lapse.
+      await expect(post(session.id, 'past my deadline')).rejects.toMatchObject({ extensions: { code: 'SESSION_ENDED' } });
     });
 
     it('DY-5: a post through a DORMANT session is refused SESSION_NOT_LIVE with reason DORMANT', async () => {

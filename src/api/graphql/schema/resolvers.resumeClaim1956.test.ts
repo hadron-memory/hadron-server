@@ -344,7 +344,9 @@ describe('fix head: Anne\'s blind review on #1966', () => {
     await db.session.update({ where: { id: s.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
     await claim(holder, s.id);
     expect(await envelope(resume(ctx(holder)))).toContain('RESUME_REFUSED');
-    expect(await envelope(resume(ctx(holder), { session: s.id }))).toContain('RESUME_REFUSED');
+    // #1036: once the claim is spent, a hard-expired row is not a LIVE
+    // fast-path candidate, even before the reaper records its end.
+    expect(await envelope(resume(ctx(holder), { session: s.id }))).toContain('NOTHING_TO_RESUME');
   });
 
   it('P2-1: an end racing the selection is never answered RESUMED', async () => {

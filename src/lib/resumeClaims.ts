@@ -143,7 +143,7 @@ export async function liveWorkerSessionsOf(db: Db, userId: string, now: Date) {
     where: { userId, endedAt: null, deletedAt: null, workerId: { not: null }, ...recentlyTouchedFilter(now) },
     orderBy: { startedAt: 'desc' },
     take: OPEN_SESSION_SCAN_CAP + 1,
-    select: { id: true, workerId: true, plan: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+    select: { id: true, workerId: true, plan: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
   });
   if (open.length > OPEN_SESSION_SCAN_CAP) throw tooManyToResume();
   const lastEvents = await loadLastEventBySession(db as never, open.map((s) => s.id));
