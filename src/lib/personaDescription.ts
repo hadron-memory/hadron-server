@@ -31,3 +31,35 @@ export function applyPersonaTemplate(template: string, name: string, role: strin
 export function templateBindsName(template: string | null | undefined): boolean {
   return !!template && template.includes(PERSONA_NAME_TOKEN);
 }
+
+/**
+ * Platform variables (#2042, cor:dmo:150:08): the CLOSED set a boot prompt may
+ * use, filled at each bind for the worker being bound and its session. Values
+ * are resolved by the caller (bottom-up: the most customised object with a
+ * value delivers it) and passed in; this function only substitutes. Compile
+ * never calls it, so one Agent prompt serves every worker and a rename reaches
+ * the next bind with no recompile.
+ *
+ * Exact tokens only, like `applyPersonaTemplate`. An unknown `{{worker.x}}`
+ * stays as written (the set is closed, nothing else resolves here). Substitution
+ * is a single pass over the template, so a value that itself contains a token
+ * (a name like `{{agent.name}}`) is inserted literally, never re-expanded.
+ * The old `{{name}}` / `{{role}}` placeholders stay until S12 (#1772).
+ */
+export interface PlatformVariableValues {
+  'worker.name': string;
+  'worker.role': string;
+  'agent.name': string;
+  'worker.reportsTo.name': string;
+  'worker.signature': string;
+  'worker.trailer': string;
+  'worker.url': string;
+  'session.llmModel': string;
+}
+
+export function applyPlatformVariables(template: string, values: PlatformVariableValues): string {
+  return template.replace(
+    /\{\{(worker\.name|worker\.role|agent\.name|worker\.reportsTo\.name|worker\.signature|worker\.trailer|worker\.url|session\.llmModel)\}\}/g,
+    (_m, key: keyof PlatformVariableValues) => values[key],
+  );
+}
