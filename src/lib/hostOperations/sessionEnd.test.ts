@@ -307,6 +307,7 @@ describe('worker.end at the host (cor:agt:020:10: it fails only if the session d
     const done = await report(op.id, { outcome: 'SUCCEEDED' });
     expect(done).toMatchObject({ status: 'succeeded', result: { handoff: false } });
     expect((await db.session.findUniqueOrThrow({ where: { id: session.id } })).endedAt).not.toBeNull();
+    expect(await db.session.findUniqueOrThrow({ where: { id: session.id } })).toMatchObject({ endReason: 'ended' });
   });
 
   it('a worker that wrote its handoff and ended is recorded as such', async () => {
