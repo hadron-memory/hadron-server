@@ -1875,6 +1875,7 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
   // (cor:agt:020:11 — reader and binder share one predicate).
   const sessionLive = Prisma.sql`(
              s.ended_at IS NULL
+             AND (s.expires_at IS NULL OR s.expires_at > ${toNaiveUtc(now)}::timestamp)
              AND ${activityAt} >= (CASE s.type::text
                          WHEN 'DEVELOPER'  THEN ${toNaiveUtc(cut.DEVELOPER)}::timestamp
                          WHEN 'CHATBOT'    THEN ${toNaiveUtc(cut.CHATBOT)}::timestamp

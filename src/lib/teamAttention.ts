@@ -354,7 +354,7 @@ async function resumeVerdict(ctx: Context, db: Context['db'], sessionId: string,
       ...recentlyTouchedFilter(now),
     },
     orderBy: [{ updatedAt: { sort: 'desc', nulls: 'last' } }, { startedAt: 'desc' }],
-    select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+    select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
     take: OPEN_SESSION_SCAN_CAP + 1,
   });
   if (others.length > OPEN_SESSION_SCAN_CAP) return 'REFUSED';
@@ -470,7 +470,7 @@ export async function resumableOwnWorkerIds(
     },
     orderBy: [{ updatedAt: { sort: 'desc' as const, nulls: 'last' as const } }, { startedAt: 'desc' as const }],
     select: {
-      id: true, workerId: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true,
+      id: true, workerId: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true,
       worker: { select: { app: { select: { sessionDormancyDays: true } } } },
     },
     take: OPEN_SESSION_SCAN_CAP,
@@ -494,7 +494,7 @@ export async function resumableOwnWorkerIds(
       workerId: { in: candidates }, endedAt: null, deletedAt: null,
       ...recentlyTouchedFilter(args.now),
     },
-    select: { id: true, workerId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+    select: { id: true, workerId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
     take: OPEN_SESSION_SCAN_CAP,
   });
   const events = await loadLastEventBySession(db as never, live.map((l) => l.id));
@@ -522,6 +522,7 @@ async function liveOwnWorkers(ctx: Context, app: AppRow): Promise<LiveWorker[]> 
       updatedAt: true,
       autoExpiredAt: true,
       endedAt: true,
+      expiresAt: true,
       worker: { select: { id: true, name: true, slug: true } },
     },
     take: OPEN_SESSION_SCAN_CAP + 1,
@@ -1626,6 +1627,7 @@ async function ownLiveSessionWorker(
       updatedAt: true,
       autoExpiredAt: true,
       endedAt: true,
+      expiresAt: true,
       worker: { select: { appId: true } },
     },
   });

@@ -239,7 +239,7 @@ async function requireReadStateDriver(ctx: Context, attendee: RegisterAttendee, 
   const open = await ctx.db.session.findMany({
     where: { workerId: attendee.workerId, userId: ctx.userId, endedAt: null, deletedAt: null, ...recentlyTouchedFilter(now) },
     orderBy: [{ updatedAt: { sort: 'desc', nulls: 'last' } }, { startedAt: 'desc' }],
-    select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+    select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
     take: OPEN_SESSION_SCAN_CAP,
   });
   const events = await loadLastEventBySession(ctx.db as never, open.map((s) => s.id));
