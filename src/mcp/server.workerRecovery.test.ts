@@ -1110,7 +1110,7 @@ describe('#1053 — hadron_record_work names an ended session', () => {
     // (cor:agt:020:05), so refusing here would invalidate durable law.
     expect(out).toContain('Recorded');
     expect(out).toContain('ALREADY ENDED');
-    expect(out).toContain('auto-expired by the server');
+    expect(out).toContain('end reason: unknown');
     expect(out).toContain('hadron_whoami');
     // The warning must NOT claim attribution stops — that is the behaviour
     // this change exists to defend, and saying otherwise would send a worker
@@ -1130,7 +1130,7 @@ describe('#1053 — hadron_record_work names an ended session', () => {
       session: sid, tool: 'github', kind: 'pr', ref: 'acme/repo#3', action: 'merged',
     });
     expect(out).toContain('Recorded');
-    expect(out).toContain('closed deliberately');
+    expect(out).toContain('end reason: ended');
     expect(out).not.toContain('auto-expired');
   });
 });
@@ -1152,7 +1152,7 @@ describe('#1053 — hadron_end_session does not read as a fresh close when it wa
 
     const out = await srv.callToolText('hadron_end_session', { id: sid, turnCount: 3 });
     expect(out).toContain('had ALREADY ended');
-    expect(out).toContain('auto-expired by the server');
+    expect(out).toContain('end reason: unknown');
     expect(out).toContain('hadron_whoami');
     // Metrics still land; the original end time stands (#1050 first-end-wins).
     const after = await db.session.findUniqueOrThrow({ where: { id: sid } });
@@ -1206,7 +1206,7 @@ describe('#1053 — the reaper racing an end must not produce a fresh-close rece
     try {
       const out = await srv.callToolText('hadron_end_session', { id: sid });
       expect(out).toContain('had ALREADY ended');
-      expect(out).toContain('auto-expired by the server');
+      expect(out).toContain('end reason: unknown');
       expect(out).not.toContain('Session ended: ');
     } finally {
       spy.mockRestore();

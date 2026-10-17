@@ -306,7 +306,7 @@ export const hostOperationMutations = {
         const [session] = await tx.$queryRaw<{ endedAt: Date | null }[]>`
           SELECT ended_at AS "endedAt" FROM sessions WHERE id = ${args.sessionId} FOR UPDATE`;
         if (status === 'succeeded' && session && !session.endedAt) {
-          await tx.session.updateMany({ where: { id: args.sessionId, endedAt: null }, data: { endedAt: now } });
+          await tx.session.updateMany({ where: { id: args.sessionId, endedAt: null }, data: { endedAt: now, endReason: 'ended' } });
           endedSessions.push(args.sessionId);
         }
         const ended = status === 'succeeded' || Boolean(session?.endedAt);

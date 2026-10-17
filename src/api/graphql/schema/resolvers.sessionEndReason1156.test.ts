@@ -1,4 +1,6 @@
 /** #1156 / cor:dmo:070:05: end evidence is first-writer-wins, never inferred. */
+import { buildSchema, type GraphQLObjectType } from 'graphql';
+import { typeDefs } from './typeDefs.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -25,6 +27,12 @@ beforeEach(async () => {
 });
 
 describe('session end reason #1156', () => {
+  it('publishes the same closed vocabulary on the shared Session type', () => {
+    const schema = buildSchema(typeDefs);
+    const field = (schema.getType('Session') as GraphQLObjectType).getFields().endReason;
+    expect(String(field.type)).toBe('SessionEndReason');
+    expect((schema.getType('SessionEndReason') as any).getValues().map((v: { name: string }) => v.name)).toEqual(['ended', 'superseded', 'expired', 'unknown']);
+  });
   it('stamps an explicit end and preserves evidence on repeat calls', async () => {
     const s = await create();
     await M.endSession({}, { id: s.id }, ctx());
@@ -81,6 +89,20 @@ describe('session end reason #1156', () => {
     const s = await create({ appId: app.id });
     await M.endAgentSession({}, { sessionId: s.id }, { db, appId: app.id, roles: [] });
     expect(await row(s.id)).toMatchObject({ endReason: 'ended' });
+  });
+  it('agent close preserves expiry when it lands between the read and write', async () => {
+    const app = await db.app.create({ data: { ownerUserId: owner.id, name: 'Race', urn: `hrn:app:test:race-${generateId()}` } });
+    const s = await create({ appId: app.id });
+    const expiredAt = new Date(Date.now() - 1000);
+    const original = db.session.updateMany.bind(db.session);
+    const spy = vi.spyOn(db.session, 'updateMany').mockImplementationOnce((async (args: any) => {
+      await db.session.update({ where: { id: s.id }, data: { endedAt: expiredAt, autoExpiredAt: expiredAt, endReason: 'expired' } });
+      return original(args);
+    }) as never);
+    try {
+      await M.endAgentSession({}, { sessionId: s.id }, { db, appId: app.id, roles: [] });
+      expect(await row(s.id)).toMatchObject({ endedAt: expiredAt, autoExpiredAt: expiredAt, endReason: 'expired' });
+    } finally { spy.mockRestore(); }
   });
   it('shows explicit and legacy reasons on MCP identity reads, never another user\'s row', async () => {
     const s = await create();
