@@ -3235,7 +3235,7 @@ export const typeDefs = `#graphql
   type HostKeyUse {
     id: ID!
     hostId: String!
-    "register, collect, report, availability, read or (#1969) session: a refused session write (updateSession, endSession)."
+    "register, collect, report, availability, read, (#1969) session: a refused session write (updateSession, endSession), or (#1981) issue: a refused issueHostOperation."
     action: String!
     "The operation a report was about."
     operationId: ID
