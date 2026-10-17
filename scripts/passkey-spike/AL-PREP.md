@@ -111,12 +111,29 @@ when scheduling). No alpha action is authorized by this checklist.
 
 Use `AL_SESSION_TTL_SECONDS=1800` and `AL_PAIRING_TTL_SECONDS=300` for the selected
 Compose deployment (30 minutes / five minutes; the old defaults are 300/60).
-Current source retains a **60-second server ceremony lifetime** and a **20-second
-browser timeout hint** (the browser may adjust that hint): request options just
-before use. Neither is configurable in #1984. Follow-up
-[#2039](https://github.com/hadron-memory/hadron-server/issues/2039) covers generous
-configurable ceremony timing; it is not implemented by this docs-only change,
-and no particular timer is proved to have caused the earlier failures.
+The spike defaults to **600 seconds (10 minutes) server ceremony expiry** and a
+**300000 ms (five-minute) browser timeout hint**. The browser/provider may clamp
+that hint; it is not a guaranteed prompt duration. These settings follow
+[#2039](https://github.com/hadron-memory/hadron-server/issues/2039); they replace
+the former fixed 60-second expiry / 20-second hint without claiming which clock
+caused the earlier failures. Request options when the devices are ready.
+
+| Setting | Compose input | `startSpike` option | Default / valid integer range |
+| --- | --- | --- | --- |
+| `PASSKEY_SPIKE_CEREMONY_EXPIRY_SECONDS` | `AL_CEREMONY_EXPIRY_SECONDS` | `ceremonyExpirySeconds` | 600 seconds / 30–3600 seconds |
+| `PASSKEY_SPIKE_BROWSER_TIMEOUT_MS` | `AL_BROWSER_TIMEOUT_MS` | `browserTimeoutMs` | 300000 ms / 20000–900000 ms |
+
+For the AL container, use `AL_CEREMONY_EXPIRY_SECONDS=600` and
+`AL_BROWSER_TIMEOUT_MS=300000` alongside the session/pairing inputs above.
+The host-process example uses the corresponding `PASSKEY_SPIKE_*` names.
+Precedence is explicit `startSpike` option → environment → default, matching
+session/pairing settings; no CLI flags are provided. Invalid, non-finite,
+fractional or out-of-range values refuse startup. `/config` exposes all four
+configured timing values. Effective server ceremony expiry is the earlier of
+its configured deadline and the original session deadline; a long window does
+not extend a session. Failed, expired, attempted and replayed ceremonies remain
+consumed/refused. A rebuild discards existing in-memory state.
+
 Start a **fresh synthetic session per independent leg**, issuing a pairing code
 only when the other device is ready. A join never extends the original session.
 The 30-minute lifetime is not a promise that one session covers the whole hour.
@@ -165,7 +182,7 @@ rules above; they do not add scheduled legs or extend the time box.
 
 Greta owns evidence under `sprints:sprint-2:qa:hadron-server-1630:al-session`. Confirm the evidence owner at scheduling (Greta was the original assignment). Confirm HTTPS URL exactly, RP `hadronmemory.com`, browser versions, OS versions, and no portal session required. Capture each verify JSON (verified, userVerified, credentialIdHash, origin, rpID, counter, backupEligible, backedUp, deviceType), actual provider chosen, and screenshot of provider prompt/result. Provider in the page is a human label, not cryptographic provider identification. Do not capture private-key material, raw cookie or pairing codes. All physical legs require UV=true; wrong origin/RP or UV=false is a failure. Distinguish user cancellation/environment setup failure from a completed assertion that violates the rule. A failed actual-device leg is reported to Holger for the feature GO/NO-GO decision; it is never silently replaced by the synthetic dry run.
 
-By default the demo session lasts five minutes, options one minute; pair codes are single-use and last 60 seconds. The page displays the configured session/pairing lifetimes. For the resumed AL session, after Holger authorizes the deployment/rebuild, set `AL_SESSION_TTL_SECONDS=1800 AL_PAIRING_TTL_SECONDS=300` with Compose (30-minute session/cookie, five-minute pairing). The host-process equivalents are `PASSKEY_SPIKE_SESSION_TTL_SECONDS=1800` and `PASSKEY_SPIKE_PAIRING_TTL_SECONDS=300`. Each accepts whole seconds from 1 through 86400; invalid values refuse startup. Pair codes and joined cookies never outlive the original session; joining does not renew it. Server ceremony expiry remains 60 seconds, with a 20-second browser timeout hint; see #2039 above. Rebuilding discards existing in-memory sessions. Record the actual deployed head and configured timing relative to #1865/#1984 before resuming; do not deploy before Holger says go. Register afresh after expiry. For every leg, choose the page's evidence label AND explicitly select the real provider in the browser/system prompt. If the prompt selected a different provider, mark that attempt misrouted and repeat; do not count it as the requested leg.
+By default the demo session lasts five minutes; ceremony expiry is ten minutes but capped by that session; pair codes are single-use and last 60 seconds. The page displays the configured session/pairing lifetimes. For the resumed AL session, after Holger authorizes the deployment/rebuild, set `AL_SESSION_TTL_SECONDS=1800 AL_PAIRING_TTL_SECONDS=300` with Compose (30-minute session/cookie, five-minute pairing). The host-process equivalents are `PASSKEY_SPIKE_SESSION_TTL_SECONDS=1800` and `PASSKEY_SPIKE_PAIRING_TTL_SECONDS=300`. Each accepts whole seconds from 1 through 86400; invalid values refuse startup. Pair codes and joined cookies never outlive the original session; joining does not renew it. Ceremony expiry and the browser hint use the configurable values above (600 seconds / 300000 ms by default); record both from `/config`. Rebuilding discards existing in-memory sessions. Record the actual deployed head and configured timing relative to #1865/#1984 before resuming; do not deploy before Holger says go. Register afresh after expiry. For every leg, choose the page's evidence label AND explicitly select the real provider in the browser/system prompt. If the prompt selected a different provider, mark that attempt misrouted and repeat; do not count it as the requested leg.
 
 ### Apple/iCloud sync — explicit opt-in coverage, not the default leg
 
