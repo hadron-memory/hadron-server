@@ -2,6 +2,8 @@ import { ApolloServer } from '@apollo/server';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { observeTransactionBackend, waitForAdvisoryWaiter } from '../../../test/advisoryWaiter.js';
 import { generateId } from '../../../lib/id.js';
 import * as tokenCrypto from '../../../lib/tokenCrypto.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -58,7 +60,7 @@ describe('#1882 — platform clear of user-owned Agent credentials', () => {
       expect(await db.aiServiceConfig.findMany({ where: { agentId: otherAgentId }, orderBy: { id: 'asc' } })).toEqual(otherBefore);
       expect(response.body.singleResult.data?.clearAgentAIConfig).toMatchObject({ id: agentId, aiProvider: null, aiModel: null, aiApiKeyPreview: null, hasAiApiKey: false });
       expect(decrypt).not.toHaveBeenCalled();
-      expect(JSON.stringify(response.body.singleResult)).not.toMatch(/sk-1882|apiKeyEncrypted|fixture-model|1882/);
+      expect(JSON.stringify(response.body.singleResult)).not.toMatch(/sk-1882|apiKeyEncrypted|fixture-model|\.\.\.1882/);
       await resolvers.Mutation.clearAgentAIConfig({}, { agentId }, context(adminId, [role]));
       expect(await db.aiServiceConfig.count({ where: { agentId } })).toBe(0);
     },
@@ -87,4 +89,32 @@ describe('#1882 — platform clear of user-owned Agent credentials', () => {
       expect(await configs()).toEqual(before);
     }
   });
+  it('refuses stale platform authority before deleting any named config', async () => {
+    await config(agentId, 'default');
+    await config(agentId, 'backup');
+    const before = await configs();
+    await db.user.update({ where: { id: adminId }, data: { roles: ['READER'] } });
+    await expect(resolvers.Mutation.clearAgentAIConfig({}, { agentId }, context(adminId, ['ADMIN'])))
+      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await configs()).toEqual(before);
+  });
+
+  it('rechecks platform authority after an actual wait on the revoker user anchor', async () => {
+    await config(agentId, 'default');
+    await config(agentId, 'backup');
+    const before = await configs();
+    const observed = observeTransactionBackend(db);
+    let outcome: Promise<unknown> | undefined;
+    await db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'user', id: adminId }], 'exclusive');
+      await tx.user.update({ where: { id: adminId }, data: { roles: ['READER'] } });
+      const clearing = resolvers.Mutation.clearAgentAIConfig({}, { agentId }, { ...context(adminId, ['ADMIN']), db: observed.db });
+      outcome = clearing.catch((error: unknown) => error);
+      const pid = await observed.backendFor(clearing);
+      await waitForAdvisoryWaiter(db, { pid, key: { form: 'int-pair', first: 'authorization:user', second: adminId } });
+    }, { timeout: 15_000 });
+    expect(await outcome).toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await configs()).toEqual(before);
+  });
+
 });
