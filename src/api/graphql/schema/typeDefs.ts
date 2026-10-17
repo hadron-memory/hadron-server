@@ -1,4 +1,12 @@
 export const typeDefs = `#graphql
+  "#1156 — hrn:node:hadronmemory.com:specs:cor:dmo:070:05: closed end causes; unknown is reserved for legacy rows."
+  enum SessionEndReason {
+    ended
+    superseded
+    expired
+    unknown
+  }
+
   enum Role {
     OWNER
     ADMIN
@@ -1665,6 +1673,8 @@ export const typeDefs = `#graphql
     outcomeMeta: JSON
     startedAt: DateTime!
     endedAt: DateTime
+    "#1156 — hrn:node:hadronmemory.com:specs:cor:dmo:070:05: null while open; stamped cause after end, unknown for legacy ends. Readable wherever this Session is; no ending actor."
+    endReason: SessionEndReason
     autoExpiredAt: DateTime
     """
     hadron-cli#791 / hrn:node:hadronmemory.com:specs:cor:agt:020:11:

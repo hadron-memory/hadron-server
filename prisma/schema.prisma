@@ -1659,6 +1659,13 @@ model PendingEdge {
 /// Tracks a unit of work by an App: an AI/agent conversation, a
 /// chatbot interaction, an automation run. Sessions are the top-level
 /// tracking concept; UsageEvent rows are recorded within a session.
+/// #1156 / cor:dmo:070:05: only an end writer supplies a cause; legacy NULL stays unknown.
+enum SessionEndReason {
+  ended
+  superseded
+  expired
+}
+
 model Session {
   id              String      @id // caller-generated (e.g. UUID from h-start-session)
   type            SessionType @default(DEVELOPER)
@@ -1748,6 +1755,8 @@ model Session {
   outcomeMeta     Json?       @map("outcome_meta")
   startedAt       DateTime    @default(now()) @map("started_at")
   endedAt         DateTime?   @map("ended_at")
+  /// First end wins. NULL on legacy ended rows is exposed as unknown, never backfilled.
+  endReason       SessionEndReason? @map("end_reason")
   /// Set by the reaper (#930) when the session was auto-expired — meaning
   /// past `expiresAt`, and since #1114 nothing else. It no longer records an
   /// idle-window expiry, because there is no longer such a thing: inactivity

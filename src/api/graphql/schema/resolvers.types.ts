@@ -1,3 +1,4 @@
+import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // typeResolvers — GraphQL type-level field resolvers extracted from resolvers.ts
 // (split step 3). No behavior change.
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
@@ -1858,6 +1859,8 @@ export const typeResolvers = {
     },
   },
   Session: {
+    /** #1156 / cor:dmo:070:05: no new read gate; the parent Session is authorized. */
+    endReason: sessionEndReason,
     /** #1645: nested events inherit current session and memory read boundaries. */
     events: async (s: { id: string }, _: unknown, ctx: Context) => {
       const session = await ctx.db.session.findFirst({
