@@ -5,15 +5,17 @@ This document is preparation, not authorization to change alpha, DNS, routing or
 any device settings. Source: [#2037](https://github.com/hadron-memory/hadron-server/issues/2037),
 Marco's relay of Holger's 2026-10-17 ruling (team chat #20335), and
 [#1865](https://github.com/hadron-memory/hadron-server/pull/1865)'s hosting review
-(Rook #10476 / Xylon #10479).
+(Rook #10476 / Xylon #10479). Eden confirmed the agreed hostname and
+Cloudflare proxy setting after Marco's content check (team chat #20348).
 
 | Choice | Settled plan | Why / remaining input |
 | --- | --- | --- |
-| Q1: ceremony origin | **Dedicated AL subdomain, not `srv.hadronmemory.com`**; RP stays **`hadronmemory.com`** | No production-session cookies on the ceremony origin. Holger/ops must choose the name and add its DNS record; exact HTTPS origin/TLS and cookie isolation must be verified before use. A dedicated host alone does not exclude parent-domain cookies. |
+| Q1: ceremony origin | **`passkey-al.hadronmemory.com`, Cloudflare-proxied like `srv.`**, not the `srv.hadronmemory.com` ceremony origin; RP stays **`hadronmemory.com`** | No production-session cookies on the ceremony origin. The name is agreed; Holger/ops adds its DNS record with the agreed proxy setting; exact HTTPS origin/TLS and cookie isolation must be verified before use. A dedicated host alone does not exclude parent-domain cookies. |
 | Q2: exposure | **Fresh random base path** ending in `/` | Meets the reviewed exposure condition without reopening the random-path/allowlist choice. Keep the path private before use; it is not authentication. |
 | Q3: process | **Option A: temporary container behind Traefik** | Isolates the throwaway process/state, uses existing TLS/proxy infrastructure, and has a small removal surface; no Hadron restart or migration. |
 
-Serve only the chosen `AL_BASE_PATH` on that exact HTTPS origin. Neither option
+The exact ceremony origin is **`https://passkey-al.hadronmemory.com`**.
+Serve only the chosen `AL_BASE_PATH` on that origin. Neither option
 uses the portal, auth tokens, Postgres, or production enrollment/signing records.
 The fixture is synthetic v1/S0, not production v3. Do not sign into production
 from the AL browser session. Before exposure, the authorized operator checks that
@@ -118,7 +120,7 @@ the corresponding #1630 coverage outstanding; no full feature GO is inferred.
 
 ## A — selected: temporary container behind Traefik on the dedicated AL origin
 
-Prepared: `Dockerfile`, its build-context ignore file, and `al.compose.yml`. Run from the approved checkout only after separate deployment authorization. Set AL_ORIGIN, AL_HOST, AL_BASE_PATH, AL_ENTRYPOINT and AL_PROXY_NETWORK to his origin and the existing Traefik settings. `docker compose -f scripts/passkey-spike/al.compose.yml up -d --build` builds Node 22 plus the exact approved SDK pair, creates one read-only non-root container on the proxy network, and adds a higher-priority Host+path router. No host port is published, no volume or DB is mounted, and the rest of the host's routing stays with its existing service. No server deployment/restart or migration is needed.
+Prepared: `Dockerfile`, its build-context ignore file, and `al.compose.yml`. Run from the approved checkout only after separate deployment authorization. Set `AL_ORIGIN=https://passkey-al.hadronmemory.com` and `AL_HOST=passkey-al.hadronmemory.com`; set AL_BASE_PATH to the chosen random path and AL_ENTRYPOINT/AL_PROXY_NETWORK to the verified existing Traefik settings. `docker compose -f scripts/passkey-spike/al.compose.yml up -d --build` builds Node 22 plus the exact approved SDK pair, creates one read-only non-root container on the proxy network, and adds a higher-priority Host+path router. No host port is published, no volume or DB is mounted, and the rest of the host's routing stays with its existing service. No server deployment/restart or migration is needed.
 
 Touches alpha: temporary image, container and Docker router labels/network membership only. Existing TLS termination stays in place; the dedicated origin must already route to alpha with valid TLS before the booked hour. The required new DNS record is Holger/ops work, not an open hosting choice. Trade-off: isolated process and easy removal, but needs Docker build capacity and verified proxy entrypoint/network. Docker is unavailable in the prep workstation, so the image has not been built here; the locked Node application itself was tested locally. Do not claim an image/deployment smoke test until it runs.
 
