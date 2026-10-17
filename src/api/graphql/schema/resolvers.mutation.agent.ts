@@ -60,6 +60,7 @@ import {
 import {
   type Context,
   requireOrgRole,
+  isPlatformAdmin,
   requireAgentAccess,
   resolveReadableAgentRef,
   requireReadableAgent,
@@ -73,6 +74,7 @@ import {
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { assertNoLiveAgentReferences } from '../../../lib/agentLiveReferences.js';
 import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
@@ -1439,10 +1441,27 @@ export const agentMutations = {
       const agent = await resolveReadableAgentRef(ctx, agentId);
       const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
-      // 036-ai-service-config: clearing deletes the 'default' registry
-      // config (idempotent).
-      await ctx.db.aiServiceConfig.deleteMany({
-        where: { agentId: resolvedAgentId, name: DEFAULT_AI_CONFIG_NAME },
+      // #1882 / cor:dmo:050:13: a platform shutdown removes every named
+      // config of a user-owned Agent. Ordinary clears retain the default shim.
+      // Re-read roles and ownership under the same authority fences as Agent
+      // management; a request-time ADMIN claim must not widen a later delete.
+      await withAuthorizedTx(ctx, [
+        { kind: 'agent', id: resolvedAgentId },
+        ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+        ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+      ], async txCtx => {
+        const current = await txCtx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+        if (current.organizationId !== agent.organizationId || current.ownerUserId !== agent.ownerUserId) {
+          throw authorizationDenied();
+        }
+        await requireAgentAccess(txCtx, current, 'ADMIN');
+      }, async (tx, txCtx) => {
+        await tx.aiServiceConfig.deleteMany({
+          where: {
+            agentId: resolvedAgentId,
+            ...(agent.ownerUserId !== null && isPlatformAdmin(txCtx) ? {} : { name: DEFAULT_AI_CONFIG_NAME }),
+          },
+        });
       });
       return ctx.db.agent.findUniqueOrThrow({
         where: { id: resolvedAgentId },

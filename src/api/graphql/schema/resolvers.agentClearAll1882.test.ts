@@ -117,4 +117,23 @@ describe('#1882 — platform clear of user-owned Agent credentials', () => {
     expect(await configs()).toEqual(before);
   });
 
+  it('refuses if the Agent changes tenancy before its authority anchors are acquired', async () => {
+    await config(agentId, 'default');
+    await config(agentId, 'backup');
+    const before = await configs();
+    const original = db.$transaction.bind(db);
+    const moved = new Proxy(db, {
+      get(target, prop) {
+        if (prop !== '$transaction') return Reflect.get(target, prop, target);
+        return async (...args: Parameters<typeof original>) => {
+          await db.agent.update({ where: { id: agentId }, data: { ownerUserId: null, organizationId: orgId, visibility: 'ORGANIZATION' } });
+          return Reflect.apply(original, db, args);
+        };
+      },
+    });
+    await expect(resolvers.Mutation.clearAgentAIConfig({}, { agentId }, { ...context(adminId, ['ADMIN']), db: moved }))
+      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await configs()).toEqual(before);
+  });
+
 });
