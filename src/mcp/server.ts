@@ -1,3 +1,4 @@
+import { sessionEndReason } from '../lib/sessionEndReason.js';
 import { GraphQLError } from 'graphql';
 import { writeResumeClaim, type ResumeCandidate } from '../lib/resumeClaims.js';
 import { registerAutomationPinTools } from './automationPinTools.js';
@@ -9228,16 +9229,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       return textResult(
         (!closed.endedByThisCall
           ? `Session ${id} had ALREADY ended${closed.endedAt ? ` at ${closed.endedAt.toISOString()}` : ''}` +
-            (closed.autoExpiredAt
-              ? ' (auto-expired by the server, so nobody closed it deliberately).'
-              : ' (closed deliberately).') +
+            ` (end reason: ${closed.endReason}).` +
             ' Metrics were updated; the original end time stands. You were not bound when you' +
             ' made this call — hadron_whoami lists what you are actually driving.'
           : // #1034: name the KIND of session that just ended. This receipt is
             // the last thing a driver reads before closing the window, and the
             // failure it is placed against is the reverse order — closing the
             // window and assuming this happened.
-            `${session.workerId ? 'Worker session' : 'Session'} ended: ${id}`) +
+            `${session.workerId ? 'Worker session' : 'Session'} ended: ${id} (end reason: ${closed.endReason})`) +
           (handoffBody
             ? '\nHandoff written — the next worker session bound to this worker receives it automatically.'
             : session.workerId && closed.endedByThisCall
@@ -9350,7 +9349,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             orderBy: { startedAt: 'desc' },
             take,
             select: {
-              id: true, startedAt: true, endedAt: true, type: true, plan: true,
+              id: true, startedAt: true, endedAt: true, endReason: true, type: true, plan: true,
               appId: true, workerId: true,
               // #1617: the liveness inputs, so each open row can say whether it
               // is live and when it lapses — before a post is refused, not after.
@@ -9429,6 +9428,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const url = workerPortalUrl(urn);
         return (
           `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}\n` +
+          (s.endedAt ? `    ended: ${s.endedAt.toISOString()} · end reason: ${sessionEndReason(s)}\n` : '') +
           // The un-bound case is the one worth calling out: it is the shape in
           // which a team-chat post silently lands under the human's name.
           (worker
@@ -11086,14 +11086,12 @@ function ageOf(at: Date, now: Date = new Date()): string {
         try {
           const s = await db.session.findUnique({
             where: { id: item.sessionId },
-            select: { endedAt: true, autoExpiredAt: true },
+            select: { endedAt: true, autoExpiredAt: true, endReason: true },
           });
           if (s?.endedAt) {
             endedNote =
               `\n\n⚠ This session ALREADY ENDED at ${s.endedAt.toISOString()}` +
-              (s.autoExpiredAt
-                ? ' — it was auto-expired by the server, so nobody closed it deliberately.'
-                : ' — it was closed deliberately.') +
+              ` — end reason: ${sessionEndReason(s)}.` +
               ' The record is kept, and further records against it will be too:' +
               ' late attribution is what the worklog is for.' +
               ' What you no longer have is a LIVE binding: the team chat will refuse to author' +
