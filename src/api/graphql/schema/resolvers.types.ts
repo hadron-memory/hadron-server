@@ -741,6 +741,7 @@ type SessionLivenessParent = {
   autoExpiredAt?: Date | null;
   endedAt?: Date | null;
   deletedAt?: Date | null;
+  expiresAt?: Date | null;
 };
 
 /**
@@ -762,13 +763,13 @@ function readLivenessRowOnce(ctx: Context, id: string) {
   if (!read) {
     read = ctx.db.session.findUnique({
       where: { id },
-      select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true },
+      select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true, expiresAt: true },
     });
     perRequest.set(id, read);
   }
   return read as Promise<{
     id: string; type: SessionType; startedAt: Date; updatedAt: Date | null;
-    autoExpiredAt: Date | null; endedAt: Date | null; deletedAt: Date | null;
+    autoExpiredAt: Date | null; endedAt: Date | null; deletedAt: Date | null; expiresAt: Date | null;
   } | null>;
 }
 
@@ -782,8 +783,8 @@ function readLivenessRowOnce(ctx: Context, id: string) {
 async function sessionLivenessRow(
   ctx: Context,
   s: SessionLivenessParent,
-): Promise<{ id: string; type: SessionType; startedAt: Date; updatedAt: Date | null; autoExpiredAt: Date | null; endedAt: Date | null } | null> {
-  const row = s.type && s.startedAt && s.deletedAt !== undefined
+): Promise<{ id: string; type: SessionType; startedAt: Date; updatedAt: Date | null; autoExpiredAt: Date | null; endedAt: Date | null; expiresAt: Date | null } | null> {
+  const row = s.type && s.startedAt && s.deletedAt !== undefined && s.expiresAt !== undefined
     ? s
     : await readLivenessRowOnce(ctx, s.id);
   if (!row || !row.type || !row.startedAt) return null;
@@ -795,6 +796,7 @@ async function sessionLivenessRow(
     updatedAt: row.updatedAt ?? null,
     autoExpiredAt: row.autoExpiredAt ?? null,
     endedAt: row.endedAt ?? null,
+    expiresAt: row.expiresAt ?? null,
   };
 }
 
@@ -1890,8 +1892,8 @@ export const typeResolvers = {
     },
     /**
      * #1617: the deadline beside `isLive` — when this session lapses unless
-     * driven first. `sessionLapsesAt` is the computation `isSessionLive` is
-     * defined by, so the two fields cannot disagree about the same row.
+     * driven first, bounded by its promised hard expiry (#1036). Idle lapse
+     * is inclusive; expiry is exclusive at equality (cor:agt:020:03).
      */
     lapsesAt: async (s: SessionLivenessParent, _: unknown, ctx: Context) => {
       const row = await sessionLivenessRow(ctx, s);

@@ -439,7 +439,7 @@ async function resolveSessionAuthor(
 ): Promise<{ workerId: string; agentId: string | null; name: string; sessionId: string; workerAppId: string; crossApp: boolean; resume: boolean }> {
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
-    select: { id: true, appId: true, userId: true, workerId: true, agentId: true, endedAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true, memoryId: true },
+    select: { id: true, appId: true, userId: true, workerId: true, agentId: true, endedAt: true, expiresAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true, memoryId: true },
   });
   if (!session) {
     throw new GraphQLError(`Session "${sessionRef}" not found.`, {
@@ -458,9 +458,16 @@ async function resolveSessionAuthor(
   // session of App A must not author in App B) is subsumed by the one check
   // below: the Worker's App is the Channel's, or the driver may write the
   // Channel's host memory.
-  if (session.endedAt) {
+  const now = new Date();
+  const hardExpired = session.expiresAt && now.getTime() >= session.expiresAt.getTime();
+  if (session.endedAt || hardExpired) {
+    // #1036: only persisted reap evidence or the expiry promise proves a cause.
+    const cause = session.autoExpiredAt
+      ? `was auto-expired by the server at ${session.autoExpiredAt.toISOString()}`
+      : !session.endedAt && hardExpired ? `expired at its promised deadline ${session.expiresAt!.toISOString()}`
+        : 'has ended (cause not recorded)';
     throw new GraphQLError(
-      `Session "${sessionRef}" has ended — its worker can no longer author messages through it.`,
+      `Session "${sessionRef}" ${cause}. Its holder must start a new session for this worker to continue; recovering their own session requires no force override.`,
       { extensions: { code: 'SESSION_ENDED' } },
     );
   }
@@ -469,7 +476,6 @@ async function resolveSessionAuthor(
   // outside its idle window is not ended, but nobody is driving it — and a
   // GraphQL caller gets no MCP heartbeat (Copilot on PR #1169). The same
   // predicate the bind refuses WORKER_TAKEN on and the roster reports.
-  const now = new Date();
   const events = await loadLastEventBySession(ctx.db as never, [session.id]);
   // #1617 B (Holger, 2026-10-05): a LAPSED session is not refused yet. Its own
   // driver may resume it by this post, which is decided at the END, once every

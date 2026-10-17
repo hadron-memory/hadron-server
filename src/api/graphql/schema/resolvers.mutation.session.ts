@@ -956,7 +956,7 @@ export const sessionMutations = {
             select: {
               id: true, userId: true, startedAt: true, updatedAt: true,
               // #1114: liveness is DERIVED, so the gate needs the inputs.
-              type: true, autoExpiredAt: true, endedAt: true,
+              type: true, autoExpiredAt: true, endedAt: true, expiresAt: true,
             },
           });
           // #1114 — AN OPEN SESSION IS NOT A LIVE ONE. Nothing ends a session

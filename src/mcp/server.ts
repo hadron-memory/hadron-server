@@ -303,12 +303,16 @@ function formatDuration(ms: number): string {
  * the instant it lapses, or lapsed since when. `lapsesAt` comes from
  * `sessionLapsesAt`, the computation the post and bind gates enforce.
  */
-function renderSessionLiveness(lapsesAt: Date | null, now: Date): string {
+function renderSessionLiveness(lapsesAt: Date | null, now: Date, expiresAt?: Date | null): string {
+  if (expiresAt && now.getTime() >= expiresAt.getTime()) {
+    return `liveness: EXPIRED at ${expiresAt.toISOString()} — its holder must start a new session for this worker; no force override is required for their own session`;
+  }
   if (!lapsesAt) return 'liveness: not live';
   const delta = lapsesAt.getTime() - now.getTime();
   return delta >= 0
     ? `liveness: LIVE until ${lapsesAt.toISOString()} (${formatDuration(delta)} left) unless driven first; ` +
-        'any attributed read, post or mark-read through it renews it'
+        (expiresAt ? `driving it may renew the idle deadline, never its hard expiry ${expiresAt.toISOString()}` :
+          'any attributed read, post or mark-read through it renews it')
     : `liveness: LAPSED at ${lapsesAt.toISOString()} (${formatDuration(-delta)} ago) — nothing drove it inside its ` +
         'idle window. It is still OPEN. If you hold this worker\'s name and no other session on it is live, your next ' +
         'team-chat post, read or mark-read through it RESUMES it (#1617); otherwise start a new session for this ' +
@@ -2639,14 +2643,15 @@ export function createMcpServerInstance(
       // as the GraphQL door does since #1540.
       const row = await db.session.findFirst({
         where: { id, endedAt: null, deletedAt: null, ...owner },
-        select: { type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+        select: { type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
       });
       if (!row) return;
       const lastEvent = (await loadLastEventBySession(db as never, [id])).get(id);
       if (!isSessionLive(row, lastEvent, new Date())) return;
+      const now = new Date();
       await db.session.updateMany({
-        where: { id, endedAt: null, deletedAt: null, ...owner },
-        data: { updatedAt: new Date() },
+        where: { id, endedAt: null, deletedAt: null, ...owner, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+        data: { updatedAt: now },
       });
     } catch (err) {
       // Deliberately swallowed — see the docstring. Logged, not raised.
@@ -9353,7 +9358,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               appId: true, workerId: true,
               // #1617: the liveness inputs, so each open row can say whether it
               // is live and when it lapses — before a post is refused, not after.
-              updatedAt: true, autoExpiredAt: true,
+              updatedAt: true, autoExpiredAt: true, expiresAt: true,
             },
           });
           const count = await tx.session.count({ where });
@@ -9436,7 +9441,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             : '    working as: nobody — this session is NOT bound to a worker, so anything it posts is attributed to you, not a teammate.\n') +
           (app ? `    app: ${app.name}\n` : '') +
           `    started: ${s.startedAt.toISOString()}${s.type ? ` · ${s.type}` : ''}` +
-          (s.endedAt ? '' : `\n    ${renderSessionLiveness(sessionLapsesAt(s, lastEventForLiveness.get(s.id)), nowForLiveness)}`) +
+          (s.endedAt ? '' : `\n    ${renderSessionLiveness(sessionLapsesAt(s, lastEventForLiveness.get(s.id)), nowForLiveness, s.expiresAt)}`) +
           (s.plan ? `\n    plan: ${s.plan}` : '') +
           (s.workerId && registerBlocks.has(s.workerId)
             ? `\n${registerBlocks.get(s.workerId)!.split('\n').map((l) => `    ${l}`).join('\n')}`
@@ -9727,7 +9732,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           ...recentlyTouchedFilter(now),
         },
         orderBy: [{ updatedAt: { sort: 'desc', nulls: 'last' } }, { startedAt: 'desc' }],
-        select: { id: true, workerId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+        select: { id: true, workerId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
         take: requestedWorker ? OPEN_SESSION_SCAN_CAP : OPEN_SESSION_SCAN_CAP + 1,
       });
       if (!requestedWorker && open.length > OPEN_SESSION_SCAN_CAP) {
@@ -10760,7 +10765,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           ],
           select: {
             id: true, userId: true, startedAt: true,
-            type: true, updatedAt: true, autoExpiredAt: true, endedAt: true,
+            type: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true,
           },
           take: OPEN_SESSION_SCAN_CAP,
         });
@@ -10795,7 +10800,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
               take: OPEN_SESSION_SCAN_CAP,
               select: {
                 id: true, userId: true, startedAt: true,
-                type: true, updatedAt: true, autoExpiredAt: true, endedAt: true,
+                type: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true,
               },
             })
           : [];
