@@ -1,38 +1,152 @@
 # Temporary AL session — preparation, no deployment authorization
 
-Two prepared alternatives, both serving only the chosen `AL_BASE_PATH` (a slash-delimited path ending in `/`, for example `/__passkey-al-RANDOM/`) on the **exact HTTPS ceremony origin Holger chooses**, RP `hadronmemory.com`. `ops:alpha` currently records the server API origin as `srv.hadronmemory.com`; the spec's apex URL is an example. Confirm the chosen host and its existing HTTPS route before deploying. Neither option uses the portal, auth tokens, Postgres, or any production enrollment/signing record. The fixture is synthetic v1/S0, not production v3. A browser may retain the throwaway passkey; remove it from the provider afterwards.
+Holger's hosting choices are settled; the one-hour session is **not booked**.
+This document is preparation, not authorization to change alpha, DNS, routing or
+any device settings. Source: [#2037](https://github.com/hadron-memory/hadron-server/issues/2037),
+Marco's relay of Holger's 2026-10-17 ruling (team chat #20335), and
+[#1865](https://github.com/hadron-memory/hadron-server/pull/1865)'s hosting review
+(Rook #10476 / Xylon #10479).
 
-## A — separate temporary container behind the existing Traefik origin (recommended)
+| Choice | Settled plan | Why / remaining input |
+| --- | --- | --- |
+| Q1: ceremony origin | **Dedicated AL subdomain, not `srv.hadronmemory.com`**; RP stays **`hadronmemory.com`** | No production-session cookies on the ceremony origin. Holger/ops must choose the name and add its DNS record; exact HTTPS origin/TLS and cookie isolation must be verified before use. A dedicated host alone does not exclude parent-domain cookies. |
+| Q2: exposure | **Fresh random base path** ending in `/` | Meets the reviewed exposure condition without reopening the random-path/allowlist choice. Keep the path private before use; it is not authentication. |
+| Q3: process | **Option A: temporary container behind Traefik** | Isolates the throwaway process/state, uses existing TLS/proxy infrastructure, and has a small removal surface; no Hadron restart or migration. |
 
-Prepared: `Dockerfile`, its build-context ignore file, and `al.compose.yml`. Run from this checkout after Holger's pick. Set AL_ORIGIN, AL_HOST, AL_BASE_PATH, AL_ENTRYPOINT and AL_PROXY_NETWORK to his origin and the existing Traefik settings. `docker compose -f scripts/passkey-spike/al.compose.yml up -d --build` builds Node 22 plus the exact approved SDK pair, creates one read-only non-root container on the proxy network, and adds a higher-priority Host+path router. No host port is published, no volume or DB is mounted, and the rest of the host's routing stays with its existing service. No server deployment/restart or migration is needed.
+Serve only the chosen `AL_BASE_PATH` on that exact HTTPS origin. Neither option
+uses the portal, auth tokens, Postgres, or production enrollment/signing records.
+The fixture is synthetic v1/S0, not production v3. Do not sign into production
+from the AL browser session. Before exposure, the authorized operator checks that
+requests to the AL origin carry no production-session cookies or auth headers
+(use a clean browser profile where needed); record only the result, never cookie
+values. If isolation cannot be established, stop rather than falling back to
+`srv.`. Remove throwaway provider passkeys afterwards.
 
-Touches alpha: temporary image, container and Docker router labels/network membership only. Existing TLS termination stays in place; the origin must already route to alpha, otherwise DNS/routing is an additional choice and this is not a minutes-only deployment. Trade-off: isolated process and easy removal, but needs Docker build capacity and verified proxy entrypoint/network. Docker is unavailable in the prep workstation, so the image has not been built here; the locked Node application itself was tested locally. Do not claim an image/deployment smoke test until it runs.
+## Failed-attempt lessons and per-device preflight
 
-Remove: `docker compose -f scripts/passkey-spike/al.compose.yml down` removes the container and its router labels, erasing all in-memory credentials. Remove temporary image afterwards if desired. Verify the path returns its ordinary 404 and the rest of the origin still works. No permanent new hostname, DNS record or TLS certificate is required.
+The previous attempt ran out of time: five-minute sessions and 60-second pairing
+codes were too short; [#1984](https://github.com/hadron-memory/hadron-server/pull/1984)
+made both configurable. Holger also reported device-setting friction and **does
+not use Apple Passwords**. The Mac leg spent about 30 minutes before the provider
+was chosen. Do not repeat an Apple-first prompt hunt or count the page's provider
+label as proof of which provider actually handled a ceremony.
 
-## B — temporary isolated Node process on alpha with a Traefik file-provider path
+**Known limits of the record:** Marco confirmed (team chat #20341) that no more
+specific device/settings record exists. His provider on each device, OS/browser
+versions, enabled providers, sync account and exact prior failure are **unknown**;
+do not reconstruct them from the old Apple/1Password checklist. Holger fills the
+following before the hour is booked. Record choices/settings, not account secrets.
 
-Prepared: `al-host.service`, `al-host.env.example`, `al-host-traefik.yml.example`, and this standalone directory plus `src/lib/signaturePayload.fixture.json`. Install under `/opt/hadron-passkey-al` as a dedicated unprivileged account, install the locked package with `npm ci --omit=dev`, fill the explicit origin and private Docker host-gateway bind address, then start the temporary systemd unit. Add the prepared Host+path router to the existing Traefik file provider, with the existing HTTPS entrypoint and private gateway address. No Hadron server change/restart or migration.
+| Device | OS + browser version | Actual passkey provider/version | Enabled extension / AutoFill setting, unlock + sync readiness | Rehearsed picker clicks |
+| --- | --- | --- | --- | --- |
+| Mac | **Unknown — Holger fills** | **Unknown — Holger fills; not assumed Apple Passwords** | **Unknown — verify with Holger** | **Unknown — record the actual prompt labels** |
+| iPhone | **Unknown — Holger fills** | **Unknown — Holger fills** | **Unknown — verify with Holger** | **Unknown — record the actual prompt labels** |
 
-Touches alpha: temporary `/opt` directory, dedicated account, environment file, systemd unit and one dynamic proxy snippet. Trade-off: no image build; more host cleanup and relies on an existing Node 22 runtime and file provider. Bind only the private proxy-facing address, not public interfaces; do not add an Internet-facing port. If Node 22/file-provider support is absent, this option is not ready in minutes and A is preferred.
+The provider on registration and signing must be named per leg. Confirm the
+provider app is installed/unlocked, the intended browser extension or iOS AutoFill
+provider is enabled, the intended sync account is available on both devices, and
+Bluetooth/proximity is available for the QR leg. Changes are made by Holger with
+his consent; record and restore any temporary setting changes. No device access
+or physical rehearsal is claimed by this documentation update.
+
+**Picker procedure to rehearse and record before starting the hour:**
+
+1. On Mac, unlock the chosen provider and confirm its browser extension is active.
+   On the AL page select Register, then explicitly choose that provider in the
+   save-passkey prompt, choose the intended vault/account and save the current
+   `synthetic-retention-user-TAG`. On Sign, select that same provider and TAG.
+   If the OS offers Apple Passwords by default, cancel or open its alternate
+   provider/device picker; do not accept Apple as Holger's normal provider.
+2. **If Holger chooses 1Password**, its browser prompt offers the save-passkey
+   flow; for another credential choose **Other options** (or Down Arrow), then
+   the current TAG. On iPhone the documented setup is **Settings → General →
+   AutoFill & Passwords → AutoFill Passwords and Passkeys → 1Password**; unlock
+   1Password, choose the current passkey and Continue. Verify these labels on
+   the recorded OS version; if they differ, write the actual steps before the
+   appointment rather than spending the session searching.
+3. For QR/hybrid, on desktop Sign choose **another device / use a phone** to
+   display the WebAuthn QR. Scan with the phone camera, choose the intended
+   provider (1Password if that is the chosen leg), complete proximity and device
+   verification. Distinguish this from the AL **pairing code**, which joins the
+   synthetic browser session; neither replaces the other.
+4. If another provider is chosen, fill its actual save/select/unlock steps in the
+   table first. If the required provider cannot be selected, stop that leg as
+   **setup blocked**; do not silently substitute Apple or another provider.
+
+Picker references, checked 2026-10-17:
+[1Password browser passkeys](https://support.1password.com/save-use-passkeys/) and
+[1Password iPhone AutoFill/passkeys](https://support.1password.com/ios-autofill/).
+These are conditional recipes, **not evidence that Holger uses 1Password**.
+Apple/iCloud sync below is a separate explicitly chosen test leg; if Holger does
+not opt into it, record **NOT RUN**, not a pass or an implicit provider change.
+
+## One-hour run order and stop / fallback
+
+Before booking: Holger supplies the device/provider table and the exact picker
+steps; Holger/ops has separately authorized and prepared the dedicated DNS/TLS,
+random path, Traefik network and isolated container. Record the deployed commit
+and the evidence owner (Greta's evidence location below; confirm who operates it
+when scheduling). No alpha action is authorized by this checklist.
+
+Use `AL_SESSION_TTL_SECONDS=1800` and `AL_PAIRING_TTL_SECONDS=300` for the selected
+Compose deployment (30 minutes / five minutes; the old defaults are 300/60).
+Ceremony options still expire after one minute: request them just before use.
+Start a **fresh synthetic session per independent leg**, issuing a pairing code
+only when the other device is ready. A join never extends the original session.
+The 30-minute lifetime is not a promise that one session covers the whole hour.
+
+| Minute | Run / evidence |
+| --- | --- |
+| 0–10 | Check exact HTTPS origin, RP, cookie isolation and displayed TTLs; read the filled device/provider table aloud and verify picker choices. Stop if a prerequisite is unknown. |
+| 10–20 | Fresh session: register and sign on Mac using the chosen provider; capture provider prompt/TAG and both verify JSON results. |
+| 20–35 | Join from iPhone, choose that same provider and synced TAG; sign and compare `credentialIdHash`. Apple/iCloud leg only if explicitly chosen; otherwise record that coverage gap. |
+| 35–45 | Fresh session: phone registration and desktop QR/hybrid signing; capture actual QR/proximity/provider flow, required UV, binding and hash. |
+| 45–50 | At most one bounded retry or an explicitly agreed remaining provider leg; preserve separate evidence and do not relabel a different-provider pass. |
+| 50–60 | Stop new ceremonies, classify every leg (PASS / FAIL / setup blocked / NOT RUN), save redacted evidence, remove AL TAGs and restore settings. Authorized operator removes the temporary service/router and verifies cleanup; unfinished cleanup stays an owned action. |
+
+**Stop / fallback rule:** allow at most five minutes of provider/pairing setup
+troubleshooting per leg and one fresh-session retry, within that leg's time box.
+If still blocked, move to an already-preflighted leg only with Holger's agreement;
+mark the blocked leg honestly. At minute 50 stop new tests to protect cleanup.
+Wrong origin/RP, UV=false, unexpected production cookies or any completed
+verification failure stops the affected run immediately for evidence and Holger's
+GO/NO-GO decision. Never relax UV/origin/RP checks, switch to `srv.`, or deploy
+option B as an unapproved fallback. If hosting or all physical legs are blocked,
+stop and reschedule; previously recorded synthetic rehearsal may explain the
+workflow but cannot replace a real-device PASS. An omitted Apple or QR leg keeps
+the corresponding #1630 coverage outstanding; no full feature GO is inferred.
+
+## A — selected: temporary container behind Traefik on the dedicated AL origin
+
+Prepared: `Dockerfile`, its build-context ignore file, and `al.compose.yml`. Run from the approved checkout only after separate deployment authorization. Set AL_ORIGIN, AL_HOST, AL_BASE_PATH, AL_ENTRYPOINT and AL_PROXY_NETWORK to his origin and the existing Traefik settings. `docker compose -f scripts/passkey-spike/al.compose.yml up -d --build` builds Node 22 plus the exact approved SDK pair, creates one read-only non-root container on the proxy network, and adds a higher-priority Host+path router. No host port is published, no volume or DB is mounted, and the rest of the host's routing stays with its existing service. No server deployment/restart or migration is needed.
+
+Touches alpha: temporary image, container and Docker router labels/network membership only. Existing TLS termination stays in place; the dedicated origin must already route to alpha with valid TLS before the booked hour. The required new DNS record is Holger/ops work, not an open hosting choice. Trade-off: isolated process and easy removal, but needs Docker build capacity and verified proxy entrypoint/network. Docker is unavailable in the prep workstation, so the image has not been built here; the locked Node application itself was tested locally. Do not claim an image/deployment smoke test until it runs.
+
+Remove: `docker compose -f scripts/passkey-spike/al.compose.yml down` removes the container and its router labels, erasing all in-memory credentials. Remove temporary image afterwards if desired. Verify the path returns its ordinary 404 and the rest of the origin still works. Holger/ops owns the dedicated DNS/TLS record disposition; remove or retain it only as separately agreed. Do not remove unrelated DNS or certificates.
+
+## B — archived alternative, not selected or an automatic fallback
+
+Retained for reference only; changing the ruled container plan requires a new explicit decision. Prepared: `al-host.service`, `al-host.env.example`, `al-host-traefik.yml.example`, and this standalone directory plus `src/lib/signaturePayload.fixture.json`. Install under `/opt/hadron-passkey-al` as a dedicated unprivileged account, install the locked package with `npm ci --omit=dev`, fill the explicit origin and private Docker host-gateway bind address, then start the temporary systemd unit. Add the prepared Host+path router to the existing Traefik file provider, with the existing HTTPS entrypoint and private gateway address. No Hadron server change/restart or migration.
+
+Touches alpha: temporary `/opt` directory, dedicated account, environment file, systemd unit and one dynamic proxy snippet. Trade-off: no image build; more host cleanup and relies on an existing Node 22 runtime and file provider. Bind only the private proxy-facing address, not public interfaces; do not add an Internet-facing port. This is not the scheduled plan; if A is blocked, stop/reschedule rather than switching to B without authorization.
 
 Remove: delete the proxy snippet and confirm the path no longer resolves to the demo, stop/remove the unit, remove `/opt/hadron-passkey-al`, env file and dedicated account. State disappears on stop. Existing application/proxy services remain running.
 
 ## Shared live preflight and evidence
 
-Greta owns evidence under `sprints:sprint-2:qa:hadron-server-1630:al-session`. Confirm HTTPS URL exactly, RP `hadronmemory.com`, browser versions, OS versions, and no portal session required. Capture each verify JSON (verified, userVerified, credentialIdHash, origin, rpID, counter, backupEligible, backedUp, deviceType), actual provider chosen, and screenshot of provider prompt/result. Provider in the page is a human label, not cryptographic provider identification. Do not capture private-key material, raw cookie or pairing codes. All physical legs require UV=true; wrong origin/RP or UV=false is a failure. Distinguish user cancellation/environment setup failure from a completed assertion that violates the rule. A failed actual-device leg is reported to Holger for the feature GO/NO-GO decision; it is never silently replaced by the synthetic dry run.
+Greta owns evidence under `sprints:sprint-2:qa:hadron-server-1630:al-session`. Confirm the evidence owner at scheduling (Greta was the original assignment). Confirm HTTPS URL exactly, RP `hadronmemory.com`, browser versions, OS versions, and no portal session required. Capture each verify JSON (verified, userVerified, credentialIdHash, origin, rpID, counter, backupEligible, backedUp, deviceType), actual provider chosen, and screenshot of provider prompt/result. Provider in the page is a human label, not cryptographic provider identification. Do not capture private-key material, raw cookie or pairing codes. All physical legs require UV=true; wrong origin/RP or UV=false is a failure. Distinguish user cancellation/environment setup failure from a completed assertion that violates the rule. A failed actual-device leg is reported to Holger for the feature GO/NO-GO decision; it is never silently replaced by the synthetic dry run.
 
-By default the demo session lasts five minutes, options one minute; pair codes are single-use and last 60 seconds. The page displays the configured session/pairing lifetimes. For the resumed AL session, after Holger authorizes rebuilding, set `AL_SESSION_TTL_SECONDS=1800 AL_PAIRING_TTL_SECONDS=300` with Compose (30-minute session/cookie, five-minute pairing). The host-process equivalents are `PASSKEY_SPIKE_SESSION_TTL_SECONDS=1800` and `PASSKEY_SPIKE_PAIRING_TTL_SECONDS=300`. Each accepts whole seconds from 1 through 86400; invalid values refuse startup. Pair codes and joined cookies never outlive the original session; joining does not renew it. Options remain one minute. Rebuilding discards existing in-memory sessions. Record the changed head and timing as a deviation from #1865 before resuming; do not deploy before Holger says go. Register afresh after expiry. For every leg, choose the page's evidence label AND explicitly select the real provider in the browser/system prompt. If the prompt selected a different provider, mark that attempt misrouted and repeat; do not count it as the requested leg.
+By default the demo session lasts five minutes, options one minute; pair codes are single-use and last 60 seconds. The page displays the configured session/pairing lifetimes. For the resumed AL session, after Holger authorizes the deployment/rebuild, set `AL_SESSION_TTL_SECONDS=1800 AL_PAIRING_TTL_SECONDS=300` with Compose (30-minute session/cookie, five-minute pairing). The host-process equivalents are `PASSKEY_SPIKE_SESSION_TTL_SECONDS=1800` and `PASSKEY_SPIKE_PAIRING_TTL_SECONDS=300`. Each accepts whole seconds from 1 through 86400; invalid values refuse startup. Pair codes and joined cookies never outlive the original session; joining does not renew it. Options remain one minute. Rebuilding discards existing in-memory sessions. Record the actual deployed head and configured timing relative to #1865/#1984 before resuming; do not deploy before Holger says go. Register afresh after expiry. For every leg, choose the page's evidence label AND explicitly select the real provider in the browser/system prompt. If the prompt selected a different provider, mark that attempt misrouted and repeat; do not count it as the requested leg.
 
-### 1 — iCloud Keychain, Mac → iPhone sync
+### Apple/iCloud sync — explicit opt-in coverage, not the default leg
 
-On Mac, choose Apple's Passwords/iCloud Keychain rather than 1Password (use the prompt's other-options/Passwords picker; temporarily disable the 1Password extension for this leg if it intercepts). Register with Touch ID/device authentication. Create a pairing code. On iPhone, open the exact same HTTPS page, paste/join within the displayed pairing lifetime, select Apple's Passwords/iCloud Keychain, then sign using Face ID/Touch ID/device passcode. Compare credentialIdHash in the Mac registration and phone signing responses; they must match. Signing uses an empty allowCredentials list (discoverable selection). A second registration is refused by the server; use a new browser session after expiry to register again. Capture both verify results and the actual provider. If quick, repeat in reverse with a fresh session. Expected: both verified, UV=true, exact origin/RP, backup flags captured, synced credential counter captured. Fail: credentialIdHash differs, the registered credential cannot sign on the other device, UV=false, wrong origin/RP, or provider ambiguous. Pairing failure/expiry is a setup retry, not a sync pass or fail.
+Run only if Holger explicitly chooses this provider for this leg; he does not normally use Apple Passwords. Otherwise record NOT RUN. On Mac, choose Apple's Passwords/iCloud Keychain rather than 1Password (use the prompt's other-options/Passwords picker; temporarily disable the 1Password extension for this leg if it intercepts). Register with Touch ID/device authentication. Create a pairing code. On iPhone, open the exact same HTTPS page, paste/join within the displayed pairing lifetime, select Apple's Passwords/iCloud Keychain, then sign using Face ID/Touch ID/device passcode. Compare credentialIdHash in the Mac registration and phone signing responses; they must match. Signing uses an empty allowCredentials list (discoverable selection). A second registration is refused by the server; use a new browser session after expiry to register again. Capture both verify results and the actual provider. If quick, repeat in reverse with a fresh session. Expected: both verified, UV=true, exact origin/RP, backup flags captured, synced credential counter captured. Fail: credentialIdHash differs, the registered credential cannot sign on the other device, UV=false, wrong origin/RP, or provider ambiguous. Pairing failure/expiry is a setup retry, not a sync pass or fail.
 
 ### 2 — cross-device QR/hybrid
 
 Fresh session: register a passkey on the phone with the intended provider, create pairing code, join from the desktop page. Desktop Sign → choose another device/iPhone/use a phone, displaying the WebAuthn QR prompt. Scan using phone, complete the Bluetooth/proximity prompt and phone verification. Do not accidentally accept the desktop's locally synced credential; capture the QR and actual phone prompt/provider. Expected: desktop receives verified assertion, UV=true, exact origin/RP, flags/counter captured. Fail: completed flow fails verification or loses required UV/origin/RP. No QR choice or failed proximity flow is a device/browser capability failure to record, not synthetic success.
 
-### 3 — 1Password provider on Mac and iPhone
+### 1Password provider on Mac and iPhone — only if selected in preflight
 
 Confirm the browser extension is enabled on Mac and 1Password is enabled/selected as the iOS passkey credential provider. Choose 1Password explicitly for registration and signing; record whether unlock used biometric or master password without recording the password. Register on Mac, sign there, then pair the same session on iPhone and sign using the 1Password provider. Expected: actual provider is 1Password on each device; UV=true after unlock (presence alone is insufficient), exact origin/RP; capture backupEligible/backedUp and counter, expected commonly zero but report the actual value. Fail: UV=false, wrong binding, same credential unavailable across devices, or verification refusal. A nonzero counter is evidence to assess, not an automatic protocol failure.
 
@@ -59,7 +173,7 @@ options and verify reject a second registration, including options pre-issued
 before first completion; a synchronous in-flight reservation also prevents two
 completions replacing each other. These are tested synthetically, and do not
 claim a real-device session has run. Rook's hosting conditions remain: dedicated
-subdomain without production-session cookies, random base path or allowlist,
+subdomain without production-session cookies and the chosen random base path,
 proxy-network confirmation, and delete each throwaway credential from Apple
 Passwords/iCloud and 1Password on both devices after capture.
 
@@ -69,8 +183,8 @@ Passwords/iCloud and 1Password on both devices after capture.
 The Compose router PathPrefix and application cookie/routing base path use the
 same required AL_BASE_PATH. Holger's random-path choice is configuration, with
 no new image or source head; use a fresh unpredictable path, ending in `/`.
-For an allowlist choice use the approved path and install/verify the allowlist
-before exposing the router. A random path mitigates casual cap exhaustion; it
+The random-path choice is settled; an allowlist is not a substitute to select
+during this attempt without a new decision. A random path mitigates casual cap exhaustion; it
 is not authentication and must not be published in public evidence before use.
 The host-process template's PASSKEY_SPIKE_BASE_PATH and proxy snippet PathPrefix
 must likewise be set to the same chosen value.
