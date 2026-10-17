@@ -26,14 +26,15 @@ values. If isolation cannot be established, stop rather than falling back to
 
 ## Failed-attempt lessons and per-device preflight
 
-The previous attempt ran out of time: five-minute sessions and 60-second pairing
-codes were too short; [#1984](https://github.com/hadron-memory/hadron-server/pull/1984)
+Holger reports that everything worked but he timed out on every attempt; which
+clock expired is unproved. Five-minute sessions and 60-second pairing
+codes were too short for the workflow; [#1984](https://github.com/hadron-memory/hadron-server/pull/1984)
 made both configurable. Holger also reported device-setting friction and **did
 not use Apple Passwords for the Mac flow**. The Mac leg spent about 30 minutes
 before the provider was chosen. Do not repeat an Apple-first prompt hunt or count the page's provider
 label as proof of which provider actually handled a ceremony.
 
-**Device record supplied by Holger via Marco (team chat #20401):** the Mac
+**Device record supplied by Holger via Marco (team chat #20401 and #20411):** the Mac
 uses 1Password; the iPhone offers both 1Password and Apple Passwords, with Apple
 Passwords enabled on the phone **for this test**. This updates the earlier
 unknown record (#20341); it does not make Apple the Mac provider. Complete the
@@ -41,8 +42,8 @@ remaining unknowns before booking. Record choices/settings, not account secrets.
 
 | Device | OS + browser version | Actual passkey provider/version | Enabled extension / AutoFill setting, unlock + sync readiness | Rehearsed picker clicks |
 | --- | --- | --- | --- | --- |
-| Mac | **macOS 26.3.1 (a) (25D771280a); Chrome, version unknown** | **1Password**; version unknown | **1Password extension state, same-account sync, unlock and Bluetooth/other settings unknown — Holger confirms** | Select 1Password and the current TAG; record actual Chrome prompt labels during preflight |
-| iPhone | **iOS 27.0.1**; browser/version unknown | **1Password AND Apple Passwords**; Apple Passwords enabled for the test; 1Password version unknown | Confirm 1Password AutoFill readiness, whether both devices share one 1Password account, unlock and Bluetooth/other settings — **still unknown** | Select **1Password for sync**, **Apple Passwords for the planned phone QR leg**; record actual prompt labels |
+| Mac | **macOS 26.3.1 (a) (25D771280a); Chrome 153.0.8010.55** | **1Password**; version unknown | **1Password extension enabled; same 1Password account on both devices confirmed**. Confirm unlock and other settings; Bluetooth must be ON for QR/hybrid | Select 1Password and the current TAG; record actual Chrome prompt labels during preflight |
+| iPhone | **iOS 27.0.1**; browser/version unknown | **1Password AND Apple Passwords**; Apple Passwords enabled for the test; 1Password version unknown | **Same 1Password account confirmed**. Confirm AutoFill readiness, unlock and other settings; Bluetooth must be ON for QR/hybrid | Select **1Password for sync**, **Apple Passwords for the planned phone QR leg**; record actual prompt labels |
 
 ### Provider selection for each scheduled leg
 
@@ -57,13 +58,14 @@ remaining unknowns before booking. Record choices/settings, not account secrets.
 Because the phone offers both providers, cancel a prompt for the wrong provider
 and explicitly switch to the matrix's selection. Record the **actual** provider
 beside each result; neither the page label nor the phone's enabled-provider list
-proves which one signed. Do not infer a shared 1Password account or Bluetooth
-readiness from the fact that both apps/providers are present.
+proves which one signed. The shared 1Password account is confirmed; actual sync
+and unlock readiness still need checking. Holger can switch Bluetooth: set it
+**ON on both devices for QR/hybrid**, and verify proximity before requesting options.
 
 The provider on registration and signing must be named per leg. Confirm the
 provider app is installed/unlocked, the intended browser extension or iOS AutoFill
 provider is enabled, the intended sync account is available on both devices, and
-Bluetooth/proximity is available for the QR leg. Changes are made by Holger with
+Bluetooth is ON on both devices and proximity is available for the QR leg. Changes are made by Holger with
 his consent; record and restore any temporary setting changes. No device access
 or physical rehearsal is claimed by this documentation update.
 
@@ -94,8 +96,8 @@ or physical rehearsal is claimed by this documentation update.
 Picker references, checked 2026-10-17:
 [1Password browser passkeys](https://support.1password.com/save-use-passkeys/) and
 [1Password iPhone AutoFill/passkeys](https://support.1password.com/ios-autofill/).
-These are picker references, **not proof of the still-unknown extension,
-account, settings or actual ceremony selection**.
+These are picker references, **not proof of actual sync readiness, remaining
+settings or actual ceremony selection**.
 Apple/iCloud sync below is a separate explicitly chosen test leg; if Holger does
 not opt into it, record **NOT RUN**, not a pass or an implicit provider change.
 
@@ -109,7 +111,12 @@ when scheduling). No alpha action is authorized by this checklist.
 
 Use `AL_SESSION_TTL_SECONDS=1800` and `AL_PAIRING_TTL_SECONDS=300` for the selected
 Compose deployment (30 minutes / five minutes; the old defaults are 300/60).
-Ceremony options still expire after one minute: request them just before use.
+Current source retains a **60-second server ceremony lifetime** and a **20-second
+browser timeout hint** (the browser may adjust that hint): request options just
+before use. Neither is configurable in #1984. Follow-up
+[#2039](https://github.com/hadron-memory/hadron-server/issues/2039) covers generous
+configurable ceremony timing; it is not implemented by this docs-only change,
+and no particular timer is proved to have caused the earlier failures.
 Start a **fresh synthetic session per independent leg**, issuing a pairing code
 only when the other device is ready. A join never extends the original session.
 The 30-minute lifetime is not a promise that one session covers the whole hour.
@@ -153,9 +160,12 @@ Remove: delete the proxy snippet and confirm the path no longer resolves to the 
 
 ## Shared live preflight and evidence
 
+The following reference procedures follow the provider matrix and one-hour stop
+rules above; they do not add scheduled legs or extend the time box.
+
 Greta owns evidence under `sprints:sprint-2:qa:hadron-server-1630:al-session`. Confirm the evidence owner at scheduling (Greta was the original assignment). Confirm HTTPS URL exactly, RP `hadronmemory.com`, browser versions, OS versions, and no portal session required. Capture each verify JSON (verified, userVerified, credentialIdHash, origin, rpID, counter, backupEligible, backedUp, deviceType), actual provider chosen, and screenshot of provider prompt/result. Provider in the page is a human label, not cryptographic provider identification. Do not capture private-key material, raw cookie or pairing codes. All physical legs require UV=true; wrong origin/RP or UV=false is a failure. Distinguish user cancellation/environment setup failure from a completed assertion that violates the rule. A failed actual-device leg is reported to Holger for the feature GO/NO-GO decision; it is never silently replaced by the synthetic dry run.
 
-By default the demo session lasts five minutes, options one minute; pair codes are single-use and last 60 seconds. The page displays the configured session/pairing lifetimes. For the resumed AL session, after Holger authorizes the deployment/rebuild, set `AL_SESSION_TTL_SECONDS=1800 AL_PAIRING_TTL_SECONDS=300` with Compose (30-minute session/cookie, five-minute pairing). The host-process equivalents are `PASSKEY_SPIKE_SESSION_TTL_SECONDS=1800` and `PASSKEY_SPIKE_PAIRING_TTL_SECONDS=300`. Each accepts whole seconds from 1 through 86400; invalid values refuse startup. Pair codes and joined cookies never outlive the original session; joining does not renew it. Options remain one minute. Rebuilding discards existing in-memory sessions. Record the actual deployed head and configured timing relative to #1865/#1984 before resuming; do not deploy before Holger says go. Register afresh after expiry. For every leg, choose the page's evidence label AND explicitly select the real provider in the browser/system prompt. If the prompt selected a different provider, mark that attempt misrouted and repeat; do not count it as the requested leg.
+By default the demo session lasts five minutes, options one minute; pair codes are single-use and last 60 seconds. The page displays the configured session/pairing lifetimes. For the resumed AL session, after Holger authorizes the deployment/rebuild, set `AL_SESSION_TTL_SECONDS=1800 AL_PAIRING_TTL_SECONDS=300` with Compose (30-minute session/cookie, five-minute pairing). The host-process equivalents are `PASSKEY_SPIKE_SESSION_TTL_SECONDS=1800` and `PASSKEY_SPIKE_PAIRING_TTL_SECONDS=300`. Each accepts whole seconds from 1 through 86400; invalid values refuse startup. Pair codes and joined cookies never outlive the original session; joining does not renew it. Server ceremony expiry remains 60 seconds, with a 20-second browser timeout hint; see #2039 above. Rebuilding discards existing in-memory sessions. Record the actual deployed head and configured timing relative to #1865/#1984 before resuming; do not deploy before Holger says go. Register afresh after expiry. For every leg, choose the page's evidence label AND explicitly select the real provider in the browser/system prompt. If the prompt selected a different provider, mark that attempt misrouted and repeat; do not count it as the requested leg.
 
 ### Apple/iCloud sync — explicit opt-in coverage, not the default leg
 
