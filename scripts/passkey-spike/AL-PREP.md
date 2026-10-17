@@ -28,21 +28,37 @@ values. If isolation cannot be established, stop rather than falling back to
 
 The previous attempt ran out of time: five-minute sessions and 60-second pairing
 codes were too short; [#1984](https://github.com/hadron-memory/hadron-server/pull/1984)
-made both configurable. Holger also reported device-setting friction and **does
-not use Apple Passwords**. The Mac leg spent about 30 minutes before the provider
-was chosen. Do not repeat an Apple-first prompt hunt or count the page's provider
+made both configurable. Holger also reported device-setting friction and **did
+not use Apple Passwords for the Mac flow**. The Mac leg spent about 30 minutes
+before the provider was chosen. Do not repeat an Apple-first prompt hunt or count the page's provider
 label as proof of which provider actually handled a ceremony.
 
-**Known limits of the record:** Marco confirmed (team chat #20341) that no more
-specific device/settings record exists. His provider on each device, OS/browser
-versions, enabled providers, sync account and exact prior failure are **unknown**;
-do not reconstruct them from the old Apple/1Password checklist. Holger fills the
-following before the hour is booked. Record choices/settings, not account secrets.
+**Device record supplied by Holger via Marco (team chat #20401):** the Mac
+uses 1Password; the iPhone offers both 1Password and Apple Passwords, with Apple
+Passwords enabled on the phone **for this test**. This updates the earlier
+unknown record (#20341); it does not make Apple the Mac provider. Complete the
+remaining unknowns before booking. Record choices/settings, not account secrets.
 
 | Device | OS + browser version | Actual passkey provider/version | Enabled extension / AutoFill setting, unlock + sync readiness | Rehearsed picker clicks |
 | --- | --- | --- | --- | --- |
-| Mac | **Unknown — Holger fills** | **Unknown — Holger fills; not assumed Apple Passwords** | **Unknown — verify with Holger** | **Unknown — record the actual prompt labels** |
-| iPhone | **Unknown — Holger fills** | **Unknown — Holger fills** | **Unknown — verify with Holger** | **Unknown — record the actual prompt labels** |
+| Mac | **macOS 26.3.1 (a) (25D771280a); Chrome, version unknown** | **1Password**; version unknown | **1Password extension state, same-account sync, unlock and Bluetooth/other settings unknown — Holger confirms** | Select 1Password and the current TAG; record actual Chrome prompt labels during preflight |
+| iPhone | **iOS 27.0.1**; browser/version unknown | **1Password AND Apple Passwords**; Apple Passwords enabled for the test; 1Password version unknown | Confirm 1Password AutoFill readiness, whether both devices share one 1Password account, unlock and Bluetooth/other settings — **still unknown** | Select **1Password for sync**, **Apple Passwords for the planned phone QR leg**; record actual prompt labels |
+
+### Provider selection for each scheduled leg
+
+| Leg | Mac selection | iPhone selection | What it can prove |
+| --- | --- | --- | --- |
+| Mac registration + local signing | **1Password**, current TAG | Not used | Mac provider/UV/binding |
+| Mac → iPhone synced credential | **1Password** registration; same synthetic session | **1Password**, same TAG; do **not** accept Apple Passwords here | 1Password sync only after same-account readiness is confirmed |
+| Phone registration → desktop QR/hybrid | **Use a phone / another device**; bypass local 1Password selection | **Apple Passwords**, current fresh-session TAG | Phone Apple credential through QR, **not Apple/iCloud sync from Mac** |
+| Optional extra QR/provider retry, only inside the remaining time box | Explicitly agreed flow, fresh session | **1Password only if named before starting this separate leg** | Separate evidence, never relabelled as Apple evidence |
+| Apple/iCloud Mac → iPhone sync | **Not scheduled under the recorded Mac 1Password setup** | Apple Passwords alone is insufficient | NOT RUN unless Holger separately opts into Apple on Mac and completes that preflight |
+
+Because the phone offers both providers, cancel a prompt for the wrong provider
+and explicitly switch to the matrix's selection. Record the **actual** provider
+beside each result; neither the page label nor the phone's enabled-provider list
+proves which one signed. Do not infer a shared 1Password account or Bluetooth
+readiness from the fact that both apps/providers are present.
 
 The provider on registration and signing must be named per leg. Confirm the
 provider app is installed/unlocked, the intended browser extension or iOS AutoFill
@@ -59,8 +75,8 @@ or physical rehearsal is claimed by this documentation update.
    `synthetic-retention-user-TAG`. On Sign, select that same provider and TAG.
    If the OS offers Apple Passwords by default, cancel or open its alternate
    provider/device picker; do not accept Apple as Holger's normal provider.
-2. **If Holger chooses 1Password**, its browser prompt offers the save-passkey
-   flow; for another credential choose **Other options** (or Down Arrow), then
+2. **For 1Password (the Mac and phone-sync selections)**, its browser prompt
+   offers the save-passkey flow; for another credential choose **Other options** (or Down Arrow), then
    the current TAG. On iPhone the documented setup is **Settings → General →
    AutoFill & Passwords → AutoFill Passwords and Passkeys → 1Password**; unlock
    1Password, choose the current passkey and Continue. Verify these labels on
@@ -68,8 +84,8 @@ or physical rehearsal is claimed by this documentation update.
    appointment rather than spending the session searching.
 3. For QR/hybrid, on desktop Sign choose **another device / use a phone** to
    display the WebAuthn QR. Scan with the phone camera, choose the intended
-   provider (1Password if that is the chosen leg), complete proximity and device
-   verification. Distinguish this from the AL **pairing code**, which joins the
+   provider (**Apple Passwords for the scheduled phone QR leg**), complete
+   proximity and device verification. Distinguish this from the AL **pairing code**, which joins the
    synthetic browser session; neither replaces the other.
 4. If another provider is chosen, fill its actual save/select/unlock steps in the
    table first. If the required provider cannot be selected, stop that leg as
@@ -78,7 +94,8 @@ or physical rehearsal is claimed by this documentation update.
 Picker references, checked 2026-10-17:
 [1Password browser passkeys](https://support.1password.com/save-use-passkeys/) and
 [1Password iPhone AutoFill/passkeys](https://support.1password.com/ios-autofill/).
-These are conditional recipes, **not evidence that Holger uses 1Password**.
+These are picker references, **not proof of the still-unknown extension,
+account, settings or actual ceremony selection**.
 Apple/iCloud sync below is a separate explicitly chosen test leg; if Holger does
 not opt into it, record **NOT RUN**, not a pass or an implicit provider change.
 
@@ -101,8 +118,8 @@ The 30-minute lifetime is not a promise that one session covers the whole hour.
 | --- | --- |
 | 0–10 | Check exact HTTPS origin, RP, cookie isolation and displayed TTLs; read the filled device/provider table aloud and verify picker choices. Stop if a prerequisite is unknown. |
 | 10–20 | Fresh session: register and sign on Mac using the chosen provider; capture provider prompt/TAG and both verify JSON results. |
-| 20–35 | Join from iPhone, choose that same provider and synced TAG; sign and compare `credentialIdHash`. Apple/iCloud leg only if explicitly chosen; otherwise record that coverage gap. |
-| 35–45 | Fresh session: phone registration and desktop QR/hybrid signing; capture actual QR/proximity/provider flow, required UV, binding and hash. |
+| 20–35 | Join from iPhone and explicitly choose **1Password**, same synced TAG; sign and compare `credentialIdHash`. Same-account readiness must be confirmed. Record Apple/iCloud Mac sync as NOT RUN under the current setup. |
+| 35–45 | Fresh session: phone registration with **Apple Passwords**, then desktop QR/hybrid signing via that phone (not local Mac 1Password); capture actual prompts, required UV, binding and hash. |
 | 45–50 | At most one bounded retry or an explicitly agreed remaining provider leg; preserve separate evidence and do not relabel a different-provider pass. |
 | 50–60 | Stop new ceremonies, classify every leg (PASS / FAIL / setup blocked / NOT RUN), save redacted evidence, remove AL TAGs and restore settings. Authorized operator removes the temporary service/router and verifies cleanup; unfinished cleanup stays an owned action. |
 
