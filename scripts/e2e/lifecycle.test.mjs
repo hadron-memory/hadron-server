@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
@@ -119,19 +119,34 @@ test('failed ownership write terminates its detached forwarder', async t => {
 
 // #1963 — a fresh Incus instance's /etc/resolv.conf points at
 // /run/systemd/resolve/stub-resolv.conf, which dangles for the first moments
-// after launch. The stub models that: resolution fails for the first
-// `recoverAfter` probes (or until a seed that REPLACED the link), and appending
-// through the link fails the way the real one does.
-for (const [scenario, recoverAfter, wait, expectSeed] of [
-  ['resolver answers a few seconds after launch: nothing is seeded', 4, '15', false],
-  ['resolver never answers: the seed replaces the dangling link', 999, '2', true],
-]) {
-  test(`E2E stack DNS guard (#1963): ${scenario}`, { skip: process.platform !== 'linux' }, t => {
+// after launch. These tests drive the real shell path in stack.sh against a stub
+// `incus` whose "instance" is a temp directory: the seed command really runs
+// (with /etc/resolv.conf mapped into it), so appending through a dangling link
+// fails the way the real one does, and resolution is "answered" only once a
+// probe count has passed or the seed left a static resolver behind.
+const dnsMatrix = [
+  // [name, resolv.conf fixture, probes that fail, E2E_DNS_WAIT_SECONDS, expect]
+  ['healthy resolver: nothing is seeded', 'symlink', 0, '3', { status: 'proceeds', seeded: false }],
+  ['slow boot: waits, leaves resolv.conf alone', 'symlink', 4, '15', { status: 'proceeds', seeded: false }],
+  ['persistent failure, dangling link: replaced, not appended through', 'symlink', 999, '2', { status: 'proceeds', seeded: true, kind: 'file' }],
+  ['persistent failure, regular file: fallback is not duplicated', 'file', 999, '2', { status: 'proceeds', seeded: true, kind: 'file' }],
+  ['fallback written but resolver still dead: bounded exit before transfer', 'symlink', 999, '2', { status: 'dead' }],
+  ['fallback cannot be written: clear failure before transfer', 'undeletable', 999, '2', { status: 'unwritable' }],
+];
+for (const [name, fixture, failProbes, wait, expect] of dnsMatrix) {
+  test(`E2E stack DNS guard (#1963): ${name}`, { skip: process.platform !== 'linux', timeout: 120000 }, t => {
     const root = mkdtempSync(join(tmpdir(), 'hadron-e2e-dns-'));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const bin = join(root, 'bin'); mkdirSync(bin);
+    const fs = join(root, 'instance-fs'); mkdirSync(fs);
+    const resolv = join(fs, 'resolv.conf');
+    if (fixture === 'symlink') symlinkSync(join(fs, 'run/systemd/resolve/stub-resolv.conf'), resolv);
+    else if (fixture === 'file') writeFileSync(resolv, 'nameserver 10.0.0.1\n');
+    else mkdirSync(resolv);
     const log = join(root, 'calls');
-    writeFileSync(join(bin, 'docker'), '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+    writeFileSync(join(bin, 'docker'), '#!/bin/sh\necho "docker $*" >> \'' + log + '\'\nexit 99\n', { mode: 0o700 });
+    // `dead` keeps the resolver dead even after the seed.
+    const deadAfterSeed = expect.status === 'dead';
     writeFileSync(join(bin, 'incus'), `#!/bin/sh
 printf '%s\\n' "$*" >> '${log}'
 case "$1" in
@@ -139,29 +154,37 @@ info) exit 1 ;;
 exec)
   if [ "$4" = getent ]; then
     n=$(cat '${root}/probes' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '${root}/probes'
-    [ -f '${root}/seeded' ] && exit 0
-    [ "$n" -gt ${recoverAfter} ] && exit 0
+    ${deadAfterSeed ? '' : `[ -f '${resolv}' ] && [ ! -L '${resolv}' ] && grep -q '^nameserver 1.1.1.1$' '${resolv}' && exit 0`}
+    [ "$n" -gt ${failProbes} ] && exit 0
     exit 2
   fi
   if [ "$4" = sh ]; then
-    case "$6" in
-      *"rm -f /etc/resolv.conf"*) touch '${root}/seeded' ;;
-      *resolv.conf*) echo "sh: 1: cannot create /etc/resolv.conf: Directory nonexistent" >&2; exit 2 ;;
-    esac
+    script=$(printf '%s' "$6" | sed "s#/etc/resolv.conf#${resolv}#g")
+    sh -c "$script"; exit $?
   fi
   exit 0 ;;
 *) exit 0 ;;
 esac
 `, { mode: 0o700 });
-    const up = spawnSync('bash', [script, 'up', 'dns-fixture'], {
-      encoding: 'utf8', timeout: 60000,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, XDG_STATE_HOME: root, E2E_BACKEND: 'incus', E2E_DNS_WAIT_SECONDS: wait },
-    });
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, XDG_STATE_HOME: root, E2E_BACKEND: 'incus' };
+    const up = spawnSync('bash', [script, 'up', 'dns-fixture'], { encoding: 'utf8', timeout: 90000, env: { ...env, E2E_DNS_WAIT_SECONDS: wait } });
     const calls = readFileSync(log, 'utf8');
-    assert(calls.includes('file push'), `the DNS guard must let the launch proceed to the source transfer\n${up.stderr}`);
-    assert.equal(calls.includes('rm -f /etc/resolv.conf'), expectSeed);
-    assert(!calls.includes('>> /etc/resolv.conf'), 'never append through a possibly dangling link');
-    assert.equal(up.stderr.includes('Directory nonexistent'), false);
-    spawnSync('bash', [script, 'down', 'dns-fixture'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, XDG_STATE_HOME: root, E2E_BACKEND: 'incus' } });
+    spawnSync('bash', [script, 'down', 'dns-fixture'], { env });
+    const reachedTransfer = calls.includes('file push');
+    assert(!up.stderr.includes('Directory nonexistent'), up.stderr);
+    if (expect.status === 'proceeds') {
+      assert(reachedTransfer, `the guard must let the launch proceed to the source transfer\n${up.stderr}`);
+    } else {
+      assert.notEqual(up.status, 0);
+      assert(!reachedTransfer, 'no source transfer after a dead resolver');
+      assert(!calls.includes('docker compose'), 'no compose after a dead resolver');
+      assert(up.stderr.includes(expect.status === 'dead' ? 'DNS not answering after seeding' : 'could not write the fallback resolver'), up.stderr);
+    }
+    assert.equal(up.stderr.includes('seeding 1.1.1.1'), Boolean(expect.seeded || expect.status !== 'proceeds'));
+    if (expect.kind === 'file') {
+      assert(!lstatSync(resolv).isSymbolicLink());
+      assert.equal(readFileSync(resolv, 'utf8'), 'nameserver 1.1.1.1\n', 'one static resolver line, never appended twice');
+    }
+    if (expect.seeded === false) assert(lstatSync(resolv).isSymbolicLink() || readFileSync(resolv, 'utf8') === 'nameserver 10.0.0.1\n' || lstatSync(resolv).isDirectory());
   });
 }

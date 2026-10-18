@@ -78,7 +78,8 @@ case "$action" in
       for ((i = 0; i < ${E2E_DNS_WAIT_SECONDS:-15}; i++)); do dns_ok && break; sleep 1; done
       if ! dns_ok; then
         echo "$project: resolver not answering; seeding 1.1.1.1 (dnsmasq race, #12129)" >&2
-        incus exec "$project" -- sh -c 'grep -q "^nameserver 1.1.1.1$" /etc/resolv.conf 2>/dev/null || { rm -f /etc/resolv.conf; echo "nameserver 1.1.1.1" > /etc/resolv.conf; }'
+        incus exec "$project" -- sh -c 'grep -q "^nameserver 1.1.1.1$" /etc/resolv.conf 2>/dev/null || { rm -f /etc/resolv.conf && echo "nameserver 1.1.1.1" > /etc/resolv.conf; }' ||
+          { echo "$project: could not write the fallback resolver (/etc/resolv.conf); refusing to continue" >&2; exit 1; }
       fi
       for i in {1..30}; do dns_ok && break; sleep 1; done
       dns_ok || { echo "$project: DNS not answering after seeding; refusing to continue (incus network check next)" >&2; exit 1; }
