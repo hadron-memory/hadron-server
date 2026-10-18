@@ -10,7 +10,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
 import { bindAgentPrompt } from './resolvers.mutation.chat.js';
-import { applyPlatformVariables } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables, templateBindsName } from '../../../lib/personaDescription.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -43,6 +43,26 @@ describe('applyPlatformVariables', () => {
     expect(applyPlatformVariables('{{worker.name}}', { ...values, 'worker.name': '{{agent.name}}$&' })).toBe(
       '{{agent.name}}$&',
     );
+  });
+});
+
+describe('one pass over the authored source (blind review P2-1, P3-1)', () => {
+  const values = {
+    'worker.name': 'Ada', 'worker.role': 'coordinator', 'agent.name': 'Actual Agent',
+    'worker.reportsTo.name': '', 'worker.signature': '', 'worker.trailer': '',
+    'worker.url': '', 'session.llmModel': 'm-1',
+  };
+
+  it('legacy and platform tokens bind together, so a legacy value holding a platform token stays literal', () => {
+    const legacy = { name: '{{agent.name}}', role: '{{session.llmModel}}' };
+    expect(applyPlatformVariables('{{name}}|{{worker.name}}|{{role}}', { ...values, 'worker.name': legacy.name }, legacy)).toBe(
+      '{{agent.name}}|{{agent.name}}|{{session.llmModel}}',
+    );
+  });
+
+  it('templateBindsName also recognises the exact {{worker.name}} token', () => {
+    expect(templateBindsName('You are {{worker.name}}.')).toBe(true);
+    expect(templateBindsName('You are {{ worker.name }}.')).toBe(false);
   });
 });
 
@@ -106,6 +126,20 @@ describe('composeWorkerPrompt — filled at each bind', () => {
     const text = (await prompt(w.id, { llmModel: null }))!;
     expect(text.startsWith('Cy|engineer|PV Agent||[]|[]|')).toBe(true);
     expect(text.endsWith('|')).toBe(true);
+  });
+
+  it('a legacy role value holding a platform token is served literally (composition level)', async () => {
+    const w = await cast('Fay', '{{session.llmModel}}');
+    await db.agent.update({ where: { id: agentId }, data: { systemPrompt: '{{role}}|{{worker.role}}' } });
+    expect(await prompt(w.id, { llmModel: 'm-9' })).toBe('{{session.llmModel}}|{{session.llmModel}}');
+  });
+
+  it('platform variables in a worker override are filled, with a template and with the override alone', async () => {
+    const w = await cast('Gus');
+    await db.worker.update({ where: { id: w.id }, data: { promptOverride: 'I am {{worker.name}} on {{session.llmModel}}.' } });
+    expect((await prompt(w.id, { llmModel: 'm-2' }))!.endsWith('\n\nI am Gus on m-2.')).toBe(true);
+    await db.agent.update({ where: { id: agentId }, data: { systemPrompt: null } });
+    expect(await prompt(w.id, { llmModel: 'm-2' })).toBe('I am Gus on m-2.');
   });
 
   it('a rename reaches the next bind with no recompile', async () => {
