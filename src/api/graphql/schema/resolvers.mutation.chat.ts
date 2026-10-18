@@ -1314,7 +1314,7 @@ export const chatMutations = {
           const encData = encryptNodeFields({ content: null, data: merged }, memEncInfo);
           await tx.node.update({
             where: { id: dataNode.id },
-            data: { data: (encData.data ?? null) as InputJsonValue },
+            data: { data: (encData.data ?? null) as InputJsonValue, updatedBy: ctx.userId ?? null },
           });
           // #1061 — folding extracted data into the memory's `data` node
           // rewrites a real node, so it is its own write.
@@ -1326,6 +1326,7 @@ export const chatMutations = {
             data: {
               id: dataNodeId, memoryId: chatNode.memoryId,
               loc: 'data', name: 'data', nodeType: 'info',
+              createdBy: ctx.userId ?? null, // cor:dmo:010:01 — submitting principal, independent of Worker lineage.
               data: (encNew.data ?? null) as InputJsonValue,
             },
           });
@@ -1611,6 +1612,7 @@ export const chatMutations = {
             loc: summaryLoc, name: summaryName,
             nodeType: 'abstract', content: encSummary.content ?? null, seq: messageCount + 1,
             tags: ['summary'],
+            createdBy: ctx.userId ?? null, // Supplied summary: attribute its submitter, not the chat creator.
           },
         });
         // No chat-root write: the summary is not a message.
