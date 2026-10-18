@@ -2687,7 +2687,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
  * partial-response transport, but make the authorization classification
  * explicit so Apollo does not report an ordinary denial as a server fault.
  */
-function memoryWriteForbidden(): GraphQLError {
+export function memoryWriteForbidden(): GraphQLError {
   return new GraphQLError('Forbidden: no write access to this memory', {
     extensions: { code: 'FORBIDDEN' },
   });
