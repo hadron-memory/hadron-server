@@ -60,7 +60,6 @@ import {
 import {
   type Context,
   requireOrgRole,
-  isPlatformAdmin,
   requireAgentAccess,
   resolveReadableAgentRef,
   requireReadableAgent,
@@ -1441,8 +1440,9 @@ export const agentMutations = {
       const agent = await resolveReadableAgentRef(ctx, agentId);
       const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
-      // #1882 / cor:dmo:050:13: a platform shutdown removes every named
-      // config of a user-owned Agent. Ordinary clears retain the default shim.
+      // #1882 / cor:dmo:050:13 (R12): a user-owned Agent clear removes every
+      // named config, for its owner or a platform admin. Org-owned clears
+      // retain the default shim.
       // Re-read roles and ownership under the same authority fences as Agent
       // management; a request-time ADMIN claim must not widen a later delete.
       await withAuthorizedTx(ctx, [
@@ -1455,11 +1455,11 @@ export const agentMutations = {
           throw authorizationDenied();
         }
         await requireAgentAccess(txCtx, current, 'ADMIN');
-      }, async (tx, txCtx) => {
+      }, async (tx) => {
         await tx.aiServiceConfig.deleteMany({
           where: {
             agentId: resolvedAgentId,
-            ...(agent.ownerUserId !== null && isPlatformAdmin(txCtx) ? {} : { name: DEFAULT_AI_CONFIG_NAME }),
+            ...(agent.ownerUserId !== null ? {} : { name: DEFAULT_AI_CONFIG_NAME }),
           },
         });
       });

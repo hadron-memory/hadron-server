@@ -10538,10 +10538,10 @@ export const typeDefs = `#graphql
     """
     Clear an Agent's AI provider config without returning or decrypting keys.
 
-    A platform ADMIN/OWNER clearing a user-owned Agent removes every named
-    configuration, including disabled configurations.
+    Clearing a user-owned Agent, by its owner or a platform ADMIN/OWNER,
+    removes every named configuration, including disabled configurations.
     hrn:node:hadronmemory.com:specs:cor:dmo:050:13
-    Other clears delete the registry configuration named 'default'.
+    An org-owned Agent clear deletes only the configuration named 'default'.
 
     Accepts the entity's ID or URN.
     """
