@@ -107,3 +107,23 @@ describe('searchReplaceInNodes (#2040)', () => {
     expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'a' } })).content).toBe('{{> b}} TOKEN');
   });
 });
+
+describe('mergeNodes and restoreNodeRevision (#2040)', () => {
+  it('a merge that folds an include onto its own target is refused, leaving the target unchanged', async () => {
+    const t = await db.node.create({ data: { id: generateId(), memoryId, loc: 't', name: 't' } });
+    await create('s', '{{> t}}');
+    const s = await db.node.findFirstOrThrow({ where: { memoryId, loc: 's' } });
+    expect(await code(M.mergeNodes({}, { input: { source: s.id, target: t.id, include: ['CONTENT'] } } as never, as()))).toBe('INCLUDE_CYCLE');
+    expect((await db.node.findUniqueOrThrow({ where: { id: t.id } })).content).toBeNull();
+  });
+
+  it('restoring a revision whose tags would now cycle is refused', async () => {
+    await create('b', 'B'); await create('a', 'v1 {{> b}}');
+    await update('a', 'v2 plain');
+    await update('b', '{{> a}}');
+    const a = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'a' } });
+    const v1 = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: a.id, content: 'v1 {{> b}}' } });
+    expect(await code(M.restoreNodeRevision(null, { revisionId: v1.id }, as()))).toBe('INCLUDE_CYCLE');
+    expect((await db.node.findUniqueOrThrow({ where: { id: a.id } })).content).toBe('v2 plain');
+  });
+});

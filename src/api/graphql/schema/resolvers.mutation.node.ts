@@ -4075,6 +4075,14 @@ export const nodeMutations = {
               ...placeholderFillPatch(lockedTarget, 'content' in changed ? changed.content : undefined),
             },
           });
+          // #2040 — the folded plaintext is re-checked for include tags (a merge
+          // can combine two nodes' tags into a cycle); a refusal rolls it back.
+          if ('content' in changed) {
+            const text = changed.content as string | null;
+            const readable = text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+            const tags = await assertIncludesWritable(tx, target, text, readable);
+            await syncDerivedIncludesEdges(tx, target, tags, readable);
+          }
         }
 
         if (fields.has('EDGES')) {
@@ -4584,6 +4592,14 @@ export const nodeMutations = {
           data: writeData,
           include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
         });
+        // #2040 — the restored text is re-checked: an old revision can hold a tag
+        // that would now make a cycle. A refusal rolls the restore back.
+        {
+          const text = plaintextFields.content as string | null;
+          const readable = text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+          const tags = await assertIncludesWritable(tx, current, text, readable);
+          await syncDerivedIncludesEdges(tx, current, tags, readable);
+        }
         return { restored, restoredPlaintext: plaintextFields, destinationEncrypted: selectedDestination.isEncrypted };
       });
       // 033 — re-embed the restored content (revision snapshots are plaintext on
