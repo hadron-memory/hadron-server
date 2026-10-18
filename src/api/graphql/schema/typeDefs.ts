@@ -8954,6 +8954,12 @@ export const typeDefs = `#graphql
     already exists at (memoryId, loc) — creating is create-only (spec 039
     Phase 0 D1); a soft-deleted node at the target loc is resurrected.
     'name' is required here and only here (D4).
+    Include tags (#2040): content may carry {{> target settings}} tags. Writes
+    that make a tag malformed refuse INVALID_INCLUDE, one that would make the
+    node include itself INCLUDE_CYCLE, and a chain deeper than 10
+    INCLUDE_TOO_DEEP; nothing is written. Each tag's target gets a derived edge
+    (governed kind INCLUDE) that only the content owns: editing or deleting it
+    directly refuses INCLUDE_EDGE_DERIVED.
     """
     createNode(input: CreateNodeInput!): Node!
 
@@ -9110,6 +9116,12 @@ export const typeDefs = `#graphql
     moveNode's job, D3). Every content field is optional — omitted fields are
     preserved ('name' included, D4; 'abstract' keeps its omit/null/string
     contract; omitted 'tags' are preserved, issue #235).
+    Include tags (#2040): content may carry {{> target settings}} tags. Writes
+    that make a tag malformed refuse INVALID_INCLUDE, one that would make the
+    node include itself INCLUDE_CYCLE, and a chain deeper than 10
+    INCLUDE_TOO_DEEP; nothing is written. Each tag's target gets a derived edge
+    (governed kind INCLUDE) that only the content owns: editing or deleting it
+    directly refuses INCLUDE_EDGE_DERIVED.
     """
     updateNode(input: UpdateNodeInput!): Node!
 
