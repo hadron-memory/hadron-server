@@ -1,3 +1,4 @@
+import { assertIncludesWritable, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
 import type { Node } from '../../index.d.js';
 import { runAsSystem } from '../../lib/requestActor.js';
 import { GRAPHS_PATH } from '../../config.js';
@@ -39,7 +40,7 @@ const createNodeAsSystem = async (
   }
 
   const id = node.id ?? generateId();
-  const tags = serializeTags(node.tags ?? []) as string[];
+  const serializedTags = serializeTags(node.tags ?? []) as string[];
   const content = node.content ?? null;
   const fields = {
     name,
@@ -47,7 +48,7 @@ const createNodeAsSystem = async (
     description: node.description ?? null,
     content,
     contentHash: node.contentHash ?? null,
-    tags,
+    tags: serializedTags,
     ownerRepo: node.ownerRepo ?? null,
   };
 
@@ -96,7 +97,7 @@ const createNodeAsSystem = async (
       }
     }
 
-    return tx.node.upsert({
+    const written = await tx.node.upsert({
       where: { loc_memoryId: { loc, memoryId: node.memoryId } },
       create: {
         id,
@@ -115,6 +116,11 @@ const createNodeAsSystem = async (
         incomingEdges: { include: { source: true } },
       },
     });
+    // #2040 — this legacy seam runs as the system with no principal, so the
+    // cycle walk is unrestricted; a refusal rolls the write back.
+    const tags = await assertIncludesWritable(tx, written, content, null);
+    await syncDerivedIncludesEdges(tx, written, tags, null);
+    return written;
   });
 
   return saved as unknown as Node;
