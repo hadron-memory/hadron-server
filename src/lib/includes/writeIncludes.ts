@@ -130,3 +130,12 @@ export async function syncDerivedIncludesEdges(
     });
   }
 }
+
+/** The text an MCP tool returns for an include refusal, or null for any other error. */
+export function includeRefusalText(e: unknown): string | null {
+  if (!(e instanceof GraphQLError)) return null;
+  const code = e.extensions?.code;
+  return code === 'INVALID_INCLUDE' || code === 'INCLUDE_CYCLE' || code === 'INCLUDE_TOO_DEEP'
+    ? `[${String(code).toLowerCase()}] ${e.message}`
+    : null;
+}
