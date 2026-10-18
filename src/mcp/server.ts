@@ -274,6 +274,7 @@ import { resolveSearchScope, canReadScope, resolveScopeByNameInApp, type SearchS
 // Spec 049 Phase 6 — the register block on hadron_whoami's bound rows.
 import { resolveRegister, renderDerivedBlocks } from '../lib/resolveRegister.js';
 import { attendeeMentionTokens } from '../lib/channelReadState.js';
+import { mentionReach } from '../lib/mentionReach.js';
 import {
   markOwnTeamChatRead,
   maybeAdvanceOwnChannelRead,
@@ -9921,7 +9922,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // A Worker never receives its own post, including a broadcast.
           if (message.authorWorkerId === watcher.workerId) return false;
           if (!watcher.mentionOnly) return true;
-          return message.mentions.some((mention) => watcher.mentionTokens.has(mention));
+          // #2020: its names, or a broadcast stamped at post time.
+          return mentionReach(message, [...watcher.mentionTokens]) !== null;
         });
         if (routes.length === 0) continue;
         const reply = message.replyToSeq != null ? ` (reply to #${message.replyToSeq})` : '';
@@ -10027,7 +10029,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       channel: z.string().describe('The Channel — its id, or its address (the chat root node URN hadron_list_channels prints). Copy one of those; a ref naming nothing reads as a Channel you may not see.'),
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
       beforeSeq: z.number().int().optional().describe('Page BACKWARD: only messages with seq strictly less than this, newest page of those. Ignores offset.'),
-      mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id) of the host App.'),
+      mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id) of the host App. For a worker this includes @all/@team broadcasts from an author who could wake everyone (decided at post time), and never its own posts.'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
       session: z.string().optional().describe('Your session id — passing it keeps that session alive (#1081).'),
@@ -10159,7 +10161,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     {
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
       beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),
-      mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id).'),
+      mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id). For a worker this includes @all/@team broadcasts from an author who could wake everyone (decided at post time), and never its own posts.'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
       session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. On an ordinary read, passing it keeps that session alive (#1081). Monitor mode uses it only as an App hint and does not heartbeat or wake the session.'),

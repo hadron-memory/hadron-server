@@ -25,7 +25,8 @@ import { composeWorkerUrn } from './entityRef/workerRef.js';
 import { normalizeUrnForLookup } from './urn.js';
 import { resolveRegister } from './resolveRegister.js';
 import { advanceReadState } from './channelReadState.js';
-import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from './mentionToken.js';
+import { mentionTokenOf } from './mentionToken.js';
+import { mentionReach, mentionReachSql, reachEnvelopeOf } from './mentionReach.js';
 import { escapePrismaLikePattern } from './literalLocPrefix.js';
 import { safeEqual } from './constantTime.js';
 import { decryptNodeFields } from './nodeCrypto.js';
@@ -586,7 +587,9 @@ async function attentionTargets(ctx: Context, app: AppRow): Promise<Target[]> {
         mentionOnly: row.entry.mentionOnly,
         seen: row.readState?.lastSeenSeq ?? 0,
         head: row.channel.lastSeq,
-        mentionTokens: token ? [...BROADCAST_MENTION_TOKENS, token] : [...BROADCAST_MENTION_TOKENS],
+        // #2020: the worker's own token only — a broadcast counts through the
+        // post-time stamp (mentionReach), never by its token alone.
+        mentionTokens: token ? [token] : [],
       });
     }
   }
@@ -692,8 +695,9 @@ type PlaintextWindowResult = {
  *
  * For one plaintext Channel and the seq window (lo, hi], each target's unread
  * is the rows above ITS seen cursor and at or below ITS frozen head, skipping
- * its own posts; a row mentions it when `data.mentions` is an array holding one
- * of its tokens (the same test the row walk applied in JS). The ranges are the
+ * its own posts; a row mentions it when it reaches it (#2020: one of its tokens,
+ * or a broadcast stamped at post time — `mentionReachSql`, the twin of the
+ * row walk's `mentionReach`). The ranges are the
  * ones the walk already used, so this reads nothing it did not: only integer
  * aggregates leave SQL, never a message body, and a target is counted against
  * its own register's cursor and head alone.
@@ -725,7 +729,7 @@ export async function aggregatePlaintextWindow(
     ),
     j AS (
       SELECT t.idx, t.mention_only, m.seq,
-        (jsonb_typeof(m.data -> 'mentions') = 'array' AND (m.data -> 'mentions') ?| t.tokens) AS mentioned
+        ${mentionReachSql(Prisma.sql`m.data`, Prisma.sql`t.tokens`)} AS mentioned
       FROM m
       JOIN t ON m.seq > t.seen AND m.seq <= t.head
         AND COALESCE(m.data ->> 'authorWorkerId', '') <> t.worker_id
@@ -944,9 +948,7 @@ async function pagedScanStep(
       const envelope = geometry.encrypted
         ? decryptRoutingEnvelope(row)
         : ((row.data && typeof row.data === 'object') ? row.data as Record<string, unknown> : {});
-      const mentions = Array.isArray(envelope.mentions)
-        ? envelope.mentions.filter((v): v is string => typeof v === 'string')
-        : [];
+      const reach = reachEnvelopeOf(envelope);
       let anyCounted = false;
       for (const ti of list) {
         const target = targets[ti];
@@ -954,7 +956,7 @@ async function pagedScanStep(
         anyCounted = true;
         state.aUnread[ti]++;
         state.aFirst[ti] = state.aFirst[ti] === 0 ? row.seq : Math.min(state.aFirst[ti], row.seq);
-        const mentioned = mentionTokensByTarget[ti].some((token) => mentions.includes(token));
+        const mentioned = mentionReach(reach, mentionTokensByTarget[ti]) !== null;
         if (mentioned) state.aMent[ti]++;
         if (!target.mentionOnly || mentioned) {
           state.aLast[ti] = Math.max(state.aLast[ti], row.seq);

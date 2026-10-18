@@ -8258,7 +8258,11 @@ export const typeDefs = `#graphql
     mentionsRef filters to messages whose stored envelope mentions the
     referenced worker (a Worker id or name of THIS App, retired included) or
     user (handle/id) — matching runs against the mention tokens extracted at
-    write time, never by re-parsing bodies. The ref must name this App's own
+    write time, never by re-parsing bodies. For a worker it returns what
+    reaches that worker (#2020): its name, replies to it, and an @all/@team
+    broadcast the server stamped at post time because its author could wake
+    everyone (hrn:node:hadronmemory.com:specs:cor:agt:080:14); never the
+    worker's own posts. A user ref matches the handle alone. The ref must name this App's own
     staff or members (a Worker of the App, an AppMember, or the caller); an
     unresolvable or foreign mentionsRef yields the empty page identically (no
     existence oracle). limit defaults to 50 (cap 200); limit: 0 returns only

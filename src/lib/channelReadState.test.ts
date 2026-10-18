@@ -64,21 +64,21 @@ function deps(llm = vi.fn(async () => ({ text: 'ok', tokensIn: 10, tokensOut: 5,
   };
 }
 
-async function post(body: string, mentions: string[] = []) {
+async function post(body: string, mentions: string[] = [], extra: Record<string, unknown> = {}) {
   const enc = await getMemoryEncryptionInfo(db, channel.memoryId);
   const chat = { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc };
   return appendChatMessage(
     db, chat, enc,
     async ({ tx, seq, msgNum }) =>
       tx.node.create({
-        data: { id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, content: body, data: { mentions } },
+        data: { id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, content: body, data: { mentions, ...extra } },
       }),
     { asChannel: true },
   );
 }
 
 /** A post carrying routing metadata: no authorWorkerId is a human's post. */
-async function postAs(body: string, mentions: string[], authorWorkerId?: string) {
+async function postAs(body: string, mentions: string[], authorWorkerId?: string, extra: Record<string, unknown> = {}) {
   const enc = await getMemoryEncryptionInfo(db, channel.memoryId);
   return appendChatMessage(
     db,
@@ -89,7 +89,7 @@ async function postAs(body: string, mentions: string[], authorWorkerId?: string)
         data: {
           id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`, name: msgNum,
           nodeType: 'chat-message', seq, content: body,
-          data: { mentions, ...(authorWorkerId ? { authorWorkerId } : {}) },
+          data: { mentions, ...(authorWorkerId ? { authorWorkerId } : {}), ...extra },
         },
       }),
     { asChannel: true },
@@ -166,12 +166,15 @@ describe('read-state', () => {
     const section = await renderAttentionSection(db, run1);
     expect(section.text).toContain('nothing new for you (mention-only; channel is at 1)');
     await post('@iris look', ['iris']);
-    await post('@all look', ['all']);
-    await post('@team look', ['team']);
+    // #2020: a broadcast is a mention when the server stamped it at post time.
+    await post('@all look', ['all'], { broadcastWakes: true });
+    await post('@team look', ['team'], { broadcastWakes: true });
     await post('@someone else', ['someone']);
-    expect((await renderAttentionSection(db, run1)).text).toContain('3 new mentions of you since seq 0 (channel is at 5)');
+    // An unstamped broadcast is ordinary unread, never a mention (cor:agt:080:08/:14).
+    await post('@all unstamped', ['all']);
+    expect((await renderAttentionSection(db, run1)).text).toContain('3 new mentions of you since seq 0 (channel is at 6)');
     await advanceReadState(db, { agentId: agent.id, appId: app.id }, channel.id, 2);
-    expect((await renderAttentionSection(db, run1)).text).toContain('2 new mentions of you since seq 2 (channel is at 5)');
+    expect((await renderAttentionSection(db, run1)).text).toContain('2 new mentions of you since seq 2 (channel is at 6)');
   });
 
   it('an encrypted Channel\'s mention-only row reports new messages instead of "nothing new for you" (#1362 review)', async () => {
@@ -211,11 +214,14 @@ describe('read-state', () => {
   it('an attendee\'s own broadcast is not attention for it; someone else\'s is (#1362 review)', async () => {
     await db.registerEntry.updateMany({ where: { appId: app.id }, data: { mentionOnly: true } });
     // Iris is cast from this run's Agent: her team-wide post is the attendee's own.
-    await postAs('@all heads up', ['all'], worker.id);
+    await postAs('@all heads up', ['all'], worker.id, { broadcastWakes: true });
     const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     expect((await renderAttentionSection(db, run)).text).toContain('nothing new for you (mention-only; channel is at 1)');
-    await postAs('@all from a human', ['all']);
+    await postAs('@all from a human', ['all'], undefined, { broadcastWakes: true });
     expect((await renderAttentionSection(db, run)).text).toContain('1 new mention of you since seq 0 (channel is at 2)');
+    // #2020: an unstamped one from a human is not a mention.
+    await postAs('@all quoted by a human', ['all']);
+    expect((await renderAttentionSection(db, run)).text).toContain('1 new mention of you since seq 0 (channel is at 3)');
   });
 
   it('an unfiltered row: the attendee\'s own posts are never new to it; a human\'s or another Agent\'s are (#1388)', async () => {
