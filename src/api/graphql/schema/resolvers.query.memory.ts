@@ -28,6 +28,7 @@ import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { activeAgentInstallLicenseIds, isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
 import { findInstallMemory, resolveInstallTarget } from './installMemory.js';
+import { listableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 
 /** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
@@ -584,6 +585,7 @@ export const memoryQueries = {
         // include concealed records. Preserve the helper's unrestricted-set
         // sentinel if supplied; current admin sets retain strict-owner limits.
         const accessibleIds = await getAccessibleMemoryIds(ctx);
+        const installListable = await listableInstallMemoryIds(ctx.db, ctx);
         // DS (Holger, 2026-10-05): the default listing is a membership slice,
         // including for platform admins whose direct-record reach is wider.
         // External AppMembers still discover their own App's readable rows.
@@ -596,7 +598,10 @@ export const memoryQueries = {
           userMemoryOfAgentId: null,
           AND: [classFilter],
           OR: [
-            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any } },
+            // #2044: an install memory is NOT an org-wide record (its customisation is the App's):
+            // the org clause skips it, and the clause below lists it to its own audience alone.
+            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any }, installOfAgentId: null },
+            { class: 'system' as any, installOfAgentId: { not: null }, id: { in: installListable } },
             {
               class: 'app' as any,
               ...(accessibleIds === null ? {} : { id: { in: accessibleIds } }),

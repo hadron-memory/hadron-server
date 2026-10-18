@@ -181,3 +181,147 @@ describe('#2044 install memory — URN reclaim (R29) and account erasure', () =>
     expect(await db.memory.count({ where: { installOfAgentId: agent.id } })).toBe(0);
   });
 });
+
+// ── Creation versus revocation (the shared authority-anchor protocol) ───────────────────────────
+// A third connection holds the contested anchors exclusively and commits the revocation; the
+// first write must prove it is WAITING on them (pg_locks barrier) and then be refused with no
+// memory created. Pinned at the guarded write itself (the transaction), not the resolver.
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
+
+async function hold(
+  lock: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<unknown>,
+) {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let held!: () => void;
+  const isHeld = new Promise<void>((r) => { held = r; });
+  const done = db.$transaction(async (tx) => { await lock(tx); held(); await gate; }, { timeout: 20_000 });
+  await isHeld;
+  return { release, done };
+}
+
+describe('#2044 install memory — a first write never outlives the authority it needs', () => {
+  async function raced(
+    revoke: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0], f: Awaited<ReturnType<typeof fixture>>) => Promise<unknown>,
+    anchors: (f: Awaited<ReturnType<typeof fixture>>) => Array<{ kind: 'app' | 'org' | 'agent' | 'user'; id: string }>,
+  ) {
+    const f = await fixture();
+    const holder = await hold(async (tx) => {
+      await lockAuthorityAnchors(tx, anchors(f), 'exclusive');
+      await revoke(tx, f);
+    });
+    const write = f.create(f.admin).then(() => 'wrote', (e: Error) => e);
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      holder.release();
+      await holder.done;
+    }
+    return { f, outcome: await write };
+  }
+
+  it('concurrent first write vs deleteApp: refused, nothing created', async () => {
+    const { f, outcome } = await raced(
+      (tx, f) => tx.app.update({ where: { id: f.app.id }, data: { deletedAt: new Date() } }),
+      (f) => [{ kind: 'app', id: f.app.id }, { kind: 'org', id: orgId }],
+    );
+    expect(outcome).not.toBe('wrote');
+    expect(await f.installRows()).toHaveLength(0);
+  });
+
+  it('concurrent first write vs uninstall: refused, nothing created', async () => {
+    const { f, outcome } = await raced(
+      (tx, f) => tx.appAgent.deleteMany({ where: { appId: f.app.id, agentId: f.agent.id } }),
+      (f) => [{ kind: 'app', id: f.app.id }, { kind: 'agent', id: f.agent.id }],
+    );
+    expect(outcome).not.toBe('wrote');
+    expect(await f.installRows()).toHaveLength(0);
+  });
+
+  it('concurrent first write vs the writer\'s own demotion: refused on the CURRENT authority, nothing created', async () => {
+    const { f, outcome } = await raced(
+      (tx, f) => tx.orgMember.updateMany({ where: { organizationId: orgId, userId: f.admin.id }, data: { role: 'READER' } }),
+      (f) => [{ kind: 'org', id: orgId }, { kind: 'user', id: f.admin.id }],
+    );
+    expect(outcome).toMatchObject({ message: expect.stringMatching(/Forbidden|APP_NOT_FOUND/) });
+    expect(await f.installRows()).toHaveLength(0);
+  });
+
+  it('CONTROL: with no revocation in flight the same first write lands', async () => {
+    const { f, outcome } = await raced(async () => undefined, (f) => [{ kind: 'app', id: f.app.id }]);
+    expect(outcome).toBe('wrote');
+    expect(await f.installRows()).toHaveLength(1);
+  });
+});
+
+// ── MCP: `install: { app, agent }` on hadron_create_node / hadron_update_node ──────────────────
+import { createTestableMcpServer } from '../../../mcp/server.js';
+import type { AuthContext } from '../../../middleware/auth.js';
+
+describe('#2044 install memory — MCP target', () => {
+  const mcpAuth = (userId: string) => ({ userId, organizationId: orgId, roles: [], clientId: `user:${userId}` }) as AuthContext;
+
+  it('hadron_create_node / hadron_update_node write the install memory; a non-manager is refused and nothing is created', async () => {
+    const f = await fixture();
+    const install = { app: f.app.id, agent: f.agent.id };
+    const denied = await createTestableMcpServer(mcpAuth(f.member.id))
+      .callToolText('hadron_create_node', { urn: 'prompts:lane', name: 'Lane', content: 'x', install });
+    expect(denied).toMatch(/Forbidden|forbidden|denied/i);
+    expect(await f.installRows()).toHaveLength(0);
+
+    const created = await createTestableMcpServer(mcpAuth(f.admin.id))
+      .callToolText('hadron_create_node', { urn: 'prompts:lane', name: 'Lane', content: 'first', install });
+    expect(created).toContain("install memory");
+    const [row] = await f.installRows();
+    expect(row).toBeTruthy();
+    expect((await db.node.findFirstOrThrow({ where: { memoryId: row!.id, loc: 'prompts:lane' } })).content).toBe('first');
+
+    const updated = await createTestableMcpServer(mcpAuth(f.admin.id))
+      .callToolText('hadron_update_node', { urn: 'prompts:lane', content: 'second', install });
+    expect(updated).toContain('updated');
+    expect((await db.node.findFirstOrThrow({ where: { memoryId: row!.id, loc: 'prompts:lane' } })).content).toBe('second');
+    // A participant reads it by URN over MCP; a stranger does not.
+    const read = await createTestableMcpServer(mcpAuth(f.member.id))
+      .callToolText('hadron_get_node', { urn: `hrn:node:${row!.urn}:prompts:lane` });
+    expect(read).toContain('second');
+    const hidden = await createTestableMcpServer(mcpAuth(f.stranger.id))
+      .callToolText('hadron_get_node', { urn: `hrn:node:${row!.urn}:prompts:lane` });
+    expect(hidden).not.toContain('second');
+  });
+
+  it('edges and isRunnable are refused with install', async () => {
+    const f = await fixture();
+    const out = await createTestableMcpServer(mcpAuth(f.admin.id)).callToolText('hadron_create_node', {
+      urn: 'x', name: 'x', isRunnable: true, install: { app: f.app.id, agent: f.agent.id },
+    });
+    expect(out).toMatch(/does not support/);
+    expect(await f.installRows()).toHaveLength(0);
+  });
+});
+
+describe('#2044 install memory — list surfaces', () => {
+  it('Query.memories(system) lists the record only to its audience', async () => {
+    const f = await fixture();
+    await f.create(f.admin);
+    const reader = await f.user('org-reader');
+    await db.orgMember.create({ data: { organizationId: orgId, userId: reader.id, role: 'READER' } });
+    const ids = async (u: { id: string }) =>
+      ((await Q.memories({}, { filter: { memoryClasses: ['system'] }, orgId, limit: 50 }, ctxOf(u.id))).items as Array<{ id: string }>)
+        .map((m) => m.id);
+    const [row] = await f.installRows();
+    expect(await ids(f.admin)).toContain(row!.id);
+    expect(await ids(f.contributor)).toContain(row!.id);
+    expect(await ids(reader)).not.toContain(row!.id);
+    expect(await ids(f.stranger)).not.toContain(row!.id);
+    // By ref and by URN: the same bare null for an org reader as for a missing memory.
+    for (const ref of [row!.id, row!.urn]) {
+      expect(await Q.memory({}, { ref }, ctxOf(reader.id))).toBeNull();
+      expect(await Q.memory({}, { ref }, ctxOf(f.stranger.id))).toBeNull();
+      expect((await Q.memory({}, { ref }, ctxOf(f.contributor.id)))?.id).toBe(row!.id);
+    }
+    // And a node read through the enumeration gate finds nothing for the reader.
+    const found = await Q.findNodes({}, { filter: { memoryIds: [row!.id] }, limit: 10 }, ctxOf(reader.id)).catch(() => ({ items: [] }));
+    expect(found.items ?? found.nodes ?? []).toHaveLength(0);
+  });
+});

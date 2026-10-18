@@ -32,6 +32,7 @@ import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { managesApp } from './appManagement.js';
 import { participantAppWhere } from './appParticipation.js';
 import { isRunPrincipal } from './runPrincipal.js';
+import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 
 export type InstallPrincipal = {
   userId?: string | null;
@@ -176,4 +177,46 @@ export async function writableInstallMemoryIds(
     if (row && (await installMemoryAudience(db, principal, row)).write) out.push(id);
   }
   return out;
+}
+
+/**
+ * The install memories whose RECORD a principal may list: those it can read the
+ * content of, plus those of any App it manages (also a soft-deleted one, R45:
+ * whoever manages the App finds the retained memory to delete it by hand).
+ * Listing surfaces use this instead of an org-wide `organizationId` clause, which
+ * would show every org member the record of every App's customisation.
+ */
+export async function listableInstallMemoryIds(
+  db: PrismaClient,
+  principal: InstallPrincipal,
+): Promise<string[]> {
+  if (!principal.userId || isRunPrincipal(principal)) return [];
+  const ids = new Set(await readableInstallMemoryIds(db, principal));
+  if (!principal.impersonation) {
+    const admins = await db.orgMember.findMany({
+      where: { userId: principal.userId, ...LIVE_ORG_MEMBERSHIP, role: { in: ['ADMIN', 'OWNER'] } },
+      select: { organizationId: true },
+    });
+    const platform = principal.roles?.includes('ADMIN') === true || principal.roles?.includes('OWNER') === true;
+    const rows = await db.memory.findMany({
+      where: {
+        class: 'system', deletedAt: null, installOfAgentId: { not: null }, appId: { not: null },
+        app: {
+          is: {
+            OR: [
+              { ownerUserId: principal.userId },
+              { members: { some: { userId: principal.userId, role: 'owner' } } },
+              ...(admins.length ? [{ ownerUserId: null, organizationId: { in: admins.map((a) => a.organizationId) } }] : []),
+              ...(platform ? [{ ownerUserId: null }] : []),
+            ],
+          },
+        },
+      },
+      select: { id: true, organizationId: true, ownerUserId: true, app: { select: { organizationId: true, ownerUserId: true } } },
+    });
+    for (const r of rows) {
+      if (r.app && r.app.organizationId === r.organizationId && r.app.ownerUserId === r.ownerUserId) ids.add(r.id);
+    }
+  }
+  return [...ids];
 }

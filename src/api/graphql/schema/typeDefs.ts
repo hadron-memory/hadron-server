@@ -5342,7 +5342,7 @@ export const typeDefs = `#graphql
   }
 
   """
-  #2044 (cor:agt:040:06) — names an App's INSTALL MEMORY by the pair that
+  #2044 (hrn:node:hadronmemory.com:specs:cor:agt:040:06) — names an App's INSTALL MEMORY by the pair that
   identifies it: the App and the Agent it customises. Both are ID-or-URN refs
   like every other entity ref (relative URNs are refused, URN_NOT_QUALIFIED).
   Accepted by createNode / updateNode in place of 'memoryId'. The install memory
@@ -7584,14 +7584,15 @@ export const typeDefs = `#graphql
 
     'ref' accepts the entity's ID or URN.
     """
+    memory(ref: ID!): Memory
+
     """
-    #2044 (cor:agt:040:06) — the App's install memory for an Agent: where the App
+    #2044 (hrn:node:hadronmemory.com:specs:cor:agt:040:06) — the App's install memory for an Agent: where the App
     keeps its customisation of that Agent. Null when the App has not customised it
     yet (this read creates nothing), and null for anyone the memory's record is not
     open to: the App's participants, and whoever manages the App.
     """
     installMemory(appRef: String!, agentRef: String!): Memory
-    memory(ref: ID!): Memory
 
     """
     Uniform paginated memory list (#473) — replaces myMemories,
