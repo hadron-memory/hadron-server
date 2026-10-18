@@ -38,7 +38,8 @@ import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
-import { applyPersonaTemplate, templateBindsName } from '../../../lib/personaDescription.js';
+import { templateBindsName } from '../../../lib/personaDescription.js';
+import { bindPlatformVariables, type PlatformVariableValues } from '../../../lib/platformVariables.js';
 // Spec 049 Phase 6 — the register block, derived data through one composition point.
 import { renderDerivedBlocks, resolveRegister } from '../../../lib/resolveRegister.js';
 import {
@@ -1770,10 +1771,22 @@ export const workerQueries = {
     }
 
     // Prompt composition mirrors Worker.prompt exactly: the agent's template
-    // with {{name}}/{{role}} bound, then the override as its own paragraph.
+    // with the platform variables bound, then the override as its own paragraph.
+    // A worker not yet cast has no portal URL and no session, so those two are
+    // left written as-is (they are filled at the first bind); a new worker
+    // reports to no one and has no signature or trailer.
     const template = agent.systemPrompt ?? null;
     const bound = template
-      ? applyPersonaTemplate(template, name, workerRole ?? agent.personaRole ?? '')
+      ? bindPlatformVariables(template, {
+        'worker.name': name,
+        'worker.role': workerRole || agent.personaRole || '',
+        'agent.name': agent.name,
+        'worker.reportsTo.name': '',
+        'worker.signature': '',
+        'worker.trailer': '',
+        'worker.url': null,
+        'session.llmModel': null,
+      })
       : null;
     const prompt = bound && override ? `${bound}\n\n${override}` : (override ?? bound);
 
@@ -2004,7 +2017,12 @@ export async function loadAppWorkerActivity(
  */
 export async function composeWorkerPrompt(
   ctx: Context,
-  worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null },
+  worker: {
+    id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null;
+    slug?: string; reportsToWorkerId?: string | null;
+  },
+  /** The session being bound, when the caller holds it (a bind). Otherwise the worker's newest open session answers. */
+  opts: { llmModel?: string | null } = {},
 ): Promise<{ text: string | null; renderedAt: Date; roleAgentUpdatedAt: Date | null }> {
   // Working-state path: the composed boot prompt embeds the agent's persona
   // template, which this loads WITHOUT the Agent read gate — so every caller
@@ -2015,7 +2033,7 @@ export async function composeWorkerPrompt(
   }
   const agent = await ctx.db.agent.findUnique({
     where: { id: worker.agentId },
-    select: { systemPrompt: true, personaRole: true, updatedAt: true, ownerUserId: true },
+    select: { name: true, systemPrompt: true, personaRole: true, updatedAt: true, ownerUserId: true },
   });
   // #1764 (Riana P1): the App's participants now include a user-owned App's members, but a USER-owned Agent stays
   // owner-only (spec 047) — its template is read by the owner, or by whoever holds the worker cast from it (the person
@@ -2025,8 +2043,7 @@ export async function composeWorkerPrompt(
     return { text: null, renderedAt: new Date(), roleAgentUpdatedAt: null };
   }
   const template = agent?.systemPrompt ?? null;
-  const role = worker.role ?? agent?.personaRole ?? '';
-  const bound = template ? applyPersonaTemplate(template, worker.name, role) : null;
+  const bound = template ? bindPlatformVariables(template, await workerBindValues(ctx, worker, agent, opts)) : null;
   const authored = bound && worker.promptOverride ? `${bound}\n\n${worker.promptOverride}` : (worker.promptOverride ?? bound);
   // Spec 049 Phase 6: the register block is DERIVED data appended through the
   // one composition point (`renderDerivedBlocks`), never authored prompt text
@@ -2040,6 +2057,50 @@ export async function composeWorkerPrompt(
   // render time. Down here, renderedAt is a lower bound the printed text and
   // its Agent stamp both satisfy.
   return { text, renderedAt: new Date(), roleAgentUpdatedAt: agent?.updatedAt ?? null };
+}
+
+/**
+ * #2042 (cor:dmo:150:08) — the platform variables of a worker bind, read NOW:
+ * a rename, a role change or a new session model reaches the next bind with no
+ * recompile. Bottom-up: the worker's own value, and an empty one falls through
+ * to the Agent's. Every value comes from entities the caller's worker read gate
+ * (`maySeeWorkerInternals`, already passed by `composeWorkerPrompt`) admits:
+ * `worker.reportsTo.name` is the SAME-App target `Worker.reportsTo` serves
+ * behind that gate, never another App's worker. Signature and trailer have no
+ * storage yet (#1602), so they bind empty.
+ */
+async function workerBindValues(
+  ctx: Context,
+  worker: {
+    id: string; name: string; role: string | null; appId: string; slug?: string; reportsToWorkerId?: string | null;
+  },
+  agent: { name: string; personaRole: string | null } | null,
+  opts: { llmModel?: string | null },
+): Promise<PlatformVariableValues> {
+  const full = worker.slug === undefined || worker.reportsToWorkerId === undefined
+    ? await ctx.db.worker.findUnique({ where: { id: worker.id }, select: { slug: true, reportsToWorkerId: true } })
+    : { slug: worker.slug, reportsToWorkerId: worker.reportsToWorkerId };
+  const reportsTo = full?.reportsToWorkerId
+    ? await ctx.db.worker.findFirst({ where: { id: full.reportsToWorkerId, appId: worker.appId }, select: { name: true } })
+    : null;
+  const url = full ? await workerFieldResolvers.Worker.portalUrl({ appId: worker.appId, slug: full.slug }, {}, ctx) : null;
+  const llmModel = opts.llmModel !== undefined
+    ? opts.llmModel
+    : (await ctx.db.session.findFirst({
+        where: { workerId: worker.id, endedAt: null },
+        orderBy: { startedAt: 'desc' },
+        select: { llmModel: true },
+      }))?.llmModel ?? null;
+  return {
+    'worker.name': worker.name,
+    'worker.role': worker.role || agent?.personaRole || '',
+    'agent.name': agent?.name ?? '',
+    'worker.reportsTo.name': reportsTo?.name ?? '',
+    'worker.signature': '',
+    'worker.trailer': '',
+    'worker.url': url ?? '',
+    'session.llmModel': llmModel ?? '',
+  };
 }
 
 /** The owner of a user-owned Agent, or the person holding the worker cast from it; never under impersonation. */

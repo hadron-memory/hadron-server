@@ -224,6 +224,20 @@ describe('#990 — workerRef by name, and the briefing always comes back', () =>
     expect(out).not.toContain('{{name}}');
   });
 
+  it('binds the platform variables, with the bound session\'s model, and hadron_get_worker agrees (#2042)', async () => {
+    await db.agent.update({
+      where: { id: agent.id },
+      data: { systemPrompt: '{{worker.name}}/{{worker.role}}/{{agent.name}}/{{session.llmModel}}/[{{worker.reportsTo.name}}]', personaRole: 'backend-engineer' },
+    });
+    await db.worker.update({ where: { id: worker.id }, data: { role: 'backend-engineer' } });
+    const srv = createTestableMcpServer(hybridAuth());
+    const agentName = (await db.agent.findUniqueOrThrow({ where: { id: agent.id }, select: { name: true } })).name;
+    const expected = `Iris/backend-engineer/${agentName}/claude-sonnet-5-5/[]`;
+    const started = await srv.callToolText('hadron_start_session', { description: 'vars', workerRef: 'Iris', llmModel: 'claude-sonnet-5-5' });
+    expect(started).toContain(expected);
+    expect(await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' })).toContain(expected);
+  });
+
   it('appends the per-worker override to the template', async () => {
     await db.agent.update({
       where: { id: agent.id },

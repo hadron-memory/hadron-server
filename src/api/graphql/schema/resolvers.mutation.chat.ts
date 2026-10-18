@@ -26,7 +26,8 @@ import {
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
-import { applyPersonaTemplate } from '../../../lib/personaDescription.js';
+import { agentOnlyVariableValues, bindPlatformVariables } from '../../../lib/platformVariables.js';
+import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import {
   evaluateEdgeCondition,
   userMessageFor,
@@ -102,6 +103,16 @@ async function chatWriteTx(
     },
     (tx) => fn(tx),
   );
+}
+
+/**
+ * #2042 (cor:dmo:150:08) — a chat binds no worker, so the platform variables
+ * come from the Agent (R10: `worker.url` is the Agent's portal URL). The server
+ * never learns the chat client's model (`startChat`/`sendChatMessage` take
+ * none), so `session.llmModel` binds empty here rather than staying unfilled.
+ */
+function chatAgentVariables(agent: { name: string; personaRole: string | null; urn: string }) {
+  return agentOnlyVariableValues(agent, { url: portalUrlForUrn(agent.urn), llmModel: null });
 }
 
 export const chatMutations = {
@@ -701,7 +712,7 @@ export const chatMutations = {
       // Bind the Agent's own identity on the chat path. Worker briefings bind
       // the same template to the Worker's name and role instead.
       if (agent.systemPrompt) {
-        systemMessage = applyPersonaTemplate(agent.systemPrompt, agent.name, agent.personaRole ?? '') + '\n\n' + systemMessage;
+        systemMessage = bindPlatformVariables(agent.systemPrompt, chatAgentVariables(agent)) + '\n\n' + systemMessage;
       }
 
       return { chatId: chatLoc, systemMessage, tools, conversationName: convName, stageName: firstStage };
@@ -1048,7 +1059,7 @@ export const chatMutations = {
 
         // Rebind on each chat turn so edits to the Agent's prompt take effect.
         if (agent?.systemPrompt) {
-          systemMessage = applyPersonaTemplate(agent.systemPrompt, agent.name, agent.personaRole ?? '') + '\n\n' + systemMessage;
+          systemMessage = bindPlatformVariables(agent.systemPrompt, chatAgentVariables(agent)) + '\n\n' + systemMessage;
         }
 
         // Build tools from hierarchical extraction spec
