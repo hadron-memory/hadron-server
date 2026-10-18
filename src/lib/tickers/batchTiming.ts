@@ -5,13 +5,17 @@
 import type { DeliverySettings } from './deliverySettings.js';
 export { loadDeliverySettings } from './deliverySettings.js';
 
-/** S1: newest-message batching; the hard busy deadline always starts at the oldest waiting post (Holger, #2025 comment6246801585). */
+/** S1: oldest-post busy deadline (Holger, #2025 comment6246801585).
+ * Clamp the busy hold to that deadline; preserve the batching window floor
+ * (S1 owner #20863; Vera ratification pending). Wake ceiling is a separate S1 check. */
 export function batchTiming(
   settings: DeliverySettings,
   input: { oldestPostedAt: Date; lastDueMessageAt: Date; busyUntil?: Date },
 ): { deliverAfter: Date; busyDeadline: Date } {
-  const after = Math.max(input.lastDueMessageAt.getTime() + settings.batchWindowSeconds * 1000, input.busyUntil?.getTime() ?? 0);
-  return { deliverAfter: new Date(after), busyDeadline: new Date(input.oldestPostedAt.getTime() + settings.busyDelaySeconds * 1000) };
+  const deadline = input.oldestPostedAt.getTime() + settings.busyDelaySeconds * 1000;
+  const windowEnd = input.lastDueMessageAt.getTime() + settings.batchWindowSeconds * 1000;
+  const after = Math.max(windowEnd, Math.min(input.busyUntil?.getTime() ?? 0, deadline));
+  return { deliverAfter: new Date(after), busyDeadline: new Date(deadline) };
 }
 
 /** S5: deadline only; the owning evaluator decides eligibility, comparison and episode lifecycle. */
