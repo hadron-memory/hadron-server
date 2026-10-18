@@ -151,6 +151,7 @@ import {
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
+import { assertIncludesWritable, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 
 /**
@@ -906,6 +907,24 @@ export async function writeNodeCore(
           ...inlineEdgeTargets.map((target) => target.memoryId),
         ]);
       }
+      // #2040 — include tags are checked and their derived edges synced in the
+      // writer's own transaction, on the plaintext the caller supplied. A
+      // refusal throws, so the content, revision and edges roll back together.
+      const readableForIncludes = typeof input.content === 'string' && input.content.includes('{{>')
+        ? await getAccessibleMemoryIds(ctx)
+        : null;
+      async function finalizeNodeWrite<T extends { id: string; loc: string; memoryId: string }>(
+        tx: Prisma.TransactionClient,
+        writtenNode: T,
+      ): Promise<T> {
+        if (input.content !== undefined) {
+          const tags = await assertIncludesWritable(tx, writtenNode, input.content, readableForIncludes);
+          const result = await replaceInlineEdges(tx, writtenNode);
+          await syncDerivedIncludesEdges(tx, writtenNode, tags, readableForIncludes);
+          return result;
+        }
+        return replaceInlineEdges(tx, writtenNode);
+      }
       async function replaceInlineEdges<T extends { id: string; loc: string; memoryId: string }>(
         tx: Prisma.TransactionClient,
         writtenNode: T,
@@ -929,7 +948,9 @@ export async function writeNodeCore(
           });
         }
 
-        await tx.edge.deleteMany({ where: { sourceId: writtenNode.id } });
+        // Derived INCLUDE edges (#2040) belong to the content writer, not the
+        // client's edge list: they survive an inline-edge replacement.
+        await tx.edge.deleteMany({ where: { sourceId: writtenNode.id, governedKind: null } });
         await tx.pendingEdge.deleteMany({ where: { sourceId: writtenNode.id } });
         if (resolvedEdges.length > 0) {
           const { count } = await tx.edge.createMany({
@@ -1282,7 +1303,7 @@ export async function writeNodeCore(
                   deletedAt: null,
                 };
             const updated = await tx.node.update({ where, data, include });
-            return { conflict: false, node: await replaceInlineEdges(tx, updated) };
+            return { conflict: false, node: await finalizeNodeWrite(tx, updated) };
           });
           if (result.conflict) {
             throw new GraphQLError(
@@ -1563,7 +1584,7 @@ export async function writeNodeCore(
             // #1606 — restoring a target restores the threads its soft delete
             // took (cause TARGET), never ones an admin deleted.
             if (reviving) await restoreThreadsOfTargets(tx, [upserted.id]);
-            return replaceInlineEdges(tx, upserted);
+            return finalizeNodeWrite(tx, upserted);
           });
         }
       } catch (e) {
