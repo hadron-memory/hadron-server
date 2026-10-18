@@ -46,8 +46,9 @@ only through the private QA bridge and the host-loopback forwarder.
 its first moments, so `up` first waits up to `E2E_DNS_WAIT_SECONDS` (default 15)
 for `deb.debian.org` to resolve and seeds nothing when it does. Only if it still
 does not, it replaces the link with `nameserver 1.1.1.1` (never appends through
-it) and waits up to 30 more seconds. If nothing resolves it exits 1 with
-`DNS not answering after seeding`; the instance and state directory remain, so
+it) and waits up to 30 more seconds. If the static resolver cannot be written it exits 1 with
+`could not write the fallback resolver`; if nothing resolves it exits 1 with
+`DNS not answering after seeding`. Either way it exits before the source transfer; the instance and state directory remain, so
 run `down` before retrying.
 
 The first slice includes server and DB. Run a local portal as described below;
