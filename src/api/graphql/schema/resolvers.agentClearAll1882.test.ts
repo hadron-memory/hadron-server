@@ -72,6 +72,39 @@ describe('#1882 — platform clear of user-owned Agent credentials', () => {
     expect(await db.aiServiceConfig.count({ where: { agentId } }), '#1882: absence of default must not skip the named clear').toBe(0);
   });
 
+  it.each([true, false])('R12: ordinary owner clears all named configs (default present: %s) without key disclosure', async (withDefault) => {
+    if (withDefault) await config(agentId, 'default');
+    await config(agentId, 'backup');
+    await config(agentId, 'disabled', false);
+    await config(otherAgentId, 'default');
+    await config(otherAgentId, 'backup');
+    const otherBefore = await db.aiServiceConfig.findMany({ where: { agentId: otherAgentId }, orderBy: { id: 'asc' } });
+    const decrypt = vi.spyOn(tokenCrypto, 'decryptToken');
+    const response = await api.executeOperation({
+      query: 'mutation($ref: ID!) { clearAgentAIConfig(agentId: $ref) { id aiProvider aiModel aiApiKeyPreview hasAiApiKey } }',
+      variables: { ref: agentId },
+    }, { contextValue: context(ownerId) });
+    expect(response.body.kind).toBe('single');
+    if (response.body.kind !== 'single') throw new Error('Unexpected incremental response');
+    expect(response.body.singleResult.errors).toBeUndefined();
+    expect(await db.aiServiceConfig.count({ where: { agentId } }), 'R12: owner clear must remove every named config too').toBe(0);
+    expect(await db.aiServiceConfig.findMany({ where: { agentId: otherAgentId }, orderBy: { id: 'asc' } })).toEqual(otherBefore);
+    expect(response.body.singleResult.data?.clearAgentAIConfig).toMatchObject({ id: agentId, aiProvider: null, aiModel: null, aiApiKeyPreview: null, hasAiApiKey: false });
+    expect(decrypt).not.toHaveBeenCalled();
+    expect(JSON.stringify(response.body.singleResult)).not.toMatch(/sk-1882|apiKeyEncrypted|fixture-model|\.\.\.1882/);
+    await resolvers.Mutation.clearAgentAIConfig({}, { agentId }, context(ownerId));
+    expect(await db.aiServiceConfig.count({ where: { agentId } })).toBe(0);
+  });
+
+  it('R12 CONTROL: impersonating the owner does not gain a clear grant', async () => {
+    await config(agentId, 'default');
+    await config(agentId, 'backup');
+    const before = await configs();
+    const caller = { ...context(ownerId), impersonation: { orgId, sessionId: 'support', actorUserId: adminId } } as Context;
+    await expect(resolvers.Mutation.clearAgentAIConfig({}, { agentId }, caller)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+    expect(await configs()).toEqual(before);
+  });
+
   it('CONTROL: an org-owned Agent keeps its named config when its default is cleared', async () => {
     const orgAgent = await db.agent.create({ data: { id: generateId(), organizationId: orgId, name: 'Org Agent', urn: 'clear-controls.test:agent', visibility: 'ORGANIZATION' } });
     await config(orgAgent.id, 'default');
