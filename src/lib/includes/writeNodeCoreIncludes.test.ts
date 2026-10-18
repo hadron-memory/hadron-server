@@ -137,3 +137,16 @@ describe('direct edge mutation of a derived INCLUDE edge (#2040)', () => {
     expect(await includeEdges('a')).toHaveLength(1);
   });
 });
+
+describe('run prompt assembly (#2040)', () => {
+  it('does not inline an include target a second time as a referenced node', async () => {
+    const { assembleRunNodePrompt } = await import('../runNodeRender.js');
+    const target = { loc: 'b', name: 'b', content: 'B body', memoryId: 'm' };
+    const out = await assembleRunNodePrompt(
+      { id: 'a', name: 'a', loc: 'a', content: 'x', memoryId: 'm', outgoingEdges: [{ name: 'includes', loc: 'includes:a:b', governedKind: 'INCLUDE', target }] } as never,
+      undefined,
+      { compileTemplate: async (c: string) => c, includeTarget: async () => true, memoryUrnOf: async () => 'o:m' } as never,
+    );
+    expect(out).not.toContain('Referenced Nodes');
+  });
+});
