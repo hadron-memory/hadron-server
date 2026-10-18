@@ -116,3 +116,52 @@ test('failed ownership write terminates its detached forwarder', async t => {
   });
   assert.equal(listening, false, 'failed persistence left an untracked listener');
 });
+
+// #1963 — a fresh Incus instance's /etc/resolv.conf points at
+// /run/systemd/resolve/stub-resolv.conf, which dangles for the first moments
+// after launch. The stub models that: resolution fails for the first
+// `recoverAfter` probes (or until a seed that REPLACED the link), and appending
+// through the link fails the way the real one does.
+for (const [scenario, recoverAfter, wait, expectSeed] of [
+  ['resolver answers a few seconds after launch: nothing is seeded', 4, '15', false],
+  ['resolver never answers: the seed replaces the dangling link', 999, '2', true],
+]) {
+  test(`E2E stack DNS guard (#1963): ${scenario}`, { skip: process.platform !== 'linux' }, t => {
+    const root = mkdtempSync(join(tmpdir(), 'hadron-e2e-dns-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const bin = join(root, 'bin'); mkdirSync(bin);
+    const log = join(root, 'calls');
+    writeFileSync(join(bin, 'docker'), '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+    writeFileSync(join(bin, 'incus'), `#!/bin/sh
+printf '%s\\n' "$*" >> '${log}'
+case "$1" in
+info) exit 1 ;;
+exec)
+  if [ "$4" = getent ]; then
+    n=$(cat '${root}/probes' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '${root}/probes'
+    [ -f '${root}/seeded' ] && exit 0
+    [ "$n" -gt ${recoverAfter} ] && exit 0
+    exit 2
+  fi
+  if [ "$4" = sh ]; then
+    case "$6" in
+      *"rm -f /etc/resolv.conf"*) touch '${root}/seeded' ;;
+      *resolv.conf*) echo "sh: 1: cannot create /etc/resolv.conf: Directory nonexistent" >&2; exit 2 ;;
+    esac
+  fi
+  exit 0 ;;
+*) exit 0 ;;
+esac
+`, { mode: 0o700 });
+    const up = spawnSync('bash', [script, 'up', 'dns-fixture'], {
+      encoding: 'utf8', timeout: 60000,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, XDG_STATE_HOME: root, E2E_BACKEND: 'incus', E2E_DNS_WAIT_SECONDS: wait },
+    });
+    const calls = readFileSync(log, 'utf8');
+    assert(calls.includes('file push'), `the DNS guard must let the launch proceed to the source transfer\n${up.stderr}`);
+    assert.equal(calls.includes('rm -f /etc/resolv.conf'), expectSeed);
+    assert(!calls.includes('>> /etc/resolv.conf'), 'never append through a possibly dangling link');
+    assert.equal(up.stderr.includes('Directory nonexistent'), false);
+    spawnSync('bash', [script, 'down', 'dns-fixture'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, XDG_STATE_HOME: root, E2E_BACKEND: 'incus' } });
+  });
+}

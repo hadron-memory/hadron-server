@@ -65,18 +65,20 @@ case "$action" in
     if [[ "$backend" == incus ]]; then
       # Ownership metadata exists even if creation succeeds but boot fails.
       incus launch qa-docker "$project" -c security.nesting=true -c "user.hadron-e2e=$project"
-      # DNS guard (#12129/#12157, Clark): fresh instances are intermittently
-      # born with a dead resolver — systemd-resolved's stub with no upstream
-      # ([::1]:53 refused, Docker Hub unresolvable). The bridge dnsmasq is
-      # healthy when this happens, so it is a per-instance boot race. Probe
-      # resolution BEFORE anything needs the network; if the stub is dead,
-      # seed a public resolver (the proven field workaround) and re-probe.
-      # Fail loud if neither the learned nor the seeded resolver answers —
-      # the old shape failed later and quieter as a slow docker-info wait.
+      # DNS guard (#12129/#12157, Clark; #1963). A fresh instance's
+      # /etc/resolv.conf points at /run/systemd/resolve/stub-resolv.conf, which
+      # DANGLES for the first moments after launch (systemd-resolved has not
+      # created the directory yet), and the bridge dnsmasq is healthy. So:
+      # (1) wait for resolution before concluding anything is wrong (nothing
+      # needs seeding in the common case), then (2) only if it still fails,
+      # REPLACE the link with a static resolver. Appending through the dangling
+      # link fails ("Directory nonexistent") and aborted every run before this.
+      # Fail loud if neither the learned nor the seeded resolver answers.
       dns_ok() { incus exec "$project" -- getent hosts deb.debian.org >/dev/null 2>&1; }
+      for ((i = 0; i < ${E2E_DNS_WAIT_SECONDS:-15}; i++)); do dns_ok && break; sleep 1; done
       if ! dns_ok; then
         echo "$project: resolver not answering; seeding 1.1.1.1 (dnsmasq race, #12129)" >&2
-        incus exec "$project" -- sh -c 'grep -q "^nameserver 1.1.1.1$" /etc/resolv.conf 2>/dev/null || echo "nameserver 1.1.1.1" >> /etc/resolv.conf'
+        incus exec "$project" -- sh -c 'grep -q "^nameserver 1.1.1.1$" /etc/resolv.conf 2>/dev/null || { rm -f /etc/resolv.conf; echo "nameserver 1.1.1.1" > /etc/resolv.conf; }'
       fi
       for i in {1..30}; do dns_ok && break; sleep 1; done
       dns_ok || { echo "$project: DNS not answering after seeding; refusing to continue (incus network check next)" >&2; exit 1; }
