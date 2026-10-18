@@ -10536,10 +10536,12 @@ export const typeDefs = `#graphql
     updateAgentAIConfig(agentId: ID!, provider: String!, model: String!, apiKey: String): Agent!
 
     """
-    Clear an Agent's AI provider config.
+    Clear an Agent's AI provider config without returning or decrypting keys.
 
-    036-ai-service-config: deletes the Agent's registry config named
-    'default'.
+    Clearing a user-owned Agent, by its owner or a platform ADMIN/OWNER,
+    removes every named configuration, including disabled configurations.
+    hrn:node:hadronmemory.com:specs:cor:dmo:050:13
+    An org-owned Agent clear deletes only the configuration named 'default'.
 
     Accepts the entity's ID or URN.
     """
