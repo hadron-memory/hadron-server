@@ -51,7 +51,7 @@ export function validateDeliverySettings(settings: DeliverySettings, patch: Deli
     }
   }
   if (settings.stuckWindowSeconds <= settings.busyDelaySeconds + settings.batchWindowSeconds) {
-    throw error('DELIVERY_SETTINGS_CONFLICT', 'stuckWindowSeconds must be greater than busyDelaySeconds + batchWindowSeconds.');
+    throw error('DELIVERY_SETTINGS_CONFLICT', 'stuckWindowSeconds must be greater than busyDelaySeconds + the shared cadence floor (batchWindowSeconds / minCadenceSeconds).');
   }
   if (patch.standbyEnabled === true) {
     throw error('DELIVERY_STANDBY_UNAVAILABLE', 'Standby cannot be enabled until standby delivery behavior is available (S7).');

@@ -6,14 +6,16 @@ import type { DeliverySettings } from './deliverySettings.js';
 export { loadDeliverySettings } from './deliverySettings.js';
 
 /** S1: oldest-post busy deadline (Holger, #2025 comment6246801585).
- * Clamp the busy hold to that deadline; preserve the batching window floor
- * (S1 owner #20863; Vera ratification pending). Wake ceiling is a separate S1 check. */
+ * The window opens at the first still-due post after the last delivery
+ * (Holger D4; Vera #2059 comment6247138701); later arrivals never slide it.
+ * A shorter busy delay retains the window floor (Proposed edge).
+ * Wake ceiling is a separate S1 check; overflow retains its original post time. */
 export function batchTiming(
   settings: DeliverySettings,
-  input: { oldestPostedAt: Date; lastDueMessageAt: Date; busyUntil?: Date },
+  input: { oldestPostedAt: Date; busyUntil?: Date },
 ): { deliverAfter: Date; busyDeadline: Date } {
   const deadline = input.oldestPostedAt.getTime() + settings.busyDelaySeconds * 1000;
-  const windowEnd = input.lastDueMessageAt.getTime() + settings.batchWindowSeconds * 1000;
+  const windowEnd = input.oldestPostedAt.getTime() + settings.batchWindowSeconds * 1000;
   const after = Math.max(windowEnd, Math.min(input.busyUntil?.getTime() ?? 0, deadline));
   return { deliverAfter: new Date(after), busyDeadline: new Date(deadline) };
 }

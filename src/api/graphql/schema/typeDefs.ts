@@ -8708,7 +8708,8 @@ export const typeDefs = `#graphql
 
     """
     #1747 — change an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05, :19). Whoever manages the App only.
-    Refusals: TICKER_SETTINGS_OUT_OF_RANGE, TICKER_SETTINGS_CONFLICT (a floor above a live ticker cadence).
+    Refusals: TICKER_SETTINGS_OUT_OF_RANGE, TICKER_SETTINGS_CONFLICT (a floor above a live ticker cadence),
+    DELIVERY_SETTINGS_CONFLICT (the shared cadence floor must keep stuckWindowSeconds greater than busyDelaySeconds + minCadenceSeconds).
     """
     setAppTickerSettings(appRef: String!, input: AppTickerSettingsInput!): AppTickerSettings!
     "App managers only; omitted preserves, null refuses. Standby activation is unavailable until S7 (hrn:node:hadronmemory.com:specs:cor:agt:080:19)."

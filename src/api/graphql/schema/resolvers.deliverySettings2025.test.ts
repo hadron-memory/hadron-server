@@ -135,20 +135,20 @@ describe('delivery settings #2025', () => {
     const { loadDeliverySettings, batchTiming, deliveryStuckAt } = await import(/* @vite-ignore */ path);
     const settings = await loadDeliverySettings(db, appId);
     const posted = new Date('2026-10-18T10:00:00Z'), busyUntil = new Date('2026-10-18T10:04:00Z');
-    expect(batchTiming(settings, { lastDueMessageAt: posted, oldestPostedAt: posted })).toEqual({ deliverAfter: new Date('2026-10-18T10:03:00Z'), busyDeadline: new Date('2026-10-18T10:05:00Z') });
-    expect(batchTiming(settings, { lastDueMessageAt: posted, oldestPostedAt: posted, busyUntil })).toEqual({ deliverAfter: busyUntil, busyDeadline: new Date('2026-10-18T10:05:00Z') });
+    expect(batchTiming(settings, { oldestPostedAt: posted })).toEqual({ deliverAfter: new Date('2026-10-18T10:03:00Z'), busyDeadline: new Date('2026-10-18T10:05:00Z') });
+    expect(batchTiming(settings, { oldestPostedAt: posted, busyUntil })).toEqual({ deliverAfter: busyUntil, busyDeadline: new Date('2026-10-18T10:05:00Z') });
     expect(deliveryStuckAt(settings, posted)).toEqual(new Date('2026-10-18T10:11:40Z'));
-    expect(batchTiming(settings, { oldestPostedAt: posted, lastDueMessageAt: new Date('2026-10-18T10:02:00Z') }).busyDeadline).toEqual(new Date('2026-10-18T10:05:00Z'));
+    expect(batchTiming(settings, { oldestPostedAt: posted }).busyDeadline).toEqual(new Date('2026-10-18T10:05:00Z'));
     const longBusy = new Date('2026-10-18T10:20:00Z');
-    expect(batchTiming(settings, { oldestPostedAt: posted, lastDueMessageAt: new Date('2026-10-18T10:02:00Z'), busyUntil: longBusy })).toEqual({ deliverAfter: new Date('2026-10-18T10:05:00Z'), busyDeadline: new Date('2026-10-18T10:05:00Z') });
+    expect(batchTiming(settings, { oldestPostedAt: posted, busyUntil: longBusy })).toEqual({ deliverAfter: new Date('2026-10-18T10:05:00Z'), busyDeadline: new Date('2026-10-18T10:05:00Z') });
     await set({ busyDelaySeconds: 60 });
     const shortBusy = await loadDeliverySettings(db, appId);
-    expect(batchTiming(shortBusy, { oldestPostedAt: posted, lastDueMessageAt: posted, busyUntil: longBusy })).toEqual({ deliverAfter: new Date('2026-10-18T10:03:00Z'), busyDeadline: new Date('2026-10-18T10:01:00Z') });
+    expect(batchTiming(shortBusy, { oldestPostedAt: posted, busyUntil: longBusy })).toEqual({ deliverAfter: new Date('2026-10-18T10:03:00Z'), busyDeadline: new Date('2026-10-18T10:01:00Z') });
     // Idle batching also remains a floor when its window ends after the busy deadline.
     expect(batchTiming(shortBusy, { oldestPostedAt: posted, lastDueMessageAt: posted }).deliverAfter).toEqual(new Date('2026-10-18T10:03:00Z'));
     await set({ busyDelaySeconds: 250, stuckWindowSeconds: 800 });
     const next = await loadDeliverySettings(db, appId);
-    expect(batchTiming(next, { lastDueMessageAt: posted, oldestPostedAt: posted, busyUntil }).busyDeadline).toEqual(new Date('2026-10-18T10:04:10Z'));
+    expect(batchTiming(next, { oldestPostedAt: posted, busyUntil }).busyDeadline).toEqual(new Date('2026-10-18T10:04:10Z'));
     expect(deliveryStuckAt(next, posted)).toEqual(new Date('2026-10-18T10:13:20Z'));
   });
   it('S1 first-due window never slides under steady arrivals and overflow retains its own post time', async () => {
