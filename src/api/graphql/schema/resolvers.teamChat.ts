@@ -645,9 +645,11 @@ async function resolveMentionTokens(
     (w) => w.id === mentionsRef.trim() || w.name.toLowerCase() === refLower,
   );
   if (workerMatch) {
+    // A resolved worker whose name yields no token (e.g. "!!!") has no direct
+    // name to match, but stamped broadcasts and replies-by-fold still reach it
+    // (Riana §10 P2 on #2058) — so it is NOT the unresolved-ref empty page.
     const token = mentionTokenOf(workerMatch.name);
-    if (token) return { tokens: [token], workerId: workerMatch.id };
-    return null;
+    return { tokens: token ? [token] : [], workerId: workerMatch.id };
   }
   // User path: accept an id, an hrn:user:<handle> URN, or (as a convenience
   // for the MCP tool) a BARE handle — resolveUserRef rejects a bare handle as
