@@ -37,6 +37,7 @@ import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { LINK_CAP_MEMORY_SELECT, cappedLinkLevel, type LinkCapMemory } from '../lib/auth/agentMemoryLinkCap.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
+import { installMemoryAudience, isInstallMemoryRow, readableInstallMemoryIds, writableInstallMemoryIds } from '../lib/auth/installMemory.js';
 
 // ---------------------------------------------------------------------------
 // Shared fold algorithm
@@ -763,11 +764,19 @@ export async function getMemoryAccess(
       where: {
         ownerUserId: auth.userId,
         class: { notIn: ['personal', 'private'] },
+        // #2044: an install memory is decided by its own arm below, so a
+        // user-owned App's owner is no blanket READ_WRITE on one (it must not
+        // survive the App's soft deletion, R45: no content reads).
+        installOfAgentId: null,
         deletedAt: null,
       },
       select: { id: true },
     });
     for (const { id } of owned) access.set(id, 'READ_WRITE');
+
+    // ── #2044: install memories — read for participants, write for managers ──
+    for (const id of await readableInstallMemoryIds(db, auth)) access.set(id, 'READ_ONLY');
+    for (const id of await writableInstallMemoryIds(db, auth)) access.set(id, 'READ_WRITE');
   }
 
   return access;
@@ -905,11 +914,15 @@ export async function canWriteToMemory(
     where: { id: memoryId },
     select: {
       class: true, userId: true, userMemoryOfAgentId: true, appId: true,
-      ownerUserId: true, workerOf: { select: { id: true } },
+      ownerUserId: true, organizationId: true, installOfAgentId: true,
+      workerOf: { select: { id: true } },
     },
   });
 
   if (!memory) return false;
+  // #2044: an install memory has its own audience (installMemory.ts) and no
+  // role shortcut below reaches it: not a platform role, not the owner arm.
+  if (isInstallMemoryRow(memory)) return (await installMemoryAudience(db, auth, { id: memoryId, ...memory })).write;
 
   if (memory.class === 'personal' || memory.class === 'private') {
     if (auth.userId !== memory.userId || auth.impersonation) return false;
@@ -1033,7 +1046,7 @@ export async function canWriteToMemory(
 
 type MemoryReadRow = Pick<
   Memory,
-  'id' | 'class' | 'userId' | 'userMemoryOfAgentId' | 'appId' | 'ownerUserId'
+  'id' | 'class' | 'userId' | 'userMemoryOfAgentId' | 'appId' | 'ownerUserId' | 'organizationId' | 'installOfAgentId'
 >;
 type SubscriptionReadRow = Pick<AgentSubscription, 'activatedAt' | 'expiresAt' | 'revokedAt'>;
 
@@ -1051,6 +1064,8 @@ async function canReadMemoryRow(
   memory: MemoryReadRow,
   opts: MemoryReadRowOptions = {},
 ): Promise<boolean> {
+  // #2044: an install memory's content is its live App's participants alone.
+  if (isInstallMemoryRow(memory)) return (await installMemoryAudience(db, auth, memory)).read;
   if (memory.class === 'personal' || memory.class === 'private') {
     if (auth.userId !== memory.userId || auth.impersonation) return false;
     // #1719 R5a: private is categorically unavailable to every AppRun,
@@ -1151,6 +1166,8 @@ export async function canReadMemory(
       userMemoryOfAgentId: true,
       appId: true,
       ownerUserId: true,
+      organizationId: true,
+      installOfAgentId: true,
     },
   });
   if (!memory) return false;
@@ -1188,6 +1205,8 @@ export async function filterReadableMemoryIds(
       userMemoryOfAgentId: true,
       appId: true,
       ownerUserId: true,
+      organizationId: true,
+      installOfAgentId: true,
     },
   });
 

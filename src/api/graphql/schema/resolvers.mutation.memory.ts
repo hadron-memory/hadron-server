@@ -154,6 +154,7 @@ import {
   type MergeMemoriesInput,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
+import { installMemoryAudience, isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /**
@@ -1239,6 +1240,15 @@ export const memoryMutations = {
       // miss — the owner-only refusals below also named the memory's class.
       const authorizeDelete = (authCtx: Context, current: typeof memory) =>
         concealUnreadableDenial(authCtx, resolvedId, id, async () => {
+          if (isInstallMemoryRow(current)) {
+            // #2044, R45: whoever manages the App (its owner, an OWNER-role member,
+            // an org admin) deletes its install memory by hand, also after the App
+            // was soft-deleted. Not content access: the record is all this opens.
+            if (!(await installMemoryAudience(authCtx.db, authCtx, current)).delete) {
+              throw new Error('Forbidden: only whoever manages the App can delete its install memory');
+            }
+            return;
+          }
           if (current.class === 'personal' || current.class === 'private') {
             if (!authCtx.userId || current.userId !== authCtx.userId) {
               throw new Error(`Forbidden: only the owner can delete a ${current.class} memory`);
@@ -1262,7 +1272,7 @@ export const memoryMutations = {
       // System-class memories are owned by their agent and can only be
       // removed by deleting the agent. This prevents the agent from ending
       // up with no brain via a stray deleteMemory call.
-      if (memory.class === 'system') {
+      if (memory.class === 'system' && !isInstallMemoryRow(memory)) {
         throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
       }
       await ctx.db.$transaction(async (tx) => {
@@ -1279,7 +1289,7 @@ export const memoryMutations = {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedId} FOR UPDATE`;
         const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedId } });
         await authorizeDelete({ ...ctx, db: tx } as Context, current);
-        if (current.class === 'system') {
+        if (current.class === 'system' && !isInstallMemoryRow(current)) {
           throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
         }
         const hosted = await tx.channel.findFirst({

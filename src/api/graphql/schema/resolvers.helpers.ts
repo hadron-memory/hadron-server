@@ -83,6 +83,7 @@ import {
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isUserOwnedAgentDefinition } from '../../../lib/auth/userOwnedAgentDefinition.js';
+import { installMemoryAudience, isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
 
 /**
@@ -2263,7 +2264,9 @@ export async function getAccessibleMemoryIds(
           // where the two columns DISAGREE, and production has none (0 of 15
           // personal user-owned rows). Nobody loses reach; an aligned row still
           // arrives through the strict-owner clause above.
-          { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId },
+          // #2044: not an install memory — that kind has its own audience below, so
+          // a user-owned App's owner keeps no blanket read once the App is deleted.
+          { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId, installOfAgentId: null },
         ],
       },
       select: { id: true },
@@ -2313,6 +2316,12 @@ export async function getAccessibleMemoryIds(
     // runs on nearly every read surface, so the shortcut is worth stating.
     if (!options?.excludeAppDerived && !(onlyMemoryId && accessibleIds.has(onlyMemoryId))) {
       for (const id of await appDerivedMemoryIds(ctx, onlyMemoryId)) accessibleIds.add(id);
+    }
+    // #2044: install memories — content for the live App's participants only.
+    if (!options?.excludeAppDerived) {
+      for (const id of await readableInstallMemoryIds(ctx.db, ctx)) {
+        if (!onlyMemoryId || id === onlyMemoryId) accessibleIds.add(id);
+      }
     }
     if (isRunPrincipal(ctx)) {
       const privateCandidates = await ctx.db.memory.findMany({ where: { id: { in: [...accessibleIds] }, class: 'private' }, select: { id: true } });
@@ -2541,9 +2550,15 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   if (ctx.appId) {
     const memory = await ctx.db.memory.findUnique({
       where: { id: memoryId },
-      select: { ownerUserId: true, userId: true, class: true },
+      select: { id: true, ownerUserId: true, userId: true, class: true, appId: true, organizationId: true, installOfAgentId: true },
     });
     if (!memory) throw memoryWriteForbidden();
+    // #2044: an install memory has its own write audience; no platform-role
+    // shortcut below may reach it (a deleted App's memory takes no write at all).
+    if (isInstallMemoryRow(memory)) {
+      if ((await installMemoryAudience(ctx.db, ctx, memory)).write) return;
+      throw memoryWriteForbidden();
+    }
     const strictOwner = memory.class === 'personal' || memory.class === 'private';
     // A strict owner's rights under App selection are decided by the shared
     // gate below, the same rule MCP applies (#1503, ruling (c)): an explicit
@@ -2572,8 +2587,15 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
       appId: true,
       userMemoryOfAgentId: true,
       createdBy: true,
+      installOfAgentId: true,
     },
   });
+
+  // #2044: see the App-keyed branch above.
+  if (isInstallMemoryRow(memory)) {
+    if ((await installMemoryAudience(ctx.db, ctx, memory)).write) return;
+    throw memoryWriteForbidden();
+  }
 
   // 034-memory-class-access: owner-owned personal/private memories are
   // owner-only to write — no ADMIN/OWNER bypass, no org-role path — EXCEPT a
