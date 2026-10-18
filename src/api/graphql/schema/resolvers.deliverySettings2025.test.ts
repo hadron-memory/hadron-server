@@ -96,12 +96,12 @@ describe('delivery settings #2025', () => {
     await code(set({ busyDelaySeconds: 500 }, ctx(member.id)), 'FORBIDDEN');
     await code(set({ busyDelaySeconds: 500 }, ctx(outsider.id)), 'APP_NOT_FOUND');
     await code(set({ busyDelaySeconds: 500 }, ctx(manager.id), foreignAppId), 'APP_NOT_FOUND');
-    await code(set({ busyDelaySeconds: 500 }, ctx(manager.id, { impersonation: {} as never })), 'FORBIDDEN');
+    await code(set({ busyDelaySeconds: 500 }, ctx(manager.id, { impersonation: { orgId, sessionId: generateId(), actorUserId: outsider.id, expiresAt: new Date(Date.now() + 60000) } })), 'FORBIDDEN');
     await code(set({ busyDelaySeconds: 500 }, ctx(manager.id, { sessionBindingRefused: true })), 'SESSION_NOT_BOUND');
     await code(runAsActor({ workerId, agentId }, () => set({ busyDelaySeconds: 500 })), 'FORBIDDEN');
-    const key = await db.appKey.create({ data: { appId, name: 'Host', keyHash: generateId(), keyPrefix: 'test' } });
+    const key = await db.appKey.create({ data: { appId, label: 'Host', keyHash: generateId(), keyPreview: 'test' } });
     for (const scoped of [false, true]) {
-      if (scoped) await db.appKeyScope.create({ data: { appKeyId: key.id, scope: 'attention:deliver', grantedByUserId: manager.id } });
+      if (scoped) await db.appKeyScope.create({ data: { id: generateId(), appKeyId: key.id, scope: 'attention:deliver', grantedByUserId: manager.id } });
       const keyCtx = ctx(undefined, { appId, appKeyId: key.id });
       await code(set({ busyDelaySeconds: 500 }, keyCtx), 'APP_NOT_FOUND');
       await code(get(keyCtx), 'APP_NOT_FOUND');
@@ -155,7 +155,7 @@ describe('delivery settings #2025', () => {
       expect(r.body.singleResult.data?.setAppDeliverySettings).toEqual({ ...defaults, busyDelaySeconds: 500 });
       const { createTestableMcpServer } = await import('../../../mcp/server.js');
       const mcp = createTestableMcpServer({ userId: manager.id, roles: ['READER'], clientId: `user:${manager.id}` } as never, { sessionId: generateId(), cachedAppResolution: { kind: 'multi-app' } });
-      const plain = await db.session.create({ data: { userId: manager.id } });
+      const plain = await db.session.create({ data: { id: generateId(), userId: manager.id } });
       const text = (r: any) => r.content[0].text;
       expect(text(await mcp.callTool('hadron_delivery_settings_get', { appRef: appId }))).toContain('"busyDelaySeconds":500');
       expect(text(await mcp.callTool('hadron_delivery_settings_set', { appRef: appId, input: { busyDelaySeconds: 450 } }))).toMatch(/^\[session_required\]/);

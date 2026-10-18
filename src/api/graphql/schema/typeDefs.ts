@@ -6936,6 +6936,8 @@ export const typeDefs = `#graphql
 
     "#1747 — an App's ticker settings: the cadence floor, the default self-subscription cadence, the live-ticker cap and the daily wake budget (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
     appTickerSettings(appRef: String!): AppTickerSettings!
+    "App delivery settings for participants; cadence/window is the ticker floor (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
+    appDeliverySettings(appRef: String!): AppDeliverySettings!
 
     "#1747 — one worker's wake settings (defaults when it has none), readable by the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:080:03)."
     workerWakeSettings(workerRef: String!): WorkerWakeSettings!
@@ -8709,6 +8711,8 @@ export const typeDefs = `#graphql
     Refusals: TICKER_SETTINGS_OUT_OF_RANGE, TICKER_SETTINGS_CONFLICT (a floor above a live ticker cadence).
     """
     setAppTickerSettings(appRef: String!, input: AppTickerSettingsInput!): AppTickerSettings!
+    "App managers only; omitted preserves, null refuses. Standby activation is unavailable until S7 (hrn:node:hadronmemory.com:specs:cor:agt:080:19)."
+    setAppDeliverySettings(appRef: String!, input: AppDeliverySettingsInput!): AppDeliverySettings!
 
     """
     #1747 — subscribe a worker to a ticker (hrn:node:hadronmemory.com:specs:cor:agt:080:20, :25). Its holder and whoever manages
@@ -12156,6 +12160,29 @@ export const typeDefs = `#graphql
     effectiveCadenceSeconds: Int
     "None of the worker's sessions has had activity within the App's dormancy period (hrn:node:hadronmemory.com:specs:cor:agt:080:07). A dormant worker is never woken."
     dormant: Boolean!
+  }
+
+  "Delivery timing per App. Busy/stuck bounds and relation are Proposed (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
+  type AppDeliverySettings {
+    "The existing ticker cadence floor and wake-rate ceiling, also the batching window. Changing it affects ticker cadence."
+    batchWindowSeconds: Int!
+    "Whole seconds, 1..86400; default 600."
+    busyDelaySeconds: Int!
+    "Whole seconds, 1..604800; default 900. Must exceed busy delay plus batch window."
+    stuckWindowSeconds: Int!
+    "Stored configuration; default false. Enabling is refused until standby behavior ships."
+    standbyEnabled: Boolean!
+    "False until S7 supplies standby behavior; configuration alone has no effect."
+    standbyEffective: Boolean!
+  }
+
+  "Atomic patch: omit to preserve, explicit null refuses. Empty patch returns the current authorized settings."
+  input AppDeliverySettingsInput {
+    "Shared ticker floor/window; existing floor, self-cadence and live-ticker limits apply."
+    batchWindowSeconds: Int
+    busyDelaySeconds: Int
+    stuckWindowSeconds: Int
+    standbyEnabled: Boolean
   }
 
   "#1747 — an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."

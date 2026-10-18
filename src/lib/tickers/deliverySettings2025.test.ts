@@ -4,23 +4,32 @@ import { readFileSync } from 'node:fs';
 import { db } from '../../integrations/db/client.js';
 import { generateId } from '../id.js';
 const migrationUrl = new URL('../../../prisma/migrations/20261018010000_delivery_settings/migration.sql', import.meta.url);
+const prePushUrl = new URL('../../../prisma/delivery-settings-pre-push.sql', import.meta.url);
 const sourceUrl = new URL('../../../prisma/delivery-settings-invariants.sql', import.meta.url);
 
 describe('delivery settings migration #2025', () => {
   it('pins post-push and byte-identical migration constraint source', () => {
     const source = readFileSync(sourceUrl, 'utf8');
-    expect(readFileSync(migrationUrl, 'utf8').endsWith(source)).toBe(true);
+    expect(readFileSync(migrationUrl, 'utf8')).toBe(readFileSync(prePushUrl, 'utf8') + '\n' + source);
+    expect(readFileSync(new URL('../../../prisma/pre-push.sql', import.meta.url), 'utf8')).toContain('\\ir delivery-settings-pre-push.sql');
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir delivery-settings-invariants.sql');
   });
   it('executes on the old App shape and preserves customized high floors', async () => {
-    const sql = readFileSync(migrationUrl, 'utf8');
+    const pre = readFileSync(prePushUrl, 'utf8');
+    const sql = readFileSync(sourceUrl, 'utf8');
     const statements = sql.split('\n').filter((s) => !s.trim().startsWith('--')).join('\n').split(/;\s*(?:\n|$)/).map((s) => s.trim()).filter(Boolean);
     const result = await db.$transaction(async (tx) => {
       await tx.$executeRawUnsafe('CREATE SCHEMA migration_2025');
       await tx.$executeRawUnsafe('SET LOCAL search_path TO migration_2025');
       await tx.$executeRawUnsafe('CREATE TABLE apps (id TEXT PRIMARY KEY, ticker_min_cadence_seconds INTEGER NOT NULL DEFAULT 120)');
       await tx.$executeRawUnsafe("INSERT INTO apps VALUES ('ordinary',120),('custom',600),('ceiling',86400)");
-      // Trusted checked-in migration text only, no interpolated caller input; execute every statement.
+      // The migration is exactly this guarded transition plus the constraints (byte-pinned above).
+      // Trusted checked-in SQL only, no interpolated caller input.
+      await tx.$executeRawUnsafe(pre);
+      const first = await tx.$queryRawUnsafe<Array<{ stuck: number }>>("SELECT delivery_stuck_window_seconds AS stuck FROM apps WHERE id='custom'");
+      expect(first).toEqual([{ stuck: 1201 }]);
+      await tx.$executeRawUnsafe("UPDATE apps SET delivery_busy_delay_seconds=500, delivery_stuck_window_seconds=1400 WHERE id='custom'");
+      await tx.$executeRawUnsafe(pre); // reapplication must not overwrite later manager-chosen settings.
       for (const statement of statements) await tx.$executeRawUnsafe(statement);
       await tx.$executeRawUnsafe("INSERT INTO apps(id) VALUES ('new')");
       const rows = await tx.$queryRawUnsafe('SELECT id, ticker_min_cadence_seconds AS floor, delivery_busy_delay_seconds AS busy, delivery_stuck_window_seconds AS stuck, delivery_standby_enabled AS standby FROM apps ORDER BY id');
@@ -29,7 +38,7 @@ describe('delivery settings migration #2025', () => {
     expect(result.message).toBe('rollback scratch schema');
     expect(result.rows).toEqual([
       { id: 'ceiling', floor: 86400, busy: 600, stuck: 87001, standby: false },
-      { id: 'custom', floor: 600, busy: 600, stuck: 1201, standby: false },
+      { id: 'custom', floor: 600, busy: 500, stuck: 1400, standby: false },
       { id: 'new', floor: 120, busy: 600, stuck: 900, standby: false },
       { id: 'ordinary', floor: 120, busy: 600, stuck: 900, standby: false },
     ]);
