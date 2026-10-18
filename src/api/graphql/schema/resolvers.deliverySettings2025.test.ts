@@ -151,6 +151,25 @@ describe('delivery settings #2025', () => {
     expect(batchTiming(next, { lastDueMessageAt: posted, oldestPostedAt: posted, busyUntil }).busyDeadline).toEqual(new Date('2026-10-18T10:04:10Z'));
     expect(deliveryStuckAt(next, posted)).toEqual(new Date('2026-10-18T10:13:20Z'));
   });
+  it('S1 first-due window never slides under steady arrivals and overflow retains its own post time', async () => {
+    const { loadDeliverySettings, batchTiming, deliveryStuckAt } = await import('../../../lib/tickers/batchTiming.js');
+    const settings = await loadDeliverySettings(db, appId);
+    const first = new Date('2026-10-18T10:00:00Z');
+    const busyUntil = new Date('2026-10-18T11:00:00Z');
+    for (let seconds = 0; seconds <= 900; seconds += 60) {
+      // Arrival metadata is deliberately varied; only the first still-due post may anchor timing.
+      const arrival = { oldestPostedAt: first, lastDueMessageAt: new Date(first.getTime() + seconds * 1000) };
+      const idle = batchTiming(settings, arrival);
+      const busy = batchTiming(settings, { ...arrival, busyUntil });
+      expect(idle.deliverAfter).toEqual(new Date('2026-10-18T10:02:00Z'));
+      expect(busy.deliverAfter).toEqual(new Date('2026-10-18T10:10:00Z'));
+      expect(busy.busyDeadline).toEqual(new Date('2026-10-18T10:10:00Z'));
+      expect(busy.deliverAfter.getTime()).toBeLessThan(deliveryStuckAt(settings, first).getTime());
+    }
+    // Overflow after a delivery keeps the oldest remaining message's original post, not delivery time.
+    const overflow = { oldestPostedAt: new Date('2026-10-18T10:01:00Z'), lastDueMessageAt: new Date('2026-10-18T10:09:00Z') };
+    expect(batchTiming(settings, overflow).deliverAfter).toEqual(new Date('2026-10-18T10:03:00Z'));
+  });
   it('GraphQL and MCP select and return the same contract; MCP requires a named plain session', async () => {
     const { ApolloServer } = await import('@apollo/server');
     const { typeDefs } = await import('./typeDefs.js');
