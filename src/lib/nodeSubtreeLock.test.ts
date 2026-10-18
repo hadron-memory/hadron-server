@@ -24,16 +24,19 @@ describe('ancestorLocs', () => {
 });
 
 /**
- * Capture the (memoryId, loc) bind values of each `$executeRaw` tagged-template
- * call, in order — that ordering is the deadlock-avoidance contract.
+ * Capture resolved key pairs; a small deterministic hash fixture isolates
+ * ancestor coverage. Real PostgreSQL hashes are pinned in nodeSubtreeLock1214.
  */
+const hash = (value: string) => [...value].reduce((sum, c) => sum + c.charCodeAt(0), 0);
 function makeTxSpy() {
   const calls: Array<{ key1: unknown; key2: unknown }> = [];
   const $executeRaw = vi.fn((_strings: TemplateStringsArray, key1: unknown, key2: unknown) => {
-    calls.push({ key1, key2 });
+    calls.push({ key1: typeof key1 === 'string' ? hash(key1) : key1, key2: typeof key2 === 'string' ? hash(key2) : key2 });
     return Promise.resolve(1);
   });
-  // Spec 049 S4: every helper consults the protected-loc gate before locking.
+  const $queryRaw = vi.fn(async (_strings: TemplateStringsArray, input: string) =>
+    (JSON.parse(input) as Array<{ memoryId: string; loc: string }>).map((k) => ({ h1: hash(k.memoryId), h2: hash(k.loc) })));
+  // Spec 049 S4: every helper consults the protected-loc gate after locking.
   // Its ONE source is the Channel table, so a memory with no Channels is the
   // unprotected world these tests describe.
   //
@@ -45,16 +48,16 @@ function makeTxSpy() {
   // a fixture describing a world that does not exist, and it would silently
   // satisfy the gate if that read ever came back.
   const channel = { findMany: vi.fn(async () => []) };
-  return { tx: { $executeRaw, channel } as unknown as Prisma.TransactionClient, calls };
+  return { tx: { $executeRaw, $queryRaw, channel } as unknown as Prisma.TransactionClient, calls };
 }
 
 describe('lockAncestorsForCreate', () => {
-  it('locks each strict ancestor root→leaf, keyed (memoryId, ancestorLoc)', async () => {
+  it('locks every strict ancestor in resolved-key order', async () => {
     const { tx, calls } = makeTxSpy();
     await lockAncestorsForCreate(tx, 'mem1', 'a:b:c');
     expect(calls).toEqual([
-      { key1: 'mem1', key2: 'a' },
-      { key1: 'mem1', key2: 'a:b' },
+      { key1: hash('mem1'), key2: hash('a') },
+      { key1: hash('mem1'), key2: hash('a:b') },
     ]);
   });
 
@@ -66,13 +69,13 @@ describe('lockAncestorsForCreate', () => {
 });
 
 describe('lockAncestorsForCreateMany', () => {
-  it('dedupes the ancestor set across locs and acquires each once, root→leaf', async () => {
+  it('dedupes the ancestor set and acquires each resolved key once', async () => {
     const { tx, calls } = makeTxSpy();
     // `a:b` and `a:c` share ancestor `a`; `a:b:d` adds `a:b`. Union = {a, a:b}.
     await lockAncestorsForCreateMany(tx, 'mem1', ['a:b', 'a:c', 'a:b:d']);
     expect(calls).toEqual([
-      { key1: 'mem1', key2: 'a' },
-      { key1: 'mem1', key2: 'a:b' },
+      { key1: hash('mem1'), key2: hash('a') },
+      { key1: hash('mem1'), key2: hash('a:b') },
     ]);
   });
 
@@ -102,16 +105,16 @@ describe('lockPathForCreateUnder', () => {
     await lockAncestorsForCreate(child.tx, 'mem1', 'chats:c1:messages:001-user');
     expect(under.calls).toEqual(child.calls);
     expect(under.calls).toEqual([
-      { key1: 'mem1', key2: 'chats' },
-      { key1: 'mem1', key2: 'chats:c1' },
-      { key1: 'mem1', key2: 'chats:c1:messages' },
+      { key1: hash('mem1'), key2: hash('chats') },
+      { key1: hash('mem1'), key2: hash('chats:c1') },
+      { key1: hash('mem1'), key2: hash('chats:c1:messages') },
     ]);
   });
 
   it('locks a root-level parent itself (it is still an ancestor of its children)', async () => {
     const { tx, calls } = makeTxSpy();
     await lockPathForCreateUnder(tx, 'mem1', 'a');
-    expect(calls).toEqual([{ key1: 'mem1', key2: 'a' }]);
+    expect(calls).toEqual([{ key1: hash('mem1'), key2: hash('a') }]);
   });
 
   it('contends with a delete of the parent', async () => {
@@ -127,11 +130,11 @@ describe('lockNodeForDelete', () => {
   it('locks the node\'s own loc — the same key a descendant-create takes as an ancestor', async () => {
     const { tx, calls } = makeTxSpy();
     await lockNodeForDelete(tx, 'mem1', 'a:b');
-    expect(calls).toEqual([{ key1: 'mem1', key2: 'a:b' }]);
+    expect(calls).toEqual([{ key1: hash('mem1'), key2: hash('a:b') }]);
     // Parity: a create of a child of a:b locks a:b among its ancestors, so the
     // two contend on an identical (memoryId, loc) key.
     const create = makeTxSpy();
     await lockAncestorsForCreate(create.tx, 'mem1', 'a:b:child');
-    expect(create.calls).toContainEqual({ key1: 'mem1', key2: 'a:b' });
+    expect(create.calls).toContainEqual({ key1: hash('mem1'), key2: hash('a:b') });
   });
 });

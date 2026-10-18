@@ -17,8 +17,8 @@ function latch<T = void>() {
 }
 
 async function fixture() {
-  const [hashes] = await db.$queryRaw<Array<{ h1: number; x: number; z: number; y: number }>>`
-    SELECT hashtext(${MEMORY}) AS h1, hashtext(${X}) AS x,
+  const [hashes] = await db.$queryRaw<Array<{ h1: number; other: number; x: number; z: number; y: number }>>`
+    SELECT hashtext(${MEMORY}) AS h1, hashtext(${`${MEMORY}-2`}) AS other, hashtext(${X}) AS x,
            hashtext(${Z}) AS z, hashtext(${Y}) AS y`;
   expect(X).not.toBe(Y);
   expect(compareLockKeys(key(X), key(Z))).toBeLessThan(0);
@@ -26,6 +26,8 @@ async function fixture() {
   expect(hashes.x).toBe(hashes.y);
   expect(hashes.z).not.toBe(hashes.x);
   expect(hashes.x).toBeLessThan(0);
+  expect(hashes.h1).toBeLessThan(0);
+  expect(hashes.other).toBeGreaterThan(0);
   return hashes;
 }
 
@@ -128,9 +130,9 @@ describe('#1214 actual-key ordering', () => {
           };
         },
       });
-      await acquireLockSet(spy, [key(Z), key(Y), key(X), key(Z)]);
+      await acquireLockSet(spy, [key(Z), { memoryId: `${MEMORY}-2`, loc: Z }, key(Y), key(X), key(Z)]);
     });
-    expect(calls).toEqual([[h.h1, h.x], [h.h1, h.z]].sort((a, b) => a[0] - b[0] || a[1] - b[1]));
+    expect(calls).toEqual([[h.h1, h.x], [h.h1, h.z], [h.other, h.z]].sort((a, b) => a[0] - b[0] || a[1] - b[1]));
   });
 
   it('empty input makes no DB call and one distinct input keeps the original hashtext statement', async () => {

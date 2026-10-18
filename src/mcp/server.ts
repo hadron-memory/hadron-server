@@ -6211,8 +6211,8 @@ export function createMcpServerInstance(
       // pre-transaction `existing` probe lost a revision under concurrency: two
       // calls both saw no row, one created it, the other overwrote it on the
       // create branch (PR #977 review, both bots). lockLocForWrite takes the
-      // same key as an ancestor-create and as lockNodeForDelete, acquired after
-      // the ancestors so the root→leaf order stays deadlock-free.
+      // same key as an ancestor-create and as lockNodeForDelete. This path
+      // takes ancestor locks first, then the own-loc lock.
       // #1181 — thrown from INSIDE the transaction by the authoritative gate
       // below and mapped to a refusal outside it. A sentinel rather than a
       // string match: throwing aborts the transaction, which is exactly what we
