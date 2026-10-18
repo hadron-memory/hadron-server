@@ -87,3 +87,23 @@ describe('include tags through createNode / updateNode (#2040)', () => {
     expect(await includeEdges('a')).toEqual([]);
   });
 });
+
+describe('searchReplaceInNodes (#2040)', () => {
+  const replace = (nodeIds: string[], oldText: string, newText: string) =>
+    M.searchReplaceInNodes(null, { input: { nodeIds, fields: ['content'], oldText, newText, dryRun: false } }, as());
+  const idOf = async (loc: string) => (await db.node.findFirstOrThrow({ where: { memoryId, loc } })).id;
+
+  it('derives edges for a rewritten node', async () => {
+    await create('b', 'B'); await create('a', 'see TOKEN');
+    await replace([await idOf('a')], 'TOKEN', '{{> b}}');
+    expect((await includeEdges('a')).map(e => e.target.loc)).toEqual(['b']);
+  });
+
+  it('a batch with one cycle rolls every node back', async () => {
+    await create('b', 'x TOKEN'); await create('a', '{{> b}} TOKEN');
+    const ids = [await idOf('a'), await idOf('b')];
+    expect(await code(replace(ids, 'TOKEN', '{{> a}}'))).toBe('INCLUDE_CYCLE');
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'b' } })).content).toBe('x TOKEN');
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'a' } })).content).toBe('{{> b}} TOKEN');
+  });
+});

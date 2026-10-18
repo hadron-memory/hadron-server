@@ -2773,6 +2773,7 @@ export const nodeMutations = {
         // replacement was computed from a read taken BEFORE this lock, so a row
         // whose tracked state changed since then refuses the whole batch
         // (all-or-nothing, as below) instead of overwriting the newer write.
+        let readableForIncludes: string[] | null = null;
         const planMemory = new Map(plans.map((p) => [p.raw.id, p.raw.memoryId]));
         // #1753 — memory rows BEFORE node rows (promotion's order). Holding the
         // memory state through the batch still stops a pre-flip plan writing
@@ -2876,6 +2877,14 @@ export const nodeMutations = {
 
           Object.assign(data, clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
+          // #2040 — a replace that rewrites content re-checks its include tags; a
+          // refusal throws and rolls the whole batch back with it.
+          if (p.contentChanged) {
+            const text = p.plaintext.content;
+            readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+            const tags = await assertIncludesWritable(tx, raw, text, readableForIncludes);
+            await syncDerivedIncludesEdges(tx, raw, tags, readableForIncludes);
+          }
         }
       }));
 
