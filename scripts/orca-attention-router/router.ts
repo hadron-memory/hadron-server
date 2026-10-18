@@ -86,11 +86,17 @@ const LARGE_GAP_SPAN = 400;
  * acknowledged).
  */
 export function nudgeText(a: AttentionItem): string {
-  const where = [
-    a.firstUnreadSeq === null ? '' : `unread #${a.firstUnreadSeq}–#${a.lastSeq}`,
-    a.lastRelevantSeq === null ? '' : `latest mention #${a.lastRelevantSeq}`,
-  ].filter(Boolean).join(', ');
-  const head = `Hadron team attention: ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where ? `; ${where}` : ''}).`;
+  // The EVERY-CYCLE nudge is deliberately terse (Holger, 2026-10-14: it lands
+  // on every woken worker and the long form added up, token-wise). Every
+  // load-bearing clause survives the compaction: the anchor (START AT the
+  // first unread — not the newest page), the unfiltered read, the nextSince
+  // paging instruction, and the silence rule that keeps 65 workers from
+  // posting 'read, nothing to do'. The MCP variant is gone: the router only
+  // nudges Orca terminals, and every roster worker is CLI-bound. The rare
+  // LARGE-GAP branch below keeps its full density — a multi-page backward
+  // walk is not the place to save tokens.
+  const where = a.firstUnreadSeq === null ? '' : `, #${a.firstUnreadSeq}–#${a.lastSeq}`;
+  const head = `Team chat: ${a.unread} unread, ${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where}.`;
   if (a.firstUnreadSeq !== null && a.lastSeq - a.firstUnreadSeq > LARGE_GAP_SPAN) {
     const since = Math.max(0, a.firstUnreadSeq - 1);
     // The walk is bounded BOTH ways by values this nudge named: the ceiling is
@@ -104,8 +110,12 @@ export function nudgeText(a: AttentionItem): string {
     // down to the fixed since floor delivers every mention in the window
     // (live control: 201 mentions, pages 200/1/0, the H+1 arrival excluded).
     const bound = a.lastSeq + 1;
+    // The walk branch names the latest mention explicitly: the walk is
+    // mentions-only, so its coverage claim is checkable against this seq.
+    const gapHead =
+      head + (a.lastRelevantSeq === null ? '' : ` Latest mention #${a.lastRelevantSeq}.`);
     return (
-      head +
+      gapHead +
       ` LARGE GAP (unread span ${a.lastSeq - a.firstUnreadSeq} > ${LARGE_GAP_SPAN}): walk MENTIONS ONLY from your first unread to the head named here — every unread mention is on the path; the rest is history.` +
       ` CLI: \`hadron team chat read --mentions-me --since ${since} --before ${bound} --limit 200\`, then follow each page's prevBefore BACKWARD to your first unread — beforeSeq selects the NEWEST page under the bound, so page down to the floor and stop at an empty or floor page; MCP: \`hadron_team_chat_read\` with your session, \`sinceSeq=${since}\`, \`beforeSeq=${bound}\`, its mentions filter and limit 200, then re-call with \`beforeSeq\` = the smallest seq on your last page until the floor (MCP pages carry no prevBefore field).` +
       ` Then mark read through your OWN session at the highest seq actually delivered to you, never above #${a.lastSeq} (CLI: \`hadron team chat mark-read --through <that seq>\`; MCP: \`hadron_team_chat_mark_read\` — a mentions-filtered read never auto-marks).` +
@@ -118,15 +128,13 @@ export function nudgeText(a: AttentionItem): string {
   // NEWEST page as every recovery brief teaches, found nothing addressed to
   // them there, and concluded "nothing needs action" — while fresh mentions
   // sat unread at their watermark. Name the mark; tell them where to start.)
-  const from =
-    a.firstUnreadSeq === null
-      ? ''
-      : ` START AT #${a.firstUnreadSeq} (your first unread message of any kind) — CLI: \`hadron team chat read --since ${Math.max(0, a.firstUnreadSeq - 1)} --limit 200\` then follow nextSince; MCP: \`hadron_team_chat_read\` with your session and \`sinceSeq=${Math.max(0, a.firstUnreadSeq - 1)}\` then the returned cursor — NOT the newest page alone;`;
+  if (a.firstUnreadSeq === null) {
+    return head + ' Read the newest page unfiltered; nothing to act on ⇒ mark read, finish silently, no post.';
+  }
   return (
     head +
-    `${from} ` +
-    'Read team chat unfiltered with your own live session; if nothing needs action, ' +
-    "mark read and finish silently — no chat post or 'read/no-action' comment. (Orca attention router; counts as of send.)"
+    ` Start at #${a.firstUnreadSeq}; read unfiltered from there (\`hadron team chat read --since ${Math.max(0, a.firstUnreadSeq - 1)} --limit 200\`, follow nextSince; never the newest page alone).` +
+    ' Nothing to act on ⇒ mark read, finish silently, no post.'
   );
 }
 
