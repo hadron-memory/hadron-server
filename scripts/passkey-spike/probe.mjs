@@ -7,7 +7,7 @@ const pin=(name,run)=>{try {run();} catch(e){failures.push(name+': '+e.message);
 import { chromium } from 'playwright';
 import { startSpike } from './preview.mjs';
 
-const timingEnvKeys = ['PASSKEY_SPIKE_SESSION_TTL_SECONDS','PASSKEY_SPIKE_PAIRING_TTL_SECONDS'];
+const timingEnvKeys = ['PASSKEY_SPIKE_SESSION_TTL_SECONDS','PASSKEY_SPIKE_PAIRING_TTL_SECONDS','PASSKEY_SPIKE_CEREMONY_EXPIRY_SECONDS','PASSKEY_SPIKE_BROWSER_TIMEOUT_MS'];
 const savedTimingEnv = timingEnvKeys.map(key => process.env[key]);
 for (const key of timingEnvKeys) delete process.env[key];
 const primary = await startSpike({basePath:'/__passkey-al/',sessionTtlSeconds:1800,pairingTtlSeconds:300});
@@ -25,6 +25,46 @@ const registrationRace=await startSpike({beforeRegistrationVerify:async()=>{
 let browser;
 try {
   browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}) });
+  // Real SDK verification with virtual credentials and a deterministic server clock.
+  // Each case checks BOTH generators; no physical provider or elapsed-time claim.
+  for (const configured of [false, true]) {
+    const expiry = configured ? 120 : 600;
+    const hint = configured ? 60000 : 300000;
+    const timing = await startSpike({sessionTtlSeconds:1800,
+      ...(configured ? {ceremonyExpirySeconds:expiry,browserTimeoutMs:hint} : {})});
+    const tc = await browser.newContext();
+    const tp = await tc.newPage();
+    const tcdp = await tc.newCDPSession(tp);
+    const realNow = Date.now;
+    let clock = realNow();
+    try {
+      await tcdp.send('WebAuthn.enable');
+      await tcdp.send('WebAuthn.addVirtualAuthenticator',{options:{protocol:'ctap2',transport:'internal',hasResidentKey:true,hasUserVerification:true,isUserVerified:true,automaticPresenceSimulation:true}});
+      await tp.goto(timing.url);
+      await tp.waitForFunction(()=>window.spike?.ready);
+      Date.now=()=>clock;
+      const reg=await tp.evaluate(()=>window.spike.request('/registration/options',{}));
+      assert.equal(reg.options.timeout,hint);
+      const response=await tp.evaluate(options=>window.SimpleWebAuthnBrowser.startRegistration({optionsJSON:options}),reg.options);
+      clock+=61000;
+      assert.equal((await tp.evaluate(body=>window.spike.post('/registration/verify',body),{id:reg.id,response})).status,200,'registration survives old deadline');
+      assert.equal((await tp.evaluate(body=>window.spike.post('/registration/verify',body),{id:reg.id,response})).body.code,'CEREMONY_SPENT');
+      const auth=await tp.evaluate(()=>window.spike.request('/authentication/options',{}));
+      assert.equal(auth.options.timeout,hint);
+      const assertion=await tp.evaluate(options=>window.spike.assertion(options),auth.options);
+      clock+=61000;
+      assert.equal((await tp.evaluate(body=>window.spike.post('/authentication/verify',body),{id:auth.id,response:assertion})).status,200,'authentication survives old deadline');
+      assert.equal((await tp.evaluate(body=>window.spike.post('/authentication/verify',body),{id:auth.id,response:assertion})).body.code,'CEREMONY_SPENT');
+      const replay=await tp.evaluate(()=>window.spike.request('/authentication/options',{}));
+      assert.equal((await tp.evaluate(body=>window.spike.post('/authentication/verify',body),{id:replay.id,response:assertion})).body.code,'REPLAY_REFUSED');
+      const expired=await tp.evaluate(()=>window.spike.request('/authentication/options',{}));
+      const fresh=await tp.evaluate(options=>window.spike.assertion(options),expired.options);
+      clock+=expiry*1000;
+      assert.equal((await tp.evaluate(body=>window.spike.post('/authentication/verify',body),{id:expired.id,response:fresh})).body.code,'CEREMONY_SPENT','expiry equality refuses');
+      clock-=1000;
+      assert.equal((await tp.evaluate(body=>window.spike.post('/authentication/verify',body),{id:expired.id,response:fresh})).body.code,'CEREMONY_SPENT','expiry consumes permanently');
+    } finally { Date.now=realNow; await tc.close(); await timing.close(); }
+  }
   const context = await browser.newContext();
   const page = await context.newPage();
   const cdp = await context.newCDPSession(page);
@@ -39,11 +79,13 @@ try {
   assert.equal(await page.locator('.session-lifetime').first().textContent(), '30 minutes');
   assert.equal(await page.getByLabel('Pairing code from the other device').isVisible(), true);
   assert.equal(await page.locator('#pair-code').evaluate(el => getComputedStyle(el).borderTopStyle), 'solid');
-  assert.deepEqual(await (await fetch(otherOrigin.url+'config')).json(), {sessionTtlSeconds:300,pairingTtlSeconds:60});
+  assert.deepEqual(await (await fetch(otherOrigin.url+'config')).json(), {sessionTtlSeconds:300,pairingTtlSeconds:60,ceremonyExpirySeconds:600,browserTimeoutMs:300000});
   process.env.PASSKEY_SPIKE_SESSION_TTL_SECONDS='1800';
   process.env.PASSKEY_SPIKE_PAIRING_TTL_SECONDS='300';
+  process.env.PASSKEY_SPIKE_CEREMONY_EXPIRY_SECONDS='900';
+  process.env.PASSKEY_SPIKE_BROWSER_TIMEOUT_MS='420000';
   const envSpike = await startSpike();
-  try { assert.deepEqual(await (await fetch(envSpike.url+'config')).json(), {sessionTtlSeconds:1800,pairingTtlSeconds:300}); }
+  try { assert.deepEqual(await (await fetch(envSpike.url+'config')).json(), {sessionTtlSeconds:1800,pairingTtlSeconds:300,ceremonyExpirySeconds:900,browserTimeoutMs:420000}); }
   finally { await envSpike.close(); for (const key of timingEnvKeys) delete process.env[key]; }
   for (const value of [0,-1,1.5,Infinity,86401]) {
     await assert.rejects(startSpike({sessionTtlSeconds:value}), /Invalid sessionTtlSeconds/);
@@ -229,6 +271,7 @@ try {
   console.log(JSON.stringify({ localLeg: 'PASS', browser: await browser.version(), rpID: 'localhost',
     origin: primary.origin, fixture: 'spec-retention-example', discoverable: true,
     registrationUV: true, authenticationUV: true, customChallengeMatchesS0: true,
+    ceremonyTiming: {defaultExpirySeconds:600,defaultBrowserHintMs:300000,overrideExpirySeconds:120,overrideBrowserHintMs:60000,bothGenerators:true,validVerificationsAfterOldDeadline:true,expiryEqualityRefused:true,expiredAndAttemptedRemainConsumed:true},
     hostedPrep: {independentUserHandle:true,atomicReservation:true,pairingIsolation:true,oneUsePair:true,secondBrowserSyntheticSigning:true,discoverableSigning:true,credentialIdentityMatches:true,oneRegistration:true},
     legDryRuns: ['iCloud workflow: copied virtual credential in paired second browser', 'QR/hybrid workflow: browser assertion and verification UI exercised; real QR unavailable', '1Password workflow: UV/BE/BS/counter reporting exercised; real provider unavailable'],
     refusals: ['UV=false', 'wrong origin', 'spent ceremony replay', 'new ceremony stored assertion replay (canonical and encoding alias)', 'wrong RP control', 'wrong challenge control'],
