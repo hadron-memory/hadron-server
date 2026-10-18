@@ -325,3 +325,23 @@ describe('#2044 install memory — list surfaces', () => {
     expect(found.items ?? found.nodes ?? []).toHaveLength(0);
   });
 });
+
+describe('#2044 install memory — the one-Agent-per-system-memory assumptions', () => {
+  it('cannot be transferred, attached as an Agent memory item, or reported/repaired as an Agent\'s own', async () => {
+    const f = await fixture();
+    await f.create(f.admin);
+    const [row] = await f.installRows();
+    // Transfer: a system-class memory never transfers independently; the plan names why.
+    const preview = await M.transferMemoryOwnership(
+      {}, { memoryRef: row!.id, orgRef: orgId, targetClass: 'knowledge', dryRun: true }, ctxOf(f.admin.id),
+    );
+    expect((preview.blockers as Array<{ code: string }>).map((b) => b.code)).toContain('UNSUPPORTED_MEMORY_CLASS');
+    // Attach: refused as an Agent memory item.
+    await expect(M.addMemoryToAgent({}, { agentRef: f.agent.id, memoryRef: row!.id, role: 'read' }, ctxOf(f.admin.id))).rejects.toThrow();
+    expect(await db.agentMemoryItem.count({ where: { memoryId: row!.id } })).toBe(0);
+    // The Agent-system-memory audit starts from Agent.systemMemoryId, which never names it.
+    const { findSystemMemoryOwnerMismatches } = await import('../../../lib/agentSystemMemory.js');
+    expect(JSON.stringify(await findSystemMemoryOwnerMismatches(db))).not.toContain(row!.id);
+    expect((await db.agent.findUniqueOrThrow({ where: { id: f.agent.id } })).systemMemoryId).not.toBe(row!.id);
+  });
+});
