@@ -163,6 +163,18 @@ describe('names, replies and own posts', () => {
   });
 });
 
+describe('a worker whose name yields no mention token (Riana §10 P2)', () => {
+  it('addressed by id, it still sees stamped broadcasts, never unstamped ones or its own', async () => {
+    const bang = await mkWorker('!!!', holderA.id);
+    await grant(bang.id);
+    const stamped = await humanSays(manager.id, 'host shutdown @all');
+    await workerSays(rook, 'quoting @all');
+    await workerSays(bang, 'its own @all');
+    expect(await mentionsOf(bang)).toEqual([stamped.seq]);
+    expect(await attentionMentions(bang)).toBe(1);
+  });
+});
+
 describe('decided at post time (cor:agt:080:14)', () => {
   it('revoking the grant and releasing the worker after the post leaves the broadcast on the read', async () => {
     const g = await grant(liam.id);
