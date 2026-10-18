@@ -205,13 +205,23 @@ describe('team-chat monitor (#1265)', () => {
       acknowledge: checkpointsOf(broadcasts),
     });
     const irisSession = irisStarted.match(/Session started: (\S+)/)![1];
+    // #2020: a worker's broadcast is a mention only when the server stamped it
+    // at post time — Iris holds no broadcast grant yet, so it routes nowhere.
     expect(await restarted.callToolText('hadron_team_chat_post', {
       body: '@all @team by Iris',
       session: irisSession,
     })).toContain('message #5');
+    const unstamped = await restarted.callToolText('hadron_team_chat_read', { monitor: true });
+    expect(unstamped).not.toContain('@all @team by Iris');
+    expect(unstamped).not.toContain('route to:');
+    await db.appGrant.create({ data: { id: generateId(), appId: app.id, granteeWorkerId: worker.id, name: 'ticker.subscribe-workers', grantedBy: admin.id } });
+    expect(await restarted.callToolText('hadron_team_chat_post', {
+      body: '@all @team by Iris, granted',
+      session: irisSession,
+    })).toContain('message #6');
     const authoredBroadcast = await restarted.callToolText('hadron_team_chat_read', { monitor: true });
     expect(authoredBroadcast).toContain('1 message needs routing');
-    expect(authoredBroadcast).toContain('@all @team by Iris');
+    expect(authoredBroadcast).toContain('@all @team by Iris, granted');
     expect(authoredBroadcast).toContain(`route to: hrn:worker:${org.urn}:app:mira`);
     expect(authoredBroadcast).not.toContain(`route to: hrn:worker:${org.urn}:app:iris`);
   });

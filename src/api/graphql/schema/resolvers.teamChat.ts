@@ -57,6 +57,7 @@ import {
 import { isSessionLive, loadLastEventBySession, touchLiveSession } from '../../../lib/sessionActivity.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf, BROADCAST_MENTION_TOKENS } from '../../../lib/mentionToken.js';
+import { reachesWorker } from '../../../lib/mentionReach.js';
 import { extractMentions } from '../../../lib/teamChatMentions.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
@@ -359,6 +360,12 @@ export interface TeamChatMessageOut {
   sessionId: string | null;
   replyToSeq: number | null;
   mentions: string[];
+  /**
+   * #2020: the post-time stamp (cor:agt:080:14) — the author could wake
+   * everyone. Internal routing input for the reach rule (`lib/mentionReach.ts`);
+   * deliberately not in the SDL.
+   */
+  broadcastWakes: boolean;
 }
 
 type MessageRow = {
@@ -412,6 +419,7 @@ function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo, memBa
     sessionId: typeof env.sessionId === 'string' ? env.sessionId : null,
     replyToSeq: typeof env.replyToSeq === 'number' ? env.replyToSeq : null,
     mentions: Array.isArray(env.mentions) ? env.mentions.filter((m): m is string => typeof m === 'string') : [],
+    broadcastWakes: env.broadcastWakes === true,
   };
 }
 
@@ -613,12 +621,17 @@ function sessionNotLiveError(sessionRef: string, dormant = false): GraphQLError 
  * nonexistent one, so a worker ref only resolves within THIS App's staff, and
  * a user ref only when the user is an AppMember of it (or the caller
  * themself).
+ *
+ * #2020: a worker ref also carries the worker's id, because what the filter
+ * returns for a worker is what REACHES it ({@link reachesWorker}: its name and
+ * replies, plus a broadcast stamped at post time, never its own post). A user
+ * ref keeps matching the handle alone: S1 pushes only to workers.
  */
 async function resolveMentionTokens(
   ctx: Context,
   appId: string,
   mentionsRef: string,
-): Promise<string[] | null> {
+): Promise<{ tokens: string[]; workerId: string | null } | null> {
   // Worker path: the App's own staff only — matched in memory on PK or
   // case-insensitive name (never a LIKE-backed filter,
   // findings:prisma-string-filters-are-unescaped-like). The staff list of one
@@ -633,7 +646,7 @@ async function resolveMentionTokens(
   );
   if (workerMatch) {
     const token = mentionTokenOf(workerMatch.name);
-    if (token) return [token];
+    if (token) return { tokens: [token], workerId: workerMatch.id };
     return null;
   }
   // User path: accept an id, an hrn:user:<handle> URN, or (as a convenience
@@ -655,7 +668,7 @@ async function resolveMentionTokens(
       if (!isSelf && !member) return null;
       const user = await ctx.db.user.findUnique({ where: { id }, select: { handle: true } });
       const token = user?.handle ? mentionTokenOf(user.handle) : null;
-      if (token) return [token];
+      if (token) return { tokens: [token], workerId: null };
       return null;
     } catch {
       // try the next spelling
@@ -1160,6 +1173,7 @@ async function postToChannelRoot(
     sessionId: (envelope.sessionId as string | undefined) ?? null,
     replyToSeq: replyToSeq ?? null,
     mentions,
+    broadcastWakes: envelope.broadcastWakes === true,
   };
 }
 
@@ -1318,14 +1332,18 @@ async function readChannelRoot(
   };
 
   if (mentionsRef) {
-    const tokens = appId === null ? null : await resolveMentionTokens(ctx, appId, mentionsRef);
-    if (!tokens) return { items: [], total: 0 };
+    const resolved = appId === null ? null : await resolveMentionTokens(ctx, appId, mentionsRef);
+    if (!resolved) return { items: [], total: 0 };
+    const { tokens, workerId } = resolved;
+    // #2020: a worker sees what reaches it (lib/mentionReach.ts); a user, its handle.
+    const matches = (msg: TeamChatMessageOut): boolean =>
+      workerId !== null ? reachesWorker(msg, [workerId], tokens) : msg.mentions.some((t) => tokens.includes(t));
     // Always scanned ASCENDING regardless of paging direction: this branch
     // filters in memory, so the direction is applied to the RESULT below.
     const rows = await ctx.db.node.findMany({ where, orderBy, select });
     const matching = rows
       .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo, memBareUrn) }))
-      .filter((m) => m.msg.mentions.some((t) => tokens.includes(t)));
+      .filter((m) => matches(m.msg));
     const page =
       take === 0
         ? []
