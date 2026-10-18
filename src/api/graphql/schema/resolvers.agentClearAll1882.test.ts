@@ -19,7 +19,7 @@ let adminId: string;
 let agentId: string;
 let otherAgentId: string;
 let orgId: string;
-const context = (userId: string, roles: string[] = ['READER']): Context => ({ db, userId, roles });
+const context = (userId: string, roles: NonNullable<Context['roles']> = ['READER']): Context => ({ db, userId, roles });
 
 beforeEach(async () => {
   vi.restoreAllMocks();
@@ -40,7 +40,7 @@ async function config(target: string, name: string, enabled = true) {
 const configs = () => db.aiServiceConfig.findMany({ orderBy: { id: 'asc' } });
 
 describe('#1882 — platform clear of user-owned Agent credentials', () => {
-  it.each(['ADMIN', 'OWNER'])(
+  it.each(['ADMIN', 'OWNER'] as const)(
     '%s removes every named config, including disabled rows, without touching another Agent or exposing keys',
     async (role) => {
       await db.user.update({ where: { id: adminId }, data: { roles: [role] } });
