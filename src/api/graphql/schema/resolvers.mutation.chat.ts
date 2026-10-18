@@ -27,7 +27,7 @@ import {
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
-import { applyPersonaTemplate, applyPlatformVariables } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables } from '../../../lib/personaDescription.js';
 import {
   evaluateEdgeCondition,
   userMessageFor,
@@ -113,7 +113,7 @@ async function chatWriteTx(
  */
 export function bindAgentPrompt(agent: { systemPrompt: string | null; name: string; urn: string; personaRole: string | null }): string {
   const role = agent.personaRole ?? '';
-  return applyPlatformVariables(applyPersonaTemplate(agent.systemPrompt ?? '', agent.name, role), {
+  return applyPlatformVariables(agent.systemPrompt ?? '', {
     'worker.name': agent.name,
     'worker.role': role,
     'agent.name': agent.name,
@@ -122,7 +122,7 @@ export function bindAgentPrompt(agent: { systemPrompt: string | null; name: stri
     'worker.trailer': '',
     'worker.url': portalUrlForUrn(agent.urn) ?? '',
     'session.llmModel': '',
-  });
+  }, { name: agent.name, role });
 }
 
 export const chatMutations = {

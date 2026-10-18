@@ -38,7 +38,7 @@ import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
-import { applyPersonaTemplate, applyPlatformVariables, templateBindsName, type PlatformVariableValues } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables, templateBindsName, type PlatformVariableValues } from '../../../lib/personaDescription.js';
 // Spec 049 Phase 6 — the register block, derived data through one composition point.
 import { renderDerivedBlocks, resolveRegister } from '../../../lib/resolveRegister.js';
 import {
@@ -1772,19 +1772,21 @@ export const workerQueries = {
     // Prompt composition mirrors Worker.prompt exactly: the agent's template
     // with {{name}}/{{role}} bound, then the override as its own paragraph.
     const template = agent.systemPrompt ?? null;
-    const bound = template
-      ? applyPlatformVariables(applyPersonaTemplate(template, name, workerRole ?? agent.personaRole ?? ''), {
-          'worker.name': name,
-          'worker.role': workerRole ?? agent.personaRole ?? '',
-          'agent.name': agent.name,
-          'worker.reportsTo.name': '',
-          'worker.signature': '',
-          'worker.trailer': '',
-          'worker.url': '',
-          'session.llmModel': '',
-        })
-      : null;
-    const prompt = bound && override ? `${bound}\n\n${override}` : (override ?? bound);
+    const previewRole = workerRole ?? agent.personaRole ?? '';
+    // No worker row or session exists yet, so url / model / reports-to have nothing to fill.
+    const values: PlatformVariableValues = {
+      'worker.name': name,
+      'worker.role': previewRole,
+      'agent.name': agent.name,
+      'worker.reportsTo.name': '',
+      'worker.signature': '',
+      'worker.trailer': '',
+      'worker.url': '',
+      'session.llmModel': '',
+    };
+    const bound = template ? applyPlatformVariables(template, values, { name, role: previewRole }) : null;
+    const boundOverride = override ? applyPlatformVariables(override, values) : override;
+    const prompt = bound && boundOverride ? `${bound}\n\n${boundOverride}` : (boundOverride ?? bound);
 
     return {
       name,
@@ -2038,8 +2040,10 @@ export async function composeWorkerPrompt(
   const role = worker.role ?? agent?.personaRole ?? '';
   // #2042 (cor:dmo:150:08): the platform variables, filled now, at this bind, from the worker being bound.
   const platform = await workerPlatformValues(ctx, worker, agent, role, opts?.llmModel);
-  const bound = template ? applyPlatformVariables(applyPersonaTemplate(template, worker.name, role), platform) : null;
-  const authored = bound && worker.promptOverride ? `${bound}\n\n${worker.promptOverride}` : (worker.promptOverride ?? bound);
+  // One pass over each authored text (blind review P2-1/P2-2): the override is boot-prompt text too.
+  const bound = template ? applyPlatformVariables(template, platform, { name: worker.name, role }) : null;
+  const override = worker.promptOverride ? applyPlatformVariables(worker.promptOverride, platform) : worker.promptOverride;
+  const authored = bound && override ? `${bound}\n\n${override}` : (override ?? bound);
   // Spec 049 Phase 6: the register block is DERIVED data appended through the
   // one composition point (`renderDerivedBlocks`), never authored prompt text
   // — evaluated for the Worker's durable holder, so an admin reading another

@@ -29,7 +29,7 @@ export function applyPersonaTemplate(template: string, name: string, role: strin
  * goes through here.
  */
 export function templateBindsName(template: string | null | undefined): boolean {
-  return !!template && template.includes(PERSONA_NAME_TOKEN);
+  return !!template && (template.includes(PERSONA_NAME_TOKEN) || template.includes('{{worker.name}}'));
 }
 
 /**
@@ -57,9 +57,19 @@ export interface PlatformVariableValues {
   'session.llmModel': string;
 }
 
-export function applyPlatformVariables(template: string, values: PlatformVariableValues): string {
+export function applyPlatformVariables(
+  template: string,
+  values: PlatformVariableValues,
+  /** The legacy `{{name}}` / `{{role}}` placeholders, bound in the SAME pass (blind review P2-1): a second pass over
+   * an already-substituted prompt would read an inserted value as template source. Omit for text that has none (a
+   * worker override keeps its legacy tokens as written). */
+  legacy?: { name: string; role: string },
+): string {
   return template.replace(
-    /\{\{(worker\.name|worker\.role|agent\.name|worker\.reportsTo\.name|worker\.signature|worker\.trailer|worker\.url|session\.llmModel)\}\}/g,
-    (_m, key: keyof PlatformVariableValues) => values[key],
+    /\{\{(name|role|worker\.name|worker\.role|agent\.name|worker\.reportsTo\.name|worker\.signature|worker\.trailer|worker\.url|session\.llmModel)\}\}/g,
+    (match, key: string) => {
+      if (key === 'name' || key === 'role') return legacy ? legacy[key] : match;
+      return values[key as keyof PlatformVariableValues];
+    },
   );
 }
