@@ -71,6 +71,7 @@ let outsider: { id: string };
 let teamAgent: { id: string; urn: string; systemMemoryId: string };
 /** The role-agent — carries ONLY the persona dressing (personaRole/Prompt). */
 let roleAgent: { id: string; urn: string; systemMemoryId: string };
+const roleAgentName = 'Backend Engineer';
 let app: { id: string; urn: string };
 
 /** Create a roles:<role> cast-list node in a system memory. Only data.names
@@ -1344,6 +1345,110 @@ describe('Worker field resolvers', () => {
     const worker = await cast({ agentRef: roleAgent.id, role: 'debugger', name: 'Zoe' });
     const prompt = await W.prompt(worker, {}, ctx(admin.id));
     expect(prompt).toContain('You are Zoe, a debugger on this team.');
+  });
+
+  describe('platform variables (#2042, cor:dmo:150:08)', () => {
+    const TEMPLATE = [
+      'name={{worker.name}}', 'role={{worker.role}}', 'agent={{agent.name}}', 'boss={{worker.reportsTo.name}}',
+      'sig=[{{worker.signature}}]', 'trailer=[{{worker.trailer}}]', 'url={{worker.url}}', 'model={{session.llmModel}}',
+      'legacy={{name}}/{{role}}',
+    ].join('\n');
+
+    async function withTemplate(template: string | null = TEMPLATE) {
+      await db.agent.update({ where: { id: roleAgent.id }, data: { systemPrompt: template } });
+    }
+
+    it('fills the full closed set at the bind, including the legacy pair', async () => {
+      const prev = process.env.FRONTEND_URL;
+      process.env.FRONTEND_URL = 'https://portal.example';
+      try {
+        await withTemplate();
+        const boss = await cast({ agentRef: roleAgent.id, name: 'Boss' });
+        const worker = await cast({ agentRef: roleAgent.id, role: 'debugger', name: 'Zoe' });
+        await db.worker.update({ where: { id: worker.id }, data: { reportsToWorkerId: boss.id } });
+        await db.session.create({
+          data: { id: generateId(), appId: app.id, workerId: worker.id, userId: admin.id, llmModel: 'claude-sonnet-5-5' },
+        });
+        const fresh = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+        const prompt = (await W.prompt(fresh, {}, ctx(admin.id))) as string;
+        const url = await W.portalUrl(fresh, {}, ctx(admin.id));
+        expect(url).toMatch(/^https:\/\/portal\.example\/app\/u\//);
+        expect(prompt.split('\n')).toEqual([
+          'name=Zoe', 'role=debugger', 'agent=' + roleAgentName, 'boss=Boss', 'sig=[]', 'trailer=[]',
+          `url=${url}`, 'model=claude-sonnet-5-5', 'legacy=Zoe/debugger',
+        ]);
+      } finally {
+        if (prev === undefined) delete process.env.FRONTEND_URL; else process.env.FRONTEND_URL = prev;
+      }
+    });
+
+    it('falls through bottom-up: an empty worker role takes the Agent personaRole; no boss and no session bind empty', async () => {
+      await withTemplate('r={{worker.role}} b=[{{worker.reportsTo.name}}] m=[{{session.llmModel}}]');
+      const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
+      await db.worker.update({ where: { id: worker.id }, data: { role: '' } });
+      const fresh = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+      expect(await W.prompt(fresh, {}, ctx(admin.id))).toBe('r=backend-engineer b=[] m=[]');
+    });
+
+    it('reads the values NOW: a role edit and a newer session model reach the next bind with no recompile', async () => {
+      await withTemplate('{{worker.role}}/{{session.llmModel}}');
+      const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
+      const read = async () => W.prompt(await db.worker.findUniqueOrThrow({ where: { id: worker.id } }), {}, ctx(admin.id));
+      await db.session.create({ data: { id: generateId(), appId: app.id, workerId: worker.id, userId: admin.id, llmModel: 'model-a', startedAt: new Date(Date.now() - 60_000) } });
+      expect(await read()).toBe('backend-engineer/model-a');
+      await db.worker.update({ where: { id: worker.id }, data: { role: 'debugger' } });
+      await db.session.create({ data: { id: generateId(), appId: app.id, workerId: worker.id, userId: admin.id, llmModel: 'model-b' } });
+      expect(await read()).toBe('debugger/model-b');
+    });
+
+    it('an ended session no longer supplies session.llmModel', async () => {
+      await withTemplate('[{{session.llmModel}}]');
+      const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
+      await db.session.create({ data: { id: generateId(), appId: app.id, workerId: worker.id, userId: admin.id, llmModel: 'gone', endedAt: new Date() } });
+      expect(await W.prompt(await db.worker.findUniqueOrThrow({ where: { id: worker.id } }), {}, ctx(admin.id))).toBe('[]');
+    });
+
+    it('values are literal: a worker role holding variable syntax is not expanded again', async () => {
+      await withTemplate('{{worker.role}}|{{worker.name}}');
+      const worker = await cast({ agentRef: roleAgent.id, role: '{{worker.name}}', name: 'Zoe' });
+      expect(await W.prompt(worker, {}, ctx(admin.id))).toBe('{{worker.name}}|Zoe');
+    });
+
+    it('a node at loc worker/agent/session in a memory does not feed the variables', async () => {
+      await withTemplate('{{worker.name}}');
+      const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
+      await db.node.create({
+        data: { id: generateId(), memoryId: teamAgent.systemMemoryId, loc: 'worker', name: 'worker', data: { name: 'Zed' } },
+      });
+      expect(await W.prompt(worker, {}, ctx(admin.id))).toBe('Zoe');
+    });
+
+    it('discloses nothing to a caller the worker read gate refuses, including the boss name', async () => {
+      await withTemplate('{{worker.reportsTo.name}}');
+      const boss = await cast({ agentRef: roleAgent.id, name: 'Boss' });
+      const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
+      await db.worker.update({ where: { id: worker.id }, data: { reportsToWorkerId: boss.id } });
+      const fresh = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+      expect(await W.prompt(fresh, {}, ctx(admin.id))).toBe('Boss');
+      expect(await W.prompt(fresh, {}, ctx(outsider.id))).toBeNull();
+    });
+
+    it('never binds a reportsTo target outside the worker\'s own App', async () => {
+      await withTemplate('[{{worker.reportsTo.name}}]');
+      const otherApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Elsewhere App', urn: `${org.urn}:elsewhere` } });
+      const foreign = await db.worker.create({
+        data: { id: generateId(), appId: otherApp.id, agentId: roleAgent.id, name: 'Elsewhere', slug: 'elsewhere' },
+      });
+      const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
+      await db.worker.update({ where: { id: worker.id }, data: { reportsToWorkerId: foreign.id } });
+      expect(await W.prompt(await db.worker.findUniqueOrThrow({ where: { id: worker.id } }), {}, ctx(admin.id))).toBe('[]');
+    });
+
+    it('castWorkerPreview mirrors the bind, leaving worker.url and session.llmModel written until a bind fills them', async () => {
+      await withTemplate('{{worker.name}}/{{worker.role}}/{{agent.name}}/[{{worker.reportsTo.name}}]/{{worker.url}}/{{session.llmModel}}');
+      const preview = await Q.castWorkerPreview({}, { appRef: app.id, agentRef: roleAgent.id, role: 'debugger', name: 'Zoe' }, ctx(admin.id));
+      expect(preview.prompt).toBe(`Zoe/debugger/${roleAgentName}/[]/{{worker.url}}/{{session.llmModel}}`);
+    });
   });
 
   it('override-only when the agent carries no template', async () => {

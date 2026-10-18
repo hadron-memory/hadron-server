@@ -389,6 +389,28 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
     expect(next.systemMessage).toBe('Existing prompt.\n\nScope the research.');
   });
 
+  it('binds the platform variables from the Agent in both chat prompt paths (#2042: no worker, so Agent values)', async () => {
+    const prev = process.env.FRONTEND_URL;
+    process.env.FRONTEND_URL = 'https://portal.example';
+    try {
+      await db.agent.update({
+        where: { id: agent.id },
+        data: {
+          systemPrompt: '{{worker.name}}|{{worker.role}}|{{agent.name}}|[{{worker.reportsTo.name}}][{{worker.signature}}][{{worker.trailer}}]|{{worker.url}}|[{{session.llmModel}}]|{{name}}',
+          personaRole: 'researcher',
+        },
+      });
+      const { urn } = await db.agent.findUniqueOrThrow({ where: { id: agent.id }, select: { urn: true } });
+      const expected = `research-agent|researcher|research-agent|[][][]|https://portal.example/app/u/${urn}|[]|research-agent\n\nScope the research.`;
+      const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
+      expect(start.systemMessage).toBe(expected);
+      const turn = await resolvers.Mutation.sendChatMessage({}, { chatId: start.chatId, userMessage: 'first turn' }, adminCtx());
+      expect(turn.systemMessage).toBe(expected);
+    } finally {
+      if (prev === undefined) delete process.env.FRONTEND_URL; else process.env.FRONTEND_URL = prev;
+    }
+  });
+
   it('includes the turn being answered on a chat longer than the window', async () => {
     const contents = await driveTurns(60);
     // The whole defect in one assertion: past the cap the model was handed
