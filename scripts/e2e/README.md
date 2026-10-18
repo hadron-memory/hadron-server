@@ -42,6 +42,14 @@ that choice consistent for teardown; auto teardown uses the recorded choice. Doc
 the Incus publication binds the disposable instance's interfaces, reachable
 only through the private QA bridge and the host-loopback forwarder.
 
+**Incus DNS guard (#1963).** A fresh instance's `/etc/resolv.conf` dangles for
+its first moments, so `up` first waits up to `E2E_DNS_WAIT_SECONDS` (default 15)
+for `deb.debian.org` to resolve and seeds nothing when it does. Only if it still
+does not, it replaces the link with `nameserver 1.1.1.1` (never appends through
+it) and waits up to 30 more seconds. If nothing resolves it exits 1 with
+`DNS not answering after seeding`; the instance and state directory remain, so
+run `down` before retrying.
+
 The first slice includes server and DB. Run a local portal as described below;
 MinIO, NATS, external-provider mocks, git-source fixtures and automated browser
 suites are not part of this slice. Mail, LLM spend and headless workers are off.
