@@ -147,3 +147,37 @@ describe('#2044 install memory — uninstall, reinstall, App deletion (ruling A)
     await expect(M.deleteMemory({}, { id: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
   });
 });
+
+describe('#2044 install memory — URN reclaim (R29) and account erasure', () => {
+  it('refuses to hard-delete a soft-deleted App while an install memory remains; allows it once removed by hand', async () => {
+    const f = await fixture();
+    await db.app.update({ where: { id: f.app.id }, data: { urn: 'il-org:reclaim-me' } });
+    await f.create(f.admin);
+    const [row] = await f.installRows();
+    await M.deleteApp({}, { ref: f.app.id }, ctxOf(f.admin.id));
+    const reclaim = () => M.createApp({}, { orgRef: orgId, agentRef: f.agent.id, name: 'Reclaim Me' }, ctxOf(f.admin.id));
+    await expect(reclaim()).rejects.toMatchObject({ extensions: { code: 'INSTALL_MEMORIES_REMAIN' } });
+    // Nothing was destroyed by the refused attempt.
+    expect(await db.app.count({ where: { id: f.app.id } })).toBe(1);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: row!.id } })).deletedAt).toBeNull();
+    await expect(M.deleteMemory({}, { id: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
+    await expect(reclaim()).resolves.toBeTruthy();
+    expect(await db.app.count({ where: { id: f.app.id } })).toBe(0);
+  });
+
+  it('erasing the owner of a user-owned Agent removes its install memories instead of failing on the Agent FK', async () => {
+    const f = await fixture();
+    const owner = await f.user('uo-owner');
+    const agent = await db.agent.create({ data: { id: generateId(), name: 'Mine', urn: 'uo:mine', ownerUserId: owner.id } });
+    // An install memory in someone else's (org) App: the App cascade of the erasure does not reach it,
+    // so only the explicit sweep keeps the RESTRICT Agent FK from rolling the erasure back.
+    const { app } = await createDbAppWithKey(db, 'foreign-app', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    await db.memory.create({
+      data: { id: generateId(), class: 'system', name: 'uo-install', urn: `${orgId}:uo-install`, organizationId: orgId, appId: app.id, installOfAgentId: agent.id },
+    });
+    const { deleteUserAccount } = await import('../../../controller/operations/deleteUser.js');
+    await deleteUserAccount(db, { targetUserId: owner.id, actorUserId: owner.id });
+    expect(await db.memory.count({ where: { installOfAgentId: agent.id } })).toBe(0);
+  });
+});
