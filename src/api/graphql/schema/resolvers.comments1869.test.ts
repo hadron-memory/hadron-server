@@ -160,7 +160,10 @@ describe('the #1869 scrub migration', () => {
     const temporary = fn(MIGRATION);
     const scrubBranch = temporary.slice(temporary.indexOf("  IF TG_OP = 'UPDATE'\n     AND"), temporary.indexOf("  IF TG_OP = 'UPDATE' THEN"));
     expect(scrubBranch).toContain('RETURN NEW;');
-    expect(temporary.replace(scrubBranch, '')).toBe(fn(INVARIANTS));
+    // The guard as it stood when this migration was written: the newest copy of
+    // the invariants before #2040 widened the kinds (an applied migration never changes).
+    const guardAtScrub = read('../../../../prisma/migrations/20261015100000_system_memories_commentable/migration.sql');
+    expect(temporary.replace(scrubBranch, '')).toBe(fn(guardAtScrub));
     // Step 3 re-applies the canonical text after the scrub and before COMMIT:
     // the file as it stood then, since an applied migration never changes
     // (#1935 has since widened the class check, in its own migration).

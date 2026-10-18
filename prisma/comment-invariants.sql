@@ -167,18 +167,19 @@ BEGIN
     -- A kind never changes once set (INCLUDE rows included), and a comment edge
     -- keeps its identity. INCLUDE rows (#2040) are replaced by delete + insert
     -- by the derived-edge sync, never rewritten in place.
-    IF OLD.governed_kind IS DISTINCT FROM NEW.governed_kind
-       OR (OLD.governed_kind = 'INCLUDE' AND (
-         OLD.source_id <> NEW.source_id OR OLD.target_id <> NEW.target_id OR OLD.loc <> NEW.loc
-         OR OLD.name IS DISTINCT FROM NEW.name
-         OR OLD.deleted_at IS DISTINCT FROM NEW.deleted_at))
+    IF OLD.governed_kind = 'INCLUDE' AND NEW.governed_kind IS NOT DISTINCT FROM 'INCLUDE' THEN
+      IF OLD.source_id <> NEW.source_id OR OLD.target_id <> NEW.target_id OR OLD.loc <> NEW.loc
+         OR OLD.name IS DISTINCT FROM NEW.name OR OLD.deleted_at IS DISTINCT FROM NEW.deleted_at THEN
+        RAISE EXCEPTION 'COMMENT_INVARIANT: derived include edge % is immutable (replace it by delete and insert)', OLD.id USING ERRCODE = 'check_violation';
+      END IF;
+    ELSIF OLD.governed_kind IS DISTINCT FROM NEW.governed_kind
        OR (OLD.governed_kind IN ('COMMENT_ANCHOR', 'COMMENT_REPLY') AND (
          OLD.source_id <> NEW.source_id OR OLD.target_id <> NEW.target_id OR OLD.loc <> NEW.loc
          OR OLD.anchor_rev_no IS DISTINCT FROM NEW.anchor_rev_no
          OR OLD.anchor_approval_hash IS DISTINCT FROM NEW.anchor_approval_hash
          OR OLD.name IS DISTINCT FROM NEW.name
          OR OLD.deleted_at IS DISTINCT FROM NEW.deleted_at)) THEN
-      RAISE EXCEPTION 'COMMENT_INVARIANT: governed edge % is immutable', OLD.id USING ERRCODE = 'check_violation';
+      RAISE EXCEPTION 'COMMENT_INVARIANT: governed comment edge % is immutable', OLD.id USING ERRCODE = 'check_violation';
     END IF;
     RETURN NEW;
   END IF;
