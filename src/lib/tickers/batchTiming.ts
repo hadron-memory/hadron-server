@@ -5,13 +5,13 @@
 import type { DeliverySettings } from './deliverySettings.js';
 export { loadDeliverySettings } from './deliverySettings.js';
 
-/** S1: newest eligible message plus the shared cadence window, bounded by caller-computed busyUntil. */
+/** S1: newest-message batching; the hard busy deadline always starts at the oldest waiting post (Holger, #2025 comment6246801585). */
 export function batchTiming(
   settings: DeliverySettings,
-  input: { lastDueMessageAt: Date; busyUntil?: Date },
+  input: { oldestPostedAt: Date; lastDueMessageAt: Date; busyUntil?: Date },
 ): { deliverAfter: Date; busyDeadline: Date } {
   const after = Math.max(input.lastDueMessageAt.getTime() + settings.batchWindowSeconds * 1000, input.busyUntil?.getTime() ?? 0);
-  return { deliverAfter: new Date(after), busyDeadline: new Date(after + settings.busyDelaySeconds * 1000) };
+  return { deliverAfter: new Date(after), busyDeadline: new Date(input.oldestPostedAt.getTime() + settings.busyDelaySeconds * 1000) };
 }
 
 /** S5: deadline only; the owning evaluator decides eligibility, comparison and episode lifecycle. */
