@@ -139,3 +139,34 @@ export function includeRefusalText(e: unknown): string | null {
     ? `[${String(code).toLowerCase()}] ${e.message}`
     : null;
 }
+
+/** Tags of content already stored: a malformed one yields no edges rather than failing the caller. */
+export function storedIncludeTags(content: string | null | undefined): IncludeTag[] {
+  try {
+    return content ? parseIncludeTags(content) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Re-derive a stored node's INCLUDE edges from its own content, for the paths
+ * that copy or move already-valid content (clone, extract, merge): no refusal,
+ * the content was valid where it came from. Encrypted memories re-derive only
+ * while their key is cached; otherwise the edges wait for the next content write.
+ */
+export async function resyncDerivedIncludesForNodes(tx: Tx, nodeIds: string[]): Promise<void> {
+  if (nodeIds.length === 0) return;
+  const nodes = await tx.node.findMany({
+    where: { id: { in: nodeIds }, deletedAt: null },
+    select: { id: true, memoryId: true, loc: true, content: true, memory: { select: { id: true, isEncrypted: true } } },
+  });
+  for (const node of nodes) {
+    let content = node.content;
+    if (node.memory.isEncrypted) {
+      if (!sessionKeyCache.getByMemoryId(node.memory.id)) continue;
+      content = decryptNodeFields({ content }, node.memory).content ?? null;
+    }
+    await syncDerivedIncludesEdges(tx, node, storedIncludeTags(content), null);
+  }
+}

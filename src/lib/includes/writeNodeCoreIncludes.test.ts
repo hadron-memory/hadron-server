@@ -127,3 +127,13 @@ describe('mergeNodes and restoreNodeRevision (#2040)', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: a.id } })).content).toBe('v2 plain');
   });
 });
+
+describe('direct edge mutation of a derived INCLUDE edge (#2040)', () => {
+  it('deleteEdge and updateEdge refuse it, naming the content as the owner', async () => {
+    await create('b', 'B'); await create('a', '{{> b}}');
+    const [edge] = await includeEdges('a');
+    expect(await code(M.deleteEdge(null, { edgeRef: edge.id }, as()))).toBe('INCLUDE_EDGE_DERIVED');
+    expect(await code(M.updateEdge(null, { edgeRef: edge.id, name: 'x' }, as()))).toBe('INCLUDE_EDGE_DERIVED');
+    expect(await includeEdges('a')).toHaveLength(1);
+  });
+});

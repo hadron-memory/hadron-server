@@ -1,3 +1,4 @@
+import { storedIncludeTags, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // sessionMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { ownsSession } from '../../../lib/sessionOwnership.js';
@@ -2041,7 +2042,8 @@ export const sessionMutations = {
         select: { id: true },
       })).map((n) => n.id);
       const edges = await ctx.db.edge.findMany({
-        where: { sourceId: { in: nodeIds }, deletedAt: null },
+        // Derived INCLUDE edges (#2040) are not snapshotted: restore re-derives them from content.
+        where: { sourceId: { in: nodeIds }, deletedAt: null, governedKind: null },
         include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
       });
       const edgeSnapshots = edges.map((e) => ({
@@ -2206,7 +2208,7 @@ export const sessionMutations = {
             select: { id: true },
           })).map((n) => n.id);
           await tx.edge.updateMany({
-            where: { sourceId: { in: currentNodeIds }, deletedAt: null },
+            where: { sourceId: { in: currentNodeIds }, deletedAt: null, governedKind: null },
             data: { deletedAt: new Date() },
           });
 
@@ -2274,6 +2276,10 @@ export const sessionMutations = {
               },
             });
             locToId.set(loc, upserted.id);
+            // #2040 — re-derive the include edges from the restored content. No
+            // refusal here: the snapshot was valid when taken, and the walk would
+            // see a half-restored graph.
+            await syncDerivedIncludesEdges(tx, upserted, storedIncludeTags(nodeData.content), null);
           }
 
           // Restore edges from snapshot. Spec 037: derive loc when an older

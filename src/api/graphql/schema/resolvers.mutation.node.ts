@@ -151,7 +151,7 @@ import {
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
-import { assertIncludesWritable, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
+import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 
 /**
@@ -160,6 +160,9 @@ import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '..
  */
 async function refuseGovernedEdge(tx: Pick<Prisma.TransactionClient, 'edge'>, edgeId: string): Promise<void> {
   const edge = await tx.edge.findUnique({ where: { id: edgeId }, select: { governedKind: true } });
+  if (edge?.governedKind === 'INCLUDE') {
+    throw includeRefusal('INCLUDE_EDGE_DERIVED', 'This edge is derived from an include tag in the source node\'s content; edit that content instead.');
+  }
   if (edge?.governedKind) throw commentGovernedError('edge', 'edits');
 }
 
