@@ -46,6 +46,7 @@ import {
 } from './auth/pendingLoginState.js';
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
+import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
 import {
   oauthSurfaceRefusal,
   oauthSurfaceRefusalMessage,
@@ -1044,6 +1045,7 @@ export async function createServer(): Promise<Express> {
   // #792 — dev-only login (triple-gated: DEV_LOGIN_ENABLED + non-production
   // NODE_ENV + localhost Host; otherwise indistinguishable from a 404).
   mountDevLoginRoutes(app, db);
+  mountPasskeyCeremonyRoutes(app);
 
   // #477 Sink 1 — login handoff exchange. The portal's server `load` (NOT the
   // browser) POSTs the one-time code from /auth/callback?code=… here and gets
@@ -1134,6 +1136,8 @@ export async function createServer(): Promise<Express> {
 
   const { typeDefs, resolvers: deploymentResolvers } = deploymentSchema();
   const apollo = new ApolloServer({
+    // #2087: concealed errors must not depend on the deployment's NODE_ENV.
+    includeStacktraceInErrorResponses: false,
     typeDefs,
     resolvers: deploymentResolvers,
     plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin],

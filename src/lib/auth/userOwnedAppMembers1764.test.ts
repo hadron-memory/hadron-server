@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1764 — members of a user-owned App are participants (Holger "A", #8151 / #8155; cor:acl:010:01).
  *
@@ -214,7 +215,7 @@ describe('what stays strict', () => {
   it('a worker\'s working memory and a session memory stay out of the member\'s reach', async () => {
     const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: owner.id, name: 'Mine2', urn: `own${generateId().toLowerCase()}:mine2`, visibility: 'ORGANIZATION' } as never });
     const workerMem = await db.memory.create({ data: { id: generateId(), class: 'app', appId: app.id, ownerUserId: owner.id, name: 'worker mem', urn: `${app.id}-w` } });
-    await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'W', slug: 'w', memoryId: workerMem.id } as never });
+    await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'W', slug: 'w', memoryId: workerMem.id } as never });
     const sessionMem = await db.memory.create({ data: { id: generateId(), class: 'app', appId: app.id, ownerUserId: owner.id, userMemoryOfAgentId: agent.id, name: 'sess', urn: `${app.id}-s` } });
     for (const m of [workerMem, sessionMem]) {
       expect(await canReadMemory(db, auth(member.id), m.id)).toBe(false);
@@ -270,7 +271,7 @@ describe('taking a worker\'s name on a user-owned App (Rook P2, #8886; interim (
   beforeEach(async () => {
     const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: owner.id, name: 'Mine3', urn: `own${generateId().toLowerCase()}:mine3`, visibility: 'ORGANIZATION' } as never });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-    workerId = (await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' }, select: { id: true } })).id;
+    workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' }, select: { id: true } })).id;
   });
 
   it('being a member does not make you a holder: a member cannot take the owner\'s unheld worker', async () => {
@@ -302,7 +303,7 @@ describe('taking a worker\'s name on a user-owned App (Rook P2, #8886; interim (
     const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'OA', urn: `${org.urn}:oa`, visibility: 'ORGANIZATION' } });
     await db.appAgent.create({ data: { appId: orgApp.id, agentId: agent.id } });
     await db.appMember.create({ data: { appId: orgApp.id, userId: member.id, role: 'member' } });
-    const w = await db.worker.create({ data: { id: generateId(), appId: orgApp.id, agentId: agent.id, name: 'Orgy', slug: 'orgy' }, select: { id: true } });
+    const w = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: orgApp.id, agentId: agent.id, name: 'Orgy', slug: 'orgy' }, select: { id: true } });
     const s = await M.startSession({}, { input: { id: generateId(), workerRef: w.id, appRef: orgApp.id } }, ctx(member.id));
     expect(s.id).toBeTruthy();
   });
@@ -313,7 +314,7 @@ describe('nested content behind the widened Worker gate (Riana P1, #1786)', () =
     const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: owner.id, name: 'Secret role', urn: `own${generateId().toLowerCase()}:secret-role`, visibility: 'ORGANIZATION', systemPrompt: 'synthetic-agent-secret' } as never });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     const mem = await db.memory.create({ data: { id: generateId(), class: 'app', appId: app.id, ownerUserId: owner.id, name: 'Strict worker state', urn: `own${generateId().toLowerCase()}:worker-state` } });
-    const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'SecretWorker', slug: 'secretworker', memoryId: mem.id, heldByUserId: owner.id, heldAt: new Date() } });
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'SecretWorker', slug: 'secretworker', memoryId: mem.id, heldByUserId: owner.id, heldAt: new Date() } });
     await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc: 'handoffs:2026-10-12-001', name: 'Synthetic handoff', nodeType: 'info', content: 'synthetic-worker-secret', data: { reviewMarker: 'synthetic-private-state' } } });
     return { agent, mem, worker };
   }

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1956 — the worker resume claim (cor:agt:020:03; Holger via Vera #11904, the 60-second window #12291).
  *
@@ -73,7 +74,7 @@ beforeEach(async () => {
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true, urn: true } });
   await db.appMember.create({ data: { appId: app.id, userId: holder, role: 'member' } });
   await db.appMember.create({ data: { appId: app.id, userId: other, role: 'member' } });
-  const w = (name: string) => db.worker.create({ data: { appId: app.id, agentId, name, slug: name.toLowerCase() }, select: { id: true } }).then((r) => r.id);
+  const w = (name: string) => db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name, slug: name.toLowerCase() }, select: { id: true } }).then((r) => r.id);
   ada = await w('Ada');
   bea = await w('Bea');
 });

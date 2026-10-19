@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #943 — `SessionInput.appRef`: the write path that makes the team-chat
  * authorship gate reachable.
@@ -485,7 +486,7 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
 
   beforeEach(async () => {
     worker = await db.worker.create({
-      data: { appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
     });
   });
 

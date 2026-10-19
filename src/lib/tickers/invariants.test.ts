@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1747 — prisma/ticker-invariants.sql is the single source for the ticker
  * facts Prisma cannot model; the migration carries a byte-identical copy and
@@ -34,7 +35,7 @@ describe('ticker-invariants.sql (#1747)', () => {
       const user = await db.user.create({ data: { id: generateId(), githubId: 95_000, githubUsername: `ti-${suffix}`, roles: ['READER'] } });
       const agent = await db.agent.create({ data: { id: generateId(), name: 'A', organizationId: org.id, urn: `${org.urn}:a` } as never });
       appId = (await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'T', urn: `${org.urn}:t` } })).id;
-      workerId = (await db.worker.create({ data: { id: generateId(), appId, agentId: agent.id, name: 'W', slug: 'w' } })).id;
+      workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: agent.id, name: 'W', slug: 'w' } })).id;
       tickerId = (await db.ticker.create({ data: { appId, name: 'E', slug: 'e', cadenceSeconds: 600, ownerUserId: user.id } })).id;
     });
 

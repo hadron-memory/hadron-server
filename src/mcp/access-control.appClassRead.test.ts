@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1003 — an App's own members must be able to READ the App's team space: the
  * `class='app'` memory hosting `chats:team` and the `worklog` ledger.
@@ -182,7 +183,7 @@ describe('#1003 — App members can read the App team space', () => {
       },
     });
     await db.worker.create({
-      data: {
+      data: { ...WORKER_SIGNATURE_DEFAULTS,
         id: generateId(),
         appId: app.id,
         agentId: agent.id,
@@ -367,7 +368,7 @@ describe('#1003 — App members can read the App team space', () => {
     const working = await makeMemory('personal-worker');
     const team = await makeMemory('personal-team', { sharedMemoryOfAgentId: agent.id });
     const scratch = await makeMemory('personal-session', { userMemoryOfAgentId: agent.id });
-    const worker = await db.worker.create({ data: {
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS,
       id: generateId(), appId: app.id, agentId: agent.id, name: 'Worker', slug: 'worker',
       memoryId: working.id, heldByUserId: holder.id,
     } });
@@ -496,7 +497,7 @@ describe('#1003 — App members can read the App team space', () => {
       id: generateId(), class: 'app', name: 'worker', urn: `${orgId}:worker`,
       organizationId: orgId, appId: app.id,
     } });
-    const worker = await db.worker.create({ data: {
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS,
       id: generateId(), appId: app.id, agentId: agent.id,
       name: 'Worker', slug: 'worker', memoryId: workerMemory.id,
     } });

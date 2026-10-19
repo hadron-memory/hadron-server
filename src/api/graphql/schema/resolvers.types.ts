@@ -1,3 +1,7 @@
+import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
+import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
+import { requireAppKeyManager } from './appKeyManagement.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // typeResolvers — GraphQL type-level field resolvers extracted from resolvers.ts
 // (split step 3). No behavior change.
@@ -76,7 +80,7 @@ import {
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
   sessionScopeFilter,
-  STORED_NODE_CONTENT,
+  CONTENT_RAW_DEFAULT,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
@@ -590,12 +594,7 @@ async function reconciledNodeForParent(
     if (!current) return null;
     const key = sessionKeyCache.getByMemoryId(current.memoryId);
     if (key) decryptNodeFieldsWithKey(current, key);
-    // Verify against what was STORED: a templated read hands field resolvers
-    // rendered `content`, which would never match the row.
-    const stored = STORED_NODE_CONTENT in n
-      ? { ...n, content: (n as { [STORED_NODE_CONTENT]?: string | null })[STORED_NODE_CONTENT] ?? null }
-      : n;
-    return revisionStateMatchesWithoutAuthorship(stored, current) ? current : null;
+    return revisionStateMatchesWithoutAuthorship(n, current) ? current : null;
   });
   cache.set(n, pending);
   return pending;
@@ -838,6 +837,18 @@ export const typeResolvers = {
     from: (s: { fromAddress: string }) => s.fromAddress,
   },
   Node: {
+    /**
+     * #2041 — the one place a node's include tags resolve for a reader
+     * (cor:dmo:150:03), so every path that reaches `Node.content` is covered
+     * and a new surface can't forget it. The row is never rewritten.
+     */
+    content: async (
+      n: Parameters<typeof resolveNodeContent>[1],
+      args: { raw?: boolean | null },
+      ctx: Context,
+    ) => resolveNodeContent(ctx, n, {
+      raw: args.raw ?? (n as { [CONTENT_RAW_DEFAULT]?: boolean })[CONTENT_RAW_DEFAULT] ?? false,
+    }),
     authorship: async (n: SnapshotSourceNode & { revSeq: number }, _: unknown, ctx: Context) => {
       if (!n.authorshipKind || !n.authoredAt) return null;
       // Start the task lookup before per-node reconciliation so sibling list
@@ -1027,6 +1038,20 @@ export const typeResolvers = {
     },
   },
   NodeRevision: {
+    // #1838 — the per-revision answer, from the one shared derivation.
+    revisionApproval: async (nv: { nodeId: string; revNo: number | null }, _: unknown, ctx: Context) => {
+      const { state, record } = nv.revNo == null
+        ? { state: 'NOT_APPROVED' as const, record: null }
+        : await revisionApprovalOf(ctx.db, nv.nodeId, nv.revNo);
+      return {
+        state,
+        approved: state === 'APPROVED',
+        recordedAtRevision: record?.revision ?? null,
+        approvedBy: record?.approvedBy ?? null,
+        approvedByInfo: record?.approvedByInfo ?? null,
+        approvedAt: record?.approvedAt ?? null,
+      };
+    },
     authorship: (nv: AuthoredState, _: unknown, ctx: Context) => resolveAuthorship(nv, ctx),
     contentValidation: (
       nv: { nodeId: string; memoryId: string | null; revNo: number | null },
@@ -1602,8 +1627,10 @@ export const typeResolvers = {
       return (await canReadMemoryRecord(ctx, memory)) ? memory : null;
     },
     keys: async (a: { id: string; keys?: unknown[] }, _: unknown, ctx: Context) => {
-      // Check before serving an eager key list as well as the DB fallback.
-      if (!(await loadReadableNestedApp(ctx, a.id))) return [];
+      // #1744: an App read grants no credential inventory. Check even an eager list.
+      const app = await ctx.db.app.findFirst({ where: { id: a.id, deletedAt: null } });
+      if (!app) throw authorizationDenied();
+      await requireAppKeyManager(ctx, app);
       if (a.keys) return a.keys;
       return ctx.db.appKey.findMany({
         where: { appId: a.id, revokedAt: null },

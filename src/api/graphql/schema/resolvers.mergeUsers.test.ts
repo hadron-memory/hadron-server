@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * mergeUsers — consolidate a duplicate User into a surviving target.
  * Covers target-wins profile semantics, relationship transfer/collision,
@@ -538,7 +539,7 @@ describe('Mutation.mergeUsers — worker holds (#1050)', () => {
       data: { id: generateId(), organizationId: org.id, name: 'App', urn: `${org.urn}:app` },
     });
     const held = await db.worker.create({
-      data: {
+      data: { ...WORKER_SIGNATURE_DEFAULTS,
         appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris',
         heldByUserId: source.id, heldAt: new Date(),
       },
@@ -546,7 +547,7 @@ describe('Mutation.mergeUsers — worker holds (#1050)', () => {
     // A name held by somebody else must not move.
     const other = await db.user.create({ data: { handle: `wh-other-${Date.now()}` } });
     const foreign = await db.worker.create({
-      data: {
+      data: { ...WORKER_SIGNATURE_DEFAULTS,
         appId: app.id, agentId: agent.id, name: 'Nadia', slug: 'nadia',
         heldByUserId: other.id, heldAt: new Date(),
       },
