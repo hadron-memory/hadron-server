@@ -237,6 +237,55 @@ describe('ticks and relevance through the whole loader', () => {
   });
 });
 
+describe('#2017 R63 — when a wake may be typed: anchorAt, deliverAfter, busyDeadline', () => {
+  const T0 = new Date('2026-10-19T02:00:00Z');
+  const timing = (w: any) => ({ anchorAt: w.anchorAt.toISOString(), deliverAfter: w.deliverAfter.toISOString(), busyDeadline: w.busyDeadline.toISOString() });
+  const at = (iso: string) => new Date(iso);
+  let window: number; let busy: number;
+  beforeEach(async () => {
+    const s = await db.app.findUniqueOrThrow({ where: { id: app.id }, select: { tickerMinCadenceSeconds: true, deliveryBusyDelaySeconds: true } });
+    window = s.tickerMinCadenceSeconds; busy = s.deliveryBusyDelaySeconds;
+  });
+  const plus = (d: Date, sec: number) => new Date(d.getTime() + sec * 1000).toISOString();
+
+  it('a mention anchors on the FIRST still-due post; later arrivals never slide it', async () => {
+    await say(channel, 'first', mention('liam'));
+    await say(channel, 'second', mention('liam'));
+    await db.node.updateMany({ where: { messageChannelId: channel.id, seq: 1 } as never, data: { createdAt: T0 } });
+    await db.node.updateMany({ where: { messageChannelId: channel.id, seq: 2 } as never, data: { createdAt: new Date(T0.getTime() + 600_000) } });
+    const w = (await due(ctx(manager.id))).wakes[0];
+    expect(timing(w)).toEqual({ anchorAt: T0.toISOString(), deliverAfter: plus(T0, window), busyDeadline: plus(T0, busy) });
+  });
+
+  it('a channel-empty tick anchors on the OLDEST unacknowledged tick, not the newest', async () => {
+    const t = await mkTicker({ cadenceSeconds: 600, anchorAt: at('2026-10-19T00:00:00Z') });
+    await subscribe(t.id, liam.id);
+    await say(channel, 'plain news'); // an ALL ticker needs relevant unread; the anchor is still the tick, not the post
+    await db.workerDeliveryTick.create({ data: { workerId: liam.id, tickerId: t.id, lastAckedTick: 2, ackedAt: new Date(Date.now() - 86_400_000) } });
+    const w = (await due(ctx(manager.id))).wakes[0];
+    // The first tick after the acknowledged tick 2 is tick 3: anchor + 3 x 600 s.
+    expect(w.reasons.map((r: any) => r.kind)).toEqual(['TICK']);
+    expect(w.anchorAt.toISOString()).toBe('2026-10-19T00:30:00.000Z');
+    expect(w.busyDeadline.toISOString()).toBe(plus(w.anchorAt, busy));
+  });
+
+  it('a mixed wake anchors on its EARLIEST reason; a re-offer never restarts it', async () => {
+    const tickAnchor = new Date(Date.now() - 3_600_000);
+    const t = await mkTicker({ cadenceSeconds: 600, anchorAt: tickAnchor });
+    await subscribe(t.id, liam.id);
+    await say(channel, 'for you', mention('liam'));
+    const posted = new Date(Date.now() - 600_000);
+    await db.node.updateMany({ where: { messageChannelId: channel.id }, data: { createdAt: posted } });
+    const first = (await due(ctx(manager.id))).wakes[0];
+    expect(first.reasons.map((r: any) => r.kind).sort()).toEqual(['MENTION', 'TICK']);
+    // The oldest unacknowledged tick (tick 1, 10 minutes after the ticker's anchor) is older than the post.
+    expect(first.anchorAt.toISOString()).toBe(new Date(tickAnchor.getTime() + 600_000).toISOString());
+    await say(channel, 'and again', mention('liam')); // arrives later: the outstanding wake is re-offered
+    const again = (await due(ctx(manager.id))).wakes[0];
+    expect(timing(again)).toEqual(timing(first));
+  });
+});
+
 describe('read fields', () => {
   it('Ticker.nextTickAt / lastTickAt and WorkerWakeSettings.dormant', async () => {
     const F = resolvers as any;

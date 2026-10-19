@@ -137,6 +137,18 @@ describe('renderBatch — S1 shared pure renderer', () => {
     const out = await render(input([msg(5, { parentSeq: 1, parent: { seq: 99, authorName: 'Wrong', excerpt: 'not-the-parent' } })]));
     expect(out.text).toContain('(re #1)'); expect(out.text).not.toContain('not-the-parent');
   });
+  it('uses the exact eligible total for overflow text and hash when given a bounded sample', async () => {
+    const messages = Array.from({ length: 10 }, (_, i) => msg(i+1));
+    const sampled = await render(input(messages, { totalEligible: 205 }));
+    expect(sampled.renderedCount).toBe(10); expect(sampled.overflow).toBe(195);
+    expect(sampled.text).toContain('+195 more waiting');
+    expect(sampled.renderHash).toBe(createHash('sha256').update(sampled.text).digest('hex'));
+    expect(sampled.renderHash).not.toBe((await render(input(messages))).renderHash);
+    expect(sampled.ranges).toEqual((await render(input(messages))).ranges);
+  });
+  it.each([1, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])('rejects an invalid eligible total %s rather than inventing overflow', async (totalEligible) => {
+    await expect(render(input([msg(1), msg(2)], { totalEligible }))).rejects.toThrow();
+  });
   it('hashes the actual UTF-8 text, stable across shuffled inputs and sensitive to body changes', async () => {
     const out = await render(input([msg(2), msg(1)]));
     expect(out.renderHash).toBe(createHash('sha256').update(out.text, 'utf8').digest('hex'));

@@ -15,7 +15,7 @@ import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { getAccessibleMemoryIds } from '../../api/graphql/schema/resolvers.helpers.js';
 import { collectRegisterRows } from '../resolveRegister.js';
 import { mentionTokenOf } from '../mentionToken.js';
-import { reachEnvelopeOf, reachesWorker } from '../mentionReach.js';
+import { reachEnvelopeOf, mentionReachSql } from '../mentionReach.js';
 import { renderBatch, type BatchMessage } from '../messaging/renderBatch.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { batchTiming, loadDeliverySettings } from './batchTiming.js';
@@ -24,8 +24,9 @@ import { batchKeyOf, type BatchProof } from './wakeProof.js';
 
 export const DELIVERY_BATCHES_PAGE_DEFAULT = 50;
 export const DELIVERY_BATCHES_PAGE_MAX = 200;
-/** Eligible messages read per channel per batch: renderBatch takes at most 10, one more tells it whether anything overflows. */
-const ELIGIBLE_READ_LIMIT = 200;
+/** A global batch selects at most ten; no channel can contribute an eleventh.
+ * Count all reached rows before this cap so overflow is exact without loading their bodies. */
+const ELIGIBLE_READ_LIMIT = 10;
 
 export type LoadedBatchRange = { channelId: string; incarnation: number; fromSeq: number; throughSeq: number; seqs: number[] };
 
@@ -45,18 +46,22 @@ export type LoadedBatch = {
 
 export type LoadedBatchPage = { batches: LoadedBatch[]; nextAfter: string | null };
 
-type Row = { seq: number; content: string | null; data: unknown; created_at: Date };
+type Row = { seq: number; content: string | null; data: unknown; created_at: Date; total_eligible: bigint };
 
 const oneLine = (s: string): string => s.replace(/\r\n|[\r\n\u2028\u2029]/g, ' ');
 
 /**
  * The batches due now for the workers registered on `hostId`. `ctx` is the caller (a host key); the caller's reading
  * right is one of the two readers a channel must pass.
+ *
+ * SELF MODE (R57, cor:agt:080:22): `hostId` null selects exactly one worker, `workerIds: [self]`, WITHOUT the host-registration
+ * join (a worker no host launches is still entitled to its own batches). The caller's gate (a live session of that very
+ * worker) is the resolver's and runs before this; every other rule is the same pipeline.
  */
 export async function loadDeliveryBatches(args: {
   ctx: Context;
   app: AppLike;
-  hostId: string;
+  hostId: string | null;
   now?: Date;
   workerIds?: string[] | null;
   first?: number | null;
@@ -67,15 +72,23 @@ export async function loadDeliveryBatches(args: {
   const now = args.now ?? new Date();
   const first = Math.min(Math.max(args.first ?? DELIVERY_BATCHES_PAGE_DEFAULT, 1), DELIVERY_BATCHES_PAGE_MAX);
 
-  const registration = await db.hostRegistration.findFirst({ where: { appId: app.id, hostId, lostAt: null }, select: { id: true } });
-  if (!registration) return { batches: [], nextAfter: null };
+  let registrationId: string | null = null;
+  if (hostId === null) {
+    if (!args.workerIds || args.workerIds.length !== 1) throw new Error('self mode selects exactly one worker');
+  } else {
+    const registration = await db.hostRegistration.findFirst({ where: { appId: app.id, hostId, lostAt: null }, select: { id: true } });
+    if (!registration) return { batches: [], nextAfter: null };
+    registrationId = registration.id;
+  }
   const workers = await db.worker.findMany({
     where: {
       appId: app.id,
       retiredAt: null,
-      launchableVia: { some: { registrationId: registration.id } },
-      ...(args.workerIds ? { id: { in: args.workerIds } } : {}),
-      ...(args.after ? { id: { gt: args.after } } : {}),
+      ...(registrationId ? { launchableVia: { some: { registrationId } } } : {}),
+      AND: [
+        ...(args.workerIds ? [{ id: { in: args.workerIds } }] : []),
+        ...(args.after ? [{ id: { gt: args.after } }] : []),
+      ],
     },
     orderBy: { id: 'asc' },
     take: first + 1,
@@ -109,6 +122,7 @@ export async function loadDeliveryBatches(args: {
     ]);
 
     const messages: BatchMessage[] = [];
+    let totalEligible = 0;
     const incarnationOf = new Map<string, number>();
     const markOf = new Map<string, number>();
     for (const ch of channels) {
@@ -121,7 +135,8 @@ export async function loadDeliveryBatches(args: {
       incarnationOf.set(ch.id, ch.incarnation);
       markOf.set(ch.id, mark);
       const eligible = await eligibleMessages(db, ch, lo, w.id, token);
-      messages.push(...eligible);
+      messages.push(...eligible.messages);
+      totalEligible += eligible.totalEligible;
     }
     if (messages.length === 0) continue;
 
@@ -129,7 +144,7 @@ export async function loadDeliveryBatches(args: {
     const timing = batchTiming(settings, { oldestPostedAt: oldest });
     if (timing.deliverAfter.getTime() > now.getTime()) continue;
 
-    const out = renderBatch({ workerName: w.name, messages });
+    const out = renderBatch({ workerName: w.name, messages, totalEligible });
     // The range starts right after the delivered mark: the messages below the first rendered one that do not reach the worker
     // (its own posts, chatter) are covered by the acknowledgement, and no eligible one above the last rendered one is.
     const ranges: LoadedBatchRange[] = out.ranges.map((r) => ({
@@ -161,24 +176,26 @@ async function eligibleMessages(
   lo: number,
   workerId: string,
   token: string,
-): Promise<BatchMessage[]> {
+): Promise<{ messages: BatchMessage[]; totalEligible: number }> {
   const rows = await db.$queryRaw<Row[]>(Prisma.sql`
-    SELECT n.seq::int AS seq, n.content, n.data, n.created_at
+    SELECT n.seq::int AS seq, n.content, n.data, n.created_at, COUNT(*) OVER() AS total_eligible
     FROM nodes n
     WHERE n.message_channel_id = ${ch.id}
       AND n.node_type = 'chat-message'
       AND n.deleted_at IS NULL
       AND n.seq > ${lo}
-    ORDER BY n.seq
-    LIMIT ${ELIGIBLE_READ_LIMIT * 5}`);
-  const eligible = rows.filter((r) => reachesWorker(reachEnvelopeOf(r.data), [workerId], [token])).slice(0, ELIGIBLE_READ_LIMIT);
+      AND (n.data -> 'authorWorkerId') IS DISTINCT FROM ${JSON.stringify(workerId)}::jsonb
+      AND ${mentionReachSql(Prisma.sql`n.data`, Prisma.sql`${[token]}::text[]`)}
+    ORDER BY n.created_at, n.seq
+    LIMIT ${ELIGIBLE_READ_LIMIT}`);
+  const eligible = rows;
   const parentSeqs = [...new Set(eligible.map((r) => replyToOf(r.data)).filter((s): s is number => s !== null))];
   const parents = parentSeqs.length === 0 ? [] : await db.$queryRaw<Array<{ seq: number; content: string | null; data: unknown }>>(Prisma.sql`
     SELECT n.seq::int AS seq, n.content, n.data FROM nodes n
     WHERE n.message_channel_id = ${ch.id} AND n.node_type = 'chat-message' AND n.deleted_at IS NULL
       AND n.seq IN (${Prisma.join(parentSeqs)})`);
   const parentOf = new Map(parents.map((p) => [p.seq, p]));
-  return eligible.map((r) => {
+  const messages: BatchMessage[] = eligible.map((r) => {
     const env = (r.data ?? {}) as Record<string, unknown>;
     const parentSeq = replyToOf(r.data);
     const p = parentSeq === null ? undefined : parentOf.get(parentSeq);
@@ -194,6 +211,7 @@ async function eligibleMessages(
       mentions: reachEnvelopeOf(r.data).mentions as string[],
     };
   });
+  return { messages, totalEligible: Number(rows[0]?.total_eligible ?? 0) };
 }
 
 const replyToOf = (data: unknown): number | null => {

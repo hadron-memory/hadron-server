@@ -33,7 +33,7 @@ import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
 import type { AuthorityAnchor } from '../auth/authorityAnchors.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import {
-  proofWakeKey, sameRequester, verifyBatchProof, verifyWakeProof, WAKE_PROOF_MAX_AGE_MS,
+  proofWakeKey, sameBatchRequester, sameRequester, verifyBatchProof, verifyWakeProof, WAKE_PROOF_MAX_AGE_MS,
   type BatchProof, type BatchRequester, type WakeProof, type WakeRequester,
 } from './wakeProof.js';
 
@@ -275,7 +275,7 @@ export async function acknowledgeBatchProofs(args: {
 
   const batches = args.acks.map((a) => {
     const proof = verifyBatchProof(a.proof);
-    if (proof.requester.appKeyId !== requester.appKeyId) refuse('WAKE_PROOF_REQUESTER_MISMATCH', 'This delivery batch was issued to someone else.');
+    if (!sameBatchRequester(proof, requester)) refuse('WAKE_PROOF_REQUESTER_MISMATCH', 'This delivery batch was issued to someone else.');
     if (now.getTime() - proof.issuedAt > WAKE_PROOF_MAX_AGE_MS || proof.issuedAt > now.getTime() + 60_000) {
       refuse('WAKE_PROOF_STALE', 'This delivery batch id is too old. Read the batch again.');
     }
@@ -283,7 +283,12 @@ export async function acknowledgeBatchProofs(args: {
   });
 
   const nowNaive = toNaiveUtc(now);
-  const ackedBy: AckedBy = { ackedByUserId: null, ackedByWorkerId: currentActor().workerId ?? null, ackedByAppKeyId: requester.appKeyId };
+  // Who delivered: a host key (and the worker session behind the request, if any), or, on the self arm, the worker itself
+  // through its own session, stamped with the person driving that session (cor:agt:020:03; Vera, team chat #21429, as
+  // S2's own-read delivered row). Attribution only: whether the session may acknowledge is mayAckBatch's decision.
+  const ackedByOf = (p: BatchProof, sessionUserId: string | null): AckedBy => ('appKeyId' in requester
+    ? { ackedByUserId: null, ackedByWorkerId: currentActor().workerId ?? null, ackedByAppKeyId: requester.appKeyId }
+    : { ackedByUserId: sessionUserId, ackedByWorkerId: p.workerId, ackedByAppKeyId: null });
   const appIds = [...new Set(batches.map((b) => b.proof.appId))].sort();
   const anchors = await authorityAnchorsOf(ctx, appIds);
 
@@ -297,6 +302,9 @@ export async function acknowledgeBatchProofs(args: {
   async function writeBatchAcks(tx: Prisma.TransactionClient, txCtx: Context): Promise<AcknowledgeResult> {
     let acknowledged = 0;
     let unchanged = 0;
+    const sessionUserId = 'sessionId' in requester
+      ? (await tx.session.findUnique({ where: { id: requester.sessionId }, select: { userId: true } }))?.userId ?? null
+      : null;
     // The lock order of acknowledgeWakes: the Apps' budget locks, then the per-worker wake locks by worker id. A batch
     // spends no budget, but sharing the order means a batch ack, a wake ack and an issue never wait in a cycle.
     for (const appId of appIds) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + appId}, 0))`;
@@ -327,7 +335,7 @@ export async function acknowledgeBatchProofs(args: {
           refuse('WAKE_PROOF_STALE', 'This delivery batch no longer starts at the delivered mark. Read the batch again.');
         }
         if (!row || !sameIncarnation || m.through > row.deliveredThroughSeq) advanced = true;
-        await raiseDeliveryMark(tx, { workerId: p.workerId, channelId: m.channelId, incarnation: m.incarnation, through: m.through }, nowNaive, ackedBy);
+        await raiseDeliveryMark(tx, { workerId: p.workerId, channelId: m.channelId, incarnation: m.incarnation, through: m.through }, nowNaive, ackedByOf(p, sessionUserId));
       }
       if (advanced) acknowledged++; else unchanged++;
     }
