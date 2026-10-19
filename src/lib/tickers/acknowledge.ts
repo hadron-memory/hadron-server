@@ -26,9 +26,10 @@ import { currentActor } from '../requestActor.js';
 import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
 import type { AuthorityAnchor } from '../auth/authorityAnchors.js';
 import { toNaiveUtc } from '../sessionActivity.js';
-import { sameRequester, verifyWakeProof, wakeIdentity, WAKE_PROOF_MAX_AGE_MS, type WakeProof, type WakeRequester } from './wakeProof.js';
-import { verifyBatchProof } from './batchProof.js';
-import type { BatchProofPayload } from './deliveryBatch.js';
+import {
+  sameRequester, verifyBatchProof, verifyWakeProof, wakeIdentity, WAKE_PROOF_MAX_AGE_MS,
+  type BatchProof, type BatchRequester, type WakeProof, type WakeRequester,
+} from './wakeProof.js';
 
 export const ACK_MAX_PROOFS = 200;
 
@@ -230,10 +231,8 @@ async function raiseDeliveryMark(
 //
 // Refusals: a forged, malformed or wrong-kind id, or a range past the channel's head → WAKE_PROOF_INVALID; an id issued
 // to somebody else, or authority gone → WAKE_PROOF_REQUESTER_MISMATCH; older than 15 minutes, issued in the future, a
-// channel recreated or deleted, or a worker gone → WAKE_PROOF_STALE (the batch stays due and the next read re-derives
-// it). A range may start above the delivered mark: the seqs between were read or do not reach the worker, so covering
-// them is the contract (the loader reads above both marks); every eligible message below `from` was in an earlier
-// batch, since new messages only take higher seqs. A `through`
+// channel recreated or deleted, a worker gone, or a range that starts above the worker's delivered mark (it would
+// acknowledge an unseen prefix) → WAKE_PROOF_STALE (the batch stays due and the next read re-derives it); a `through`
 // naming a channel not in the batch, a channel twice, or a seq the batch did not render → BAD_USER_INPUT. Nothing is
 // written unless every id in the call passes.
 
@@ -242,13 +241,13 @@ export type BatchAck = { proof: string; through?: BatchThrough[] };
 
 export async function acknowledgeBatchProofs(args: {
   ctx: Context;
-  requester: { appKeyId: string };
+  requester: BatchRequester;
   acks: BatchAck[];
   /**
    * Decides, per batch and INSIDE the transaction (after the worker's wake lock), that the requester may still
    * acknowledge this worker's batches: the S1 host/scope re-derivation (slice c). Same contract as `mayReadWorker`.
    */
-  mayAckBatch: (proof: BatchProofPayload, tx: Prisma.TransactionClient, txCtx: Context) => Promise<boolean>;
+  mayAckBatch: (proof: BatchProof, tx: Prisma.TransactionClient, txCtx: Context) => Promise<boolean>;
   now?: Date;
 }): Promise<AcknowledgeResult> {
   const { ctx, requester } = args;
@@ -304,6 +303,11 @@ export async function acknowledgeBatchProofs(args: {
       for (const m of marks) {
         const row = await tx.workerDeliveryChannel.findUnique({ where: { workerId_channelId: { workerId: p.workerId, channelId: m.channelId } } });
         const sameIncarnation = row?.channelIncarnation === m.incarnation;
+        // The batch covers from..through. A mark below from - 1 would leave seqs between it and from unseen yet
+        // acknowledged; the loader issues from = mark + 1 and the mark only rises, so this is a batch to re-read.
+        if (row && sameIncarnation && row.deliveredThroughSeq < m.from - 1) {
+          refuse('WAKE_PROOF_STALE', 'This delivery batch no longer starts at the delivered mark. Read the batch again.');
+        }
         if (!row || !sameIncarnation || m.through > row.deliveredThroughSeq) advanced = true;
         await raiseDeliveryMark(tx, { workerId: p.workerId, channelId: m.channelId, incarnation: m.incarnation, through: m.through }, nowNaive, ackedBy);
       }
@@ -318,7 +322,7 @@ export async function acknowledgeBatchProofs(args: {
  * channels, each to its listed seq, which must be one the batch rendered (so the covered prefix is the batch's own
  * start through a shown message, never a gap). Validated before any lock: a bad `through` is the caller's error.
  */
-function marksOf(proof: BatchProofPayload, through: BatchThrough[] | undefined): Array<{ channelId: string; incarnation: number; from: number; through: number }> {
+function marksOf(proof: BatchProof, through: BatchThrough[] | undefined): Array<{ channelId: string; incarnation: number; from: number; through: number }> {
   if (through === undefined) return proof.channels.map((c) => ({ channelId: c.channelId, incarnation: c.incarnation, from: c.from, through: c.through }));
   const seen = new Set<string>();
   return through.map((t) => {
