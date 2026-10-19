@@ -297,14 +297,16 @@ describe('R57 self arm: a worker acknowledges its own batches through its own li
     for (const p of bad) expect(await code(() => verifyBatchProof(signBatchProof(p)))).toBe('WAKE_PROOF_INVALID');
   });
 
-  it('its own session acknowledges; the mark records the worker, no App key and no user', async () => {
+  it('its own session acknowledges; the mark records the worker, the session\'s user and no App key', async () => {
+    const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id }, select: { agentId: true } });
+    await db.session.create({ data: { id: SELF.sessionId, appId: app.id, userId: manager.id, workerId: worker.id, agentId: w.agentId, type: 'DEVELOPER', startedAt: new Date() } });
     await say(chA); await say(chA);
     const seen: unknown[] = [];
     const mayAckBatch = vi.fn(async (p: BatchProof) => { seen.push(p.requester); return true; });
     expect(await ackAs(SELF, [{ proof: signBatchProof(selfProof([range(chA, [1, 2])])) }], { mayAckBatch })).toEqual({ acknowledged: 1, unchanged: 0 });
     expect(seen).toEqual([SELF]); // liveness and "its own worker" are decided by the callback, inside the transaction
     expect(await db.workerDeliveryChannel.findUnique({ where: { workerId_channelId: { workerId: worker.id, channelId: chA.id } } }))
-      .toMatchObject({ deliveredThroughSeq: 2, ackedByWorkerId: worker.id, ackedByAppKeyId: null, ackedByUserId: null });
+      .toMatchObject({ deliveredThroughSeq: 2, ackedByWorkerId: worker.id, ackedByAppKeyId: null, ackedByUserId: manager.id });
   });
 
   it('another session (same worker, same holder), a host key, or a session acking a host proof is a mismatch; nothing moves', async () => {
