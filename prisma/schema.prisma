@@ -429,6 +429,7 @@ model User {
   userApiKeys                   UserApiKey[]
   authCodes                     AuthCode[]
   passkeyCredentials            PasskeyCredential[]
+  signIns                       SignIn[]
   authHandoffCodes              AuthHandoffCode[]
   // #620: revisions this user approved (NodeRevision.approvedBy).
   approvedNodeRevisions         NodeRevision[]             @relation("NodeRevisionApprover")
@@ -3888,10 +3889,17 @@ model UserApiKey {
   mintedByKey UserApiKey? @relation("UserKeyLineage", fields: [mintedByKeyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   mintedKeys UserApiKey[] @relation("UserKeyLineage")
 
+  /// #1897 / R66: the factor-protected sign-in this key descends from, directly
+  /// or through minting keys. Immutable, server-derived, never inferred from
+  /// email/time/issuedVia; null = direct issuance or legacy (S6), never backfilled.
+  originSignInId String? @map("origin_sign_in_id")
+  originSignIn SignIn? @relation(fields: [originSignInId, userId], references: [id, userId], onDelete: NoAction, onUpdate: NoAction)
+
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([mintedByKeyId])
+  @@index([originSignInId])
   @@map("user_api_keys")
 }
 
@@ -4032,12 +4040,17 @@ model AuthCode {
   /// Actor that initiated the /authorize request that minted this code.
   /// Resolves to the signed-in User; equals `userId` in self-service v1.
   createdBy     String?   @map("created_by")
+  /// #1897: the sign-in this code descends from (null = not factor-protected;
+  /// never inferred). Immutable, same owner as `userId`.
+  signInId      String?   @map("sign_in_id")
 
   user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   client OAuthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+  signIn SignIn?     @relation(fields: [signInId, userId], references: [id, userId], onDelete: NoAction, onUpdate: NoAction)
 
   @@index([userId])
   @@index([clientId])
+  @@index([signInId])
   @@map("auth_codes")
 }
 
@@ -4074,9 +4087,38 @@ model PasskeyCredential {
 
   owner User @relation(fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   signatures NodeSignature[]
+  signIns SignIn[]
 
   @@index([ownerId])
   @@map("passkey_credentials")
+}
+
+/// #1897 / cor:aut:030:02 + R66: a completed, factor-protected sign-in. Its id is
+/// the `sid` claim of the JWT it publishes and the root of every code/key that
+/// descends from it, so ending it (the first-passkey cancel link) can revoke
+/// exactly that lineage. Identity/lineage fields are immutable; only `endedAt`/
+/// `endReason` are set, once. Rows are never deleted while descendants exist.
+model SignIn {
+  id                    String    @id @default(cuid())
+  userId                String    @map("user_id")
+  /// How the person arrived ('email'); the factor is `completedByPasskeyId`.
+  method                String
+  completedByPasskeyId  String?   @map("completed_by_passkey_id")
+  completedAt           DateTime  @default(now()) @map("completed_at")
+  expiresAt             DateTime  @map("expires_at")
+  endedAt               DateTime? @map("ended_at")
+  endReason             String?   @map("end_reason")
+
+  user    User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  passkey PasskeyCredential? @relation(fields: [completedByPasskeyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  handoffs AuthHandoffCode[]
+  authCodes AuthCode[]
+  keys    UserApiKey[]
+
+  @@unique([id, userId])
+  @@index([userId])
+  @@index([completedByPasskeyId])
+  @@map("sign_ins")
 }
 
 /// #1632 / cor:dmo:130:03 — a request for a person to sign one node's content.
@@ -4184,10 +4226,14 @@ model AuthHandoffCode {
   expiresAt       DateTime  @map("expires_at")
   redeemedAt      DateTime? @map("redeemed_at")
   createdAt       DateTime  @default(now()) @map("created_at")
+  /// #1897: the sign-in this handoff publishes (null = not factor-protected).
+  signInId        String?   @map("sign_in_id")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  signIn SignIn? @relation(fields: [signInId, userId], references: [id, userId], onDelete: NoAction, onUpdate: NoAction)
 
   @@index([userId])
+  @@index([signInId])
   @@map("auth_handoff_codes")
 }
 
