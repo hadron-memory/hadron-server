@@ -114,13 +114,16 @@ describe('everything else is left alone', () => {
     expect(formatGraphQLError(formatted, error)).toBe(formatted);
   });
 
-  it('preserves extensions the formatter already set (path, http, …)', () => {
+  it('preserves public extensions while removing diagnostic extensions (#2087)', () => {
     const original = new AssetUploadError('NOT_FOUND', 'asset not found');
     const out = formatGraphQLError(
-      { message: original.message, extensions: { code: 'INTERNAL_SERVER_ERROR', stacktrace: ['x'] } },
+      { message: original.message, extensions: { code: 'INTERNAL_SERVER_ERROR', stacktrace: ['x'], exception: { stacktrace: ['private'] }, http: { status: 404 }, appRef: 'public-ref' } },
       new GraphQLError(original.message, { originalError: original }),
     );
-    expect(out.extensions?.stacktrace).toEqual(['x']);
+    expect(out.extensions?.stacktrace).toBeUndefined();
+    expect(out.extensions?.exception).toBeUndefined();
+    expect(out.extensions?.http).toEqual({ status: 404 });
+    expect(out.extensions?.appRef).toBe('public-ref');
     expect(out.extensions?.code).toBe('NOT_FOUND');
   });
 
