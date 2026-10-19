@@ -116,10 +116,10 @@ const createNodeAsSystem = async (
         incomingEdges: { include: { source: true } },
       },
     });
-    // #2040 — this legacy seam runs as the system with no principal, so the
-    // cycle walk is unrestricted; a refusal rolls the write back.
-    const tags = await assertIncludesWritable(tx, written, content, null);
-    await syncDerivedIncludesEdges(tx, written, tags, null);
+    // #2040 — this legacy seam runs as the system with no principal, so tags
+    // reach only the node's own memory; a refusal rolls the write back.
+    const tags = await assertIncludesWritable(tx, written, content, [node.memoryId]);
+    await syncDerivedIncludesEdges(tx, written, tags, [node.memoryId]);
     return written;
   });
 

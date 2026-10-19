@@ -891,7 +891,7 @@ const syncGraphFromGithubAsSystem = async (
             select: { id: true },
           });
           try {
-            await assertIncludesWritable(tx, { id: selfRow?.id ?? prospectiveNodeId(loc), memoryId: graph.id, loc }, update.content, null, includeOverlay);
+            await assertIncludesWritable(tx, { id: selfRow?.id ?? prospectiveNodeId(loc), memoryId: graph.id, loc }, update.content, [graph.id], includeOverlay);
           } catch (e) {
             const text = includeRefusalText(e);
             if (!text) throw e;
@@ -1235,7 +1235,7 @@ const syncGraphFromGithubAsSystem = async (
       // a tag may name a file synced later in the same run.
       for (const written of writtenNodes) {
         const row = await tx.node.findUnique({ where: { id: written.id }, select: { content: true } });
-        await syncDerivedIncludesEdges(tx, written, storedIncludeTags(row?.content), null);
+        await syncDerivedIncludesEdges(tx, written, storedIncludeTags(row?.content), [graph.id]);
       }
 
       // Spec 049 S4: never delete a row under (or above) a Channel's address,

@@ -158,3 +158,19 @@ describe('run prompt assembly (#2040)', () => {
     expect(out).not.toContain('Referenced Nodes');
   });
 });
+
+describe('copy paths conceal foreign targets (#2040, §10)', () => {
+  it('clone re-derives same-memory tags only: an unreadable foreign target gets no edge, exactly like a missing one', async () => {
+    const foreignOrg = await db.organization.create({ data: { id: generateId(), name: 'Foreign', urn: 'foreign.example' } });
+    const foreign = await db.memory.create({ data: { id: generateId(), name: 'secret', urn: 'foreign.example:secret', class: 'knowledge', organizationId: foreignOrg.id } });
+    await db.node.create({ data: { id: generateId(), memoryId: foreign.id, loc: 'hidden', name: 'hidden', content: 'H' } });
+    await create('local', 'L');
+    await create('src', '{{> local}} {{> hrn:node:foreign.example:secret:hidden}} {{> hrn:node:foreign.example:secret:absent}}');
+    expect((await includeEdges('src')).map(e => e.target.loc)).toEqual(['local']);
+    const org = await db.organization.findFirstOrThrow({ where: { urn: 'inc.example' } });
+    const clone = await M.cloneMemory(null, { ref: memoryId, targetUrn: `hrn:mem:${org.urn}:copy` }, as());
+    const edges = await db.edge.findMany({ where: { memoryId: clone.id, governedKind: 'INCLUDE' }, include: { source: true, target: true } });
+    expect(edges.map(e => `${e.source.loc}>${e.target.loc}`)).toEqual(['src>local']);
+    expect(edges.every(e => e.targetId !== undefined && !e.loc.includes(foreign.id))).toBe(true);
+  });
+});

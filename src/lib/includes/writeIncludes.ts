@@ -206,6 +206,8 @@ export async function resyncDerivedIncludesForNodes(tx: Tx, nodeIds: string[]): 
       if (!sessionKeyCache.getByMemoryId(node.memory.id)) continue;
       content = decryptNodeFields({ content }, node.memory).content ?? null;
     }
-    await syncDerivedIncludesEdges(tx, node, storedIncludeTags(content), null);
+    // No principal is present on a copy / move / merge: derive same-memory targets only,
+    // so a tag can never create an edge (existence, id) into a memory nobody checked.
+    await syncDerivedIncludesEdges(tx, node, storedIncludeTags(content), [node.memoryId]);
   }
 }

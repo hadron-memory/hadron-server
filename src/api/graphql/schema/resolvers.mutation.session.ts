@@ -2279,7 +2279,7 @@ export const sessionMutations = {
             // #2040 — re-derive the include edges from the restored content. No
             // refusal here: the snapshot was valid when taken, and the walk would
             // see a half-restored graph.
-            await syncDerivedIncludesEdges(tx, upserted, storedIncludeTags(nodeData.content), null);
+            await syncDerivedIncludesEdges(tx, upserted, storedIncludeTags(nodeData.content), [sysMemId]);
           }
 
           // Restore edges from snapshot. Spec 037: derive loc when an older
