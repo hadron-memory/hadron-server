@@ -236,3 +236,87 @@ describe('the writer\'s read check (cor:dmo:150:04)', () => {
     expect(await db.node.count({ where: { memoryId, loc: 'm1' } })).toBe(0);
   });
 });
+
+describe('traversal-safe memoization (Xavier GAPS item 3)', () => {
+  it('a target reached shallow AND near the depth cap renders per traversal: no cached shallow success bypasses the cap', async () => {
+    await mk('z', 'Z');
+    await mk('y', 'Y{{> z}}');
+    await mk('x', 'X{{> y}}');
+    for (let i = 8; i >= 1; i--) await mk(`c${i}`, i === 8 ? '{{> x}}' : `{{> c${i + 1}}}`);
+    await mk('root', '{{> x}}|{{> c1}}');
+    const out = (await run(NODE_Q, as(reader), { ref: urn('root') })).data as { node: { content: string } };
+    // shallow branch: x(1) y(2) z(3). deep branch: c1..c8 = 1..8, x(9) y(10), z would be 11.
+    expect(out.node.content).toBe(`XYZ|XY${BROKEN_INCLUDE_NOTICE}`);
+  });
+
+  it('a diamond resolves in both branches, and a cycle introduced later still renders the notice at its repeat', async () => {
+    await mk('d', 'D');
+    await mk('b', 'B{{> d}}');
+    await mk('c', 'C{{> d}}');
+    await mk('a', '{{> b}}{{> c}}');
+    expect(((await run(NODE_Q, as(reader), { ref: urn('a') })).data as { node: { content: string } }).node.content).toBe('BDCD');
+    await db.node.update({ where: { memoryId_loc: { memoryId, loc: 'd' } } as never, data: { content: 'D{{> a}}' } }).catch(async () => {
+      await db.node.updateMany({ where: { memoryId, loc: 'd' }, data: { content: 'D{{> a}}' } });
+    });
+    const again = ((await run(NODE_Q, as(reader), { ref: urn('a') })).data as { node: { content: string } }).node.content;
+    expect(again).toBe(`BD${BROKEN_INCLUDE_NOTICE}CD${BROKEN_INCLUDE_NOTICE}`);
+  });
+
+  it('two revision settings for one target serve two revisions, and approved/signed (S3, #1838) are the notice for now', async () => {
+    const t = await mk('t', 'v2');
+    await db.nodeRevision.create({
+      data: { id: generateId(), nodeId: t.id, memoryId, revNo: 1, loc: 't', name: 't', content: 'v1', tags: [] },
+    });
+    await mk('a', '{{> t}} {{> t rev=1}} {{> t rev=9}} {{> t approved}} {{> t signed}}');
+    const out = (await run(NODE_Q, as(reader), { ref: urn('a') })).data as { node: { content: string } };
+    expect(out.node.content).toBe(`v2 v1 ${BROKEN_INCLUDE_NOTICE} ${BROKEN_INCLUDE_NOTICE} ${BROKEN_INCLUDE_NOTICE}`);
+  });
+
+  it('readers with different access in one process never share a result', async () => {
+    const org2 = await db.organization.findFirstOrThrow({ where: { urn: 'rd.example' } });
+    const second = await db.user.create({ data: { githubId: 204103, githubUsername: 'rd-second', handle: 'rd-second', roles: [] } });
+    await db.orgMember.create({ data: { organizationId: org2.id, userId: second.id, role: 'READER' } });
+    const foreign = await db.memory.findFirstOrThrow({ where: { urn: foreignUrn } });
+    const other = await db.orgMember.findFirstOrThrow({ where: { organizationId: foreign.organizationId! } }).catch(() => null);
+    expect(other).toBeNull();
+    await mk('a', `{{> hrn:node:${foreignUrn}:secret}}`);
+    // the first reader can read neither; grant the second reader the foreign org and read both
+    await db.orgMember.create({ data: { organizationId: foreign.organizationId!, userId: second.id, role: 'READER' } });
+    const [r1, r2] = await Promise.all([
+      run(NODE_Q, as(reader), { ref: urn('a') }),
+      run(NODE_Q, as(second), { ref: urn('a') }),
+    ]);
+    expect(r1.data).toEqual({ node: { content: BROKEN_INCLUDE_NOTICE } });
+    expect(r2.data).toEqual({ node: { content: 'FOREIGN_SECRET' } });
+  });
+});
+
+describe('genuinely sealed targets and the search index (#2041)', () => {
+  it('an encrypted target resolves with a live key and is the notice without one; the stored row is an envelope', async () => {
+    const { sessionKeyCache } = await import('../sessionKeyCache.js');
+    const { generateDataKey } = await import('../crypto.js');
+    const { encryptNodeFields } = await import('../nodeCrypto.js');
+    const org = await db.organization.findFirstOrThrow({ where: { urn: 'rd.example' } });
+    const encMem = await db.memory.create({
+      data: { name: 'sealed', urn: 'rd.example:sealed', organizationId: org.id, class: 'knowledge', visibility: 'ORGANIZATION', isEncrypted: true },
+    });
+    sessionKeyCache.set('rd-session', encMem.id, generateDataKey());
+    const sealed = encryptNodeFields({ content: 'SEALED_TEXT' }, { id: encMem.id, isEncrypted: true });
+    const row = await db.node.create({ data: { id: generateId(), memoryId: encMem.id, loc: 'vault', name: 'vault', content: sealed.content } });
+    expect(row.content).not.toContain('SEALED_TEXT');
+    await mk('a', `{{> hrn:node:${encMem.urn}:vault}}`);
+    expect((await run(NODE_Q, as(reader), { ref: urn('a') })).data).toEqual({ node: { content: 'SEALED_TEXT' } });
+    sessionKeyCache.clear();
+    expect((await run(NODE_Q, as(reader), { ref: urn('a') })).data).toEqual({ node: { content: BROKEN_INCLUDE_NOTICE } });
+  });
+
+  it('a phrase only in the included node finds the target and never the includer', async () => {
+    await mk('policy', 'zebrafish quarterly obligations');
+    await mk('doc', 'See {{> policy}}');
+    await run(NODE_Q, as(reader), { ref: urn('doc') }); // a resolved read first
+    const hits = await resolvers.Query.findNodes({}, { query: 'zebrafish', mode: 'keyword' } as never, as(reader)) as { nodes?: Array<{ node: { loc: string } }> } | Array<{ node?: { loc: string }; loc?: string }>;
+    const locs = JSON.stringify(hits);
+    expect(locs).toContain('policy');
+    expect(locs).not.toContain('"doc"');
+  });
+});
