@@ -38,3 +38,12 @@ it('policy producers replace future expiry at the actual boundary without losing
   await expect(run(tx => transitionDeliveryException(tx, { ...pause, effectiveAt: at(19), active: true }))).rejects.toThrow('DELIVERY_POLICY_LATE');
   expect((await run(tx => loadDeliveryWait(tx, { ...message, dueSince: at(12) }, at(30)))).waitedMs).toBe(5 * 60_000);
 });
+
+it('does not certify policy time for a worker whose owning organization was deleted', async () => {
+  await db.organization.update({ where: { id: orgId }, data: { deletedAt: at(45) } });
+  try {
+    await expect(run(tx => observeDeliveryPolicyThrough(tx, workerId, at(50)))).rejects.toThrow('DELIVERY_WORKER_NOT_FOUND');
+  } finally {
+    await db.organization.update({ where: { id: orgId }, data: { deletedAt: null } });
+  }
+});
