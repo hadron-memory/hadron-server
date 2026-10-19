@@ -6,10 +6,10 @@ import type { Config, Runner } from '../orca-attention-router/router.js';
 import { pass } from './ticker-wake.js';
 
 const RULE = '─'.repeat(112);
-// Claude Code 2.1.303 start screen, verbatim shape from the cli#907 captures (c01-start): the
+// A finished Claude Code 2.1.303 turn over an empty composer (shapes from the cli#907 captures): the
 // mode footer WITHOUT the transient "· ← for agents" suffix.
 const CLAUDE_START = [
-  ' ▐▛███▛█   Claude Code v2.1.303', '▝▜██████▀  Sonnet 5.5 · Claude Max', ' ▝▝   ▝▝   ~/orca/workspaces/x',
+  '❯ reply with exactly the word ok', '● ok', '✻ Crunched for 2s · done 11:14 PM',
   RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
 ];
 const TICK = { kind: 'TICK', ticker: { name: 'coordinator-tick' } };
