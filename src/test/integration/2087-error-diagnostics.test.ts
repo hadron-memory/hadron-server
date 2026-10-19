@@ -2,7 +2,7 @@
 import { beforeAll, afterAll, afterEach, describe, it, expect, vi } from 'vitest';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { GraphQLError } from 'graphql';
+import { GraphQLError, GraphQLSchema, GraphQLObjectType, GraphQLScalarType, GraphQLString, getVariableValues, parse } from 'graphql';
 import { Prisma } from '../../generated/prisma/index.js';
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
@@ -162,6 +162,17 @@ describe('#2087 variable coercion',()=>{
     const result=await response.json() as any;
     expect(result.errors[0].extensions.code).toBe('GRAPHQL_VALIDATION_FAILED');
     expect(result.errors.every((e:any)=>e.message!=='Invalid GraphQL variable input.')).toBe(true);
+  });
+  it('custom scalar coercion drops supplied extensions and preserves available locations/path',()=>{
+    const scalar=new GraphQLScalarType({name:'Reject2087',parseValue(value){throw new GraphQLError('PRIVATE_SCALAR_2087',{extensions:{code:'SCALAR_FAILURE',rejected:value,...diagnostics}});}});
+    const schema=new GraphQLSchema({query:new GraphQLObjectType({name:'Query',fields:{echo:{type:GraphQLString,args:{input:{type:scalar}}}}})});
+    const operation=parse('query($input:Reject2087){echo(input:$input)}').definitions[0] as any;
+    const result=getVariableValues(schema,operation.variableDefinitions,{input:{secret}});
+    expect(result.errors).toHaveLength(1);
+    const error=result.errors![0];
+    const formatted=formatGraphQLError({...error.toJSON(),path:['available-path']},error);
+    expect(formatted).toEqual({message:'Invalid GraphQL variable input.',extensions:{code:'BAD_USER_INPUT'},locations:error.locations,path:['available-path']});
+    expect(JSON.stringify(formatted)).not.toContain(secret); noDiagnostics(formatted);
   });
   it('public domain BAD_USER_INPUT remains a domain refusal',()=>{
     const error=new GraphQLError('Repair this public field.',{extensions:{code:'BAD_USER_INPUT',reason:'PUBLIC_REMEDY'}});
