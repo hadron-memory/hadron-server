@@ -45,3 +45,10 @@ describe('S3 dark mode and immutable team snapshot', () => {
     expect(buildTeamSnapshot(workers, 'solo', [])).toEqual({teamTagsVersion: 1, teamTags: [], teamHeadIds: [], teamBroadcastWorkerIds: []});
   });
 });
+
+it('does not forge tags from literal tag text, import foreign authors, or climb past a retired immediate head', () => {
+  expect(buildTeamSnapshot(workers, 'foreign-worker', ['team.head'])).toMatchObject({teamTags:[],teamBroadcastWorkerIds:[]});
+  const retiredHead = workers.map(w=>w.id==='head'?{...w,retiredAt:new Date()}:w);
+  expect(buildTeamSnapshot(retiredHead,'child',[]).teamTags).toEqual([]);
+  expect(buildTeamSnapshot(workers,'child',['retired']).teamHeadIds).toEqual(['head']);
+});

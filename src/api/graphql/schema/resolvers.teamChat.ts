@@ -1098,8 +1098,13 @@ async function postToChannelRoot(
     // #1748 (N3): who may wake everyone is decided NOW, here, on live authority held through the commit, and
     // stamped; nothing re-decides it later. The authority is taken BEFORE the resume below (which locks the Worker
     // row FOR UPDATE) and the stamps after it, so the Worker row is never taken SHARE then upgraded (Diego, cycle 3).
+    let teamGraphHeld = false;
+    const holdTeamGraph = async () => { await lockAppReportsTo(tx, app!.id, 'shared'); teamGraphHeld = true; };
     const stampAuthority = mentions.length > 0 || (useTeamTags && app && !opts.system)
-      ? { authority: await lockStampAuthority(ctx, tx, app, useTeamTags && app && !opts.system ? () => lockAppReportsTo(tx, app.id, 'shared') : undefined) } : null;
+      ? { authority: await lockStampAuthority(ctx, tx, app, useTeamTags && app && !opts.system ? holdTeamGraph : undefined) } : null;
+    if (useTeamTags && app && !opts.system && !teamGraphHeld) {
+      throw new GraphQLError('Cannot post team metadata for an unavailable App.', { extensions: { code: 'APP_UNINSTALLED' } });
+    }
     if (useTeamTags) {
       const workers = !opts.system && app ? await tx.worker.findMany({ where: { appId: app.id }, select: { id: true, name: true, reportsToWorkerId: true, retiredAt: true } }) : [];
       Object.assign(envelope, buildTeamSnapshot(workers, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, mentions));

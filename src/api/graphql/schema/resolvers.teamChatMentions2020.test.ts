@@ -313,6 +313,9 @@ describe('S3 real post/filter/history integration', () => {
     const page = await Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: rook.id, limit: 0}, ctx(holderA.id));
     expect(page).toEqual({items: [], total: 1});
     expect((await Q.teamChatMessages({}, {appRef: app.id, untagged: true}, ctx(holderA.id))).total).toBe(0);
+    await db.channelReadState.create({data:{id:generateId(),workerId:liam.id,appId:app.id,channelId:channel.id,lastSeenSeq:0}});
+    await Q.teamChatMessages({}, {appRef:app.id,sinceSeq:0,teamHeadRef:rook.id,advanceReadState:true},ctx(holderA.id,{sessionId:liam.session}));
+    expect((await db.channelReadState.findFirstOrThrow({where:{workerId:liam.id,channelId:channel.id}})).lastSeenSeq).toBe(0);
   });
   it('preserves absent/empty and legacy reach through ON and rollback; invalid heads roll back allocation', async () => {
     vi.stubEnv('TEAM_TAGS_ENABLED', 'false');
@@ -391,4 +394,26 @@ describe('S3 graph snapshot concurrency', () => {
     expect(old.items.map((m:any)=>m.seq)).toEqual([message.seq]);
     expect(old.items[0].teamTags).toEqual(message.teamTags);
   });
+});
+
+it('S3 refuses atomically if App uninstall wins before the early graph bracket', async () => {
+  vi.stubEnv('TEAM_TAGS_ENABLED','true');
+  const { lockAuthorityAnchors } = await import('../../../lib/auth/authorityAnchors.js');
+  const { waitForLockWaiters } = await import('../../../test/lockWait.js');
+  let release!: () => void;
+  let ready!: () => void;
+  const held = new Promise<void>(resolve=>{ready=resolve;});
+  const gate = new Promise<void>(resolve=>{release=resolve;});
+  const writer = db.$transaction(async tx=>{
+    await lockAuthorityAnchors(tx,[{kind:'app',id:app.id}],'exclusive');
+    await tx.app.update({where:{id:app.id},data:{uninstalledAt:new Date()}});
+    ready(); await gate;
+  },{timeout:20000});
+  await held;
+  const outcome = humanSays(manager.id,'must not append').then(value=>({value,error:null}),error=>({value:null,error}));
+  try {await waitForLockWaiters(db,1,3000);} finally {release();}
+  await writer;
+  expect((await outcome).error).toMatchObject({extensions:{code:'APP_UNINSTALLED'}});
+  expect(await db.node.count({where:{messageChannelId:channel.id,nodeType:'chat-message'}})).toBe(0);
+  expect((await db.channel.findUniqueOrThrow({where:{id:channel.id}})).lastSeq).toBe(0);
 });
