@@ -1608,11 +1608,16 @@ export async function confirmTeamAttentionSwitchover(
   };
 }
 
-/** Resolve one exact, live, caller-owned Worker session and its owning App. */
+/**
+ * Resolve one exact, live, caller-owned Worker session and its owning App. `readOnly` is the re-check under a lock
+ * that holds the session row FOR SHARE (#2101, George P2): no heartbeat, since another reader may hold the same row
+ * shared while waiting on a lock this caller holds. Resuming a lapsed session is the caller's write, never done here.
+ */
 async function ownLiveSessionWorker(
   ctx: Context,
   sessionRef: string,
   expectedAppId?: string,
+  opts: { readOnly?: boolean } = {},
 ): Promise<{ workerId: string; appId: string; sessionId: string; lapsed: boolean } | null> {
   if (!ctx.userId || ctx.impersonation) return null;
   const session = await ctx.db.session.findFirst({
@@ -1655,7 +1660,7 @@ async function ownLiveSessionWorker(
   if (isSessionLive(session, events.get(session.id), new Date())) {
     // #1540 — a read or mark-read through the session is its driver driving it.
     // Owned, eligible and live are all established above, so keep it alive.
-    await touchLiveSession(ctx.db, session.id);
+    if (!opts.readOnly) await touchLiveSession(ctx.db, session.id);
     return { workerId: session.workerId, appId: session.appId, sessionId: session.id, lapsed: false };
   }
   // #1617 B — a LAPSED session may be resumed by its holder-driver's act. This
@@ -1819,7 +1824,9 @@ async function advanceOwnMentionsRead(
       await tx.$queryRaw`SELECT id FROM tickers WHERE app_id = ${appId} AND deleted_at IS NULL FOR SHARE`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + workerId}, 0))`;
 
-      const live = await ownLiveSessionWorker(txCtx, session.sessionId, appId);
+      // Read-only: the heartbeat already ran outside (maybeAdvanceOwnChannelRead); an UPDATE of the session row here
+      // would wait on another reader's FOR SHARE while that reader waits on this wake lock (George P2 on 8ed33339).
+      const live = await ownLiveSessionWorker(txCtx, session.sessionId, appId, { readOnly: true });
       if (!live || live.lapsed || live.workerId !== workerId) return null;
       const view = await resolveRegister(tx as never, { attendee: { workerId }, actor: txCtx });
       const row = view?.rows.find((r) => r.channel.id === args.channelId);
