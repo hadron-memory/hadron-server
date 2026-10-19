@@ -70,6 +70,30 @@ async function resolveTarget(
   return { id: node.id, memoryId: node.memoryId, loc: node.loc, content };
 }
 
+/**
+ * Does the tag's target exist, live, in a memory the writer may read? Existence
+ * and read access only: an encrypted target the writer may read counts without
+ * a session key, because the question is access, not decryption (cor:dmo:150:04).
+ * A batch overlay counts as existing: a file written in the same batch is there.
+ */
+async function targetIsReadable(
+  tx: Tx, tag: IncludeTag, from: IncludeWriteNode, readable: ReadableMemoryIds, overlay?: IncludeOverlay,
+): Promise<boolean> {
+  let memoryId = from.memoryId;
+  let loc = tag.target;
+  if (tag.kind === 'urn') {
+    let parts: ReturnType<typeof splitNodeUrn>;
+    try { parts = splitNodeUrn(tag.target); } catch { return false; }
+    const mem = await tx.memory.findUnique({ where: { urn: parts.memoryUrn }, select: { id: true } });
+    if (!mem) return false;
+    memoryId = mem.id;
+    loc = parts.loc;
+  }
+  if (readable !== null && !readable.includes(memoryId)) return false;
+  if (overlay && memoryId === overlay.memoryId && overlay.contents.has(loc)) return true;
+  return (await tx.node.count({ where: { memoryId, loc, deletedAt: null } })) > 0;
+}
+
 export function includeRefusal(code: string, message: string, extra: Record<string, unknown> = {}): GraphQLError {
   return new GraphQLError(message, { extensions: { code, ...extra } });
 }
@@ -94,6 +118,14 @@ export async function assertIncludesWritable(
   } catch (e) {
     if (e instanceof IncludeSyntaxError) throw includeRefusal('INVALID_INCLUDE', e.message, { tag: e.raw });
     throw e;
+  }
+  // cor:dmo:150:04: a writer can't include what they can't read. One error for
+  // a target that doesn't exist, was deleted or isn't readable, naming only the
+  // tag the writer typed, so the refusal reveals nothing about the target.
+  for (const tag of tags) {
+    if (!(await targetIsReadable(tx, tag, node, readable, overlay))) {
+      throw includeRefusal('INCLUDE_TARGET_UNAVAILABLE', `Include ${tag.raw} can't be used: the target doesn't exist or you can't read it.`, { tag: tag.raw });
+    }
   }
   // Longest chain below a node (0 for a leaf), memoized so a node reached first
   // by a shallow branch cannot hide a deeper one: acceptance never depends on
@@ -174,7 +206,7 @@ export async function syncDerivedIncludesEdges(
 export function includeRefusalText(e: unknown): string | null {
   if (!(e instanceof GraphQLError)) return null;
   const code = e.extensions?.code;
-  if (code !== 'INVALID_INCLUDE' && code !== 'INCLUDE_CYCLE' && code !== 'INCLUDE_TOO_DEEP') return null;
+  if (code !== 'INVALID_INCLUDE' && code !== 'INCLUDE_CYCLE' && code !== 'INCLUDE_TOO_DEEP' && code !== 'INCLUDE_TARGET_UNAVAILABLE') return null;
   const tag = typeof e.extensions?.tag === 'string' ? ` Tag: ${e.extensions.tag}` : '';
   return `[${String(code).toLowerCase()}] ${e.message}${tag}`;
 }

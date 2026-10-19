@@ -206,3 +206,33 @@ describe('exports (cor:dmo:150:03, R40/R47)', () => {
     expect(presented).not.toContain('{{> b}}');
   });
 });
+
+describe('the writer\'s read check (cor:dmo:150:04)', () => {
+  const mcp = (u: { id: string }) => createTestableMcpServer({ userId: u.id, roles: [], clientId: `user:${u.id}` });
+  const create = (loc: string, content: string) =>
+    resolvers.Mutation.createNode({}, { input: { memoryId, loc, name: loc, content } } as never, as(reader)).then(
+      () => 'ok', (e: { message: string; extensions?: { code?: string; tag?: string } }) => `${e.extensions?.code}|${e.message}`,
+    );
+
+  it('refuses a missing, a deleted and an unreadable target with the SAME error, and stores nothing', async () => {
+    const d = await mk('gone', 'GONE');
+    await db.node.update({ where: { id: d.id }, data: { deletedAt: new Date() } });
+    const unreadable = await create('w1', `{{> hrn:node:${foreignUrn}:secret}}`);
+    const missingUrn = await create('w2', `{{> hrn:node:${foreignUrn}:nothing}}`);
+    const missingLoc = await create('w3', '{{> nope}}');
+    const deleted = await create('w4', '{{> gone}}');
+    for (const r of [unreadable, missingUrn, missingLoc, deleted]) expect(r).toMatch(/^INCLUDE_TARGET_UNAVAILABLE\|/);
+    // the message names only the tag the writer typed, and never the target's existence
+    expect(unreadable.replace(/Include .*? can't/, 'Include X can\'t')).toBe(missingUrn.replace(/Include .*? can't/, 'Include X can\'t'));
+    expect(await db.node.count({ where: { memoryId, loc: { in: ['w1', 'w2', 'w3', 'w4'] } } })).toBe(0);
+  });
+
+  it('accepts a target the writer can read, by loc and by URN, and the MCP writer refuses identically', async () => {
+    await mk('b', 'B');
+    expect(await create('ok1', '{{> b}}')).toBe('ok');
+    expect(await create('ok2', `{{> ${urn('b')}}}`)).toBe('ok');
+    const refused = await mcp(reader).callToolText('hadron_create_node', { urn: urn('m1'), name: 'm1', content: `{{> hrn:node:${foreignUrn}:secret}}` });
+    expect(refused).toContain('[include_target_unavailable]');
+    expect(await db.node.count({ where: { memoryId, loc: 'm1' } })).toBe(0);
+  });
+});
