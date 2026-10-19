@@ -46,7 +46,7 @@ export type LoadedBatch = {
 
 export type LoadedBatchPage = { batches: LoadedBatch[]; nextAfter: string | null };
 
-type Row = { seq: number; content: string | null; data: unknown; created_at: Date; total_eligible: bigint };
+type Row = { seq: number; content: string | null; data: unknown; created_at: Date; oldest_posted_at: Date; total_eligible: bigint };
 
 const oneLine = (s: string): string => s.replace(/\r\n|[\r\n\u2028\u2029]/g, ' ');
 
@@ -102,21 +102,16 @@ export async function loadDeliveryEligibility(args: DeliverySelectionArgs): Prom
   if (page.length === 0) return { workers: [], nextAfter };
 
   const callerIds = await getAccessibleMemoryIds(ctx);
-  const callerCan = (memoryId: string) => callerIds === null || callerIds.includes(memoryId);
   const holderCache = new Map<string, Set<string> | 'all' | null>();
   const selected: EligibleDeliveryWorker[] = [];
 
   for (const w of page) {
     const token = mentionTokenOf(w.name);
     if (!token) continue;
-    const holder = w.heldByUserId ? await holderAccess(ctx, app, w.heldByUserId, holderCache) : 'all';
     const rows = (await collectRegisterRows(db, { workerId: w.id }))?.rows ?? [];
-    const channelIds = [...new Set(rows.filter((r) => r.role !== 'POST').map((r) => r.channelId))];
+    const channelIds = [...new Set(rows.filter(r => r.role !== 'POST').map(r => r.channelId))];
     if (channelIds.length === 0) continue;
-    const channels = await db.channel.findMany({
-      where: { id: { in: channelIds }, deletedAt: null },
-      select: { id: true, memoryId: true, lastSeq: true, incarnation: true, memory: { select: { isEncrypted: true } } },
-    });
+    const channels = await loadDeliveryChannelPolicy(ctx, app, w, { callerIds, holderCache, channelIds });
     const [seen, delivered] = await Promise.all([
       db.channelReadState.findMany({ where: { workerId: w.id, channelId: { in: channelIds } }, select: { channelId: true, lastSeenSeq: true } }),
       db.workerDeliveryChannel.findMany({ where: { workerId: w.id, channelId: { in: channelIds } } }),
@@ -124,7 +119,6 @@ export async function loadDeliveryEligibility(args: DeliverySelectionArgs): Prom
 
     const eligibleChannels: EligibleDeliveryChannel[] = [];
     for (const ch of channels) {
-      if (ch.memory.isEncrypted || !callerCan(ch.memoryId) || !mayRead(holder, ch.memoryId)) continue;
       const d = delivered.find(x => x.channelId === ch.id);
       const mark = d && d.channelIncarnation === ch.incarnation ? d.deliveredThroughSeq : 0;
       const lo = Math.max(seen.find(x => x.channelId === ch.id)?.lastSeenSeq ?? 0, mark);
@@ -140,6 +134,31 @@ export async function loadDeliveryEligibility(args: DeliverySelectionArgs): Prom
   return { workers: selected, nextAfter };
 }
 
+/** Current channel policy shared by rendering and BOTH proof-ack arms.
+ * Deliberately ignores read/delivery marks: a repeated ack still has authority
+ * after its own mark moved. The caller supplies a fresh transaction context.
+ */
+export async function loadDeliveryChannelPolicy(
+  ctx: Context,
+  app: AppLike,
+  worker: { id: string; heldByUserId: string | null },
+  readers?: { callerIds: string[] | null; holderCache: Map<string, Set<string> | 'all' | null>; channelIds: string[] },
+) {
+  const callerIds = readers ? readers.callerIds : await getAccessibleMemoryIds(ctx);
+  const holder = worker.heldByUserId
+    ? await holderAccess(ctx, app, worker.heldByUserId, readers?.holderCache ?? new Map())
+    : 'all';
+  const rows = readers ? [] : (await collectRegisterRows(ctx.db, { workerId: worker.id }))?.rows ?? [];
+  const channelIds = readers?.channelIds ?? [...new Set(rows.filter(r => r.role !== 'POST').map(r => r.channelId))];
+  if (!channelIds.length) return [];
+  const channels = await ctx.db.channel.findMany({
+    where: { id: { in: channelIds }, deletedAt: null },
+    select: { id: true, memoryId: true, lastSeq: true, incarnation: true, memory: { select: { isEncrypted: true } } },
+  });
+  return channels.filter(c => !c.memory.isEncrypted
+    && (callerIds === null || callerIds.includes(c.memoryId)) && mayRead(holder, c.memoryId));
+}
+
 export async function loadDeliveryBatches(args: DeliverySelectionArgs): Promise<LoadedBatchPage> {
   const { workers, nextAfter } = await loadDeliveryEligibility(args);
   if (!workers.length) return { batches: [], nextAfter };
@@ -149,6 +168,7 @@ export async function loadDeliveryBatches(args: DeliverySelectionArgs): Promise<
   for (const w of workers) {
     const messages: BatchMessage[] = [];
     let totalEligible = 0;
+    let oldestPostedAt: Date | null = null;
     const incarnationOf = new Map<string, number>();
     const markOf = new Map<string, number>();
     for (const ch of w.channels) {
@@ -157,11 +177,14 @@ export async function loadDeliveryBatches(args: DeliverySelectionArgs): Promise<
       const eligible = await eligibleMessages(args.ctx.db, ch);
       messages.push(...eligible.messages);
       totalEligible += eligible.totalEligible;
+      if (eligible.oldestPostedAt && (!oldestPostedAt || eligible.oldestPostedAt < oldestPostedAt)) {
+        oldestPostedAt = eligible.oldestPostedAt;
+      }
     }
     if (messages.length === 0) continue;
 
-    const oldest = messages.reduce((a, m) => (m.createdAt < a ? m.createdAt : a), messages[0]!.createdAt);
-    const timing = batchTiming(settings, { oldestPostedAt: oldest });
+    // Timing follows every eligible post, not only the seq-prefix body sample.
+    const timing = batchTiming(settings, { oldestPostedAt: oldestPostedAt! });
     if (timing.deliverAfter.getTime() > now.getTime()) continue;
 
     const out = renderBatch({ workerName: w.workerName, messages, totalEligible });
@@ -190,11 +213,11 @@ export async function loadDeliveryBatches(args: DeliverySelectionArgs): Promise<
 }
 
 /** The messages of a plaintext channel above `lo` that reach the worker, with their reply parent when it is in the channel. */
-async function eligibleMessages(db: Context['db'], ch: EligibleDeliveryChannel): Promise<{ messages: BatchMessage[]; totalEligible: number }> {
+async function eligibleMessages(db: Context['db'], ch: EligibleDeliveryChannel): Promise<{ messages: BatchMessage[]; totalEligible: number; oldestPostedAt: Date | null }> {
   const rows = await db.$queryRaw<Row[]>(Prisma.sql`
-    SELECT n.seq::int AS seq, n.content, n.data, n.created_at, COUNT(*) OVER() AS total_eligible
+    SELECT n.seq::int AS seq, n.content, n.data, n.created_at, MIN(n.created_at) OVER() AS oldest_posted_at, COUNT(*) OVER() AS total_eligible
     FROM nodes n WHERE ${ch.predicate}
-    ORDER BY n.created_at, n.seq
+    ORDER BY n.seq
     LIMIT ${ELIGIBLE_READ_LIMIT}`);
   const eligible = rows;
   const parentSeqs = [...new Set(eligible.map((r) => replyToOf(r.data)).filter((s): s is number => s !== null))];
@@ -219,7 +242,7 @@ async function eligibleMessages(db: Context['db'], ch: EligibleDeliveryChannel):
       mentions: reachEnvelopeOf(r.data).mentions as string[],
     };
   });
-  return { messages, totalEligible: Number(rows[0]?.total_eligible ?? 0) };
+  return { messages, totalEligible: Number(rows[0]?.total_eligible ?? 0), oldestPostedAt: rows[0]?.oldest_posted_at ?? null };
 }
 
 const replyToOf = (data: unknown): number | null => {

@@ -220,3 +220,16 @@ describe('timing, parent context, identity, paging and overflow', () => {
     expect((await batch()).ranges[0]!.seqs).toEqual([1002]);
   });
 });
+
+it('samples a channel by seq before the cap even if timestamps disagree', async () => {
+  for (let i = 1; i <= 11; i++) await say(`backward-${i}`, {}, channel, new Date(posted.getTime() - i * 1000));
+  expect((await batch()).ranges[0].seqs).toEqual([1,2,3,4,5,6,7,8,9,10]);
+});
+
+it('keeps timing from the oldest eligible post even when seq sampling leaves it beyond the cap', async () => {
+  for (let i = 1; i <= 10; i++) await say(`recent-${i}`, {}, channel, ready);
+  await say('older-beyond-prefix', {}, channel, posted);
+  const b = await batch();
+  expect(b.ranges[0].seqs).toEqual([1,2,3,4,5,6,7,8,9,10]);
+  expect(b.deliverAfter.getTime()).toBeLessThanOrEqual(ready.getTime());
+});

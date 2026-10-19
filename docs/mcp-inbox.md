@@ -10,7 +10,14 @@ record audit facts.
 
 A worker supplies its own live bound `session` in its own App. It can read and
 acknowledge only its own deliveries. An ended, revoked or foreign binding is
-refused. A host uses its actual App key with both `attention:deliver` and
+refused. Self mode also admits an active App key on a same-App **userless**,
+non-host-launched own-worker session, if that key has never held `host:operate`.
+It still supplies `session`, passes the existing session-write gate and reads
+only the memories that key-bound session may read. It cannot borrow a person's
+session or gain channel access merely by naming a worker; an eligible self call
+can therefore return no batches. This is separate from host mode.
+
+A host uses its actual App key with both `attention:deliver` and
 `host:operate`, without a session binding, and reaches only workers in that
 host's current registration. A holder or manager token alone does not substitute
 for either batch caller.

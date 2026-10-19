@@ -439,6 +439,22 @@ describe('#2068 (R49/R54) — a ticker with reason every-tick, through the whole
     expect(await db.workerDeliveryTick.count()).toBe(0);
   });
 
+  it('#2102 Dara P2-4: a prior-cycle ancestor receipt does not let a late ancestor proof charge again', async () => {
+    await say(channel, 'one', mention('liam'));
+    const a = (await due(ctx(manager.id))).wakes[0];
+    const aKey = verifyWakeProof(a.proof).wakeKey!;
+    // A receipt of the same still-due textless mention from a PRIOR cycle (R53: offered again after the floor).
+    await db.workerWakeAck.create({ data: { workerId: liam.id, wakeKey: aKey, ackedAt: new Date(Date.now() - 3600_000) } });
+    const t = await everyTick();
+    await subscribe(t.id, liam.id);
+    const b = (await due(ctx(manager.id))).wakes[0];
+    const r = await db.appWakeReservation.findUniqueOrThrow({ where: { workerId: liam.id } });
+    expect(r.absorbedKeys).toContain(aKey);
+    expect(await M.acknowledgeWakes({}, { proofs: [b.proof] }, ctx(manager.id))).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await M.acknowledgeWakes({}, { proofs: [a.proof] }, ctx(manager.id))).toEqual({ acknowledged: 0, unchanged: 1 });
+    expect((await db.appWakeDay.findFirstOrThrow({ where: { appId: app.id } })).wakes).toBe(1);
+  });
+
   it('every-tick bypasses none of: pause, dormancy, the daily budget', async () => {
     const t = await everyTick();
     await subscribe(t.id, liam.id);
