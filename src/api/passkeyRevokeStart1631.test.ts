@@ -33,12 +33,17 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-async function challenge(origin: string | null = ORIGIN) {
-  const r = await fetch(`${base}/passkeys/revoke/challenge`, { method: 'POST', headers: origin ? { origin } : {} });
-  if (r.status !== 200) return { status: r.status } as const;
+interface Issued { ceremonyId: string; ch: string; cookie: string }
+
+async function challengeStatus(origin: string | null = ORIGIN) {
+  return (await fetch(`${base}/passkeys/revoke/challenge`, { method: 'POST', headers: origin ? { origin } : {} })).status;
+}
+
+async function challenge(): Promise<Issued> {
+  const r = await fetch(`${base}/passkeys/revoke/challenge`, { method: 'POST', headers: { origin: ORIGIN } });
+  expect(r.status).toBe(200);
   const { ceremonyId, challenge: ch } = await r.json() as { ceremonyId: string; challenge: string };
-  const cookie = (r.headers.get('set-cookie') ?? '').split(';')[0];
-  return { status: 200, ceremonyId, ch, cookie } as const;
+  return { ceremonyId, ch, cookie: (r.headers.get('set-cookie') ?? '').split(';')[0] ?? '' };
 }
 
 function body(ceremonyId: string, ch: string, over: { counter?: number; origin?: string; uv?: boolean } = {}) {
@@ -55,7 +60,6 @@ const start = (b: string, cookie: string | undefined, origin: string | null = OR
 describe('#1631 revoke/start proof by existing passkey', () => {
   it('accepts a UV assertion over the issued challenge from the cookie holder, mints no session, advances the counter', async () => {
     const c = await challenge();
-    if (c.status !== 200) throw new Error('challenge refused');
     expect((c.cookie.length)).toBeGreaterThan(0);
     const r = await start(body(c.ceremonyId, c.ch), c.cookie);
     expect(r.status).toBe(200);
@@ -66,7 +70,6 @@ describe('#1631 revoke/start proof by existing passkey', () => {
 
   it('is single-use: replaying the same proof is the uniform 403', async () => {
     const c = await challenge();
-    if (c.status !== 200) throw new Error('challenge refused');
     const b = body(c.ceremonyId, c.ch);
     expect((await start(b, c.cookie)).status).toBe(200);
     expect((await start(b, c.cookie)).status).toBe(403);
@@ -80,7 +83,6 @@ describe('#1631 revoke/start proof by existing passkey', () => {
     ['an assertion without user verification', (c: { cookie: string }) => ({ cookie: c.cookie, origin: ORIGIN, uv: false })],
   ])('refuses %s with the uniform 403 and consumes nothing', async (_n, make) => {
     const c = await challenge();
-    if (c.status !== 200) throw new Error('challenge refused');
     const o = make(c);
     const r = await start(body(c.ceremonyId, c.ch, { uv: o.uv }), o.cookie, o.origin);
     expect(r.status).toBe(403);
@@ -90,22 +92,20 @@ describe('#1631 revoke/start proof by existing passkey', () => {
   });
 
   it('refuses a challenge request from an unlisted origin and when the allowlist is empty', async () => {
-    expect((await challenge('https://evil.example')).status).toBe(403);
-    expect((await challenge(null)).status).toBe(403);
+    expect(await challengeStatus('https://evil.example')).toBe(403);
+    expect(await challengeStatus(null)).toBe(403);
     vi.stubEnv('SIGNING_CEREMONY_ORIGINS', '');
-    expect((await challenge()).status).toBe(403);
+    expect(await challengeStatus()).toBe(403);
   });
 
   it('refuses a revoked credential', async () => {
     const c = await challenge();
-    if (c.status !== 200) throw new Error('challenge refused');
     await db.$executeRaw`UPDATE passkey_credentials SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') WHERE id = ${passkeyId}`;
     expect((await start(body(c.ceremonyId, c.ch), c.cookie)).status).toBe(403);
   });
 
   it('keeps register/start refusing everyone, even with a valid proof', async () => {
     const c = await challenge();
-    if (c.status !== 200) throw new Error('challenge refused');
     const r = await fetch(`${base}/passkeys/register/start`, {
       method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN, cookie: c.cookie }, body: body(c.ceremonyId, c.ch),
     });

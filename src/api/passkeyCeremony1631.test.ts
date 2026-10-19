@@ -38,7 +38,7 @@ describe('#1631 enabled ceremony refuses bearer-only callers', () => {
   it.each(['/passkeys/register/start', '/passkeys/revoke/start'])(
     '%s refuses a real sign-in bearer and the same JWT copied into a cookie', async (path) => {
       await boot();
-      for (const auth of [
+      for (const auth of <Array<Record<string, string>>>[
         { authorization: `Bearer ${token}` },
         { cookie: `hadron_token=${token}` },
         { authorization: `Bearer ${token}`, cookie: `hadron_token=${token}` },
