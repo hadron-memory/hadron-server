@@ -4522,9 +4522,9 @@ export const typeDefs = `#graphql
     memory all answer [] rather than erroring.
     """
     repos: [String!]!
-    "Per-worker signature template, masked for nonreaders (cor:agt:040:04)."
+    "Per-worker signature template, masked for nonreaders (hrn:node:hadronmemory.com:specs:cor:agt:040:04)."
     signature: String
-    "Per-worker commit trailer template, masked for nonreaders (cor:agt:040:04)."
+    "Per-worker commit trailer template, masked for nonreaders (hrn:node:hadronmemory.com:specs:cor:agt:040:04)."
     trailer: String
     "Per-worker individuality layered over the agent's template prompt."
     promptOverride: String
@@ -11174,7 +11174,7 @@ export const typeDefs = `#graphql
     Omitted preserves, null refuses, whitespace-only becomes empty text; other text is raw, max 2000 characters, no NUL.
     A mixed update is atomic. These values reach the next compose/bind via S4.
 
-    The other casting identity fields stay immutable: \`name\` is permanent by law (cor:agt:020:02)
+    The other casting identity fields stay immutable: \`name\` is permanent by law (hrn:node:hadronmemory.com:specs:cor:agt:020:02)
     and \`role\`/\`agent\` define the casting itself. OMITTING promptOverride
     preserves it; explicit \`null\` or a blank string CLEARS it, matching the
     nullable column and castWorker's blank-is-absent normalization.
