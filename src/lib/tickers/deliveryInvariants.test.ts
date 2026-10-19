@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
-import { PrismaClient } from '../../generated/prisma/index.js';
+import { Client } from 'pg';
 
 describe('S5 migration/source contract', () => {
   it('ships the same checks via migration and post-push', () => {
@@ -10,18 +10,25 @@ describe('S5 migration/source contract', () => {
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir delivery-stall-invariants.sql');
   });
   it('rejects invalid coverage and unknown metadata keys at the database boundary', async () => {
-    const db = new PrismaClient();
+    const db = new Client({ connectionString: process.env.DATABASE_URL });
+    await db.connect();
     try {
-      // No fixtures needed: CHECK precedes FK validation, and deliberately invalid
-      // records cannot survive even when inserted outside the typed writer.
-      await expect(db.workerDeliveryWaitException.create({ data: {
-        id: 'invalid-s5', workerId: 'missing', cause: 'wake-budget', coverageKey: 'worker', startedAt: new Date(),
-      } })).rejects.toThrow(/chk_delivery_wait_exception/);
-      await expect(db.agentTeamEvent.create({ data: {
-        appId: 'missing', type: 'delivery.resumed', subjectWorkerId: 'missing', payload: {
-          episodeId: 'e', channelId: 'c', channelIncarnation: 1, throughSeq: 1, resumedAt: new Date().toISOString(), principal: { kind: 'worker', workerId: 'w' }, draft: 'must never persist',
-        },
-      } })).rejects.toThrow(/chk_delivery_event_payload/);
-    } finally { await db.$disconnect(); }
+      // PostgreSQL's structured code/constraint fields are authoritative.
+      // Prisma messages include source snippets, so matching a bare constraint
+      // name there can match the assertion's own source instead of the failure.
+      await expect(db.query(`INSERT INTO worker_delivery_wait_exceptions
+        (id,worker_id,cause,coverage_key,started_at) VALUES ('invalid-s5','missing','wake-budget','worker',now())`))
+        .rejects.toMatchObject({ code: '23514', constraint: 'chk_delivery_wait_exception' });
+      const base = { episodeId: 'e', channelId: 'c', channelIncarnation: 1, throughSeq: 1,
+        resumedAt: new Date().toISOString(), principal: { kind: 'worker', workerId: 'w' } };
+      for (const payload of [
+        { ...base, draft: 'must never persist' },
+        { ...base, throughSeq: 'draft text must not fit in an allowlisted numeric field' },
+      ]) {
+        await expect(db.query(`INSERT INTO agent_team_events
+          (id,app_id,type,subject_worker_id,payload) VALUES ('invalid-s5-event','missing','delivery.resumed','missing',$1::jsonb)`, [JSON.stringify(payload)]))
+          .rejects.toMatchObject({ code: '23514', constraint: 'chk_delivery_event_payload' });
+      }
+    } finally { await db.end(); }
   });
 });
