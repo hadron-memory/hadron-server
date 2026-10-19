@@ -152,6 +152,7 @@ import {
   resolveUserRefArg,
   resolveOrgRefArg,
   resolveMemoryRefArg,
+  getAccessibleMemoryIds,
   type MergeMemoriesInput,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
@@ -1466,6 +1467,7 @@ export const memoryMutations = {
         ownerUserId: isUserOwned ? ctx.userId! : null,
         groupOwnerUserId: source.class === 'group' ? (ctx.userId ?? null) : null,
         actorId: ctx.userId ?? ctx.clientId ?? null,
+        readableMemoryIds: await getAccessibleMemoryIds(ctx),
       });
 
       // 033 — the clone carries the source's vector-index config but no
@@ -1679,6 +1681,7 @@ export const memoryMutations = {
       // slug (a valid loc), and the display name is the slug the caller chose.
       const vectorIndexEnabled = newClass === 'knowledge';
       const { memoryId } = await extractParentNodeGraph(ctx.db, {
+        readableMemoryIds: await getAccessibleMemoryIds(ctx),
         sourceMemoryId: source.id,
         parentLoc: parent.loc,
         newUrn,

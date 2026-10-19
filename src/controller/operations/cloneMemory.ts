@@ -1,4 +1,4 @@
-import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
+import { assertCopiedIncludesReadable, resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
 import { NOT_DECISION_FAMILY_WHERE } from '../../lib/decisions/index.js';
@@ -123,6 +123,8 @@ export interface CloneMemoryArgs {
   groupOwnerUserId: string | null;
   /** Audit attribution for createdBy columns. */
   actorId: string | null;
+  /** Memories the copier may read (`null` = all). Omitted by server-authored callers: no include read check (#2041). */
+  readableMemoryIds?: string[] | null;
 }
 
 export interface CloneMemoryResult {
@@ -356,6 +358,10 @@ export async function cloneMemoryGraph(
         await tx.edge.createMany({ data: edgeRows, skipDuplicates: true });
       }
       // #2040 — the copies' include edges are re-derived from their content.
+      // #2041 — the copier's own read access, when a caller supplies it.
+      if (args.readableMemoryIds !== undefined) {
+        await assertCopiedIncludesReadable(tx, nodeRows.map((r) => r.id as string), args.readableMemoryIds);
+      }
       await resyncDerivedIncludesForNodes(tx, nodeRows.map((r) => r.id as string));
 
       // ── PendingEdges ───────────────────────────────────────────────────

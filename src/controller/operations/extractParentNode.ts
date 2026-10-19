@@ -1,4 +1,4 @@
-import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
+import { assertCopiedIncludesReadable, resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { decisionContainedError, isDecisionFamilyRole } from '../../lib/decisions/index.js';
@@ -79,6 +79,8 @@ export interface ExtractParentNodeArgs {
   ownerUserId: string | null;
   /** Bootstrap this user as the group-class extract's first owner member. */
   groupOwnerUserId: string | null;
+  /** Memories the copier may read (`null` = all). Omitted by server-authored callers: no include read check (#2041). */
+  readableMemoryIds?: string[] | null;
   /** contentChunks vector index on the new memory (knowledge default = true). */
   vectorIndexEnabled: boolean;
   /** move = soft-delete the source subtree after copying; copy = leave it. */
@@ -402,6 +404,10 @@ export async function extractParentNodeGraph(
         await tx.edge.createMany({ data: edgeRows });
       }
       // #2040 — the copies' include edges are re-derived from their content.
+      // #2041 — the copier's own read access, when a caller supplies it.
+      if (args.readableMemoryIds !== undefined) {
+        await assertCopiedIncludesReadable(tx, nodeRows.map((r) => r.id as string), args.readableMemoryIds);
+      }
       await resyncDerivedIncludesForNodes(tx, nodeRows.map((r) => r.id as string));
 
       // ── Move disposition ─────────────────────────────────────────────────

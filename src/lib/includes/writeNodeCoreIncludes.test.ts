@@ -160,18 +160,17 @@ describe('run prompt assembly (#2040)', () => {
 });
 
 describe('copy paths conceal foreign targets (#2040, §10)', () => {
-  it('clone re-derives same-memory tags only: an unreadable foreign target gets no edge, exactly like a missing one', async () => {
+  it('clone refuses a copied includer whose foreign URN target the copier cannot read, and leaves no clone (#2041)', async () => {
     const foreignOrg = await db.organization.create({ data: { id: generateId(), name: 'Foreign', urn: 'foreign.example' } });
     const foreign = await db.memory.create({ data: { id: generateId(), name: 'secret', urn: 'foreign.example:secret', class: 'knowledge', organizationId: foreignOrg.id } });
     await db.node.create({ data: { id: generateId(), memoryId: foreign.id, loc: 'hidden', name: 'hidden', content: 'H' } });
     await create('local', 'L');
-    // Stored directly: a write with an unreadable target is now refused (#2041, cor:dmo:150:04),
-    // and this test is about what a COPY of such stored content does.
+    // Stored directly: a write with an unreadable target is refused (#2041, cor:dmo:150:04).
     await db.node.create({ data: { id: generateId(), memoryId, loc: 'src', name: 'src', content: '{{> local}} {{> hrn:node:foreign.example:secret:hidden}} {{> hrn:node:foreign.example:secret:absent}}' } });
     const org = await db.organization.findFirstOrThrow({ where: { urn: 'inc.example' } });
-    const clone = await M.cloneMemory(null, { ref: memoryId, targetUrn: `hrn:mem:${org.urn}:copy` }, as());
-    const edges = await db.edge.findMany({ where: { memoryId: clone.id, governedKind: 'INCLUDE' }, include: { source: true, target: true } });
-    expect(edges.map(e => `${e.source.loc}>${e.target.loc}`)).toEqual(['src>local']);
-    expect(edges.every(e => e.targetId !== undefined && !e.loc.includes(foreign.id))).toBe(true);
+    await expect(M.cloneMemory(null, { ref: memoryId, targetUrn: `hrn:mem:${org.urn}:copy` }, as())).rejects.toMatchObject({
+      extensions: { code: 'INCLUDE_TARGET_UNAVAILABLE' },
+    });
+    expect(await db.memory.count({ where: { urn: `${org.urn}:copy`, deletedAt: null } })).toBe(0);
   });
 });

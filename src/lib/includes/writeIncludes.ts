@@ -243,3 +243,26 @@ export async function resyncDerivedIncludesForNodes(tx: Tx, nodeIds: string[]): 
     await syncDerivedIncludesEdges(tx, node, storedIncludeTags(content), [node.memoryId]);
   }
 }
+
+/**
+ * A copy is a write (cor:dmo:150:04): refuse it, with the one write-side error,
+ * when a copied includer names a URN target the copier can't read. Same-memory
+ * loc tags travel with the copy and are not re-checked. Plaintext content only,
+ * as for the edge re-derive above: ciphertext carries no tags to read. Runs
+ * inside the copy's transaction, so a refusal leaves nothing behind.
+ */
+export async function assertCopiedIncludesReadable(tx: Tx, nodeIds: string[], readable: ReadableMemoryIds): Promise<void> {
+  if (nodeIds.length === 0) return;
+  const nodes = await tx.node.findMany({
+    where: { id: { in: nodeIds }, deletedAt: null, content: { contains: '{{>' } },
+    select: { id: true, memoryId: true, loc: true, content: true, memory: { select: { isEncrypted: true } } },
+  });
+  for (const node of nodes) {
+    if (node.memory.isEncrypted) continue;
+    for (const tag of storedIncludeTags(node.content)) {
+      if (tag.kind === 'urn' && !(await targetIsReadable(tx, tag, node, readable))) {
+        throw includeRefusal('INCLUDE_TARGET_UNAVAILABLE', `Include ${tag.raw} can't be used: the target doesn't exist or you can't read it.`, { tag: tag.raw });
+      }
+    }
+  }
+}
