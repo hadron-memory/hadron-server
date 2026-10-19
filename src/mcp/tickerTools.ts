@@ -15,6 +15,7 @@
  * and follows the write rule; calling `hadron_worker_wake_settings` with nothing
  * to set reads them.
  */
+import { s7Available } from '../lib/tickers/s7Availability.js';
 import { appKeyCaller } from '../lib/appKeyScopes/scopes.js';
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
@@ -369,7 +370,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     },
   );
   const isolationText = (verb: string, s: Row) =>
-    `${verb}. ${s.isolatedUntil && new Date(s.isolatedUntil).getTime() > Date.now() ? `Isolated until ${iso(s.isolatedUntil)}: no chat batches or ordinary wakes, and no task matching.` : 'Not isolated.'}`;
+    `${verb}. ${s7Available() && s.isolatedUntil && new Date(s.isolatedUntil).getTime() > Date.now() ? `Isolated until ${iso(s.isolatedUntil)}: no chat batches or ordinary wakes, and no task matching.` : 'Not isolated.'}`;
   server.tool(
     'hadron_isolate_worker',
     'Isolate a worker (S7, #2023): until the time you give (default 2 hours, at most 7 days; a later time extends, an earlier one shortens). ' +

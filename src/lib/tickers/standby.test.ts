@@ -3,10 +3,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Prisma } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
+import { setS7AvailableForTest } from './s7Availability.js';
 import { generateId } from '../id.js';
 import type { Context } from '../../api/graphql/schema/resolvers.js';
-import { loadDeliveryBatches } from './deliveryBatch.js';
+import { batchProofPayload, loadDeliveryBatches } from './deliveryBatch.js';
+import { acknowledgeBatchProofs } from './acknowledge.js';
+import { signBatchProof } from './wakeProof.js';
 import { enumeratePendingDelivery } from './pendingDelivery.js';
+import { raiseDeliveredOnAssignment } from './standbyAssignment.js';
+import { loadDeliverySettings } from './deliverySettings.js';
+import { setS7AvailableForTest as setAvail } from './s7Availability.js';
 import { StandbyCoverageClassifier, standbyAdmits, standbyAdmitsSql, onStandbySql, workerStandby } from './standby.js';
 
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -72,6 +78,7 @@ const load = () => loadDeliveryBatches({ ctx: caller, app, hostId: 'host-a', now
 const enumerate = () => enumeratePendingDelivery({ ctx: caller, app, hostId: 'host-a', now: ready, first: 1000 });
 
 beforeEach(async () => {
+  setS7AvailableForTest(true); // these exercise the mechanism; the inert contract is pinned in inertS7a.test.ts
   await cleanDb(db); n = 0; peerWorker = null;
   const org = await db.organization.create({ data: { id: generateId(), name: 'Standby', urn: `standby-${generateId()}.com` } });
   orgId = org.id;
@@ -296,5 +303,49 @@ describe('the assignment raise (R90)', () => {
     for (const f of ['acknowledge.ts', 'wakeProof.ts']) {
       expect(readFileSync(new URL(`./${f}`, import.meta.url), 'utf8'), f).not.toMatch(/standbyAssignment|raiseDeliveredOnAssignment/);
     }
+  });
+});
+
+describe('S7a is inert: persisted state activates nothing (Diego #25404, Ada #25407)', () => {
+  it('a STORED standby=true: not effective, nobody is on standby, the renderer holds nothing, the assignment raise advances nothing', async () => {
+    const head = await mkWorker('Head');
+    const target = await mkWorker('Target', { reportsToWorkerId: head.id });
+    await setSwitch(true); // raw row, as a pre-existing or seeded App would carry
+    setAvail(false);
+    expect(await loadDeliverySettings(db, appId)).toMatchObject({ standbyEnabled: true, standbyEffective: false });
+    expect((await workerStandby(db, target.id)).onStandby).toBe(false);
+    expect((await db.$queryRaw<Array<{ b: boolean }>>(Prisma.sql`SELECT ${onStandbySql(Prisma.sql`w`)} AS b FROM workers w WHERE w.id = ${target.id}`))[0]!.b).toBe(false);
+    await say('human', { authorUserId: holderId });
+    await say('peer', { authorWorkerId: (await peer()).id });
+    const mine = (await load()).batches.find((b) => b.workerId === target.id)!;
+    expect(mine.ranges[0]!.seqs, 'ordinary delivery: the peer message is NOT held').toEqual([1, 2]);
+    const task = await db.agentTask.create({ data: { id: generateId(), appId, title: 't', ownerUserId: holderId, assigneeWorkerId: target.id, assignedAt: posted, status: 'pending' } });
+    expect(await db.$transaction((tx) => raiseDeliveredOnAssignment(tx, { workerId: target.id, taskId: task.id, actor: { userId: holderId, workerId: null }, now: ready }))).toBe(0);
+    expect(await db.workerDeliveryChannel.count({ where: { workerId: target.id } })).toBe(0);
+  });
+  it('a STORED live isolation does not drop the worker from delivery', async () => {
+    const target = await mkWorker('Target');
+    await say('hello', { authorUserId: holderId });
+    await db.workerWakeSettings.create({ data: { workerId: target.id, isolatedUntil: new Date(ready.getTime() + 3_600_000), isolatedAt: ready, isolatedByUserId: holderId } });
+    setAvail(false);
+    expect((await load()).batches.some((b) => b.workerId === target.id), 'inert: still delivered').toBe(true);
+    setAvail(true);
+    expect((await load()).batches.some((b) => b.workerId === target.id), 'mechanism (S7b): dropped').toBe(false);
+  });
+});
+
+describe('S7b (#2130): an ordinary batch ack must not pass a held message (George P2, #2114) — red on the enabled path', () => {
+  it.fails('held seq 1 + admitted seq 2: after the real batch ack the held message is still in the complete enumeration', async () => {
+    const head = await mkWorker('Head');
+    const target = await mkWorker('Target', { reportsToWorkerId: head.id });
+    await setSwitch(true);
+    await say('peer', { authorWorkerId: (await peer()).id });   // 1 held
+    await say('human', { authorUserId: holderId });             // 2 admitted
+    const mine = (await load()).batches.find((b) => b.workerId === target.id)!;
+    expect(mine.ranges[0]!.seqs).toEqual([2]);
+    const proof = signBatchProof(batchProofPayload(mine, { appId, hostId: 'host-a', appKeyId: caller.appKeyId!, now: ready }));
+    await acknowledgeBatchProofs({ ctx: { ...caller, userId: holderId } as Context, requester: { appKeyId: caller.appKeyId! }, acks: [{ proof }], mayAckBatch: async () => true, now: ready });
+    const after = (await enumerate()).items.filter((i) => i.workerId === target.id).map((i) => i.seq);
+    expect(after, 'the held message was never rendered or counted, so it must stay pending').toContain(1);
   });
 });

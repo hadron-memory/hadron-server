@@ -32,6 +32,7 @@
 // (tick and dormancy are decided once, in src/lib/tickers). NOT BUILT: the owner
 // succession of cor:agt:080:18 (Proposed).
 
+import { s7Available } from '../../../lib/tickers/s7Availability.js';
 import { GraphQLError } from 'graphql';
 import { loadDeliverySettings, parseDeliverySettingsPatch, validateDeliverySettings, type DeliverySettings } from '../../../lib/tickers/deliverySettings.js';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -639,7 +640,9 @@ type WakeSettingsRow = {
 function wakeSettingsOut(workerId: string, row: WakeSettingsRow | null) {
   return {
     workerId, mentions: row?.mentions ?? 'IMMEDIATE', pausedUntil: row?.pausedUntil ?? null,
-    isolatedUntil: row?.isolatedUntil ?? null, isolatedAt: row?.isolatedAt ?? null, isolatedByUserId: row?.isolatedByUserId ?? null,
+    // Inert until S7b: a stored isolation projects as none, matching its (absent) effect.
+    isolatedUntil: s7Available() ? row?.isolatedUntil ?? null : null, isolatedAt: s7Available() ? row?.isolatedAt ?? null : null,
+    isolatedByUserId: s7Available() ? row?.isolatedByUserId ?? null : null,
   };
 }
 
@@ -665,6 +668,9 @@ async function writeWorkerIsolation(
   const app = await appOf(ctx, target.appId);
   const actor = await resolveTaskActor(ctx, app);
   if (!actor || actor.kind !== 'user') throw isolationForbidden();
+  if (op.kind === 'set' && !s7Available()) {
+    throw taskError('WORKER_ISOLATION_UNAVAILABLE', 'Isolating a worker is not available yet (S7b). Nothing was changed.');
+  }
   const until = op.kind === 'set' && op.until != null ? parseDate(op.until, 'until') : null;
   const row = await writeInApp(ctx, app, actor, () => workerNotFound(workerRef), async (tx, txCtx, fresh) => {
     const w = await lockWorker(tx, target.id);
@@ -1005,7 +1011,7 @@ export const tickerFieldResolvers = {
       });
       return fastest._min.cadenceSeconds ?? null;
     },
-    isolated: (w: { isolatedUntil?: Date | null }) => !!w.isolatedUntil && w.isolatedUntil.getTime() > Date.now(),
+    isolated: (w: { isolatedUntil?: Date | null }) => s7Available() && !!w.isolatedUntil && w.isolatedUntil.getTime() > Date.now(),
     isolatedByHandle: async (w: { isolatedByUserId?: string | null }, _: unknown, ctx: Context) =>
       w.isolatedByUserId ? (await ctx.db.user.findUnique({ where: { id: w.isolatedByUserId }, select: { handle: true } }))?.handle ?? null : null,
     dormant: async (w: { workerId: string }, _: unknown, ctx: Context) => {

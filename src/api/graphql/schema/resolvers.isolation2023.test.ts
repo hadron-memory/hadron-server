@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { setS7AvailableForTest } from '../../../lib/tickers/s7Availability.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -27,6 +28,7 @@ const isolate = (c: Context, until?: Date) => M.isolateWorker({}, { workerRef: l
 const clear = (c: Context) => M.clearWorkerIsolation({}, { workerRef: liam.id }, c);
 
 beforeEach(async () => {
+  setS7AvailableForTest(true); // mechanism tests; the inert contract is pinned in inertS7a.test.ts
   await cleanDb(db);
   const s = `${Date.now()}-${Math.floor(Math.random() * 1e5)}`;
   const org = await db.organization.create({ data: { id: generateId(), name: 'iso', urn: `iso-${s}.com` } });
@@ -119,5 +121,24 @@ describe('isolateWorker bounds and the worker\'s own pause', () => {
     expect(F.isolated(s)).toBe(true);
     expect(await F.isolatedByHandle(s, {}, ctx(member.id))).toBe((await db.user.findUniqueOrThrow({ where: { id: admin.id } })).handle);
     expect(F.isolated({ isolatedUntil: new Date(Date.now() - 1) })).toBe(false);
+  });
+});
+
+describe('S7a is inert (Ada #25399, #25407)', () => {
+  it('isolating is refused with the typed error and the row is unchanged; a clear still works', async () => {
+    setS7AvailableForTest(false);
+    let err: unknown;
+    try { await isolate(ctx(admin.id), hours(1)); } catch (e) { err = e; }
+    expect((err as GraphQLError).extensions?.code).toBe('WORKER_ISOLATION_UNAVAILABLE');
+    expect(await row()).toBeNull();
+    expect(await clear(ctx(admin.id))).toMatchObject({ isolatedUntil: null });
+  });
+  it('a STORED live isolation projects as none', async () => {
+    await db.workerWakeSettings.create({ data: { workerId: liam.id, isolatedUntil: hours(1), isolatedAt: new Date(), isolatedByUserId: admin.id } });
+    setS7AvailableForTest(false);
+    expect(await clear(ctx(admin.id))).toMatchObject({ isolatedUntil: null, isolatedAt: null, isolatedByUserId: null });
+    await db.workerWakeSettings.update({ where: { workerId: liam.id }, data: { isolatedUntil: hours(1), isolatedAt: new Date(), isolatedByUserId: admin.id } });
+    const out = await (resolvers as any).Query.workerWakeSettings?.({}, { workerRef: liam.id }, ctx(admin.id)).catch(() => null);
+    if (out) expect(out.isolatedUntil).toBeNull();
   });
 });

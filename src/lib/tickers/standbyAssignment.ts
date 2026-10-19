@@ -17,6 +17,7 @@ import { mentionReachSql } from '../mentionReach.js';
 import { mentionTokenOf } from '../mentionToken.js';
 import { raiseDeliveryMark } from '../workerMarks.js';
 import { standbyAdmitsSql, workerStandby } from './standby.js';
+import { s7Available } from './s7Availability.js';
 
 export type AssignmentActor = { userId: string | null; workerId: string | null };
 
@@ -25,6 +26,7 @@ export async function raiseDeliveredOnAssignment(
   tx: Prisma.TransactionClient,
   args: { workerId: string; taskId: string; actor: AssignmentActor; now?: Date },
 ): Promise<number> {
+  if (!s7Available()) return 0; // inert until S7b: no lock, no marks, no count (Ada #25413 option a)
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + args.workerId}, 0))`;
   const state = await workerStandby(tx, args.workerId, { excludeTaskId: args.taskId });
   if (!state.onStandby || !state.headWorkerId) return 0;

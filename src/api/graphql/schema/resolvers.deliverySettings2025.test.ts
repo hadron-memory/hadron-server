@@ -3,6 +3,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { setS7AvailableForTest } from '../../../lib/tickers/s7Availability.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
@@ -89,9 +90,16 @@ describe('delivery settings #2025', () => {
     await M.createTicker({}, { appRef: appId, input: { name: 'Fast', cadenceSeconds: 120 } }, ctx(member.id));
     await code(set({ batchWindowSeconds: 180 }), 'TICKER_SETTINGS_CONFLICT');
   });
-  it('S7: the standby switch is accepted and effective once on; off restores the defaults', async () => {
+  it('S7a is inert: enabling standby is refused with the typed error and nothing is written', async () => {
+    await code(set({ standbyEnabled: true }), 'DELIVERY_STANDBY_UNAVAILABLE');
+    expect(await set({ standbyEnabled: false })).toEqual(defaults);
+  });
+  it('S7: the standby switch is accepted and effective once on (S7b); off restores the defaults', async () => {
+    setS7AvailableForTest(true);
+    try {
     expect(await set({ standbyEnabled: true })).toEqual({ ...defaults, standbyEnabled: true, standbyEffective: true });
     expect(await set({ standbyEnabled: false })).toEqual(defaults);
+    } finally { setS7AvailableForTest(false); }
   });
   it('refuses ordinary members, keys, impersonation, invalid bindings and foreign Apps', async () => {
     await code(set({ busyDelaySeconds: 500 }, ctx(member.id)), 'FORBIDDEN');

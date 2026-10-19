@@ -29,6 +29,7 @@ import { collectRegisterRows } from '../resolveRegister.js';
 import { decryptNodeFields } from '../nodeCrypto.js';
 import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from '../mentionToken.js';
 import { onStandbySql, standbyAdmitsSql } from './standby.js';
+import { s7Available } from './s7Availability.js';
 import { isWorkerDormant, toNaiveUtc } from '../sessionActivity.js';
 import {
   relevantMentionCount,
@@ -509,7 +510,7 @@ export async function computeDueWakes(args: {
       continue; // never due
     }
     if (ws?.pausedUntil && ws.pausedUntil.getTime() > now.getTime()) continue; // a pause silences ticks AND mentions (Q2)
-    if (ws?.isolatedUntil && ws.isolatedUntil.getTime() > now.getTime()) continue; // S7 R85: a live isolation, its own state
+    if (s7Available() && ws?.isolatedUntil && ws.isolatedUntil.getTime() > now.getTime()) continue; // S7 R85: a live isolation, its own state
 
     // S7: a TICK is not one of the four kinds a standby worker is sent.
     const subscriptions: SubscriptionInput[] = (standbyHead ? [] : subsOf.get(w.id) ?? []).map((s) => ({

@@ -9,6 +9,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
  * GraphQL codes, wake settings read without a session and set with one.
  */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { setS7AvailableForTest } from '../lib/tickers/s7Availability.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -64,7 +65,7 @@ beforeEach(async () => {
   post = vi.spyOn(teamChatMutations, 'createTeamChatMessage').mockResolvedValue({} as never);
 });
 
-afterEach(() => post.mockRestore());
+afterEach(() => { post.mockRestore(); setS7AvailableForTest(false); });
 
 describe('ticker tools: who acts', () => {
   it('every write tool refuses without a session, and writes nothing', async () => {
@@ -203,6 +204,7 @@ describe('ticker tools: who acts', () => {
     expect(code(text(await sh.callTool('hadron_ack_wakes', { proofs: ['x'], session: plain.id })))).toBe('WAKE_PROOF_INVALID');
   });
   it('S7: isolate / clear are for a person acting as themselves; a worker session is refused; the wake-settings read shows it', async () => {
+    setS7AvailableForTest(true);
     const sa = mcp(authOf(admin.id));
     const plain = await session({ userId: admin.id });
     const isolated = text(await sa.callTool('hadron_isolate_worker', { workerRef: liam.id, session: plain.id }));

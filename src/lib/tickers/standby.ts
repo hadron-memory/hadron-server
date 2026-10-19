@@ -22,6 +22,7 @@
 import { Prisma } from '../../generated/prisma/index.js';
 import { mentionReach, reachEnvelopeOf } from '../mentionReach.js';
 import { mentionTokenOf } from '../mentionToken.js';
+import { s7Available } from './s7Availability.js';
 
 type Tx = Pick<Prisma.TransactionClient, 'worker' | 'app' | 'agentTask' | '$queryRaw'>;
 
@@ -34,6 +35,7 @@ export const STANDBY_BUSY_TASK_STATUSES = ['pending', 'started'] as const;
 /** Question 1, in TS. Evaluate inside the deciding transaction. */
 /** `excludeTaskId`: the assignment being made, so "was on standby immediately before this assignment" reads true inside it. */
 export async function workerStandby(tx: Tx, workerId: string, opts: { excludeTaskId?: string } = {}): Promise<WorkerStandby> {
+  if (!s7Available()) return OFF;
   const w = await tx.worker.findUnique({
     where: { id: workerId },
     select: { appId: true, retiredAt: true, reportsToWorkerId: true },
@@ -51,6 +53,7 @@ export async function workerStandby(tx: Tx, workerId: string, opts: { excludeTas
 
 /** Question 1, in SQL: a boolean expression over `workers` aliased by `w`. The twin of {@link workerStandby}. */
 export function onStandbySql(w: Prisma.Sql = Prisma.sql`w`): Prisma.Sql {
+  if (!s7Available()) return Prisma.sql`false`;
   return Prisma.sql`(
     ${w}.retired_at IS NULL
     AND ${w}.reports_to_worker_id IS NOT NULL

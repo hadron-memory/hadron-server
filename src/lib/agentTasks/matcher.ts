@@ -49,6 +49,7 @@
  */
 
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+import { s7Available } from '../tickers/s7Availability.js';
 import { type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadAppWorkerActivity, loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
@@ -246,7 +247,7 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
       families: familiesOf({ bound, bindingFamily, launchableFamilies }),
     };
   });
-  const isolatedRows = await db.workerWakeSettings.findMany({ where: { workerId: { in: ids }, isolatedUntil: { gt: now } }, select: { workerId: true } });
+  const isolatedRows = s7Available() ? await db.workerWakeSettings.findMany({ where: { workerId: { in: ids }, isolatedUntil: { gt: now } }, select: { workerId: true } }) : [];
   const isolatedIds = new Set(isolatedRows.map((r) => r.workerId));
   const avail = await loadAvailabilityByFamily(db, partial.map((w) => ({ id: w.id, appId, families: w.families })), now);
   return partial.map((w) => {
@@ -281,7 +282,7 @@ async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId
   const families = familiesOf({ bound, bindingFamily: activity?.bindingFamily ?? null, launchableFamilies: launchable });
   if (!families.includes(family)) return false;
   const availability = (await loadAvailabilityByFamily(tx, [{ id: workerId, appId, families: [family] }], now)).get(workerId) as WorkerAvailabilityView;
-  const isolated = (await tx.workerWakeSettings.count({ where: { workerId, isolatedUntil: { gt: now } } })) > 0;
+  const isolated = s7Available() && (await tx.workerWakeSettings.count({ where: { workerId, isolatedUntil: { gt: now } } })) > 0;
   return freeFamiliesOf({ retired: false, isolated, openTaskCount, families: [family], availability }).length > 0;
 }
 

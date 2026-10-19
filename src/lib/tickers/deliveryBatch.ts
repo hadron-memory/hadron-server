@@ -22,6 +22,7 @@ import { batchTiming, loadDeliverySettings } from './batchTiming.js';
 import { holderAccess, mayRead, type AppLike } from './dueWakes.js';
 import { batchKeyOf, type BatchProof } from './wakeProof.js';
 import { standbyAdmitsSql, workerStandby } from './standby.js';
+import { s7Available } from './s7Availability.js';
 
 export const DELIVERY_BATCHES_PAGE_DEFAULT = 50;
 export const DELIVERY_BATCHES_PAGE_MAX = 200;
@@ -115,7 +116,7 @@ export async function loadDeliveryEligibility(args: DeliverySelectionArgs): Prom
     const token = mentionTokenOf(w.name);
     if (!token) continue;
     // R85: a live isolation drops the worker before any channel scan. Chat batches and ordinary wakes only; the S6 notice lane is not here.
-    if (w.wakeSettings?.isolatedUntil && w.wakeSettings.isolatedUntil.getTime() > (args.now ?? new Date()).getTime()) continue;
+    if (s7Available() && w.wakeSettings?.isolatedUntil && w.wakeSettings.isolatedUntil.getTime() > (args.now ?? new Date()).getTime()) continue;
     const rows = (await collectRegisterRows(db, { workerId: w.id }))?.rows ?? [];
     const channelIds = [...new Set(rows.filter(r => r.role !== 'POST').map(r => r.channelId))];
     if (channelIds.length === 0) continue;
