@@ -396,6 +396,6 @@ it('memory-row visibility changes are fenced before the worker/reporting locks a
   await Promise.race([ready, changing]);
   const result = code(report(b.id));
   try { await waitForLockWaitersOfType(db, 'transactionid', 1, 1000); } finally { release(); await changing; }
-  expect(await result).toBe('WAKE_PROOF_STALE');
+  expect(await result).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
   expect(await db.workerDeliveryHold.count()).toBe(0);
 });
