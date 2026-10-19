@@ -104,6 +104,17 @@ describe('#1631 revoke/start proof by existing passkey', () => {
     expect((await start(body(c.ceremonyId, c.ch), c.cookie)).status).toBe(403);
   });
 
+  it('refuses a valid assertion from a retained credential of a soft-deleted owner, consuming nothing', async () => {
+    const c = await challenge();
+    await db.$executeRaw`UPDATE users SET deleted_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') WHERE id = (SELECT owner_id FROM passkey_credentials WHERE id = ${passkeyId})`;
+    const r = await start(body(c.ceremonyId, c.ch), c.cookie);
+    expect(r.status).toBe(403);
+    expect(await r.text()).toBe('{"error":"forbidden"}');
+    const [row] = await db.$queryRaw<Array<{ consumed_at: Date | null }>>`SELECT consumed_at FROM passkey_ceremonies WHERE id = ${c.ceremonyId}`;
+    expect(row.consumed_at).toBeNull();
+    expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: passkeyId } })).counter).toBe(0n);
+  });
+
   it('keeps register/start refusing everyone, even with a valid proof', async () => {
     const c = await challenge();
     const r = await fetch(`${base}/passkeys/register/start`, {

@@ -107,7 +107,7 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
 
       const decided = await db.$transaction(async (tx) => {
         await lockAuthorityAnchors(tx, [{ kind: 'user', id: row.owner_id }], 'exclusive');
-        if (!(await tx.user.findUnique({ where: { id: row.owner_id }, select: { id: true } }))) return null;
+        if (!(await tx.user.findFirst({ where: { id: row.owner_id, deletedAt: null }, select: { id: true } }))) return null;
         return decideCeremonyAssertion(tx, {
           ceremonyId, browserNonceHash: sha256Hex(nonce), purpose: 'STEP_UP_ONLY', verified: verified.snapshot,
         });
