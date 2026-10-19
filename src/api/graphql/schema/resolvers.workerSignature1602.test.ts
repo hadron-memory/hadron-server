@@ -72,7 +72,7 @@ describe('#1602 signature/trailer', () => {
     const before = await row();
     const c = kind === 'staff' ? ctx(staff) : kind === 'member' ? ctx(member) : kind === 'outsider' ? ctx(outsider)
       : kind === 'key' ? { db, appId: app.id, roles: [] } as Context
-      : kind === 'impersonation' ? ctx(admin, { impersonation: { userId: member.id } } as any)
+      : kind === 'impersonation' ? ctx(admin, { roles: [], impersonation: { sessionId: generateId(), actorUserId: outsider.id, orgId: org.id, expiresAt: new Date(Date.now() + 60000) } })
       : ctx();
     const call = () => update({ signature: 'denied', trailer: 'denied', promptOverride: 'denied' }, c);
     const result = kind === 'session' ? runAsActor({ workerId: worker.id, agentId: agent.id }, call) : kind === 'run' ? runAsActor({ workerId: null, agentId: agent.id }, call) : call();
@@ -186,4 +186,72 @@ it('actual MCP SDK updates, preserves omitted fields, reads raw templates and re
     expect((await row()).signature).toBe('mcp {{worker.name}}');
     await call({ signature: 'human' }); expect((await row()).signature).toBe('human');
   } finally { await client.close(); await server.close(); }
+});
+
+async function withSignatureSdk(fn: (call: (args: Record<string, unknown>) => Promise<any>) => Promise<void>, authExtra: object = {}) {
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+  const { createMcpServerInstance } = await import('../../../mcp/server.js');
+  const server = createMcpServerInstance({ userId: admin.id, roles: ['READER'], clientId: `sig-delta:${admin.id}`, ...authExtra } as any, () => undefined, { kind: 'multi-app' });
+  const client = new Client({ name: 'signature-delta', version: '1' });
+  const [local, remote] = InMemoryTransport.createLinkedPair();
+  await server.connect(remote); await client.connect(local);
+  try { await fn(args => client.callTool({ name: 'hadron_update_worker', arguments: { workerRef: worker.id, ...args } })); }
+  finally { await client.close(); await server.close(); }
+}
+
+it.each([
+  ['signature', null], ['trailer', null], ['signature', 'kept override'], ['trailer', 'kept override'],
+] as const)('MCP %s-only edit truthfully preserves override %s and echoes the stored template', async (field, override) => {
+  await db.worker.update({ where: { id: worker.id }, data: { promptOverride: override } });
+  await withSignatureSdk(async call => {
+    const reply = await call({ [field]: '  custom {{worker.name}}  ' });
+    const text = reply.content[0].text;
+    expect(text).toContain('Updated **Anne**');
+    expect(text).not.toContain('Prompt override cleared.');
+    expect(text).not.toContain('Prompt override now:');
+    expect(text).toContain(`${field === 'signature' ? 'Signature' : 'Trailer'} template now:\n\n  custom {{worker.name}}  `);
+    expect(await row()).toMatchObject({ promptOverride: override, [field]: '  custom {{worker.name}}  ' });
+    const clear = await call({ promptOverride: '' });
+    expect(clear.content[0].text).toContain('Prompt override cleared.');
+    expect((await row()).promptOverride).toBeNull();
+  });
+});
+
+it.each(['ended', 'absent', 'foreign', 'expired'] as const)('MCP refuses an invalid named %s session before any edit or heartbeat', async kind => {
+  const session = kind === 'absent' ? null : await db.session.create({ data: {
+    id: generateId(), userId: kind === 'foreign' ? outsider.id : admin.id, appId: app.id,
+    ...(kind === 'ended' ? { endedAt: new Date() } : {}),
+    ...(kind === 'expired' ? { expiresAt: new Date(Date.now() - 1000) } : {}),
+  } });
+  const before = await row();
+  await withSignatureSdk(async call => {
+    const reply = await call({ signature: 'do not store', promptOverride: 'do not store', session: session?.id ?? 'not-a-session' });
+    expect(reply.isError).toBe(true);
+    expect(reply.content[0].text).toContain('[session_not_bound]');
+    expect(await row()).toEqual(before);
+    if (session) expect(await db.session.findUnique({ where: { id: session.id } })).toEqual(session);
+    const retry = await call({ signature: 'human retry' });
+    expect(retry.isError).not.toBe(true);
+    expect((await row()).signature).toBe('human retry');
+  });
+});
+
+it.each(['worker-only', 'context-bound', 'binding-refused'] as const)('H26 independently refuses %s without relying on agent actor', async kind => {
+  const session = kind === 'context-bound' ? await db.session.create({ data: { id: generateId(), userId: admin.id, appId: app.id, workerId: worker.id, agentId: agent.id } }) : null;
+  const before = await row();
+  const call = () => update({ signature: 'no', trailer: 'no', promptOverride: 'no' }, ctx(admin, {
+    ...(session ? { sessionId: session.id } : {}), ...(kind === 'binding-refused' ? { sessionBindingRefused: true } : {}),
+  }));
+  await expect(kind === 'worker-only' ? runAsActor({ workerId: worker.id, agentId: null }, call) : call()).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  expect(await row()).toEqual(before);
+});
+
+it('MCP carries a refused authenticated session header into the shared signature gate', async () => {
+  const before = await row();
+  await withSignatureSdk(async call => {
+    const reply = await call({ signature: 'no' });
+    expect(reply.content[0].text).toContain('Error:');
+    expect(await row()).toEqual(before);
+  }, { sessionBindingRefused: true });
 });
