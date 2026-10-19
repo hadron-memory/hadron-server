@@ -10,7 +10,7 @@ Anne owns S13 read projection, GraphQL/SDL/MCP composition and new deliveryHealt
 
 ## Implemented foundation
 
-Metadata-only per-message interval union, selective range coverage, explicit rollout/completeness state, one worker alarm anchor, persisted uncovered-wait escalation baselines, acknowledgment stopping escalation, committed-mark-only closure, and immediate aged successor selection. Policy writes and alarm evaluation share authority/App-budget/worker locks. SQL rejects invalid coverage and extra delivery-event metadata. Historical events remain immutable.
+Metadata-only per-message interval union, selective range coverage, explicit rollout/completeness state, one worker alarm anchor, persisted uncovered-wait escalation baselines, acknowledgment stopping escalation, committed-mark-only closure, and immediate aged successor selection. Policy writes and alarm evaluation share authority/App-budget/worker locks. SQL rejects invalid coverage and extra delivery-event metadata. Historical events remain immutable. The effective transition seam now supports early cancellation/replacement of a future policy expiry without changing certified past time. Alarm owners are derived from the canonical reportsTo walk under its shared graph lock, with current-manager fallback only when no reporting line exists. Interval reads are restricted to time intersecting the pending candidates or active anchor.
 
 ## Outstanding before freeze
 
@@ -18,4 +18,10 @@ Wire canonical policy producers and authoritative reached-message selection; con
 
 ## Evidence
 
-Red commits `f420cd61` and `006d5b8f` precede implementation. Targeted standard Vitest run: 128/128 passing across deliveryWait, deliveryState, deliveryInvariants, existing task stall and task invariant suites. TypeScript check passed. Tests use an isolated local PostgreSQL database and repository-managed per-run clones.
+Red commits `f420cd61` and `006d5b8f` precede implementation. Targeted standard Vitest run: 133/133 passing across deliveryWait, deliveryState, deliveryPolicy, deliveryScenarios, deliveryInvariants, existing task stall and task invariant suites. Persisted S7 pause carry and S8 selective-coverage pins reload state between deciding transactions. TypeScript check passed. Tests use an isolated local PostgreSQL database and repository-managed per-run clones.
+
+## Candidate S13 seams (not the complete frozen DTO)
+
+`loadDeliveryWait(tx, message, asOf)` returns `{ waitedMs, waitAsOf, suppressed }` using the ledger and explicit completeness certificate. `deliveryAlarmSnapshot(tx, workerId, asOf)` returns null or `{ episodeId, eventId, channelId, channelIncarnation, firstPendingSeq, waitedMs, waitAsOf, state: ACTIVE | SUPPRESSED, acknowledgedAt }`. Both require authorized callers. They throw `DELIVERY_WAIT_INCOMPLETE` rather than fabricate zero deducted time. Raw exception evidence never leaves these seams. The per-channel hold projection still needs S1 integration, so this is not the complete S13 current-health DTO or an invitation to activate the path.
+
+The policy-owner seam is `transitionDeliveryException(tx, { workerId, cause, coverage, effectiveAt, active, until? })`, inside the common lock transaction, after re-reading the owning policy. Coverage is whole-worker or exact channel/incarnation/seq range. Policy producers must be integrated before completeness can be certified or the affected evaluator path enabled.

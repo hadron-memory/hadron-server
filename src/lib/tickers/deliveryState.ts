@@ -117,17 +117,21 @@ export async function observeDeliveryPolicyThrough(tx: Tx, workerId: string, thr
   await tx.workerDeliveryWaitState.updateMany({ where: { workerId, observedThrough: { lt: through } }, data: { observedThrough: through } });
 }
 
-async function waitInputs(tx: Tx, workerId: string, now: Date) {
+async function waitInputs(tx: Tx, workerId: string, now: Date, oldestDueAt: Date) {
   const state = await tx.workerDeliveryWaitState.findUnique({ where: { workerId } });
   if (!state || state.observedThrough < now) fail('DELIVERY_WAIT_INCOMPLETE');
-  const rows = await tx.workerDeliveryWaitException.findMany({ where: { workerId, startedAt: { lte: now }, OR: [{ endedAt: null }, { endedAt: { gt: state.trackedFrom } }] }, orderBy: [{ startedAt: 'asc' }, { id: 'asc' }] });
+  if (!Number.isFinite(now.getTime()) || !Number.isFinite(oldestDueAt.getTime())) fail('DELIVERY_WAIT_INVALID');
+  // Only intervals intersecting a candidate/anchor's possible wait can matter.
+  // Never scan the worker's entire lifetime for a recently posted message.
+  const lower = new Date(Math.min(now.getTime(), Math.max(state.trackedFrom.getTime(), oldestDueAt.getTime())));
+  const rows = await tx.workerDeliveryWaitException.findMany({ where: { workerId, startedAt: { lte: now }, OR: [{ endedAt: null }, { endedAt: { gt: lower } }] }, orderBy: [{ startedAt: 'asc' }, { id: 'asc' }] });
   const exceptions: WaitException[] = rows.map(r => ({ workerId, cause: r.cause as WaitException['cause'], startedAt: r.startedAt, endedAt: r.endedAt,
     coverage: r.channelId === null ? { kind: 'worker' } : { kind: 'range', channelId: r.channelId, channelIncarnation: r.channelIncarnation!, fromSeq: r.fromSeq!, throughSeq: r.throughSeq! } }));
   return { state, exceptions };
 }
 
 export async function loadDeliveryWait(tx: Tx, message: DeliveryMessage, now: Date) {
-  const { state, exceptions } = await waitInputs(tx, message.workerId, now);
+  const { state, exceptions } = await waitInputs(tx, message.workerId, now, message.dueSince);
   return deliveryWait(message, exceptions, state, now);
 }
 
@@ -160,8 +164,9 @@ export async function reconcileDeliveryAlarm(tx: Tx, input: DeliveryAlarmInput):
   const principal = input.mark ? (p => p.kind === 'worker' ? { kind: p.kind, workerId: safeId(p.workerId) } : p.kind === 'user' ? { kind: p.kind, userId: safeId(p.userId) } : { kind: p.kind, appKeyId: safeId(p.appKeyId), hostId: safeId(p.hostId) })(input.mark.principal) : null;
   const worker = await tx.worker.findUniqueOrThrow({ where: { id: workerId }, select: { appId: true } });
   if (input.candidates.some(m => m.workerId !== workerId)) fail('DELIVERY_WORKER_MISMATCH');
-  const { state, exceptions } = await waitInputs(tx, workerId, now);
   let active = await tx.workerDeliveryAlarmEpisode.findUnique({ where: { workerId } });
+  const oldestDueAt = new Date(input.candidates.reduce((oldest, m) => Math.min(oldest, m.dueSince.getTime()), Math.min(now.getTime(), active?.dueSince.getTime() ?? now.getTime())));
+  const { state, exceptions } = await waitInputs(tx, workerId, now, oldestDueAt);
   let resumed: string | null = null;
   let coveredThrough = -1;
   if (input.mark) {
