@@ -244,7 +244,12 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
         );
         const wire = result.body.kind === 'single' ? result.body.singleResult : null;
         const out = (wire?.data as any)?.updateNode;
-        if (out) { expect(out.content ?? null).toBeNull(); expect(out.description ?? null).toBeNull(); }
+        // Xan/Andi P3: the write must have SUCCEEDED, or the concealment assertions below prove nothing.
+        expect(wire?.errors?.map((e) => e.message)).toBeUndefined();
+        expect(out).not.toBeNull();
+        expect(out.content ?? null).toBeNull();
+        expect(out.description ?? null).toBeNull();
+        expect(out.name).toBe('prompts:lane');
       }
     } finally { await server.stop(); }
     // The same addresses return the content to a participant manager.
@@ -254,6 +259,53 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     expect(viaId.content).toBe('replacement');
     const viaUrn = await M.updateNode({}, { input: { id: nodeUrn, name: 'p3' } }, ctxOf(f.admin.id));
     expect(viaUrn.content).toBe('replacement');
+  });
+
+  it('Ruth P2: a partial update by a nonparticipant returns NO preexisting title or content-derived field, and the write succeeds', async () => {
+    const f = await fixture();
+    const node = await f.create(f.admin);
+    const before = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(before.name).not.toBe('prompts:lane');
+    const platform = await f.user('platform-outsider-3');
+    await db.user.update({ where: { id: platform.id }, data: { roles: ['ADMIN'] } });
+    const ctx = ctxOf(platform.id, { roles: ['ADMIN'] });
+    const { ApolloServer } = await import('@apollo/server');
+    const { typeDefs } = await import('./typeDefs.js');
+    const server = new ApolloServer({ typeDefs, resolvers });
+    await server.start();
+    try {
+      const result = await server.executeOperation(
+        { query: `mutation($i:UpdateNodeInput!){updateNode(input:$i){id memoryId loc name description abstract tags content data
+          memory{id} outgoingEdges{id} incomingEdges{id} asset{id} signingRequests{id} commentSummary{comments openThreads}
+          approvalStatus{state approval{revision}} mintStatus{minted mintedByInfo} authorship{__typename} createdByWorker{id} updatedByAgent{id}
+          contentValidation{state} signatureStatus{state signatures{id}}}}`, variables: { i: { install: f.install, loc: 'prompts:lane', description: 'only-this' } } },
+        { contextValue: ctx },
+      );
+      const wire = result.body.kind === 'single' ? result.body.singleResult : null;
+      // The write itself must have SUCCEEDED (a refused write would also leak nothing, and prove nothing).
+      expect(wire?.errors?.map((e) => e.message)).toBeUndefined();
+      const out = (wire?.data as any)?.updateNode;
+      expect(out).not.toBeNull();
+      expect(out.id).toBe(node.id);
+      expect(out.name).toBe('prompts:lane');
+      expect(out).toMatchObject({ description: null, abstract: null, tags: [], content: null, data: null, memory: null,
+        outgoingEdges: [], incomingEdges: [], asset: null, signingRequests: [], authorship: null, createdByWorker: null, updatedByAgent: null });
+      expect(out.commentSummary).toEqual({ comments: 0, openThreads: 0 });
+      expect(out.approvalStatus).toEqual({ state: 'NOT_APPLICABLE', approval: null });
+      // And it really was applied.
+      expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).description).toBe('only-this');
+    } finally { await server.stop(); }
+  });
+
+  it('withInstallConcealment never reaches the original resolver for a concealed parent, and passes others through', async () => {
+    const { withInstallConcealment, INSTALL_CONCEALED, INSTALL_CONCEALED_FIELDS } = await import('./installMemory.js');
+    let calls = 0;
+    const map = withInstallConcealment(Object.fromEntries(INSTALL_CONCEALED_FIELDS.map((k) => [k, () => { calls++; return 'ORIGINAL'; }])) as any);
+    for (const field of INSTALL_CONCEALED_FIELDS) {
+      expect(await map[field]({ [INSTALL_CONCEALED]: true, id: 'x' })).not.toBe('ORIGINAL');
+      expect(await map[field]({ id: 'x' })).toBe('ORIGINAL');
+    }
+    expect(calls).toBe(INSTALL_CONCEALED_FIELDS.length);
   });
 
   it('a participant manager still gets the content back from an update (positive control)', async () => {
