@@ -330,12 +330,16 @@ describe('R57 own-live-session batches', () => {
   });
 
   it('MCP explicit validated session replaces a refused ambient binding', async () => {
-    const s = await ownSession();
+    const s = await ownSession(); await postForBoth();
     const { createTestableMcpServer } = await import('../../../mcp/server.js');
     const server = createTestableMcpServer({ userId: manager.id, roles: ['READER'], sessionBindingRefused: true } as never, { sessionId: `refused-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
     const result: any = await server.callTool('hadron_delivery_batches', { appRef: app.id, session: s.id });
     expect(result.isError).not.toBe(true);
-    expect(JSON.parse(result.content[0].text).batches).toEqual([]);
+    const batches = JSON.parse(result.content[0].text).batches;
+    expect(batches.map((b: any) => b.workerId)).toEqual([kit.id]);
+    const ack: any = await server.callTool('hadron_ack_delivery_batches', { batchIds: [batches[0].id], session: s.id });
+    expect(ack.isError).not.toBe(true);
+    expect(ack.content[0].text).toBe('Acknowledged 1.');
   });
 
 });
