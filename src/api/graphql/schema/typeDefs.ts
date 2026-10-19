@@ -6945,8 +6945,8 @@ export const typeDefs = `#graphql
     dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String): DueWakePage!
     """
     #2017 (S1) — the ready-to-deliver batches of the workers registered on the calling host (hrn:node:hadronmemory.com:specs:cor:agt:080:22, :26).
-    A host key only: an App key holding attention:deliver AND host:operate; the host is the key's, the request names none. A worker not
-    on this host is absent. The text is written by the server and typed unchanged. Reading moves nothing; acknowledge the batch ids.
+    An own live session reads only its bound worker. A host App key needs attention:deliver AND host:operate;
+    the host is the key's, the request names none, and a worker not on that host is absent. The text is written by the server and typed unchanged. Reading moves nothing; acknowledge the batch ids.
     """
     deliveryBatches(appRef: String!, workerRefs: [String!], first: Int, after: String): DeliveryBatchPage!
 
@@ -8745,7 +8745,7 @@ export const typeDefs = `#graphql
     "#1748 — record that wakes were delivered (hrn:node:hadronmemory.com:specs:cor:agt:080:16). Never moves a read position."
     acknowledgeWakes(proofs: [String!]!): AcknowledgeWakesResult!
     """
-    #2017 (S1) — record that delivery batches were typed (hrn:node:hadronmemory.com:specs:cor:agt:080:16, :17). Only the host key the ids name.
+    #2017 (S1) — record that delivery batches were typed (hrn:node:hadronmemory.com:specs:cor:agt:080:16, :17). Only the receiving host key or the worker's own receiving live session, within 15 minutes.
     The delivered mark rises to the end of each rendered range; with through (one batch only), only the listed channels move, each to a
     rendered seq of its own. Writes no read position, tick or budget. A repeat changes nothing.
     """

@@ -9,6 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { idleWindowMsFor } from '../../../lib/sessionActivity.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
@@ -220,6 +221,73 @@ describe('R57 own-live-session batches', () => {
     } });
     await expect(selfRead(s, {}, { db: wrapped })).rejects.toThrow('audit unavailable');
     expect(await db.appLogEntry.count()).toBe(0);
+  });
+
+  it.each([-1, 0, 1])('uses the inclusive idle boundary at delta %s ms', async (delta) => {
+    const deadline = Date.now(); const start = new Date(deadline - idleWindowMsFor('DEVELOPER'));
+    const s = await ownSession({ startedAt: start, updatedAt: start });
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(deadline + delta);
+    try {
+      if (delta <= 0) expect((await selfRead(s)).batches).toEqual([]);
+      else expect(await code(selfRead(s))).toBe('SESSION_NOT_LIVE');
+    } finally { vi.useRealTimers(); }
+  });
+  it.each([-1, 0, 1])('uses the exclusive hard expiry at delta %s ms', async (delta) => {
+    const deadline = Date.now() + 10_000; const s = await ownSession({ expiresAt: new Date(deadline) });
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(deadline + delta);
+    try {
+      if (delta < 0) expect((await selfRead(s)).batches).toEqual([]);
+      else expect(await code(selfRead(s))).toBe('SESSION_NOT_LIVE');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['caller', 'holder', 'encrypted'])('omits a channel without trace when %s cannot receive it', async (reason) => {
+    const s = await ownSession(); await postForBoth();
+    const outsider = await db.user.create({ data: { githubId: 999999992, githubUsername: 'unreadable-owner', roles: ['READER'] } });
+    if (reason === 'encrypted') await db.memory.update({ where: { id: channel.memoryId }, data: { isEncrypted: true } });
+    else {
+      await db.memory.update({ where: { id: channel.memoryId }, data: { class: 'private', userId: reason === 'caller' ? outsider.id : manager.id, userMemoryOfAgentId: agentId, sharedMemoryOfAgentId: null } });
+      if (reason === 'holder') {
+        await db.orgMember.create({ data: { organizationId: org.id, userId: outsider.id, role: 'READER' } });
+        await db.worker.update({ where: { id: kit.id }, data: { heldByUserId: outsider.id } });
+      }
+    }
+    expect(await selfRead(s)).toEqual({ batches: [], pageInfo: { hasNextPage: false, endCursor: null } });
+  });
+  it('executes the same read and acknowledgement through the GraphQL SDL', async () => {
+    const s = await ownSession(); await postForBoth();
+    const { ApolloServer } = await import('@apollo/server');
+    const { typeDefs } = await import('./typeDefs.js');
+    const server = new ApolloServer<Context>({ typeDefs, resolvers: resolvers as any });
+    try {
+      const r = await server.executeOperation({ query: 'query($app: String!) { deliveryBatches(appRef: $app) { batches { id text worker { id } } } }', variables: { app: app.id } }, { contextValue: selfCtx(s) });
+      expect(r.body.kind).toBe('single'); if (r.body.kind !== 'single') throw new Error('expected single response');
+      expect(r.body.singleResult.errors).toBeUndefined();
+      const batches = (r.body.singleResult.data as any).deliveryBatches.batches;
+      expect(batches.map((b: any) => b.worker.id)).toEqual([kit.id]);
+      const a = await server.executeOperation({ query: 'mutation($ids: [String!]!) { acknowledgeDeliveryBatches(batchIds: $ids) { acknowledged unchanged } }', variables: { ids: [batches[0].id] } }, { contextValue: selfCtx(s) });
+      expect(a.body.kind).toBe('single'); if (a.body.kind !== 'single') throw new Error('expected single response');
+      expect(a.body.singleResult.errors).toBeUndefined();
+      expect((a.body.singleResult.data as any).acknowledgeDeliveryBatches).toEqual({ acknowledged: 1, unchanged: 0 });
+    } finally { await server.stop(); }
+  });
+
+  it('a userless own-session key can read but cannot borrow a human session or survive key revocation', async () => {
+    const s = await ownSession({ userId: null });
+    const context = keyCtx(bareKey, app.id, { sessionId: s.id });
+    expect((await Q.deliveryBatches({}, { appRef: app.id }, context)).batches).toEqual([]);
+    const human = await ownSession();
+    expect(await code(Q.deliveryBatches({}, { appRef: app.id }, { ...context, sessionId: human.id }))).toBe('SESSION_NOT_FOUND');
+    await db.appKey.update({ where: { id: bareKey.id }, data: { revokedAt: new Date() } });
+    expect(await code(Q.deliveryBatches({}, { appRef: app.id }, context))).toBe('SESSION_NOT_FOUND');
+  });
+
+  it('MCP read forwards each explicit session independently of the ambient binding', async () => {
+    const kitSession = await ownSession(); const rookSession = await ownSession({ workerId: rook.id }); await postForBoth();
+    const { createTestableMcpServer } = await import('../../../mcp/server.js');
+    const server = createTestableMcpServer({ userId: manager.id, sessionId: kitSession.id, roles: ['READER'] } as never, { sessionId: `mixed-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
+    const results = await Promise.all([kitSession, rookSession].map(s => server.callTool('hadron_delivery_batches', { appRef: app.id, session: s.id })));
+    expect(results.map((r: any) => JSON.parse(r.content[0].text).batches.map((b: any) => b.workerId))).toEqual([[kit.id], [rook.id]]);
   });
 
 });
