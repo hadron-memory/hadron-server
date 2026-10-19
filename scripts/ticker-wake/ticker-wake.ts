@@ -45,8 +45,8 @@ import {
   type Config, type Runner,
 } from '../orca-attention-router/router.js';
 
-const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{worker{id name} reasons{kind ticker{id name}} proof anchorAt deliverAfter busyDeadline} pageInfo{hasNextPage endCursor}}}`;
-const ACK = `mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowledged unchanged}}`;
+export const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{worker{id name} reasons{kind ticker{id name}} proof anchorAt deliverAfter busyDeadline} pageInfo{hasNextPage endCursor}}}`;
+export const ACK = `mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowledged unchanged}}`;
 const MAX_PAGES = 10;
 
 type Log = (line: string) => void;

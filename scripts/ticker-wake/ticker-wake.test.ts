@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Config, Runner } from '../orca-attention-router/router.js';
-import { pass, main, acquireLock, proofTicks } from './ticker-wake.js';
+import { buildSchema, parse, validate } from 'graphql';
+import { typeDefs } from '../../src/api/graphql/schema/typeDefs.js';
+import { pass, main, acquireLock, proofTicks, QUERY, ACK } from './ticker-wake.js';
 
 const RULE = '─'.repeat(112);
 // A finished Claude Code 2.1.303 turn over an empty composer (shapes from the cli#907 captures): the
@@ -703,4 +705,19 @@ describe('CLI entry and single instance', () => {
     expect(results.filter((r) => r === 'GOT')).toHaveLength(1);
     expect(results.filter((r) => r === 'DENIED')).toHaveLength(5);
   }, 30_000);
+});
+
+// The loop sends two GraphQL documents. The R63 timing seam (anchorAt, deliverAfter,
+// busyDeadline on a due wake) is server-owned and landed with S1 (#2102); this pins that the
+// documents the loop actually sends are valid against the server's own SDL, so a rename or a
+// removal on the server side fails here instead of at the first live poll.
+describe('GraphQL contract with the server SDL (#2102 / R63)', () => {
+  const schema = buildSchema(typeDefs);
+  it('the dueWakes query validates and asks for the timing fields the loop consumes', () => {
+    expect(validate(schema, parse(QUERY)).map((e) => e.message)).toEqual([]);
+    for (const f of ['anchorAt', 'deliverAfter', 'busyDeadline']) expect(QUERY).toContain(f);
+  });
+  it('the acknowledgeWakes mutation validates', () => {
+    expect(validate(schema, parse(ACK)).map((e) => e.message)).toEqual([]);
+  });
 });
