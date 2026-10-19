@@ -1143,3 +1143,23 @@ describe('cycle 3 — the stamp holds the Worker row in one mode (Diego P2-3)', 
     expect(await db.node.count({ where: { messageChannelId: { in: [channel.id, other.id] }, nodeType: 'chat-message' } })).toBe(2);
   });
 });
+
+describe('S3 immutable team reach before wake sampling', () => {
+  afterEach(() => vi.unstubAllEnvs());
+  it('finds a real ordinary-author team post beyond irrelevant rows, without extending global @all', async () => {
+    vi.stubEnv('TEAM_TAGS_ENABLED','true');
+    post.mockRestore();
+    const { writeReportsTo } = await import('../workerReportsTo.js');
+    await db.$transaction(tx=>writeReportsTo(tx,{appId:app.id,workerId:liam.id,to:rook.id,actor:{userId:manager.id,workerId:null,agentId:null},setBy:'app-manager'}));
+    const solo = await mkWorker('Solo',{heldByUserId:holderB.id,heldAt:new Date()});
+    await db.registerEntry.updateMany({where:{attendeeWorkerId:{in:[liam.id,rook.id,solo.id]}},data:{mentionOnly:true}});
+    for (let i=0;i<10;i++) await say(channel,`irrelevant ${i}`,{teamTagsVersion:1,teamBroadcastWorkerIds:[solo.id]});
+    const posted = await teamChatMutations.createTeamChatMessage({}, {appRef:app.id,body:'@team.rook.all @all',sessionRef:null,replyToSeq:null},ctx(holderA.id));
+    expect(posted.broadcastWakes).toBe(false);
+    await db.$transaction(tx=>writeReportsTo(tx,{appId:app.id,workerId:liam.id,to:null,actor:{userId:manager.id,workerId:null,agentId:null},setBy:'app-manager'}));
+    vi.stubEnv('TEAM_TAGS_ENABLED','false');
+    const page = await computeDueWakes({ctx:ctx(manager.id),app:{id:app.id,organizationId:org.id,ownerUserId:null},reader:{manager:true,userId:manager.id},requester:{userId:manager.id},workerIds:[liam.id,rook.id],scan:{pageRows:1,maxRows:2}});
+    expect(page.wakes.map(w=>w.workerId).sort()).toEqual([liam.id,rook.id].sort());
+    expect(page.wakes.every(w=>w.wake.channels[0]?.latestMentionSeq===posted.seq)).toBe(true);
+  });
+});

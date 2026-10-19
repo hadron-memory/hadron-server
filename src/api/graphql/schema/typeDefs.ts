@@ -4355,6 +4355,11 @@ export const typeDefs = `#graphql
   server-side at write time (the '@worker-name / @handle' format, stored
   without the '@').
   """
+  type TeamTagSnapshot {
+    headId: ID!
+    label: String!
+  }
+
   type TeamChatMessage {
     "The message node's id."
     nodeId: ID!
@@ -4386,6 +4391,8 @@ export const typeDefs = `#graphql
     "The seq this message replies to, when it is a reply."
     replyToSeq: Int
     mentions: [String!]!
+    "Immutable head identity/display pairs. Null means absent or withheld; [] means known empty."
+    teamTags: [TeamTagSnapshot!]
   }
 
   type TeamChatMessagesPage {
@@ -8290,6 +8297,10 @@ export const typeDefs = `#graphql
       sinceSeq: Int
       beforeSeq: Int
       mentionsRef: ID
+      "Stable authorized head ID; mutually exclusive with untagged."
+      teamHeadRef: ID
+      "Select no stored head identity (legacy absent or explicit empty). Requires metadata access."
+      untagged: Boolean
       limit: Int
       offset: Int
     ): TeamChatMessagesPage!
@@ -8309,6 +8320,10 @@ export const typeDefs = `#graphql
       sinceSeq: Int
       beforeSeq: Int
       mentionsRef: ID
+      "Stable authorized head ID; mutually exclusive with untagged."
+      teamHeadRef: ID
+      "Select no stored head identity (legacy absent or explicit empty). Requires metadata access."
+      untagged: Boolean
       limit: Int
       offset: Int
     ): TeamChatMessagesPage!
