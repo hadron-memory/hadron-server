@@ -242,6 +242,15 @@ export const deliveryBatchMutations = {
     await requireKeyScope(requestCtx.db, key, 'attention:deliver');
     refuseSessionBound(requestCtx);
     if (currentActor().workerId) throw taskError('APP_KEY_SESSION_BOUND', 'A host key does not act as a worker. Send no session.');
+    // Match the self arm's accepted no-op, but every host call still owes a
+    // use record. No proof callback runs for [], so authorize and record here.
+    if (a.batchIds.length === 0) {
+      const { app, host, authorize } = await batchKeyEntry(requestCtx, key.appId);
+      return withAuthorizedTx(requestCtx, appAnchors(app), txCtx => authorize(txCtx.db), async tx => {
+        await recordHostKeyUse(tx, host, 'deliver', { count: 0 });
+        return { acknowledged: 0, unchanged: 0 };
+      });
+    }
     const acks: BatchAck[] = a.batchIds.map((proof) => ({ proof, ...(a.through && a.through.length > 0 ? { through: a.through } : {}) }));
     return acknowledgeBatchProofs({
       ctx: requestCtx,
