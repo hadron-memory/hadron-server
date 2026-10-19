@@ -277,10 +277,64 @@ export async function concealUnreadableInstallWrite<T extends { memoryId: string
   });
   if (!memory || !isInstallMemoryRow(memory)) return node;
   if ((await installMemoryAudience(ctx.db as never, ctx, memory)).read) return node;
-  return {
-    ...node,
-    content: null, description: null, abstract: null, abstractOriginHash: null, tokens: null,
-    tags: [], properties: null, data: null,
-    outgoingEdges: [], incomingEdges: [], asset: null, memory: null,
-  } as T;
+  return concealedInstallNode(node as unknown as Record<string, any>) as unknown as T;
+}
+
+/** Marks a Node parent whose every content-derived field must read as empty (see {@link withInstallConcealment}). */
+export const INSTALL_CONCEALED = '__installConcealed';
+
+/**
+ * The ONLY fields of a written node that survive concealment (#2064 §10, Ruth P2): its address and
+ * revision counter, which the writer supplied or chose. An ALLOWLIST, so a field the Node type
+ * gains later is concealed until someone decides it is not content; the earlier blocklist let a
+ * preexisting title (`name`) through on a partial update. `name` is set to the loc, never the title.
+ */
+const CONCEALED_NODE_KEEPS = ['id', 'memoryId', 'loc', 'nodeType', 'objectType', 'revision', 'isLink', 'isPlaceholder', 'createdAt', 'updatedAt'] as const;
+
+function concealedInstallNode(node: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = { [INSTALL_CONCEALED]: true, tags: [], outgoingEdges: [], incomingEdges: [], embeddingAttempts: 0 };
+  for (const key of CONCEALED_NODE_KEEPS) out[key] = node[key];
+  out.name = node.loc;
+  return out;
+}
+
+type ConcealResolver = (parent: any, args?: any, ctx?: any, info?: any) => unknown;
+
+/** Node field → what a concealed install-write node returns, whatever its resolver would load by id. */
+const CONCEALED_FIELDS: Record<string, () => unknown> = {
+  memory: () => null,
+  moveLinkWarnings: () => null,
+  authorship: () => null,
+  createdByWorker: () => null,
+  createdByAgent: () => null,
+  updatedByWorker: () => null,
+  updatedByAgent: () => null,
+  asComment: () => null,
+  asset: () => null,
+  inheritedFrom: () => null,
+  signingRequests: () => [],
+  outgoingEdges: () => [],
+  incomingEdges: () => [],
+  commentSummary: () => ({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null }),
+  approvalStatus: () => ({ state: 'NOT_APPLICABLE', approval: null }),
+  mintStatus: () => ({ minted: false, mintedAt: null, mintedBy: null, mintedByInfo: null, revision: null, hash: null }),
+  signatureStatus: () => ({ state: null, signatures: [], integrityProblems: 0 }),
+  contentValidation: () => ({ state: 'UNVALIDATED', latestReport: null }),
+};
+
+/** Fields in {@link CONCEALED_FIELDS}, for the drift pin. */
+export const INSTALL_CONCEALED_FIELDS = Object.keys(CONCEALED_FIELDS);
+
+/**
+ * Wrap the merged Node resolver map: on a concealed parent, every field whose resolver loads by node
+ * id (comments, signatures, approvals, attribution, edges, asset, memory) reads as empty, so the
+ * response of an install-memory write by a non-participant carries nothing derived from content.
+ */
+export function withInstallConcealment<T extends Record<string, any>>(node: T): T {
+  const out: Record<string, ConcealResolver> = { ...node };
+  for (const [field, empty] of Object.entries(CONCEALED_FIELDS)) {
+    const original: ConcealResolver = node[field] ?? ((parent) => parent[field]);
+    out[field] = (parent, args, ctx, info) => (parent?.[INSTALL_CONCEALED] ? empty() : original(parent, args, ctx, info));
+  }
+  return out as T;
 }
