@@ -1,4 +1,5 @@
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { endApprovalsOnEncryptedEntry } from '../../../lib/nodeApproval.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { generateId } from '../../../lib/id.js';
 import { UrnNotQualifiedError } from '../../../lib/urn.js';
@@ -2321,6 +2322,10 @@ export const memoryMutations = {
               extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: resolvedMemoryId },
             });
           }
+          // #1838 (cor:dmo:120:04): the flip ENDS the approvals in this same
+          // transaction, so an interrupted completion pass below cannot leave
+          // a live or copied hash behind. Who/when/revision stay.
+          await endApprovalsOnEncryptedEntry(tx, { memoryId: resolvedMemoryId });
         });
         // Promotion's live-node rewrite does not cover tombstones or prior
         // snapshots. Reuse the bounded completion pass under the verifier we
@@ -2519,6 +2524,9 @@ export const memoryMutations = {
             },
           });
           if (flip.count !== 1) throw new Error('Memory is already encrypted');
+          // #1838 (cor:dmo:120:04): entering ENDS the approvals, in this same
+          // transaction, so no copied hash can revive after any later move out.
+          await endApprovalsOnEncryptedEntry(tx, { memoryId: resolvedMemoryId });
         });
       }
       /** Keep conversion authority current while holding memory before node locks. */
@@ -2729,7 +2737,12 @@ export const memoryMutations = {
           extensions: { code: 'ENCRYPTION_INCOMPLETE', memoryId: resolvedMemoryId },
         });
       }
-      return ctx.db.$transaction(lockConversionMemory);
+      return ctx.db.$transaction(async (tx) => {
+        const current = await lockConversionMemory(tx);
+        // A completion of an earlier encryption ends approvals it predates.
+        await endApprovalsOnEncryptedEntry(tx, { memoryId: resolvedMemoryId });
+        return current;
+      });
     },
 
     // Spec cor:api:060 — run a task by loose name (mirrors hadron_run_task MCP tool).

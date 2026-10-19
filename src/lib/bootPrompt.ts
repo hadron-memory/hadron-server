@@ -49,7 +49,8 @@ export function withSyncCaller<T>(workerId: string | null, fn: () => Promise<T>)
   return syncCallerScope.run({ workerId }, fn);
 }
 
-function boundWorkerId(): string | null {
+/** The worker session behind this request: the actor, else the git sync's saved requester. */
+export function boundWorkerId(): string | null {
   return currentActor().workerId ?? syncCallerScope.getStore()?.workerId ?? null;
 }
 
@@ -154,4 +155,31 @@ export async function assertNoBootPromptRowsForWorkerSession(
     select: { id: true },
   });
   if (hit) throw bootPromptWorkerSessionError(op);
+}
+
+/**
+ * A merge folds a source node onto the target node at the same loc. Refuse,
+ * before anything commits, when that target is a compiled boot prompt (only a
+ * compile writes one) or, under a worker session, a boot-prompt source
+ * (cor:agt:040:11). Source-only checks miss this: the written node is the target's.
+ */
+export async function assertNoBootPromptMergeCollisions(
+  db: { node: { findFirst: (args: any) => Promise<unknown>; findMany: (args: any) => Promise<Array<{ nodeType: string | null; role: string | null; loc: string }>> } },
+  sourceMemoryId: string,
+  targetMemoryId: string,
+): Promise<void> {
+  if (inCompileScope()) return;
+  const targets = await db.node.findMany({
+    where: { memoryId: targetMemoryId, deletedAt: null, OR: [{ nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE }, BOOT_PROMPT_ROLE_WHERE] },
+    select: { nodeType: true, role: true, loc: true },
+  });
+  const relevant = targets.filter((t) => t.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE || boundWorkerId());
+  if (relevant.length === 0) return;
+  const collides = await db.node.findFirst({
+    where: { memoryId: sourceMemoryId, deletedAt: null, loc: { in: relevant.map((t) => t.loc) }, nodeType: { notIn: ['comment', COMPILED_BOOT_PROMPT_NODE_TYPE] } },
+    select: { loc: true },
+  });
+  if (!collides) return;
+  const hit = relevant.find((t) => t.loc === (collides as { loc: string }).loc)!;
+  assertBootPromptWriteAllowed(hit, {}, 'merge');
 }

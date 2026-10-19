@@ -1,4 +1,4 @@
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, withSyncCaller } from '../../lib/bootPrompt.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, withSyncCaller } from '../../lib/bootPrompt.js';
 import { currentActor } from '../../lib/requestActor.js';
 import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
@@ -1693,4 +1693,4 @@ function extractOwnerRepo(gitUrl: string): string {
  * the system even inside a worker's request: node and revision then agree.
  */
 export const syncGraphFromGithub: typeof syncGraphFromGithubAsSystem = (...args) =>
-  withSyncCaller(currentActor().workerId, () => runAsSystem(() => syncGraphFromGithubAsSystem(...args)));
+  withSyncCaller(boundWorkerId(), () => runAsSystem(() => syncGraphFromGithubAsSystem(...args)));
