@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1709 (T6 slice 2) — starting a worker through its host. Holger's rulings via
  * Vera: the credential is A (#10761; Rook's conditions #10734), the six launch
@@ -84,8 +85,8 @@ beforeEach(async () => {
   agentId = agent.id;
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   for (const id of [holder.id, other.id]) await db.appMember.create({ data: { appId: app.id, userId: id, role: 'member' } });
-  ada = await db.worker.create({ data: { appId: app.id, agentId, name: 'Ada', slug: 'ada', heldByUserId: other.id }, select: { id: true } });
-  kit = await db.worker.create({ data: { appId: app.id, agentId, name: 'Kit', slug: 'kit', heldByUserId: holder.id, heldAt: new Date(), reportsToWorkerId: ada.id }, select: { id: true } });
+  ada = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Ada', slug: 'ada', heldByUserId: other.id }, select: { id: true } });
+  kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Kit', slug: 'kit', heldByUserId: holder.id, heldAt: new Date(), reportsToWorkerId: ada.id }, select: { id: true } });
   orca1 = await mkKey('orca1');
   plainKey = await mkKey('plain');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
@@ -215,7 +216,7 @@ describe('the grant (Holger\'s ruling A, Rook #10734)', () => {
     const { opId, grant } = await collectedStart();
     const elsewhereOrg = await db.organization.create({ data: { name: 'Elsewhere', urn: `${org.urn}-else` }, select: { id: true } });
     const elsewhere = await db.app.create({ data: { organizationId: elsewhereOrg.id, name: 'Else', urn: `${org.urn}-else:else` }, select: { id: true } });
-    const foreign = await db.worker.create({ data: { appId: elsewhere.id, agentId, name: 'Zed', slug: 'zed' }, select: { id: true } });
+    const foreign = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: elsewhere.id, agentId, name: 'Zed', slug: 'zed' }, select: { id: true } });
     const env = async (ref: string) => {
       try {
         await redeem(holder.id, grant, { workerRef: ref });

@@ -82,9 +82,14 @@ const TAG = /\{\{>\s*([^}]*?)\s*\}\}/g;
  * whose target or settings are malformed, so the write path can refuse it.
  */
 export function parseIncludeTags(content: string): IncludeTag[] {
+  return locateIncludeTags(content).map(({ index: _index, ...tag }) => tag);
+}
+
+/** `parseIncludeTags` with each tag's offset in `content`, for the reader that splices resolved text in (#2041). */
+export function locateIncludeTags(content: string): Array<IncludeTag & { index: number }> {
   if (!content.includes('{{>')) return [];
   const masked = maskCode(content);
-  const tags: IncludeTag[] = [];
+  const tags: Array<IncludeTag & { index: number }> = [];
   for (const m of masked.matchAll(TAG)) {
     const raw = content.slice(m.index!, m.index! + m[0].length);
     const parts = m[1].split(/\s+/).filter(Boolean);
@@ -104,9 +109,9 @@ export function parseIncludeTags(content: string): IncludeTag[] {
       } catch {
         throw new IncludeSyntaxError(raw, 'target is not a valid node URN');
       }
-      tags.push({ kind: 'urn', target, settings, raw });
+      tags.push({ kind: 'urn', target, settings, raw, index: m.index! });
     } else {
-      tags.push({ kind: 'loc', target, settings, raw });
+      tags.push({ kind: 'loc', target, settings, raw, index: m.index! });
     }
   }
   return tags;

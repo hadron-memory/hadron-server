@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
@@ -11,7 +12,7 @@ beforeAll(async () => {
   await db.organization.create({ data: { id: orgId, name: 'Delivery policy pins', urn: `s5-${orgId}.example` } });
   await db.agent.create({ data: { id: agentId, organizationId: orgId, name: 'Policy', urn: `s5-${orgId}.example:agent` } });
   await db.app.create({ data: { id: appId, organizationId: orgId, name: 'Policy', urn: `s5-${orgId}.example:app` } });
-  await db.worker.create({ data: { id: workerId, appId, agentId, name: 'Policy worker', slug: 'policy-worker' } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: workerId, appId, agentId, name: 'Policy worker', slug: 'policy-worker' } });
 });
 afterAll(async () => {
   await db.worker.deleteMany({ where: { id: workerId } });
@@ -53,8 +54,8 @@ it('captures the reportsTo chain nearest first, falling back to current managers
   const managerId = generateId(), leadId = generateId(), headId = generateId();
   await db.user.create({ data: { id: managerId, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: orgId, userId: managerId, role: 'ADMIN' } });
-  await db.worker.create({ data: { id: headId, appId, agentId, name: 'Head', slug: 'head' } });
-  await db.worker.create({ data: { id: leadId, appId, agentId, name: 'Lead', slug: 'lead', reportsToWorkerId: headId } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: headId, appId, agentId, name: 'Head', slug: 'head' } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: leadId, appId, agentId, name: 'Lead', slug: 'lead', reportsToWorkerId: headId } });
   await db.worker.update({ where: { id: workerId }, data: { reportsToWorkerId: leadId } });
   try {
     expect(await run(tx => deliveryAlarmChain(tx, workerId))).toEqual([{ workerId: leadId }, { workerId: headId }]);

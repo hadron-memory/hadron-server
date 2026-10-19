@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #939 — createTeamChatMessage + teamChatMessages: the team-chat platform
  * operations.
@@ -132,7 +133,7 @@ beforeEach(async () => {
  * named identity; `Session.agentId` still records the role-agent. */
 async function workerSession(userId: string, name = 'Iris'): Promise<{ workerId: string; workerName: string; sessionId: string }> {
   const worker = await db.worker.create({
-    data: { appId: app.id, agentId: teamAgent.id, name, slug: workerSlugBase(name) },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: teamAgent.id, name, slug: workerSlugBase(name) },
   });
   const sessionId = generateId();
   await db.session.create({
@@ -549,7 +550,7 @@ describe('createTeamChatMessage — sessionRef author derivation', () => {
     });
     await db.appAgent.create({ data: { appId: otherApp.id, agentId: teamAgent.id } });
     const foreignWorker = await db.worker.create({
-      data: { appId: otherApp.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: otherApp.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
     });
     const sessionId = generateId();
     await db.session.create({
@@ -667,7 +668,7 @@ describe('teamChatMessages — mentions round trip', () => {
       },
     });
     const foreignWorker = await db.worker.create({
-      data: { appId: foreignApp.id, agentId: foreignAgent.id, name: 'Iris', slug: 'iris' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: foreignApp.id, agentId: foreignAgent.id, name: 'Iris', slug: 'iris' },
     });
     await post(ctx(appMember.id), { body: '@iris are you there' });
     const page = await read(ctx(appMember.id), { mentionsRef: foreignWorker.id });
@@ -692,7 +693,7 @@ describe('teamChatMessages — mentions round trip', () => {
     // Worker names may legally contain spaces; the mention contract slugs
     // them (mentionTokenOf) on both the write and the filter side.
     const mj = await db.worker.create({
-      data: { appId: app.id, agentId: teamAgent.id, name: 'Mary Jane', slug: 'mary-jane' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: teamAgent.id, name: 'Mary Jane', slug: 'mary-jane' },
     });
     await post(ctx(appMember.id), { body: '@mary-jane please review' });
     const page = await read(ctx(appMember.id), { mentionsRef: mj.id });
@@ -1030,7 +1031,7 @@ describe('#1029 — worker handoff', () => {
 
   async function castOne(name = 'Iris') {
     const worker = await db.worker.create({
-      data: { appId: app.id, agentId: teamAgent.id, name, slug: workerSlugBase(name) },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: teamAgent.id, name, slug: workerSlugBase(name) },
     });
     return worker;
   }

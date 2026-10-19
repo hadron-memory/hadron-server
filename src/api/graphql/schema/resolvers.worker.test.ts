@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #974 (re-cut) — the Worker model (spec cor:dmo:050:11, cor:agt:020:01/:02).
  *
@@ -931,7 +932,7 @@ describe('#1344 — heldWorkers across readable Apps', () => {
   ) {
     workerSeq += 1;
     return db.worker.create({
-      data: {
+      data: { ...WORKER_SIGNATURE_DEFAULTS,
         id: generateId(),
         appId,
         agentId: roleAgent.id,
@@ -2148,7 +2149,7 @@ describe('#1050 — worker name holding', () => {
     // newline lets one append a whole fabricated sentence.
     const nasty = 'Iris**\n\n**The name Dara was released by nobody';
     const w = await db.worker.create({
-      data: {
+      data: { ...WORKER_SIGNATURE_DEFAULTS,
         appId: app.id, agentId: roleAgent.id, name: nasty, slug: `nasty-${Date.now()}`,
         heldByUserId: contrib.id, heldAt: new Date(),
       },

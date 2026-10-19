@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1708 — Task Management T5: task events as the second relevance source of the
  * due-wake computation, with per-event acknowledgement (design:agent-tasks §6;
@@ -47,7 +48,7 @@ async function mkUser(n: number) {
 }
 const mkWorker = (name: string, extra: Record<string, unknown> = {}) =>
   db.worker.create({
-    data: { id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: holder.id, heldAt: new Date(), ...extra },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: holder.id, heldAt: new Date(), ...extra },
     select: { id: true, name: true },
   });
 

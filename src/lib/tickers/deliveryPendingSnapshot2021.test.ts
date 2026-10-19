@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /** S5 consumes all S1 metadata pages inside one stable authorized snapshot. */
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -28,7 +29,7 @@ beforeEach(async () => {
   await db.memory.create({ data: { id: id(6), organizationId: id(1), name: 'Team', urn: 'adapter.example:shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: id(4) } });
   await db.node.create({ data: { id: id(7), memoryId: id(6), loc: 'chat:team', name: 'Team', nodeType: 'chat' } });
   await db.channel.create({ data: { id: id(8), memoryId: id(6), loc: 'chat:team', name: 'Team', chatRootNodeId: id(7), incarnation: 2, lastSeq: 13 } });
-  await db.worker.create({ data: { id: id(9), appId: app.id, agentId: id(4), name: 'Target', slug: 'target', heldByUserId: id(3), heldAt: posted } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: id(9), appId: app.id, agentId: id(4), name: 'Target', slug: 'target', heldByUserId: id(3), heldAt: posted } });
   await db.hostRegistration.create({ data: { id: id(10), appId: app.id, hostId: 'host-a', label: 'host-a', pollIntervalSeconds: 60, refreshedAt: now } });
   await db.hostRegistrationWorker.create({ data: { registrationId: id(10), workerId: id(9), family: 'codex' } });
   await db.registerEntry.create({ data: { appId: app.id, channelId: id(8), attendeeWorkerId: id(9), role: 'BOTH' } });

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /** #2021 held reports: signed descriptor authority, privacy, no delivery effects and atomic events. */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -73,8 +74,8 @@ beforeEach(async () => {
   agentId = (await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(manager.id))).id;
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true, urn: true } });
   otherApp = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other` }, select: { id: true } });
-  kit = await db.worker.create({ data: { appId: app.id, agentId, name: 'Kit', slug: 'kit' }, select: { id: true, name: true } });
-  rook = await db.worker.create({ data: { appId: app.id, agentId, name: 'Rook', slug: 'rook' }, select: { id: true, name: true } });
+  kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Kit', slug: 'kit' }, select: { id: true, name: true } });
+  rook = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Rook', slug: 'rook' }, select: { id: true, name: true } });
   const memory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agentId } });
   const made = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:team', name: 'team', createdBy: manager.id });
   channel = { id: made.channel.id, memoryId: memory.id, loc: 'chats:team', chatRootNodeId: made.rootId };
@@ -401,4 +402,35 @@ it('memory-row visibility changes are fenced before the worker/reporting locks a
   try { await waitForLockWaitersOfType(db, 'transactionid', 1, 1000); } finally { release(); await changing; }
   expect(await result).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
   expect(await db.workerDeliveryHold.count()).toBe(0);
+});
+
+it.each([
+ ['batch ack',true],['batch ack',false],['own mentions read',true],['own mentions read',false],
+] as const)('S2 %s projects covered S5 metadata correctly (mentionOnly=%s)',async(kind,mentionOnly)=>{
+ await db.registerEntry.updateMany({where:{attendeeWorkerId:kit.id,channelId:channel.id},data:{mentionOnly}});
+ const b=await batch();await report(b.id);
+ const {deliveryStateTransaction,beginDeliveryTracking,observeDeliveryPolicyThrough,reconcileDeliveryAlarm}=await import('../../../lib/tickers/deliveryState.js');
+ const {loadDeliveryHealthSnapshot}=await import('../../../lib/tickers/deliveryPendingSnapshot.js');
+ const at=new Date(),posted=(await db.node.findFirstOrThrow({where:{messageChannelId:channel.id},orderBy:{seq:'asc'}})).createdAt;
+ await deliveryStateTransaction(db,app.id,kit.id,async tx=>{
+  await beginDeliveryTracking(tx,kit.id,posted);await observeDeliveryPolicyThrough(tx,kit.id,at);
+  await reconcileDeliveryAlarm(tx,{workerId:kit.id,now:at,candidates:[{workerId:kit.id,channelId:channel.id,channelIncarnation:1,seq:b.ranges[0].seqs[0],dueSince:posted}],hold:null});
+ });
+ const snapshot=()=>db.$transaction(tx=>loadDeliveryHealthSnapshot(tx,{ctx:keyCtx(hostKey),app:{...app,organizationId:org.id,ownerUserId:null},hostId:'orca1',workerId:kit.id,asOf:at}),{isolationLevel:'RepeatableRead'});
+ expect(await snapshot()).toMatchObject({pendingMessageCount:1,heldChannelCount:1,activeAlarmCount:1});
+ if(kind==='batch ack')await M.acknowledgeDeliveryBatches({}, {batchIds:[b.id]},keyCtx(hostKey));
+ else{
+  const session=await ownSession();
+  const page=await Q.channelMessages({}, {channelRef:channel.id,mentionsRef:kit.id,sinceSeq:0,limit:20},selfCtx(session));
+  expect(page.items).toHaveLength(1);
+ }
+ const delivered=await db.workerDeliveryChannel.findUniqueOrThrow({where:{workerId_channelId:{workerId:kit.id,channelId:channel.id}}});
+ const readMark=await db.channelReadState.findFirst({where:{workerId:kit.id,channelId:channel.id}});
+ expect(delivered.deliveredThroughSeq).toBe(b.ranges[0].throughSeq);
+ expect(readMark?.lastSeenSeq??0).toBe(mentionOnly?b.ranges[0].throughSeq:0);
+ expect(await snapshot()).toMatchObject({pendingMessageCount:0,heldChannelCount:0,activeAlarmCount:0,suppressedAlarmCount:0,alarm:null,channels:[]});
+ expect(await db.workerDeliveryHold.count({where:{workerId:kit.id}})).toBe(1);
+ expect(await db.workerDeliveryAlarmEpisode.count({where:{workerId:kit.id}})).toBe(1);
+ expect(await db.agentTeamEvent.count({where:{type:'delivery.resumed'}})).toBe(0);
+ expect(await code(report(b.id))).toBe('WAKE_PROOF_STALE');
 });

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /** #2021/#2023: head-fixed mode spans consume only internal coverage decisions. */
 import {afterAll,beforeAll,beforeEach,expect,it,vi} from 'vitest';
 import {PrismaClient} from '../../generated/prisma/index.js';
@@ -15,7 +16,7 @@ beforeAll(async()=>{
  await db.organization.create({data:{id:orgId,name:'Mode span',urn:`mode-${orgId}.example`}});
  await db.agent.create({data:{id:agentId,organizationId:orgId,name:'Mode',urn:`mode-${orgId}.example:agent`}});
  await db.app.create({data:{id:appId,organizationId:orgId,name:'Mode',urn:`mode-${orgId}.example:app`}});
- await db.worker.create({data:{id:workerId,appId,agentId,name:'Mode worker',slug:'mode-worker'}});
+ await db.worker.create({data:{ ...WORKER_SIGNATURE_DEFAULTS,id:workerId,appId,agentId,name:'Mode worker',slug:'mode-worker'}});
 });
 beforeEach(async()=>{
  await db.workerDeliveryWaitException.deleteMany({where:{workerId}});

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /** Persisted 050:26 S7/S8: each pass reloads the ledger in a new transaction. */
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { PrismaClient } from '../../generated/prisma/index.js';
@@ -13,7 +14,7 @@ beforeEach(async () => {
   await db.organization.create({ data: { id: orgId, name: 'S5 scenario', urn: `s5-${orgId}.example` } });
   await db.agent.create({ data: { id: agentId, organizationId: orgId, name: 'Scenario', urn: `s5-${orgId}.example:agent` } });
   await db.app.create({ data: { id: appId, organizationId: orgId, name: 'Scenario', urn: `s5-${orgId}.example:app` } });
-  await db.worker.create({ data: { id: workerId, appId, agentId, name: 'Scenario worker', slug: 'scenario-worker' } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: workerId, appId, agentId, name: 'Scenario worker', slug: 'scenario-worker' } });
 
   const memoryId = generateId(), rootId = generateId();
   await db.memory.create({ data: { id: memoryId, organizationId: orgId, name: 'S5 channel host', urn: `s5-${orgId}.example:channels`, class: 'knowledge' } });

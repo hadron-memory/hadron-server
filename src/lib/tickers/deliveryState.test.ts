@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
@@ -12,7 +13,7 @@ beforeAll(async () => {
   await db.organization.create({ data: { id: orgId, name: 'S5 isolated fixture', urn: `s5-${orgId}.example` } });
   await db.agent.create({ data: { id: agentId, organizationId: orgId, name: 'S5', urn: `s5-${orgId}.example:agent` } });
   await db.app.create({ data: { id: appId, organizationId: orgId, name: 'S5', urn: `s5-${orgId}.example:app` } });
-  await db.worker.create({ data: { id: workerId, appId, agentId, name: 'S5 worker', slug: 's5-worker' } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: workerId, appId, agentId, name: 'S5 worker', slug: 's5-worker' } });
 
   const memoryId = generateId(), rootId = generateId();
   await db.memory.create({ data: { id: memoryId, organizationId: orgId, name: 'S5 channel host', urn: `s5-${orgId}.example:channels`, class: 'knowledge' } });

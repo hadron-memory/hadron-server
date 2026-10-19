@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /** S5 internal projection; S1's verified report/pending gates are separate. */
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { PrismaClient } from '../../generated/prisma/index.js';
@@ -21,7 +22,7 @@ beforeEach(async () => {
   await db.organization.create({ data: { id: orgId, name: 'Health', urn: `s5-${orgId}.example` } });
   await db.agent.create({ data: { id: agentId, organizationId: orgId, name: 'Health', urn: `s5-${orgId}.example:agent` } });
   await db.app.create({ data: { id: appId, organizationId: orgId, name: 'Health', urn: `s5-${orgId}.example:app` } });
-  await db.worker.create({ data: { id: workerId, appId, agentId, name: 'Health', slug: 'health' } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: workerId, appId, agentId, name: 'Health', slug: 'health' } });
   const memoryId = generateId();
   await db.memory.create({ data: { id: memoryId, organizationId: orgId, name: 'Health channels', urn: `s5-${orgId}.example:channels`, class: 'knowledge' } });
   for (const id of ['aaa', 'bbb']) {

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /** #2021/#2014 — task-less alarm transport uses real schedules and per-event delivery identity. */
 import { beforeEach, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -30,7 +31,7 @@ async function mkUser(n: number) {
 }
 const mkWorker = (name: string, extra: Record<string, unknown> = {}) =>
   db.worker.create({
-    data: { id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: holder.id, heldAt: new Date(), ...extra },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: holder.id, heldAt: new Date(), ...extra },
     select: { id: true, name: true },
   });
 
