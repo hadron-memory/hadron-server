@@ -21,13 +21,16 @@
  * also makes the source self-bounding: a task a worker is already working on
  * does not wake it at deploy.
  *
- * ALARMS are re-checked before every delivery (Rook §10 P3-1 on #1720): the
+ * TASK ALARMS are re-checked before every delivery (Rook §10 P3-1 on #1720): the
  * episode is still current (`currentAlarmEpisodes`, the evaluator's own rule),
  * which also requires the task to be open and the App installed; the App and
  * its org are live; and the alarm is unacknowledged. The worker's CURRENT
  * standing (not retired; its holder still an App participant) is the caller's
  * (`computeDueWakes`), never the sealed chain. A person in the chain is never
  * delivered to: they are skipped, and T2's escalation timer keeps running.
+ *
+ * #2021/#2014 task-less alarms use a separate closed arm with their owning
+ * policy currentness and nullable task fields, never the task episode rule.
  *
  * Delivery is never an alarm acknowledgement (cor:agt:050:20). Nothing here
  * writes the alarm; `acknowledgeAlarm` stays the only way to stop a climb.
@@ -189,7 +192,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         if (error instanceof Error && error.message === 'DELIVERY_WAIT_INCOMPLETE') continue;
         throw error;
       }
-      if (!alarm || alarm.eventId !== r.eventId || alarm.state !== 'ACTIVE') continue;
+      if (!alarm || alarm.eventId !== r.eventId || alarm.state !== 'ACTIVE' || alarm.acknowledgedAt !== null) continue;
     }
     // post-limit.exceeded owns wall-clock scheduling; its live chain/ack gate is above.
     push({workerId:r.workerId,subjectWorkerId:r.subjectWorkerId,taskId:null,title:null,

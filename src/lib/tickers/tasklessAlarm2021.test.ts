@@ -137,3 +137,19 @@ it.each(['missing-coverage','replaced-channel','retired-subject'])('task-less de
  expect((await pendingTaskWakes(db,[rook.id],now())).get(rook.id)).toBeUndefined();
  expect(await db.agentTeamEvent.findUniqueOrThrow({where:{id:e.id}})).toEqual(e);
 });
+
+it('an acknowledgement committed after the candidate query is rechecked before offering an S5 wake',async()=>{
+ const e=await deliveryAlarm();
+ const interleaved=new Proxy(db,{get(target,prop,receiver){
+  const value=Reflect.get(target,prop,receiver);
+  if(prop!=='$queryRaw') return typeof value==='function'?value.bind(target):value;
+  return async(...args:unknown[])=>{
+   const result=await (value as Function).apply(target,args);
+   const sql=(args[0] as {sql?:string}).sql??'';
+   if(sql.includes('e.task_id IS NULL')) await M.acknowledgeAlarm({}, {eventId:e.id},ctx(manager.id));
+   return result;
+  };
+ }});
+ expect((await pendingTaskWakes(interleaved,[rook.id],now())).get(rook.id)).toBeUndefined();
+ expect((await db.agentTeamEvent.findUniqueOrThrow({where:{id:e.id}})).acknowledgedAt).not.toBeNull();
+});

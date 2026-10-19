@@ -324,9 +324,10 @@ it('a partially covered rendered descriptor is stale, rather than reporting its 
   expect(await db.workerDeliveryHold.count()).toBe(0);
 });
 
-// Xavier #22152 supersedes JSON: keep typed input; shared #2087/#2090 owns this expected failure.
-it.fails('shared GraphQL formatter must not echo signed batch ids or unknown sensitive values', async () => {
+// Required integration pin: typed input plus the shared #2087/#2090 coercion formatter.
+it('shared GraphQL formatter must not echo signed batch ids or unknown sensitive values', async () => {
   const b = await batch();
+  const before = await effects();
   const { createServer } = await import('../../../server.js');
   const { createServer: httpServer } = await import('node:http');
   const server = httpServer(await createServer());
@@ -338,10 +339,12 @@ it.fails('shared GraphQL formatter must not echo signed batch ids or unknown sen
     }, body: JSON.stringify({ query: 'mutation($input:DeliveryHoldReportInput!){reportDeliveryHold(input:$input){workerId}}',
       variables: { input: { batchId: b.id, reason: 'draft', proof: 'SECRET_DRAFT' } } }) });
     const answer = await response.json() as { errors?: unknown[] };
-    expect(answer.errors?.length).toBeGreaterThan(0);
-    // This must reach the shared formatter, not be a success or an auth error.
-    expect(JSON.stringify(answer.errors)).not.toContain(b.id);
-    expect(JSON.stringify(answer.errors)).not.toContain('SECRET_DRAFT');
+    expect(answer.errors).toEqual([{ message: 'Invalid GraphQL variable input.',
+      locations: [{ line: 1, column: 10 }], extensions: { code: 'BAD_USER_INPUT' } }]);
+    expect(JSON.stringify(answer)).not.toContain(b.id);
+    expect(JSON.stringify(answer)).not.toContain('SECRET_DRAFT');
+    expect(await db.workerDeliveryHold.count()).toBe(0);
+    expect(await effects()).toEqual(before);
   } finally { await new Promise<void>((resolve,reject) => server.close(e => e ? reject(e) : resolve())); }
 });
 
