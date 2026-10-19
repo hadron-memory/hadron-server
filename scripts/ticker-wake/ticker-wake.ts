@@ -10,17 +10,22 @@
  *
  * usage: tsx ticker-wake.ts once [--dry] [--ack-mentions] | loop [--interval 120] [--ack-mentions]
  */
+import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 import {
   loadConfig, DEFAULT_CONFIG, runCommand, listTerminals, resolveTerminal, provesIdle, sendNudge,
+  type Config, type Runner,
 } from '../orca-attention-router/router.js';
 
 const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{worker{id name} reasons{kind ticker{name}} proof} pageInfo{hasNextPage endCursor}}}`;
 const SUBS = `query($a:String!){tickers(appRef:$a){subscribers(first:200){items{worker{id}}}}}`;
 const ACK = `mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowledged unchanged}}`;
 
-function pass(dry: boolean, ackMentions: boolean): void {
-  const cfg = loadConfig(DEFAULT_CONFIG);
-  const run = runCommand;
+export function pass(
+  cfg: Config, run: Runner, opts: { dry?: boolean; ackMentions?: boolean } = {}, log: (line: string) => void = console.log,
+): void {
+  const dry = Boolean(opts.dry);
+  const ackMentions = Boolean(opts.ackMentions);
   const wakes: any[] = [];
   let page: string | null = null;
   for (let n = 0; n < 10; n++) {
@@ -46,9 +51,9 @@ function pass(dry: boolean, ackMentions: boolean): void {
     stuck = wakes.filter((w) => subIds.has(w.worker.id) && !w.reasons.some((r: any) => r.kind === 'TICK'));
   }
   for (const w of stuck) {
-    if (dry) { console.log(`${new Date().toISOString()} ${w.worker.name}: WOULD ack mention-only reservation`); continue; }
+    if (dry) { log(`${new Date().toISOString()} ${w.worker.name}: WOULD ack mention-only reservation`); continue; }
     const ack = JSON.parse(run([cfg.hadronCli, 'api', ACK, '-F', `p=["${w.proof}"]`]).stdout);
-    console.log(`${new Date().toISOString()} ${w.worker.name}: acked mention-only reservation ${JSON.stringify(ack.data?.acknowledgeWakes ?? ack.errors?.[0]?.message)}`);
+    log(`${new Date().toISOString()} ${w.worker.name}: acked mention-only reservation ${JSON.stringify(ack.data?.acknowledgeWakes ?? ack.errors?.[0]?.message)}`);
   }
   const ticks = wakes.filter((w) => w.reasons.some((r: any) => r.kind === 'TICK'));
   const terminals = ticks.length ? listTerminals(cfg, run) : [];
@@ -56,20 +61,20 @@ function pass(dry: boolean, ackMentions: boolean): void {
   for (const w of ticks) {
     const name = w.worker.name;
     const entry = cfg.roster.find((e) => e.worker === w.worker.id);
-    if (!entry) { console.log(`${ts} ${name}: not on roster`); continue; }
+    if (!entry) { log(`${ts} ${name}: not on roster`); continue; }
     const [handle, detail] = resolveTerminal(entry, terminals, cfg, run);
-    if (!handle) { console.log(`${ts} ${name}: held (${detail})`); continue; }
+    if (!handle) { log(`${ts} ${name}: held (${detail})`); continue; }
     const [idle, why] = provesIdle(cfg, handle, detail, undefined, cfg.busyWaitMs, run);
-    if (!idle) { console.log(`${ts} ${name}: held (${why})`); continue; }
+    if (!idle) { log(`${ts} ${name}: held (${why})`); continue; }
     const tickers = [...new Set(w.reasons.filter((r: any) => r.kind === 'TICK').map((r: any) => r.ticker?.name))].join(', ');
     const text = `Hadron ticker wake (${tickers}): run your standing routine for this tick, then end your turn. Read only your own mentions; no unfiltered chat catch-up.`;
-    if (dry) { console.log(`${ts} ${name}: WOULD nudge ${handle}`); continue; }
+    if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); continue; }
     const [ok, d] = sendNudge(cfg, handle, text, run);
-    if (!ok) { console.log(`${ts} ${name}: send not accepted (${d})`); continue; }
+    if (!ok) { log(`${ts} ${name}: send not accepted (${d})`); continue; }
     const ack = JSON.parse(run([cfg.hadronCli, 'api', ACK, '-F', `p=["${w.proof}"]`]).stdout);
-    console.log(`${ts} ${name}: nudged ${handle}; ack ${JSON.stringify(ack.data?.acknowledgeWakes ?? ack.errors?.[0]?.message)}`);
+    log(`${ts} ${name}: nudged ${handle}; ack ${JSON.stringify(ack.data?.acknowledgeWakes ?? ack.errors?.[0]?.message)}`);
   }
-  if (!ticks.length) console.log(`${ts} no ticker wakes due (${wakes.length} mention-only wakes ignored)`);
+  if (!ticks.length) log(`${ts} no ticker wakes due (${wakes.length} mention-only wakes ignored)`);
 }
 
 async function main(): Promise<void> {
@@ -81,9 +86,9 @@ async function main(): Promise<void> {
     const i = rest.indexOf('--interval');
     const sec = i >= 0 ? Number(rest[i + 1]) : 120;
     for (;;) {
-      try { pass(false, ackMentions); } catch (e) { console.log(`${new Date().toISOString()} pass failed: ${(e as Error).message}`); }
+      try { pass(loadConfig(DEFAULT_CONFIG), runCommand, { ackMentions }); } catch (e) { console.log(`${new Date().toISOString()} pass failed: ${(e as Error).message}`); }
       await new Promise((r) => setTimeout(r, sec * 1000));
     }
-  } else pass(dry, ackMentions);
+  } else pass(loadConfig(DEFAULT_CONFIG), runCommand, { dry, ackMentions });
 }
-main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) void main();
