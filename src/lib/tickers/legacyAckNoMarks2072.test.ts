@@ -286,3 +286,16 @@ describe('#2072: the wake receipt is inside the #1162 reference fence', () => {
     expect(await receipts()).toEqual([]);
   });
 });
+
+describe('#2102 Dara P2-3, the legacy-wake twin: freshness is re-checked at the write', () => {
+  it('a wake proof that expires while its read gate waits is refused, and writes no receipt or charge', async () => {
+    const { acknowledgeWakes } = await import('./acknowledge.js');
+    await say(channel, 'one', mention('liam'));
+    const w = (await due(ctx(holderA.id))).wakes[0];
+    const late = signWakeProof({ ...payloadOf(w.proof), issuedAt: Date.now() - 899_000 });
+    const slow = async () => { await new Promise((r) => setTimeout(r, 1_200)); return true; };
+    expect(await code(acknowledgeWakes({ ctx: ctx(holderA.id), requester: { userId: holderA.id }, proofs: [late], mayReadWorker: slow }))).toBe('WAKE_PROOF_STALE');
+    expect(await receipts()).toEqual([]);
+    expect(await charged()).toBe(0);
+  });
+});

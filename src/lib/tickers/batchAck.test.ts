@@ -349,3 +349,33 @@ describe('R57 self arm: a worker acknowledges its own batches through its own li
     expect(selfProof([range(chA, [1, 2])]).batchKey).toBe(proofFor([range(chA, [1, 2])]).batchKey);
   });
 });
+
+describe('#2102 Dara P2-3: freshness is re-checked when the marks are written, not only at entry', () => {
+  const slowGate = (ms: number) => async () => { await new Promise((r) => setTimeout(r, ms)); return true; };
+
+  it('a proof that expires while the call waits on its gate is refused, and writes no mark', async () => {
+    const seq = await say(chA);
+    const proof = signBatchProof(proofFor([range(chA, [seq])], { issuedAt: Date.now() - 899_000 }));
+    expect(await code(ack([{ proof }], { mayAckBatch: slowGate(1_200) }))).toBe('WAKE_PROOF_STALE');
+    expect(await mark(chA)).toBeNull();
+  });
+
+  it('a multi-proof call rolls back entirely when a later proof expires during its wait', async () => {
+    const a = await say(chA);
+    const b = await say(chB);
+    const fresh = signBatchProof(proofFor([range(chA, [a])]));
+    const old = signBatchProof(proofFor([range(chB, [b])], { issuedAt: Date.now() - 899_000 }));
+    let calls = 0;
+    const gate = async () => { calls++; if (calls === 2) await new Promise((r) => setTimeout(r, 1_200)); return true; };
+    expect(await code(ack([{ proof: fresh }, { proof: old }], { mayAckBatch: gate }))).toBe('WAKE_PROOF_STALE');
+    expect(await mark(chA)).toBeNull();
+    expect(await mark(chB)).toBeNull();
+  });
+
+  it('control: a slow gate on a fresh proof still acknowledges', async () => {
+    const seq = await say(chA);
+    const proof = signBatchProof(proofFor([range(chA, [seq])]));
+    expect(await ack([{ proof }], { mayAckBatch: slowGate(300) })).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await mark(chA)).toBe(seq);
+  });
+});
