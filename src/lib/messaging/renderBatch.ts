@@ -5,7 +5,7 @@ export type BatchMessage = {
   body: string; parentSeq: number | null;
   parent: { seq: number; authorName: string; excerpt: string } | null; mentions: string[];
 };
-export type RenderInput = { workerName: string; messages: BatchMessage[]; maxMessages?: number; maxChars?: number };
+export type RenderInput = { workerName: string; messages: BatchMessage[]; maxMessages?: number; maxChars?: number; totalEligible?: number };
 export type RenderedRange = { channelId: string; fromSeq: number; throughSeq: number; seqs: number[] };
 export type RenderOutput = { text: string; ranges: RenderedRange[]; renderedCount: number; overflow: number; renderHash: string };
 
@@ -61,9 +61,15 @@ function format(workerName: string, messages: BatchMessage[], overflow: number):
  * for a smaller later one. The first message is always delivered whole, alone
  * if its body exceeds the character budget. Only flattened bodies count toward
  * the budget (Liam #21298); header, authors, parent context, overflow and hint do not.
+ * The loader may supply a bounded sample plus its exact totalEligible; counts
+ * outside that sample affect overflow text/hash, never rendered ranges.
  * Parent context is supplied by the loader under its two-reader gate. No DB/auth/proof work.
  */
 export function renderBatch(input: RenderInput): RenderOutput {
+  const totalEligible = input.totalEligible ?? input.messages.length;
+  if (!Number.isSafeInteger(totalEligible) || totalEligible < input.messages.length) {
+    throw new RangeError('totalEligible must be a safe integer at least messages.length.');
+  }
   const ordered = [...input.messages].sort((a, b) =>
     a.createdAt.getTime() - b.createdAt.getTime() || compareText(a.channelId, b.channelId) || a.seq - b.seq);
   const messageLimit = Math.min(10, input.maxMessages ?? 10);
@@ -78,7 +84,7 @@ export function renderBatch(input: RenderInput): RenderOutput {
     bodyCharacters = nextCharacters;
     if (nextCharacters > characterLimit) break;
   }
-  const overflow = ordered.length - selected.length;
+  const overflow = totalEligible - selected.length;
   const text = format(input.workerName, selected, overflow);
   const channels = new Map<string, number[]>();
   for (const message of selected) {
