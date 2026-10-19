@@ -70,6 +70,14 @@ describe('the due rule — cor:agt:080:08–:12', () => {
     expect(run([channel('c1', [])], [ticker()])).toBeNull();
   });
 
+  it('#2068: relevance narrows read-team-channel only; every-tick ignores it (ALL and MENTIONS)', () => {
+    const plain = [channel('c1', [msg(3)])];
+    expect(run(plain, [ticker({ relevance: 'MENTIONS', reasons: ['read-team-channel'] })])).toBeNull();
+    expect(run(plain, [ticker({ relevance: 'MENTIONS', reasons: ['every-tick'] })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([channel('c1', [])], [ticker({ relevance: 'MENTIONS', reasons: ['every-tick'] })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([channel('c1', [])], [ticker({ relevance: 'ALL', reasons: ['every-tick'] })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+  });
+
   it('#2068: every-tick never bypasses the tick rules (acked, disabled, not yet a tick)', () => {
     expect(run([channel('c1', [])], [{ ...ticker({ reasons: ['every-tick'] }), lastAckedTick: 1 }])).toBeNull();
     expect(run([channel('c1', [])], [ticker({ reasons: ['every-tick'], enabled: false })])).toBeNull();
