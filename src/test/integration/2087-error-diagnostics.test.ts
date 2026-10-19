@@ -3,6 +3,7 @@ import { beforeAll, afterAll, afterEach, describe, it, expect, vi } from 'vitest
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { GraphQLError } from 'graphql';
+import { Prisma } from '../../generated/prisma/index.js';
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
@@ -93,6 +94,13 @@ describe('#2087 development diagnostic boundaries',()=>{
   });
 });
 describe('#2087 formatter diagnostics supplied by callers',()=>{
+  it('keeps Prisma internals redacted and the original error available to reporting',()=>{
+    const error=new Prisma.PrismaClientValidationError('PRIVATE_QUERY_2087',{clientVersion:Prisma.prismaVersion.client});
+    const result=formatGraphQLError({message:error.message,extensions:{code:'INTERNAL_SERVER_ERROR',...diagnostics}},error);
+    noDiagnostics(result); expect(result.extensions?.code).toBe('INTERNAL_SERVER_ERROR');
+    expect(result.message).toBe('Unable to complete this request. Please try again.');
+    expect(error.message).toBe('PRIVATE_QUERY_2087');
+  });
   it.each([new UrnNotQualifiedError('bad',undefined,'app'),new GraphQLError('typed',{extensions:{code:'APP_NOT_FOUND'}}),new Error('internal')])('strips diagnostics without losing public metadata (%s)',error=>{
     const result=formatGraphQLError({message:error.message,extensions:{code:'INTERNAL_SERVER_ERROR',appRef:absent,...diagnostics}},error);
     noDiagnostics(result); expect(result.extensions?.appRef).toBe(absent);
