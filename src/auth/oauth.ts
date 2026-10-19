@@ -1678,13 +1678,20 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
   try {
     outcome = await db.$transaction(async (tx): Promise<TokenOutcome> => {
       await lockAuthorityAnchors(tx, [{ kind: 'user', id: authCode.userId }], 'shared');
-      const claim = await tx.authCode.updateMany({
-        // Expiry is re-checked HERE, after any wait for the anchor: the read above is from before it.
-        where: { codeHash, redeemedAt: null, expiresAt: { gt: new Date() } },
-        data: { redeemedAt: new Date() },
-      });
-      // Lost the race (or the code expired while this waited on the anchor). The other side just minted a token; we don't.
-      if (claim.count !== 1) return { kind: 'lost' };
+      // Expiry is judged by the DATABASE clock at the moment the row lock is actually held
+      // (Ruth P2, #2116): a cutoff bound in JS is fixed before the UPDATE waits on a competing row
+      // lock, so a code that expired during that wait would still be claimed. `clock_timestamp()`
+      // is the wall clock at evaluation, unlike `now()` (the transaction start).
+      // Take the row lock FIRST, as its own statement: an UPDATE that waits on a lock whose holder
+      // changed nothing keeps the qualification it evaluated BEFORE waiting (no recheck), so the
+      // expiry test must run in a statement that starts after the lock is held.
+      await tx.$queryRaw`SELECT id FROM auth_codes WHERE code_hash = ${codeHash} FOR UPDATE`;
+      const claimed = await tx.$executeRaw`
+        UPDATE auth_codes SET redeemed_at = (clock_timestamp() AT TIME ZONE 'UTC')
+        WHERE code_hash = ${codeHash} AND redeemed_at IS NULL
+          AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')`;
+      // Lost the race (or the code expired while this waited on the anchor or the row).
+      if (claimed !== 1) return { kind: 'lost' };
       const live = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT id FROM users WHERE id = ${authCode.userId} AND deleted_at IS NULL FOR SHARE`;
       if (!live[0]) throw new Error('User not found');

@@ -141,4 +141,24 @@ describe('POST /oauth/token carries the sign-in root (#1897)', () => {
     expect(await db.userApiKey.count({ where: { userId } })).toBe(0);
     expect((await db.authCode.findFirstOrThrow({ where: { userId } })).redeemedAt).toBeNull();
   });
+
+  it('Ruth P2: a code that expires while its ROW is locked by another transaction is not claimed (database clock after the lock)', async () => {
+    for (const rooted of [false, true]) {
+      await db.userApiKey.deleteMany({ where: { userId } });
+      await db.authCode.deleteMany({ where: { userId } });
+      const si = rooted ? await db.$transaction((tx) => createSignIn(tx, { userId, method: 'email', passkeyId })) : null;
+      const seed = await seedCode(si?.id ?? null);
+      await db.authCode.updateMany({ where: { userId }, data: { expiresAt: new Date(Date.now() + 1500) } });
+      let redeemed: Promise<Response> | undefined;
+      await db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM auth_codes WHERE user_id = ${userId} FOR UPDATE`;
+        redeemed = redeem(seed);
+        await waitForLockWaitersOfType(db, 'transactionid');
+        await new Promise((r) => setTimeout(r, 1700));
+      });
+      expect((await redeemed!).status).toBe(400);
+      expect(await db.userApiKey.count({ where: { userId } })).toBe(0);
+      expect((await db.authCode.findFirstOrThrow({ where: { userId } })).redeemedAt).toBeNull();
+    }
+  });
 });

@@ -124,11 +124,16 @@ export async function redeemLoginCode(
   // Exactly one concurrent caller sees count=1.
   const row = await db.$transaction(async (tx) => {
     await lockAuthorityAnchors(tx, [{ kind: 'user', id: probe.userId }], 'shared');
-    const claim = await tx.authHandoffCode.updateMany({
-      where: { codeHash, kind: 'login', redeemedAt: null, expiresAt: { gt: new Date() } },
-      data: { redeemedAt: new Date() },
-    });
-    if (claim.count !== 1) return null;
+    // Database clock at the moment the row lock is held, not a JS cutoff bound before a lock wait
+    // (Ruth P2 on the same shape in /oauth/token, #2116).
+    // The row lock is its own earlier statement: an UPDATE that waits on a lock whose holder changed
+    // nothing keeps the qualification it evaluated before waiting.
+    await tx.$queryRaw`SELECT id FROM auth_handoff_codes WHERE code_hash = ${codeHash} FOR UPDATE`;
+    const claimedRows = await tx.$executeRaw`
+      UPDATE auth_handoff_codes SET redeemed_at = (clock_timestamp() AT TIME ZONE 'UTC')
+      WHERE code_hash = ${codeHash} AND kind = 'login' AND redeemed_at IS NULL
+        AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')`;
+    if (claimedRows !== 1) return null;
     const claimed = await tx.authHandoffCode.findUnique({ where: { codeHash } });
     if (!claimed) return null; // unreachable after a successful claim, but keeps types honest
     if (claimed.signInId) {

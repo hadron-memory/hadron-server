@@ -161,6 +161,22 @@ describe('login handoff carries the root', () => {
   });
 });
 
+describe('handoff expiry is judged after the row lock', () => {
+  it('a handoff that expires while its row is locked elsewhere is not redeemed', async () => {
+    const code = await issueLoginCode({ userId, redirect: '/', isNew: false });
+    await db.authHandoffCode.updateMany({ where: { userId }, data: { expiresAt: new Date(Date.now() + 1500) } });
+    let redeemed: Promise<unknown> | undefined;
+    const { waitForLockWaitersOfType } = await import('../test/lockWait.js');
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM auth_handoff_codes WHERE user_id = ${userId} FOR UPDATE`;
+      redeemed = redeemLoginCode(code);
+      await waitForLockWaitersOfType(db, 'transactionid');
+      await new Promise((r) => setTimeout(r, 1700));
+    });
+    await expect(redeemed).resolves.toBeNull();
+  });
+});
+
 describe('database invariants', () => {
   it('lineage and identity never change; a sign-in with keys is never deleted; same-owner FK', async () => {
     const si = await signIn();
