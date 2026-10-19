@@ -42,6 +42,7 @@ const MODELS_WITHOUT_ID = new Set<string>([
   // #1715 — keyed by the merged-away account.
   'UserMerge',
   // #1747 — keyed by their worker (and channel / ticker).
+  'WorkerDeliveryWaitState', 'WorkerDeliveryAlarmEpisode',
   'WorkerWakeSettings',
   'WorkerDeliveryChannel',
   'WorkerDeliveryTick', 'AppWakeDay', 'AppWakeReservation',

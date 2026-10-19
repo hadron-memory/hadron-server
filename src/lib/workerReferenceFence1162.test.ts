@@ -13,9 +13,12 @@ describe('#1162 reference fence deployment', () => {
   });
 
   it('enumerates every typed scalar Worker/session column in the current schema', () => {
+    // Later models install their fences in the migration that creates their
+    // tables; the original deployed migration must not reference future tables.
+    const inventory = source + readFileSync(new URL('../../prisma/delivery-stall-invariants.sql', import.meta.url), 'utf8');
     for (const model of Prisma.dmmf.datamodel.models) {
       const table = model.dbName ?? model.name;
-      const trigger = source.split(`CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "${table}"`)[1]?.split(';')[0];
+      const trigger = inventory.split(`CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "${table}"`)[1]?.split(';')[0];
       for (const field of model.fields.filter((f) => f.kind === 'scalar' && /(?:worker|session)Id$/i.test(f.name))) {
         expect(trigger, `${model.name}.${field.name} missing from closed fence inventory`).toContain(`'${/workerId$/i.test(field.name) ? 'w' : 's'}:$.${field.dbName ?? field.name}'`);
       }

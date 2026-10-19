@@ -3760,6 +3760,10 @@ model Worker {
   @@index([heldByUserId])
   @@index([reportsToWorkerId])
   @@map("workers")
+  deliveryWaitState WorkerDeliveryWaitState?
+  deliveryWaitExceptions WorkerDeliveryWaitException[]
+  deliveryAlarmEpisode WorkerDeliveryAlarmEpisode?
+
 }
 
 /// Asymmetric cross-user grant for personal-class memory (spec 023
@@ -5296,6 +5300,9 @@ model AgentTeamAlarmSchedule {
   @@id([eventId, chainIndex])
   @@index([wokenAt, dueAt])
   @@map("agent_team_alarm_schedule")
+  /// S5: next escalation starts from the previous owner's accumulated uncovered wait.
+  deliveryWaitBaselineMs BigInt? @map("delivery_wait_baseline_ms")
+
 }
 
 /// #1706 — one worker's availability for work (cor:agt:060:02). At most one
@@ -5927,4 +5934,46 @@ model WorkerReferenceFence {
   version   BigInt @default(0)
 
   @@map("worker_reference_fences")
+}
+
+/// S5 rollout/producer completeness watermark; never fabricated pre-rollout history.
+model WorkerDeliveryWaitState {
+  workerId String @id @map("worker_id")
+  trackedFrom DateTime @map("tracked_from")
+  observedThrough DateTime @map("observed_through")
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  @@map("worker_delivery_wait_states")
+}
+
+/// S5 metadata-only exception coverage, not a message outbox.
+model WorkerDeliveryWaitException {
+  id String @id @default(cuid())
+  workerId String @map("worker_id")
+  cause String
+  coverageKey String @map("coverage_key")
+  channelId String? @map("channel_id")
+  channelIncarnation Int? @map("channel_incarnation")
+  fromSeq Int? @map("from_seq")
+  throughSeq Int? @map("through_seq")
+  startedAt DateTime @map("started_at")
+  endedAt DateTime? @map("ended_at")
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  @@unique([workerId, cause, coverageKey, startedAt])
+  @@index([workerId, startedAt, endedAt])
+  @@index([workerId, channelId, channelIncarnation, fromSeq, throughSeq])
+  @@map("worker_delivery_wait_exceptions")
+}
+
+/// S5 one active stuck alarm across all of a worker's channels, independent of holds.
+model WorkerDeliveryAlarmEpisode {
+  workerId String @id @map("worker_id")
+  episodeId String @unique @map("episode_id")
+  channelId String @map("channel_id")
+  channelIncarnation Int @map("channel_incarnation")
+  anchorSeq Int @map("anchor_seq")
+  dueSince DateTime @map("due_since")
+  alarmEventId String @unique @map("alarm_event_id")
+  createdAt DateTime @map("created_at")
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  @@map("worker_delivery_alarm_episodes")
 }
