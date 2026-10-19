@@ -1,14 +1,14 @@
 /** Safe S5 read projection. Caller owns App visibility and a consistent read transaction. */
 import type { Prisma } from '../../generated/prisma/index.js';
 import type { DeliveryMessage } from './deliveryWait.js';
-import { loadDeliveryWaits, deliveryAlarmSnapshot } from './deliveryState.js';
+import { loadDeliveryWaits, deliveryAlarmSnapshot, type StandbyCoverageClassifier } from './deliveryState.js';
 import { holdSnapshot } from './deliveryHolds.js';
 import { loadDeliverySettings } from './deliverySettings.js';
 
 /** S1 adapter must finish ALL pages at one asOf before constructing this input. */
 export type CompletePendingDeliverySnapshot = { complete: true; asOf: Date; messages: readonly DeliveryMessage[] };
 export async function deliveryHealthSnapshot(tx: Prisma.TransactionClient, a: {
-  appId: string; workerId: string; asOf: Date; pending: CompletePendingDeliverySnapshot; limit?: number; visibleChannelIds?: readonly string[];
+  appId: string; workerId: string; asOf: Date; pending: CompletePendingDeliverySnapshot; limit?: number; visibleChannelIds?: readonly string[]; standbyClassifier?: StandbyCoverageClassifier;
 }) {
   const p = a.pending;
   const visible = a.visibleChannelIds === undefined ? null : new Set(a.visibleChannelIds);
@@ -38,11 +38,11 @@ export async function deliveryHealthSnapshot(tx: Prisma.TransactionClient, a: {
   };
   const messages = p.messages.filter(m => current.get(m.channelId) === m.channelIncarnation && m.seq > covered(m.channelId, m.channelIncarnation));
   const holds = storedHolds.filter(h => current.get(h.channelId) === h.channelIncarnation && h.firstPendingSeq > covered(h.channelId, h.channelIncarnation));
-  const waits = await loadDeliveryWaits(tx, a.workerId, messages, a.asOf);
+  const waits = await loadDeliveryWaits(tx, a.workerId, messages, a.asOf, a.standbyClassifier);
   // A caller-scoped read must not reveal a stored anchor excluded by the same
   // encrypted/caller/holder gates as S1 pending selection. History remains intact.
   const anchor = visible ? await tx.workerDeliveryAlarmEpisode.findUnique({ where: { workerId: a.workerId }, select: { channelId: true } }) : null;
-  const alarm = visible && (!anchor || !visible.has(anchor.channelId)) ? null : await deliveryAlarmSnapshot(tx, a.workerId, a.asOf);
+  const alarm = visible && (!anchor || !visible.has(anchor.channelId)) ? null : await deliveryAlarmSnapshot(tx, a.workerId, a.asOf, a.standbyClassifier);
   const channelIds = [...new Set([...messages.map(m => m.channelId), ...holds.map(h => h.channelId)])].sort();
   const grouped = new Map<string, (DeliveryMessage & (typeof waits)[number] & { suppressionClassification: 'EXCEPTION' | 'NONE' })[]>();
   messages.forEach((m, i) => {

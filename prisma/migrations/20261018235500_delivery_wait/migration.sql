@@ -89,10 +89,11 @@ ALTER TABLE worker_delivery_wait_exceptions DROP CONSTRAINT IF EXISTS chk_delive
 ALTER TABLE worker_delivery_wait_exceptions ADD CONSTRAINT chk_delivery_wait_exception CHECK (
   cause IN ('no-live-session','isolated','team-paused','team-halted','wake-paused','standby','wake-budget')
   AND (ended_at IS NULL OR ended_at >= started_at)
-  AND ((num_nonnulls(channel_id,channel_incarnation,from_seq,through_seq) = 0 AND coverage_key = 'worker')
+  AND ((num_nonnulls(channel_id,channel_incarnation,from_seq,through_seq) = 0 AND (coverage_key = 'worker' OR (cause = 'standby' AND coverage_key ~ '^standby-mode:[A-Za-z0-9_-]{1,128}$')))
        OR (num_nonnulls(channel_id,channel_incarnation,from_seq,through_seq) = 4
-           AND channel_incarnation >= 0 AND from_seq > 0 AND through_seq >= from_seq))
-  AND (cause NOT IN ('standby','wake-budget') OR channel_id IS NOT NULL)
+           AND channel_incarnation >= 0 AND from_seq > 0 AND through_seq >= from_seq AND coverage_key NOT LIKE 'standby-mode:%'))
+  AND (cause <> 'wake-budget' OR channel_id IS NOT NULL)
+  AND (cause <> 'standby' OR channel_id IS NOT NULL OR coverage_key ~ '^standby-mode:[A-Za-z0-9_-]{1,128}$')
 );
 CREATE UNIQUE INDEX IF NOT EXISTS delivery_wait_open_coverage_uniq
   ON worker_delivery_wait_exceptions(worker_id,cause,coverage_key) WHERE ended_at IS NULL;

@@ -3,13 +3,13 @@ import {afterAll,beforeAll,beforeEach,expect,it,vi} from 'vitest';
 import {PrismaClient} from '../../generated/prisma/index.js';
 import {generateId} from '../id.js';
 import {deliveryWait} from './deliveryWait.js';
-import {beginDeliveryTracking,deliveryStateTransaction,loadDeliveryWait,observeDeliveryPolicyThrough,transitionDeliveryException} from './deliveryState.js';
+import {beginDeliveryTracking,deliveryStateTransaction,loadDeliveryWait,observeDeliveryPolicyThrough,transitionDeliveryException,type StandbyCoverageClassifier} from './deliveryState.js';
 const db=new PrismaClient();
 const at=(m:number)=>new Date(Date.UTC(2026,9,19,10,m));
 const orgId=generateId(),appId=generateId(),agentId=generateId(),workerId=generateId();
 const message={workerId,channelId:'standby-channel',channelIncarnation:1,seq:1,dueSince:at(0)};
 const tracking={trackedFrom:at(0),observedThrough:at(30)};
-const span=(headWorkerId:string,from=5,to=20)=>({workerId,cause:'standby' as const,coverage:{kind:'standby-mode',headWorkerId} as any,startedAt:at(from),endedAt:at(to)});
+const span=(headWorkerId:string,from=5,to=20)=>({workerId,cause:'standby' as const,coverage:{kind:'standby-mode' as const,headWorkerId},startedAt:at(from),endedAt:at(to)});
 const run=<T>(fn:Parameters<typeof deliveryStateTransaction<T>>[3])=>deliveryStateTransaction(db,appId,workerId,fn);
 beforeAll(async()=>{
  await db.organization.create({data:{id:orgId,name:'Mode span',urn:`mode-${orgId}.example`}});
@@ -45,8 +45,8 @@ it('persists mode coverage and calls the internal classifier with exact message 
  await run(tx=>transitionDeliveryException(tx,{workerId,cause:'standby',coverage:span('head-a').coverage,effectiveAt:at(5),until:at(20),active:true}));
  await run(tx=>observeDeliveryPolicyThrough(tx,workerId,at(30)));
  await expect(run(tx=>loadDeliveryWait(tx,message,at(25)))).rejects.toThrow('DELIVERY_WAIT_INCOMPLETE');
- const classify=vi.fn(async(_tx:unknown,args:any)=>({held:true,headWorkerId:args.headWorkerId}));
- const answer=await run(tx=>(loadDeliveryWait as any)(tx,message,at(25),classify));
+ const classify=vi.fn<StandbyCoverageClassifier>(async(_tx,args)=>({held:true,headWorkerId:args.headWorkerId}));
+ const answer=await run(tx=>loadDeliveryWait(tx,message,at(25),classify));
  expect(answer.waitedMs).toBe(10*60000);
  expect(classify).toHaveBeenCalledTimes(1);
  expect(classify.mock.calls[0][1]).toEqual({workerId,channelId:message.channelId,incarnation:1,seq:1,headWorkerId:'head-a'});
@@ -58,10 +58,35 @@ it('rejects mismatched classifier head and never certifies policy time from its 
  await run(tx=>transitionDeliveryException(tx,{workerId,cause:'standby',coverage:span('head-a').coverage,effectiveAt:at(5),until:at(20),active:true}));
  await run(tx=>observeDeliveryPolicyThrough(tx,workerId,at(30)));
  const before=await db.workerDeliveryWaitState.findUniqueOrThrow({where:{workerId}});
- await expect(run(tx=>(loadDeliveryWait as any)(tx,message,at(25),async()=>({held:true,headWorkerId:'other'})))).rejects.toThrow('DELIVERY_WAIT_INCOMPLETE');
+ await expect(run(tx=>loadDeliveryWait(tx,message,at(25),async()=>({held:true,headWorkerId:'other'})))).rejects.toThrow('DELIVERY_WAIT_INCOMPLETE');
  expect(await db.workerDeliveryWaitState.findUniqueOrThrow({where:{workerId}})).toEqual(before);
 });
 it.each(['wake-budget','wake-paused','isolated'] as const)('mode coverage is not admitted for %s',async cause=>{
  await expect(run(tx=>transitionDeliveryException(tx,{workerId,cause,coverage:span('head-a').coverage,effectiveAt:at(5),active:true}))).rejects.toThrow('DELIVERY_COVERAGE_INVALID');
  expect(await db.workerDeliveryWaitException.count({where:{workerId}})).toBe(0);
+});
+
+it('does not trust a caller-supplied coverage map when the canonical classifier is absent',async()=>{
+ await run(tx=>transitionDeliveryException(tx,{workerId,cause:'standby',coverage:span('head-a').coverage,effectiveAt:at(5),until:at(20),active:true}));
+ await run(tx=>observeDeliveryPolicyThrough(tx,workerId,at(30)));
+ await expect(run(tx=>loadDeliveryWait(tx,{...message,standbyCoverage:new Map([['head-a',false]])},at(25)))).rejects.toThrow('DELIVERY_WAIT_INCOMPLETE');
+});
+it('ignores mode intervals ending before a message becomes due without requiring classification',async()=>{
+ await run(tx=>transitionDeliveryException(tx,{workerId,cause:'standby',coverage:span('head-a').coverage,effectiveAt:at(5),until:at(20),active:true}));
+ await run(tx=>observeDeliveryPolicyThrough(tx,workerId,at(30)));
+ expect((await run(tx=>loadDeliveryWait(tx,{...message,dueSince:at(20)},at(25)))).waitedMs).toBe(5*60000);
+});
+it('rolls back an atomic head split with its deciding transaction',async()=>{
+ await run(tx=>transitionDeliveryException(tx,{workerId,cause:'standby',coverage:span('head-a').coverage,effectiveAt:at(5),active:true}));
+ await expect(run(async tx=>{
+  await transitionDeliveryException(tx,{workerId,cause:'standby',coverage:span('head-a').coverage,effectiveAt:at(10),active:false});
+  await transitionDeliveryException(tx,{workerId,cause:'standby',coverage:span('head-b').coverage,effectiveAt:at(10),active:true});
+  throw new Error('DECIDING_WRITE_FAILED');
+ })).rejects.toThrow('DECIDING_WRITE_FAILED');
+ expect(await db.workerDeliveryWaitException.findMany({where:{workerId},select:{coverageKey:true,endedAt:true}})).toEqual([{coverageKey:'standby-mode:head-a',endedAt:null}]);
+});
+it.each([
+ ['standby','standby-mode:'],['standby','standby-mode:bad/head'],['isolated','standby-mode:head-a'],['wake-budget','standby-mode:head-a'],
+])('database refuses invalid mode shape %s %s',async(cause,coverageKey)=>{
+ await expect(db.workerDeliveryWaitException.create({data:{id:generateId(),workerId,cause,coverageKey,startedAt:at(5)}})).rejects.toThrow(/23514[\s\S]*chk_delivery_wait_exception/);
 });

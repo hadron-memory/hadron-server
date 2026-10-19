@@ -1,8 +1,11 @@
 /** S5: metadata-only uncovered wait (cor:agt:050:26, Proposed exception timing). */
 export const DELIVERY_EXCEPTION_CAUSES = ['no-live-session', 'isolated', 'team-paused', 'team-halted', 'wake-paused', 'standby', 'wake-budget'] as const;
 export type DeliveryExceptionCause = typeof DELIVERY_EXCEPTION_CAUSES[number];
-export type DeliveryMessage = { workerId: string; channelId: string; channelIncarnation: number; seq: number; dueSince: Date };
-export type WaitCoverage = { kind: 'worker' } | { kind: 'range'; channelId: string; channelIncarnation: number; fromSeq: number; throughSeq: number };
+export type DeliveryMessage = { workerId: string; channelId: string; channelIncarnation: number; seq: number; dueSince: Date;
+  /** Internal clock evidence only, never a pending/health/transport DTO field. */
+  standbyCoverage?: ReadonlyMap<string, boolean>;
+};
+export type WaitCoverage = { kind: 'worker' } | { kind: 'range'; channelId: string; channelIncarnation: number; fromSeq: number; throughSeq: number } | { kind: 'standby-mode'; headWorkerId: string };
 export type WaitException = { workerId: string; cause: DeliveryExceptionCause; startedAt: Date; endedAt: Date | null; coverage: WaitCoverage };
 export type WaitTracking = { trackedFrom: Date; observedThrough: Date };
 export type DeliveryWait = { waitedMs: number; waitAsOf: Date; suppressed: boolean };
@@ -12,8 +15,16 @@ const instant = (d: Date) => {
   if (!Number.isFinite(n)) throw new Error('DELIVERY_WAIT_INVALID');
   return n;
 };
-const covers = (m: DeliveryMessage, e: WaitException): boolean => e.workerId === m.workerId &&
-  (e.coverage.kind === 'worker' || (e.coverage.channelId === m.channelId && e.coverage.channelIncarnation === m.channelIncarnation && e.coverage.fromSeq <= m.seq && m.seq <= e.coverage.throughSeq));
+const covers = (m: DeliveryMessage, e: WaitException): boolean => {
+  if (e.workerId !== m.workerId) return false;
+  if (e.coverage.kind === 'worker') return true;
+  if (e.coverage.kind === 'standby-mode') {
+    const held = m.standbyCoverage?.get(e.coverage.headWorkerId);
+    if (typeof held !== 'boolean') throw new Error('DELIVERY_WAIT_INCOMPLETE');
+    return held;
+  }
+  return e.coverage.channelId === m.channelId && e.coverage.channelIncarnation === m.channelIncarnation && e.coverage.fromSeq <= m.seq && m.seq <= e.coverage.throughSeq;
+};
 
 /** Missing producer coverage is unavailable, never an implicit zero deduction. */
 export function deliveryWait(m: DeliveryMessage, exceptions: readonly WaitException[], tracking: WaitTracking, now: Date): DeliveryWait {
@@ -24,6 +35,8 @@ export function deliveryWait(m: DeliveryMessage, exceptions: readonly WaitExcept
   const intervals: [number, number][] = [];
   let suppressed = false;
   for (const e of exceptions) {
+    // A mode outside this message's possible wait needs no classification.
+    if (e.coverage.kind === 'standby-mode' && (instant(e.startedAt) > end || (e.endedAt && instant(e.endedAt) <= start))) continue;
     if (!covers(m, e)) continue;
     const lo = instant(e.startedAt);
     const hi = e.endedAt ? instant(e.endedAt) : Infinity;

@@ -4,6 +4,7 @@ import { withoutRequestCaches, type Context } from '../../api/graphql/schema/res
 import { loadDeliveryEligibility } from './deliveryBatch.js';
 import { enumeratePendingDelivery, type PendingDeliveryArgs } from './pendingDelivery.js';
 import { deliveryHealthSnapshot, type CompletePendingDeliverySnapshot } from './deliveryHealthRead.js';
+import type { StandbyCoverageClassifier } from './deliveryState.js';
 import type { DeliveryMessage } from './deliveryWait.js';
 
 export type PendingSnapshotArgs = {
@@ -55,11 +56,11 @@ export async function loadPendingDeliverySnapshot(tx: Prisma.TransactionClient, 
 }
 
 /** S13/internal consumer facade: enumeration and canonical health share exactly the same authorized snapshot. */
-export async function loadDeliveryHealthSnapshot(tx: Prisma.TransactionClient, args: PendingSnapshotArgs & { limit?: number }) {
+export async function loadDeliveryHealthSnapshot(tx: Prisma.TransactionClient, args: PendingSnapshotArgs & { limit?: number; standbyClassifier?: StandbyCoverageClassifier }) {
   const pending = await loadPendingDeliverySnapshot(tx, args);
   const eligible = await loadDeliveryEligibility({ ctx: withoutRequestCaches(args.ctx, tx), app: args.app,
     hostId: args.hostId, workerIds: [args.workerId], first: 1, now: pending.asOf });
   const visibleChannelIds = eligible.workers.find(w => w.workerId === args.workerId)?.channels.map(c => c.channelId) ?? [];
   return deliveryHealthSnapshot(tx, { appId: args.app.id, workerId: args.workerId, asOf: pending.asOf, pending,
-    visibleChannelIds, limit: args.limit });
+    visibleChannelIds, limit: args.limit, standbyClassifier: args.standbyClassifier });
 }

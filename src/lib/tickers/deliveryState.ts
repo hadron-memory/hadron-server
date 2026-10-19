@@ -16,6 +16,10 @@ import { deliveryCoveredThrough } from './deliveryHolds.js';
 import { deliveryWait, oldestStuckMessage, nextDeliveryOwnerDue, DELIVERY_EXCEPTION_CAUSES, type DeliveryMessage, type WaitException, type WaitCoverage } from './deliveryWait.js';
 
 type Tx = Prisma.TransactionClient;
+/** S1/S7 internal seam: exact authorized identity in this transaction, coverage metadata only. */
+export type StandbyCoverageClassifier = (tx: Tx, identity: {
+  workerId: string; channelId: string; incarnation: number; seq: number; headWorkerId: string;
+}) => Promise<{ held: boolean; headWorkerId: string } | null>;
 function fail(code: string): never { throw new Error(code); }
 
 /** Preserve authority -> reporting graph -> App budget -> worker wake order. */
@@ -50,8 +54,19 @@ export async function beginDeliveryTracking(tx: Tx, workerId: string, at: Date):
 
 function coverageKey(c: WaitCoverage): string {
   if (c.kind === 'worker') return 'worker';
-  if (!c.channelId || c.channelId.length > 256 || ![c.channelIncarnation, c.fromSeq, c.throughSeq].every(Number.isSafeInteger) || c.channelIncarnation < 0 || c.fromSeq < 1 || c.throughSeq < c.fromSeq) fail('DELIVERY_COVERAGE_INVALID');
+  if (c.kind === 'standby-mode') {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(c.headWorkerId)) fail('DELIVERY_COVERAGE_INVALID');
+    return `standby-mode:${c.headWorkerId}`;
+  }
+  if (c.kind !== 'range' || !c.channelId || c.channelId.length > 256 || ![c.channelIncarnation, c.fromSeq, c.throughSeq].every(Number.isSafeInteger) || c.channelIncarnation < 0 || c.fromSeq < 1 || c.throughSeq < c.fromSeq) fail('DELIVERY_COVERAGE_INVALID');
   return JSON.stringify([c.channelId, c.channelIncarnation, c.fromSeq, c.throughSeq]);
+}
+
+/** Standby alone may use a head-fixed mode; budget coverage remains an exact range. */
+function validateCoverageCause(cause: WaitException['cause'], coverage: WaitCoverage) {
+  if ((coverage.kind === 'standby-mode' && cause !== 'standby') ||
+      (cause === 'wake-budget' && coverage.kind !== 'range') ||
+      (cause === 'standby' && !['range', 'standby-mode'].includes(coverage.kind))) fail('DELIVERY_COVERAGE_INVALID');
 }
 
 /** Idempotent effective-time producer write. Caller holds worker lock and knows exact coverage. */
@@ -59,7 +74,7 @@ export async function recordDeliveryException(tx: Tx, e: WaitException): Promise
   if (!(DELIVERY_EXCEPTION_CAUSES as readonly string[]).includes(e.cause) || !Number.isFinite(e.startedAt.getTime()) || (e.endedAt && (!Number.isFinite(e.endedAt.getTime()) || e.endedAt < e.startedAt))) fail('DELIVERY_EXCEPTION_INVALID');
   const state = await tx.workerDeliveryWaitState.findUnique({ where: { workerId: e.workerId } });
   if (!state || e.startedAt < state.trackedFrom) fail('DELIVERY_WAIT_INCOMPLETE');
-  if (['standby', 'wake-budget'].includes(e.cause) && e.coverage.kind !== 'range') fail('DELIVERY_COVERAGE_INVALID');
+  validateCoverageCause(e.cause, e.coverage);
   const key = coverageKey(e.coverage);
   const identity = { workerId: e.workerId, cause: e.cause, coverageKey: key, startedAt: e.startedAt };
   const prior = await tx.workerDeliveryWaitException.findUnique({ where: { workerId_cause_coverageKey_startedAt: identity } });
@@ -89,7 +104,7 @@ export async function transitionDeliveryException(tx: Tx, change: {
   if (!(DELIVERY_EXCEPTION_CAUSES as readonly string[]).includes(cause) ||
       !Number.isFinite(effectiveAt.getTime()) ||
       (until && (!Number.isFinite(until.getTime()) || until <= effectiveAt))) fail('DELIVERY_EXCEPTION_INVALID');
-  if (['standby', 'wake-budget'].includes(cause) && coverage.kind !== 'range') fail('DELIVERY_COVERAGE_INVALID');
+  validateCoverageCause(cause, coverage);
   const key = coverageKey(coverage);
   const state = await tx.workerDeliveryWaitState.findUnique({ where: { workerId } });
   if (!state || effectiveAt < state.trackedFrom) fail('DELIVERY_WAIT_INCOMPLETE');
@@ -133,22 +148,42 @@ async function waitInputs(tx: Tx, workerId: string, now: Date, oldestDueAt: Date
   const lower = new Date(Math.min(now.getTime(), Math.max(state.trackedFrom.getTime(), oldestDueAt.getTime())));
   const rows = await tx.workerDeliveryWaitException.findMany({ where: { workerId, startedAt: { lte: now }, OR: [{ endedAt: null }, { endedAt: { gt: lower } }] }, orderBy: [{ startedAt: 'asc' }, { id: 'asc' }] });
   const exceptions: WaitException[] = rows.map(r => ({ workerId, cause: r.cause as WaitException['cause'], startedAt: r.startedAt, endedAt: r.endedAt,
-    coverage: r.channelId === null ? { kind: 'worker' } : { kind: 'range', channelId: r.channelId, channelIncarnation: r.channelIncarnation!, fromSeq: r.fromSeq!, throughSeq: r.throughSeq! } }));
+    coverage: r.coverageKey.startsWith('standby-mode:') ? { kind: 'standby-mode', headWorkerId: r.coverageKey.slice('standby-mode:'.length) } : r.channelId === null ? { kind: 'worker' } : { kind: 'range', channelId: r.channelId, channelIncarnation: r.channelIncarnation!, fromSeq: r.fromSeq!, throughSeq: r.throughSeq! } }));
   return { state, exceptions };
 }
 
-export async function loadDeliveryWait(tx: Tx, message: DeliveryMessage, now: Date) {
+/** No supplied classification map is trusted by the persisted service; resolve canonical evidence afresh. */
+async function classifyStandby(tx: Tx, message: DeliveryMessage, exceptions: readonly WaitException[], state: { trackedFrom: Date }, asOf: Date, classifier?: StandbyCoverageClassifier): Promise<DeliveryMessage> {
+  const start = Math.max(message.dueSince.getTime(), state.trackedFrom.getTime());
+  const heads = new Set(exceptions.flatMap(e => e.workerId === message.workerId && e.coverage.kind === 'standby-mode' &&
+    e.startedAt <= asOf && (!e.endedAt || e.endedAt.getTime() > start) ? [e.coverage.headWorkerId] : []));
+  if (!heads.size) return message;
+  if (!classifier) fail('DELIVERY_WAIT_INCOMPLETE');
+  const coverage = new Map<string, boolean>();
+  for (const headWorkerId of heads) {
+    const decision = await classifier(tx, { workerId: message.workerId, channelId: message.channelId,
+      incarnation: message.channelIncarnation, seq: message.seq, headWorkerId });
+    if (!decision || typeof decision.held !== 'boolean' || decision.headWorkerId !== headWorkerId ||
+        Object.keys(decision).some(k => k !== 'held' && k !== 'headWorkerId')) fail('DELIVERY_WAIT_INCOMPLETE');
+    coverage.set(headWorkerId, decision.held);
+  }
+  return { ...message, standbyCoverage: coverage };
+}
+
+export async function loadDeliveryWait(tx: Tx, message: DeliveryMessage, now: Date, classifier?: StandbyCoverageClassifier) {
   const { state, exceptions } = await waitInputs(tx, message.workerId, now, message.dueSince);
-  return deliveryWait(message, exceptions, state, now);
+  return deliveryWait(await classifyStandby(tx, message, exceptions, state, now, classifier), exceptions, state, now);
 }
 
 /** One ledger read for the complete pending set; empty still verifies coverage. */
-export async function loadDeliveryWaits(tx: Tx, workerId: string, messages: readonly DeliveryMessage[], asOf: Date) {
+export async function loadDeliveryWaits(tx: Tx, workerId: string, messages: readonly DeliveryMessage[], asOf: Date, classifier?: StandbyCoverageClassifier) {
   if (messages.some(m => m.workerId !== workerId)) fail('DELIVERY_WORKER_MISMATCH');
   const oldest = new Date(messages.reduce((n, m) => Math.min(n, m.dueSince.getTime()), asOf.getTime()));
   const { state, exceptions } = await waitInputs(tx, workerId, asOf, oldest);
   if (state.trackedFrom > asOf) fail('DELIVERY_WAIT_INCOMPLETE');
-  return messages.map(m => deliveryWait(m, exceptions, state, asOf));
+  const waits = [];
+  for (const message of messages) waits.push(deliveryWait(await classifyStandby(tx, message, exceptions, state, asOf, classifier), exceptions, state, asOf));
+  return waits;
 }
 
 /** Capture under deliveryStateTransaction's shared reportsTo/authority fences. */
@@ -167,6 +202,7 @@ export async function deliveryAlarmChain(tx: Tx, workerId: string): Promise<Alar
 
 export type DeliveryAlarmInput = {
   workerId: string; candidates: DeliveryMessage[]; now: Date;
+  standbyClassifier?: StandbyCoverageClassifier;
   hold: { reason: 'draft' | 'isolated' | 'question' | 'screen-unknown' | 'not-submitted' | 'two-agents' | 'binding-mismatch'; terminalId: string | null } | null;
   /** S1/S2 supply provenance only AFTER persisting marks. Claimed ranges are verified below. */
   mark?: { channelId: string; channelIncarnation: number; throughSeq: number; principal: DeliveryMarkPrincipal };
@@ -224,7 +260,9 @@ export async function reconcileDeliveryAlarm(tx: Tx, input: DeliveryAlarmInput):
   if (!candidates.length) return { raised: null, resumed };
   const oldestDueAt = new Date(candidates.reduce((oldest, m) => Math.min(oldest, m.dueSince.getTime()), now.getTime()));
   const { state, exceptions } = await waitInputs(tx, workerId, now, oldestDueAt);
-  const selected = oldestStuckMessage(candidates, exceptions, state, now, stuckWindowSeconds);
+  const classified: DeliveryMessage[] = [];
+  for (const candidate of candidates) classified.push(await classifyStandby(tx, candidate, exceptions, state, now, input.standbyClassifier));
+  const selected = oldestStuckMessage(classified, exceptions, state, now, stuckWindowSeconds);
   if (!selected) return { raised: null, resumed };
   if (input.hold?.terminalId && !/^term_[A-Za-z0-9_-]{1,128}$/.test(input.hold.terminalId)) fail('DELIVERY_TERMINAL_INVALID');
   const episodeId = generateId(), eventId = generateId();
@@ -242,7 +280,7 @@ export async function reconcileDeliveryAlarm(tx: Tx, input: DeliveryAlarmInput):
 }
 
 /** Delivery alarms do not participate in the task evaluator's wall-clock escalation. */
-export async function advanceDeliveryEscalation(tx: Tx, workerId: string, now: Date): Promise<boolean> {
+export async function advanceDeliveryEscalation(tx: Tx, workerId: string, now: Date, classifier?: StandbyCoverageClassifier): Promise<boolean> {
   const active = await tx.workerDeliveryAlarmEpisode.findUnique({ where: { workerId } });
   if (!active) return false;
   const worker = await tx.worker.findUniqueOrThrow({ where: { id: workerId }, select: { appId: true } });
@@ -253,7 +291,7 @@ export async function advanceDeliveryEscalation(tx: Tx, workerId: string, now: D
   if (!event || event.acknowledgedAt) return false;
   const next = await tx.agentTeamAlarmSchedule.findFirst({ where: { eventId: active.alarmEventId, wokenAt: null }, orderBy: { chainIndex: 'asc' } });
   if (!next || next.deliveryWaitBaselineMs === null) return false;
-  const wait = await loadDeliveryWait(tx, { workerId, channelId: active.channelId, channelIncarnation: active.channelIncarnation, seq: active.anchorSeq, dueSince: active.dueSince }, now);
+  const wait = await loadDeliveryWait(tx, { workerId, channelId: active.channelId, channelIncarnation: active.channelIncarnation, seq: active.anchorSeq, dueSince: active.dueSince }, now, classifier);
   if (!nextDeliveryOwnerDue(wait, Number(next.deliveryWaitBaselineMs), stuckWindowSeconds, false)) return false;
   const changed = await tx.agentTeamAlarmSchedule.updateMany({ where: { eventId: active.alarmEventId, chainIndex: next.chainIndex, wokenAt: null }, data: { wokenAt: now } });
   if (!changed.count) return false;
@@ -262,11 +300,11 @@ export async function advanceDeliveryEscalation(tx: Tx, workerId: string, now: D
 }
 
 /** S13's read seam: return safe currentness/wait only, never the raw coverage ledger. */
-export async function deliveryAlarmSnapshot(tx: Tx, workerId: string, asOf: Date) {
+export async function deliveryAlarmSnapshot(tx: Tx, workerId: string, asOf: Date, classifier?: StandbyCoverageClassifier) {
   const active = await tx.workerDeliveryAlarmEpisode.findUnique({ where: { workerId } });
   if (!active || !(await channelStillCurrent(tx, active.channelId, active.channelIncarnation))) return null;
   if (active.anchorSeq <= await deliveryCoveredThrough(tx, workerId, active.channelId, active.channelIncarnation)) return null;
-  const wait = await loadDeliveryWait(tx, { workerId, channelId: active.channelId, channelIncarnation: active.channelIncarnation, seq: active.anchorSeq, dueSince: active.dueSince }, asOf);
+  const wait = await loadDeliveryWait(tx, { workerId, channelId: active.channelId, channelIncarnation: active.channelIncarnation, seq: active.anchorSeq, dueSince: active.dueSince }, asOf, classifier);
   const event = await tx.agentTeamEvent.findUniqueOrThrow({ where: { id: active.alarmEventId }, select: { acknowledgedAt: true, acknowledgedByWorkerId: true, acknowledgedByUserId: true } });
   return { episodeId: active.episodeId, eventId: active.alarmEventId, channelId: active.channelId, channelIncarnation: active.channelIncarnation, firstPendingSeq: active.anchorSeq, waitedMs: wait.waitedMs, waitAsOf: asOf, state: wait.suppressed ? 'SUPPRESSED' as const : 'ACTIVE' as const, acknowledgedAt: event.acknowledgedAt, acknowledgedBy: event.acknowledgedByWorkerId ? { kind: 'worker' as const, workerId: event.acknowledgedByWorkerId } : event.acknowledgedByUserId ? { kind: 'user' as const, userId: event.acknowledgedByUserId } : null };
 }
