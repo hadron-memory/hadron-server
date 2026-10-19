@@ -215,7 +215,7 @@ describe('what stays strict', () => {
   it('a worker\'s working memory and a session memory stay out of the member\'s reach', async () => {
     const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: owner.id, name: 'Mine2', urn: `own${generateId().toLowerCase()}:mine2`, visibility: 'ORGANIZATION' } as never });
     const workerMem = await db.memory.create({ data: { id: generateId(), class: 'app', appId: app.id, ownerUserId: owner.id, name: 'worker mem', urn: `${app.id}-w` } });
-    await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'W', slug: 'w', memoryId: workerMem.id } as never });
+    await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'W', slug: 'w', memoryId: workerMem.id } as never });
     const sessionMem = await db.memory.create({ data: { id: generateId(), class: 'app', appId: app.id, ownerUserId: owner.id, userMemoryOfAgentId: agent.id, name: 'sess', urn: `${app.id}-s` } });
     for (const m of [workerMem, sessionMem]) {
       expect(await canReadMemory(db, auth(member.id), m.id)).toBe(false);
