@@ -557,3 +557,26 @@ it('a routed flow that is also a partial remains executable and is captured only
   expect(Object.keys(pin.nodes).filter(id => id === f.next.id)).toHaveLength(1);
   expect(await executeAppRun(db, (await f.run()).id, f.deps)).toBe('completed');
 });
+
+// #2040: the shared include parser feeds the pin.
+it('a loc tag with settings pins its target, and a tag in code pins nothing', async () => {
+  const f = await fixture();
+  await db.node.update({ where: { id: f.entry.id }, data: { content: '{{> snippet rev=2 approved}} `{{> literal}}`' } });
+  const snippet = await db.node.create({ data: { memoryId: f.memory.id, loc: 'snippet', name: 'Snippet', content: 'S' } });
+  const pin = await adopt(f);
+  expect(pin.nodes).toHaveProperty(snippet.id);
+  expect(pin.absentPartials).toEqual([]);
+});
+it('a URN tag pins a readable same-organization target and records an unreadable one as absent', async () => {
+  const f = await fixture();
+  const other = await db.memory.create({ data: { name: 'Other', urn: 'pin.test:other', class: 'knowledge', organizationId: f.org.id } });
+  const shared = await db.node.create({ data: { memoryId: other.id, loc: 'shared', name: 'Shared', content: 'SHARED' } });
+  const foreignOrg = await db.organization.create({ data: { name: 'Foreign', urn: 'foreign.test' } });
+  const foreign = await db.memory.create({ data: { name: 'F', urn: 'foreign.test:f', class: 'knowledge', organizationId: foreignOrg.id } });
+  await db.node.create({ data: { memoryId: foreign.id, loc: 'secret', name: 'Secret', content: 'SECRET' } });
+  await db.node.update({ where: { id: f.entry.id }, data: { content: '{{> hrn:node:pin.test:other:shared}} {{> hrn:node:foreign.test:f:secret}}' } });
+  const pin = await adopt(f);
+  expect(pin.nodes).toHaveProperty(shared.id);
+  expect(JSON.stringify(pin)).not.toContain('SECRET');
+  expect(pin.absentPartials.map((p) => p.urn)).toEqual(['hrn:node:foreign.test:f:secret']);
+});
