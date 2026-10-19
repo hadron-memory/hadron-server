@@ -1,5 +1,6 @@
 /** #1744 / cor:dmo:050:05: one manager audience for credential issuance and inventory. */
 import { beforeEach, describe, expect, it } from 'vitest';
+import { runAsActor } from '../../../lib/requestActor.js';
 import type { Role } from '../../../generated/prisma/index.js';
 import { parse, type OperationDefinitionNode } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
@@ -166,4 +167,36 @@ describe('#1744 transport impersonation chokepoint remains intact', () => {
       await expect(action).rejects.toMatchObject({ extensions: { code: 'IMPERSONATION_READ_ONLY' } });
     });
   }
+});
+
+/** #2080 Rico P2-1: provisional audience refusal (Eden #22213), awaiting Holger's ruling. */
+describe('#2080 bound worker actor cannot manage App credentials (provisional)', () => {
+  for (const name of ['owner', 'admin']) {
+    for (const op of writes) {
+      it(`${op}: refuses a bound worker driven by ${name} with no credential changes`, async () => {
+        const before = await snapshot();
+        await runAsActor({ workerId: generateId(), agentId: generateId() }, async () => {
+          await forbidden(write(op, ctx(name)));
+        });
+        expect(await snapshot()).toEqual(before);
+      });
+    }
+    it(`inventory: refuses a bound worker driven by ${name} on direct and eager/fallback nested paths`, async () => {
+      const keys = await db.appKey.findMany({ where: { appId } });
+      await runAsActor({ workerId: generateId(), agentId: generateId() }, async () => {
+        await forbidden(Q.appKeys({}, { appRef: appId }, ctx(name)));
+        await forbidden(typeResolvers.App.keys({ id: appId }, {}, ctx(name)));
+        await forbidden(typeResolvers.App.keys({ id: appId, keys }, {}, ctx(name)));
+      });
+    });
+  }
+  it('an org ADMIN without App membership still manages keys as a person', async () => {
+    expect(await db.appMember.count({ where: { appId, userId: users.admin! } })).toBe(0);
+    await runAsActor({ workerId: null, agentId: null }, async () => {
+      await expect(write('mint', ctx('admin'))).resolves.toHaveProperty('rawKey');
+      await expect(Q.appKeys({}, { appRef: appId }, ctx('admin'))).resolves.toBeTruthy();
+      await expect(write('revoke', ctx('admin'))).resolves.toBe(true);
+      await expect(write('rotate', ctx('admin'))).resolves.toHaveProperty('rawKey');
+    });
+  });
 });
