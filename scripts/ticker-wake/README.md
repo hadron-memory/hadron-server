@@ -24,7 +24,7 @@ skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
   proof would acknowledge the unseen components (#2069 owns the joining policy).
   There is no mention-ack path.
 - **Timing (R63).** The server owns it: each wake carries `anchorAt`,
-  `deliverAfter` and `busyDeadline` (Liam's seam, hadron-server#2063 on the S1
+  `deliverAfter` and `busyDeadline` (Liam's seam, hadron-server#2017 (S1)
   branch). Nothing is typed before `deliverAfter`; a busy terminal is held until
   `busyDeadline`, after which busy alone stops vetoing. Nothing is recomputed or
   remembered locally, so a re-offer, join or restart cannot restart it, and a
