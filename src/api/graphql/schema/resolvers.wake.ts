@@ -138,6 +138,7 @@ export async function dueWakesFor(
         task: r.kind === 'TASK'
           ? { id: r.taskId, eventId: r.eventId, chainIndex: r.chainIndex, event: r.event, title: r.title,
               ...(r.subjectWorkerId ? { subjectWorkerId: r.subjectWorkerId } : {}),
+              ...(r.standbyHeld ? { standbyHeld: r.standbyHeld } : {}),
               ref: r.taskId === null ? `ALARM:${r.eventId}:${r.chainIndex}` : taskReasonRef(r.taskId, r.event) }
           : null,
       })),

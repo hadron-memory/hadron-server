@@ -18,6 +18,8 @@ export type RoutedMessage = {
   broadcastWakes: boolean;
   /** Server-written at post time: the author manages the App (cor:agt:080:15 budget exemption). */
   managerPost: boolean;
+  /** S7 (#2023): a person, not a worker or the system, wrote it. Read only for a worker on standby (standby.ts). */
+  humanAuthored?: boolean;
   /** R63: when the message was posted (ms since epoch); the anchor of a mention. Optional so pure-rule fixtures need not carry it. */
   postedAtMs?: number;
 };
@@ -52,6 +54,8 @@ export type TaskWakeReason = {
   chainIndex: number;
   event: 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'ALARM' | 'END_SESSION';
   title: string | null;
+  /** S7 (R90): assignment held count, returned once from its event. Inert until S7b. */
+  standbyHeld?: number;
 };
 
 export type WakeReason = { kind: 'MENTION' } | { kind: 'TICK'; tickerId: string; k: number } | TaskWakeReason;
@@ -162,7 +166,7 @@ export function workerWake(args: {
   }
 
   for (const t of args.tasks ?? []) {
-    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title, ...(t.subjectWorkerId ? {subjectWorkerId:t.subjectWorkerId} : {}) });
+    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title, ...(t.subjectWorkerId ? { subjectWorkerId: t.subjectWorkerId } : {}), ...(t.standbyHeld ? { standbyHeld: t.standbyHeld } : {}) });
     if (t.atMs !== undefined) anchors.push(t.atMs);
   }
 
