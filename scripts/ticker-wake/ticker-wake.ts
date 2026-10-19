@@ -16,9 +16,14 @@
  *    joining policy). There is no mention-ack path in this script.
  *
  * Safety:
- *  - a nudge is typed only after the terminal proves idle AND a final read of
- *    the composer shows it empty with no Orca draft, even when tui-idle holds;
- *    unknown/menu/input state holds. Nothing is cleared or interrupted.
+ *  - timing is the server's (R63): nothing is typed before the wake's
+ *    deliverAfter; a busy terminal is held until its busyDeadline, after which
+ *    busy alone stops vetoing. Anchors/floors are never recomputed or remembered
+ *    here, so a re-offer, join or restart cannot restart them.
+ *  - the composer rules are unconditional, deadline or not: a nudge is typed
+ *    only when a read shows the composer empty with no Orca draft, even when
+ *    tui-idle holds; a draft, question/menu, unknown input or identity holds.
+ *    Nothing is cleared or interrupted.
  *  - a CONFIRMED send (Orca's stages include `turn_started`) is recorded in a durable
  *    receipt, with the tick coverage and the receiving terminal, BEFORE the
  *    ack. A lost ack is retried ack-only, only for a proof fully covered by a
@@ -35,12 +40,12 @@ import { linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSyn
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  loadConfig, DEFAULT_CONFIG, runCommand, listTerminals, resolveTerminal, provesIdle,
-  readScreen, promptIsEmptyFromTerm, screenAgentFamily,
+  loadConfig, DEFAULT_CONFIG, runCommand, listTerminals, resolveTerminal,
+  readScreen, promptIsEmptyFromTerm, screenAgentFamily, isIdle, idleProofAbovePrompt,
   type Config, type Runner,
 } from '../orca-attention-router/router.js';
 
-const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{worker{id name} reasons{kind ticker{id name}} proof} pageInfo{hasNextPage endCursor}}}`;
+const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{worker{id name} reasons{kind ticker{id name}} proof anchorAt deliverAfter busyDeadline} pageInfo{hasNextPage endCursor}}}`;
 const ACK = `mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowledged unchanged}}`;
 const MAX_PAGES = 10;
 
@@ -204,19 +209,35 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
     if (!ticks) { log(`${ts} ${name}: held (the proof's tick coverage cannot be established)`); continue; }
     let prior = receipts[id];
 
+    // The server owns the timing (R63): anchor, floor and busy deadline come with the wake and are never recomputed or
+    // remembered here, so a re-offer, a join or a restart cannot restart them. Missing/unparsable timing holds.
+    const at = (v: unknown): number => (typeof v === 'string' ? Date.parse(v) : NaN);
+    const deliverAfter = at(w.deliverAfter);
+    const busyDeadline = at(w.busyDeadline);
+    if (!Number.isFinite(deliverAfter) || !Number.isFinite(busyDeadline) || !Number.isFinite(at(w.anchorAt))) { log(`${ts} ${name}: held (the wake carries no server timing)`); continue; }
+
     const [handle, detail] = resolveTerminal(entry, terminals, cfg, run);
     if (!handle) { log(`${ts} ${name}: held (${detail})`); continue; }
     const term0 = terminals.find((t) => t.handle === handle) as any;
     const receiver = `${handle}#${term0?.incarnationId ?? ''}`;
 
-    /** The idle proof plus the final empty-composer/no-draft read: required before ANYTHING that can type into this terminal. */
+    /**
+     * The R63 delivery gate for anything that can type into this terminal. The composer rules are unconditional: a
+     * draft, a question/menu, unknown input or identity, or a foreign composer always holds. Before the server's
+     * deliverAfter nothing is typed; "busy" alone vetoes only until the server's busyDeadline, then stops vetoing.
+     */
     const safeToType = (): string | null => {
-      const [idle, why] = provesIdle(cfg, handle, detail, undefined, cfg.busyWaitMs, run);
-      if (!idle) return why;
+      if (now < deliverAfter) return `before deliverAfter ${new Date(deliverAfter).toISOString()}`;
+      const idleNow = isIdle(cfg, handle, cfg.busyWaitMs, run);
       const term = readScreen(cfg, handle, run);
       const agent = detail === 'claude' || detail === 'codex' ? detail : (screenAgentFamily(term) ?? '');
       const [empty, emptyWhy] = promptIsEmptyFromTerm(term, agent);
-      return empty ? null : `composer not provably empty: ${emptyWhy}`;
+      if (!empty) return `composer not provably empty: ${emptyWhy}`;
+      if (idleNow) return null;
+      const [proof, why] = idleProofAbovePrompt((term?.tail ?? []) as string[], agent);
+      if (proof === 'idle') return null;
+      if (proof === 'busy') return now >= busyDeadline ? null : `busy until the server's busyDeadline ${new Date(busyDeadline).toISOString()} (${why})`;
+      return `unknown input state (${why})`;
     };
 
     // An unreconciled earlier request is reconciled with ITS OWN identity. Reissuing it can still perform input, so it

@@ -92,13 +92,18 @@ function fake(): Fake {
   return f;
 }
 
-const wake = (id: string, name: string, reasons: any[], p = proof(['T:1']), channels: any[] = []) => ({ worker: { id, name }, reasons, channels, proof: p });
+// Server-owned timing (R63): by default past the floor, busy deadline still ahead.
+const iso = (ms: number): string => new Date(ms).toISOString();
+const wake = (id: string, name: string, reasons: any[], p = proof(['T:1']), channels: any[] = [], timing?: { anchorAt: string; deliverAfter: string; busyDeadline: string }) => ({
+  worker: { id, name }, reasons, channels, proof: p,
+  ...(timing ?? { anchorAt: iso(Date.now() - 600_000), deliverAfter: iso(Date.now() - 300_000), busyDeadline: iso(Date.now() + 3_600_000) }),
+});
 const cfg = (): Config => ({
   app: 'hrn:app:test:team', channel: 'chan', hadronCli: 'hadron', orcaCli: 'orca', stateDir: dir,
   roster: [{ worker: 'w-ada', name: 'Ada', worktree: dir, terminal: 'term_a' }],
   busyWaitMs: 10, submitWaitS: 1, coordinatorWatchMinutes: 20,
 } as Config);
-const go = (opts: { dry?: boolean } = {}) => pass(cfg(), f.run, opts, (l) => lines.push(l));
+const go = (opts: { dry?: boolean; now?: () => number } = {}) => pass(cfg(), f.run, opts, (l) => lines.push(l));
 const log = () => lines.join('\n');
 const receiptsFile = () => join(dir, 'ticker-wake', 'receipts.json');
 
@@ -249,6 +254,88 @@ describe('idle gate (C1 rule)', () => {
     f.screen = { source: 'screen', tail: ['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'] };
     go();
     expect(f.sent).toEqual([]);
+  });
+});
+
+describe('R63 timing (server-owned anchor, floor and busy deadline)', () => {
+  const BUSY = ['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'];
+  const T0 = Date.parse('2026-10-19T02:00:00.000Z');
+  const timing = (deliverAfter: number, busyDeadline: number) => ({ anchorAt: iso(T0 - 900_000), deliverAfter: iso(deliverAfter), busyDeadline: iso(busyDeadline) });
+  const at = (ms: number) => ({ now: () => ms });
+
+  it('nothing is typed before deliverAfter, even to an idle terminal; at deliverAfter it is delivered', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing(T0 + 60_000, T0 + 600_000))];
+    go(at(T0 + 59_999));
+    expect(f.sent).toEqual([]);
+    expect(log()).toContain('before deliverAfter');
+    go(at(T0 + 60_000));
+    expect(f.sent).toHaveLength(1);
+  });
+
+  it('busy vetoes before busyDeadline, and stops vetoing at and after it', () => {
+    f.idle = false;
+    f.screen = { source: 'screen', tail: BUSY };
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing(T0 - 1, T0 + 600_000))];
+    go(at(T0 + 599_999));
+    expect(f.sent).toEqual([]);
+    expect(log()).toContain('busy until the server');
+    go(at(T0 + 600_000));
+    expect(f.sent).toHaveLength(1); // at the deadline busy alone no longer vetoes
+    expect(f.acked).toHaveLength(1);
+  });
+
+  it('after the deadline a busy terminal is delivered to; after it nothing else relaxes', () => {
+    f.idle = false;
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing(T0 - 1, T0 + 1))];
+    for (const [label, screen] of [
+      ['draft', { source: 'screen', tail: BUSY, draft: 'half typed' }],
+      ['menu/question', { source: 'screen', tail: ['Which option do you pick?', '❯ 1. Alpha', '  2. Beta', 'Enter to select · ↑/↓ to navigate'] }],
+      ['second footer row', { source: 'screen', tail: [...BUSY, '  esc to interrupt'] }],
+      ['unknown screen', { source: 'screen', tail: [RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'] }],
+    ] as const) {
+      f.sent = []; f.acked = []; lines = [];
+      f.screen = screen as any;
+      go(at(T0 + 3_600_000)); // an hour past the deadline
+      expect(f.sent, label).toEqual([]);
+      expect(f.acked, label).toEqual([]);
+    }
+  });
+
+  it('timing comes only from the wake: a restart, re-offer or join decides identically and keeps no local clock', () => {
+    f.idle = false;
+    f.screen = { source: 'screen', tail: BUSY };
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'first-offer'), [], timing(T0 - 1, T0 + 600_000))];
+    go(at(T0 + 10_000)); // held
+    // a re-offer carries the SAME stored anchor/floor/deadline (new proof bytes): decided by the wake's fields alone
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 're-offer'), [], timing(T0 - 1, T0 + 600_000))];
+    go(at(T0 + 10_000));
+    expect(f.sent).toEqual([]);
+    // a fresh process (no memory of the earlier passes) at the deadline delivers
+    go(at(T0 + 600_000));
+    expect(f.sent).toHaveLength(1);
+    // a joined reason leaves the wake untouched whatever the clock says
+    f.sent = []; f.acked = [];
+    f.wakes = [wake('w-ada', 'Ada', [TICK, MENTION], proof(['T:1']), [], timing(T0 - 1, T0 + 1))];
+    go(at(T0 + 3_600_000));
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+  });
+
+  it('a wake without server timing (old server) is held, never given a local default', () => {
+    f.wakes = [{ worker: { id: 'w-ada', name: 'Ada' }, reasons: [TICK], channels: [], proof: proof(['T:1']) }];
+    go();
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('no server timing');
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], { anchorAt: 'x', deliverAfter: iso(Date.now()), busyDeadline: iso(Date.now()) })];
+    go();
+    expect(f.sent).toEqual([]);
+  });
+
+  it('asks the server for anchorAt, deliverAfter and busyDeadline', () => {
+    f.wakes = [];
+    go();
+    expect(f.dueQueries[0]).toMatch(/anchorAt deliverAfter busyDeadline/);
   });
 });
 

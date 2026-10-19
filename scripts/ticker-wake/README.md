@@ -23,9 +23,16 @@ skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
   (MENTION, TASK, unknown) is left alone, neither nudged nor acked: the opaque
   proof would acknowledge the unseen components (#2069 owns the joining policy).
   There is no mention-ack path.
-- **Composer.** A nudge is typed only after the terminal proves idle and a final
-  read shows the composer empty with no Orca draft (even when `tui-idle` holds).
-  Nothing is cleared or interrupted.
+- **Timing (R63).** The server owns it: each wake carries `anchorAt`,
+  `deliverAfter` and `busyDeadline` (Liam's seam, hadron-server#2063 on the S1
+  branch). Nothing is typed before `deliverAfter`; a busy terminal is held until
+  `busyDeadline`, after which busy alone stops vetoing. Nothing is recomputed or
+  remembered locally, so a re-offer, join or restart cannot restart it, and a
+  wake without timing (old server) is held.
+- **Composer.** Unconditional, deadline or not: a nudge is typed only when a
+  read shows the composer empty with no Orca draft (even when `tui-idle` holds);
+  a draft, question/menu, unknown input or identity holds. Nothing is cleared or
+  interrupted.
 - **Typed once.** A send counts only when Orca's receipt stages include the
   exact stage `turn_started`. It is recorded in `receipts.json` (delivered tick
   coverage + receiving terminal incarnation) before the ack; a lost ack is
@@ -48,6 +55,5 @@ skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
 
 Dependencies: #2067 (footer rule), #2068, #2069, hadron-cli#907. The `turn_started` stage name is from Orca's documented receipt and
 recorded sends, not yet from an independent scratch-terminal capture (QA).
-Busy-delay timing follows the router's idle wait; composer safety is
-independent of it. Verified by the 43 fake-runner tests; live-host rollout
+Verified by the 51 fake-runner tests; live-host rollout
 evidence is separate.
