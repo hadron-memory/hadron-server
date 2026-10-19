@@ -83,6 +83,7 @@ describe('whole delivery batch loader: host roster and S4 reach', () => {
     await say('mine', { authorWorkerId: worker.id });
     await say('body says @target but envelope does not', { mentions: [] });
     await say('reply-folded', { mentions: ['target'], replyToSeq: 1 });
+    await say('string stamp is not authority', { mentions: ['all'], broadcastWakes: 'true' });
     expect((await batch()).ranges[0]!.seqs).toEqual([1,2,6]);
   });
   it('applies the maximum of read and current-incarnation delivered marks', async () => {
@@ -184,6 +185,29 @@ describe('timing, parent context, identity, paging and overflow', () => {
     ].sort((x,y) => x.channelId.localeCompare(y.channelId)));
     await db.channel.update({ where: { id: second.id }, data: { incarnation: 2 } });
     const b = await batch(); expect(b.text).toBe(a.text); expect(b.renderHash).toBe(a.renderHash); expect(b.batchKey).not.toBe(a.batchKey);
+  });
+  it('returns at most ten eligible bodies per channel while retaining the full eligible total', async () => {
+    await rawMessages(205);
+    const fetched: number[] = [];
+    const raw = db.$queryRaw.bind(db) as (...args: unknown[]) => Promise<unknown>;
+    const observedDb = new Proxy(db, { get(target, property) {
+      if (property === '$queryRaw') return async (...args: unknown[]) => {
+        const result = await raw(...args);
+        if (Array.isArray(result) && result.length && result[0] && typeof result[0] === 'object' && 'created_at' in result[0]) fetched.push(result.length);
+        return result;
+      };
+      return Reflect.get(target, property, target);
+    } });
+    const page = await load({ ctx: { ...caller, db: observedDb } });
+    expect(page.batches[0]!.overflow).toBe(195); expect(fetched).toEqual([10]);
+  });
+  it('starts timing at the first eligible post rather than older ordinary unread', async () => {
+    await say('old ordinary', { mentions: [] }, channel, new Date(posted.getTime() - 3600_000));
+    await say('eligible');
+    expect((await load({ now: new Date(posted.getTime() + 119_999) })).batches).toEqual([]);
+    const out = (await load({ now: new Date(posted.getTime() + 120_000) })).batches[0]!;
+    expect(out.deliverAfter).toEqual(new Date(posted.getTime() + 120_000));
+    expect(out.ranges[0]).toMatchObject({ fromSeq: 1, throughSeq: 2, seqs: [2] });
   });
   it('counts all eligible overflow beyond the internal per-channel sample', async () => {
     await rawMessages(205);
