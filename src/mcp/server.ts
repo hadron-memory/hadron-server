@@ -10672,7 +10672,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // is the answer and an age beside it invites reading the age as
             // presence, which is #1034's confusion in a new place.
             if (!act?.lastActiveAt) flags.push('never driven');
-            else if (!act.hasLiveSession) flags.push(`last driven ${ageOf(act.lastActiveAt)}`);
+            else if (!act.hasLiveSession) flags.push(`last recorded activity ${ageOf(act.lastActiveAt)}`);
             // #1026 — built from the SAME page-shared URN above, so the roster
             // costs no extra lookup per worker (the PR #1000 rule that pulled
             // the App URN out of the per-item path in the first place).
