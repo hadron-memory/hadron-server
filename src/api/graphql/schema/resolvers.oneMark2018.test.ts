@@ -21,6 +21,7 @@ import { getMemoryEncryptionInfo } from '../../../lib/nodeCrypto.js';
 import { resolvers, type Context } from './resolvers.js';
 import { maybeAdvanceOwnChannelRead } from '../../../lib/teamAttention.js';
 import { recordMentionsWorker } from '../../../lib/mentionsReadResolution.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -319,15 +320,142 @@ describe('#2018 S2: authority, exclusions, atomicity', () => {
     expect(await marks()).toEqual({ delivered: 0, read: 0 });
   });
 
-  it.each(['read first', 'ack first'])('an own read and a batch ack racing (%s) end at the max of both, without deadlock', async (order) => {
+  // George P3 on 8f146ccb: Promise.all order does not decide which takes the wake lock first. The first is parked
+  // holding the lock, the second is observed blocked on it, then the first is released.
+  it.each(['read first', 'ack first'] as const)('an own read and a batch ack racing (%s holds the wake lock) end at the max of both', async (order) => {
     const s = await ownSession();
     await mentionOnly();
     for (const t of ['a', 'b', 'c']) await say(`@kit ${t}`, { mentions: ['kit'] });
     await aged();
     const b = (await read(hostKey)).batches[0];
-    const ack = () => M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelId: channel.id, seq: 2 }] }, keyCtx(hostKey));
-    const own = () => mentionsRead(s, { sinceSeq: 0, limit: 20 });
-    await Promise.all(order === 'read first' ? [own(), ack()] : [ack(), own()]);
+    const park = parkAfterWakeLock();
+    const ack = (d = db) => M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelId: channel.id, seq: 2 }] }, keyCtx(hostKey, app.id, { db: d as never }));
+    const own = (d = db) => Q.channelMessages({}, { channelRef: channel.id, mentionsRef: kit.id, sinceSeq: 0, limit: 20 }, selfCtx(s, { db: d as never }));
+    const first = order === 'read first' ? own(park.db) : ack(park.db);
+    await park.reached;
+    const second = order === 'read first' ? ack() : own();
+    await waitForLockWaiters(db, 1);
+    park.release();
+    await Promise.all([first, second]);
     expect(await marks()).toEqual({ delivered: 3, read: 3 });
+  });
+});
+
+/**
+ * Wrap `db` so the first transaction statement matching `match` runs `before` first (awaited), or parks right
+ * before or after it until released.
+ */
+function hookedDb(match: (sql: string, values: unknown[]) => boolean, hook: { before?: () => Promise<void>; park?: 'before' | 'after' }) {
+  let fired = false;
+  let reached!: () => void; const reachedP = new Promise<void>((r) => { reached = r; });
+  let release!: () => void; const released = new Promise<void>((r) => { release = r; });
+  const original = db.$transaction.bind(db) as any;
+  const wrapped = new Proxy(db, { get(target, prop) {
+    if (prop !== '$transaction') return Reflect.get(target, prop);
+    return (work: any, opts: any) => original(async (tx: any) => work(new Proxy(tx, { get(t, key) {
+      if (key !== '$executeRaw') return Reflect.get(t, key);
+      return async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const hit = !fired && match(strings.join('?'), values);
+        if (hit) { fired = true; await hook.before?.(); }
+        if (hit && hook.park === 'before') { reached(); await released; }
+        const result = await t.$executeRaw(strings, ...values);
+        if (hit && hook.park === 'after') { reached(); await released; }
+        return result;
+      };
+    } })), opts);
+  } });
+  return { db: wrapped, reached: reachedP, release, fired: () => fired };
+}
+const parkAfterWakeLock = () => hookedDb((sql, v) => sql.includes('pg_advisory_xact_lock(') && v.includes('wake:' + kit.id), { park: 'after' });
+/** Park the mark transaction at its delivered write: every lock is held and every condition has been read. */
+const parkAtMarkWrite = () => hookedDb((sql) => sql.includes('INSERT INTO worker_delivery_channels'), { park: 'before' });
+
+/** An enabled ALL-relevance ticker covering every channel, with Kit subscribed (Dara's probe fixture). */
+async function allTicker(opts: { enabled?: boolean; subscribe?: boolean } = {}) {
+  const t = await db.ticker.create({ data: { id: generateId(), appId: app.id, ownerUserId: manager.id, name: 'All', slug: 'all', cadenceSeconds: 600, anchorAt: new Date(Date.now() - 3600_000), enabled: opts.enabled ?? true } });
+  if (opts.subscribe ?? true) await db.tickerSubscription.create({ data: { id: generateId(), tickerId: t.id, workerId: kit.id, createdBy: manager.id } });
+  return t;
+}
+
+// Dara P2-1 on 8f146ccb: the own-mentions marks are decided under the mark's own locks, not on the policy the
+// preflight read. Unshown chatter at seq 1, the mention at seq 2; the mentions page returns [2].
+describe('#2018 S2: the own-mentions mark decision is re-derived and fenced (Dara P2-1)', () => {
+  type Kind = 'register' | 'session' | 'all-ticker' | 'control';
+  // A second org admin edits the register: the session driver's own user anchor must not be what orders the write.
+  async function admin2() {
+    const u = await db.user.create({ data: { githubId: 82_000_000 + Math.floor(Math.random() * 1_000_000), githubUsername: `bt-a2-${generateId()}`, roles: ['READER'] }, select: { id: true } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: u.id, role: 'ADMIN' } });
+    return u;
+  }
+  async function setup(kind: Kind) {
+    const s = await ownSession();
+    if (kind !== 'all-ticker') await mentionOnly();
+    await say('unshown chatter');
+    await say('@kit visible', { mentions: ['kit'] });
+    await aged();
+    return s;
+  }
+
+  // The change commits AFTER the preflight and BEFORE the mark transaction's first lock: the decision must see it.
+  it.each(['register', 'session', 'all-ticker', 'control'] as const)('a %s change committed after the preflight moves no mark', async (kind: Kind) => {
+    const s = await setup(kind);
+    const other = await admin2();
+    const change = async () => {
+      if (kind === 'register') {
+        const e = await db.registerEntry.findFirstOrThrow({ where: { attendeeWorkerId: kit.id, channelId: channel.id } });
+        await M.updateRegisterEntry({}, { ref: e.id, input: { role: 'POST' } }, ctx(other.id));
+      } else if (kind === 'session') {
+        await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+      } else if (kind === 'all-ticker') {
+        await allTicker();
+      }
+    };
+    // The mark transaction's first lock: the authority anchors (fixed head) or the wake lock (8f146ccb).
+    const hook = hookedDb((sql, v) => sql.includes('pg_advisory_xact_lock') && (v.includes('authorization:app') || v.includes('wake:' + kit.id)), { before: change });
+    const page = await Q.channelMessages({}, { channelRef: channel.id, mentionsRef: kit.id, sinceSeq: 0, limit: 20 }, selfCtx(s, { db: hook.db as never }));
+    expect(hook.fired()).toBe(true);
+    expect(page.items.map((m: any) => m.seq)).toEqual([2]);
+    expect(await marks()).toEqual(kind === 'control' ? { delivered: 2, read: 2 } : { delivered: 0, read: 0 });
+    // Nothing was marked delivered: a fresh host batch still starts at the unshown chatter (8f146ccb offered none).
+    if (kind === 'all-ticker') expect((await read(hostKey)).batches[0]?.ranges[0]?.fromSeq).toBe(1);
+  });
+
+  // The writer arrives after the mark's locks: parked right after the wake lock (before any condition is read), or at
+  // the delivered write (every condition read). It is observed blocked, the marks commit on the policy they were
+  // decided on, and only then does it land.
+  const kinds = ['register', 'session', 'ticker-enable', 'ticker-subscribe', 'ticker-create'] as const;
+  const points = ['after the wake lock', 'at the mark write'] as const;
+  it.each(kinds.flatMap((k) => points.map((p) => [k, p] as const)))('a %s writer arriving %s waits for the marks to commit', async (kind, point) => {
+    const s = await setup(kind === 'register' || kind === 'session' ? 'control' : 'all-ticker');
+    const other = await admin2();
+    const ticker = kind === 'ticker-enable' ? await allTicker({ enabled: false })
+      : kind === 'ticker-subscribe' ? await allTicker({ subscribe: false }) : null;
+    const park = point === 'at the mark write' ? parkAtMarkWrite() : parkAfterWakeLock();
+    const reading = Q.channelMessages({}, { channelRef: channel.id, mentionsRef: kit.id, sinceSeq: 0, limit: 20 }, selfCtx(s, { db: park.db as never }));
+    await park.reached;
+    let committed = false;
+    const write = (async () => {
+      if (kind === 'register') {
+        const e = await db.registerEntry.findFirstOrThrow({ where: { attendeeWorkerId: kit.id, channelId: channel.id } });
+        await M.updateRegisterEntry({}, { ref: e.id, input: { role: 'POST' } }, ctx(other.id));
+      } else if (kind === 'session') {
+        await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+      } else if (kind === 'ticker-enable') {
+        await M.updateTicker({}, { ref: ticker!.id, input: { enabled: true } }, ctx(manager.id));
+      } else if (kind === 'ticker-subscribe') {
+        await M.subscribeWorker({}, { tickerRef: ticker!.id, workerRef: kit.id }, ctx(manager.id));
+      } else {
+        // A ticker created after the row scan has no row to hold: the App's tickers lock orders the create.
+        const t = await M.createTicker({}, { appRef: app.id, input: { name: 'All', cadenceSeconds: 600 } }, ctx(manager.id));
+        await M.subscribeWorker({}, { tickerRef: t.id, workerRef: kit.id }, ctx(manager.id));
+      }
+    })().then(() => { committed = true; });
+    // Unfenced, the writer commits at once and nothing ever waits: fail fast instead of hanging the parked read.
+    await waitForLockWaiters(db, 1, 2_000).catch((e) => { park.release(); throw e; });
+    expect(committed).toBe(false);
+    park.release();
+    expect((await reading).items.map((m: any) => m.seq)).toEqual([2]);
+    await write;
+    expect(await marks()).toEqual(kind === 'register' || kind === 'session' ? { delivered: 2, read: 2 } : { delivered: 2, read: 0 });
   });
 });
