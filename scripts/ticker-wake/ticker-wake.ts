@@ -2,18 +2,25 @@
  * Ticker-only wake delivery for an Orca host (Hugo, 2026-10-18; corrected after
  * the #2070 gate, 2026-10-19).
  *
- * Delivers ONLY wakes whose reasons are TICK (optionally with MENTION) from
- * hadron dueWakes to the worker's terminal, then acks the wake by proof.
- * Mentions are not relayed: chat posts reach terminals through
- * hadron-chat-send. Interim until hadron-cli#907 (C1); shares no token, ledger
- * or lock with the attention router.
+ * Delivers ONLY wakes that carry a TICK, from hadron dueWakes to the worker's
+ * terminal, then acks the wake by proof. Mentions are not relayed: chat posts
+ * reach terminals through hadron-chat-send. Interim until hadron-cli#907 (C1);
+ * shares no token, ledger or lock with the attention router.
  *
- * Per-reason contract (TICK-only; #2070 gate, Vera's receipt):
- *  - a wake whose reasons are exactly TICK: nudge once, then ack it.
- *  - any wake carrying another reason (MENTION, TASK, unknown): left alone,
- *    neither nudged nor acked. The opaque proof would also acknowledge the
- *    undelivered components, possibly marking mentions read (#2069 owns the
- *    joining policy). There is no mention-ack path in this script.
+ * Per-reason contract (TICK-only; #2070 gate, Vera's receipt; updated for #2102):
+ *  - a wake whose reasons are TICK, or TICK joined with MENTION: nudge once, then
+ *    ack it. Since #2069 (landed in #2102) a MENTION-only reservation absorbs a
+ *    later tick, so a worker holding an outstanding mention is offered a
+ *    TICK+MENTION wake; skipping it would starve that worker of ticks. Since R53
+ *    (#2072, cor:agt:080:04/:16) acknowledging a wake moves NO message mark: it
+ *    records the tick and spends the reservation, and the mention stays unread
+ *    and due (it is delivered by an S1 batch / hadron-chat-send, never by this
+ *    script). The nudge tells the worker to read the team channel unfiltered.
+ *  - any wake carrying another reason (TASK, unknown): left alone, neither
+ *    nudged nor acked. A proof naming task events records them delivered
+ *    unseen (T5 receipts), and this script does not deliver tasks.
+ *  - a MENTION-only wake is ignored and never acked: there is no mention-ack
+ *    path in this script.
  *
  * Safety:
  *  - timing is the server's (R63): nothing is typed before the wake's
@@ -201,8 +208,8 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
   for (const w of due) {
     const name = w.worker.name;
     const id: string = w.worker.id;
-    const other = [...kinds(w)].filter((x) => x !== 'TICK');
-    if (other.length) { log(`${ts} ${name}: left alone (also carries ${other.join(',')}; the proof would acknowledge them unseen)`); continue; }
+    const other = [...kinds(w)].filter((x) => x !== 'TICK' && x !== 'MENTION');
+    if (other.length) { log(`${ts} ${name}: left alone (also carries ${other.join(',')}; the proof would record them delivered unseen)`); continue; }
     const entry = cfg.roster.find((e) => e.worker === id);
     if (!entry) { log(`${ts} ${name}: not on roster`); continue; }
     const ticks = proofTicks(w.proof);

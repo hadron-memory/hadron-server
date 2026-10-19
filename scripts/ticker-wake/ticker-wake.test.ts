@@ -138,8 +138,22 @@ describe('selection and delivery', () => {
     expect(f.dueQueries[0]).not.toContain('channels');
   });
 
-  it('TICK+MENTION, TICK+TASK and TICK+unknown are left alone: no nudge, no ack, no receipt', () => {
-    for (const extra of [MENTION, TASK, { kind: 'FUTURE', ticker: null }]) {
+  // #2069 (landed in #2102): a MENTION-only reservation absorbs a later tick, so the due wake is TICK+MENTION. R53
+  // (#2072, cor:agt:080:04/:16): a wake carries no message text and acknowledging it moves NO message mark, so acking the
+  // joined proof records the tick and spends the reservation and never marks the mention delivered or read (S1 text
+  // batches and the worker's own read do that). Without delivering the joined wake, every worker holding an outstanding
+  // mention would never get its ticks: the dark team #2069 describes.
+  it('TICK+MENTION is delivered: nudged once and acked (the ack moves no message mark, R53)', () => {
+    const p = proof(['T:1']);
+    f.wakes = [wake('w-ada', 'Ada', [TICK, MENTION], p)];
+    go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toContain('coordinator-tick');
+    expect(f.acked).toEqual([p]);
+  });
+
+  it('TICK+TASK and TICK+unknown are left alone: no nudge, no ack, no receipt (a proof naming task events records them delivered)', () => {
+    for (const extra of [TASK, { kind: 'FUTURE', ticker: null }]) {
       f.wakes = [wake('w-ada', 'Ada', [TICK, extra])];
       go();
     }
@@ -149,15 +163,16 @@ describe('selection and delivery', () => {
     expect(existsSync(receiptsFile())).toBe(false);
   });
 
-  it('a joined proof after an earlier delivery is still untouched (no send, no ack)', () => {
+  it('a joined TICK+MENTION proof after an earlier delivery is never retyped; the lost ack is recovered ack-only', () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
     f.ackReply = () => ({ errors: [{ message: 'down' }] });
     go(); // typed, ack lost: a sent receipt exists
     f.ackReply = null;
-    f.wakes = [wake('w-ada', 'Ada', [TICK, MENTION], proof(['T:1']))];
+    const joined = proof(['T:1'], 'joined');
+    f.wakes = [wake('w-ada', 'Ada', [TICK, MENTION], joined)];
     go();
-    expect(f.sent).toHaveLength(1);
-    expect(f.acked).toEqual([]);
+    expect(f.sent).toHaveLength(1); // still the one original nudge: the joined re-offer is not typed again
+    expect(f.acked).toEqual([joined]); // its tick coverage is fully covered by the confirmed receipt
   });
 
   it('a worker not on the roster is skipped without an ack', () => {
@@ -315,9 +330,9 @@ describe('R63 timing (server-owned anchor, floor and busy deadline)', () => {
     // a fresh process (no memory of the earlier passes) at the deadline delivers
     go(at(T0 + 600_000));
     expect(f.sent).toHaveLength(1);
-    // a joined reason leaves the wake untouched whatever the clock says
+    // a joined TASK reason leaves the wake untouched whatever the clock says
     f.sent = []; f.acked = [];
-    f.wakes = [wake('w-ada', 'Ada', [TICK, MENTION], proof(['T:1']), [], timing(T0 - 1, T0 + 1))];
+    f.wakes = [wake('w-ada', 'Ada', [TICK, TASK], proof(['T:1']), [], timing(T0 - 1, T0 + 1))];
     go(at(T0 + 3_600_000));
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);

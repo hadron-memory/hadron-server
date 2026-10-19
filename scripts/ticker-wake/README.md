@@ -2,7 +2,7 @@
 
 Interim ticker-wake deliverer for an Orca host (orca1). It reads `dueWakes`,
 types one short nudge into the idle terminal of each roster worker whose wake
-carries **only** a TICK, and acks the wake by proof. It reuses the attention
+carries a TICK (alone, or joined with a MENTION), and acks the wake by proof. It reuses the attention
 router's terminal and idle helpers (`../orca-attention-router/router.ts`,
 including the C1 empty-composer rule) and shares no token, ledger or lock with
 the router. Retire it when hadron-cli#907 (C1, delivery inside the host poller)
@@ -19,10 +19,16 @@ skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
 
 ## Contract
 
-- **Reasons.** TICK-only: nudge once, then ack. A wake carrying any other reason
-  (MENTION, TASK, unknown) is left alone, neither nudged nor acked: the opaque
-  proof would acknowledge the unseen components (#2069 owns the joining policy).
-  There is no mention-ack path.
+- **Reasons.** TICK, or TICK joined with MENTION: nudge once, then ack. Since
+  #2069 (landed in #2102) a MENTION-only reservation absorbs a later tick, so a
+  worker holding an outstanding mention is offered a TICK+MENTION wake; skipping
+  it would starve that worker of ticks. Since R53 (#2072) acknowledging a wake
+  moves no message mark: it records the tick and spends the reservation, and the
+  mention stays unread and due (an S1 batch or `hadron-chat-send` delivers it,
+  never this script). A wake carrying TASK or an unknown reason is left alone,
+  neither nudged nor acked (a proof naming task events records them delivered
+  unseen). A MENTION-only wake is ignored and never acked: there is no
+  mention-ack path.
 - **Timing (R63).** The server owns it: each wake carries `anchorAt`,
   `deliverAfter` and `busyDeadline` (Liam's seam, hadron-server#2017 (S1)
   branch). Nothing is typed before `deliverAfter`; a busy terminal is held until
@@ -53,7 +59,7 @@ skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
   `lock.takeover` file, after re-reading the lock, so a replacement owner is
   never unlinked.
 
-Dependencies: #2067 (footer rule), #2068, #2069, hadron-cli#907. The `turn_started` stage name is from Orca's documented receipt and
+Dependencies: landed on main: #2067 (footer rule), #2068 (#2078), and #2069, R53 and R63 with S1 (#2102); still open: hadron-cli#907 (this script is the interim for it). The `turn_started` stage name is from Orca's documented receipt and
 recorded sends, not yet from an independent scratch-terminal capture (QA).
-Verified by the 51 fake-runner tests; live-host rollout
+Verified by the 54 fake-runner and contract tests (the contract tests build the schema from the real typeDefs); live-host rollout
 evidence is separate.
