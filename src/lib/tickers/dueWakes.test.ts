@@ -229,6 +229,35 @@ describe('ticks and relevance through the whole loader', () => {
   });
 });
 
+describe('#2068 — a ticker that wakes without chat, through the whole loader', () => {
+  it('ticks with no unread at all, acknowledges, and is not due again until the next tick; without the option it stays silent', async () => {
+    const quiet = await mkTicker();
+    await subscribe(quiet.id, liam.id);
+    expect(ids(await due(ctx(manager.id)))).toEqual([]);
+    await db.ticker.update({ where: { id: quiet.id }, data: { wakeWithoutChat: true } });
+    const page = await due(ctx(manager.id));
+    expect(ids(page)).toEqual([liam.id]);
+    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: quiet.id }), task: null }]);
+    expect(page.wakes[0].channels).toEqual([]);
+    expect(page.wakes[0]).toMatchObject({ unread: 0, unreadMentions: 0 });
+    const ack = await M.acknowledgeWakes({}, { proofs: [page.wakes[0].proof] }, ctx(manager.id));
+    expect(ack.acknowledged).toBe(1);
+    const row = await db.workerDeliveryTick.findFirstOrThrow({ where: { workerId: liam.id, tickerId: quiet.id } });
+    expect(row.lastAckedTick).toBeGreaterThanOrEqual(1);
+    await db.workerDeliveryTick.updateMany({ data: { ackedAt: new Date(Date.now() - 3600_000) } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([]); // same tick, already acknowledged
+    const later = await computeDueWakes({ ctx: ctx(manager.id), app: { id: app.id, organizationId: org.id, ownerUserId: null }, reader: { manager: true, userId: manager.id }, requester: { userId: manager.id }, now: new Date(Date.now() + 600_000) });
+    expect(later.wakes).toHaveLength(1);
+  });
+
+  it('never bypasses a pause or the per-worker floor', async () => {
+    const t = await mkTicker({ wakeWithoutChat: true });
+    await subscribe(t.id, liam.id);
+    await db.workerWakeSettings.create({ data: { workerId: liam.id, pausedUntil: new Date(Date.now() + 3600_000) } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([]);
+  });
+});
+
 describe('read fields', () => {
   it('Ticker.nextTickAt / lastTickAt and WorkerWakeSettings.dormant', async () => {
     const F = resolvers as any;

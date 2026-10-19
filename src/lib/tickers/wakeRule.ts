@@ -30,7 +30,7 @@ export type ChannelInput = {
 };
 
 export type SubscriptionInput = {
-  ticker: TickerSchedule & { id: string; relevance: 'ALL' | 'MENTIONS'; channelIds: string[] };
+  ticker: TickerSchedule & { id: string; relevance: 'ALL' | 'MENTIONS'; channelIds: string[]; /** #2068: tick even with nothing relevant unread. */ wakeWithoutChat?: boolean };
   lastAckedTick: number;
 };
 
@@ -141,7 +141,8 @@ export function workerWake(args: {
       any = true;
       included.add(ch.channelId);
     }
-    if (any) reasons.push({ kind: 'TICK', tickerId: sub.ticker.id, k });
+    // #2068 (Holger): a ticker may be set to tick whether or not there is chat. Every other tick rule above still holds.
+    if (any || sub.ticker.wakeWithoutChat) reasons.push({ kind: 'TICK', tickerId: sub.ticker.id, k });
   }
 
   for (const t of args.tasks ?? []) {

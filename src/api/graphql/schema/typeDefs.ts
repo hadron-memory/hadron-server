@@ -12110,6 +12110,8 @@ export const typeDefs = `#graphql
     "The channels named, limited to those the reader can read. Empty means every channel the subscriber watches."
     channels: [Channel!]!
     relevance: TickerRelevance!
+    "#2068 — tick even when no relevant chat is unread. Off by default: the tick is then chat-gated (cor:agt:080:10)."
+    wakeWithoutChat: Boolean!
     enabled: Boolean!
     owner: ActorRef
     "The next moment this ticker ticks, quiet hours skipped; null when disabled."
@@ -12190,6 +12192,7 @@ export const typeDefs = `#graphql
     quietHours: JSON
     channelIds: [ID!]
     relevance: TickerRelevance
+    wakeWithoutChat: Boolean
     enabled: Boolean
   }
 
@@ -12203,6 +12206,7 @@ export const typeDefs = `#graphql
     channelIds: [ID!]
     clearChannels: Boolean
     relevance: TickerRelevance
+    wakeWithoutChat: Boolean
     enabled: Boolean
   }
 

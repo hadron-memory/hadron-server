@@ -283,6 +283,7 @@ type TickerInput = {
   quietHours?: unknown;
   channelIds?: string[] | null;
   relevance?: string | null;
+  wakeWithoutChat?: boolean | null;
   enabled?: boolean | null;
 };
 type TickerPatch = Partial<TickerInput> & { clearQuietHours?: boolean | null; clearChannels?: boolean | null };
@@ -357,6 +358,7 @@ const crudMutations = {
         data: {
           appId: fresh.id, name, slug, cadenceSeconds: cadence, anchorAt,
           quietHours: quiet ?? Prisma.DbNull, channelIds, relevance,
+          wakeWithoutChat: input.wakeWithoutChat ?? false,
           enabled: input.enabled ?? true,
           // The owner is whoever made the call, never an argument (cor:agt:080:18).
           ownerWorkerId: actor.kind === 'worker' ? actor.workerId : null,
@@ -391,7 +393,7 @@ const crudMutations = {
       // subscriber. Each must be one the editor could subscribe at the new terms
       // (cor:agt:080:20, R3); otherwise the edit is a way round the subscribe rule.
       const faster = cadence !== undefined && cadence < t.cadenceSeconds;
-      const wider = relevance === 'ALL' && t.relevance !== 'ALL';
+      const wider = (relevance === 'ALL' && t.relevance !== 'ALL') || (input.wakeWithoutChat === true && !t.wakeWithoutChat);
       if (faster || wider) {
         await requireSubscribersCovered(tx, txCtx, fresh, actor, t, cadence ?? t.cadenceSeconds, settings);
       }
@@ -404,6 +406,7 @@ const crudMutations = {
           ...(quiet !== undefined ? { quietHours: quiet } : input.clearQuietHours ? { quietHours: Prisma.DbNull } : {}),
           ...(channelIds !== undefined ? { channelIds } : input.clearChannels ? { channelIds: [] } : {}),
           ...(relevance !== undefined ? { relevance } : {}),
+          ...(input.wakeWithoutChat != null ? { wakeWithoutChat: input.wakeWithoutChat } : {}),
           ...(input.enabled != null ? { enabled: input.enabled } : {}),
           ...updatedStamp(txCtx),
         },
