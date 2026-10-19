@@ -20,7 +20,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { APP_INCLUDE } from './resolvers.helpers.js';
+import { APP_INCLUDE, canReadApp, requireAppRead } from './resolvers.helpers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -146,6 +146,18 @@ describe('#2089 parent admission — Query.app', () => {
     expect((await eager(as(boss.id)))?.id).toBe(app.id);
     await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: boss.id } } });
     await expect(eager(as(boss.id))).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  });
+
+  it('decides live-App and current-membership in ONE statement: an App deleted after the caller loaded it is refused (Anne P2)', async () => {
+    // The deterministic scheduling probe: the caller holds a row that WAS live,
+    // deleteApp commits, and only then does the membership predicate run. A
+    // predicate that trusts the earlier liveness and reads only AppMember
+    // would still admit the owner-role member.
+    const stale = await db.app.findUniqueOrThrow({ where: { id: app.id } });
+    expect(stale.deletedAt).toBeNull();
+    await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
+    await expect(requireAppRead(as(boss.id), stale)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await canReadApp(as(boss.id), stale)).toBe(false);
   });
 
   it('does not admit a soft-deleted App', async () => {
