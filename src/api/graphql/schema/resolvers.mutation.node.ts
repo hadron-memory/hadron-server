@@ -209,7 +209,7 @@ export async function classifyFailedUpdate(
   return { kind: 'moved', memoryId: row.memoryId, loc: row.loc };
 }
 
-export async function writeNodeCore(
+async function writeNodeCoreRaw(
   rawInput: NodeWriteInput,
   ctx: Context,
   mode: NodeWriteMode,
@@ -2219,7 +2219,7 @@ async function createNodeInInstallMemory(input: CreateNodeArgs, ctx: Context) {
       transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
     }));
   for (const effect of effects) effect();
-  return concealUnreadableInstallWrite(ctx, written);
+  return written;
 }
 
 /** The caller's view of an App's install memory, creating nothing: a miss and a refusal read the same. */
@@ -2311,8 +2311,7 @@ export const nodeMutations = {
             { extensions: { code: 'BAD_USER_INPUT' } });
         }
         const memory = await findCallerInstallMemory(ctx, install);
-        const updated = await updateNodeCore({ ...rest, memoryId: memory.id } as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
-        return concealUnreadableInstallWrite(ctx, updated);
+        return updateNodeCore({ ...rest, memoryId: memory.id } as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
       }
       return updateNodeCore(input as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
     },
@@ -4797,3 +4796,17 @@ export const nodeMutations = {
     },
 
 };
+
+/**
+ * THE node writer. The response of a write to an App's install memory is held to the memory's READ
+ * audience here, at the one writer every door shares (createNode/updateNode by address or by
+ * memoryId, the kind doors, merges, importers, MCP), not per door: a door-by-door wrap let an
+ * alternate address return the content a write-only manager cannot read (Andi on #2064).
+ * An ordinary memory costs one indexed select.
+ */
+export async function writeNodeCore(...args: Parameters<typeof writeNodeCoreRaw>): ReturnType<typeof writeNodeCoreRaw> {
+  const written = await writeNodeCoreRaw(...args);
+  const ctx = args[1];
+  if (!written || typeof written !== 'object' || typeof (written as { memoryId?: unknown }).memoryId !== 'string') return written;
+  return concealUnreadableInstallWrite(ctx, written as { memoryId: string }) as unknown as typeof written;
+}

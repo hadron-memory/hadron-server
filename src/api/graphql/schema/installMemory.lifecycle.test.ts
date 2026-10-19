@@ -219,6 +219,38 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     } finally { await server.stop(); }
   });
 
+  it('the concealment holds at EVERY address of the same write: memoryId+loc and id, not only install+loc (Andi)', async () => {
+    const f = await fixture();
+    const node = await f.create(f.admin);
+    const platform = await f.user('platform-outsider-2');
+    await db.user.update({ where: { id: platform.id }, data: { roles: ['ADMIN'] } });
+    const ctx = ctxOf(platform.id, { roles: ['ADMIN'] });
+    expect(await Q.node({}, { ref: node.id, raw: true }, ctx)).toBeNull();
+    const { ApolloServer } = await import('@apollo/server');
+    const { typeDefs } = await import('./typeDefs.js');
+    const server = new ApolloServer({ typeDefs, resolvers });
+    await server.start();
+    try {
+      for (const input of [
+        { memoryId: node.memoryId, loc: 'prompts:lane', name: 'by-memory-loc' },
+        { id: node.id, name: 'by-id' },
+      ]) {
+        const result = await server.executeOperation(
+          { query: 'mutation($i:UpdateNodeInput!){updateNode(input:$i){id name content description}}', variables: { i: input } },
+          { contextValue: ctx },
+        );
+        const wire = result.body.kind === 'single' ? result.body.singleResult : null;
+        const out = (wire?.data as any)?.updateNode;
+        if (out) { expect(out.content ?? null).toBeNull(); expect(out.description ?? null).toBeNull(); }
+      }
+    } finally { await server.stop(); }
+    // The same addresses return the content to a participant manager.
+    const viaMemory = await M.updateNode({}, { input: { memoryId: node.memoryId, loc: 'prompts:lane', name: 'p1' } }, ctxOf(f.admin.id));
+    expect(viaMemory.content).toBe('replacement');
+    const viaId = await M.updateNode({}, { input: { id: node.id, name: 'p2' } }, ctxOf(f.admin.id));
+    expect(viaId.content).toBe('replacement');
+  });
+
   it('a participant manager still gets the content back from an update (positive control)', async () => {
     const f = await fixture();
     await f.create(f.admin);

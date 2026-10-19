@@ -275,7 +275,8 @@ export async function concealUnreadableInstallWrite<T extends { memoryId: string
     where: { id: node.memoryId },
     select: { id: true, class: true, appId: true, installOfAgentId: true, isInstallMemory: true, organizationId: true, ownerUserId: true },
   });
-  if (memory && (await installMemoryAudience(ctx.db as never, ctx, memory)).read) return node;
+  if (!memory || !isInstallMemoryRow(memory)) return node;
+  if ((await installMemoryAudience(ctx.db as never, ctx, memory)).read) return node;
   return {
     ...node,
     content: null, description: null, abstract: null, abstractOriginHash: null, tokens: null,
