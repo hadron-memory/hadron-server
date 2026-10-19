@@ -1,4 +1,4 @@
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptMergeCollisions, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptMergeCollisions, assertNoBootPromptRows, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
@@ -583,6 +583,9 @@ async function runMerge(
           // Reentrant memory locks; fresh governed/protected facts for the rows
           // now serialized by their source + destination address locks.
           await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
+          // #2043 — the preflight boot-prompt scan is fail-fast only: a role set or a
+          // compiled node created after it is caught here, on the locked rows.
+          await assertNoBootPromptRows(tx, rows.map((r) => r.id), 'merge');
           if (args.principal) {
             await assertRoleWritersForNodes(tx, args.principal, rows, { from: sourceMemoryId, to: targetMemoryId });
           }
@@ -758,6 +761,9 @@ async function runMerge(
       // inside this transaction, under the Channel-memory locks. The Phase-1
       // preflight cannot cover a fold that runs transactions later.
       await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], [...srcRows, ...tgtRows], 'merge');
+      // #2043 — authoritative boot-prompt recheck on the locked source AND target rows
+      // (the preflight collision scan cannot see a role or compiled node added since).
+      await assertNoBootPromptRows(tx, [...srcRows, ...tgtRows].map((r) => r.id), 'merge');
       if (args.principal) {
         await assertRoleWritersForNodes(tx, args.principal, srcRows, { from: sourceMemoryId, to: targetMemoryId });
         await assertRoleWritersForNodes(tx, args.principal, tgtRows, { from: targetMemoryId });
