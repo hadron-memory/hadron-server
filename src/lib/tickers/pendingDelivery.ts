@@ -12,7 +12,7 @@ export type PendingDeliveryItem = {
   state: 'due' | 'withheld'; withheldReason: 'timing' | null;
 };
 export type PendingDeliveryPage = { items: PendingDeliveryItem[]; complete: boolean; nextAfter: string | null };
-export type PendingDeliveryArgs = Omit<DeliverySelectionArgs, 'after'> & { after?: string | null };
+export type PendingDeliveryArgs = Omit<DeliverySelectionArgs, 'after' | 'now'> & { now: Date; after?: string | null };
 export const PENDING_DELIVERY_PAGE_DEFAULT = 200;
 export const PENDING_DELIVERY_PAGE_MAX = 1000;
 type Cursor = { v: 1; scope: string; workerId: string; channelId: string; incarnation: number; seq: number };
@@ -20,8 +20,9 @@ const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 const invalidCursor = (): never => { throw new Error('Invalid after cursor for pending delivery.'); };
 
 export async function enumeratePendingDelivery(args: PendingDeliveryArgs): Promise<PendingDeliveryPage> {
-  const now = args.now ?? new Date();
-  if (!Number.isFinite(now.getTime())) throw new Error('Invalid pending delivery now.');
+  if (args.hostId === null && args.workerIds?.length !== 1) throw new Error('self mode selects exactly one worker');
+  const now = args.now;
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new Error('Invalid pending delivery now.');
   if (args.first != null && !Number.isSafeInteger(args.first)) throw new Error('Invalid pending delivery first.');
   const first = Math.min(PENDING_DELIVERY_PAGE_MAX, Math.max(1, args.first ?? PENDING_DELIVERY_PAGE_DEFAULT));
   const scope = createHash('sha256').update(JSON.stringify([
