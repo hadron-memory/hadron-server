@@ -1,3 +1,4 @@
+import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // typeResolvers — GraphQL type-level field resolvers extracted from resolvers.ts
 // (split step 3). No behavior change.
@@ -1027,6 +1028,20 @@ export const typeResolvers = {
     },
   },
   NodeRevision: {
+    // #1838 — the per-revision answer, from the one shared derivation.
+    revisionApproval: async (nv: { nodeId: string; revNo: number | null }, _: unknown, ctx: Context) => {
+      const { state, record } = nv.revNo == null
+        ? { state: 'NOT_APPROVED' as const, record: null }
+        : await revisionApprovalOf(ctx.db, nv.nodeId, nv.revNo);
+      return {
+        state,
+        approved: state === 'APPROVED',
+        recordedAtRevision: record?.revision ?? null,
+        approvedBy: record?.approvedBy ?? null,
+        approvedByInfo: record?.approvedByInfo ?? null,
+        approvedAt: record?.approvedAt ?? null,
+      };
+    },
     authorship: (nv: AuthoredState, _: unknown, ctx: Context) => resolveAuthorship(nv, ctx),
     contentValidation: (
       nv: { nodeId: string; memoryId: string | null; revNo: number | null },
