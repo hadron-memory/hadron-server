@@ -15,10 +15,9 @@ import { ensureChannelWithRoot } from '../channels.js';
 import { appendChatMessage } from '../chatRoot.js';
 import { getMemoryEncryptionInfo } from '../nodeCrypto.js';
 import type { Context } from '../../api/graphql/schema/resolvers.js';
-import {
-  batchKeyOf, signBatchProof, verifyBatchProof, signWakeProof, verifyWakeProof,
-  BATCH_PROOF_MAX_SEQS, type BatchProof, type WakeProof,
-} from './wakeProof.js';
+import { signWakeProof, verifyWakeProof, type WakeProof } from './wakeProof.js';
+import { signBatchProof, verifyBatchProof, BATCH_PROOF_MAX_SEQS } from './batchProof.js';
+import { batchProofPayload, type BatchProofPayload as BatchProof, type LoadedBatch } from './deliveryBatch.js';
 import { acknowledgeBatchProofs } from './acknowledge.js';
 
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -54,12 +53,15 @@ async function say(ch: typeof chA, body = 'hi'): Promise<number> {
 }
 const renderHash = (text: string) => createHash('sha256').update(text).digest('hex');
 
-/** A proof as the loader would issue it: ranges over rendered seqs, its batchKey derived from them. */
+/** The loader's stable key (deliveryBatch.ts computes it; the proof only carries it). */
+const keyOf = (channels: BatchProof['channels']) =>
+  createHash('sha256').update(JSON.stringify([worker.id, renderHash('text'), channels.map((c) => [c.channelId, c.incarnation, c.seqs])])).digest('hex');
+
+/** A proof as the loader would issue it: ranges over rendered seqs, with the loader's batchKey. */
 function proofFor(channels: BatchProof['channels'], over: Partial<BatchProof> = {}): BatchProof {
-  const base = { workerId: worker.id, channels, renderHash: renderHash('text') };
   return {
     v: 1, kind: 'batch-proof', appId: app.id, workerId: worker.id, hostId: 'host-a', requester: KEY,
-    channels, renderHash: base.renderHash, batchKey: batchKeyOf(base), issuedAt: Date.now(), ...over,
+    channels, renderHash: renderHash('text'), batchKey: keyOf(channels), issuedAt: Date.now(), ...over,
   };
 }
 const range = (ch: { id: string }, seqs: number[], from = seqs[0]!, incarnation = 1) =>
@@ -93,6 +95,19 @@ describe('batch proof: signing, domain separation, shape', () => {
     expect(await code(() => verifyWakeProof(signBatchProof(p)))).toBe('WAKE_PROOF_INVALID');
   });
 
+  it('an id built by the loader\'s batchProofPayload verifies to the same payload, and acknowledges', async () => {
+    await say(chA); await say(chA);
+    const batch: LoadedBatch = {
+      workerId: worker.id, workerName: 'Liam', text: 'text', renderHash: renderHash('text'), batchKey: 'k'.repeat(64),
+      deliverAfter: new Date(), busyDeadline: new Date(), interrupt: false, overflow: 0,
+      ranges: [{ channelId: chA.id, incarnation: 1, fromSeq: 1, throughSeq: 2, seqs: [1, 2] }],
+    };
+    const payload = batchProofPayload(batch, { appId: app.id, hostId: 'host-a', appKeyId: KEY.appKeyId, now: new Date() });
+    expect(verifyBatchProof(signBatchProof(payload))).toEqual(payload);
+    expect(await ack([{ proof: signBatchProof(payload) }])).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await mark(chA)).toBe(2);
+  });
+
   it('a tampered body, a batchKey presented as an id, and an unknown version are invalid', async () => {
     const p = proofFor([range(chA, [1, 2])]);
     const [body, sig] = signBatchProof(p).split('.') as [string, string];
@@ -103,7 +118,7 @@ describe('batch proof: signing, domain separation, shape', () => {
     expect(body.length).toBeGreaterThan(0);
   });
 
-  it('refuses a malformed range: unsorted or empty seqs, through not the last seq, from above the first seq, a repeated channel, too many seqs, a bad renderHash, a batchKey that does not match', async () => {
+  it('refuses a malformed range: unsorted or empty seqs, through not the last seq, from above the first seq, a repeated channel, too many seqs, a bad renderHash, an empty batchKey', async () => {
     const bad: BatchProof[] = [
       proofFor([{ ...range(chA, [1, 2]), seqs: [2, 1] }]),
       proofFor([{ ...range(chA, [1]), seqs: [] }]),
@@ -112,7 +127,7 @@ describe('batch proof: signing, domain separation, shape', () => {
       proofFor([range(chA, [1]), range(chA, [2])]),
       proofFor([range(chA, Array.from({ length: BATCH_PROOF_MAX_SEQS + 1 }, (_, i) => i + 1))]),
       proofFor([range(chA, [1])], { renderHash: 'not-a-hash' }),
-      proofFor([range(chA, [1])], { batchKey: 'f'.repeat(32) }),
+      proofFor([range(chA, [1])], { batchKey: '' }),
       proofFor([]),
     ];
     for (const p of bad) expect(await code(() => verifyBatchProof(signBatchProof(p)))).toBe('WAKE_PROOF_INVALID');
@@ -194,13 +209,11 @@ describe('acknowledgeBatchProofs: the retry matrix', () => {
     expect(await mark(chA)).toBeNull();
   });
 
-  it('a range that starts above the delivered mark (an unseen prefix) is stale; nothing moves', async () => {
+  it('a range may start above the delivered mark (seqs read or not reaching the worker) and covers through its end', async () => {
     for (let i = 0; i < 6; i++) await say(chA);
     await ack([{ proof: signBatchProof(proofFor([range(chA, [1, 2])])) }]);
-    expect(await code(ack([{ proof: signBatchProof(proofFor([range(chA, [5, 6], 5)])) }]))).toBe('WAKE_PROOF_STALE');
-    expect(await mark(chA)).toBe(2);
-    // A range widened down to the mark (ineligible seqs 3-4 below the first rendered one) is fine.
-    expect(await ack([{ proof: signBatchProof(proofFor([range(chA, [5, 6], 3)])) }])).toEqual({ acknowledged: 1, unchanged: 0 });
+    // As the loader issues it: the first rendered seq is 5 (3 and 4 were read already, or did not reach the worker).
+    expect(await ack([{ proof: signBatchProof(proofFor([range(chA, [5, 6])])) }])).toEqual({ acknowledged: 1, unchanged: 0 });
     expect(await mark(chA)).toBe(6);
   });
 
