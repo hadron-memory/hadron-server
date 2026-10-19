@@ -422,3 +422,59 @@ describe('#2102 refused host uses are recorded once apart', () => {
     finally { log.mockRestore(); }
   });
 });
+
+describe('#2102 empty host acknowledgement is an audited no-op', () => {
+  it.each(['resolver', 'graphql', 'mcp'])('records one zero-count accepted use through %s', async surface => {
+    if (surface === 'resolver') expect(await ack(hostKey, [])).toEqual({ acknowledged: 0, unchanged: 0 });
+    else if (surface === 'graphql') {
+      const { ApolloServer } = await import('@apollo/server'); const { typeDefs } = await import('./typeDefs.js');
+      const server = new ApolloServer({ typeDefs, resolvers: resolvers as any });
+      try {
+        const r = await server.executeOperation({ query: 'mutation{acknowledgeDeliveryBatches(batchIds:[]){acknowledged unchanged}}' }, { contextValue: keyCtx(hostKey) });
+        expect(r.body.kind).toBe('single');
+        if (r.body.kind === 'single') { expect(r.body.singleResult.errors).toBeUndefined(); expect(r.body.singleResult.data?.acknowledgeDeliveryBatches).toEqual({ acknowledged: 0, unchanged: 0 }); }
+      } finally { await server.stop(); }
+    } else {
+      const { createTestableMcpServer } = await import('../../../mcp/server.js');
+      const server = createTestableMcpServer({ ...keyCtx(hostKey), clientId: `app:${app.id}` } as never);
+      const r = await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [] });
+      expect(r.content[0].text).toBe('Acknowledged 0.');
+    }
+    const uses = await db.hostKeyUse.findMany({ where: { appKeyId: hostKey.id, action: 'deliver' } });
+    expect(uses).toHaveLength(1); expect(uses[0]).toMatchObject({ count: 0, refusedCode: null, hostId: 'orca1' });
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect(await db.channelReadState.count()).toBe(0);
+    expect(await db.workerWakeAck.count()).toBe(0);
+    expect(await db.appWakeDay.count()).toBe(0);
+  });
+
+  it('preserves the self arm empty result without a host use', async () => {
+    const session = await db.session.create({ data: { id: generateId(), appId: app.id, userId: manager.id, workerId: kit.id, agentId } });
+    expect(await M.acknowledgeDeliveryBatches({}, { batchIds: [] }, { ...ctx(manager.id), appId: app.id, sessionId: session.id })).toEqual({ acknowledged: 0, unchanged: 0 });
+    expect(await db.hostKeyUse.count({ where: { action: 'deliver' } })).toBe(0);
+  });
+
+  it.each(['scope', 'registration'])('rechecks %s at the no-op transaction and records only its refusal', async kind => {
+    const caller = beforeDecision(async () => {
+      if (kind === 'scope') await M.revokeAppKeyScope({}, { id: hostKey.id, scope: 'attention:deliver' }, ctx(manager.id));
+      else await db.hostRegistration.updateMany({ where: { appId: app.id, hostId: 'orca1' }, data: { lostAt: new Date() } });
+    });
+    expect(await code(M.acknowledgeDeliveryBatches({}, { batchIds: [] }, caller))).toBe('APP_KEY_SCOPE_REQUIRED');
+    const uses = await db.hostKeyUse.findMany({ where: { appKeyId: hostKey.id, action: 'deliver' } });
+    expect(uses).toHaveLength(1); expect(uses[0].refusedCode).toBe('APP_KEY_SCOPE_REQUIRED');
+  });
+
+  it('cannot report accepted no-op success when the transactional use record fails', async () => {
+    const original = db.$transaction.bind(db);
+    const wrapped = new Proxy(db, { get(t, prop) {
+      if (prop !== '$transaction') return Reflect.get(t, prop);
+      return (body: any, ...options: any[]) => (original as any)(async (tx: any) => body(new Proxy(tx, { get(target, key) {
+        if (key !== 'hostKeyUse') return Reflect.get(target, key);
+        return new Proxy(target.hostKeyUse, { get(model, method) { if (method === 'create') return async () => { throw new Error('synthetic no-op audit unavailable'); }; return Reflect.get(model, method); }});
+      }})), ...options);
+    }});
+    await expect(M.acknowledgeDeliveryBatches({}, { batchIds: [] }, keyCtx(hostKey, app.id, { db: wrapped }))).rejects.toThrow('synthetic no-op audit unavailable');
+    expect(await db.hostKeyUse.count({ where: { action: 'deliver' } })).toBe(0);
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+  });
+});
