@@ -88,3 +88,10 @@ Author review found two integration gaps before readiness. Red db29a0c3 proves t
 Red f19a3a3f adds a real memory-row visibility-change barrier. The old facade acquired advisory authorities but never waited for the changing memory row. Held reporting now enters through existing withAuthorizedTx: authority anchors AND current caller/owner/memory rows are fenced before reporting-graph/budget/worker locks. lockDeliveryState shares the existing S5 lower lock order without a nested transaction or duplicated public gate. App/memory ownership drift refuses rather than using a stale anchor set. S1's session helper body and proof/ack files remain unchanged.
 
 Prior full-suite attempts were cancelled for the upstream base change and substantive author-review fixes; they are not acceptance evidence. Final focused/typecheck/full/CI results are recorded on the later pushed head. No new platform rule or citation is minted: this implements existing no-trace visibility, transactional authority and the accepted held contract.
+
+
+## Current checkpoint validation (27c9a057)
+
+Current-source full suite completed successfully: 759 files, 13,264 passed tests, one expected privacy failure, seven skipped (426.41s). Typecheck and git diff --check pass. Latest focused five-file run: 66 passes plus that same expected privacy failure. The expected failure is the real HTTP typed-variable signed-batchId non-echo pin; it is not a waiver and must become a required pass after frozen shared #2090 integration. Earlier interrupted broad runs remain excluded from acceptance evidence.
+
+This is still a draft checkpoint. The private evaluator boundary has Xavier's scoped engineering fit (#2021 comments 6258953175/6258957002), with Vera's caller-less/unheld-reader product fit pending. Liam owns the separate S1 enumeration and mark integration. Policy producer coverage/certification, lifecycle/evaluator and current-authority owner-wake hooks remain incomplete; no activation or final review/QA claim. Ada's S10 #2026 follow-on starts after S5 freezes.
