@@ -80,6 +80,15 @@ export type DueWakesResult = {
   budgetNotice: { appId: string; day: Date; withheld: number } | null;
 };
 
+/** #2069: the reasons a wake carries that a delivery must name: a mention, one tick of one ticker, one task event. */
+const reasonKeys = (wake: WorkerWake): Set<string> =>
+  new Set(wake.reasons.map((r) => (r.kind === 'MENTION' ? 'M' : r.kind === 'TICK' ? `T:${r.tickerId}:${r.k}` : `K:${r.eventId}:${r.chainIndex}`)));
+/** True when `fresh` carries a TICK or TASK reason the outstanding wake lacks. A grown mention range alone is not one. */
+const absorbsNewReason = (outstanding: WorkerWake, fresh: WorkerWake): boolean => {
+  const had = reasonKeys(outstanding);
+  return [...reasonKeys(fresh)].some((k) => k !== 'M' && !had.has(k));
+};
+
 const tasksOf = (wake: WorkerWake) =>
   wake.reasons.flatMap((r) => (r.kind === 'TASK' ? [{ eventId: r.eventId, chainIndex: r.chainIndex }] : []));
 
@@ -343,7 +352,7 @@ export async function computeDueWakes(args: {
   const nextAfter = hasMore ? workers[workers.length - 1]!.id : null;
   const ids = workers.map((w) => w.id);
 
-  const [wakeSettings, availability, activity, subs, deliveryChannels, deliveryTicks, readStates, deliveryTasks] = await Promise.all([
+  const [wakeSettings, availability, activity, subs, deliveryChannels, deliveryTicks, readStates, deliveryTasks, wakeAcks] = await Promise.all([
     db.workerWakeSettings.findMany({ where: { workerId: { in: ids } } }),
     db.workerAvailability.findMany({ where: { workerId: { in: ids } } }),
     loadWorkersActivity(ctx, ids, now),
@@ -356,8 +365,11 @@ export async function computeDueWakes(args: {
     db.channelReadState.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, channelId: true, lastSeenSeq: true } }),
     // #1708: the latest task-event delivery per worker, for the floor (cor:agt:080:13).
     db.workerDeliveryTaskEvent.groupBy({ by: ['workerId'], where: { workerId: { in: ids }, deliveredAt: { not: null } }, _max: { deliveredAt: true } }),
+    // #2072 (R53): the latest acknowledged wake per worker. A textless wake moves no mark, so its receipt is the floor's clock.
+    db.workerWakeAck.groupBy({ by: ['workerId'], where: { workerId: { in: ids } }, _max: { ackedAt: true } }),
   ]);
   const taskDeliveredOf = new Map(deliveryTasks.map((d) => [d.workerId, d._max.deliveredAt?.getTime() ?? 0]));
+  const wakeAckedOf = new Map(wakeAcks.map((d) => [d.workerId, d._max.ackedAt?.getTime() ?? 0]));
   const settingsOf = new Map(wakeSettings.map((s) => [s.workerId, s]));
   const availabilityOf = new Map(availability.map((a) => [a.workerId, a]));
   const subsOf = new Map<string, typeof subs>();
@@ -451,11 +463,13 @@ export async function computeDueWakes(args: {
       appId: app.id,
       workerId,
       requester,
-      channels: wake.channels.map((c) => ({ channelId: c.channelId, incarnation: c.incarnation, through: c.throughSeq })),
+      // #2072 (R53): no channel range. The display channels stay on the wake; the proof carries the wake's identity.
+      channels: [],
       ticks: wake.reasons.flatMap((r) => (r.kind === 'TICK' ? [{ tickerId: r.tickerId, k: r.k }] : [])),
       tasks: tasksOf(wake),
       exempt: wake.exempt,
       issuedAt: now.getTime(),
+      wakeKey: wakeIdentity(identityOf(wake)),
     });
   const issued: Array<Omit<DueWakeOut, 'timing'> & { exempt: boolean }> = [];
   const dormant: Array<{ workerId: string; mentions: number }> = [];
@@ -515,6 +529,7 @@ export async function computeDueWakes(args: {
       ...deliveryChannels.filter((d) => d.workerId === w.id).map((d) => d.deliveredAt.getTime()),
       ...deliveryTicks.filter((d) => d.workerId === w.id).map((d) => d.ackedAt.getTime()),
       taskDeliveredOf.get(w.id) ?? 0,
+      wakeAckedOf.get(w.id) ?? 0,
     );
     if (last > 0 && now.getTime() - last < floorMs) continue;
 
@@ -601,11 +616,11 @@ export async function computeDueWakes(args: {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + app.id}, 0))`;
       const used = (await tx.appWakeDay.findUnique({ where: { appId_day: { appId: app.id, day } } }))?.wakes ?? 0;
       const cutoff = toNaiveUtc(new Date(now.getTime() - WAKE_PROOF_MAX_AGE_MS));
-      const rows = await tx.$queryRaw<Array<{ worker_id: string; wake_key: string; wake: WorkerWake }>>(Prisma.sql`
-        SELECT worker_id, wake_key, wake FROM app_wake_reservations WHERE app_id = ${app.id} AND reserved_at > ${cutoff}::timestamp`);
+      const rows = await tx.$queryRaw<Array<{ worker_id: string; wake_key: string; wake: WorkerWake; absorbed_keys: string[] }>>(Prisma.sql`
+        SELECT worker_id, wake_key, wake, absorbed_keys FROM app_wake_reservations WHERE app_id = ${app.id} AND reserved_at > ${cutoff}::timestamp`);
       const live = new Map(rows.map((r) => [r.worker_id, r]));
       let consumed = used + live.size;
-      const reserve: Array<{ workerId: string; key: string; wake: WorkerWake }> = [];
+      const reserve: Array<{ workerId: string; key: string; wake: WorkerWake; absorbed?: string[] }> = [];
       wakes.length = 0;
       withheld = 0;
       for (const i of issued) {
@@ -645,6 +660,18 @@ export async function computeDueWakes(args: {
           // or its proof lapses: a second, different wake would be a second delivery against one allowance (and
           // inside one floor), which no acknowledgement-side refusal can undo once the nudge is sent (Diego cycle 3,
           // P2-1). What arrived since stays due, and is the next wake after this one is consumed.
+          // #2069: but a reason that fell due AFTER the outstanding wake was issued (a tick, a task event) is not "what
+          // arrived since" to wait on a consumer that may never come: an unacknowledged MENTION wake would otherwise hide
+          // every later TICK and TASK for as long as it stays outstanding (a dark team). The reservation is rewritten to
+          // the current wake: still ONE reservation and ONE slot for the worker, and the old proof still acknowledges
+          // exactly what it names.
+          if (absorbsNewReason(have.wake, i.wake)) {
+            // The descendant remembers every key it absorbed: that lineage, not "some reservation exists", is what lets an
+            // earlier proof of the same wake be acknowledged without a second charge (acknowledge.ts).
+            reserve.push({ workerId: i.workerId, key: wakeIdentity(identityOf(i.wake)), wake: i.wake, absorbed: [...new Set([...have.absorbed_keys, have.wake_key])] });
+            passes(i);
+            continue;
+          }
           if (have.wake_key !== wakeIdentity(identityOf(i.wake))) {
             // A reservation made before R63 carries no anchor: it takes the fresh one. One that has it keeps it (never restarted).
             have.wake.anchorAtMs ??= i.wake.anchorAtMs ?? null;
@@ -652,7 +679,7 @@ export async function computeDueWakes(args: {
             i.exempt = have.wake.exempt;
             i.proof = signFor(i.workerId, have.wake);
           }
-          reserve.push({ workerId: i.workerId, key: have.wake_key, wake: have.wake });
+          reserve.push({ workerId: i.workerId, key: have.wake_key, wake: have.wake, absorbed: have.absorbed_keys });
           passes(i);
           continue;
         }
@@ -664,12 +691,13 @@ export async function computeDueWakes(args: {
         passes(i);
       }
       const nowNaive = toNaiveUtc(now);
-      for (const { workerId, key, wake } of reserve) {
+      for (const { workerId, key, wake, absorbed } of reserve) {
         await tx.$executeRaw(Prisma.sql`
-          INSERT INTO app_wake_reservations (worker_id, app_id, reserved_at, wake_key, wake)
-          VALUES (${workerId}, ${app.id}, ${nowNaive}::timestamp, ${key}, ${JSON.stringify(wake)}::jsonb)
+          INSERT INTO app_wake_reservations (worker_id, app_id, reserved_at, wake_key, wake, absorbed_keys)
+          VALUES (${workerId}, ${app.id}, ${nowNaive}::timestamp, ${key}, ${JSON.stringify(wake)}::jsonb,
+                  ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(absorbed ?? [])}::jsonb)))
           ON CONFLICT (worker_id) DO UPDATE SET reserved_at = EXCLUDED.reserved_at, app_id = EXCLUDED.app_id,
-            wake_key = EXCLUDED.wake_key, wake = EXCLUDED.wake`);
+            wake_key = EXCLUDED.wake_key, wake = EXCLUDED.wake, absorbed_keys = EXCLUDED.absorbed_keys`);
       }
     });
   }

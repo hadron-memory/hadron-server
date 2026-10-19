@@ -12,14 +12,20 @@
 // delivers, acknowledged per (event, worker, chain position). A v1 proof (no
 // `tasks`) still verifies, read as delivering none, so a proof issued before
 // the deploy can still be acknowledged inside its 15 minutes.
+//
+// v3 (#2072, Holger R53 / A′, cor:agt:080:04/:16) names NO channel range: acknowledging a wake that carried no message
+// text moves no message mark, so the proof no longer says which seqs it covers. It carries the wake's identity instead
+// (`wakeKey`, the reservation key computed at issue from the whole wake), so the acknowledgement still spends exactly
+// the reservation of the wake it delivers. A v1/v2 proof keeps deriving its key from the channels it names; those
+// channels are still validated (incarnation) but never written.
 
 import { createHash, createHmac } from 'node:crypto';
 import { GraphQLError } from 'graphql';
 import { attentionTokenSecret } from '../teamAttention.js';
 import { safeEqual } from '../constantTime.js';
 
-export const WAKE_PROOF_VERSION = 2;
-const ACCEPTED_VERSIONS: ReadonlySet<unknown> = new Set([1, 2]);
+export const WAKE_PROOF_VERSION = 3;
+const ACCEPTED_VERSIONS: ReadonlySet<unknown> = new Set([1, 2, 3]);
 export const WAKE_PROOF_MAX_AGE_MS = 15 * 60 * 1000;
 /** The longest proof the verifier accepts; the issuer keeps every proof within it (#1708). */
 export const MAX_PROOF_CHARS = 16_384;
@@ -27,11 +33,12 @@ export const MAX_PROOF_CHARS = 16_384;
 export type WakeRequester = { userId: string } | { appKeyId: string };
 
 export type WakeProof = {
-  v: 1 | 2;
+  v: 1 | 2 | 3;
   kind: 'wake-proof';
   appId: string;
   workerId: string;
   requester: WakeRequester;
+  /** v1/v2 only: the channel ranges the wake counted. Always empty from v3 (#2072): never a message mark. */
   channels: Array<{ channelId: string; incarnation: number; through: number }>;
   ticks: Array<{ tickerId: string; k: number }>;
   /** v2: the task events delivered, by event and alarm chain position (0 for an ordinary event). Empty for v1. */
@@ -39,6 +46,8 @@ export type WakeProof = {
   /** Manager-authored mentions are exempt from the daily budget (cor:agt:080:15); decided when the wake is issued. */
   exempt: boolean;
   issuedAt: number;
+  /** v3: the wake's reservation key (`wakeIdentity` of the whole wake, channels included), signed in. */
+  wakeKey?: string;
 };
 
 const refuse = (code: string, message: string): never => {
@@ -82,7 +91,14 @@ export function verifyWakeProof(token: unknown): WakeProof {
     !value.tasks.every((t) => t && typeof t.eventId === 'string' && Number.isInteger(t.chainIndex) && t.chainIndex >= 0) ||
     !r || (typeof r.userId !== 'string' && typeof r.appKeyId !== 'string')
   ) return invalid();
+  // v3 carries its identity and no channel range; a v3 proof naming a channel was not issued by this server.
+  if (value.v === 3 && (typeof value.wakeKey !== 'string' || value.wakeKey.length === 0 || value.channels.length > 0)) return invalid();
   return value as WakeProof;
+}
+
+/** The reservation key a wake proof spends: signed in from v3, derived from the named channels and ticks before. */
+export function proofWakeKey(p: WakeProof): string {
+  return p.v === 3 ? p.wakeKey! : wakeIdentity(p);
 }
 
 /** Is `who` the principal the proof was issued to? */

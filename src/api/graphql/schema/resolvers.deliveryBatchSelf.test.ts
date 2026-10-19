@@ -182,9 +182,9 @@ describe('R57 own-live-session batches', () => {
     const { createTestableMcpServer } = await import('../../../mcp/server.js');
     const server = createTestableMcpServer({ userId: manager.id, roles: ['READER'] } as never, { sessionId: `self-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
     const text = (r: any) => r.content[0].text;
-    const result = JSON.parse(text(await server.callTool('hadron_delivery_batches', { appRef: app.id, session: s.id })));
+    const result = JSON.parse(text(await server.callTool('hadron_team_chat_inbox', { appRef: app.id, session: s.id })));
     expect(result.batches.map((b: any) => b.workerId)).toEqual([kit.id]);
-    expect(text(await server.callTool('hadron_ack_delivery_batches', { batchIds: [result.batches[0].id], session: s.id }))).toBe('Acknowledged 1.');
+    expect(text(await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [result.batches[0].id], session: s.id }))).toBe('Acknowledged 1.');
   });
   it('a committed membership revocation denies even the same owned session', async () => {
     const s = await ownSession(); await postForBoth();
@@ -286,7 +286,7 @@ describe('R57 own-live-session batches', () => {
     const kitSession = await ownSession(); const rookSession = await ownSession({ workerId: rook.id }); await postForBoth();
     const { createTestableMcpServer } = await import('../../../mcp/server.js');
     const server = createTestableMcpServer({ userId: manager.id, sessionId: kitSession.id, roles: ['READER'] } as never, { sessionId: `mixed-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-    const results = await Promise.all([kitSession, rookSession].map(s => server.callTool('hadron_delivery_batches', { appRef: app.id, session: s.id })));
+    const results = await Promise.all([kitSession, rookSession].map(s => server.callTool('hadron_team_chat_inbox', { appRef: app.id, session: s.id })));
     expect(results.map((r: any) => JSON.parse(r.content[0].text).batches.map((b: any) => b.workerId))).toEqual([[kit.id], [rook.id]]);
   });
 
@@ -333,13 +333,81 @@ describe('R57 own-live-session batches', () => {
     const s = await ownSession(); await postForBoth();
     const { createTestableMcpServer } = await import('../../../mcp/server.js');
     const server = createTestableMcpServer({ userId: manager.id, roles: ['READER'], sessionBindingRefused: true } as never, { sessionId: `refused-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-    const result: any = await server.callTool('hadron_delivery_batches', { appRef: app.id, session: s.id });
+    const result: any = await server.callTool('hadron_team_chat_inbox', { appRef: app.id, session: s.id });
     expect(result.isError).not.toBe(true);
     const batches = JSON.parse(result.content[0].text).batches;
     expect(batches.map((b: any) => b.workerId)).toEqual([kit.id]);
-    const ack: any = await server.callTool('hadron_ack_delivery_batches', { batchIds: [batches[0].id], session: s.id });
+    const ack: any = await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [batches[0].id], session: s.id });
     expect(ack.isError).not.toBe(true);
     expect(ack.content[0].text).toBe('Acknowledged 1.');
   });
 
+});
+
+it('self proof uses the same current register policy as host proof after read', async () => {
+  const s = await ownSession(); await postForBoth();
+  const [b] = (await selfRead(s)).batches;
+  await db.registerEntry.updateMany({ where: { attendeeWorkerId: kit.id }, data: { role: 'POST' } });
+  expect(await code(selfAck(s, [b.id]))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+  expect(await db.workerDeliveryChannel.count()).toBe(0);
+});
+
+it('self read waits on the deciding session row and sees an end committed by its lock holder', async () => {
+  const s = await ownSession(); await postForBoth();
+  let held!: () => void; const holding = new Promise<void>(r => { held = r; });
+  let release!: () => void; const released = new Promise<void>(r => { release = r; });
+  let entering!: () => void; const locking = new Promise<'locking'>(r => { entering = () => r('locking'); });
+  let auditing!: () => void; const auditStage = new Promise<'auditing'>(r => { auditing = () => r('auditing'); });
+  const blocker = db.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM sessions WHERE id=${s.id} FOR UPDATE`;
+    held(); await released;
+    await tx.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+  });
+  await holding;
+  const original = db.$transaction.bind(db);
+  const wrapped = new Proxy(db, { get(t, prop) {
+    if (prop !== '$transaction') return Reflect.get(t, prop);
+    return (body: any, ...options: any[]) => (original as any)(async (tx: any) => body(new Proxy(tx, { get(target, key) {
+      if (key === 'appLogEntry') return new Proxy(target.appLogEntry, { get(model, method) {
+        if (method !== 'create') return Reflect.get(model, method);
+        return (...args: any[]) => { auditing(); return model.create(...args); };
+      }});
+      if (key !== '$queryRaw') return Reflect.get(target, key);
+      return (...args: any[]) => {
+        const sql = Array.isArray(args[0]) ? args[0].join(' ') : '';
+        if (sql.includes('FROM sessions') && sql.includes('FOR SHARE')) entering();
+        return target.$queryRaw(...args);
+      };
+    }})), ...options);
+  }});
+  const result = code(selfRead(s, {}, { db: wrapped }));
+  try { expect(await Promise.race([locking, auditStage, result.then(() => 'completed')])).toBe('locking'); }
+  finally { release(); await blocker; }
+  expect(await result).toBe('SESSION_NOT_LIVE');
+  expect(await db.appLogEntry.count()).toBe(0);
+});
+
+it('the post-load self check refuses a hard expiry crossed during message loading', async () => {
+  const deadline = Date.now() + 60_000; const s = await ownSession({ expiresAt: new Date(deadline) });
+  await postForBoth(); let crossed = false;
+  const original = db.$transaction.bind(db);
+  const wrapped = new Proxy(db, { get(t, prop) {
+    if (prop !== '$transaction') return Reflect.get(t, prop);
+    return (body: any, ...options: any[]) => (original as any)(async (tx: any) => body(new Proxy(tx, { get(target, key) {
+      if (key !== '$queryRaw') return Reflect.get(target, key);
+      return async (...args: any[]) => {
+        const rows = await target.$queryRaw(...args);
+        if (!crossed && args[0]?.strings?.join(' ').includes('total_eligible')) {
+          crossed = true; vi.setSystemTime(deadline);
+        }
+        return rows;
+      };
+    }})), ...options);
+  }});
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(deadline - 1);
+  try {
+    expect(await code(selfRead(s, {}, { db: wrapped }))).toBe('SESSION_NOT_LIVE');
+    expect(crossed).toBe(true);
+    expect(await db.appLogEntry.count()).toBe(0);
+  } finally { vi.useRealTimers(); }
 });

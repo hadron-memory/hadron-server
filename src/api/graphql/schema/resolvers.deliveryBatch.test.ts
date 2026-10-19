@@ -202,7 +202,7 @@ describe('acknowledging a batch', () => {
 });
 
 describe('the MCP twin carries the same text and the same gates', () => {
-  it('hadron_delivery_batches returns the GraphQL text byte for byte; hadron_ack_delivery_batches acknowledges it; a bare key is refused', async () => {
+  it('hadron_team_chat_inbox returns the GraphQL text byte for byte; hadron_team_chat_inbox_ack acknowledges it; a bare key is refused', async () => {
     const { createTestableMcpServer } = await import('../../../mcp/server.js');
     const mk = (k: { id: string }) =>
       createTestableMcpServer({ appId: app.id, appKeyId: k.id, organizationId: org.id, roles: [] } as never, { sessionId: `ak-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
@@ -210,12 +210,271 @@ describe('the MCP twin carries the same text and the same gates', () => {
     await postForBoth();
     const gql = (await read(hostKey)).batches[0];
     const server = mk(hostKey);
-    const mcp = JSON.parse(text(await server.callTool('hadron_delivery_batches', { appRef: app.id })));
+    const mcp = JSON.parse(text(await server.callTool('hadron_team_chat_inbox', { appRef: app.id })));
     expect(mcp.batches).toHaveLength(1);
     expect(mcp.batches[0].text).toBe(gql.text);
     expect(mcp.batches[0].worker).toBe('Kit');
-    expect(text(await server.callTool('hadron_ack_delivery_batches', { batchIds: [mcp.batches[0].id] }))).toBe('Acknowledged 1.');
-    expect(JSON.parse(text(await server.callTool('hadron_delivery_batches', { appRef: app.id }))).batches).toEqual([]);
-    expect(text(await mk(bareKey).callTool('hadron_delivery_batches', { appRef: app.id }))).toMatch(/^\[app_key_scope_required\]/);
+    expect(text(await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [mcp.batches[0].id] }))).toBe('Acknowledged 1.');
+    expect(JSON.parse(text(await server.callTool('hadron_team_chat_inbox', { appRef: app.id }))).batches).toEqual([]);
+    expect(text(await mk(bareKey).callTool('hadron_team_chat_inbox', { appRef: app.id }))).toMatch(/^\[app_key_scope_required\]/);
+  });
+});
+
+// #2102 review regressions: commit the revocation just before the deciding
+// transaction starts. The hook changes real rows/registrations, never the answer.
+function beforeDecision(change: () => Promise<unknown>): Context {
+  let once = false;
+  const original = db.$transaction.bind(db);
+  const hooked = new Proxy(db, { get(target, prop) {
+    if (prop !== '$transaction') return Reflect.get(target, prop);
+    return async (...args: any[]) => {
+      if (!once) { once = true; await change(); }
+      return (original as any)(...args);
+    };
+  }});
+  return keyCtx(hostKey, app.id, { db: hooked });
+}
+
+describe('#2102 current host delivery policy at the deciding transaction', () => {
+  it('a supported host refresh removing the worker cannot return its earlier loaded text', async () => {
+    await postForBoth();
+    const c = beforeDecision(async () => {
+      await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 1', pollIntervalSeconds: 60, workers: [] } }, keyCtx(hostKey));
+      expect(await db.hostRegistrationWorker.count({ where: { workerId: kit.id } })).toBe(0);
+    });
+    expect((await Q.deliveryBatches({}, { appRef: app.id }, c)).batches).toEqual([]);
+  });
+
+  it.each(['register', 'encrypted', 'holder', 'caller'] as const)('read omits a channel after %s authority is revoked in the gap', async (kind) => {
+    await db.worker.update({ where: { id: kit.id }, data: { heldByUserId: manager.id } });
+    await postForBoth();
+    const c = beforeDecision(() => revoke(kind));
+    expect((await Q.deliveryBatches({}, { appRef: app.id }, c)).batches).toEqual([]);
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+  });
+
+  async function revoke(kind: 'register' | 'encrypted' | 'holder' | 'caller') {
+    if (kind === 'register') return db.registerEntry.updateMany({ where: { attendeeWorkerId: kit.id }, data: { role: 'POST' } });
+    if (kind === 'encrypted') return db.memory.update({ where: { id: channel.memoryId }, data: { isEncrypted: true } });
+    if (kind === 'caller') return db.memory.update({ where: { id: channel.memoryId }, data: { class: 'private', userId: manager.id, appId: null, sharedMemoryOfAgentId: null, userMemoryOfAgentId: null } });
+    return db.orgMember.update({ where: { organizationId_userId: { organizationId: org.id, userId: manager.id } }, data: { deletedAt: new Date() } });
+  }
+
+  it.each(['register', 'encrypted', 'holder', 'caller'] as const)('old host proof refuses after %s authority loss, including at transaction entry', async (kind) => {
+    await db.worker.update({ where: { id: kit.id }, data: { heldByUserId: manager.id } });
+    await postForBoth();
+    const [b] = (await read(hostKey)).batches;
+    const c = beforeDecision(() => revoke(kind));
+    expect(await code(M.acknowledgeDeliveryBatches({}, { batchIds: [b.id] }, c))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect((await read(hostKey)).batches).toEqual([]);
+  });
+});
+
+describe('#2102 proof policy after an actual worker wake-lock wait', () => {
+  it.each(['register', 'encrypted'] as const)('a committed %s revocation while ack waits refuses with zero marks', async (kind) => {
+    await postForBoth();
+    const [b] = (await read(hostKey)).batches;
+    let held!: () => void; const holding = new Promise<void>(r => { held = r; });
+    let release!: () => void; const released = new Promise<void>(r => { release = r; });
+    let entering!: () => void; const waiting = new Promise<void>(r => { entering = r; });
+    const blocker = db.$transaction(async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + kit.id}, 0))`;
+      held(); await released;
+    });
+    await holding;
+    const original = db.$transaction.bind(db);
+    const hooked = new Proxy(db, { get(target, prop) {
+      if (prop !== '$transaction') return Reflect.get(target, prop);
+      return (body: any, ...options: any[]) => (original as any)(async (tx: any) => body(new Proxy(tx, { get(t, key) {
+        if (key !== '$executeRaw') return Reflect.get(t, key);
+        return (...args: any[]) => {
+          if (args.includes('wake:' + kit.id)) entering();
+          return t.$executeRaw(...args);
+        };
+      }})), ...options);
+    }});
+    const pending = M.acknowledgeDeliveryBatches({}, { batchIds: [b.id] }, keyCtx(hostKey, app.id, { db: hooked }));
+    try {
+      await waiting;
+      // Observe a real blocked PostgreSQL advisory lock, not a timed sleep.
+      let blocked = false;
+      for (let i = 0; i < 100 && !blocked; i++) {
+        const rows = await db.$queryRaw<Array<{ waiting: boolean }>>`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())) AS waiting`;
+        blocked = rows[0]!.waiting;
+      }
+      expect(blocked).toBe(true);
+      if (kind === 'register') await db.registerEntry.updateMany({ where: { attendeeWorkerId: kit.id }, data: { role: 'POST' } });
+      else await db.memory.update({ where: { id: channel.memoryId }, data: { isEncrypted: true } });
+    } finally { release(); await blocker; }
+    expect(await code(pending)).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+  });
+});
+
+describe('#2102 register policy remains fenced after the deciding read', () => {
+  it.each([
+    ['host', 'app', 'update'], ['self', 'app', 'update'],
+    ['host', 'org', 'update'], ['self', 'org', 'update'],
+    ['host', 'app', 'delete'], ['self', 'app', 'create'],
+  ] as const)('%s ack fences %s register %s through commit', async (arm, owner, change) => {
+    const entry = await db.registerEntry.findFirstOrThrow({ where: { attendeeWorkerId: kit.id } });
+    if (owner === 'org') await db.registerEntry.update({ where: { id: entry.id }, data: { appId: null, organizationId: org.id } });
+    if (change === 'create') await db.registerEntry.update({ where: { id: entry.id }, data: { attendeeWorkerId: null } });
+    await postForBoth();
+    const session = arm === 'self' ? await db.session.create({ data: { id: generateId(), appId: app.id, userId: manager.id, workerId: kit.id, agentId } }) : null;
+    const caller = session ? { ...ctx(manager.id), appId: app.id, sessionId: session.id } : keyCtx(hostKey);
+    const [batch] = (await Q.deliveryBatches({}, { appRef: app.id }, caller)).batches;
+    let reached!: () => void; const policyRead = new Promise<void>(r => { reached = r; });
+    let release!: () => void; const resumed = new Promise<void>(r => { release = r; });
+    let once = false;
+    const original = db.$transaction.bind(db);
+    const wrapped = new Proxy(db, { get(t, prop) {
+      if (prop !== '$transaction') return Reflect.get(t, prop);
+      return (body: any, ...options: any[]) => (original as any)(async (tx: any) => body(new Proxy(tx, { get(target, key) {
+        if (key !== 'channel') return Reflect.get(target, key);
+        return new Proxy(target.channel, { get(model, method) {
+          if (method !== 'findMany') return Reflect.get(model, method);
+          return async (args: any) => {
+            const rows = await model.findMany(args);
+            if (!once && args.select?.memory?.select?.isEncrypted) { once = true; reached(); await resumed; }
+            return rows;
+          };
+        }});
+      }})), ...options);
+    }});
+    const pending = M.acknowledgeDeliveryBatches({}, { batchIds: [batch.id] }, { ...caller, db: wrapped });
+    await policyRead;
+    let committed = false;
+    const write = change === 'delete'
+      ? M.deleteRegisterEntry({}, { ref: entry.id }, ctx(manager.id))
+      : change === 'create'
+        ? M.createRegisterEntry({}, { input: { ownerRef: app.id, channelRef: channel.id, attendeeRef: kit.id, role: 'POST' } }, ctx(manager.id))
+        : M.updateRegisterEntry({}, { ref: entry.id, input: { role: 'POST' } }, ctx(manager.id));
+    const revoke = write.then(() => { committed = true; });
+    try {
+      let blocked = false;
+      for (let i = 0; i < 100 && !blocked && !committed; i++) {
+        const rows = await db.$queryRaw<Array<{ waiting: boolean }>>`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())) AS waiting`;
+        blocked = rows[0]!.waiting;
+      }
+      expect(committed).toBe(false);
+      expect(blocked).toBe(true);
+    } finally { release(); await Promise.allSettled([pending, revoke]); }
+    expect(await pending).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(committed).toBe(true);
+    expect(await code(M.acknowledgeDeliveryBatches({}, { batchIds: [batch.id] }, caller))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await db.workerDeliveryChannel.count()).toBe(1);
+  });
+});
+
+describe('#2102 refused host uses are recorded once apart', () => {
+  async function callRead(k: { id: string }, surface: string) {
+    const caller = keyCtx(k);
+    if (surface === 'resolver') return code(Q.deliveryBatches({}, { appRef: app.id }, caller));
+    if (surface === 'graphql') {
+      const { ApolloServer } = await import('@apollo/server'); const { typeDefs } = await import('./typeDefs.js');
+      const server = new ApolloServer({ typeDefs, resolvers: resolvers as any });
+      try { const r = await server.executeOperation({ query: 'query($app:String!){deliveryBatches(appRef:$app){batches{id}}}', variables: { app: app.id } }, { contextValue: caller });
+        expect(r.body.kind).toBe('single'); if (r.body.kind === 'single') return r.body.singleResult.errors?.[0]?.extensions?.code;
+      } finally { await server.stop(); }
+    }
+    const { createTestableMcpServer } = await import('../../../mcp/server.js');
+    const server = createTestableMcpServer({ ...caller, clientId: `app:${app.id}` } as never);
+    const r = await server.callTool('hadron_team_chat_inbox', { appRef: app.id });
+    expect((r as any).isError).toBe(true); return undefined;
+  }
+
+  it.each(['resolver', 'graphql', 'mcp'])('host-only read refusal is recorded once through %s', async surface => {
+    await callRead(opOnlyKey, surface);
+    const rows = await db.hostKeyUse.findMany({ where: { appKeyId: opOnlyKey.id, action: 'deliver', refusedCode: 'APP_KEY_SCOPE_REQUIRED' } });
+    expect(rows).toHaveLength(1);
+  });
+
+  it.each(['resolver', 'graphql', 'mcp'])('receiver ack after attention scope revocation records once through %s', async surface => {
+    await postForBoth(); const [b] = (await read(hostKey)).batches;
+    await M.revokeAppKeyScope({}, { id: hostKey.id, scope: 'attention:deliver' }, ctx(manager.id));
+    if (surface === 'resolver') expect(await code(ack(hostKey, [b.id]))).toBe('APP_KEY_SCOPE_REQUIRED');
+    else if (surface === 'graphql') {
+      const { ApolloServer } = await import('@apollo/server'); const { typeDefs } = await import('./typeDefs.js');
+      const server = new ApolloServer({ typeDefs, resolvers: resolvers as any });
+      try {
+        const r = await server.executeOperation({ query: 'mutation($ids:[String!]!){acknowledgeDeliveryBatches(batchIds:$ids){acknowledged}}', variables: { ids: [b.id] } }, { contextValue: keyCtx(hostKey) });
+        expect(r.body.kind).toBe('single');
+        if (r.body.kind === 'single') expect(r.body.singleResult.errors?.[0]?.extensions?.code).toBe('APP_KEY_SCOPE_REQUIRED');
+      } finally { await server.stop(); }
+    } else {
+      const { createTestableMcpServer } = await import('../../../mcp/server.js');
+      const server = createTestableMcpServer({ ...keyCtx(hostKey), clientId: `app:${app.id}` } as never);
+      expect((await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [b.id] }) as any).isError).toBe(true);
+    }
+    expect(await db.hostKeyUse.count({ where: { appKeyId: hostKey.id, action: 'deliver', refusedCode: 'APP_KEY_SCOPE_REQUIRED' } })).toBe(1);
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+  });
+
+  it('an audit-storage failure preserves the original refusal', async () => {
+    const failed = new Proxy(db, { get(t, prop) {
+      if (prop !== 'hostKeyUse') return Reflect.get(t, prop);
+      return new Proxy(t.hostKeyUse, { get(model, method) { if (method === 'create') return async () => { throw new Error('synthetic audit unavailable'); }; return Reflect.get(model, method); }});
+    }});
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try { expect(await code(Q.deliveryBatches({}, { appRef: app.id }, keyCtx(opOnlyKey, app.id, { db: failed })))).toBe('APP_KEY_SCOPE_REQUIRED'); expect(log).toHaveBeenCalledTimes(1); }
+    finally { log.mockRestore(); }
+  });
+});
+
+describe('#2102 empty host acknowledgement is an audited no-op', () => {
+  it.each(['resolver', 'graphql', 'mcp'])('records one zero-count accepted use through %s', async surface => {
+    if (surface === 'resolver') expect(await ack(hostKey, [])).toEqual({ acknowledged: 0, unchanged: 0 });
+    else if (surface === 'graphql') {
+      const { ApolloServer } = await import('@apollo/server'); const { typeDefs } = await import('./typeDefs.js');
+      const server = new ApolloServer({ typeDefs, resolvers: resolvers as any });
+      try {
+        const r = await server.executeOperation({ query: 'mutation{acknowledgeDeliveryBatches(batchIds:[]){acknowledged unchanged}}' }, { contextValue: keyCtx(hostKey) });
+        expect(r.body.kind).toBe('single');
+        if (r.body.kind === 'single') { expect(r.body.singleResult.errors).toBeUndefined(); expect(r.body.singleResult.data?.acknowledgeDeliveryBatches).toEqual({ acknowledged: 0, unchanged: 0 }); }
+      } finally { await server.stop(); }
+    } else {
+      const { createTestableMcpServer } = await import('../../../mcp/server.js');
+      const server = createTestableMcpServer({ ...keyCtx(hostKey), clientId: `app:${app.id}` } as never);
+      const r = await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [] });
+      expect(r.content[0].text).toBe('Acknowledged 0.');
+    }
+    const uses = await db.hostKeyUse.findMany({ where: { appKeyId: hostKey.id, action: 'deliver' } });
+    expect(uses).toHaveLength(1); expect(uses[0]).toMatchObject({ count: 0, refusedCode: null, hostId: 'orca1' });
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect(await db.channelReadState.count()).toBe(0);
+    expect(await db.workerWakeAck.count()).toBe(0);
+    expect(await db.appWakeDay.count()).toBe(0);
+  });
+
+  it('preserves the self arm empty result without a host use', async () => {
+    const session = await db.session.create({ data: { id: generateId(), appId: app.id, userId: manager.id, workerId: kit.id, agentId } });
+    expect(await M.acknowledgeDeliveryBatches({}, { batchIds: [] }, { ...ctx(manager.id), appId: app.id, sessionId: session.id })).toEqual({ acknowledged: 0, unchanged: 0 });
+    expect(await db.hostKeyUse.count({ where: { action: 'deliver' } })).toBe(0);
+  });
+
+  it.each(['scope', 'registration'])('rechecks %s at the no-op transaction and records only its refusal', async kind => {
+    const caller = beforeDecision(async () => {
+      if (kind === 'scope') await M.revokeAppKeyScope({}, { id: hostKey.id, scope: 'attention:deliver' }, ctx(manager.id));
+      else await db.hostRegistration.updateMany({ where: { appId: app.id, hostId: 'orca1' }, data: { lostAt: new Date() } });
+    });
+    expect(await code(M.acknowledgeDeliveryBatches({}, { batchIds: [] }, caller))).toBe('APP_KEY_SCOPE_REQUIRED');
+    const uses = await db.hostKeyUse.findMany({ where: { appKeyId: hostKey.id, action: 'deliver' } });
+    expect(uses).toHaveLength(1); expect(uses[0].refusedCode).toBe('APP_KEY_SCOPE_REQUIRED');
+  });
+
+  it('cannot report accepted no-op success when the transactional use record fails', async () => {
+    const original = db.$transaction.bind(db);
+    const wrapped = new Proxy(db, { get(t, prop) {
+      if (prop !== '$transaction') return Reflect.get(t, prop);
+      return (body: any, ...options: any[]) => (original as any)(async (tx: any) => body(new Proxy(tx, { get(target, key) {
+        if (key !== 'hostKeyUse') return Reflect.get(target, key);
+        return new Proxy(target.hostKeyUse, { get(model, method) { if (method === 'create') return async () => { throw new Error('synthetic no-op audit unavailable'); }; return Reflect.get(model, method); }});
+      }})), ...options);
+    }});
+    await expect(M.acknowledgeDeliveryBatches({}, { batchIds: [] }, keyCtx(hostKey, app.id, { db: wrapped }))).rejects.toThrow('synthetic no-op audit unavailable');
+    expect(await db.hostKeyUse.count({ where: { action: 'deliver' } })).toBe(0);
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
   });
 });

@@ -70,9 +70,26 @@ export function renderBatch(input: RenderInput): RenderOutput {
   if (!Number.isSafeInteger(totalEligible) || totalEligible < input.messages.length) {
     throw new RangeError('totalEligible must be a safe integer at least messages.length.');
   }
-  const ordered = [...input.messages].sort((a, b) =>
-    a.createdAt.getTime() - b.createdAt.getTime() || compareText(a.channelId, b.channelId) || a.seq - b.seq);
+  // A mark covers by seq. Merge channel prefixes by their oldest available
+  // head, never timestamp-sort within a channel (clocks can run backward).
+  // A comparator mixing same-channel seq with cross-channel time is not
+  // transitive, so make the per-channel ordering explicit first.
+  const queues = new Map<string, BatchMessage[]>();
+  for (const message of input.messages) {
+    const queue = queues.get(message.channelId) ?? [];
+    queue.push(message); queues.set(message.channelId, queue);
+  }
+  for (const queue of queues.values()) queue.sort((a, b) => a.seq - b.seq);
   const messageLimit = Math.min(10, input.maxMessages ?? 10);
+  const ordered: BatchMessage[] = [];
+  while (queues.size && ordered.length < messageLimit) {
+    const head = [...queues.values()].map(q => q[0]).sort((a, b) =>
+      a.createdAt.getTime() - b.createdAt.getTime() || compareText(a.channelId, b.channelId) || a.seq - b.seq)[0];
+    ordered.push(head);
+    const queue = queues.get(head.channelId)!;
+    queue.shift();
+    if (!queue.length) queues.delete(head.channelId);
+  }
   const characterLimit = Math.min(6000, input.maxChars ?? 6000);
   const selected: BatchMessage[] = [];
   let bodyCharacters = 0;

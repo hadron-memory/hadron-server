@@ -10,9 +10,8 @@
 // The batch is DERIVED (src/lib/tickers/deliveryBatch.ts); its id is a signed proof (src/lib/tickers/batchProof.ts).
 
 import type { Prisma } from '../../../generated/prisma/index.js';
-import { getAccessibleMemoryIds, type Context } from './resolvers.helpers.js';
+import type { Context } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
-import { holderAccess, mayRead } from '../../../lib/tickers/dueWakes.js';
 import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
 import { ownsSession, appPrincipalMayWriteSession } from '../../../lib/sessionOwnership.js';
 import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
@@ -22,9 +21,9 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { appKeyCaller, refuseSessionBound, requireKeyScope } from '../../../lib/appKeyScopes/scopes.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
-import { keyHostId, recordHostKeyUse, type HostKey } from '../../../lib/hostOperations/hostKey.js';
+import { keyHostId, recordHostKeyUse, recordHostKeyUseApart, type HostKey } from '../../../lib/hostOperations/hostKey.js';
 import { liveCaller } from '../../../lib/tickers/liveCaller.js';
-import { batchProofPayload, loadDeliveryBatches } from '../../../lib/tickers/deliveryBatch.js';
+import { batchProofPayload, loadDeliveryBatches, loadDeliveryChannelPolicy } from '../../../lib/tickers/deliveryBatch.js';
 import { signBatchProof, type BatchProof } from '../../../lib/tickers/wakeProof.js';
 import { acknowledgeBatchProofs, type BatchAck } from '../../../lib/tickers/acknowledge.js';
 
@@ -36,6 +35,21 @@ const appAnchors = (app: TaskApp): AuthorityAnchor[] => [
 
 const hostScopeRequired = () =>
   taskError('APP_KEY_SCOPE_REQUIRED', 'Delivery batches need an App key that holds attention:deliver and host:operate for one host.');
+
+/** Refusals use an apart write, after the deciding transaction rolled back.
+ * Both transports enter here once; adapters must not record another use.
+ */
+async function recordingBatchRefusal<T>(ctx: Context, call: () => Promise<T>): Promise<T> {
+  try { return await call(); }
+  catch (error) {
+    const key = appKeyCaller(ctx);
+    const code = (error as { extensions?: { code?: unknown } } | null)?.extensions?.code;
+    if (key && typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code)) {
+      await recordHostKeyUseApart(ctx.db, key, 'deliver', { refusedCode: code });
+    }
+    throw error;
+  }
+}
 
 /**
  * The gate outside any transaction, in the order that makes what a key learns independent of what it does not hold: a
@@ -142,7 +156,7 @@ export const deliveryBatchQueries = {
     _: unknown,
     a: { appRef: string; workerRefs?: string[] | null; first?: number | null; after?: string | null },
     requestCtx: Context,
-  ) => {
+  ) => recordingBatchRefusal(requestCtx, async () => {
     const ctx = (await liveCaller(requestCtx)) ?? (() => { throw taskError('APP_NOT_FOUND', 'App not found.'); })();
     if (ctx.sessionBindingRefused && !appKeyCaller(ctx)) throw taskError('SESSION_NOT_LIVE', 'The named session is not live or cannot bind.');
     if (ctx.sessionId && (!appKeyCaller(ctx) || !(await keyHostId(ctx.db, appKeyCaller(ctx)!)))) return selfBatches(ctx, a);
@@ -153,32 +167,40 @@ export const deliveryBatchQueries = {
       const resolved = await Promise.all(a.workerRefs.map((r) => resolveWorkerRef(ctx.db, r).then((x) => x.id, () => null)));
       only = resolved.filter((id): id is string => id !== null);
     }
-    const now = new Date();
-    const page = await loadDeliveryBatches({ ctx, app, hostId: host.hostId, now, workerIds: only, first: a.first, after: a.after });
-    // The answer is decided under the App's anchor on EVERY path (an empty page still carries cursors), and the read is
-    // recorded in the same transaction, so it is recorded exactly when it is allowed to be returned.
-    await ctx.db.$transaction(async (tx) => {
-      await authorize(tx);
+    // Select workers, channel policy, rendered text and audit under the deciding
+    // authority protocol, using its cache-free transaction context throughout.
+    return withAuthorizedTx(ctx, appAnchors(app), async txCtx => authorize(txCtx.db), async (tx, txCtx) => {
+      const now = new Date();
+      const currentApp = await loadApp(txCtx, app.id);
+      if (!currentApp || currentApp.deletedAt || currentApp.uninstalledAt) throw taskError('APP_NOT_FOUND', 'App not found.');
+      const page = await loadDeliveryBatches({ ctx: txCtx, app: currentApp, hostId: host.hostId, now, workerIds: only, first: a.first, after: a.after });
       await recordHostKeyUse(tx, host, 'deliver', { count: page.batches.length });
+      const workers = new Map((await tx.worker.findMany({ where: { id: { in: page.batches.map((b) => b.workerId) } } })).map((w) => [w.id, w]));
+      const channelIds = [...new Set(page.batches.flatMap((b) => b.ranges.map((r) => r.channelId)))];
+      const channels = new Map((await tx.channel.findMany({ where: { id: { in: channelIds } } })).map((c) => [c.id, c]));
+      return {
+        batches: page.batches.map((b) => ({
+          id: signBatchProof(batchProofPayload(b, { appId: app.id, hostId: host.hostId, appKeyId: host.appKeyId, now })),
+          worker: workers.get(b.workerId)!,
+          text: b.text,
+          deliverAfter: b.deliverAfter,
+          busyDeadline: b.busyDeadline,
+          interrupt: b.interrupt,
+          ranges: b.ranges.map((r) => ({ channel: channels.get(r.channelId)!, incarnation: r.incarnation, fromSeq: r.fromSeq, throughSeq: r.throughSeq, seqs: r.seqs })),
+          overflow: b.overflow,
+        })),
+        pageInfo: { hasNextPage: page.nextAfter !== null, endCursor: page.nextAfter },
+      };
     });
-    const workers = new Map((await ctx.db.worker.findMany({ where: { id: { in: page.batches.map((b) => b.workerId) } } })).map((w) => [w.id, w]));
-    const channelIds = [...new Set(page.batches.flatMap((b) => b.ranges.map((r) => r.channelId)))];
-    const channels = new Map((await ctx.db.channel.findMany({ where: { id: { in: channelIds } } })).map((c) => [c.id, c]));
-    return {
-      batches: page.batches.map((b) => ({
-        id: signBatchProof(batchProofPayload(b, { appId: app.id, hostId: host.hostId, appKeyId: host.appKeyId, now })),
-        worker: workers.get(b.workerId)!,
-        text: b.text,
-        deliverAfter: b.deliverAfter,
-        busyDeadline: b.busyDeadline,
-        interrupt: b.interrupt,
-        ranges: b.ranges.map((r) => ({ channel: channels.get(r.channelId)!, incarnation: r.incarnation, fromSeq: r.fromSeq, throughSeq: r.throughSeq, seqs: r.seqs })),
-        overflow: b.overflow,
-      })),
-      pageInfo: { hasNextPage: page.nextAfter !== null, endCursor: page.nextAfter },
-    };
-  },
+  }),
 };
+
+async function currentBatchChannels(
+  ctx: Context, app: TaskApp, worker: { id: string; heldByUserId: string | null }, proof: BatchProof,
+): Promise<boolean> {
+  const channels = new Set((await loadDeliveryChannelPolicy(ctx, app, worker)).map(c => c.id));
+  return proof.channels.every(c => channels.has(c.channelId));
+}
 
 /**
  * Acknowledge typed batches (cor:agt:080:16/:17). Only the key the id names, with the authority re-derived INSIDE the
@@ -191,7 +213,7 @@ export const deliveryBatchMutations = {
     _: unknown,
     a: { batchIds: string[]; through?: Array<{ channelId: string; seq: number }> | null },
     requestCtx: Context,
-  ) => {
+  ) => recordingBatchRefusal(requestCtx, async () => {
     const key = appKeyCaller(requestCtx);
     if (requestCtx.sessionBindingRefused && !key) throw taskError('SESSION_NOT_LIVE', 'The named session is not live or cannot bind.');
     if (requestCtx.sessionId && (!key || !(await keyHostId(requestCtx.db, key)))) {
@@ -208,10 +230,7 @@ export const deliveryBatchMutations = {
             if (live.session.id !== own.session.id || live.worker.id !== p.workerId) return false;
             const app = await loadApp(txCtx, p.appId);
             if (!app || app.deletedAt || app.uninstalledAt) return false;
-            const callerIds = await getAccessibleMemoryIds(txCtx);
-            const holder = live.worker.heldByUserId ? await holderAccess(txCtx, app, live.worker.heldByUserId, new Map()) : 'all';
-            const channels = await tx.channel.findMany({ where: { id: { in: p.channels.map(c => c.channelId) }, deletedAt: null }, select: { id: true, memoryId: true, memory: { select: { isEncrypted: true } } } });
-            return channels.length === p.channels.length && channels.every(c => !c.memory.isEncrypted && (callerIds === null || callerIds.includes(c.memoryId)) && mayRead(holder, c.memoryId));
+            return await currentBatchChannels(txCtx, app, live.worker, p);
           } catch { return false; }
         },
       });
@@ -223,6 +242,15 @@ export const deliveryBatchMutations = {
     await requireKeyScope(requestCtx.db, key, 'attention:deliver');
     refuseSessionBound(requestCtx);
     if (currentActor().workerId) throw taskError('APP_KEY_SESSION_BOUND', 'A host key does not act as a worker. Send no session.');
+    // Match the self arm's accepted no-op, but every host call still owes a
+    // use record. No proof callback runs for [], so authorize and record here.
+    if (a.batchIds.length === 0) {
+      const { app, host, authorize } = await batchKeyEntry(requestCtx, key.appId);
+      return withAuthorizedTx(requestCtx, appAnchors(app), txCtx => authorize(txCtx.db), async tx => {
+        await recordHostKeyUse(tx, host, 'deliver', { count: 0 });
+        return { acknowledged: 0, unchanged: 0 };
+      });
+    }
     const acks: BatchAck[] = a.batchIds.map((proof) => ({ proof, ...(a.through && a.through.length > 0 ? { through: a.through } : {}) }));
     return acknowledgeBatchProofs({
       ctx: requestCtx,
@@ -250,9 +278,11 @@ export const deliveryBatchMutations = {
             AND rw.worker_id = ${p.workerId} AND w.retired_at IS NULL
           FOR SHARE OF r`;
         if (rows.length === 0) return false;
+        const worker = await tx.worker.findUnique({ where: { id: p.workerId } });
+        if (!worker || !(await currentBatchChannels(txCtx, app, worker, p))) return false;
         await recordHostKeyUse(tx, { appKeyId: key.appKeyId, appId: key.appId, hostId: p.hostId }, 'deliver', { count: p.channels.reduce((n, c) => n + c.seqs.length, 0) });
         return true;
       },
     });
-  },
+  }),
 };
