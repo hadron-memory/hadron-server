@@ -74,6 +74,14 @@ const subscribe = (tickerId: string, workerId: string) =>
   db.tickerSubscription.create({ data: { id: generateId(), tickerId, workerId, createdBy: manager.id } });
 const due = (c: Context, extra: Record<string, unknown> = {}) => Q.dueWakes({}, { appRef: app.id, ...extra }, c);
 const ids = (page: any) => page.wakes.map((w: any) => w.worker.id).sort();
+/** Moves every floor clock an hour back: channel deliveries and, since #2072 (R53), the textless wakes' receipts. */
+const pastFloor = async (ageMs = 3600_000) => {
+  const ago = new Date(Date.now() - ageMs);
+  await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: ago } });
+  await db.workerWakeAck.updateMany({ data: { ackedAt: ago } });
+};
+/** A proof as it was issued `ms` earlier: what replaying it looks like after `pastFloor(ms)` moved the clocks back. */
+const issuedEarlier = (proof: string, ms: number) => { const p = verifyWakeProof(proof); return signWakeProof({ ...p, issuedAt: p.issuedAt - ms }); };
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -275,7 +283,7 @@ describe('who may read due wakes, and R1/B3', () => {
     // acknowledged and the floor has passed, the manager sees only the readable channel.
     expect((await due(ctx(manager.id))).wakes).toEqual([]);
     await M.acknowledgeWakes({}, { proofs: mine.wakes.map((w: any) => w.proof) }, ctx(holderA.id));
-    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    await pastFloor();
     const both = await due(ctx(manager.id));
     expect(both.wakes[0].channels.map((c: any) => c.channel.id)).toEqual([channel.id]);
     expect(both.wakes[0].unread).toBe(1);
@@ -291,22 +299,25 @@ describe('delivery record: acknowledging, never reading', () => {
     const r = await M.acknowledgeWakes({}, { proofs: [first.wakes[0].proof] }, ctx(holderA.id));
     expect(r).toEqual({ acknowledged: 1, unchanged: 0 });
     expect(await db.channelReadState.count({ where: { workerId: liam.id } })).toBe(0);
-    const row = await db.workerDeliveryChannel.findFirstOrThrow({ where: { workerId: liam.id } });
-    expect(row).toMatchObject({ deliveredThroughSeq: 1, ackedByUserId: holderA.id });
-    // Nothing newer: not due again (outside or inside the ceiling).
+    // #2072 (R53): the acknowledgement records the wake's receipt, with who, and moves no message mark.
+    expect(await db.workerDeliveryChannel.count({ where: { workerId: liam.id } })).toBe(0);
+    expect(await db.workerWakeAck.findFirstOrThrow({ where: { workerId: liam.id } })).toMatchObject({ ackedByUserId: holderA.id });
+    // Inside the ceiling it is not due again, though its text stays undelivered.
     expect(ids(await due(ctx(holderA.id)))).toEqual([]);
 
     // A repeat acknowledgement moves nothing and is not another wake against the budget.
     expect(await M.acknowledgeWakes({}, { proofs: [first.wakes[0].proof] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
     expect((await db.appWakeDay.findFirstOrThrow({ where: { appId: app.id } })).wakes).toBe(1);
 
-    // An older proof can never lower delivered-through.
+    // An older proof replayed after a newer wake was acknowledged changes nothing.
     await say(channel, 'two', mention('liam'));
-    await db.workerDeliveryChannel.update({ where: { workerId_channelId: { workerId: liam.id, channelId: channel.id } }, data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    const ageMs = 5 * 60_000;
+    await pastFloor(ageMs);
     const second = await due(ctx(holderA.id));
-    await M.acknowledgeWakes({}, { proofs: [second.wakes[0].proof] }, ctx(holderA.id));
-    await M.acknowledgeWakes({}, { proofs: [first.wakes[0].proof] }, ctx(holderA.id));
-    expect((await db.workerDeliveryChannel.findFirstOrThrow({ where: { workerId: liam.id } })).deliveredThroughSeq).toBe(2);
+    expect(await M.acknowledgeWakes({}, { proofs: [second.wakes[0].proof] }, ctx(holderA.id))).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await M.acknowledgeWakes({}, { proofs: [issuedEarlier(first.wakes[0].proof, ageMs)] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
+    expect((await db.appWakeDay.findFirstOrThrow({ where: { appId: app.id } })).wakes).toBe(2);
+    expect(await db.workerDeliveryChannel.count({ where: { workerId: liam.id } })).toBe(0);
   });
 
   it('records the tick; the same tick is not due again until the next one', async () => {
@@ -318,7 +329,7 @@ describe('delivery record: acknowledging, never reading', () => {
     const tick = await db.workerDeliveryTick.findFirstOrThrow({ where: { workerId: liam.id, tickerId: t.id } });
     expect(tick.lastAckedTick).toBeGreaterThanOrEqual(1);
     await say(channel, 'more news');
-    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    await pastFloor();
     await db.workerDeliveryTick.updateMany({ data: { ackedAt: new Date(Date.now() - 3600_000) } });
     expect(ids(await due(ctx(manager.id)))).toEqual([]); // same tick, already acknowledged
     const later = await computeDueWakes({ ctx: ctx(manager.id), app: { id: app.id, organizationId: org.id, ownerUserId: null }, reader: { manager: true, userId: manager.id }, requester: { userId: manager.id }, now: new Date(Date.now() + 600_000) });
@@ -368,7 +379,8 @@ describe('R2 — amplification limits', () => {
     expect((await computeDueWakes({ ...args, now: at(30_000) })).wakes).toEqual([]);
     const later = await computeDueWakes({ ...args, now: at(121_000) });
     expect(later.wakes).toHaveLength(1);
-    expect(later.wakes[0].wake.unreadMentions).toBe(2); // the burst is ONE wake
+    // The burst is ONE wake. #2072 (R53): the first mention's text was never delivered, so it is still unread with them.
+    expect(later.wakes[0].wake.unreadMentions).toBe(3);
   });
 
   it('broadcast: an unstamped @all waits for the tick; a stamped one wakes at once', async () => {
@@ -400,10 +412,11 @@ describe('R2 — amplification limits', () => {
     await M.acknowledgeWakes({}, { proofs: page.wakes.map((w: any) => w.proof) }, ctx(manager.id));
     expect((await db.appWakeDay.findFirstOrThrow({ where: { appId: app.id } })).wakes).toBe(1);
     // Spent: the next non-exempt wake is withheld (and stays due), the stamp-exempt one passes.
-    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    await pastFloor();
     await say(channel, 'again', mention('liam'));
     const after = await due(ctx(manager.id));
-    expect(after.wakes).toEqual([]);
+    // #2072 (R53): the manager's mention to Nova moved no mark, so it is still due and, exempt, passes again.
+    expect(after.wakes.map((w: any) => w.worker.id)).toEqual([third.id]);
     expect(after.withheld).toBe(2); // Rook's unacknowledged mention is still due, and so is Liam's new one
   });
 
@@ -579,15 +592,17 @@ describe('cycle 1 — a repeat acknowledgement changes nothing (Diego P2-3)', ()
     await say(channel, 'one', mention('liam'));
     const first = (await due(ctx(holderA.id))).wakes[0];
     await M.acknowledgeWakes({}, { proofs: [first.proof] }, ctx(holderA.id));
-    const old = new Date(Date.now() - 3600_000);
-    await db.workerDeliveryChannel.updateMany({ where: { workerId: liam.id }, data: { deliveredAt: old, ackedByUserId: manager.id } });
+    // #2072 (R53): the wake's receipt is its delivery record now; no message mark is written.
+    const ageMs = 5 * 60_000;
+    const old = new Date(Date.now() - ageMs);
+    await db.workerWakeAck.updateMany({ where: { workerId: liam.id }, data: { ackedAt: old, ackedByUserId: manager.id } });
     await db.workerDeliveryTick.updateMany({ where: { workerId: liam.id }, data: { ackedAt: old, ackedByUserId: manager.id } });
-    expect(await M.acknowledgeWakes({}, { proofs: [first.proof] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
-    const ch = await db.workerDeliveryChannel.findFirstOrThrow({ where: { workerId: liam.id } });
+    expect(await M.acknowledgeWakes({}, { proofs: [issuedEarlier(first.proof, ageMs)] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
+    const ch = await db.workerWakeAck.findFirstOrThrow({ where: { workerId: liam.id } });
     const tk = await db.workerDeliveryTick.findFirstOrThrow({ where: { workerId: liam.id } });
-    expect([ch.deliveredAt.getTime(), ch.ackedByUserId]).toEqual([old.getTime(), manager.id]);
+    expect([ch.ackedAt.getTime(), ch.ackedByUserId]).toEqual([old.getTime(), manager.id]);
     expect([tk.ackedAt.getTime(), tk.ackedByUserId]).toEqual([old.getTime(), manager.id]);
-    // A newer mention is therefore not held back by the replay: the window ended an hour ago.
+    // A newer mention is therefore not held back by the replay: the window ended five minutes ago.
     await say(channel, 'two', mention('liam'));
     expect(ids(await due(ctx(holderA.id)))).toEqual([liam.id]);
   });
@@ -845,7 +860,9 @@ describe('cycle 2 — an old, unchanged proof cannot cancel a newer reservation 
     await say(channel, 'one', mention('liam'));
     const p1 = (await due(ctx(holderA.id))).wakes[0];
     await M.acknowledgeWakes({}, { proofs: [p1.proof] }, ctx(holderA.id));
-    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    const ageMs = 5 * 60_000;
+    await pastFloor(ageMs);
+    const replay = issuedEarlier(p1.proof, ageMs); // p1 as issued before its own (now five-minute-old) receipt
     await say(channel, 'two', mention('liam'));
     const p2 = (await due(ctx(holderA.id))).wakes[0];
     expect(p2.proof).not.toBe(p1.proof);
@@ -855,7 +872,7 @@ describe('cycle 2 — an old, unchanged proof cannot cancel a newer reservation 
     await say(channel, 'for rook', mention('rook'));
     expect((await due(ctx(holderB.id))).wakes).toHaveLength(0);
     // The old proof, replayed, is unchanged and must not free Liam's second reservation.
-    expect(await M.acknowledgeWakes({}, { proofs: [p1.proof] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
+    expect(await M.acknowledgeWakes({}, { proofs: [replay] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
     expect(await db.appWakeReservation.findMany()).toEqual(before);
     expect((await due(ctx(holderB.id))).wakes).toHaveLength(0);
     // Acknowledging the second spends it for good.
@@ -917,7 +934,7 @@ describe('cycle 3 — one outstanding wake per worker (Diego P2-1)', () => {
     expect(await M.acknowledgeWakes({}, { proofs: [p2.proof] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
     expect((await db.appWakeDay.findFirstOrThrow({ where: { appId: app.id } })).wakes).toBe(1);
     // What arrived since is still owed, but the budget is spent and the floor holds: it waits, withheld.
-    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    await pastFloor();
     const next = await due(ctx(holderA.id));
     expect(next.wakes).toEqual([]);
     expect(next.withheld).toBe(1);
@@ -929,8 +946,9 @@ describe('cycle 3 — one outstanding wake per worker (Diego P2-1)', () => {
     await say(channel, 'two', mention('liam'));
     expect((await due(ctx(holderA.id))).wakes[0].channels[0].throughSeq).toBe(1);
     await M.acknowledgeWakes({}, { proofs: [p1.proof] }, ctx(holderA.id));
-    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
-    expect((await due(ctx(holderA.id))).wakes[0].channels[0]).toMatchObject({ fromSeq: 2, throughSeq: 2 });
+    await pastFloor();
+    // #2072 (R53): the acknowledgement delivered no text, so the next wake still starts at the first mention.
+    expect((await due(ctx(holderA.id))).wakes[0].channels[0]).toMatchObject({ fromSeq: 1, throughSeq: 2 });
   });
 });
 
@@ -973,7 +991,8 @@ describe('cycle 3 — a recreated channel does not wedge an outstanding wake (Ro
     await db.channel.update({ where: { id: channel.id }, data: { incarnation: { increment: 1 }, lastSeq: 0 } });
     await db.node.deleteMany({ where: { messageChannelId: channel.id } });
     await say(channel, 'fresh start', mention('liam'));
-    expect(await code(M.acknowledgeWakes({}, { proofs: [p1.proof] }, ctx(holderA.id)))).toBe('WAKE_PROOF_STALE');
+    // #2072 (R53) retired the STALE refusal of p1 here: a v3 proof names no channel, so a recreated one cannot void
+    // it (the old-format v2 refusal is pinned under 'refuses a foreign requester…'). The stored wake is still dropped.
     const p2 = (await due(ctx(holderA.id))).wakes[0];
     expect(p2.channels[0].channel.id).toBe(channel.id);
     expect(await M.acknowledgeWakes({}, { proofs: [p2.proof] }, ctx(holderA.id))).toEqual({ acknowledged: 1, unchanged: 0 });

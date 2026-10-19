@@ -153,14 +153,31 @@ export async function acknowledgeWakes(args: {
           WHERE worker_delivery_task_events.delivered_at IS NULL`;
         if (moved > 0) advanced = true;
       }
+      // #2072 (R53): the wake's receipt, which is what a textless acknowledgement records (cor:agt:080:04): the floor's
+      // clock (080:13) and the once-per-wake budget test (080:15). Written only when no receipt of this key was recorded
+      // at or after this proof's issue: a repeat, or an older proof's replay, changes nothing (Diego P2-3), while the
+      // same wake offered again after the floor (a fresh issue) is a new delivery, floored and charged again (Vera, #2072).
+      const issuedNaive = toNaiveUtc(new Date(p.issuedAt));
+      const delivered = (await tx.$executeRaw`
+        INSERT INTO worker_wake_acks (worker_id, wake_key, acked_at, acked_by_user_id, acked_by_worker_id, acked_by_app_key_id)
+        VALUES (${p.workerId}, ${proofWakeKey(p)}, ${nowNaive}::timestamp,
+                ${ackedBy.ackedByUserId}, ${ackedBy.ackedByWorkerId}, ${ackedBy.ackedByAppKeyId})
+        ON CONFLICT (worker_id, wake_key) DO UPDATE SET
+          acked_at = EXCLUDED.acked_at,
+          acked_by_user_id = EXCLUDED.acked_by_user_id,
+          acked_by_worker_id = EXCLUDED.acked_by_worker_id,
+          acked_by_app_key_id = EXCLUDED.acked_by_app_key_id
+        WHERE worker_wake_acks.acked_at < ${issuedNaive}::timestamp`) > 0;
       // Only the reservation of THIS wake is spent or void: the one carrying this proof's wake key. A re-read of an
-      // unchanged wake shares the key, so it is freed whichever proof is acknowledged; a replay of an old, unchanged
-      // proof matches nothing newer, so it can never cancel the allowance of a wake issued after it (Diego cycle 2, P2-3).
-      await tx.$executeRaw(Prisma.sql`DELETE FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND wake_key = ${proofWakeKey(p)}`);
-      // Counted against the day's budget only when it moved something: a repeat acknowledgement is not another wake.
-      if (!advanced) { unchanged++; continue; }
+      // unchanged wake shares the key, so it is freed whichever proof is acknowledged. Under R53 a mark no longer moves,
+      // so the same wake offered again after the floor carries the SAME key: only a delivering acknowledgement frees
+      // it, and an old proof's replay (refused by the receipt above) can never cancel the allowance of a wake issued
+      // after it (Diego cycle 2, P2-3). Every earlier reservation of the key was freed by the receipt's own write.
+      if (delivered) await tx.$executeRaw(Prisma.sql`DELETE FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND wake_key = ${proofWakeKey(p)}`);
+      if (!delivered && !advanced) { unchanged++; continue; }
       acknowledged++;
-      if (!p.exempt) {
+      // Counted against the day's budget once per delivered wake: a repeat acknowledgement is not another wake.
+      if (delivered && !p.exempt) {
         const dayText = now.toISOString().slice(0, 10);
         await tx.$executeRaw(Prisma.sql`
           INSERT INTO app_wake_days (app_id, day, wakes) VALUES (${p.appId}, ${dayText}::date, 1)

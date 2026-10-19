@@ -338,7 +338,7 @@ export async function computeDueWakes(args: {
   const nextAfter = hasMore ? workers[workers.length - 1]!.id : null;
   const ids = workers.map((w) => w.id);
 
-  const [wakeSettings, availability, activity, subs, deliveryChannels, deliveryTicks, readStates, deliveryTasks] = await Promise.all([
+  const [wakeSettings, availability, activity, subs, deliveryChannels, deliveryTicks, readStates, deliveryTasks, wakeAcks] = await Promise.all([
     db.workerWakeSettings.findMany({ where: { workerId: { in: ids } } }),
     db.workerAvailability.findMany({ where: { workerId: { in: ids } } }),
     loadWorkersActivity(ctx, ids, now),
@@ -351,8 +351,11 @@ export async function computeDueWakes(args: {
     db.channelReadState.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, channelId: true, lastSeenSeq: true } }),
     // #1708: the latest task-event delivery per worker, for the floor (cor:agt:080:13).
     db.workerDeliveryTaskEvent.groupBy({ by: ['workerId'], where: { workerId: { in: ids }, deliveredAt: { not: null } }, _max: { deliveredAt: true } }),
+    // #2072 (R53): the latest acknowledged wake per worker. A textless wake moves no mark, so its receipt is the floor's clock.
+    db.workerWakeAck.groupBy({ by: ['workerId'], where: { workerId: { in: ids } }, _max: { ackedAt: true } }),
   ]);
   const taskDeliveredOf = new Map(deliveryTasks.map((d) => [d.workerId, d._max.deliveredAt?.getTime() ?? 0]));
+  const wakeAckedOf = new Map(wakeAcks.map((d) => [d.workerId, d._max.ackedAt?.getTime() ?? 0]));
   const settingsOf = new Map(wakeSettings.map((s) => [s.workerId, s]));
   const availabilityOf = new Map(availability.map((a) => [a.workerId, a]));
   const subsOf = new Map<string, typeof subs>();
@@ -511,6 +514,7 @@ export async function computeDueWakes(args: {
       ...deliveryChannels.filter((d) => d.workerId === w.id).map((d) => d.deliveredAt.getTime()),
       ...deliveryTicks.filter((d) => d.workerId === w.id).map((d) => d.ackedAt.getTime()),
       taskDeliveredOf.get(w.id) ?? 0,
+      wakeAckedOf.get(w.id) ?? 0,
     );
     if (last > 0 && now.getTime() - last < floorMs) continue;
 

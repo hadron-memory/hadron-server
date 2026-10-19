@@ -194,6 +194,86 @@ describe('#2072 / R53: acknowledging a legacy wake moves no message mark', () =>
     });
     expect(await code(ack([w.proof, old], ctx(manager.id)))).toBe('WAKE_PROOF_STALE');
     expect(await db.workerDeliveryTick.count({ where: { workerId: liam.id } })).toBe(0);
+    expect(await db.workerWakeAck.count({ where: { workerId: liam.id } })).toBe(0);
     expect(issued.ticks.length).toBe(1);
+  });
+});
+
+/** The day's charged wakes for the App (0 when nothing was charged). */
+const charged = async () => (await db.appWakeDay.findFirst({ where: { appId: app.id } }))?.wakes ?? 0;
+const receipts = () => db.workerWakeAck.findMany({ where: { workerId: liam.id } });
+/** Moves the receipts `ms` back, as if acknowledged that much earlier, and returns a proof as issued that much earlier. */
+async function receiptsAged(proof: string, ms: number) {
+  await db.workerWakeAck.updateMany({ data: { ackedAt: new Date(Date.now() - ms) } });
+  const p = payloadOf(proof);
+  return signWakeProof({ ...p, issuedAt: p.issuedAt - ms });
+}
+
+describe('#2072 / R53 seam 2: a textless acknowledgement records the wake\'s receipt (cor:agt:080:04/:13/:15)', () => {
+  it('a MENTION-only ack records one receipt, with who, and is charged once; a repeat changes nothing', async () => {
+    await say(channel, 'one', mention('liam'));
+    const w = (await due(ctx(holderA.id))).wakes[0];
+    expect(await ack([w.proof], ctx(holderA.id))).toEqual({ acknowledged: 1, unchanged: 0 });
+    const [r] = await receipts();
+    expect(r).toMatchObject({ wakeKey: payloadOf(w.proof).wakeKey, ackedByUserId: holderA.id });
+    expect(await charged()).toBe(1);
+    expect(await ack([w.proof], ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
+    expect(await receipts()).toEqual([r]); // neither the clock nor the attribution is refreshed
+    expect(await charged()).toBe(1);
+    expect(await marks()).toEqual([]);
+  });
+
+  it('an exempt wake records its receipt and is not charged', async () => {
+    await say(channel, 'from a manager', { ...mention('liam'), managerPost: true });
+    const w = (await due(ctx(manager.id))).wakes[0];
+    expect(await ack([w.proof], ctx(manager.id))).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await receipts()).toHaveLength(1);
+    expect(await charged()).toBe(0);
+  });
+
+  it('the floor: the still-due mention waits inside it, then is offered again with the same key and charged as a new wake', async () => {
+    await say(channel, 'one', mention('liam'));
+    const first = (await due(ctx(holderA.id))).wakes[0];
+    await ack([first.proof], ctx(holderA.id));
+    // Its text was not delivered, so it is still due; the receipt starts the floor, so it is not offered yet.
+    expect((await due(ctx(holderA.id))).wakes).toEqual([]);
+    await receiptsAged(first.proof, 5 * 60_000);
+    const again = (await due(ctx(holderA.id))).wakes[0];
+    expect(payloadOf(again.proof).wakeKey).toBe(payloadOf(first.proof).wakeKey);
+    expect(await ack([again.proof], ctx(holderA.id))).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await charged()).toBe(2);
+    expect((await receipts())[0]!.ackedAt.getTime()).toBeGreaterThan(Date.now() - 60_000);
+    expect(await db.appWakeReservation.count({ where: { workerId: liam.id } })).toBe(0);
+  });
+
+  it('an old proof replayed after the same wake was offered again neither frees that reservation nor is charged', async () => {
+    await say(channel, 'one', mention('liam'));
+    const first = (await due(ctx(holderA.id))).wakes[0];
+    await ack([first.proof], ctx(holderA.id));
+    const replay = await receiptsAged(first.proof, 5 * 60_000); // the first proof, issued before its own receipt
+    const again = (await due(ctx(holderA.id))).wakes[0];
+    const reserved = await db.appWakeReservation.findMany({ where: { workerId: liam.id } });
+    expect(reserved.map((r) => r.wakeKey)).toEqual([payloadOf(first.proof).wakeKey]);
+    expect(await ack([replay], ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
+    expect(await db.appWakeReservation.findMany({ where: { workerId: liam.id } })).toEqual(reserved);
+    expect(await charged()).toBe(1);
+    expect(await ack([again.proof], ctx(holderA.id))).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await db.appWakeReservation.count({ where: { workerId: liam.id } })).toBe(0);
+    expect(await charged()).toBe(2);
+  });
+
+  it('two proofs of one outstanding wake, acknowledged in either order, charge it once', async () => {
+    for (const order of [[0, 1], [1, 0]]) {
+      await db.workerWakeAck.deleteMany();
+      await db.appWakeDay.deleteMany();
+      await db.appWakeReservation.deleteMany();
+      await say(channel, `m${order[0]}`, mention('liam'));
+      const a = (await due(ctx(holderA.id))).wakes[0];
+      const b = (await due(ctx(holderA.id))).wakes[0]; // handed out again, exactly
+      const proofs = [a.proof, b.proof];
+      expect(await ack([proofs[order[0]!]!], ctx(holderA.id))).toEqual({ acknowledged: 1, unchanged: 0 });
+      expect(await ack([proofs[order[1]!]!], ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
+      expect(await charged()).toBe(1);
+    }
   });
 });

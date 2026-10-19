@@ -254,7 +254,8 @@ describe('attention:deliver — the key at dueWakes', () => {
     expect(reads).toHaveLength(1);
     expect(reads[0]).toMatchObject({ appKeyId: key.id, appId: app.id, workerCount: 1 });
     expect(await ack(keyCtx(key, app.id), page.wakes.map((w: any) => w.proof))).toEqual({ acknowledged: 1, unchanged: 0 });
-    const delivered = await db.workerDeliveryChannel.findFirstOrThrow({ where: { workerId: liam.id } });
+    // #2072 (R53): the wake's receipt names the key; no message mark is written.
+    const delivered = await db.workerWakeAck.findFirstOrThrow({ where: { workerId: liam.id } });
     expect(delivered.ackedByAppKeyId).toBe(key.id);
     expect(delivered.ackedByUserId).toBeNull();
     // A second read is a second row.
