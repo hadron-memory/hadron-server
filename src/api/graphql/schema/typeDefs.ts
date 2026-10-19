@@ -329,6 +329,8 @@ export const typeDefs = `#graphql
     name: String
     sourceId: ID!
     targetId: ID!
+    "The edge's governed kind (#2124); see Edge.governedKind."
+    governedKind: EdgeGovernedKind
   }
 
   "Paged envelope for memoryNodes — the standard limit/offset/total idiom; total is the memory's full node count."
@@ -1545,6 +1547,21 @@ export const typeDefs = `#graphql
     asset: Asset
   }
 
+  """
+  Which server-owned mechanism governs an edge (#2124). A governed edge is
+  written by its own path and refused by every ordinary edge write. A client
+  must tolerate a value it does not know as read-only/unsupported, never as an
+  ordinary edge: this list grows when the server adds a governed kind.
+  """
+  enum EdgeGovernedKind {
+    "Derived from an include tag in the source node's content (#2040)."
+    INCLUDE
+    "A comment's anchor edge to the node it comments on."
+    COMMENT_ANCHOR
+    "A reply comment's edge to its thread root."
+    COMMENT_REPLY
+  }
+
   type Edge {
     id: ID!
     "The source node. NULLABLE (#781): null when the caller cannot read the source node's memory — a cross-memory edge (e.g. reached via incomingEdges) must not expose an endpoint in a memory the caller can't read. For a same-memory edge the caller can already see, this is always present."
@@ -1592,6 +1609,14 @@ export const typeDefs = `#graphql
     """
     priority: Int!
     data: JSON
+    """
+    The edge's OWN stored governed kind (#2124): null for an ordinary edge,
+    otherwise INCLUDE, COMMENT_ANCHOR or COMMENT_REPLY. Read-only; it rides
+    the same gate as the edge, is never inferred from name or loc, and no
+    edge write accepts it. A stored value this server does not support is an
+    UNSUPPORTED_EDGE_GOVERNED_KIND error, never null.
+    """
+    governedKind: EdgeGovernedKind
   }
 
   """
