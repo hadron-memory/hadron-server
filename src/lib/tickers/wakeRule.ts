@@ -30,7 +30,7 @@ export type ChannelInput = {
 };
 
 export type SubscriptionInput = {
-  ticker: TickerSchedule & { id: string; relevance: 'ALL' | 'MENTIONS'; channelIds: string[]; /** #2068: tick even with nothing relevant unread. */ wakeWithoutChat?: boolean };
+  ticker: TickerSchedule & { id: string; relevance: 'ALL' | 'MENTIONS'; channelIds: string[]; /** #2068: why it fires (cor:agt:080:10). Default read-team-channel. */ reasons?: readonly string[] };
   lastAckedTick: number;
 };
 
@@ -141,8 +141,10 @@ export function workerWake(args: {
       any = true;
       included.add(ch.channelId);
     }
-    // #2068 (Holger): a ticker may be set to tick whether or not there is chat. Every other tick rule above still holds.
-    if (any || sub.ticker.wakeWithoutChat) reasons.push({ kind: 'TICK', tickerId: sub.ticker.id, k });
+    // #2068 (Holger R49): the ticker's reasons decide whether it fires; any one that holds fires it. Every other tick rule
+    // above (schedule, acknowledged tick) still holds. No reasons = never.
+    const why = sub.ticker.reasons ?? ['read-team-channel'];
+    if (why.includes('every-tick') || (why.includes('read-team-channel') && any)) reasons.push({ kind: 'TICK', tickerId: sub.ticker.id, k });
   }
 
   for (const t of args.tasks ?? []) {

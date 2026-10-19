@@ -5638,8 +5638,9 @@ model Ticker {
   channelIds        String[]  @default([]) @map("channel_ids")
   /// 'ALL' | 'MENTIONS'.
   relevance         String    @default("ALL")
-  /// #2068: tick even when no relevant chat is unread (cor:agt:080:10). Off keeps the chat-gated tick.
-  wakeWithoutChat   Boolean   @default(false) @map("wake_without_chat")
+  /// #2068 (cor:agt:080:01, :10, R49): why the ticker fires, a closed set: 'read-team-channel' (relevant unread, as before) and
+  /// 'every-tick' (unconditional). Empty = never fires; any-of when several (Proposed).
+  reasons           String[]  @default(["read-team-channel"]) @map("reasons")
   enabled           Boolean   @default(true)
   ownerUserId       String?   @map("owner_user_id")
   ownerWorkerId     String?   @map("owner_worker_id")

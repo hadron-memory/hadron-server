@@ -487,7 +487,7 @@ export async function computeDueWakes(args: {
         deletedAt: s.ticker.deletedAt,
         relevance: s.ticker.relevance === 'MENTIONS' ? 'MENTIONS' : 'ALL',
         channelIds: s.ticker.channelIds,
-        wakeWithoutChat: s.ticker.wakeWithoutChat,
+        reasons: s.ticker.reasons,
       },
       lastAckedTick: tickAckOf.get(`${w.id}:${s.ticker.id}`)?.lastAckedTick ?? 0,
     }));

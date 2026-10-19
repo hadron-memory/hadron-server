@@ -234,7 +234,7 @@ describe('#2068 — a ticker that wakes without chat, through the whole loader',
     const quiet = await mkTicker();
     await subscribe(quiet.id, liam.id);
     expect(ids(await due(ctx(manager.id)))).toEqual([]);
-    await db.ticker.update({ where: { id: quiet.id }, data: { wakeWithoutChat: true } });
+    await db.ticker.update({ where: { id: quiet.id }, data: { reasons: ['every-tick'] } });
     const page = await due(ctx(manager.id));
     expect(ids(page)).toEqual([liam.id]);
     expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: quiet.id }), task: null }]);
@@ -251,7 +251,7 @@ describe('#2068 — a ticker that wakes without chat, through the whole loader',
   });
 
   it('never bypasses a pause or the per-worker floor', async () => {
-    const t = await mkTicker({ wakeWithoutChat: true });
+    const t = await mkTicker({ reasons: ['every-tick'] });
     await subscribe(t.id, liam.id);
     await db.workerWakeSettings.create({ data: { workerId: liam.id, pausedUntil: new Date(Date.now() + 3600_000) } });
     expect(ids(await due(ctx(manager.id)))).toEqual([]);

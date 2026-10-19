@@ -93,7 +93,7 @@ async function renderTicker(t: Row, ctx: Context): Promise<string> {
   }
   const quiet = t.quietHours ? `quiet hours ${t.quietHours.timezone} (${t.quietHours.windows.length} window${t.quietHours.windows.length === 1 ? '' : 's'})` : null;
   return [
-    `- ${t.name} · ${urn ?? t.id} · every ${t.cadenceSeconds}s · ${t.enabled ? 'enabled' : 'disabled'} · relevance ${t.relevance}${t.wakeWithoutChat ? ' · wakes without chat' : ''}`,
+    `- ${t.name} · ${urn ?? t.id} · every ${t.cadenceSeconds}s · ${t.enabled ? 'enabled' : 'disabled'} · relevance ${t.relevance}· reasons ${(t.reasons as string[]).map((x) => x.toLowerCase().replace(/_/g, '-')).join('+')}`,
     `  anchor ${iso(t.anchorAt)}${quiet ? ` · ${quiet}` : ''}${readable.length ? ` · ${readable.length} channel(s)` : ''}`,
     `  owner ${owner ? owner.name : 'unknown'} · subscribers: ${names.length ? names.join(', ') : 'none'}${subs.hasNextPage ? ' (more)' : ''}`,
   ].join('\n');
@@ -245,7 +245,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       quietHours: quietHours.optional(),
       channelIds: z.array(z.string()).optional().describe('Channels whose unread can wake a subscriber. Not a grant. Omit for every channel the subscriber watches.'),
       relevance: z.enum(['ALL', 'MENTIONS']).optional().describe('Default ALL.'),
-      wakeWithoutChat: z.boolean().optional().describe('Default false. True makes each tick wake its subscribers even when no relevant chat is unread (cor:agt:080:10); the floor, daily budget, pause and dormancy still apply.'),
+      reasons: z.array(z.enum(['read-team-channel', 'every-tick'])).min(1).optional().describe('Why it fires (cor:agt:080:10). Default [read-team-channel]: only when there is relevant unread. every-tick fires on every tick; the floor, daily budget, pause and dormancy still apply. Never empty.'),
       enabled: z.boolean().optional().describe('Default true.'),
       session: SESSION_WRITE,
     },
@@ -270,7 +270,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       channelIds: z.array(z.string()).optional(),
       clearChannels: z.boolean().optional(),
       relevance: z.enum(['ALL', 'MENTIONS']).optional(),
-      wakeWithoutChat: z.boolean().optional(),
+      reasons: z.array(z.enum(['read-team-channel', 'every-tick'])).min(1).optional(),
       enabled: z.boolean().optional(),
       session: SESSION_WRITE,
     },

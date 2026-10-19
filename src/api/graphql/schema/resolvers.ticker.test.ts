@@ -876,3 +876,49 @@ describe('cycle 1 — time zones are validated by the consumer (local P2-4)', ()
     }
   });
 });
+
+
+describe('#2068 (R49/R54) — a ticker has reasons: a closed, never-empty list', () => {
+  it('defaults to [read-team-channel]; every-tick is stored and shown; the list is closed and de-duplicated in set order', async () => {
+    const plain = await createTicker(ctx(member.id), { name: 'Plain' });
+    expect(plain.reasons).toEqual(['read-team-channel']);
+    expect(await F.Ticker.reasons(plain)).toEqual(['READ_TEAM_CHANNEL']);
+    const every = await createTicker(ctx(member.id), { name: 'Every', reasons: ['EVERY_TICK', 'every-tick', 'READ_TEAM_CHANNEL'] });
+    expect(every.reasons).toEqual(['read-team-channel', 'every-tick']);
+    expect(await F.Ticker.reasons(every)).toEqual(['READ_TEAM_CHANNEL', 'EVERY_TICK']);
+  });
+
+  it('an empty or unknown reasons list is refused on create and update, writing nothing', async () => {
+    await expectCode(createTicker(ctx(member.id), { name: 'None', reasons: [] }), 'BAD_USER_INPUT');
+    await expectCode(createTicker(ctx(member.id), { name: 'Odd', reasons: ['sometimes'] }), 'BAD_USER_INPUT');
+    expect(await db.ticker.count()).toBe(0);
+    const t = await createTicker(ctx(member.id), { name: 'Mine' });
+    await expectCode(M.updateTicker({}, { ref: t.id, input: { reasons: [] } }, ctx(member.id)), 'BAD_USER_INPUT');
+    await expectCode(M.updateTicker({}, { ref: t.id, input: { reasons: ['whenever'] } }, ctx(member.id)), 'BAD_USER_INPUT');
+    expect((await db.ticker.findUniqueOrThrow({ where: { id: t.id } })).reasons).toEqual(['read-team-channel']);
+  });
+
+  it('an update that omits reasons keeps them; every-tick can be added and removed again', async () => {
+    const t = await createTicker(ctx(member.id), { name: 'Cycle' });
+    const rename = await M.updateTicker({}, { ref: t.id, input: { name: 'Cycle2' } }, ctx(member.id));
+    expect(rename.reasons).toEqual(['read-team-channel']);
+    const on = await M.updateTicker({}, { ref: t.id, input: { reasons: ['EVERY_TICK'] } }, ctx(member.id));
+    expect(on.reasons).toEqual(['every-tick']);
+    expect((await M.updateTicker({}, { ref: t.id, input: { cadenceSeconds: 900 } }, ctx(member.id))).reasons).toEqual(['every-tick']);
+    const off = await M.updateTicker({}, { ref: t.id, input: { reasons: ['READ_TEAM_CHANNEL'] } }, ctx(member.id));
+    expect(off.reasons).toEqual(['read-team-channel']);
+  });
+
+  it('adding every-tick is a widening: a subscriber its editor could not subscribe at the new terms refuses the change, atomically', async () => {
+    const fast = await createTicker(ctx(member.id), { name: 'Fast', cadenceSeconds: 120 });
+    await subscribe(ctx(liamHolder.id), fast, liam); // the holder, as a person, may put Liam on the fast ticker
+    await expectCode(M.updateTicker({}, { ref: fast.id, input: { reasons: ['EVERY_TICK'], name: 'Fast2' } }, ctx(member.id)), 'TICKER_CADENCE_NEEDS_CONSENT');
+    const row = await db.ticker.findUniqueOrThrow({ where: { id: fast.id } });
+    expect(row.reasons).toEqual(['read-team-channel']);
+    expect(row.name).toBe('Fast');
+    // A manager could subscribe Liam at the new terms, so the change passes for them.
+    await expect(M.updateTicker({}, { ref: fast.id, input: { reasons: ['EVERY_TICK'] } }, ctx(appOwner.id))).resolves.toMatchObject({ reasons: ['every-tick'] });
+    // Narrowing back to read-team-channel is never a widening.
+    await expect(M.updateTicker({}, { ref: fast.id, input: { reasons: ['READ_TEAM_CHANNEL'] } }, ctx(member.id))).resolves.toMatchObject({ reasons: ['read-team-channel'] });
+  });
+});
