@@ -325,7 +325,12 @@ async function filterReadableAppRows<T extends {
     candidateIds.length === 0
       ? []
       : (await ctx.db.appMember.findMany({
-          where: { userId: ctx.userId!, role: APP_OWNER_MEMBER_ROLE, appId: { in: candidateIds } },
+          where: {
+            userId: ctx.userId!,
+            role: APP_OWNER_MEMBER_ROLE,
+            appId: { in: candidateIds },
+            app: { deletedAt: null }, // live-App and current-member decided in the same statement
+          },
           select: { appId: true },
         })).map((m) => m.appId),
   );

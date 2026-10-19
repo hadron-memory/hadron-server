@@ -1555,13 +1555,24 @@ export async function isUserOwnedAppOwnerMember(
   ctx: Context,
   app: { id: string; ownerUserId: string | null; deletedAt?: Date | null },
 ): Promise<boolean> {
+  // Cheap short-circuits only; neither of them decides admission. The row the
+  // caller holds may have been loaded before a deleteApp committed.
   if (app.ownerUserId === null || app.deletedAt) return false;
   if (ctx.impersonation || !ctx.userId) return false;
-  const member = await ctx.db.appMember.findUnique({
-    where: { appId_userId: { appId: app.id, userId: ctx.userId } },
-    select: { role: true },
+  // ONE statement decides live-App AND current-membership together (the join
+  // reads the App row and the AppMember row in the same snapshot), so an App
+  // deleted after it was loaded is refused here rather than trusted from the
+  // caller's earlier read.
+  const member = await ctx.db.appMember.findFirst({
+    where: {
+      appId: app.id,
+      userId: ctx.userId,
+      role: APP_OWNER_MEMBER_ROLE,
+      app: { deletedAt: null, ownerUserId: { not: null } },
+    },
+    select: { appId: true },
   });
-  return member?.role === APP_OWNER_MEMBER_ROLE;
+  return member !== null;
 }
 
 /**
