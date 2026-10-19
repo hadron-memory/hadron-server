@@ -32,6 +32,7 @@
 // (tick and dormancy are decided once, in src/lib/tickers). NOT BUILT: the owner
 // succession of cor:agt:080:18 (Proposed).
 
+import { s7Available } from '../../../lib/tickers/s7Availability.js';
 import { GraphQLError } from 'graphql';
 import { loadDeliverySettings, parseDeliverySettingsPatch, validateDeliverySettings, type DeliverySettings } from '../../../lib/tickers/deliverySettings.js';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -632,8 +633,70 @@ async function settingsOut(db: Pick<Context['db'], 'app' | 'worker'>, appId: str
   };
 }
 
-function wakeSettingsOut(workerId: string, row: { mentions: string; pausedUntil: Date | null } | null) {
-  return { workerId, mentions: row?.mentions ?? 'IMMEDIATE', pausedUntil: row?.pausedUntil ?? null };
+type WakeSettingsRow = {
+  mentions: string; pausedUntil: Date | null;
+  isolatedUntil?: Date | null; isolatedAt?: Date | null; isolatedByUserId?: string | null;
+};
+function wakeSettingsOut(workerId: string, row: WakeSettingsRow | null) {
+  return {
+    workerId, mentions: row?.mentions ?? 'IMMEDIATE', pausedUntil: row?.pausedUntil ?? null,
+    // Inert until S7b: a stored isolation projects as none, matching its (absent) effect.
+    isolatedUntil: s7Available() ? row?.isolatedUntil ?? null : null, isolatedAt: s7Available() ? row?.isolatedAt ?? null : null,
+    isolatedByUserId: s7Available() ? row?.isolatedByUserId ?? null : null,
+  };
+}
+
+// ── Isolation (S7, #2023, R85) ─────────────────────────────────────────────
+
+/** D-2026-10-16-005: the default; the maximum is an engineering bound (tunable), recorded in the S7 attach. */
+export const ISOLATION_DEFAULT_MS = 2 * 3_600_000;
+export const ISOLATION_MAX_MS = 7 * 24 * 3_600_000;
+const isolationForbidden = () => taskError(
+  'WORKER_ISOLATION_FORBIDDEN',
+  'Only a person managing this App, or the person holding this worker, acting as themselves, can isolate it or lift its isolation.',
+);
+
+/**
+ * The ONE isolation writer (GraphQL and MCP both reach it). Its only audience is a human acting as themselves who manages the
+ * App or holds the worker: a worker session (even a manager's), an App key and an impersonation are refused, and the row
+ * is unchanged. Never reads or writes paused_until: the worker's own pause is untouched (R85).
+ */
+async function writeWorkerIsolation(
+  ctx: Context, workerRef: string, op: { kind: 'set'; until?: Date | string | null } | { kind: 'clear' },
+) {
+  const target = await workerForRead(ctx, workerRef);
+  const app = await appOf(ctx, target.appId);
+  const actor = await resolveTaskActor(ctx, app);
+  if (!actor || actor.kind !== 'user') throw isolationForbidden();
+  if (op.kind === 'set' && !s7Available()) {
+    throw taskError('WORKER_ISOLATION_UNAVAILABLE', 'Isolating a worker is not available yet (S7b). Nothing was changed.');
+  }
+  const until = op.kind === 'set' && op.until != null ? parseDate(op.until, 'until') : null;
+  const row = await writeInApp(ctx, app, actor, () => workerNotFound(workerRef), async (tx, txCtx, fresh) => {
+    const w = await lockWorker(tx, target.id);
+    if (!w || w.appId !== fresh.id || w.retiredAt) throw workerNotFound(workerRef);
+    const manages = await actorManagesApp(txCtx, fresh, actor);
+    if (!manages && w.heldByUserId !== actor.userId) throw isolationForbidden();
+    const now = new Date();
+    const stamp = updatedStamp(txCtx);
+    if (op.kind === 'clear') {
+      return tx.workerWakeSettings.upsert({
+        where: { workerId: w.id },
+        create: { workerId: w.id },
+        update: { isolatedUntil: null, isolatedAt: null, isolatedByUserId: null },
+      });
+    }
+    const end = until ?? new Date(now.getTime() + ISOLATION_DEFAULT_MS);
+    if (end.getTime() <= now.getTime()) throw badInput('until must be in the future.');
+    if (end.getTime() > now.getTime() + ISOLATION_MAX_MS) throw badInput(`until is at most ${ISOLATION_MAX_MS / 86_400_000} days ahead.`);
+    const set = { isolatedUntil: end, isolatedAt: now, isolatedByUserId: actor.userId };
+    return tx.workerWakeSettings.upsert({
+      where: { workerId: w.id },
+      create: { workerId: w.id, ...set, updatedBy: stamp.updatedBy, updatedByWorkerId: stamp.updatedByWorkerId, updatedByAgentId: stamp.updatedByAgentId },
+      update: { ...set, updatedAt: now, updatedBy: stamp.updatedBy, updatedByWorkerId: stamp.updatedByWorkerId, updatedByAgentId: stamp.updatedByAgentId },
+    });
+  });
+  return wakeSettingsOut(target.id, row);
 }
 
 // ── Subscriptions ─────────────────────────────────────────────────────────
@@ -816,6 +879,11 @@ const wakeAndGrantMutations = {
     return wakeSettingsOut(target.id, row);
   },
 
+  isolateWorker: (_: unknown, a: { workerRef: string; until?: Date | string | null }, ctx: Context) =>
+    writeWorkerIsolation(ctx, a.workerRef, { kind: 'set', until: a.until }),
+  clearWorkerIsolation: (_: unknown, a: { workerRef: string }, ctx: Context) =>
+    writeWorkerIsolation(ctx, a.workerRef, { kind: 'clear' }),
+
   // ── The may-subscribe-workers grant (cor:agt:080:24) ──────────────────────
 
   grantApp: (_: unknown, a: { appRef: string; workerRef: string; name: string }, ctx: Context) => changeGrant(ctx, a, 'grant'),
@@ -943,6 +1011,9 @@ export const tickerFieldResolvers = {
       });
       return fastest._min.cadenceSeconds ?? null;
     },
+    isolated: (w: { isolatedUntil?: Date | null }) => s7Available() && !!w.isolatedUntil && w.isolatedUntil.getTime() > Date.now(),
+    isolatedByHandle: async (w: { isolatedByUserId?: string | null }, _: unknown, ctx: Context) =>
+      w.isolatedByUserId ? (await ctx.db.user.findUnique({ where: { id: w.isolatedByUserId }, select: { handle: true } }))?.handle ?? null : null,
     dormant: async (w: { workerId: string }, _: unknown, ctx: Context) => {
       const worker = await ctx.db.worker.findUnique({ where: { id: w.workerId }, select: { app: { select: { sessionDormancyDays: true } } } });
       if (!worker) return false;
