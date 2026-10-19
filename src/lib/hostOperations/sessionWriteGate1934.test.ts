@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1934 — cor:agt:070:04: a host key never drives the session it starts. "Drives" is ANY session write (Ada's ruling,
  * team chat #11486 item 4): updating, ending, or recording work against it. Two refusals on the shared session write
@@ -100,7 +101,7 @@ beforeEach(async () => {
   const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(manager.id));
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: holder.id, role: 'member' } });
-  kit = await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
+  kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
   orca1 = await mkKey('orca1');
   plainKey = await mkKey('plain');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));

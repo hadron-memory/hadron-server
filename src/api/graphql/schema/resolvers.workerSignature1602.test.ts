@@ -120,3 +120,70 @@ describe('#1602 signature/trailer', () => {
     });
   });
 });
+
+it('user-owned App owner may edit without an org staffing role', async () => {
+  await db.app.update({ where: { id: app.id }, data: { organizationId: null, ownerUserId: outsider.id } });
+  await expect(update({ signature: 'owned' }, ctx(outsider))).resolves.toMatchObject({ signature: 'owned' });
+});
+
+it('rechecks retirement at the transactional write and rolls back the mixed edit', async () => {
+  let parked = false;
+  const wrapped = new Proxy(db, { get(target, prop) {
+    if (prop !== '$transaction') return Reflect.get(target, prop);
+    return (fn: any, opts: any) => target.$transaction(async tx => fn(new Proxy(tx, { get(client, key) {
+      if (key !== 'worker') return Reflect.get(client, key);
+      return new Proxy(client.worker, { get(delegate, method) {
+        if (method !== 'updateMany') return Reflect.get(delegate, method);
+        return async (args: any) => {
+          if (!parked) { parked = true; await db.worker.update({ where: { id: worker.id }, data: { retiredAt: new Date() } }); }
+          return delegate.updateMany(args);
+        };
+      } });
+    } })), opts);
+  } });
+  await expect(update({ signature: 'late', promptOverride: 'late' }, ctx(admin, { db: wrapped }))).rejects.toMatchObject({ extensions: { code: 'WORKER_RETIRED' } });
+  expect(await row()).toMatchObject({ signature: SIG, trailer: TRL, promptOverride: null });
+});
+
+it('GraphQL exposes both fields, preserves omissions, and atomically refuses null', async () => {
+  const { ApolloServer } = await import('@apollo/server');
+  const { typeDefs } = await import('./typeDefs.js');
+  const server = new ApolloServer<Context>({ typeDefs, resolvers });
+  const source = 'mutation($id:ID!,$signature:String){updateWorker(workerRef:$id,signature:$signature){signature trailer}}';
+  const goodResult = await server.executeOperation({ query: source, variables: { id: worker.id, signature: 'graphql' } }, { contextValue: ctx() });
+  const good = (goodResult.body as any).singleResult;
+  expect(good.errors).toBeUndefined();
+  expect((good.data as any).updateWorker).toEqual({ signature: 'graphql', trailer: TRL });
+  const badResult = await server.executeOperation({ query: source, variables: { id: worker.id, signature: null } }, { contextValue: ctx() });
+  const bad = (badResult.body as any).singleResult;
+  expect(bad.errors?.[0].extensions.code).toBe('BAD_USER_INPUT');
+  expect((await row()).signature).toBe('graphql');
+  await server.stop();
+});
+
+it('actual MCP SDK updates, preserves omitted fields, reads raw templates and refuses H26 bound edits', async () => {
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+  const { createMcpServerInstance } = await import('../../../mcp/server.js');
+  const server = createMcpServerInstance({ userId: admin.id, roles: ['READER'], clientId: `sig:${admin.id}` } as any, () => undefined, { kind: 'multi-app' });
+  const client = new Client({ name: 'signature-test', version: '1' });
+  const [local, remote] = InMemoryTransport.createLinkedPair();
+  await server.connect(remote); await client.connect(local);
+  try {
+    const call = (args: any) => client.callTool({ name: 'hadron_update_worker', arguments: { workerRef: worker.id, ...args } });
+    const good: any = await call({ signature: 'mcp {{worker.name}}', trailer: '' });
+    expect(good.content[0].text).toContain('Updated **Anne**');
+    expect(await row()).toMatchObject({ signature: 'mcp {{worker.name}}', trailer: '' });
+    await call({ promptOverride: 'independent' });
+    expect((await row()).signature).toBe('mcp {{worker.name}}');
+    const read: any = await client.callTool({ name: 'hadron_get_worker', arguments: { workerRef: worker.id } });
+    expect(read.content[0].text).toContain('Signature template:\nmcp {{worker.name}}');
+    const before = await row();
+    await call({ signature: null, promptOverride: 'no commit' }); expect(await row()).toEqual(before);
+    await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: admin.id, heldAt: new Date() } });
+    const session = await db.session.create({ data: { id: generateId(), userId: admin.id, appId: app.id, workerId: worker.id, agentId: agent.id } });
+    await call({ signature: 'bound', session: session.id });
+    expect((await row()).signature).toBe('mcp {{worker.name}}');
+    await call({ signature: 'human' }); expect((await row()).signature).toBe('human');
+  } finally { await client.close(); await server.close(); }
+});

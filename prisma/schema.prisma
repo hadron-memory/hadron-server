@@ -3676,6 +3676,8 @@ model Worker {
   /// Per-worker individuality layered over the agent's template prompt
   /// (cor:agt:020:01) — nullable; two castings of one agent share the
   /// template and nothing else.
+  signature      String
+  trailer        String
   promptOverride String?   @map("prompt_override")
   /// #974 — the worker-scoped working memory in the App's container
   /// (`hrn:mem:<owner>:<app-slug>:<worker-slug>`), provisioned at cast.

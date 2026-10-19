@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /**
  * Spec 049 Phase 7 — read-state and the attention section, what is pinned:
  *   - advances are MONOTONIC and keyed on the attendee: a lower seq is a
@@ -113,7 +114,7 @@ beforeEach(async () => {
   appMem = await db.memory.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agent.id },
   });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
   const made = await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app.id });
   channel = { id: made.channel.id, loc: 'chats:team', memoryId: appMem.id, chatRootNodeId: made.rootId };
   const node = await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'tasks:go', name: 'go', nodeType: 'task', content: 'go', isRunnable: true } });
@@ -227,7 +228,7 @@ describe('read-state', () => {
   it('an unfiltered row: the attendee\'s own posts are never new to it; a human\'s or another Agent\'s are (#1388)', async () => {
     const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     // Iris is cast from this run's Agent, and a retired sibling's posts are still its own.
-    const retired = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Old', slug: 'old', retiredAt: new Date() } });
+    const retired = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Old', slug: 'old', retiredAt: new Date() } });
     await postAs('done with the build', [], worker.id);
     await postAs('old note', [], retired.id);
     const own = await renderAttentionSection(db, run);
@@ -240,7 +241,7 @@ describe('read-state', () => {
     // So is another Agent's Worker, once the human's post has been seen.
     await advanceReadState(db, { agentId: agent.id, appId: app.id }, channel.id, 3);
     const otherAgent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'other', urn: `${org.urn}:other`, visibility: 'ORGANIZATION' } });
-    const stranger = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: otherAgent.id, name: 'Zed', slug: 'zed' } });
+    const stranger = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: otherAgent.id, name: 'Zed', slug: 'zed' } });
     await postAs('mine now', [], worker.id);
     expect((await renderAttentionSection(db, run)).text).toContain('nothing new from others since seq 3 (channel is at 4)');
     // A deleted post is no news either.
