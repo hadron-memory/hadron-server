@@ -2147,7 +2147,7 @@ export function createMcpServerInstance(
     // #1707 — the team roster read (its own optional session).
     'hadron_team_roster',
     // #1747 — ticker reads (each takes its own optional session; wake settings enforces the write rule itself).
-    'hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes',
+    'hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get',
     // Per-connection selections and key handling: nothing authored.
     'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
     'hadron_unlock_memory', 'hadron_lock_memory',
