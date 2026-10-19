@@ -108,10 +108,9 @@ it('a covered S5 anchor stops waking while the retained episode/event remain unc
 
 it('real GraphQL execution preserves null-task alarm metadata without non-null bubbling or fake refs',async()=>{
  const e=await deliveryAlarm();
- const {makeExecutableSchema}=await import('@graphql-tools/schema');
- const {graphql}=await import('graphql');
+ const {graphql,buildSchema}=await import('graphql');
  const {typeDefs}=await import('../../api/graphql/schema/typeDefs.js');
- const result=await graphql({schema:makeExecutableSchema({typeDefs,resolvers:resolvers as never}),contextValue:ctx(manager.id),
+ const result=await graphql({schema:buildSchema(typeDefs),rootValue:{dueWakes:(args:unknown)=>(resolvers.Query as any).dueWakes({},args,ctx(manager.id))},
   source:'query($app:String!){dueWakes(appRef:$app){wakes{reasons{kind task{id title eventId chainIndex event ref subjectWorkerId}}}}}',variableValues:{app:app.id}});
  expect(result.errors).toBeUndefined();
  const answer=JSON.parse(JSON.stringify(result.data));
