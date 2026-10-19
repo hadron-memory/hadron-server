@@ -1,10 +1,11 @@
-// S1 (#2017) — ready-to-deliver batches for the workers of ONE host (cor:agt:080:22–:26).
+// S1 (#2017) — one host's batches, or a live session's own worker (cor:agt:080:22–:26, R57).
 //
 // WHO MAY READ: an App key that holds BOTH attention:deliver and a live host:operate scope bound to a host (the host id is
 // the key's, never the request's), carries no session, and acts in its own App. A bare App-wide attention:deliver key keeps
 // dueWakes and is refused here (cor:agt:080:22, R4). The decision is re-made inside the transaction that records the read,
 // under the App's authority anchor held shared, so a revoked scope, key or registration refuses from its next call. Every
-// read writes a host-key use row (action 'deliver') in that same transaction.
+// host read writes a host-key use row (action 'deliver') in that same transaction. R57 self calls use the validated
+// session's own worker, recheck ownership/liveness in the transaction, and record reads in app_log instead.
 //
 // The batch is DERIVED (src/lib/tickers/deliveryBatch.ts); its id is a signed proof (src/lib/tickers/batchProof.ts).
 

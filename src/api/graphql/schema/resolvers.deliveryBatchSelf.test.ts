@@ -290,4 +290,36 @@ describe('R57 own-live-session batches', () => {
     expect(results.map((r: any) => JSON.parse(r.content[0].text).batches.map((b: any) => b.workerId))).toEqual([[kit.id], [rook.id]]);
   });
 
+  it('an end winning after ack entry but before the transaction prevents every mark', async () => {
+    const s = await ownSession(); await postForBoth(); const [b] = (await selfRead(s)).batches;
+    const wrapped = new Proxy(db, { get(target, property) {
+      if (property === '$transaction') return async (...args: any[]) => {
+        await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+        return (target.$transaction as any)(...args);
+      };
+      const value = Reflect.get(target, property); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    expect(await code(selfAck(s, [b.id], { db: wrapped }))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+  });
+  it('self ack rechecks channel access and rejects a mixed invalid list atomically', async () => {
+    const s = await ownSession(); await postForBoth(); const [b] = (await selfRead(s)).batches;
+    expect(await code(selfAck(s, [b.id, b.id + 'x']))).toBe('WAKE_PROOF_INVALID');
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+    const outsider = await db.user.create({ data: { githubId: 999999993, githubUsername: 'ack-revoked-owner', roles: ['READER'] } });
+    await db.memory.update({ where: { id: channel.memoryId }, data: { class: 'private', userId: outsider.id, userMemoryOfAgentId: agentId, sharedMemoryOfAgentId: null } });
+    expect(await code(selfAck(s, [b.id]))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+  });
+  it('self partial ack moves only a rendered prefix and the remainder stays due', async () => {
+    const s = await ownSession(); await postForBoth(); await postForBoth();
+    const [b] = (await selfRead(s)).batches; expect(b.ranges[0].seqs).toHaveLength(2);
+    const seq = b.ranges[0].seqs[0];
+    expect(await M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelId: channel.id, seq }] }, selfCtx(s))).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect((await selfRead(s)).batches[0].ranges[0].seqs).toEqual([b.ranges[0].seqs[1]]);
+    expect(await selfAck(s, [b.id])).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect((await selfRead(s)).batches).toEqual([]);
+    expect(await db.channelReadState.count()).toBe(0);
+  });
+
 });
