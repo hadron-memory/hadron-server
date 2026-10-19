@@ -1411,6 +1411,8 @@ type ReadProjectionNode = {
   approvedBy: string | null;
   approvedByInfo: string | null;
   approvedAt: Date | null;
+  /** #1838 — null once the approval ended on encrypted entry; a hashless record authorizes nothing. */
+  approvalHash?: string | null;
   /** #1591 — the mint record. */
   mintedAt: Date | null;
   mintedBy: string | null;
@@ -1809,7 +1811,7 @@ async function renderNodeReadProjection(
   // #1591: the approval line. Approver by handle when a user is known, else
   // the stored principal info.
   let approvalLine = opts.encryptedMemory ? 'Approval: not applicable (encrypted memory)' : `Approval: not approved (r${revision})`;
-  if (!opts.encryptedMemory && node.approvedRevNo != null && node.approvedAt) {
+  if (!opts.encryptedMemory && node.approvedRevNo != null && node.approvedAt && node.approvalHash !== null) {
     const handle = node.approvedBy
       ? (opts.batch
         ? opts.batch.humanNames.get(node.approvedBy)
@@ -1825,7 +1827,7 @@ async function renderNodeReadProjection(
   }
 
   if (inheritedFrom) {
-    approvalLine = node.approvedRevNo != null && node.contentRevSeq <= node.approvedRevNo
+    approvalLine = node.approvedRevNo != null && node.approvalHash !== null && node.contentRevSeq <= node.approvedRevNo
       ? `Approval: approved r${node.approvedRevNo}`
       : `Approval: not approved (r${revision})`;
   }

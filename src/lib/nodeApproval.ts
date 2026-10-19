@@ -318,9 +318,9 @@ export function approvalStatePrismaWhere(
   if (state == null) return {};
   if (state === 'NOT_APPLICABLE') return { memory: { isEncrypted: true } };
   const memory = { isEncrypted: false };
-  if (state === 'NOT_APPROVED') return { memory, approvedRevNo: null };
-  if (state === 'APPROVED') return { memory, approvedRevNo: { gte: db.node.fields.contentRevSeq } };
-  if (state === 'SUPERSEDED') return { memory, approvedRevNo: { lt: db.node.fields.contentRevSeq } };
+  if (state === 'NOT_APPROVED') return { memory, OR: [{ approvedRevNo: null }, { approvalHash: null }] };
+  if (state === 'APPROVED') return { memory, approvalHash: { not: null }, approvedRevNo: { gte: db.node.fields.contentRevSeq } };
+  if (state === 'SUPERSEDED') return { memory, approvalHash: { not: null }, approvedRevNo: { lt: db.node.fields.contentRevSeq } };
   return { id: { in: [] } }; // Unknown wire values grant no approved matches.
 }
 
@@ -329,9 +329,10 @@ export function approvalStateSql(state: NodeApprovalState | null | undefined): s
   if (state == null) return null;
   const encrypted = 'EXISTS (SELECT 1 FROM memories approval_memory WHERE approval_memory.id = nodes.memory_id AND approval_memory.is_encrypted)';
   if (state === 'NOT_APPLICABLE') return encrypted;
-  const predicate = state === 'NOT_APPROVED' ? 'approved_rev_no IS NULL'
-    : state === 'APPROVED' ? 'approved_rev_no >= content_rev_seq'
-    : state === 'SUPERSEDED' ? 'approved_rev_no < content_rev_seq' : 'FALSE';
+  // #1838: a hashless record (approval ended on encrypted entry) is no approval.
+  const predicate = state === 'NOT_APPROVED' ? '(approved_rev_no IS NULL OR approval_hash IS NULL)'
+    : state === 'APPROVED' ? '(approval_hash IS NOT NULL AND approved_rev_no >= content_rev_seq)'
+    : state === 'SUPERSEDED' ? '(approval_hash IS NOT NULL AND approved_rev_no < content_rev_seq)' : 'FALSE';
   return `(NOT ${encrypted} AND ${predicate})`;
 }
 

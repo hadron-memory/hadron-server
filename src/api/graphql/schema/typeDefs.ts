@@ -2654,7 +2654,7 @@ export const typeDefs = `#graphql
     approvedAt: DateTime
     "#1591 — approval hash v1 recorded when this revision was approved."
     approvalHash: String
-    "#1838 — was THIS revision approved (for pinning)? Not whether the node is approved now (that is Node.approvalStatus). A revision counts as approved when some recorded approval covers exactly its hashed content, whichever revision the approval was recorded on (Holger's R7, cor:dmo:060:04)."
+    "#1838 — was THIS revision approved (for pinning)? Not whether the node is approved now (that is Node.approvalStatus). A revision counts as approved when some recorded approval covers exactly its hashed content, whichever revision the approval was recorded on (Holger's R7, hrn:node:hadronmemory.com:specs:cor:dmo:060:04)."
     revisionApproval: RevisionApproval!
     createdAt: DateTime!
   }

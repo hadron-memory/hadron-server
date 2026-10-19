@@ -10,6 +10,7 @@ import { computeApprovalHash } from './approvalHash.js';
 import { revisionApprovalOf, endApprovalsOnEncryptedEntry } from './nodeApproval.js';
 import { revisionsExemptFromPruning } from './nodeRevisionSnapshot.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { createTestableMcpServer } from '../mcp/server.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -218,5 +219,45 @@ describe('entering an encrypted memory ends approvals (#1838, cor:dmo:120:04)', 
       const revs = await db.nodeRevision.findMany({ where: { nodeId: id } });
       expect(revs.every((r) => r.approvalHash === null)).toBe(true);
     }
+  });
+});
+
+describe('a hashless record authorizes nothing, on any surface (#1838)', () => {
+  it('status, filters (Prisma and SQL), mint and the MCP line treat an ended approval as not approved; controls stay approved', async () => {
+    const ended = await mk('h:1');
+    const control = await mk('h:2');
+    await db.node.update({ where: { id: ended.id }, data: { properties: { marker: 'yes' } } });
+    await db.node.update({ where: { id: control.id }, data: { properties: { marker: 'yes' } } });
+    await approve(ended.id);
+    await approve(control.id);
+    // the memory is plaintext again (the fixture stands in for a move out)
+    await db.$transaction((tx) => endApprovalsOnEncryptedEntry(tx, { nodeIds: [ended.id] }));
+
+    const row = await db.node.findUniqueOrThrow({ where: { id: ended.id } });
+    expect(await resolvers.Node.approvalStatus(row, {}, as())).toEqual({ state: 'NOT_APPROVED', approval: null });
+    const ctrl = await db.node.findUniqueOrThrow({ where: { id: control.id } });
+    expect((await resolvers.Node.approvalStatus(ctrl, {}, as())).state).toBe('APPROVED');
+
+    for (const viaSql of [false, true]) {
+      for (const state of ['APPROVED', 'NOT_APPROVED', 'SUPERSEDED'] as const) {
+        const res = await resolvers.Query.findNodes(null, {
+          filter: { memoryIds: [memory.id], approvalState: state, ...(viaSql ? { where: { path: ['marker'], eq: 'yes' } } : {}) },
+        }, as());
+        const ids = res.hits.map((h: { node: { id: string } }) => h.node.id);
+        expect(ids.includes(ended.id)).toBe(state === 'NOT_APPROVED');
+        expect(ids.includes(control.id)).toBe(state === 'APPROVED');
+      }
+    }
+
+    const mcp = createTestableMcpServer({ userId: admin.id, roles: [], clientId: `user:${admin.id}` });
+    const mem = await db.memory.findUniqueOrThrow({ where: { id: memory.id } });
+    const text = await mcp.callToolText('hadron_get_node', { urn: `hrn:node:${mem.urn}:h:1` });
+    expect(text).toContain('Approval: not approved');
+    expect(await mcp.callToolText('hadron_get_node', { urn: `hrn:node:${mem.urn}:h:2` })).toContain('Approval: approved');
+
+    await expect(resolvers.Mutation.mintMemoryNodes(null, { memoryRef: memory.id, dryRun: false }, as()))
+      .rejects.toBeDefined();
+    expect((await db.node.findUniqueOrThrow({ where: { id: ended.id } })).mintedAt).toBeNull();
+    expect((await revisionApprovalOf(db, ended.id, 1)).state).toBe('NOT_APPROVED');
   });
 });
