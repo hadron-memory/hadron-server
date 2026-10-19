@@ -1,3 +1,4 @@
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, bootPromptCompiledWriteError, isBootPromptRole } from '../../lib/bootPrompt.js';
 import type { Node } from '../../index.d.js';
 import { runAsSystem } from '../../lib/requestActor.js';
 import { GRAPHS_PATH } from '../../config.js';
@@ -77,6 +78,12 @@ const createNodeAsSystem = async (
     if (prior && (!existing || existing.loc !== loc || existing.memoryId !== node.memoryId)) {
       throw new Error(`createNode: the node at "${loc}" moved during the write; retry.`);
     }
+    // #2043 — defensive: no boot-prompt role or compiled marker reaches this
+    // legacy path today (memory-root creation only); a future caller must not reopen it.
+    if (isBootPromptRole((node as { role?: string | null }).role) || (node as { nodeType?: string | null }).nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+      throw bootPromptCompiledWriteError('create', 'produces');
+    }
+    assertBootPromptWriteAllowed(existing, {}, 'update');
     let authoredEdit = false;
     if (existing) {
       const changes = diffNodeChanges(existing, fields);

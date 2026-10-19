@@ -638,6 +638,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1606 / #1607 — comment-node invariants. One source, shared verbatim with
 -- migration 20261005200000_comment_nodes (pinned by src/lib/comments/invariantsSql.test.ts).
 \ir comment-invariants.sql
+\ir boot-prompt-invariants.sql
 
 -- #1655: compiled automation versions.
 \ir automation-invariants.sql

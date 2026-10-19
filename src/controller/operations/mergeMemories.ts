@@ -1,3 +1,4 @@
+import { BOOT_PROMPT_ROLE_WHERE, COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows } from '../../lib/bootPrompt.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
@@ -395,6 +396,15 @@ async function runMerge(
   // before the first batch commits.
   await assertMemoryBulkMutable(db, sourceMemoryId, 'merge', { comments: 'carry' });
   await assertMemoryBulkMutable(db, targetMemoryId, 'merge into', { comments: 'carry' });
+  // #2043 — a merge relocates or folds nodes, a non-compile write: it refuses
+  // while either memory holds a compiled boot prompt, and (cor:agt:040:11)
+  // refuses a worker session's merge of any boot-prompt source. Before any batch commits.
+  for (const memoryId of [sourceMemoryId, targetMemoryId]) {
+    await assertNoBootPromptRows(db, (await db.node.findMany({
+      where: { memoryId, deletedAt: null, OR: [{ nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE }, BOOT_PROMPT_ROLE_WHERE] },
+      select: { id: true },
+    })).map((n) => n.id), 'merge');
+  }
   await preflightMergeComments(db, sourceMemoryId, targetMemoryId);
   // #1468 — every source node leaves the source memory (relocated, or folded
   // and deleted) and the source memory is then deleted: a mint-stamped source
