@@ -58,18 +58,20 @@ const oneLine = (s: string): string => s.replace(/\r\n|[\r\n\u2028\u2029]/g, ' '
  * join (a worker no host launches is still entitled to its own batches). The caller's gate (a live session of that very
  * worker) is the resolver's and runs before this; every other rule is the same pipeline.
  */
-export async function loadDeliveryBatches(args: {
-  ctx: Context;
-  app: AppLike;
-  hostId: string | null;
-  now?: Date;
-  workerIds?: string[] | null;
-  first?: number | null;
-  after?: string | null;
-}): Promise<LoadedBatchPage> {
+export type DeliverySelectionArgs = {
+  ctx: Context; app: AppLike; hostId: string | null; now?: Date;
+  workerIds?: string[] | null; first?: number | null; after?: string | null;
+};
+export type EligibleDeliveryChannel = { channelId: string; incarnation: number; mark: number; predicate: Prisma.Sql };
+export type EligibleDeliveryWorker = { workerId: string; workerName: string; channels: EligibleDeliveryChannel[] };
+
+/** Shared authority/eligibility core for rendered batches and complete metadata enumeration.
+ * Predicates are server-local SQL, never a transport DTO. Neither path may widen the selected channels or reparse reach.
+ * Entry authentication and a consistent transaction/snapshot are the caller's responsibility.
+ */
+export async function loadDeliveryEligibility(args: DeliverySelectionArgs): Promise<{ workers: EligibleDeliveryWorker[]; nextAfter: string | null }> {
   const { ctx, app, hostId } = args;
   const db = ctx.db;
-  const now = args.now ?? new Date();
   const first = Math.min(Math.max(args.first ?? DELIVERY_BATCHES_PAGE_DEFAULT, 1), DELIVERY_BATCHES_PAGE_MAX);
 
   let registrationId: string | null = null;
@@ -77,7 +79,7 @@ export async function loadDeliveryBatches(args: {
     if (!args.workerIds || args.workerIds.length !== 1) throw new Error('self mode selects exactly one worker');
   } else {
     const registration = await db.hostRegistration.findFirst({ where: { appId: app.id, hostId, lostAt: null }, select: { id: true } });
-    if (!registration) return { batches: [], nextAfter: null };
+    if (!registration) return { workers: [], nextAfter: null };
     registrationId = registration.id;
   }
   const workers = await db.worker.findMany({
@@ -97,13 +99,12 @@ export async function loadDeliveryBatches(args: {
   const hasMore = workers.length > first;
   const page = workers.slice(0, first);
   const nextAfter = hasMore ? page[page.length - 1]!.id : null;
-  if (page.length === 0) return { batches: [], nextAfter };
+  if (page.length === 0) return { workers: [], nextAfter };
 
-  const settings = await loadDeliverySettings(db, app.id);
   const callerIds = await getAccessibleMemoryIds(ctx);
   const callerCan = (memoryId: string) => callerIds === null || callerIds.includes(memoryId);
   const holderCache = new Map<string, Set<string> | 'all' | null>();
-  const batches: LoadedBatch[] = [];
+  const selected: EligibleDeliveryWorker[] = [];
 
   for (const w of page) {
     const token = mentionTokenOf(w.name);
@@ -121,20 +122,39 @@ export async function loadDeliveryBatches(args: {
       db.workerDeliveryChannel.findMany({ where: { workerId: w.id, channelId: { in: channelIds } } }),
     ]);
 
+    const eligibleChannels: EligibleDeliveryChannel[] = [];
+    for (const ch of channels) {
+      if (ch.memory.isEncrypted || !callerCan(ch.memoryId) || !mayRead(holder, ch.memoryId)) continue;
+      const d = delivered.find(x => x.channelId === ch.id);
+      const mark = d && d.channelIncarnation === ch.incarnation ? d.deliveredThroughSeq : 0;
+      const lo = Math.max(seen.find(x => x.channelId === ch.id)?.lastSeenSeq ?? 0, mark);
+      if (ch.lastSeq <= lo) continue;
+      eligibleChannels.push({ channelId: ch.id, incarnation: ch.incarnation, mark,
+        predicate: Prisma.sql`n.message_channel_id = ${ch.id}
+          AND n.node_type = 'chat-message' AND n.deleted_at IS NULL AND n.seq > ${lo}
+          AND (n.data -> 'authorWorkerId') IS DISTINCT FROM ${JSON.stringify(w.id)}::jsonb
+          AND ${mentionReachSql(Prisma.sql`n.data`, Prisma.sql`${[token]}::text[]`)}` });
+    }
+    selected.push({ workerId: w.id, workerName: w.name, channels: eligibleChannels });
+  }
+  return { workers: selected, nextAfter };
+}
+
+export async function loadDeliveryBatches(args: DeliverySelectionArgs): Promise<LoadedBatchPage> {
+  const { workers, nextAfter } = await loadDeliveryEligibility(args);
+  if (!workers.length) return { batches: [], nextAfter };
+  const now = args.now ?? new Date();
+  const settings = await loadDeliverySettings(args.ctx.db, args.app.id);
+  const batches: LoadedBatch[] = [];
+  for (const w of workers) {
     const messages: BatchMessage[] = [];
     let totalEligible = 0;
     const incarnationOf = new Map<string, number>();
     const markOf = new Map<string, number>();
-    for (const ch of channels) {
-      if (ch.memory.isEncrypted) continue; // ruled: no text for encrypted channels
-      if (!callerCan(ch.memoryId) || !mayRead(holder, ch.memoryId)) continue;
-      const d = delivered.find((x) => x.channelId === ch.id);
-      const mark = d && d.channelIncarnation === ch.incarnation ? d.deliveredThroughSeq : 0;
-      const lo = Math.max(seen.find((x) => x.channelId === ch.id)?.lastSeenSeq ?? 0, mark);
-      if (ch.lastSeq <= lo) continue;
-      incarnationOf.set(ch.id, ch.incarnation);
-      markOf.set(ch.id, mark);
-      const eligible = await eligibleMessages(db, ch, lo, w.id, token);
+    for (const ch of w.channels) {
+      incarnationOf.set(ch.channelId, ch.incarnation);
+      markOf.set(ch.channelId, ch.mark);
+      const eligible = await eligibleMessages(args.ctx.db, ch);
       messages.push(...eligible.messages);
       totalEligible += eligible.totalEligible;
     }
@@ -144,19 +164,19 @@ export async function loadDeliveryBatches(args: {
     const timing = batchTiming(settings, { oldestPostedAt: oldest });
     if (timing.deliverAfter.getTime() > now.getTime()) continue;
 
-    const out = renderBatch({ workerName: w.name, messages, totalEligible });
+    const out = renderBatch({ workerName: w.workerName, messages, totalEligible });
     // The range starts right after the delivered mark: the messages below the first rendered one that do not reach the worker
     // (its own posts, chatter) are covered by the acknowledgement, and no eligible one above the last rendered one is.
     const ranges: LoadedBatchRange[] = out.ranges.map((r) => ({
       ...r, incarnation: incarnationOf.get(r.channelId)!, fromSeq: markOf.get(r.channelId)! + 1,
     }));
     batches.push({
-      workerId: w.id,
-      workerName: w.name,
+      workerId: w.workerId,
+      workerName: w.workerName,
       text: out.text,
       renderHash: out.renderHash,
       batchKey: batchKeyOf({
-        workerId: w.id, renderHash: out.renderHash,
+        workerId: w.workerId, renderHash: out.renderHash,
         channels: ranges.map((r) => ({ channelId: r.channelId, incarnation: r.incarnation, from: r.fromSeq, through: r.throughSeq, seqs: r.seqs })),
       }),
       deliverAfter: timing.deliverAfter,
@@ -170,29 +190,17 @@ export async function loadDeliveryBatches(args: {
 }
 
 /** The messages of a plaintext channel above `lo` that reach the worker, with their reply parent when it is in the channel. */
-async function eligibleMessages(
-  db: Context['db'],
-  ch: { id: string },
-  lo: number,
-  workerId: string,
-  token: string,
-): Promise<{ messages: BatchMessage[]; totalEligible: number }> {
+async function eligibleMessages(db: Context['db'], ch: EligibleDeliveryChannel): Promise<{ messages: BatchMessage[]; totalEligible: number }> {
   const rows = await db.$queryRaw<Row[]>(Prisma.sql`
     SELECT n.seq::int AS seq, n.content, n.data, n.created_at, COUNT(*) OVER() AS total_eligible
-    FROM nodes n
-    WHERE n.message_channel_id = ${ch.id}
-      AND n.node_type = 'chat-message'
-      AND n.deleted_at IS NULL
-      AND n.seq > ${lo}
-      AND (n.data -> 'authorWorkerId') IS DISTINCT FROM ${JSON.stringify(workerId)}::jsonb
-      AND ${mentionReachSql(Prisma.sql`n.data`, Prisma.sql`${[token]}::text[]`)}
+    FROM nodes n WHERE ${ch.predicate}
     ORDER BY n.created_at, n.seq
     LIMIT ${ELIGIBLE_READ_LIMIT}`);
   const eligible = rows;
   const parentSeqs = [...new Set(eligible.map((r) => replyToOf(r.data)).filter((s): s is number => s !== null))];
   const parents = parentSeqs.length === 0 ? [] : await db.$queryRaw<Array<{ seq: number; content: string | null; data: unknown }>>(Prisma.sql`
     SELECT n.seq::int AS seq, n.content, n.data FROM nodes n
-    WHERE n.message_channel_id = ${ch.id} AND n.node_type = 'chat-message' AND n.deleted_at IS NULL
+    WHERE n.message_channel_id = ${ch.channelId} AND n.node_type = 'chat-message' AND n.deleted_at IS NULL
       AND n.seq IN (${Prisma.join(parentSeqs)})`);
   const parentOf = new Map(parents.map((p) => [p.seq, p]));
   const messages: BatchMessage[] = eligible.map((r) => {
@@ -201,7 +209,7 @@ async function eligibleMessages(
     const p = parentSeq === null ? undefined : parentOf.get(parentSeq);
     const pEnv = (p?.data ?? {}) as Record<string, unknown>;
     return {
-      channelId: ch.id,
+      channelId: ch.channelId,
       seq: r.seq,
       createdAt: r.created_at,
       authorName: typeof env.authorName === 'string' ? env.authorName : 'unknown',
