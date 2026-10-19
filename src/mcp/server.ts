@@ -218,6 +218,7 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
+import { resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
@@ -4637,8 +4638,12 @@ export function createMcpServerInstance(
         .enum(['content', 'abstract', 'all'])
         .optional()
         .describe("Selects what the response includes. 'content' (default): meta block + body, with abstract substituted into the body slot when content is null/empty (Source: abstract-fallback line appears). 'abstract': meta block + abstract, no body. 'all': meta block + abstract + body."),
+      raw: z
+        .boolean()
+        .optional()
+        .describe('Return the stored text with include tags ({{> loc}}) as written instead of resolving them (cor:dmo:150:03). Default false: includes resolve with your own read access.'),
     },
-    async ({ urn: rawUrn, contentScope }) => {
+    async ({ urn: rawUrn, contentScope, raw }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -4801,7 +4806,11 @@ export function createMcpServerInstance(
       const lockState = mcpDecryptOrMark(current);
       // Shared with hadron_get_nodes (batch) so the per-node projection can never
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
-      const projection = await renderNodeReadProjection(current, scope, {
+      // #2041 — include tags resolve with the caller's own read access; `raw` skips it.
+      const served = lockState === 'locked' || raw
+        ? current
+        : { ...current, content: await resolveNodeContent(scopeCtx(), current, { raw }) };
+      const projection = await renderNodeReadProjection(served, scope, {
         locked: lockState === 'locked',
         encryptedMemory: lockState !== 'plaintext',
         auth,
@@ -4873,8 +4882,12 @@ export function createMcpServerInstance(
         .enum(['content', 'abstract', 'all'])
         .optional()
         .describe("Per-node projection scope, as on hadron_get_node. Default 'content'."),
+      raw: z
+        .boolean()
+        .optional()
+        .describe('Return the stored text with include tags ({{> loc}}) as written instead of resolving them (cor:dmo:150:03). Default false: includes resolve with your own read access.'),
     },
-    async ({ refs, memoryUrn, locPrefix, contentScope }) => {
+    async ({ refs, memoryUrn, locPrefix, contentScope, raw }) => {
       // Defensive contentScope validation — parity with hadron_get_node (covers
       // direct-handler callers that bypass the transport's zod parsing).
       if (
@@ -5257,13 +5270,17 @@ export function createMcpServerInstance(
         openThreadCounts(db, visible.map((n) => n.id)),
       ]);
       const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures };
+      const batchReadCtx = scopeCtx(); // one memo for the whole call (#2041)
       for (const n of visible) {
         if (truncated) {
           omitted.push(await nodeUrn(n.loc, n.memoryId, memoryUrnOf));
           continue;
         }
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
-        const projection = await renderNodeReadProjection(n, scope, {
+        const served = lockState === 'locked' || raw
+          ? n
+          : { ...n, content: await resolveNodeContent(batchReadCtx, n, { raw }) };
+        const projection = await renderNodeReadProjection(served, scope, {
           locked: lockState === 'locked',
           encryptedMemory: lockState !== 'plaintext',
           auth,
@@ -5324,8 +5341,12 @@ export function createMcpServerInstance(
     {
       parent: z.string().describe('Fully-qualified parent node URN, e.g. "hrn:node:acme.com:mmdata:sections"'),
       current: z.string().optional().describe('Fully-qualified current child node URN (must be in the same memory as `parent`)'),
+      raw: z
+        .boolean()
+        .optional()
+        .describe('Return the stored text with include tags ({{> loc}}) as written instead of resolving them (cor:dmo:150:03). Default false: includes resolve with your own read access.'),
     },
-    async ({ parent: rawParent, current: rawCurrent }) => {
+    async ({ parent: rawParent, current: rawCurrent, raw }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawParent, 'node');
@@ -5438,7 +5459,8 @@ export function createMcpServerInstance(
         .filter(Boolean)
         .join('\n');
 
-      return textResult(meta + '\n\n---\n\n' + (node.content || ''));
+      const body = raw ? node.content : await resolveNodeContent(scopeCtx(), node, { raw });
+      return textResult(meta + '\n\n---\n\n' + (body || ''));
     },
   );
 

@@ -86,14 +86,15 @@ import { isUserOwnedAgentDefinition } from '../../../lib/auth/userOwnedAgentDefi
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
 
 /**
- * The STORED (uncompiled) content of a Node whose `content` a read resolver
- * replaced with rendered Mustache output (`node(ref:)` / `nextNode` without
- * `raw`). Field resolvers that verify the parent against the database —
- * `Node.authorship`'s and `Node.revision`'s reconcile — must compare stored
- * state, not presentation. A Symbol key is never serialized by GraphQL, so the
- * wire shape is unchanged (#1326 review, Codex on #1397 `138e8185`).
+ * Marks a Node row whose `content` field answers with the STORED text unless a
+ * query asks otherwise: `node(raw: true)` / `nextNode(raw: true)` set it for
+ * the node they return, and `nodeBatch` sets it on every node (R21 A: a bulk
+ * read resolves only for `content(raw: false)`). `Node.content` reads it as its
+ * default; an explicit `content(raw:)` wins. The row itself is never rewritten,
+ * so field resolvers that verify the parent against the database see stored
+ * text. A Symbol key is never serialized by GraphQL (#2041).
  */
-export const STORED_NODE_CONTENT: unique symbol = Symbol('storedNodeContent');
+export const CONTENT_RAW_DEFAULT: unique symbol = Symbol('contentRawDefault');
 
 export interface Context {
   login?: import('../../../auth/jwt.js').HadronJwtPayload['login'];

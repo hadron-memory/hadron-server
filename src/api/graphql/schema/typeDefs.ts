@@ -1487,7 +1487,13 @@ export const typeDefs = `#graphql
     backoff ceiling and likely needs operator attention). System-managed.
     """
     embeddingAttempts: Int!
-    content: String
+    """
+    The node's text. Include tags and data variables resolve for the reader
+    (hrn:node:hadronmemory.com:specs:cor:dmo:150:03); pass raw: true for the stored text with its tags as
+    written. Through nodeBatch, an omitted raw returns the stored text
+    permanently (R21 A) and raw: false resolves.
+    """
+    content(raw: Boolean): String
     tokens: Int
     tags: [String!]!
     properties: JSON
