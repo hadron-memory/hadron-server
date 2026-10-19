@@ -141,6 +141,8 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/agent-task-matching-invariants.sql', import.meta.url), 'utf8'));
   // #1747 — tickers, subscriptions, wake settings, app grants, App ticker bounds.
   await client.query(readFileSync(new URL('../../prisma/ticker-invariants.sql', import.meta.url), 'utf8'));
+  // #2047 — the served-prompt record: one owner, owner-consistent identity, immutable, deleted only with its owner.
+  await client.query(readFileSync(new URL('../../prisma/served-prompt-invariants.sql', import.meta.url), 'utf8'));
 
   // #1326 — nullable attribution is either unknown, a task at an exact
   // revision, or an authenticated human. A CHECK with a bare OR of enum
