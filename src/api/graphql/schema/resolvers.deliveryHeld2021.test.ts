@@ -361,3 +361,20 @@ it('verifier boundary caps the atomic result at ten channels and refuses an elev
   expect(await db.workerDeliveryHold.count()).toBe(10);
   expect(await db.agentTeamEvent.count({ where: { type: 'delivery.held' } })).toBe(before);
 });
+it('canonical health omits stored holds and alarms for encrypted channels as well as pending messages', async () => {
+  const b = await batch(); await report(b.id);
+  const { deliveryStateTransaction, beginDeliveryTracking, observeDeliveryPolicyThrough, reconcileDeliveryAlarm } = await import('../../../lib/tickers/deliveryState.js');
+  const { loadDeliveryHealthSnapshot } = await import('../../../lib/tickers/deliveryPendingSnapshot.js');
+  const at = new Date(), posted = (await db.node.findFirstOrThrow({ where: { messageChannelId: channel.id }, orderBy: { seq: 'asc' } })).createdAt;
+  await deliveryStateTransaction(db, app.id, kit.id, async tx => {
+    await beginDeliveryTracking(tx, kit.id, posted); await observeDeliveryPolicyThrough(tx, kit.id, at);
+    await reconcileDeliveryAlarm(tx, { workerId: kit.id, now: at, candidates: [{ workerId: kit.id, channelId: channel.id, channelIncarnation: 1, seq: b.ranges[0].seqs[0], dueSince: posted }], hold: null });
+  });
+  const snapshot = () => db.$transaction(tx => loadDeliveryHealthSnapshot(tx, { ctx: keyCtx(hostKey), app: { ...app, organizationId: org.id, ownerUserId: null }, hostId: 'orca1', workerId: kit.id, asOf: at }), { isolationLevel: 'RepeatableRead' });
+  expect(await snapshot()).toMatchObject({ pendingMessageCount: 1, heldChannelCount: 1, activeAlarmCount: 1 });
+  await db.memory.update({ where: { id: channel.memoryId }, data: { isEncrypted: true } });
+  const hidden = await snapshot();
+  expect(hidden).toMatchObject({ pendingMessageCount: 0, heldChannelCount: 0, activeAlarmCount: 0, suppressedAlarmCount: 0, alarm: null, channels: [], totalChannels: 0 });
+  expect(JSON.stringify(hidden)).not.toContain(channel.id);
+  expect(await db.workerDeliveryHold.count()).toBe(1); // history/current storage is not deleted by a read
+});
