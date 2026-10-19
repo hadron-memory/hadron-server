@@ -354,10 +354,12 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
   });
 
   /**
-   * #2003: `driveTurns(60)` is 60 sequential DB round trips. Measured alone it
-   * takes 2-5 s and scales with host load (5.2 s seen at load ~76 on 32 cores),
-   * so vitest's 5 s default is too tight on the shared agent host. This bounds
-   * slow work only: a hang still fails, just at 20 s.
+   * #2003: `driveTurns(60)` is 60 sequential chat turns, each with several DB
+   * calls. Measured alone it took 2-5 s and followed host load (5.2 s seen at
+   * load ~76 on 32 cores), so vitest's 5 s default is too tight on the shared
+   * agent host. 20 s is about 4x the worst observed time, a candidate margin
+   * and not a measured necessity (waits were not instrumented). It bounds
+   * slow runs only: a hang still fails, just later.
    */
   const DRIVE_60_TIMEOUT_MS = 20_000;
 
