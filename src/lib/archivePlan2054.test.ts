@@ -90,7 +90,7 @@ describe('real caller transports and rolled-back state',()=>{
     validation.mockRejectedValue(new ArchivePlanStaleError());
     const result=await createTestableMcpServer(auth()).callTool('hadron_move_node',{urn:urn('source'),targetUrn:urn('target'),overwrite:true});
     expect(validation).toHaveBeenCalledTimes(3);
-    expect(result.isError).not.toBe(true);
+    expect(result).not.toHaveProperty('isError',true);
     expect(result.content).toEqual([{type:'text',text:'The node was moved concurrently; re-read it and retry.'}]);
     expect((await db.node.findUniqueOrThrow({where:{id:source.id}})).loc).toBe('source');
     expect((await db.node.findUniqueOrThrow({where:{id:target.id}})).loc).toBe('target');
@@ -168,7 +168,7 @@ describe('changes after discovery and before the first address set is granted',(
     const source=await node('source');const old=await node('target',true);
     for(let i=1;i<n;i++)validation.mockRejectedValueOnce(new ArchivePlanStaleError());
     const result=await createTestableMcpServer(auth()).callTool('hadron_move_node',{urn:urn('source'),targetUrn:urn('target'),overwrite:true});
-    expect(result.isError).not.toBe(true);expect(validation).toHaveBeenCalledTimes(n);
+    expect(result).not.toHaveProperty('isError',true);expect(validation).toHaveBeenCalledTimes(n);
     expect((await db.node.findUniqueOrThrow({where:{id:source.id}})).loc).toBe('target');
     expect((await db.node.findUniqueOrThrow({where:{id:old.id}})).loc).toBe(`target__deleted-${old.id}`);
     expect(mirrorNodeMoveToGit).toHaveBeenCalledTimes(1);
@@ -202,4 +202,53 @@ it('a late non-retryable failure rolls back archive and placeholder without publ
   expect((await db.node.findUniqueOrThrow({where:{id:old.id}})).loc).toBe('target');
   expect(await db.node.count({where:{isPlaceholder:true}})).toBe(0);
   expect(publishNodeWritten).not.toHaveBeenCalled();expect(await db.nodeRevision.count()).toBe(0);
+});
+
+describe('MCP source/destination revocation does not become plan conflict',()=>{
+  it.each(['source','target'] as const)('between attempts: %s grant revocation stops retries and effects',async side=>{
+    const source=await node('source');
+    const other=await db.organization.create({data:{name:'other2054',urn:'other2054'}});
+    await db.orgMember.create({data:{organizationId:other.id,userId:user.id,role:'ADMIN'}});
+    const destination=await resolvers.Mutation.createMemory({}, {orgId:other.id,name:'destination2054'},context());
+    await db.node.create({data:{id:generateId(),memoryId:destination.id,loc:'target',name:'target',nodeType:'info',deletedAt:new Date()}});
+    const from=await db.memory.findUniqueOrThrow({where:{id:memory.id}});
+    await db.user.update({where:{id:user.id},data:{roles:['READER']}});
+    validation.mockImplementationOnce(async()=>{
+      await db.orgMember.deleteMany({where:{userId:user.id,organizationId:side==='source'?from.organizationId!:other.id}});
+      throw new ArchivePlanStaleError();
+    });
+    const caller={userId:user.id,roles:['READER'],clientId:`user:${user.id}`} as never;
+    const text=await createTestableMcpServer(caller).callToolText('hadron_move_node',{urn:urn('source'),targetUrn:`urn:node:${destination.urn}:target`,overwrite:true});
+    expect(text).toContain('Memory write access changed');expect(text).not.toContain('The node was moved concurrently');
+    expect(validation).toHaveBeenCalledTimes(1);
+    expect((await db.node.findUniqueOrThrow({where:{id:source.id}})).loc).toBe('source');
+    expect(mirrorNodeMoveToGit).not.toHaveBeenCalled();expect(await db.nodeRevision.count()).toBe(0);
+  });
+  it.each(['source','target'] as const)('queued on first address: %s grant revocation wins',async side=>{
+    const source=await node('source');
+    const other=await db.organization.create({data:{name:'other2054',urn:'other2054'}});
+    await db.orgMember.create({data:{organizationId:other.id,userId:user.id,role:'ADMIN'}});
+    const destination=await resolvers.Mutation.createMemory({}, {orgId:other.id,name:'destination2054'},context());
+    await db.node.create({data:{id:generateId(),memoryId:destination.id,loc:'target',name:'target',nodeType:'info',deletedAt:new Date()}});
+    const from=await db.memory.findUniqueOrThrow({where:{id:memory.id}});
+    await db.user.update({where:{id:user.id},data:{roles:['READER']}});
+    const held=latch(),release=latch();
+    const blocker=db.$transaction(async tx=>{
+      await acquireLockSet(tx,[{memoryId:destination.id,loc:'target'}]);held.resolve();await release.promise;
+      await tx.orgMember.deleteMany({where:{userId:user.id,organizationId:side==='source'?from.organizationId!:other.id}});
+    },{timeout:20000});
+    await held.promise;
+    const observed=observeTransactionBackend(db);
+    const spy=vi.spyOn(db,'$transaction').mockImplementation(observed.db.$transaction as never);
+    const caller={userId:user.id,roles:['READER'],clientId:`user:${user.id}`} as never;
+    const pending=createTestableMcpServer(caller).callToolText('hadron_move_node',{urn:urn('source'),targetUrn:`urn:node:${destination.urn}:target`,overwrite:true});
+    try {
+      const pid=await observed.backendFor(pending);
+      await waitForAdvisoryWaiter(db,{pid,key:{form:'int-pair',first:destination.id,second:'target'}});
+    } finally {release.resolve();await blocker;}
+    const text=await pending;spy.mockRestore();
+    expect(text).toContain('Memory write access changed');expect(validation).not.toHaveBeenCalled();
+    expect((await db.node.findUniqueOrThrow({where:{id:source.id}})).loc).toBe('source');
+    expect(mirrorNodeMoveToGit).not.toHaveBeenCalled();expect(await db.nodeRevision.count()).toBe(0);
+  });
 });
