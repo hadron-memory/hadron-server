@@ -21,7 +21,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { appKeyCaller, refuseSessionBound, requireKeyScope } from '../../../lib/appKeyScopes/scopes.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
-import { keyHostId, recordHostKeyUse, type HostKey } from '../../../lib/hostOperations/hostKey.js';
+import { keyHostId, recordHostKeyUse, recordHostKeyUseApart, type HostKey } from '../../../lib/hostOperations/hostKey.js';
 import { liveCaller } from '../../../lib/tickers/liveCaller.js';
 import { batchProofPayload, loadDeliveryBatches, loadDeliveryChannelPolicy } from '../../../lib/tickers/deliveryBatch.js';
 import { signBatchProof, type BatchProof } from '../../../lib/tickers/wakeProof.js';
@@ -35,6 +35,21 @@ const appAnchors = (app: TaskApp): AuthorityAnchor[] => [
 
 const hostScopeRequired = () =>
   taskError('APP_KEY_SCOPE_REQUIRED', 'Delivery batches need an App key that holds attention:deliver and host:operate for one host.');
+
+/** Refusals use an apart write, after the deciding transaction rolled back.
+ * Both transports enter here once; adapters must not record another use.
+ */
+async function recordingBatchRefusal<T>(ctx: Context, call: () => Promise<T>): Promise<T> {
+  try { return await call(); }
+  catch (error) {
+    const key = appKeyCaller(ctx);
+    const code = (error as { extensions?: { code?: unknown } } | null)?.extensions?.code;
+    if (key && typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code)) {
+      await recordHostKeyUseApart(ctx.db, key, 'deliver', { refusedCode: code });
+    }
+    throw error;
+  }
+}
 
 /**
  * The gate outside any transaction, in the order that makes what a key learns independent of what it does not hold: a
@@ -141,7 +156,7 @@ export const deliveryBatchQueries = {
     _: unknown,
     a: { appRef: string; workerRefs?: string[] | null; first?: number | null; after?: string | null },
     requestCtx: Context,
-  ) => {
+  ) => recordingBatchRefusal(requestCtx, async () => {
     const ctx = (await liveCaller(requestCtx)) ?? (() => { throw taskError('APP_NOT_FOUND', 'App not found.'); })();
     if (ctx.sessionBindingRefused && !appKeyCaller(ctx)) throw taskError('SESSION_NOT_LIVE', 'The named session is not live or cannot bind.');
     if (ctx.sessionId && (!appKeyCaller(ctx) || !(await keyHostId(ctx.db, appKeyCaller(ctx)!)))) return selfBatches(ctx, a);
@@ -177,7 +192,7 @@ export const deliveryBatchQueries = {
         pageInfo: { hasNextPage: page.nextAfter !== null, endCursor: page.nextAfter },
       };
     });
-  },
+  }),
 };
 
 async function currentBatchChannels(
@@ -198,7 +213,7 @@ export const deliveryBatchMutations = {
     _: unknown,
     a: { batchIds: string[]; through?: Array<{ channelId: string; seq: number }> | null },
     requestCtx: Context,
-  ) => {
+  ) => recordingBatchRefusal(requestCtx, async () => {
     const key = appKeyCaller(requestCtx);
     if (requestCtx.sessionBindingRefused && !key) throw taskError('SESSION_NOT_LIVE', 'The named session is not live or cannot bind.');
     if (requestCtx.sessionId && (!key || !(await keyHostId(requestCtx.db, key)))) {
@@ -260,5 +275,5 @@ export const deliveryBatchMutations = {
         return true;
       },
     });
-  },
+  }),
 };

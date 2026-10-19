@@ -313,12 +313,18 @@ describe('#2102 proof policy after an actual worker wake-lock wait', () => {
 });
 
 describe('#2102 register policy remains fenced after the deciding read', () => {
-  it.each(['host', 'self'] as const)('%s ack holds register revocation until its mark commits', async arm => {
+  it.each([
+    ['host', 'app', 'update'], ['self', 'app', 'update'],
+    ['host', 'org', 'update'], ['self', 'org', 'update'],
+    ['host', 'app', 'delete'], ['self', 'app', 'create'],
+  ] as const)('%s ack fences %s register %s through commit', async (arm, owner, change) => {
+    const entry = await db.registerEntry.findFirstOrThrow({ where: { attendeeWorkerId: kit.id } });
+    if (owner === 'org') await db.registerEntry.update({ where: { id: entry.id }, data: { appId: null, organizationId: org.id } });
+    if (change === 'create') await db.registerEntry.update({ where: { id: entry.id }, data: { attendeeWorkerId: null } });
     await postForBoth();
     const session = arm === 'self' ? await db.session.create({ data: { id: generateId(), appId: app.id, userId: manager.id, workerId: kit.id, agentId } }) : null;
     const caller = session ? { ...ctx(manager.id), appId: app.id, sessionId: session.id } : keyCtx(hostKey);
     const [batch] = (await Q.deliveryBatches({}, { appRef: app.id }, caller)).batches;
-    const entry = await db.registerEntry.findFirstOrThrow({ where: { attendeeWorkerId: kit.id } });
     let reached!: () => void; const policyRead = new Promise<void>(r => { reached = r; });
     let release!: () => void; const resumed = new Promise<void>(r => { release = r; });
     let once = false;
@@ -340,7 +346,12 @@ describe('#2102 register policy remains fenced after the deciding read', () => {
     const pending = M.acknowledgeDeliveryBatches({}, { batchIds: [batch.id] }, { ...caller, db: wrapped });
     await policyRead;
     let committed = false;
-    const revoke = M.updateRegisterEntry({}, { ref: entry.id, input: { role: 'POST' } }, ctx(manager.id)).then(() => { committed = true; });
+    const write = change === 'delete'
+      ? M.deleteRegisterEntry({}, { ref: entry.id }, ctx(manager.id))
+      : change === 'create'
+        ? M.createRegisterEntry({}, { input: { ownerRef: app.id, channelRef: channel.id, attendeeRef: kit.id, role: 'POST' } }, ctx(manager.id))
+        : M.updateRegisterEntry({}, { ref: entry.id, input: { role: 'POST' } }, ctx(manager.id));
+    const revoke = write.then(() => { committed = true; });
     try {
       let blocked = false;
       for (let i = 0; i < 100 && !blocked && !committed; i++) {
@@ -371,7 +382,7 @@ describe('#2102 refused host uses are recorded once apart', () => {
     const { createTestableMcpServer } = await import('../../../mcp/server.js');
     const server = createTestableMcpServer({ ...caller, clientId: `app:${app.id}` } as never);
     const r = await server.callTool('hadron_team_chat_inbox', { appRef: app.id });
-    expect(r.isError).toBe(true); return undefined;
+    expect((r as any).isError).toBe(true); return undefined;
   }
 
   it.each(['resolver', 'graphql', 'mcp'])('host-only read refusal is recorded once through %s', async surface => {
@@ -395,7 +406,7 @@ describe('#2102 refused host uses are recorded once apart', () => {
     } else {
       const { createTestableMcpServer } = await import('../../../mcp/server.js');
       const server = createTestableMcpServer({ ...keyCtx(hostKey), clientId: `app:${app.id}` } as never);
-      expect((await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [b.id] })).isError).toBe(true);
+      expect((await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [b.id] }) as any).isError).toBe(true);
     }
     expect(await db.hostKeyUse.count({ where: { appKeyId: hostKey.id, action: 'deliver', refusedCode: 'APP_KEY_SCOPE_REQUIRED' } })).toBe(1);
     expect(await db.workerDeliveryChannel.count()).toBe(0);
