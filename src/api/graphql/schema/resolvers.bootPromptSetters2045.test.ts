@@ -1,0 +1,208 @@
+/**
+ * #2045 (S8 step 8b, R23/R24) — the three GraphQL pointer setters: the owner's
+ * read gate first, then the authority gate, then the target checks, then the
+ * write, in one transaction under the owner's anchors. The gate and the target
+ * checks themselves are pinned in lib/bootPromptPointer2045.test.ts.
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { GraphQLError } from 'graphql';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb, createDbAppAgent, createDbAppMember, createDbAppWithKey } from '../../../test/helpers.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
+import { generateId } from '../../../lib/id.js';
+import { EntityNotFoundError } from '../../../lib/entityRef/errors.js';
+import { runAsActor } from '../../../lib/requestActor.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { resolvers } from './resolvers.js';
+import type { Context } from './resolvers.helpers.js';
+
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+
+const M = resolvers.Mutation as any;
+let orgId: string;
+
+beforeEach(async () => {
+  await cleanDb(db);
+  orgId = (await db.organization.create({ data: { id: generateId(), name: 'bs-org', urn: 'bs-org' } })).id;
+});
+
+const ctxOf = (userId: string, extra: Record<string, unknown> = {}) =>
+  ({ db, userId, roles: [], clientId: `user:${userId}`, ...extra }) as unknown as Context;
+const user = (name: string) => db.user.create({ data: { id: generateId(), name } });
+const compiledIn = (memoryId: string, loc = 'boot:compiled') => withCompileWrite(() => db.node.create({
+  data: { id: generateId(), memoryId, loc, name: 'Compiled', content: 'c', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+}));
+
+async function fixture() {
+  const admin = await user('admin');
+  await db.orgMember.create({ data: { organizationId: orgId, userId: admin.id, role: 'ADMIN' } });
+  const member = await user('member');
+  const stranger = await user('stranger');
+  const agentMem = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'agent-sys', urn: 'bs-org:agent-sys', organizationId: orgId } });
+  const agent = await db.agent.create({ data: { id: generateId(), name: 'Agent', urn: 'bs-org:agent', organizationId: orgId, systemMemoryId: agentMem.id } });
+  const unused = await db.agent.create({ data: { id: generateId(), name: 'Unused', urn: 'bs-org:unused', organizationId: orgId } });
+  const { app } = await createDbAppWithKey(db, 'bs-app', orgId);
+  await createDbAppAgent(db, app.id, agent.id);
+  await createDbAppMember(db, app.id, member.id, 'member');
+  const install = await db.memory.create({
+    data: { id: generateId(), class: 'system', name: 'install', urn: 'bs-org:install', organizationId: orgId, appId: app.id, installOfAgentId: agent.id, isInstallMemory: true },
+  });
+  const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+  const agentNode = await compiledIn(agentMem.id);
+  const installNode = await compiledIn(install.id);
+  return { admin, member, stranger, agent, unused, app, worker, agentNode, installNode };
+}
+type F = Awaited<ReturnType<typeof fixture>>;
+
+const setters = {
+  AGENT: (f: F, nodeRef: unknown, ctx: Context) =>
+    M.setAgentBootPrompt(null, nodeRef === undefined ? { agentRef: f.agent.id } : { agentRef: f.agent.id, nodeRef }, ctx),
+  APP_AGENT: (f: F, nodeRef: unknown, ctx: Context) =>
+    M.setAppAgentBootPrompt(null, nodeRef === undefined ? { appRef: f.app.id, agentRef: f.agent.id } : { appRef: f.app.id, agentRef: f.agent.id, nodeRef }, ctx),
+  WORKER: (f: F, nodeRef: unknown, ctx: Context) =>
+    M.setWorkerBootPrompt(null, nodeRef === undefined ? { workerRef: f.worker.id } : { workerRef: f.worker.id, nodeRef }, ctx),
+};
+type Field = keyof typeof setters;
+const FIELDS = Object.keys(setters) as Field[];
+const nodeFor = (f: F, field: Field) => (field === 'AGENT' ? f.agentNode : f.installNode);
+const typeOf = { AGENT: 'Agent', APP_AGENT: 'AppAgent', WORKER: 'Worker' } as const;
+
+const errorOf = async (p: Promise<unknown>) => {
+  try { await p; return null; } catch (e) {
+    if (e instanceof GraphQLError) return { code: e.extensions.code, message: e.message };
+    if (e instanceof EntityNotFoundError) return { code: e.code, message: e.message };
+    throw e;
+  }
+};
+const codeOf = async (p: Promise<unknown>) => (await errorOf(p))?.code ?? 'NO_ERROR';
+
+async function storedId(f: F, field: Field) {
+  if (field === 'AGENT') return (await db.agent.findUniqueOrThrow({ where: { id: f.agent.id } })).bootPromptNodeId;
+  if (field === 'APP_AGENT') return (await db.appAgent.findUniqueOrThrow({ where: { appId_agentId: { appId: f.app.id, agentId: f.agent.id } } })).bootPromptNodeId;
+  return (await db.worker.findUniqueOrThrow({ where: { id: f.worker.id } })).bootPromptNodeId;
+}
+
+describe('#2045 8b setters', () => {
+  it.each(FIELDS)('%s: the manager sets (returning the owner, whose field reads the pointer) and an explicit null clears', async (field) => {
+    const f = await fixture();
+    const owner = await setters[field](f, nodeFor(f, field).id, ctxOf(f.admin.id));
+    const ref = await (resolvers as any)[typeOf[field]].bootPromptRef(owner, {}, ctxOf(f.admin.id));
+    expect(ref).toMatch(/^hrn:node:.*boot.*compiled/);
+    expect(await storedId(f, field)).toBe(nodeFor(f, field).id);
+    await setters[field](f, null, ctxOf(f.admin.id));
+    expect(await storedId(f, field)).toBeNull();
+  });
+
+  it.each(FIELDS)('%s: an omitted nodeRef is BAD_USER_INPUT, never a clear', async (field) => {
+    const f = await fixture();
+    await setters[field](f, nodeFor(f, field).id, ctxOf(f.admin.id));
+    expect(await codeOf(setters[field](f, undefined, ctxOf(f.admin.id)))).toBe('BAD_USER_INPUT');
+    expect(await storedId(f, field)).toBe(nodeFor(f, field).id);
+  });
+
+  it.each([
+    ['AGENT', 'AGENT_NOT_FOUND'],
+    ['APP_AGENT', 'APP_NOT_FOUND'],
+    ['WORKER', 'WORKER_NOT_FOUND'],
+  ] as const)('%s: an owner the caller cannot read answers its usual not-found, before any gate', async (field, code) => {
+    const f = await fixture();
+    expect(await codeOf(setters[field](f, nodeFor(f, field).id, ctxOf(f.stranger.id)))).toBe(code);
+  });
+
+  it.each(FIELDS)('%s: an App participant who is not a manager is FORBIDDEN, identically for a good and a bad target', async (field) => {
+    const f = await fixture();
+    if (field === 'AGENT') await db.orgMember.create({ data: { organizationId: orgId, userId: f.member.id, role: 'READER' } });
+    const good = await errorOf(setters[field](f, nodeFor(f, field).id, ctxOf(f.member.id)));
+    const bad = await errorOf(setters[field](f, generateId(), ctxOf(f.member.id)));
+    expect(good?.code).toBe('FORBIDDEN');
+    expect(bad).toEqual(good);
+    expect(await storedId(f, field)).toBeNull();
+  });
+
+  it.each(FIELDS)("%s: the manager's own bound worker session is SESSION_REFUSED", async (field) => {
+    const f = await fixture();
+    expect(await runAsActor({ workerId: f.worker.id, agentId: null }, () => codeOf(setters[field](f, nodeFor(f, field).id, ctxOf(f.admin.id)))))
+      .toBe('BOOT_PROMPT_POINTER_SESSION_REFUSED');
+    expect(await storedId(f, field)).toBeNull();
+  });
+
+  it('setAppAgentBootPrompt: an Agent the App has not installed answers like a missing Agent', async () => {
+    const f = await fixture();
+    const notInstalled = await errorOf(M.setAppAgentBootPrompt(null, { appRef: f.app.id, agentRef: f.unused.id, nodeRef: f.installNode.id }, ctxOf(f.admin.id)));
+    const missing = await errorOf(M.setAppAgentBootPrompt(null, { appRef: f.app.id, agentRef: 'bs-org:nobody', nodeRef: f.installNode.id }, ctxOf(f.admin.id)));
+    expect(notInstalled?.code).toBe('AGENT_NOT_FOUND');
+    expect(missing?.code).toBe('AGENT_NOT_FOUND');
+  });
+
+  it.each(FIELDS)("%s: the manager's demotion racing the write: refused on the CURRENT role, nothing written", async (field) => {
+    const f = await fixture();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    const demotion = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'org', id: orgId }, { kind: 'user', id: f.admin.id }], 'exclusive');
+      await tx.orgMember.updateMany({ where: { organizationId: orgId, userId: f.admin.id }, data: { role: 'READER' } });
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await isHeld;
+    const writing = setters[field](f, nodeFor(f, field).id, ctxOf(f.admin.id)).then(() => 'wrote', (e: Error) => e);
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      release();
+      await demotion;
+    }
+    expect(await writing).not.toBe('wrote');
+    expect(await storedId(f, field)).toBeNull();
+  });
+
+  async function racedRevocation(
+    f: F,
+    field: Field,
+    anchors: Array<{ kind: 'org' | 'app'; id: string }>,
+    revoke: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<unknown>,
+  ) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    const revocation = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, anchors, 'exclusive');
+      await revoke(tx);
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await isHeld;
+    const writing = setters[field](f, nodeFor(f, field).id, ctxOf(f.admin.id)).then(() => 'wrote', (e: Error) => e);
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      release();
+      await revocation;
+    }
+    return writing;
+  }
+
+  it.each(FIELDS)("%s: the owner's org deleted racing the write (org anchor only): refused, nothing written", async (field) => {
+    const f = await fixture();
+    expect(await racedRevocation(f, field, [{ kind: 'org', id: orgId }],
+      (tx) => tx.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } }))).not.toBe('wrote');
+    expect(await storedId(f, field)).toBeNull();
+  });
+
+  it.each(['APP_AGENT', 'WORKER'] as const)("%s: the App deleted racing the write (App anchor only): refused, nothing written", async (field) => {
+    const f = await fixture();
+    expect(await racedRevocation(f, field, [{ kind: 'app', id: f.app.id }],
+      (tx) => tx.app.update({ where: { id: f.app.id }, data: { deletedAt: new Date() } }))).not.toBe('wrote');
+    expect(await storedId(f, field)).toBeNull();
+  });
+
+  it('CONTROL: with no revocation in flight the same write lands', async () => {
+    const f = await fixture();
+    await setters.WORKER(f, f.installNode.id, ctxOf(f.admin.id));
+    expect(await storedId(f, 'WORKER')).toBe(f.installNode.id);
+  });
+});
