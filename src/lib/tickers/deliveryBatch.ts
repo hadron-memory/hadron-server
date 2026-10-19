@@ -191,3 +191,38 @@ const replyToOf = (data: unknown): number | null => {
   const v = data && typeof data === 'object' ? (data as Record<string, unknown>).replyToSeq : null;
   return typeof v === 'number' ? v : null;
 };
+
+/**
+ * The payload the batch's signed id carries (slice b signs and verifies it: src/lib/tickers/batchProof.ts). Domain-separated
+ * from the wake proof. `seqs` are exactly the rendered messages; `batchKey` is the stable re-derivation key.
+ */
+export type BatchProofPayload = {
+  v: 1;
+  kind: 'batch-proof';
+  appId: string;
+  workerId: string;
+  hostId: string;
+  requester: { appKeyId: string };
+  channels: Array<{ channelId: string; incarnation: number; from: number; through: number; seqs: number[] }>;
+  renderHash: string;
+  batchKey: string;
+  issuedAt: number;
+};
+
+export function batchProofPayload(
+  batch: LoadedBatch,
+  who: { appId: string; hostId: string; appKeyId: string; now: Date },
+): BatchProofPayload {
+  return {
+    v: 1,
+    kind: 'batch-proof',
+    appId: who.appId,
+    workerId: batch.workerId,
+    hostId: who.hostId,
+    requester: { appKeyId: who.appKeyId },
+    channels: batch.ranges.map((r) => ({ channelId: r.channelId, incarnation: r.incarnation, from: r.fromSeq, through: r.throughSeq, seqs: r.seqs })),
+    renderHash: batch.renderHash,
+    batchKey: batch.batchKey,
+    issuedAt: who.now.getTime(),
+  };
+}
