@@ -14,10 +14,12 @@ const CLAUDE_IDLE = [
   '❯ reply with exactly the word ok', '● ok', '✻ Crunched for 2s · done 11:14 PM',
   RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
 ];
-const TICK = { kind: 'TICK', ticker: { name: 'coordinator-tick' } };
+const TICK = { kind: 'TICK', ticker: { id: 'T', name: 'coordinator-tick' } };
+const TICK2 = { kind: 'TICK', ticker: { id: 'U', name: 'eden-queue-tick' } };
 const MENTION = { kind: 'MENTION', ticker: null };
 const TASK = { kind: 'TASK', ticker: null };
 const CONFIRMED = { ok: true, result: { send: { accepted: true, prompt: { requestId: 'r1', stages: ['input_accepted', 'turn_started'] } } } };
+const NO_ID_ACCEPTED = { ok: true, result: { send: { accepted: true, prompt: { stages: ['input_accepted'] } } } };
 const ACCEPTED_ONLY = { ok: true, result: { send: { accepted: true, prompt: { requestId: 'r1', stages: ['input_accepted'] } } } };
 
 /** A proof whose payload carries the given ticks ("T:k"), like the server's (opaque to everything else). */
@@ -38,6 +40,8 @@ interface Fake {
   sendReply: (() => string) | null;
   dueError: string | null;
   incarnation: string;
+  retries: string[];
+  retryReply: (() => string) | null;
 }
 
 let dir: string;
@@ -48,7 +52,7 @@ function fake(): Fake {
   const f: Fake = {
     wakes: [], acked: [], sent: [], idle: true, screen: { source: 'screen', tail: CLAUDE_IDLE },
     dueQueries: [], pages: 0, alwaysMore: false, ackReply: null, sendReply: null, dueError: null,
-    incarnation: 'inc-1', run: undefined as any,
+    incarnation: 'inc-1', retries: [], retryReply: null, run: undefined as any,
   };
   f.run = (argv) => {
     const out = (o: unknown) => ({ code: 0, stdout: JSON.stringify(o), stderr: '' });
@@ -73,6 +77,10 @@ function fake(): Fake {
       }
       if (argv[2] === 'wait') return out({ ok: f.idle, result: { wait: { satisfied: f.idle } }, error: f.idle ? undefined : { code: 'timeout' } });
       if (argv[2] === 'read') return out({ ok: true, result: { terminal: f.screen } });
+      if (argv[2] === 'send' && argv.includes('--retry-request')) {
+        f.retries.push(argv[argv.indexOf('--retry-request') + 1]);
+        return { code: 0, stdout: f.retryReply ? f.retryReply() : JSON.stringify(ACCEPTED_ONLY), stderr: '' };
+      }
       if (argv[2] === 'send') {
         f.sent.push(argv[argv.indexOf('--text') + 1]);
         if (f.sendReply) return { code: 0, stdout: f.sendReply(), stderr: '' };
@@ -246,18 +254,18 @@ describe('idle gate (C1 rule)', () => {
 
 describe('typed-once, coverage and ambiguity', () => {
   const lostAck = () => { f.ackReply = () => ({ errors: [{ message: 'upstream 502' }] }); };
+  const T = (k: number) => `T:${k}`;
 
   it('a confirmed send whose ack fails is retried ack-only for a fully covered proof, never retyped', () => {
-    const p = proof(['T:1']);
-    f.wakes = [wake('w-ada', 'Ada', [TICK], p)];
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1)]))];
     lostAck();
     go();
     expect(f.sent).toHaveLength(1);
     expect(log()).toContain('ack FAILED');
-    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'sent', coverage: ['T:1'], receiver: 'term_a#inc-1' });
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'sent', coverage: [T(1)], receiver: 'term_a#inc-1' });
     f.ackReply = null;
     lines = [];
-    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'reissued'))]; // a re-read proof: same ticks, new bytes
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1)], 'reissued'))]; // a re-read proof: same ticks, new bytes
     go();
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toHaveLength(1);
@@ -265,19 +273,48 @@ describe('typed-once, coverage and ambiguity', () => {
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))).toEqual({});
   });
 
-  it('new ticks beyond the receipt are NOT covered: a fresh nudge, and coverage is the union', () => {
-    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+  it('overlapping ticks: the second nudge names ONLY the uncovered ticker, coverage is the union, the combined proof is acked', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1)]))];
+    lostAck();
+    go();
+    expect(f.sent[0]).toContain('coordinator-tick');
+    f.ackReply = null;
+    const both = proof([T(1), 'U:1'], 'both');
+    f.wakes = [wake('w-ada', 'Ada', [TICK, TICK2], both)];
+    go();
+    expect(f.sent).toHaveLength(2);
+    expect(f.sent[1]).toContain('eden-queue-tick');
+    expect(f.sent[1]).not.toContain('coordinator-tick'); // the covered work is not asked for again
+    expect(f.acked).toEqual([both]);
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))).toEqual({});
+  });
+
+  it('a later tick of the SAME ticker is new work and is named', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1)]))];
     lostAck();
     go();
     f.ackReply = null;
-    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1', 'T:2']))];
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1), T(2)]))];
     go();
     expect(f.sent).toHaveLength(2);
+    expect(f.sent[1]).toContain('coordinator-tick');
     expect(f.acked).toHaveLength(1);
   });
 
-  it('a changed receiver (replacement terminal) does not inherit the old receipt: no ack on it', () => {
-    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+  it('uncovered tick work that cannot be mapped to a ticker is held, not repeated', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1)]))];
+    lostAck();
+    go();
+    f.ackReply = null;
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1), 'Z:9']))]; // Z is not among the wake's reasons
+    go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('cannot be identified');
+  });
+
+  it('a changed receiver (replacement terminal) does not inherit the old receipt', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1)]))];
     lostAck();
     go();
     f.ackReply = null;
@@ -294,48 +331,86 @@ describe('typed-once, coverage and ambiguity', () => {
     expect(log()).not.toMatch(/; acked /);
   });
 
-  it('accepted without a confirmed submission is ambiguous: never acked, never retyped, kept across passes', () => {
+  it('accepted without a confirmed turn start is ambiguous and kept with its request id; it is reconciled by that id, never retyped', () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
     go();
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toEqual([]);
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'ambiguous', requestId: 'r1', handle: 'term_a' });
     f.sendReply = null;
-    lines = [];
-    go();
-    go();
+    go(); // still unconfirmed on retry
+    expect(f.retries).toEqual(['r1']);
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toEqual([]);
-    expect(log()).toContain('unreconciled');
+    expect(log()).toContain('still unreconciled');
+    f.retryReply = () => JSON.stringify(CONFIRMED); // the retry now reports the turn started
+    lines = [];
+    go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toHaveLength(1);
+    expect(log()).toContain('reconciled as delivered');
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))).toEqual({});
+  });
+
+  it('only the exact stage turn_started confirms', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    f.sendReply = () => JSON.stringify({ ok: true, result: { send: { accepted: true, prompt: { requestId: 'r2', stages: ['input_accepted', 'no_turn_started_yet'] } } } });
+    go();
+    expect(f.acked).toEqual([]);
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada'].state).toBe('ambiguous');
   });
 
-  it('an unparsable send receipt is ambiguous too', () => {
+  it('an unparsable or id-less receipt is ambiguous with no request id: held for a human, no retry calls', () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.sendReply = () => 'not json';
     go();
     f.sendReply = null;
     go();
+    go();
     expect(f.sent).toHaveLength(1);
+    expect(f.retries).toEqual([]);
     expect(f.acked).toEqual([]);
+    expect(log()).toContain('unreconciled');
+  });
+
+  it('a failure that names a request id is reissued once with that same id: confirmed on retry means one send, acked', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    f.sendReply = () => JSON.stringify({ ok: false, error: { code: 'transport', details: { requestId: 'rq9' } } });
+    f.retryReply = () => JSON.stringify(CONFIRMED);
+    go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.retries).toEqual(['rq9']);
+    expect(f.acked).toHaveLength(1);
+  });
+
+  it('a failure after possible submission whose retry also fails stays ambiguous with its request id', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    f.sendReply = () => JSON.stringify({ ok: false, error: { code: 'transport', details: { requestId: 'rq9' } } });
+    f.retryReply = () => JSON.stringify({ ok: false, error: { code: 'transport', details: { requestId: 'rq9' } } });
+    go();
+    expect(f.acked).toEqual([]);
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'ambiguous', requestId: 'rq9' });
+    go();
+    expect(f.sent).toHaveLength(1); // not retyped
   });
 
   it('an ambiguous receipt older than a day is still kept (no silent expiry)', () => {
-    writeFileSync(join(dir, 'x'), '');
     mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
-    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1'], receiver: 'term_a#inc-1', at: 1, detail: 'old' } }));
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1'], receiver: 'term_a#inc-1', at: 1, detail: 'old', text: 't', handle: 'term_a' } }));
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     go();
     expect(f.sent).toEqual([]);
     expect(log()).toContain('unreconciled');
   });
 
-  it('a refused send leaves the wake due and retypes later', () => {
+  it('a structured refusal (no request id, nothing typed) leaves the wake due and retypes later', () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
-    f.sendReply = () => JSON.stringify({ ok: false, error: { code: 'busy' } });
+    f.sendReply = () => JSON.stringify({ ok: false, error: { code: 'invalid_argument' } });
     go();
     expect(f.acked).toEqual([]);
     expect(log()).toContain('send refused');
+    expect(existsSync(receiptsFile())).toBe(false);
     f.sendReply = null;
     go();
     expect(f.acked).toHaveLength(1);
@@ -344,16 +419,36 @@ describe('typed-once, coverage and ambiguity', () => {
   it('unreadable or malformed receipt state stops the pass: nothing is sent or acked', () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
-    writeFileSync(receiptsFile(), '{not json');
-    expect(() => go()).toThrow('malformed');
-    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'sent' } }));
-    expect(() => go()).toThrow('malformed');
+    const bad = [
+      '{not json', '[]', 'null', '"x"', '7',
+      JSON.stringify({ 'w-ada': { state: 'sent' } }),
+      JSON.stringify({ 'w-ada': { state: 'sent', coverage: [], receiver: 'r', at: 1 } }),
+      JSON.stringify({ 'w-ada': { state: 'sent', coverage: [1], receiver: 'r', at: 1 } }),
+      JSON.stringify({ 'w-ada': { state: 'sent', coverage: ['T:1'], receiver: 'r', at: 'x' } }),
+      JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1'], receiver: 'r', at: 1 } }),
+      JSON.stringify({ 'w-ada': [] }),
+    ];
+    for (const raw of bad) {
+      writeFileSync(receiptsFile(), raw);
+      expect(() => go(), raw).toThrow('malformed');
+    }
     writeFileSync(receiptsFile(), '{}');
     chmodSync(receiptsFile(), 0o000);
     if (process.getuid?.() !== 0) expect(() => go()).toThrow('unreadable');
     chmodSync(receiptsFile(), 0o600);
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
+  });
+
+  it('a receipt file replaced by [] after a lost ack stops the restart instead of retyping', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1)]))];
+    lostAck();
+    go();
+    expect(f.sent).toHaveLength(1);
+    writeFileSync(receiptsFile(), '[]');
+    f.ackReply = null;
+    expect(() => go()).toThrow('malformed');
+    expect(f.sent).toHaveLength(1);
   });
 });
 
@@ -422,6 +517,50 @@ describe('CLI entry and single instance', () => {
     expect(readFileSync(join(stateDir, 'lock'), 'utf8')).toBe(String(process.pid));
     release();
     expect(existsSync(join(stateDir, 'lock'))).toBe(false);
+  });
+
+  it('stale-lock takeover race: a second contender during the takeover is refused, exactly one proceeds', () => {
+    const stateDir = join(dir, 'ticker-wake');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'lock'), '999999999');
+    // The first contender is a live process named ticker-wake (liveness is judged from /proc cmdline).
+    const first = spawn('node', ['-e', 'setTimeout(() => {}, 20000)', 'ticker-wake'], { stdio: 'ignore' });
+    try {
+      let nested = '';
+      const release = acquireLock(stateDir, first.pid!, {
+        beforeUnlink: () => {
+          try { acquireLock(stateDir, process.pid + 1); nested = 'GOT'; } catch (e) { nested = (e as Error).message; }
+        },
+      });
+      expect(nested).toContain('taking over');
+      expect(readFileSync(join(stateDir, 'lock'), 'utf8')).toBe(String(first.pid));
+      release();
+      expect(existsSync(join(stateDir, 'lock.takeover'))).toBe(false);
+    } finally { first.kill(); }
+  });
+
+  it('stale-lock takeover never unlinks a live replacement owner that arrived after the stale judgment', () => {
+    const stateDir = join(dir, 'ticker-wake');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'lock'), '999999999');
+    const holder = spawn('node', ['-e', 'setTimeout(() => {}, 20000)', 'ticker-wake'], { stdio: 'ignore' });
+    try {
+      expect(() => acquireLock(stateDir, process.pid, {
+        afterJudgedStale: () => { writeFileSync(join(stateDir, 'lock'), String(holder.pid)); }, // replacement arrives
+      })).toThrow('holds');
+      expect(readFileSync(join(stateDir, 'lock'), 'utf8')).toBe(String(holder.pid)); // left intact
+      expect(existsSync(join(stateDir, 'lock.takeover'))).toBe(false);
+    } finally { holder.kill(); }
+  });
+
+  it('a takeover file left by a dead process does not wedge acquisition', () => {
+    const stateDir = join(dir, 'ticker-wake');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'lock'), '999999999');
+    writeFileSync(join(stateDir, 'lock.takeover'), '999999998');
+    const release = acquireLock(stateDir);
+    expect(readFileSync(join(stateDir, 'lock'), 'utf8')).toBe(String(process.pid));
+    release();
   });
 
   it('simultaneous starters: exactly one process wins the lock', async () => {

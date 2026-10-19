@@ -19,7 +19,7 @@
  *  - a nudge is typed only after the terminal proves idle AND a final read of
  *    the composer shows it empty with no Orca draft, even when tui-idle holds;
  *    unknown/menu/input state holds. Nothing is cleared or interrupted.
- *  - a CONFIRMED send (Orca reports the turn started) is recorded in a durable
+ *  - a CONFIRMED send (Orca's stages include `turn_started`) is recorded in a durable
  *    receipt, with the tick coverage and the receiving terminal, BEFORE the
  *    ack. A lost ack is retried ack-only, only for a proof fully covered by a
  *    receipt for the same receiver. An accepted-but-unconfirmed or unparsable
@@ -35,12 +35,12 @@ import { linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSyn
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  loadConfig, DEFAULT_CONFIG, runCommand, listTerminals, resolveTerminal, provesIdle, sendNudge,
+  loadConfig, DEFAULT_CONFIG, runCommand, listTerminals, resolveTerminal, provesIdle,
   readScreen, promptIsEmptyFromTerm, screenAgentFamily,
   type Config, type Runner,
 } from '../orca-attention-router/router.js';
 
-const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{worker{id name} reasons{kind ticker{name}} proof} pageInfo{hasNextPage endCursor}}}`;
+const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{worker{id name} reasons{kind ticker{id name}} proof} pageInfo{hasNextPage endCursor}}}`;
 const ACK = `mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowledged unchanged}}`;
 const MAX_PAGES = 10;
 
@@ -49,8 +49,8 @@ export interface Opts { dry?: boolean; now?: () => number }
 
 /** What a confirmed send covered, and who received it. */
 interface Delivered { state: 'sent'; coverage: string[]; receiver: string; at: number }
-/** An accepted-but-unconfirmed or unparsable send: kept until a human reconciles it. */
-interface Ambiguous { state: 'ambiguous'; coverage: string[]; receiver: string; at: number; detail: string }
+/** An accepted-but-unconfirmed or failed-after-possible-submission send, kept until reconciled. */
+interface Ambiguous { state: 'ambiguous'; coverage: string[]; receiver: string; at: number; detail: string; text: string; handle: string; requestId?: string }
 type Receipt = Delivered | Ambiguous;
 type Receipts = Record<string, Receipt>; // by worker id
 
@@ -71,10 +71,18 @@ function loadReceipts(dir: string): Receipts {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return {};
     throw new Error(`receipts unreadable (${(e as Error).message}); stopping rather than risk a retype`);
   }
+  const bad = (): never => { throw new Error('receipts malformed; stopping rather than risk a retype'); };
   let parsed: any;
-  try { parsed = JSON.parse(raw); } catch { throw new Error('receipts malformed; stopping rather than risk a retype'); }
-  for (const r of Object.values(parsed ?? {}) as any[]) {
-    if (!r || (r.state !== 'sent' && r.state !== 'ambiguous') || !Array.isArray(r.coverage) || typeof r.receiver !== 'string') throw new Error('receipts malformed; stopping rather than risk a retype');
+  try { parsed = JSON.parse(raw); } catch { return bad(); }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return bad(); // [] would be silently rewritten as []
+  for (const [id, r] of Object.entries(parsed) as [string, any][]) {
+    const common = id !== '' && r && typeof r === 'object' && !Array.isArray(r)
+      && Array.isArray(r.coverage) && r.coverage.length > 0 && r.coverage.every((c: unknown) => typeof c === 'string' && c !== '')
+      && typeof r.receiver === 'string' && r.receiver !== '' && typeof r.at === 'number' && Number.isFinite(r.at);
+    if (!common) return bad();
+    if (r.state === 'sent') continue;
+    if (r.state !== 'ambiguous' || typeof r.detail !== 'string' || typeof r.text !== 'string' || typeof r.handle !== 'string'
+      || (r.requestId !== undefined && typeof r.requestId !== 'string')) return bad();
   }
   return parsed as Receipts;
 }
@@ -103,8 +111,58 @@ function ack(cfg: Config, run: Runner, proof: string): { ok: boolean; text: stri
   } catch (e) { return { ok: false, text: (e as Error).message }; }
 }
 
-/** Orca reports the submitted prompt started a turn: the only result that counts as a confirmed submission. */
-const CONFIRMED = /turn_started|submitted/;
+/**
+ * The structured outcome of typing a nudge:
+ *  - confirmed: Orca accepted the input AND reports the turn started (exact stage `turn_started`).
+ *  - refused: the reply parsed and says the input was not accepted, with no request identity: nothing was typed.
+ *  - uncertain: accepted without a confirmed turn start, an unparsable reply, or a failure that names a request
+ *    identity (the input may have been submitted). Carries the durable requestId when Orca gave one.
+ */
+export interface Submission { kind: 'confirmed' | 'refused' | 'uncertain'; requestId?: string; stages: string[]; detail: string }
+
+function findRequestId(o: unknown): string | undefined {
+  if (Array.isArray(o)) { for (const v of o) { const r = findRequestId(v); if (r) return r; } return undefined; }
+  if (o && typeof o === 'object') {
+    for (const [k, v] of Object.entries(o)) {
+      if ((k === 'requestId' || k === 'request_id' || k === 'retryRequestId') && typeof v === 'string' && v) return v;
+      const r = findRequestId(v);
+      if (r) return r;
+    }
+  }
+  return undefined;
+}
+
+function classify(stdout: string): Submission {
+  let data: any;
+  try { data = JSON.parse(stdout); } catch { return { kind: 'uncertain', stages: [], detail: 'unparsable send receipt' }; }
+  const requestId = findRequestId(data);
+  if (data?.ok && data.result?.send?.accepted) {
+    const stages: string[] = Array.isArray(data.result.send.prompt?.stages) ? data.result.send.prompt.stages : [];
+    return stages.includes('turn_started')
+      ? { kind: 'confirmed', requestId, stages, detail: stages.join(',') }
+      : { kind: 'uncertain', requestId, stages, detail: `accepted, turn start not confirmed (${stages.join(',') || 'no stages'})` };
+  }
+  if (requestId) return { kind: 'uncertain', requestId, stages: [], detail: `failed with a request identity (${JSON.stringify(data?.error ?? null).slice(0, 120)})` };
+  if (data && typeof data === 'object' && data.ok === false && data.error) return { kind: 'refused', stages: [], detail: `send refused: ${JSON.stringify(data.error).slice(0, 160)}` };
+  return { kind: 'uncertain', stages: [], detail: 'unrecognized send receipt' };
+}
+
+/**
+ * Type the nudge and submit it (one attempt). With `retryRequestId` the exact
+ * prior request is reissued, which Orca binds to the same prompt payload and
+ * terminal incarnation: it reports that request's state and never types twice.
+ */
+export function submit(cfg: Config, run: Runner, handle: string, text: string, retryRequestId?: string): Submission {
+  const argv = [cfg.orcaCli, 'terminal', 'send', '--terminal', handle, '--text', text, '--enter', '--wait-submit', String(cfg.submitWaitS), '--json'];
+  if (retryRequestId) argv.push('--retry-request', retryRequestId);
+  const first = classify(run(argv).stdout);
+  // An ambiguous transport failure that names its request is reissued ONCE with that same request identity.
+  if (!retryRequestId && first.kind === 'uncertain' && first.requestId && !first.stages.length) {
+    const again = classify(run([...argv, '--retry-request', first.requestId]).stdout);
+    return { ...again, requestId: again.requestId ?? first.requestId };
+  }
+  return first;
+}
 
 export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = console.log, stateDir = join(cfg.stateDir, 'ticker-wake')): void {
   const dry = Boolean(opts.dry);
@@ -140,23 +198,46 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
     if (!entry) { log(`${ts} ${name}: not on roster`); continue; }
     const ticks = proofTicks(w.proof);
     if (!ticks) { log(`${ts} ${name}: held (the proof's tick coverage cannot be established)`); continue; }
-    const prior = receipts[id];
-    if (prior?.state === 'ambiguous') { log(`${ts} ${name}: an earlier send is unreconciled (${prior.detail}); not retyped, not acked`); continue; }
+    let prior = receipts[id];
 
     const [handle, detail] = resolveTerminal(entry, terminals, cfg, run);
     if (!handle) { log(`${ts} ${name}: held (${detail})`); continue; }
     const term0 = terminals.find((t) => t.handle === handle) as any;
     const receiver = `${handle}#${term0?.incarnationId ?? ''}`;
 
-    // A receipt for the SAME receiver that fully covers this proof: the nudge was already typed; only the ack is missing.
-    if (prior?.state === 'sent' && prior.receiver === receiver && ticks.every((t) => prior.coverage.includes(t))) {
+    // An unreconciled earlier request is reconciled with ITS OWN identity (Orca never types twice for one request id);
+    // without a request identity it stays held for a human.
+    if (prior?.state === 'ambiguous') {
+      if (!prior.requestId || dry) { log(`${ts} ${name}: an earlier send is unreconciled (${prior.detail}); not retyped, not acked`); continue; }
+      const r = submit(cfg, run, prior.handle, prior.text, prior.requestId);
+      if (r.kind !== 'confirmed') { log(`${ts} ${name}: earlier request still unreconciled (${r.detail}); not retyped, not acked`); continue; }
+      prior = receipts[id] = { state: 'sent', coverage: prior.coverage, receiver: prior.receiver, at: now };
+      saveReceipts(stateDir, receipts);
+      log(`${ts} ${name}: earlier request reconciled as delivered`);
+    }
+
+    const covered = prior?.state === 'sent' && prior.receiver === receiver ? prior.coverage : [];
+    const newTicks = ticks.filter((t) => !covered.includes(t));
+    // Everything in this proof was already delivered to this receiver: only the ack is missing.
+    if (!newTicks.length) {
       if (dry) { log(`${ts} ${name}: WOULD ack-only (covered by a confirmed receipt)`); continue; }
       const a = ack(cfg, run, w.proof);
       log(`${ts} ${name}: ack-only recovery ${a.ok ? 'acked' : 'FAILED'} ${a.text}`);
       if (a.ok) { delete receipts[id]; saveReceipts(stateDir, receipts); }
       continue;
     }
-    // Otherwise (no receipt, a replacement receiver, or new ticks): a fresh nudge for the uncovered ticks.
+
+    // Otherwise a fresh nudge for ONLY the uncovered tick work; if it cannot be identified, hold rather than repeat covered work.
+    const nameOf = new Map<string, string>();
+    for (const r of w.reasons) if (r.kind === 'TICK' && r.ticker?.id) nameOf.set(r.ticker.id, r.ticker.name);
+    const newTickers = new Set<string>();
+    for (const t of newTicks) {
+      const tickerName = nameOf.get(t.slice(0, t.lastIndexOf(':')));
+      if (!tickerName) { newTickers.clear(); break; }
+      newTickers.add(tickerName);
+    }
+    if (!newTickers.size) { log(`${ts} ${name}: held (the uncovered tick work cannot be identified; reconcile rather than repeat covered work)`); continue; }
+
     const [idle, why] = provesIdle(cfg, handle, detail, undefined, cfg.busyWaitMs, run);
     if (!idle) { log(`${ts} ${name}: held (${why})`); continue; }
     // Final composer check, even when tui-idle held: the idle helper does not read the draft.
@@ -164,18 +245,16 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
     const agent = detail === 'claude' || detail === 'codex' ? detail : (screenAgentFamily(term) ?? '');
     const [empty, emptyWhy] = promptIsEmptyFromTerm(term, agent);
     if (!empty) { log(`${ts} ${name}: held (composer not provably empty: ${emptyWhy})`); continue; }
-    const tickers = [...new Set(w.reasons.map((r: any) => r.ticker?.name))].join(', ');
-    const text = `Hadron ticker wake (${tickers}): run your standing routine for this tick, then end your turn. Read only your own mentions; no unfiltered chat catch-up.`;
+    const text = `Hadron ticker wake (${[...newTickers].join(', ')}): run your standing routine for this tick, then end your turn. Read only your own mentions; no unfiltered chat catch-up.`;
     if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); continue; }
-    const covered = prior?.state === 'sent' && prior.receiver === receiver ? prior.coverage : [];
     const coverage = [...new Set([...covered, ...ticks])].sort();
-    const [ok, sendDetail] = sendNudge(cfg, handle, text, run);
-    if (!ok && !/unparsable/.test(sendDetail)) { log(`${ts} ${name}: send refused (${sendDetail}); will retry`); continue; }
-    if (!ok || !CONFIRMED.test(sendDetail)) {
-      // Accepted without a confirmed submission, or an unparsable receipt: uncertainty, never an ack, never a retype.
-      receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: ok ? `accepted, not confirmed (${sendDetail})` : sendDetail };
+    const r = submit(cfg, run, handle, text);
+    if (r.kind === 'refused') { log(`${ts} ${name}: ${r.detail}; will retry`); continue; }
+    if (r.kind === 'uncertain') {
+      // Never an ack, never a fresh type: recorded with its request identity so it can be reconciled.
+      receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: r.detail, text, handle, ...(r.requestId ? { requestId: r.requestId } : {}) };
       saveReceipts(stateDir, receipts);
-      log(`${ts} ${name}: send not confirmed (${receipts[id] && (receipts[id] as Ambiguous).detail}); left for reconciliation`);
+      log(`${ts} ${name}: send not confirmed (${r.detail}); left for reconciliation`);
       continue;
     }
     receipts[id] = { state: 'sent', coverage, receiver, at: now };
@@ -191,28 +270,49 @@ function pidAlive(pid: number): boolean {
   try { return pid > 0 && readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('ticker-wake'); } catch { return false; }
 }
 
+/** Test seams for the stale-takeover race. */
+export interface LockHooks { afterJudgedStale?: () => void; beforeUnlink?: () => void }
+
 /**
- * One instance per state dir. Acquisition is atomic: the owner's pid goes into
- * a private temp file that is hard-linked to `lock` (link fails if it exists),
- * so two simultaneous starters cannot both win. A lock whose owner is gone is
- * removed once and the link retried; the loser of any race is refused.
+ * One instance per state dir.
+ *  - Fresh acquisition is atomic: the owner's pid goes into a private temp file hard-linked to `lock` (fails if it exists).
+ *  - A stale lock (dead owner) is only ever removed by a contender holding the exclusive `lock.takeover` file, and only
+ *    after re-reading `lock` under it: a replacement owner that arrived meanwhile is never unlinked. A contender that
+ *    cannot take `lock.takeover` (another takeover is in progress) is refused.
  */
-export function acquireLock(dir: string, pid = process.pid): () => void {
+export function acquireLock(dir: string, pid = process.pid, hooks: LockHooks = {}): () => void {
   mkdirSync(dir, { recursive: true });
   const lock = join(dir, 'lock');
-  const tmp = join(dir, `lock.${pid}.${Math.random().toString(36).slice(2)}`);
-  writeFileSync(tmp, String(pid));
+  const takeover = join(dir, 'lock.takeover');
+  const mk = (): string => { const t = join(dir, `lock.${pid}.${Math.random().toString(36).slice(2)}`); writeFileSync(t, String(pid)); return t; };
+  const linked = (t: string, to: string): boolean => {
+    try { linkSync(t, to); return true; } catch (e) { if ((e as NodeJS.ErrnoException).code === 'EEXIST') return false; throw e; }
+  };
+  const ownerOf = (p: string): number | null => { try { return Number(readFileSync(p, 'utf8').trim()); } catch { return null; } };
+  const releaseFn = (): void => { try { if (ownerOf(lock) === pid) unlinkSync(lock); } catch { /* gone */ } };
+  const tmp = mk();
   try {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try { linkSync(tmp, lock); return () => { try { if (readFileSync(lock, 'utf8').trim() === String(pid)) unlinkSync(lock); } catch { /* gone */ } }; } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      }
-      let held = 0;
-      try { held = Number(readFileSync(lock, 'utf8').trim()); } catch { continue; } // vanished: retry the link
-      if (held !== pid && pidAlive(held)) throw new Error(`another ticker-wake (pid ${held}) holds ${lock}`);
-      try { if (Number(readFileSync(lock, 'utf8').trim()) === held) unlinkSync(lock); } catch { /* someone else removed it */ }
+    if (linked(tmp, lock)) return releaseFn;
+    const held = ownerOf(lock);
+    if (held !== null && held !== pid && pidAlive(held)) throw new Error(`another ticker-wake (pid ${held}) holds ${lock}`);
+    hooks.afterJudgedStale?.();
+    // Take the takeover right; if a dead process left it behind, clear that one stale file and try once more.
+    let have = linked(tmp, takeover);
+    if (!have) {
+      const t = ownerOf(takeover);
+      if (t !== null && t !== pid && pidAlive(t)) throw new Error(`another starter is taking over ${lock}`);
+      try { if (ownerOf(takeover) === t) unlinkSync(takeover); } catch { /* raced */ }
+      have = linked(tmp, takeover);
     }
-    throw new Error(`could not take ${lock}: another starter won the race`);
+    if (!have) throw new Error(`could not take ${lock}: another starter is taking over`);
+    try {
+      hooks.beforeUnlink?.();
+      const now = ownerOf(lock);
+      if (now !== null && now !== pid && pidAlive(now)) throw new Error(`another ticker-wake (pid ${now}) holds ${lock}`);
+      if (now !== null) { try { unlinkSync(lock); } catch { /* gone */ } }
+      if (!linked(tmp, lock)) throw new Error(`could not take ${lock}: it was taken meanwhile`);
+      return releaseFn;
+    } finally { try { if (ownerOf(takeover) === pid) unlinkSync(takeover); } catch { /* gone */ } }
   } finally { try { unlinkSync(tmp); } catch { /* already gone */ } }
 }
 
