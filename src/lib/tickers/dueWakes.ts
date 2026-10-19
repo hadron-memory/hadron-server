@@ -446,11 +446,13 @@ export async function computeDueWakes(args: {
       appId: app.id,
       workerId,
       requester,
-      channels: wake.channels.map((c) => ({ channelId: c.channelId, incarnation: c.incarnation, through: c.throughSeq })),
+      // #2072 (R53): no channel range. The display channels stay on the wake; the proof carries the wake's identity.
+      channels: [],
       ticks: wake.reasons.flatMap((r) => (r.kind === 'TICK' ? [{ tickerId: r.tickerId, k: r.k }] : [])),
       tasks: tasksOf(wake),
       exempt: wake.exempt,
       issuedAt: now.getTime(),
+      wakeKey: wakeIdentity(identityOf(wake)),
     });
   const issued: Array<DueWakeOut & { exempt: boolean }> = [];
   const dormant: Array<{ workerId: string; mentions: number }> = [];

@@ -1,11 +1,17 @@
 // acknowledgeWakes — #1748, cor:agt:080:16/:17 (plan §4.3, R4).
 //
 // The router delivers a nudge, then hands back the wake proof. In ONE
-// transaction this raises deliveredThroughSeq (monotonic: GREATEST), records
-// each ticker's tick, records who acknowledged, and counts the wake against the
+// transaction this records each ticker's tick, records who acknowledged, and
+// counts the wake against the
 // App's daily budget unless the proof says it was exempt (releasing the
 // reservation dueWakes made for it). A repeat changes nothing. It NEVER touches
 // ChannelReadState: delivery and reading are different facts.
+//
+// #2072 (Holger R53 / A′, cor:agt:080:04/:16): a wake carries no message text, so acknowledging it moves NO message
+// mark, neither delivered-through nor the read position, whatever the proof's version. Only an S1 text batch
+// (acknowledgeBatchProofs) or the worker's own read moves them. A v1/v2 proof that still names channel ranges is
+// validated as before (a recreated channel is stale) and its ranges are otherwise ignored; its reservation key is
+// still derived from them, so it spends the reservation it was issued against.
 //
 // #1708 (T5): a v2 proof also names task events. Each is recorded delivered on
 // (worker, event, chain position), once. That is a receipt, NEVER an alarm
@@ -27,7 +33,7 @@ import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
 import type { AuthorityAnchor } from '../auth/authorityAnchors.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import {
-  sameRequester, verifyBatchProof, verifyWakeProof, wakeIdentity, WAKE_PROOF_MAX_AGE_MS,
+  proofWakeKey, sameRequester, verifyBatchProof, verifyWakeProof, WAKE_PROOF_MAX_AGE_MS,
   type BatchProof, type BatchRequester, type WakeProof, type WakeRequester,
 } from './wakeProof.js';
 
@@ -113,11 +119,6 @@ export async function acknowledgeWakes(args: {
       }
 
       let advanced = false;
-      for (const c of p.channels) {
-        const row = await tx.workerDeliveryChannel.findUnique({ where: { workerId_channelId: { workerId: p.workerId, channelId: c.channelId } } });
-        if (!row || row.channelIncarnation !== c.incarnation || c.through > row.deliveredThroughSeq) advanced = true;
-        await raiseDeliveryMark(tx, { workerId: p.workerId, channelId: c.channelId, incarnation: c.incarnation, through: c.through }, nowNaive, ackedBy);
-      }
       for (const t of p.ticks) {
         const row = await tx.workerDeliveryTick.findUnique({ where: { workerId_tickerId: { workerId: p.workerId, tickerId: t.tickerId } } });
         if (!row || t.k > row.lastAckedTick) advanced = true;
@@ -155,7 +156,7 @@ export async function acknowledgeWakes(args: {
       // Only the reservation of THIS wake is spent or void: the one carrying this proof's wake key. A re-read of an
       // unchanged wake shares the key, so it is freed whichever proof is acknowledged; a replay of an old, unchanged
       // proof matches nothing newer, so it can never cancel the allowance of a wake issued after it (Diego cycle 2, P2-3).
-      await tx.$executeRaw(Prisma.sql`DELETE FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND wake_key = ${wakeIdentity(p)}`);
+      await tx.$executeRaw(Prisma.sql`DELETE FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND wake_key = ${proofWakeKey(p)}`);
       // Counted against the day's budget only when it moved something: a repeat acknowledgement is not another wake.
       if (!advanced) { unchanged++; continue; }
       acknowledged++;
