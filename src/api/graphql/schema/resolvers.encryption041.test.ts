@@ -428,7 +428,10 @@ describe('encryptMemory — locked conversion (#1346)', () => {
 
   it('pages more than 200 old snapshots and encrypts tombstone history', async () => {
     // encryptMemory pages 200 snapshots. Keep exactly one beyond that boundary
-    // (#1999), with tombstone history on the second page; no timeout increase.
+    // (#1999), with tombstone history on the second page. The fixture is already
+    // at the boundary minimum, yet it still took 5.1 s alone at host load ~94
+    // (#2003), so the case carries an explicit 20 s limit (about 4x the worst
+    // observed time; a candidate margin, waits not instrumented). A hang still fails.
     const snapshotCount = 201;
     const deleted = await db.node.create({
       data: {
@@ -452,7 +455,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     expect(rows.every((revision) => isCiphertext(revision.content))).toBe(true);
     const tombstoneHistory = rows.find((revision) => revision.nodeId === deleted.id)!;
     expect(decryptNodeFieldsWithKey(tombstoneHistory, parseDataKey(dataKey)).content).toBe(`historical ${snapshotCount - 1}`);
-  });
+}, 20_000);
 
   it('continues past a pruned page-boundary snapshot', async () => {
     const history = Array.from({ length: 201 }, (_, index) => ({

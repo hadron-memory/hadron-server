@@ -5834,6 +5834,9 @@ model AppWakeReservation {
   wakeKey    String   @map("wake_key")
   /// The wake itself, so an outstanding one is handed out again, exactly, until it is consumed or lapses.
   wake       Json     @map("wake")
+  /// #2069: the wake keys this reservation absorbed (a tick or task that fell due after them). An earlier proof whose key
+  /// is listed shares this reservation's allowance and is not charged again; any other proof is unrelated to it.
+  absorbedKeys String[] @default([]) @map("absorbed_keys")
 
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)

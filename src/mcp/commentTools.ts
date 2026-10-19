@@ -25,6 +25,7 @@
  */
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
+import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { commentFieldResolvers, type CommentView } from '../api/graphql/schema/resolvers.comments.js';
@@ -71,7 +72,7 @@ function textResult(text: string) {
  */
 export function commentErrorText(e: unknown) {
   if (e instanceof GraphQLError) {
-    const { code, ...rest } = e.extensions ?? {};
+    const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'));
   }
