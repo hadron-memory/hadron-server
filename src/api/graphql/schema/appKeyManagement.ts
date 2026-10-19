@@ -2,12 +2,19 @@
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+import { currentActor } from '../../../lib/requestActor.js';
 import type { Context } from './resolvers.helpers.js';
 
 type KeyApp = { id: string; organizationId: string | null; ownerUserId: string | null };
 
-/** Only whoever manages the App, as themselves, may see or manage its keys. */
+/**
+ * Only whoever manages the App, as themselves, may see or manage its keys.
+ * Bound-worker refusal is PROVISIONAL (Eden #22213, #2080 Rico P2-1), pending
+ * Holger's audience ruling; it matches the existing key-scope person-only gate.
+ * Use the authenticated actor, not App participation: org admins need no AppMember row.
+ */
 export async function requireAppKeyManager(ctx: Context, app: KeyApp): Promise<void> {
+  if (currentActor().workerId) throw authorizationDenied();
   if (!(await managesApp(ctx, app))) throw authorizationDenied();
 }
 
