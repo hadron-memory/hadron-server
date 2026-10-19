@@ -13,6 +13,11 @@ beforeAll(async () => {
   await db.agent.create({ data: { id: agentId, organizationId: orgId, name: 'S5', urn: `s5-${orgId}.example:agent` } });
   await db.app.create({ data: { id: appId, organizationId: orgId, name: 'S5', urn: `s5-${orgId}.example:app` } });
   await db.worker.create({ data: { id: workerId, appId, agentId, name: 'S5 worker', slug: 's5-worker' } });
+
+  const memoryId = generateId(), rootId = generateId();
+  await db.memory.create({ data: { id: memoryId, organizationId: orgId, name: 'S5 channel host', urn: `s5-${orgId}.example:channels`, class: 'knowledge' } });
+  await db.node.create({ data: { id: rootId, memoryId, loc: 'chats:scenario', name: 'Scenario root', nodeType: 'chat' } });
+  await db.channel.create({ data: { id: 'channel-s5', memoryId, loc: 'chats:scenario', name: 'Scenario channel', chatRootNodeId: rootId } });
   for (const id of managers) {
     await db.user.create({ data: { id, roles: ['READER'] } });
     await db.orgMember.create({ data: { organizationId: orgId, userId: id, role: 'ADMIN' } });

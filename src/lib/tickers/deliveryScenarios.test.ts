@@ -14,6 +14,11 @@ beforeEach(async () => {
   await db.agent.create({ data: { id: agentId, organizationId: orgId, name: 'Scenario', urn: `s5-${orgId}.example:agent` } });
   await db.app.create({ data: { id: appId, organizationId: orgId, name: 'Scenario', urn: `s5-${orgId}.example:app` } });
   await db.worker.create({ data: { id: workerId, appId, agentId, name: 'Scenario worker', slug: 'scenario-worker' } });
+
+  const memoryId = generateId(), rootId = generateId();
+  await db.memory.create({ data: { id: memoryId, organizationId: orgId, name: 'S5 channel host', urn: `s5-${orgId}.example:channels`, class: 'knowledge' } });
+  await db.node.create({ data: { id: rootId, memoryId, loc: 'chats:scenario', name: 'Scenario root', nodeType: 'chat' } });
+  await db.channel.create({ data: { id: 'scenario-channel', memoryId, loc: 'chats:scenario', name: 'Scenario channel', chatRootNodeId: rootId } });
   await run(tx => beginDeliveryTracking(tx, workerId, at(0)));
 });
 afterEach(async () => {
@@ -64,4 +69,23 @@ it('loads a nondefault persisted S9 window for the deciding App', async () => {
   expect((await evaluate(30)).raised).toBeTruthy();
   const event = await db.agentTeamEvent.findFirstOrThrow({ where: { appId, type: 'delivery.stuck' } });
   expect(event.payload).toMatchObject({ windowSeconds: 1_800 });
+});
+
+
+it.each(['deleted', 'replaced', 'removed'] as const)('R62: a channel %s ends the episode once, with channel-deleted provenance and no fabricated mark', async (change) => {
+  await run(tx => observeDeliveryPolicyThrough(tx, workerId, at(30)));
+  const raised = await evaluate(15);
+  const alarm = await db.agentTeamEvent.findUniqueOrThrow({ where: { id: raised.raised! } });
+  if (change === 'removed') await db.channel.delete({ where: { id: 'scenario-channel' } });
+  else await db.channel.update({ where: { id: 'scenario-channel' }, data: change === 'deleted' ? { deletedAt: at(16) } : { incarnation: 2 } });
+  const ended = await evaluate(16, []);
+  expect(ended.resumed).toBeTruthy();
+  expect(await evaluate(17, [])).toEqual({ raised: null, resumed: null });
+  expect(await db.workerDeliveryAlarmEpisode.count({ where: { workerId } })).toBe(0);
+  const history = await db.agentTeamEvent.findMany({ where: { appId, type: 'delivery.resumed' } });
+  expect(history).toHaveLength(1);
+  expect(history[0]!.payload).toMatchObject({ reason: 'channel-deleted', principal: { kind: 'platform' }, channelIncarnation: 1 });
+  expect(history[0]!.payload).not.toHaveProperty('throughSeq');
+  expect(await db.agentTeamEvent.findUnique({ where: { id: alarm.id } })).toEqual(alarm);
+  expect(await db.workerDeliveryChannel.count({ where: { workerId } })).toBe(0);
 });
