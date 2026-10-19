@@ -173,9 +173,31 @@ export async function acknowledgeWakes(args: {
       // so the same wake offered again after the floor carries the SAME key: only a delivering acknowledgement frees
       // it, and an old proof's replay (refused by the receipt above) can never cancel the allowance of a wake issued
       // after it (Diego cycle 2, P2-3). Every earlier reservation of the key was freed by the receipt's own write.
-      if (delivered) await tx.$executeRaw(Prisma.sql`DELETE FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND wake_key = ${proofWakeKey(p)}`);
+      let spent: string[] | null = null;
+      if (delivered) {
+        const freed = await tx.$queryRaw<Array<{ absorbed_keys: string[] }>>(Prisma.sql`
+          DELETE FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND wake_key = ${proofWakeKey(p)} RETURNING absorbed_keys`);
+        if (freed.length > 0) {
+          spent = freed[0]!.absorbed_keys ?? [];
+          // #2069 + R53 (Xavier, #21593): a wake that absorbed earlier reasons covers its ancestors. Their keys get a receipt
+          // now (never overwriting one), so an ancestor's proof acknowledged AFTER this one finds a receipt at or after its
+          // issue and is neither a delivery nor another charge; the floor already counts from this acknowledgement.
+          for (const k of spent) {
+            await tx.$executeRaw`
+              INSERT INTO worker_wake_acks (worker_id, wake_key, acked_at, acked_by_user_id, acked_by_worker_id, acked_by_app_key_id)
+              VALUES (${p.workerId}, ${k}, ${nowNaive}::timestamp, ${ackedBy.ackedByUserId}, ${ackedBy.ackedByWorkerId}, ${ackedBy.ackedByAppKeyId})
+              ON CONFLICT (worker_id, wake_key) DO NOTHING`;
+          }
+        }
+      }
       if (!delivered && !advanced) { unchanged++; continue; }
       acknowledged++;
+      // #2069: ONE allowance per outstanding wake. An ancestor proof (its key absorbed into the reservation still outstanding)
+      // may deliver what it names, but the slot belongs to the descendant, which is spent and charged by ITS proof.
+      if (delivered && spent === null) {
+        const [{ n }] = await tx.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`SELECT count(*)::bigint AS n FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND ${proofWakeKey(p)} = ANY(absorbed_keys)`);
+        if (Number(n) > 0) continue;
+      }
       // Counted against the day's budget once per delivered wake: a repeat acknowledgement is not another wake.
       if (delivered && !p.exempt) {
         const dayText = now.toISOString().slice(0, 10);
