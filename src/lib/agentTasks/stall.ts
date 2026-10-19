@@ -589,6 +589,7 @@ export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise
       WHERE w.woken_at IS NULL
         AND w.due_at <= ${toNaiveUtc(now)}::timestamp
         AND e.acknowledged_at IS NULL
+        AND e.type <> 'delivery.stuck'
       ORDER BY w.due_at, w.event_id, w.chain_index
       LIMIT 500
       FOR NO KEY UPDATE OF w SKIP LOCKED

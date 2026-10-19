@@ -9,7 +9,7 @@ const minutes = (n: number) => n * 60_000;
 
 describe('cor:agt:050:26 S6–S8: uncovered wait', () => {
   it('S6: exact window is due, one instant before is not', () => {
-    expect(oldestStuckMessage([message()], [], coverage, at('10:14'), 900)).toBeNull();
+    expect(oldestStuckMessage([message()], [], coverage, new Date(at('10:15').getTime() - 1), 900)).toBeNull();
     expect(oldestStuckMessage([message()], [], coverage, at('10:15'), 900)?.message.seq).toBe(1);
   });
   it('S7: deducts the pause, carrying five minutes across restart', () => {

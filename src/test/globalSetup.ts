@@ -530,6 +530,8 @@ async function applyTemplateConstraints(client: Client) {
       WHERE "node_type" = 'chat-message' AND "deleted_at" IS NULL AND "seq" IS NOT NULL;
   `);
 
+  // S5 extends the task episode shape; apply after the task invariants.
+  await client.query(readFileSync(new URL('../../prisma/delivery-stall-invariants.sql', import.meta.url), 'utf8'));
 }
 
 async function provisionParallel(admin: Client, base: string, runId: string) {

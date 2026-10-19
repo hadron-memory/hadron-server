@@ -368,3 +368,43 @@ export async function appendReportsToEvent(
     },
   });
 }
+
+// S5: taskless delivery history, produced only by platform state reconciliation.
+export type DeliveryMarkPrincipal =
+  | { kind: 'worker'; workerId: string }
+  | { kind: 'user'; userId: string }
+  | { kind: 'host-key'; appKeyId: string; hostId: string };
+
+export async function appendDeliveryResumedEvent(tx: Prisma.TransactionClient, a: {
+  appId: string; workerId: string; episodeId: string; channelId: string; channelIncarnation: number;
+  throughSeq: number; principal: DeliveryMarkPrincipal; now: Date;
+}): Promise<string> {
+  const p = a.principal;
+  const principal = p.kind === 'worker' ? { kind: p.kind, workerId: p.workerId }
+    : p.kind === 'user' ? { kind: p.kind, userId: p.userId }
+    : { kind: p.kind, appKeyId: p.appKeyId, hostId: p.hostId };
+  const row = await tx.agentTeamEvent.create({ data: {
+    id: generateId(), appId: a.appId, type: 'delivery.resumed', subjectWorkerId: a.workerId,
+    actorUserId: p.kind === 'user' ? p.userId : null,
+    actorWorkerId: p.kind === 'worker' ? p.workerId : null,
+    payload: { episodeId: a.episodeId, channelId: a.channelId, channelIncarnation: a.channelIncarnation,
+      throughSeq: a.throughSeq, resumedAt: a.now.toISOString(), principal }, createdAt: a.now,
+  } });
+  return row.id;
+}
+
+export async function appendDeliveryStuckEvent(tx: Prisma.TransactionClient, a: {
+  id: string; appId: string; workerId: string; episodeId: string; channelId: string;
+  channelIncarnation: number; firstPendingSeq: number; dueSince: Date; windowSeconds: number;
+  reason: 'draft' | 'isolated' | 'question' | 'screen-unknown' | 'not-submitted' | 'two-agents' | 'binding-mismatch' | null;
+  terminalId: string | null; chain: AlarmChain; now: Date;
+}): Promise<void> {
+  await tx.agentTeamEvent.create({ data: {
+    id: a.id, appId: a.appId, type: 'delivery.stuck', severity: 'alarm', subjectWorkerId: a.workerId,
+    chain: a.chain.map(partyJson), episodeStart: a.now, createdAt: a.now,
+    payload: { episodeId: a.episodeId, workerId: a.workerId, channelId: a.channelId,
+      channelIncarnation: a.channelIncarnation, firstPendingSeq: a.firstPendingSeq,
+      oldestDueAt: a.dueSince.toISOString(), windowSeconds: a.windowSeconds,
+      reason: a.reason, terminalId: a.terminalId },
+  } });
+}
