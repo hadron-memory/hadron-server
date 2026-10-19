@@ -16,7 +16,8 @@ export const BROKEN_INCLUDE_NOTICE = '[Include unavailable]';
 /** Node types whose body is a literal record, never a template: an include-shaped string in one is text (#2041). */
 export const INCLUDE_LITERAL_NODE_TYPES: ReadonlySet<string> = new Set(['chat-message', 'record']);
 
-interface Target { id: string; memoryId: string; content: string | null }
+/** `content` is the live row's decrypted text; `memory` is kept so a past revision can be decrypted with the same authorized context. */
+interface Target { id: string; memoryId: string; content: string | null; revSeq: number; memory: { id: string; isEncrypted: boolean } }
 
 /**
  * Per-request lookups, and nothing else. It holds a reader's authorized
@@ -51,6 +52,19 @@ async function memoryIdOfUrn(db: Db, memo: IncludeReadMemo, urn: string): Promis
   return hit;
 }
 
+/**
+ * Decrypt one sealed field with the memory's cached key. A failure (a key that
+ * no longer fits, a damaged envelope) is the same "can't resolve" as a missing
+ * key: `undefined`, rendered as the notice, never an error that fails the read.
+ */
+function openSealed(content: string | null, memory: { id: string; isEncrypted: boolean }): string | null | undefined {
+  try {
+    return decryptNodeFields({ content }, memory).content ?? null;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The stored text of a node the reader may read, or null for missing, deleted, unreadable and keyless-encrypted alike. */
 async function lookupTarget(
   db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, memoryId: string, loc: string,
@@ -61,12 +75,15 @@ async function lookupTarget(
     hit = (async () => {
       const node = await db.node.findFirst({
         where: { memoryId, loc, deletedAt: null, AND: [access] },
-        select: { id: true, memoryId: true, content: true, memory: { select: { id: true, isEncrypted: true } } },
+        select: { id: true, memoryId: true, content: true, revSeq: true, memory: { select: { id: true, isEncrypted: true } } },
       });
       if (!node) return null;
-      if (!node.memory?.isEncrypted) return { id: node.id, memoryId: node.memoryId, content: node.content };
-      if (!sessionKeyCache.getByMemoryId(node.memory.id)) return null;
-      return { id: node.id, memoryId: node.memoryId, content: decryptNodeFields({ content: node.content }, node.memory).content ?? null };
+      const memory = { id: node.memoryId, isEncrypted: node.memory?.isEncrypted === true };
+      const base = { id: node.id, memoryId: node.memoryId, revSeq: node.revSeq, memory };
+      if (!memory.isEncrypted) return { ...base, content: node.content };
+      if (!sessionKeyCache.getByMemoryId(memory.id)) return null;
+      const text = openSealed(node.content, memory);
+      return text === undefined ? null : { ...base, content: text };
     })();
     memo.targetByAddress.set(key, hit);
   }
@@ -83,8 +100,17 @@ async function lookupRevision(db: Db, memo: IncludeReadMemo, target: Target, rev
         where: { nodeId: target.id, revNo },
         select: { memoryId: true, content: true },
       });
+      if (!rev) {
+        // The live row is revision `revSeq` and may have no snapshot yet (the same rule revisionApprovalOf uses).
+        return revNo === target.revSeq ? target.content : null;
+      }
       // A snapshot captured while the node lived in another memory is not this reader's to see.
-      if (!rev || (rev.memoryId != null && rev.memoryId !== target.memoryId)) return null;
+      if (rev.memoryId != null && rev.memoryId !== target.memoryId) return null;
+      // Same memory, so the same authorized key: a sealed snapshot is read as plaintext, never as its envelope.
+      if (target.memory.isEncrypted) {
+        if (!sessionKeyCache.getByMemoryId(target.memory.id)) return null;
+        return openSealed(rev.content, target.memory) ?? null;
+      }
       return rev.content ?? null;
     })();
     memo.revisionByKey.set(key, hit);

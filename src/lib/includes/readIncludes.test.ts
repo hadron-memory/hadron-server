@@ -301,3 +301,42 @@ describe('the empty-filter render paths (run, chat, session) stay local (#2041 Â
     expect(await compileTemplate(text, null, memoryId, db, {})).toBe(`B ${BROKEN_INCLUDE_NOTICE} B`);
   });
 });
+
+describe('pinned revisions: the live revision and sealed history (Atilla P2-1/P2-2, Jane P2)', () => {
+  it('rev=N naming the LIVE revision serves it when no snapshot row exists', async () => {
+    const t = await mk('live', 'CURRENT-PIN-TEXT');
+    expect(await db.nodeRevision.count({ where: { nodeId: t.id, revNo: t.revSeq } })).toBe(0);
+    await mk('a', `{{> live rev=${t.revSeq}}}`);
+    expect((await run(NODE_Q, as(reader), { ref: urn('a') })).data).toEqual({ node: { content: 'CURRENT-PIN-TEXT' } });
+    await mk('b', `{{> live rev=${t.revSeq + 5}}}`);
+    expect((await run(NODE_Q, as(reader), { ref: urn('b') })).data).toEqual({ node: { content: BROKEN_INCLUDE_NOTICE } });
+  });
+
+  it('a pin into a sealed memory returns plaintext with the key, the notice without it or with a wrong key, and never an error or an envelope', async () => {
+    const { sessionKeyCache } = await import('../sessionKeyCache.js');
+    const { generateDataKey } = await import('../crypto.js');
+    const { encryptNodeFields } = await import('../nodeCrypto.js');
+    const org = await db.organization.findFirstOrThrow({ where: { urn: 'rd.example' } });
+    const encMem = await db.memory.create({
+      data: { name: 'sealed2', urn: 'rd.example:sealed2', organizationId: org.id, class: 'knowledge', visibility: 'ORGANIZATION', isEncrypted: true },
+    });
+    const info = { id: encMem.id, isEncrypted: true };
+    sessionKeyCache.set('rd-s', encMem.id, generateDataKey());
+    const live = await db.node.create({
+      data: { id: generateId(), memoryId: encMem.id, loc: 'vault', name: 'vault', content: encryptNodeFields({ content: 'LIVE-SEALED' }, info).content },
+    });
+    await db.nodeRevision.create({
+      data: { id: generateId(), nodeId: live.id, memoryId: encMem.id, revNo: 1, loc: 'vault', name: 'vault', content: encryptNodeFields({ content: 'PAST-SEALED' }, info).content, tags: [] },
+    });
+    const stored = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: live.id, revNo: 1 } });
+    expect(stored.content).not.toContain('PAST-SEALED');
+    await mk('a', `{{> hrn:node:${encMem.urn}:vault rev=1}}|{{> hrn:node:${encMem.urn}:vault}}`);
+    expect((await run(NODE_Q, as(reader), { ref: urn('a') })).data).toEqual({ node: { content: 'PAST-SEALED|LIVE-SEALED' } });
+    sessionKeyCache.clear();
+    expect((await run(NODE_Q, as(reader), { ref: urn('a') })).data).toEqual({ node: { content: `${BROKEN_INCLUDE_NOTICE}|${BROKEN_INCLUDE_NOTICE}` } });
+    sessionKeyCache.set('rd-s2', encMem.id, generateDataKey()); // a different key: decrypt fails
+    const wrong = await run(NODE_Q, as(reader), { ref: urn('a') });
+    expect(wrong.errors).toBeUndefined();
+    expect(wrong.data).toEqual({ node: { content: `${BROKEN_INCLUDE_NOTICE}|${BROKEN_INCLUDE_NOTICE}` } });
+  });
+});
