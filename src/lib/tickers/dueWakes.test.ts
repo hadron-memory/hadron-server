@@ -229,6 +229,43 @@ describe('ticks and relevance through the whole loader', () => {
   });
 });
 
+describe('#2069 — an outstanding wake absorbs reasons that fall due later', () => {
+  const kinds = (w: any) => w.reasons.map((r: any) => r.kind).sort();
+
+  it('an unacknowledged MENTION wake does not hide a tick that falls due after it: one wake, both reasons, one slot', async () => {
+    await say(channel, 'for you', mention('liam'));
+    const first = (await due(ctx(manager.id))).wakes[0];
+    expect(kinds(first)).toEqual(['MENTION']);
+    const t = await mkTicker();
+    await subscribe(t.id, liam.id);
+    const again = (await due(ctx(manager.id))).wakes;
+    expect(again).toHaveLength(1);
+    expect(kinds(again[0])).toEqual(['MENTION', 'TICK']);
+    const slots = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*)::bigint n FROM app_wake_reservations WHERE worker_id = ${liam.id}`;
+    expect(Number(slots[0]!.n)).toBe(1);
+    const ack = await M.acknowledgeWakes({}, { proofs: [again[0].proof] }, ctx(manager.id));
+    expect(ack.acknowledged).toBe(1);
+    const row = await db.workerDeliveryTick.findFirstOrThrow({ where: { workerId: liam.id, tickerId: t.id } });
+    expect(row.lastAckedTick).toBeGreaterThanOrEqual(1);
+    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    await db.workerDeliveryTick.updateMany({ data: { ackedAt: new Date(Date.now() - 3600_000) } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([]);
+  });
+
+  it('the OLD proof, acknowledged first, clears only the mention; the tick stays due', async () => {
+    await say(channel, 'for you', mention('liam'));
+    const first = (await due(ctx(manager.id))).wakes[0];
+    const t = await mkTicker();
+    await subscribe(t.id, liam.id);
+    await M.acknowledgeWakes({}, { proofs: [first.proof] }, ctx(manager.id));
+    await say(channel, 'plain news');
+    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    await db.workerDeliveryTick.updateMany({ data: { ackedAt: new Date(Date.now() - 3600_000) } });
+    const rest = (await due(ctx(manager.id))).wakes;
+    expect(rest.map(kinds)).toEqual([['TICK']]);
+  });
+});
+
 describe('read fields', () => {
   it('Ticker.nextTickAt / lastTickAt and WorkerWakeSettings.dormant', async () => {
     const F = resolvers as any;
