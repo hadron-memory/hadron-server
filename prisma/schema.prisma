@@ -5729,6 +5729,11 @@ model WorkerWakeSettings {
   workerId          String    @id @map("worker_id")
   mentions          String    @default("IMMEDIATE")
   pausedUntil       DateTime? @map("paused_until")
+  /// S7 (#2023, R85) — ISOLATION is its own state, never `pausedUntil`: written only by
+  /// isolateWorker / clearWorkerIsolation, always by a human acting as themselves.
+  isolatedUntil     DateTime? @map("isolated_until")
+  isolatedAt        DateTime? @map("isolated_at")
+  isolatedByUserId  String?   @map("isolated_by_user_id")
   updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at")
   updatedBy         String?   @map("updated_by")
   updatedByWorkerId String?   @map("updated_by_worker_id")
