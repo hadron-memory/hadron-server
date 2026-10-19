@@ -2309,6 +2309,10 @@ export const memoryMutations = {
               extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: resolvedMemoryId },
             });
           }
+          // #1838 (cor:dmo:120:04): the flip ENDS the approvals in this same
+          // transaction, so an interrupted completion pass below cannot leave
+          // a live or copied hash behind. Who/when/revision stay.
+          await endApprovalsOnEncryptedEntry(tx, { memoryId: resolvedMemoryId });
         });
         // Promotion's live-node rewrite does not cover tombstones or prior
         // snapshots. Reuse the bounded completion pass under the verifier we

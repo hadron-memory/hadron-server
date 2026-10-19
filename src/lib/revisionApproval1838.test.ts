@@ -261,3 +261,46 @@ describe('a hashless record authorizes nothing, on any surface (#1838)', () => {
     expect((await revisionApprovalOf(db, ended.id, 1)).state).toBe('NOT_APPROVED');
   });
 });
+
+describe('anonymous promotion ends approvals in its flip transaction (#1838, QA P2)', () => {
+  it('an interrupted completion pass leaves no live or copied hash, audit kept', async () => {
+    const { withTestOperationKey } = await import('../test/operationKey.js');
+    const { memoryMutations } = await import('../api/graphql/schema/resolvers.mutation.memory.js');
+    const org = await db.organization.findUniqueOrThrow({ where: { id: orgId } });
+    const app = await db.app.create({ data: { name: 'Promo App', urn: 'rev.example:promo', organizationId: orgId } });
+    const agent = await db.agent.create({ data: { name: 'Promo agent', urn: 'rev.example:promo-agent', organizationId: orgId } });
+    const anon = await db.memory.create({ data: {
+      name: 'Anon', urn: 'rev.example:anon', organizationId: org.id, appId: app.id, userMemoryOfAgentId: agent.id,
+      anonymousExpiresAt: new Date(Date.now() + 86400000), class: 'app',
+    } });
+    const n = await db.node.create({ data: { id: generateId(), memoryId: anon.id, loc: 'a:1', name: 'T', abstract: 'A', content: 'one' } });
+    await resolvers.Mutation.approveNode(null, { nodeRef: n.id }, { db, appId: app.id, userId: admin.id, roles: [] } as Context)
+      .catch(async () => {
+        // an anonymous App-scoped memory is not approvable through the user path: stamp a record directly
+        const h = computeApprovalHash({ title: 'T', abstract: 'A', content: 'one' });
+        await db.node.update({ where: { id: n.id }, data: { approvedRevNo: 1, approvedBy: admin.id, approvedAt: new Date(), approvalHash: h } });
+      });
+    await edit(n.id, 'two').catch(async () => {
+      await db.node.update({ where: { id: n.id }, data: { content: 'two' } });
+    });
+    await db.nodeRevision.create({ data: {
+      id: generateId(), nodeId: n.id, memoryId: anon.id, loc: 'a:1', name: 'T', abstract: 'A', content: 'one', tags: [], revNo: 7,
+      approvedBy: admin.id, approvedAt: new Date(), approvalHash: computeApprovalHash({ title: 'T', abstract: 'A', content: 'one' }),
+    } });
+    const key = Buffer.alloc(32, 5).toString('base64');
+    const spy = vi.spyOn(memoryMutations, 'encryptMemory').mockRejectedValue(new Error('interrupted'));
+    try {
+      await expect(withTestOperationKey(key, app.id, () =>
+        resolvers.Mutation.linkMemoryToUser({}, { memoryId: anon.id, externalUserId: 'promo-user' }, { db, appId: app.id, roles: [] }),
+      )).rejects.toThrow('interrupted');
+    } finally { spy.mockRestore(); }
+    expect((await db.memory.findUniqueOrThrow({ where: { id: anon.id } })).isEncrypted).toBe(true);
+    const live = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+    expect(live.approvalHash).toBeNull();
+    expect(live.approvedBy).toBe(admin.id);
+    expect(live.approvedAt).not.toBeNull();
+    const revs = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
+    expect(revs.every((r) => r.approvalHash === null)).toBe(true);
+    expect(revs.some((r) => r.approvedBy === admin.id && r.approvedAt)).toBe(true);
+  });
+});
