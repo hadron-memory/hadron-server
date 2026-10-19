@@ -8,7 +8,7 @@ import { type Prisma, type PrismaClient, type WorkerDeliveryAlarmEpisode } from 
 import { generateId } from '../id.js';
 import { appendDeliveryResumedEvent, appendDeliveryStuckEvent, appendDeliveryChannelRetiredEvent, type DeliveryMarkPrincipal, type AlarmChain } from '../agentTasks/events.js';
 export type { DeliveryMarkPrincipal } from '../agentTasks/events.js';
-import { lockAuthorityAnchors, type AuthorityAnchor } from '../auth/authorityAnchors.js';
+import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { lockAppReportsTo, reportsToChain } from '../workerReportsTo.js';
 import { appManagerUserIds } from '../auth/appManagement.js';
 import { loadDeliverySettings } from './deliverySettings.js';
@@ -19,24 +19,29 @@ type Tx = Prisma.TransactionClient;
 function fail(code: string): never { throw new Error(code); }
 
 /** Preserve authority -> reporting graph -> App budget -> worker wake order. */
-export async function deliveryStateTransaction<T>(db: PrismaClient, appId: string, workerId: string, fn: (tx: Tx) => Promise<T>, options: { authorityAnchors?: readonly AuthorityAnchor[] } = {}): Promise<T> {
+export async function deliveryStateTransaction<T>(db: PrismaClient, appId: string, workerId: string, fn: (tx: Tx) => Promise<T>): Promise<T> {
   return db.$transaction(async tx => {
     const app = await tx.app.findUnique({ where: { id: appId }, select: { organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true } });
     if (!app || app.deletedAt || app.uninstalledAt) fail('DELIVERY_WORKER_NOT_FOUND');
-    await lockAuthorityAnchors(tx, [{ kind: 'app', id: appId }, ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []), ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []), ...(options.authorityAnchors ?? [])], 'shared');
+    await lockAuthorityAnchors(tx, [{ kind: 'app', id: appId }, ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []), ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : [])], 'shared');
     const current = await tx.app.findUnique({ where: { id: appId }, select: {
       organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true,
       organization: { select: { deletedAt: true } }, ownerUser: { select: { deletedAt: true } },
     } });
     if (!current || current.deletedAt || current.uninstalledAt || current.organization?.deletedAt || current.ownerUser?.deletedAt) fail('DELIVERY_WORKER_NOT_FOUND');
     if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) fail('DELIVERY_AUTHORITY_CHANGED');
+    await lockDeliveryState(tx, appId, workerId);
+    return fn(tx);
+  }, { timeout: 30_000 });
+}
+
+/** After the caller holds its authority/owner rows, share the canonical graph -> budget -> worker order. */
+export async function lockDeliveryState(tx: Tx, appId: string, workerId: string): Promise<void> {
     await lockAppReportsTo(tx, appId, 'shared');
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + appId}, 0))`;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + workerId}, 0))`;
     const worker = await tx.worker.findFirst({ where: { id: workerId, appId, retiredAt: null, app: { deletedAt: null, uninstalledAt: null } }, select: { id: true } });
     if (!worker) fail('DELIVERY_WORKER_NOT_FOUND');
-    return fn(tx);
-  }, { timeout: 30_000 });
 }
 
 export async function beginDeliveryTracking(tx: Tx, workerId: string, at: Date): Promise<void> {

@@ -1,14 +1,14 @@
 /** #2021 / cor:agt:050:26: authenticated hold observations, never an acknowledgement or caller-reported resume. */
 import { Prisma } from '../../../generated/prisma/index.js';
 import { type Context } from './resolvers.helpers.js';
-import { liveTxContext } from './authorizedTx.js';
+import { withAuthorizedTx } from './authorizedTx.js';
 import { taskError } from './resolvers.agentTask.js';
 import { batchKeyEntry, ownBatchSession } from './resolvers.deliveryBatch.js';
 import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
 import { keyHostId, recordHostKeyUse } from '../../../lib/hostOperations/hostKey.js';
 import { verifyBatchProof, sameBatchRequester, WAKE_PROOF_MAX_AGE_MS, MAX_PROOF_CHARS } from '../../../lib/tickers/wakeProof.js';
 import { loadDeliveryEligibility } from '../../../lib/tickers/deliveryBatch.js';
-import { deliveryStateTransaction } from '../../../lib/tickers/deliveryState.js';
+import { lockDeliveryState } from '../../../lib/tickers/deliveryState.js';
 import { recordDeliveryHold, DELIVERY_HOLD_REASONS, type DeliveryHoldReason, type DeliveryHoldPrincipal } from '../../../lib/tickers/deliveryHolds.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 
@@ -41,17 +41,25 @@ export const deliveryHeldMutations = {
     // Entry is re-run inside the transaction too. The host identity is never a supplied worker/host field.
     const hostEntry = own ? null : await batchKeyEntry(ctx, proof.appId);
     if (hostEntry && proof.hostId !== hostEntry.host.hostId) mismatch();
+    const appScope = hostEntry?.app ?? await ctx.db.app.findUnique({ where: { id: proof.appId }, select: { id: true, organizationId: true, ownerUserId: true } });
+    if (!appScope) stale();
     const subject = await ctx.db.worker.findUnique({ where: { id: proof.workerId }, select: { heldByUserId: true } });
     const channels = await ctx.db.channel.findMany({ where: { id: { in: proof.channels.map(c => c.channelId) } },
       select: { id: true, memoryId: true, memory: { select: { organizationId: true, ownerUserId: true, userId: true } } } });
     const anchors: AuthorityAnchor[] = [
+      { kind: 'app', id: proof.appId },
+      ...(appScope!.organizationId ? [{ kind: 'org' as const, id: appScope!.organizationId }] : []),
+      ...(appScope!.ownerUserId ? [{ kind: 'user' as const, id: appScope!.ownerUserId }] : []),
       ...[ctx.userId, subject?.heldByUserId].filter((id): id is string => !!id).map(id => ({ kind: 'user' as const, id })),
       ...channels.flatMap(c => [{ kind: 'memory' as const, id: c.memoryId },
         ...(c.memory.organizationId ? [{ kind: 'org' as const, id: c.memory.organizationId }] : []),
         ...[c.memory.ownerUserId, c.memory.userId].filter((id): id is string => !!id).map(id => ({ kind: 'user' as const, id }))]),
     ];
-    return deliveryStateTransaction(ctx.db, proof.appId, proof.workerId, async tx => {
-      const txCtx = await liveTxContext(ctx, tx);
+    return withAuthorizedTx(ctx, anchors, async () => undefined, async (tx, txCtx) => {
+      // The shared wrapper fences authority AND owner/memory rows before graph/budget/worker locks.
+      const currentApp = await tx.app.findUnique({ where: { id: proof.appId }, select: { organizationId: true, ownerUserId: true } });
+      if (!currentApp || currentApp.organizationId !== appScope!.organizationId || currentApp.ownerUserId !== appScope!.ownerUserId) mismatch();
+      await lockDeliveryState(tx, proof.appId, proof.workerId);
       // Keep Worker -> Session row order, after authority / budget / wake locks.
       await tx.$queryRaw`SELECT id FROM workers WHERE id = ${proof.workerId} FOR SHARE`;
       const worker = await tx.worker.findUnique({ where: { id: proof.workerId }, select: { heldByUserId: true } });
@@ -71,7 +79,8 @@ export const deliveryHeldMutations = {
       const selected = eligible.workers.find(w => w.workerId === proof.workerId) ?? mismatch();
       for (const c of proof.channels) {
         const channel = selected.channels.find(x => x.channelId === c.channelId);
-        const current = await tx.channel.findUnique({ where: { id: c.channelId }, select: { memoryId: true } });
+        const current = await tx.channel.findUnique({ where: { id: c.channelId }, select: { memoryId: true, memory: { select: { organizationId: true, ownerUserId: true, userId: true } } } });
+        if (current && JSON.stringify(current.memory) !== JSON.stringify(channels.find(x => x.id === c.channelId)?.memory)) mismatch();
         if (!channel || channel.incarnation !== c.incarnation || current?.memoryId !== channels.find(x => x.id === c.channelId)?.memoryId) stale();
         const remaining = await tx.$queryRaw<Array<{ seq: number }>>(Prisma.sql`
           SELECT n.seq::int AS seq FROM nodes n WHERE ${channel!.predicate} AND n.seq IN (${Prisma.join(c.seqs)})`);
@@ -95,7 +104,7 @@ export const deliveryHeldMutations = {
       }
       if (entry) await recordHostKeyUse(tx, entry.host, 'deliver', { count: holds.length });
       return { workerId: proof.workerId, holds, pageInfo: { hasNextPage: false, endCursor: null } };
-    }, { authorityAnchors: anchors }).catch((error: unknown) => {
+    }, { timeout: 30_000 }).catch((error: unknown) => {
       // Only the common transaction's typed stale-authority refusals are translated.
       // Database outages and persistence failures must still fail the whole report.
       if (error instanceof Error && error.message === 'DELIVERY_WORKER_NOT_FOUND') stale();

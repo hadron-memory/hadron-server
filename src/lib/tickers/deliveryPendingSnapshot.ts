@@ -1,6 +1,7 @@
 /** #2021 / cor:agt:050:26 — S1 metadata becomes a complete S5 pending set, never a rendered batch. */
 import type { Prisma } from '../../generated/prisma/index.js';
 import { withoutRequestCaches, type Context } from '../../api/graphql/schema/resolvers.helpers.js';
+import { loadDeliveryEligibility } from './deliveryBatch.js';
 import { enumeratePendingDelivery, type PendingDeliveryArgs } from './pendingDelivery.js';
 import { deliveryHealthSnapshot, type CompletePendingDeliverySnapshot } from './deliveryHealthRead.js';
 import type { DeliveryMessage } from './deliveryWait.js';
@@ -56,5 +57,9 @@ export async function loadPendingDeliverySnapshot(tx: Prisma.TransactionClient, 
 /** S13/internal consumer facade: enumeration and canonical health share exactly the same authorized snapshot. */
 export async function loadDeliveryHealthSnapshot(tx: Prisma.TransactionClient, args: PendingSnapshotArgs & { limit?: number }) {
   const pending = await loadPendingDeliverySnapshot(tx, args);
-  return deliveryHealthSnapshot(tx, { appId: args.app.id, workerId: args.workerId, asOf: pending.asOf, pending, limit: args.limit });
+  const eligible = await loadDeliveryEligibility({ ctx: withoutRequestCaches(args.ctx, tx), app: args.app,
+    hostId: args.hostId, workerIds: [args.workerId], first: 1, now: pending.asOf });
+  const visibleChannelIds = eligible.workers.find(w => w.workerId === args.workerId)?.channels.map(c => c.channelId) ?? [];
+  return deliveryHealthSnapshot(tx, { appId: args.app.id, workerId: args.workerId, asOf: pending.asOf, pending,
+    visibleChannelIds, limit: args.limit });
 }
