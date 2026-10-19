@@ -1,3 +1,5 @@
+import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
+import { liveTxContext } from './authorizedTx.js';
 // Draft spec corpora (#1447): the server-owned spec-corpus operations.
 //
 // #1450 — reserveSpecCitation. Contract:
@@ -28,7 +30,7 @@ import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
 import { pendingEdgeStableTargetId } from '../../../lib/pendingEdgePromotion.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
-import { editorFromAuth, ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
+import { editorFromAuth, reconcileNodeWithIncludeHistory } from '../../../lib/nodeRevisionSnapshot.js';
 import { mayMintNodes } from './resolvers.nodeApproval.js';
 import { approvalHoldsFor, checkNodeIntegrity, loadApprovedSnapshots } from '../../../lib/nodeApproval.js';
 import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
@@ -1066,9 +1068,12 @@ async function rewriteWithRetry(
     // the value read here, and a refused write rolls the reconcile back too, so
     // every retry would conflict again. Commit the reconcile on its own first,
     // then read the settled revSeq and plan from that.
-    await ctx.db.$transaction((tx) =>
-      ensureCurrentNodeRevisionInTransaction(tx, node!.id, { expectedMemoryId: corpus.id }),
-    );
+    await withIncludeHistoryTransaction(ctx.db, async (history) => {
+      const tx = includeHistoryClient(history);
+      const fresh = await liveTxContext(ctx, tx);
+      await concealUnreadableDenial(fresh, corpus.id, corpus.id, () => requireMemoryWriteAccess(fresh, corpus.id));
+      return reconcileNodeWithIncludeHistory(history, node!.id, { expectedMemoryId: corpus.id });
+    }, { timeoutMs: 5_000, maxWaitMs: 2_000 });
     node = await loadCorpusNode(ctx.db, corpus.id, initial.id);
     if (!node) return null; // deleted or moved out meanwhile: nothing left to rewrite
     const plan = planRewrite(node, corpus.pattern, fromLoc, toLoc, accept, corpus.urn);

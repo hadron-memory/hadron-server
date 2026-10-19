@@ -1,3 +1,5 @@
+import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
+import { liveTxContext } from './authorizedTx.js';
 /**
  * #1177 §3 — the seam: the server judges, the client does I/O.
  *
@@ -44,7 +46,7 @@ import { createHash } from 'node:crypto';
 import { BATCH_READ_MAX_BYTES } from '../../../lib/batchRead.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
-import { getAccessibleMemoryIds, memoryAccessFilter } from './resolvers.helpers.js';
+import { getAccessibleMemoryIds, memoryAccessFilter, isMemoryReadableCached } from './resolvers.helpers.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveScopeRef } from '../../../lib/entityRef/scopeRef.js';
@@ -56,7 +58,7 @@ import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { isCiphertext } from '../../../lib/crypto.js';
 import { canReadScope, explainScope } from '../../../lib/scopes.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
-import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
+import { reconcileNodeWithIncludeHistory } from '../../../lib/nodeRevisionSnapshot.js';
 import {
   classifyDeclaration,
   classifySkill,
@@ -732,13 +734,23 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
       let liveMetadataBytes = 0n;
       const candidateMemory = new Map(candidates.map((r) => [r.id, r.memoryId]));
       for (const id of candidates.map((r) => r.id).sort()) {
-        const live = await ctx.db.$transaction(
-          async (tx) => {
+        const live = await withIncludeHistoryTransaction(ctx.db,
+          async (history) => {
+            const tx = includeHistoryClient(history);
+            const fresh = await liveTxContext(ctx, tx);
+            if (!(await isMemoryReadableCached(fresh, candidateMemory.get(id)!))) return null;
             if (selectedRefs !== undefined) {
+              // READ COMMITTED after the outer fence: hold this selected row
+              // before reading its JSON size or properties, so those reads
+              // describe one state without a frozen pre-fence snapshot.
+              const locked = await tx.$queryRaw<Array<{ id: string }>>`
+                SELECT id FROM nodes WHERE id = ${id} AND memory_id = ${candidateMemory.get(id)!}
+                  AND deleted_at IS NULL FOR UPDATE`;
+              if (locked.length !== 1) return null;
               // A named task may have no declaration for this host. Recheck
               // access, then bound the live JSON before deserializing it. A
               // writer can enlarge properties after the candidate snapshot;
-              // REPEATABLE READ holds this check and fetch to one snapshot.
+              // The row lock keeps this check and fetch coherent.
               const authorized = await tx.node.findFirst({
                 where: { AND: [declaredWhere, { id }] } as never,
                 select: { id: true },
@@ -769,7 +781,7 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
             // Never reconcile a row that left the memory it was discovered in
             // (@codex P1, PR #1339) — the refetch below would drop it anyway,
             // but only after a revision had been written into another tenant.
-            if ((await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: candidateMemory.get(id)! })) == null) return null;
+            if ((await reconcileNodeWithIncludeHistory(history, id, { expectedMemoryId: candidateMemory.get(id)! })) == null) return null;
             return tx.node.findFirst({
               // Reapply BOTH discovery and access/scope predicates after
               // waiting for the lock. The id can move into another tenant's
@@ -780,9 +792,8 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
             });
           },
           {
-            timeout: 60_000,
-            maxWait: 15_000,
-            ...(selectedRefs !== undefined ? { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : {}),
+            timeoutMs: 60_000,
+            maxWaitMs: 15_000,
           },
         );
         if (live != null) liveRows.push(live);

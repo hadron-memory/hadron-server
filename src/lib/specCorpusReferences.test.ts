@@ -1220,7 +1220,7 @@ describe('an ambiguous citation blocks the mint as MISSING (#1505)', () => {
 
 
 describe('#2063 standalone renumber reconciliation boundary', () => {
-  it('waits before reconciling a referencing node; the move and later writer remain separate cuts', async () => {
+  it.each([false, true])('waits before standalone reconciliation and rechecks write authority (revoked=%s)', async (revoked) => {
     await db.node.update({ where: { id: other.id }, data: { content: (await content('pas:020')) + '\nRaw drift.' } });
     let entered!: () => void;
     let release!: () => void;
@@ -1234,14 +1234,19 @@ describe('#2063 standalone renumber reconciliation boundary', () => {
       await waitForLockWaitersOfType(db, 'advisory', 1, 750);
       expect((await db.node.findUniqueOrThrow({ where: { id: other.id } })).revSeq).toBe(1);
       await db.$transaction(async (tx) => {
-        await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${other.id} FOR UPDATE NOWAIT`;
+        await tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${draft.id} ORDER BY id FOR UPDATE NOWAIT`;
       });
+      if (revoked) await db.orgMember.deleteMany({ where: { userId: admin.id } });
     } finally {
       release();
       await holder;
       await outcome;
     }
     await pending;
-    expect(await content('pas:020')).toContain('pas:040');
+    if (revoked) {
+      expect((await db.node.findUniqueOrThrow({ where: { id: other.id } })).revSeq).toBe(1);
+      expect(await content('pas:020')).toContain('pas:010');
+      expect(await db.nodeRevision.count({ where: { nodeId: other.id } })).toBe(0);
+    } else expect(await content('pas:020')).toContain('pas:040');
   });
 });
