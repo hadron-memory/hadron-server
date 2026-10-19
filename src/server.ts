@@ -1136,6 +1136,8 @@ export async function createServer(): Promise<Express> {
 
   const { typeDefs, resolvers: deploymentResolvers } = deploymentSchema();
   const apollo = new ApolloServer({
+    // #2087: concealed errors must not depend on the deployment's NODE_ENV.
+    includeStacktraceInErrorResponses: false,
     typeDefs,
     resolvers: deploymentResolvers,
     plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin],

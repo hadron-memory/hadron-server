@@ -1411,6 +1411,8 @@ type ReadProjectionNode = {
   approvedBy: string | null;
   approvedByInfo: string | null;
   approvedAt: Date | null;
+  /** #1838 — null once the approval ended on encrypted entry; a hashless record authorizes nothing. */
+  approvalHash?: string | null;
   /** #1591 — the mint record. */
   mintedAt: Date | null;
   mintedBy: string | null;
@@ -1809,7 +1811,7 @@ async function renderNodeReadProjection(
   // #1591: the approval line. Approver by handle when a user is known, else
   // the stored principal info.
   let approvalLine = opts.encryptedMemory ? 'Approval: not applicable (encrypted memory)' : `Approval: not approved (r${revision})`;
-  if (!opts.encryptedMemory && node.approvedRevNo != null && node.approvedAt) {
+  if (!opts.encryptedMemory && node.approvedRevNo != null && node.approvedAt && node.approvalHash !== null) {
     const handle = node.approvedBy
       ? (opts.batch
         ? opts.batch.humanNames.get(node.approvedBy)
@@ -1825,7 +1827,7 @@ async function renderNodeReadProjection(
   }
 
   if (inheritedFrom) {
-    approvalLine = node.approvedRevNo != null && node.contentRevSeq <= node.approvedRevNo
+    approvalLine = node.approvedRevNo != null && node.approvalHash !== null && node.contentRevSeq <= node.approvedRevNo
       ? `Approval: approved r${node.approvedRevNo}`
       : `Approval: not approved (r${revision})`;
   }
@@ -8755,7 +8757,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
    * recover on its own.
    */
   async function bindReceipt(
-    session: { id: string; appId: string | null; workerId: string | null; agentId: string | null },
+    session: { id: string; appId: string | null; workerId: string | null; agentId: string | null; llmModel?: string | null },
     mcpCtx: Context,
   ): Promise<string> {
     // #1005: pin the session's App as this MCP session's active App.
@@ -8852,7 +8854,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // the stamps describe the text printed below (one agent read — no
         // parallel lookup that could race a template edit).
         const briefing = worker
-          ? await composeWorkerPrompt(mcpCtx, worker)
+          ? await composeWorkerPrompt(mcpCtx, worker, { llmModel: session.llmModel })
           : { text: null as string | null, renderedAt: null as Date | null, roleAgentUpdatedAt: null as Date | null };
         const prompt = briefing.text;
         // #1029: the previous stint's handoff, delivered with the briefing
@@ -8877,7 +8879,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           : null;
         const boundUrl = workerPortalUrl(boundUrn);
         workerLine =
-          `\nWorking as ${worker?.name ?? 'worker'} (${session.workerId}).` +
+          `\nWorking as ${worker?.name ?? 'worker'} (worker id: ${session.workerId}).` +
           (boundUrn ? `\n${boundUrn}` : '') +
           (boundUrl ? `\nURL: ${boundUrl}` : '') +
           // A worker whose agent carries no template and who has no override
@@ -8891,11 +8893,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           renderWorkerContinuity(continuity as RenderableContinuity | null);
       } catch {
         workerLine =
-          `\nWorking as worker ${session.workerId}.` +
+          `\nWorking as worker (worker id: ${session.workerId}).` +
           '\n\n(The boot briefing could not be rendered just now — the session IS started and bound. Retry with hadron_get_node on the role agent, or start again after ending this session; do NOT retry hadron_start_session, which would refuse WORKER_TAKEN.)';
       }
     }
-    return `${sharedConnectionNote}${workerLine}`;
+    // #1599: the session argument is never the adjacent worker identity.
+    const sessionLabel = session.workerId ? 'Worker session id' : 'Session id';
+    return `${sharedConnectionNote}\n${sessionLabel}: ${session.id} (pass as \`session\` to team tools)${workerLine}`;
   }
 
   // ── hadron_start_session ──────────────────────────────────────────────────────
@@ -9433,12 +9437,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // identifier cannot disagree.
         const url = workerPortalUrl(urn);
         return (
-          `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}\n` +
+          `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}${s.workerId ? ' (worker session id; pass as `session` to team tools)' : ' (session id)'}\n` +
           (s.endedAt ? `    ended: ${s.endedAt.toISOString()} · end reason: ${sessionEndReason(s)}\n` : '') +
           // The un-bound case is the one worth calling out: it is the shape in
           // which a team-chat post silently lands under the human's name.
           (worker
-            ? `    working as: ${worker.name}${worker.role ? ` (${worker.role})` : ''}${urn ? `\n    ${urn}` : ''}${url ? `\n    URL: ${url}` : ''}\n`
+            ? `    working as: ${worker.name}${worker.role ? ` (${worker.role})` : ''} (worker id: ${worker.id})${urn ? `\n    ${urn}` : ''}${url ? `\n    URL: ${url}` : ''}\n`
             : '    working as: nobody — this session is NOT bound to a worker, so anything it posts is attributed to you, not a teammate.\n') +
           (app ? `    app: ${app.name}\n` : '') +
           `    started: ${s.startedAt.toISOString()}${s.type ? ` · ${s.type}` : ''}` +
@@ -10826,7 +10830,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // is otherwise stays behind the takeover refusal, which is a
             // deliberate act rather than a listing (hadron_list_workers' rule).
             (mine
-              ? `Your active session: ${mine.id} (since ${mine.startedAt.toISOString()})\n`
+              ? `Your active session: ${mine.id} (worker session id; pass as \`session\` to team tools; since ${mine.startedAt.toISOString()})\n`
               : '') +
             // Shown separately from the briefing, and labelled as the editable
             // part, so hadron_update_worker's replace semantics have something
