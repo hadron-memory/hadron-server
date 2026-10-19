@@ -20,6 +20,7 @@ import {
   BATCH_PROOF_MAX_SEQS, type BatchProof, type WakeProof,
 } from './wakeProof.js';
 import { acknowledgeBatchProofs } from './acknowledge.js';
+import { batchProofPayload, type LoadedBatch } from './deliveryBatch.js';
 
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -91,6 +92,20 @@ describe('batch proof: signing, domain separation, shape', () => {
     const wake: WakeProof = { v: 2, kind: 'wake-proof', appId: app.id, workerId: worker.id, requester: KEY, channels: [], ticks: [], tasks: [], exempt: false, issuedAt: Date.now() };
     expect(await code(() => verifyBatchProof(signWakeProof(wake)))).toBe('WAKE_PROOF_INVALID');
     expect(await code(() => verifyWakeProof(signBatchProof(p)))).toBe('WAKE_PROOF_INVALID');
+  });
+
+  it('an id built by the loader\'s batchProofPayload verifies to the same payload, and acknowledges', async () => {
+    await say(chA); await say(chA);
+    const ranges = [{ channelId: chA.id, incarnation: 1, fromSeq: 1, throughSeq: 2, seqs: [1, 2] }];
+    const batch: LoadedBatch = {
+      workerId: worker.id, workerName: 'Liam', text: 'text', renderHash: renderHash('text'),
+      batchKey: batchKeyOf({ workerId: worker.id, renderHash: renderHash('text'), channels: ranges.map((r) => ({ channelId: r.channelId, incarnation: r.incarnation, from: r.fromSeq, through: r.throughSeq, seqs: r.seqs })) }),
+      deliverAfter: new Date(), busyDeadline: new Date(), interrupt: false, overflow: 0, ranges,
+    };
+    const payload = batchProofPayload(batch, { appId: app.id, hostId: 'host-a', appKeyId: KEY.appKeyId, now: new Date() });
+    expect(verifyBatchProof(signBatchProof(payload))).toEqual(payload);
+    expect(await ack([{ proof: signBatchProof(payload) }])).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await mark(chA)).toBe(2);
   });
 
   it('a tampered body, a batchKey presented as an id, and an unknown version are invalid', async () => {
