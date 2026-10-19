@@ -103,7 +103,7 @@ export function defaultWakeBudget(roster: number, selfSubscribeCadenceSeconds: n
 
 type Reader = { manager: boolean; userId: string | null };
 
-type AppLike = { id: string; organizationId: string | null; ownerUserId: string | null };
+export type AppLike = { id: string; organizationId: string | null; ownerUserId: string | null };
 
 /** Workers of the App the caller may read wakes for: all of them for a manager, else the ones the caller holds. */
 async function readableWorkers(
@@ -137,7 +137,7 @@ async function holderParticipates(ctx: Context, app: AppLike, holderId: string):
   return (await isAppParticipant(actor, app)) ? holder : null;
 }
 
-async function holderAccess(
+export async function holderAccess(
   ctx: Context,
   app: AppLike,
   holderId: string,
@@ -158,7 +158,7 @@ async function holderAccess(
   return result;
 }
 
-const mayRead = (set: Set<string> | 'all' | null, memoryId: string): boolean => set === 'all' || (set !== null && set.has(memoryId));
+export const mayRead = (set: Set<string> | 'all' | null, memoryId: string): boolean => set === 'all' || (set !== null && set.has(memoryId));
 
 function envelopeOf(data: unknown): RoutedMessage | null {
   if (!data || typeof data !== 'object') return null;
