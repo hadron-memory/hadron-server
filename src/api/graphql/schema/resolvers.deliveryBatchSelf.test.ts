@@ -322,4 +322,11 @@ describe('R57 own-live-session batches', () => {
     expect(await db.channelReadState.count()).toBe(0);
   });
 
+  it('keeps the session refusal when middleware removed an invalid named binding', async () => {
+    const context = { ...ctx(manager.id), sessionBindingRefused: true };
+    expect(await code(Q.deliveryBatches({}, { appRef: app.id }, context))).toBe('SESSION_NOT_LIVE');
+    expect(await code(M.acknowledgeDeliveryBatches({}, { batchIds: [] }, context))).toBe('SESSION_NOT_LIVE');
+    expect(await db.appLogEntry.count()).toBe(0);
+  });
+
 });
