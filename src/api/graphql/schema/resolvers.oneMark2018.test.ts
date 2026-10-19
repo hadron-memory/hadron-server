@@ -420,6 +420,32 @@ describe('#2018 S2: the own-mentions mark decision is re-derived and fenced (Dar
     if (kind === 'all-ticker') expect((await read(hostKey)).batches[0]?.ranges[0]?.fromSeq).toBe(1);
   });
 
+  // George P2 on 8ed33339: two own reads through the SAME session both hold its row FOR SHARE. The liveness re-check
+  // under the wake lock must not write that row (the heartbeat already ran outside), or the wake holder's UPDATE waits
+  // on the other reader's share lock while that reader waits on the wake lock: a deadlock.
+  it('two own reads through the same session, both holding its row, one holding the wake lock, both complete', async () => {
+    const s = await setup('control');
+    const call = (d: unknown) => {
+      const page = { items: [{ seq: 2 }], total: 1 };
+      recordMentionsWorker(page, kit.id);
+      return maybeAdvanceOwnChannelRead(selfCtx(s, { db: d as never }), { channelId: channel.id, capturedHead: 2, mentionsRef: kit.id, sinceSeq: 0, limit: 20, page });
+    };
+    // B: past its outside heartbeat, parked before its transaction's first lock. A: through to the wake lock, parked.
+    // B then takes the session row FOR SHARE and waits on the wake lock; A is released.
+    const parkB = hookedDb((sql, v) => sql.includes('pg_advisory_xact_lock') && v.includes('authorization:app'), { park: 'before' });
+    const second = call(parkB.db);
+    await parkB.reached;
+    const parkA = parkAfterWakeLock();
+    const first = call(parkA.db);
+    await parkA.reached;
+    parkB.release();
+    await waitForLockWaiters(db, 1);
+    parkA.release();
+    const settled = await Promise.allSettled([first, second]);
+    expect(settled.map((r) => r.status === 'rejected' ? String(r.reason) : r.status)).toEqual(['fulfilled', 'fulfilled']);
+    expect(await marks()).toEqual({ delivered: 2, read: 2 });
+  });
+
   // The writer arrives after the mark's locks: parked right after the wake lock (before any condition is read), or at
   // the delivered write (every condition read). It is observed blocked, the marks commit on the policy they were
   // decided on, and only then does it land.
