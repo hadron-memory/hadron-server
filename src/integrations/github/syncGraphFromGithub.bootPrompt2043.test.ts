@@ -94,4 +94,16 @@ describe('git sync and boot prompts (#2043)', () => {
     expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
     expect(await db.node.findUnique({ where: { id: src.id } })).toBeNull();
   });
+
+  it('the saved worker requester survives the system re-entry used by the preflight retry', async () => {
+    const { withSyncCaller, boundWorkerId } = await import('../../lib/bootPrompt.js');
+    const { runAsSystem } = await import('../../lib/requestActor.js');
+    const seen = await runAsActor({ workerId: 'w-1', agentId: null }, () =>
+      withSyncCaller(boundWorkerId(), () => runAsSystem(async () => {
+        const first = boundWorkerId();
+        // the recursive call re-wraps exactly as the exported entry point does
+        return withSyncCaller(boundWorkerId(), () => runAsSystem(async () => [first, boundWorkerId()]));
+      })));
+    expect(seen).toEqual(['w-1', 'w-1']);
+  });
 });

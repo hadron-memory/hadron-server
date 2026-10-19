@@ -1,4 +1,4 @@
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptMergeCollisions, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
@@ -401,6 +401,9 @@ async function runMerge(
   // commits. For any other caller compiled nodes are excluded below, like
   // comments: a merge is not a compile and the target recompiles.
   await assertNoBootPromptRowsForWorkerSession(db, sourceMemoryId, 'merge');
+  // Destination writes too (Ruth P2): a source node folding onto a compiled target, or onto a
+  // boot-prompt target under a worker session, is refused before any batch commits.
+  await assertNoBootPromptMergeCollisions(db, sourceMemoryId, targetMemoryId);
   await preflightMergeComments(db, sourceMemoryId, targetMemoryId);
   // #1468 — every source node leaves the source memory (relocated, or folded
   // and deleted) and the source memory is then deleted: a mint-stamped source

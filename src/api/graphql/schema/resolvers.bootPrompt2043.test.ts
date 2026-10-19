@@ -211,6 +211,31 @@ describe('merge and MCP twins (#2043)', () => {
   });
 });
 
+describe('merge target collisions (#2043, Ruth P2)', () => {
+  it('a merge cannot fold a source node onto a compiled target; a worker session cannot fold onto a boot-prompt target', async () => {
+    const target = await resolvers.Mutation.createMemory(null, { orgId, name: 'collide-target' }, ctx());
+    const tCompiled = await withCompileWrite(() => db.node.create({ data: {
+      id: generateId(), memoryId: target.id, loc: 'boot:compiled', name: 'TC', content: 'compiled', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE,
+    } }));
+    const tSource = await db.node.create({ data: { id: generateId(), memoryId: target.id, loc: 'boot:source', name: 'TS', content: 'target source', role: 'boot-prompt' } });
+    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'boot:compiled', name: 'S1', content: 'forged over compiled' } });
+    const before = await snapshot(tCompiled.id);
+    expect(await codeOf(resolvers.Mutation.mergeMemories(null, { input: { source: memory.id, target: target.id } }, ctx())))
+      .toBe('BOOT_PROMPT_COMPILED_WRITE');
+    expect(await snapshot(tCompiled.id)).toEqual(before);
+    expect(await db.node.count({ where: { memoryId: memory.id, loc: 'boot:compiled' } })).toBe(1);
+    // worker session: a plain source node colliding with a boot-prompt TARGET source.
+    await db.node.deleteMany({ where: { memoryId: memory.id, loc: 'boot:compiled' } });
+    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'boot:source', name: 'S2', content: 'plain over boot' } });
+    const beforeSrc = await snapshot(tSource.id);
+    expect(await asWorker(() => codeOf(resolvers.Mutation.mergeMemories(null, { input: { source: memory.id, target: target.id } }, ctx()))))
+      .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await snapshot(tSource.id)).toEqual(beforeSrc);
+    // control: the same collision by a non-session caller on an ordinary-role target is allowed (admin may fold onto a source).
+    expect(await codeOf(resolvers.Mutation.mergeMemories(null, { input: { source: memory.id, target: target.id } }, ctx()))).toBe('NO_ERROR');
+  });
+});
+
 describe('subtree move (#2043, Jane P2-1)', () => {
   it('a worker session cannot move a boot-prompt source or its subtree; the manager and ordinary nodes can', async () => {
     const s = await source();
