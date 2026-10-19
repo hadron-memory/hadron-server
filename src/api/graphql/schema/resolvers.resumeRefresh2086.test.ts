@@ -66,7 +66,7 @@ beforeEach(async () => {
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true, urn: true } });
   await db.appMember.create({ data: { appId: app.id, userId: holder, role: 'member' } });
   await db.appMember.create({ data: { appId: app.id, userId: other, role: 'member' } });
-  const w = (name: string) => db.worker.create({ data: { appId: app.id, agentId, name, slug: name.toLowerCase() }, select: { id: true } }).then((r) => r.id);
+  const w = (name: string) => db.worker.create({ data: { appId: app.id, agentId, name, slug: name.toLowerCase(), signature: '', trailer: '' }, select: { id: true } }).then((r) => r.id);
   ada = await w('Ada');
   bea = await w('Bea');
 });
