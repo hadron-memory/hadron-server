@@ -74,3 +74,12 @@ DROP TRIGGER IF EXISTS served_prompts_no_truncate ON served_prompts;
 CREATE TRIGGER served_prompts_no_truncate
   BEFORE TRUNCATE ON served_prompts
   FOR EACH STATEMENT EXECUTE FUNCTION hadron_served_prompt_no_truncate();
+
+-- #1162: the record's worker and session columns are typed Worker/session references, so they sit under the same
+-- writer fence as every other one. The #1162 invariants file is closed (a shipped migration, byte-identical with its
+-- source) and its migration predates this table, so the trigger is created here; the function is that file's. The
+-- composite foreign keys above already guarantee the session and worker exist; this adds the typed
+-- WORKER_REFERENCE_NOT_FOUND refusal and the coordination with Worker deletion.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "served_prompts";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "served_prompts"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id', 's:$.session_id');
