@@ -387,7 +387,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
           const ch = (w.channels as Row[]).map((c) => `${c.channel.name} ${c.fromSeq}-${c.throughSeq}`).join(', ');
           lines.push(
             `- ${w.worker.name}: ${why} · ${w.unread} unread (${w.unreadMentions} mention${w.unreadMentions === 1 ? '' : 's'}) · ${ch}` +
-              `${w.availability ? ` · ${w.availability.state}${w.availability.reason ? ` (${w.availability.reason})` : ''}` : ''}\n  proof: ${w.proof}`,
+              `${w.availability ? ` · ${w.availability.state}${w.availability.reason ? ` (${w.availability.reason})` : ''}` : ''}\n  anchor ${iso(w.anchorAt)} · deliverAfter ${iso(w.deliverAfter)} · busyDeadline ${iso(w.busyDeadline)}\n  proof: ${w.proof}`,
           );
         }
         const dormant = (page.dormant as Row[]).map((d) => `${d.worker.name} (${d.mentions})`);
