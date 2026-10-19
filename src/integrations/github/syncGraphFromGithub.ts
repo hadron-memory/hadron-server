@@ -1,4 +1,4 @@
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoWorkerSessionBootPromptWrite, withSyncCaller } from '../../lib/bootPrompt.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, withSyncCaller } from '../../lib/bootPrompt.js';
 import { currentActor } from '../../lib/requestActor.js';
 import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
@@ -1271,8 +1271,13 @@ const syncGraphFromGithubAsSystem = async (
             ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
             : {}),
           ...unreadableLocFilter,
+          // #2043 — repo-wins cleanup never removes a compiled boot prompt, file or no file:
+          // only a compile (or a deliberate delete) removes one.
+          nodeType: { not: COMPILED_BOOT_PROMPT_NODE_TYPE },
         };
         const pruned = await tx.node.findMany({ where: cleanupWhere, select: { id: true, loc: true } });
+        // #2043 (cor:agt:040:11) — nor does a worker session's sync delete a boot-prompt source.
+        await assertNoBootPromptRows(tx, pruned.map((n) => n.id), 'import');
         if (memoryState.readBranch == null && !memoryState.readBranchCorrected && pruned.length > 0) {
           // #1566: old blank-read syncs could ingest the write branch and
           // adopt Hadron-created nodes as repo-owned. Boot sync runs before an

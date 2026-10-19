@@ -211,6 +211,22 @@ describe('merge and MCP twins (#2043)', () => {
   });
 });
 
+describe('subtree move (#2043, Jane P2-1)', () => {
+  it('a worker session cannot move a boot-prompt source or its subtree; the manager and ordinary nodes can', async () => {
+    const s = await source();
+    const child = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'boot:source:child', name: 'Child', content: 'c' } });
+    const plain = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'n:move', name: 'Plain', content: 'p' } });
+    const before = await snapshot(s.id);
+    const to = (loc: string) => `hrn:node:${memory.urn}:${loc}`;
+    expect(await asWorker(() => codeOf(resolvers.Mutation.moveNode(null, { sourceRef: s.id, targetUrn: to('elsewhere:source') }, ctx()))))
+      .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await snapshot(s.id)).toEqual(before);
+    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).loc).toBe('boot:source:child');
+    expect(await asWorker(() => codeOf(resolvers.Mutation.moveNode(null, { sourceRef: plain.id, targetUrn: to('n:moved') }, ctx())))).toBe('NO_ERROR');
+    expect(await codeOf(resolvers.Mutation.moveNode(null, { sourceRef: s.id, targetUrn: to('elsewhere:source') }, ctx()))).toBe('NO_ERROR');
+  });
+});
+
 describe('the invariants file is copied verbatim into its migration (#2043)', () => {
   it('migration carries prisma/boot-prompt-invariants.sql and post-push includes it', () => {
     const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');

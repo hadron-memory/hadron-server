@@ -67,4 +67,31 @@ describe('git sync and boot prompts (#2043)', () => {
     expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
     expect(await db.node.count({ where: { memoryId: graph.id, loc: 'source' } })).toBe(1);
   });
+
+  it('repo-wins cleanup keeps a compiled node whose file is gone, and prunes an ordinary repo row (control)', async () => {
+    const compiledRow = await withCompileWrite(() => db.node.create({ data: {
+      id: generateId(), memoryId: graph.id, loc: 'compiled', name: 'Compiled', content: 'compiled text',
+      role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE, ownerRepo: 'test/repo',
+    } }));
+    const ordinary = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'gone', name: 'Gone', content: 'x', ownerRepo: 'test/repo' } });
+    mirror('other', 'name: Other', 'present');
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect(await db.node.findUnique({ where: { id: compiledRow.id } })).not.toBeNull();
+    expect(await db.node.findUnique({ where: { id: ordinary.id } })).toBeNull();
+  });
+
+  it('a worker session\'s sync that would prune a boot-prompt source is refused whole', async () => {
+    const app = await db.app.create({ data: { id: generateId(), name: 'App', urn: 'test-org:app', organizationId: graph.organizationId! } });
+    const agent = await db.agent.create({ data: { id: generateId(), name: 'Agent', urn: 'test-org:agent', organizationId: graph.organizationId! } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+    const src = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'boot-source', name: 'Src', content: 'x', role: 'boot-prompt', ownerRepo: 'test/repo' } });
+    mirror('other', 'name: Other', 'present');
+    const refused = await runAsActor({ workerId: worker.id, agentId: null }, () => syncGraphFromGithub(graph));
+    expect(refused.error ?? '').toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await db.node.findUnique({ where: { id: src.id } })).not.toBeNull();
+    // control: the server's own sync (no worker) prunes the absent source.
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect(await db.node.findUnique({ where: { id: src.id } })).toBeNull();
+  });
 });
