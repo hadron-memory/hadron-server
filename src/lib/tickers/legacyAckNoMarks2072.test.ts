@@ -277,3 +277,12 @@ describe('#2072 / R53 seam 2: a textless acknowledgement records the wake\'s rec
     }
   });
 });
+
+describe('#2072: the wake receipt is inside the #1162 reference fence', () => {
+  it('a receipt naming a missing worker as its acknowledger is refused, and writes nothing', async () => {
+    await expect(db.$executeRaw`
+      INSERT INTO worker_wake_acks (worker_id, wake_key, acked_at, acked_by_worker_id)
+      VALUES (${liam.id}, 'k', now()::timestamp, 'no-such-worker')`).rejects.toThrow(/Cannot add a new worker reference/);
+    expect(await receipts()).toEqual([]);
+  });
+});
