@@ -2821,6 +2821,7 @@ export const typeDefs = `#graphql
     null means WITHHELD from this caller (#2089), never no Agents.
     """
     agents: [Agent!]
+    "Key inventory, only for whoever manages the App as themselves, never through a bound worker session (hrn:node:hadronmemory.com:specs:cor:dmo:050:05)."
     keys: [AppKey!]!
     createdAt: DateTime!
     updatedAt: DateTime
@@ -7962,7 +7963,9 @@ export const typeDefs = `#graphql
     appAIConfig(appRef: ID!): AppAIConfig
 
     """
-    List keys for an App (org ADMIN of the App's org).
+    List keys for an App, only for whoever manages the App
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request.
 
     Accepts the entity's ID or URN.
     """
@@ -9671,7 +9674,9 @@ export const typeDefs = `#graphql
 
     """
     App key management — revoke all active keys for an App and mint a
-    fresh one. (See createAppKey / revokeAppKey / deleteApp below.)
+    fresh one. Only whoever manages the App, as themselves
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request. The replacement key holds no scopes.
 
     Accepts the entity's ID or URN.
     """
@@ -11725,13 +11730,18 @@ export const typeDefs = `#graphql
     removeAgentImport(parentAgentRef: ID!, importedAgentRef: ID!): Boolean!
 
     """
-    Mint a new AppKey for an App.
+    Mint a new AppKey for an App. Only whoever manages the App, as themselves
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request; new keys hold no scopes.
+    Granting or revoking scopes uses the same manager audience.
 
     Accepts the entity's ID or URN.
     """
     createAppKey(appRef: ID!, label: String): AppKeyCreated!
     """
-    AppKey is keyed by raw ID — no urn column. Stays ID-only.
+    Revoke an AppKey. Only whoever manages the App, as themselves
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request. AppKey has no URN; the id is raw ID-only.
     """
     revokeAppKey(id: ID!): Boolean!
     """
