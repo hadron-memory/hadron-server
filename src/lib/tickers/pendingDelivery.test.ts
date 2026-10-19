@@ -96,6 +96,8 @@ describe('complete metadata-only pending enumeration', () => {
     await db.channelReadState.create({ data: { workerId, channelId, lastSeenSeq: 1 } });
     await db.workerDeliveryChannel.create({ data: { workerId, channelId, channelIncarnation: 1, deliveredThroughSeq: 2, deliveredAt: posted } });
     expect((await enumerate()).items.map((m: any) => m.seq)).toEqual([6]);
+    await db.channelReadState.update({ where: { workerId_channelId: { workerId, channelId } }, data: { lastSeenSeq: 6 } });
+    expect((await enumerate()).items).toEqual([]);
   });
   it('a stale delivery incarnation does not hide the current occupancy', async () => {
     await messages(3);
