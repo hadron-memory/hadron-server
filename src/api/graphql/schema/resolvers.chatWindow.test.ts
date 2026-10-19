@@ -353,6 +353,14 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
     }
   });
 
+  /**
+   * #2003: `driveTurns(60)` is 60 sequential DB round trips. Measured alone it
+   * takes 2-5 s and scales with host load (5.2 s seen at load ~76 on 32 cores),
+   * so vitest's 5 s default is too tight on the shared agent host. This bounds
+   * slow work only: a hang still fails, just at 20 s.
+   */
+  const DRIVE_60_TIMEOUT_MS = 20_000;
+
   /** Drive `turns` real turns; return the contents the last call handed the model. */
   async function driveTurns(turns: number): Promise<string[]> {
     const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
@@ -395,7 +403,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
     // turn-1..turn-50 and never the question in front of it.
     expect(contents).toContain('turn-60');
     expect(contents).not.toContain('turn-1');
-  });
+  }, DRIVE_60_TIMEOUT_MS);
 
   it('hands over exactly the newest window, oldest-first', async () => {
     const contents = await driveTurns(60);
@@ -404,7 +412,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
     // Ascending: each turn number strictly greater than the one before it.
     const numbers = userTurns.map((c) => Number(c.slice('turn-'.length)));
     expect(numbers).toEqual([...numbers].sort((a, b) => a - b));
-  });
+  }, DRIVE_60_TIMEOUT_MS);
 
   it('CONTROL: under the window the current turn is present too', async () => {
     const contents = await driveTurns(12);
