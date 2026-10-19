@@ -77,6 +77,15 @@ export type DueWakesResult = {
   budgetNotice: { appId: string; day: Date; withheld: number } | null;
 };
 
+/** #2069: the reasons a wake carries that a delivery must name: a mention, one tick of one ticker, one task event. */
+const reasonKeys = (wake: WorkerWake): Set<string> =>
+  new Set(wake.reasons.map((r) => (r.kind === 'MENTION' ? 'M' : r.kind === 'TICK' ? `T:${r.tickerId}:${r.k}` : `K:${r.eventId}`)));
+/** True when `fresh` carries a TICK or TASK reason the outstanding wake lacks. A grown mention range alone is not one. */
+const absorbsNewReason = (outstanding: WorkerWake, fresh: WorkerWake): boolean => {
+  const had = reasonKeys(outstanding);
+  return [...reasonKeys(fresh)].some((k) => k !== 'M' && !had.has(k));
+};
+
 const tasksOf = (wake: WorkerWake) =>
   wake.reasons.flatMap((r) => (r.kind === 'TASK' ? [{ eventId: r.eventId, chainIndex: r.chainIndex }] : []));
 
@@ -634,6 +643,16 @@ export async function computeDueWakes(args: {
           // or its proof lapses: a second, different wake would be a second delivery against one allowance (and
           // inside one floor), which no acknowledgement-side refusal can undo once the nudge is sent (Diego cycle 3,
           // P2-1). What arrived since stays due, and is the next wake after this one is consumed.
+          // #2069: but a reason that fell due AFTER the outstanding wake was issued (a tick, a task event) is not "what
+          // arrived since" to wait on a consumer that may never come: an unacknowledged MENTION wake would otherwise hide
+          // every later TICK and TASK for as long as it stays outstanding (a dark team). The reservation is rewritten to
+          // the current wake: still ONE reservation and ONE slot for the worker, and the old proof still acknowledges
+          // exactly what it names.
+          if (absorbsNewReason(have.wake, i.wake)) {
+            reserve.push({ workerId: i.workerId, key: wakeIdentity(identityOf(i.wake)), wake: i.wake });
+            passes(i);
+            continue;
+          }
           if (have.wake_key !== wakeIdentity(identityOf(i.wake))) {
             i.wake = have.wake;
             i.exempt = have.wake.exempt;
