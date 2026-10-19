@@ -297,6 +297,21 @@ describe('#2089 child withholding for the newly admitted reader', () => {
     }
   });
 
+  it('withholds the children from any non-owner who reaches the App by an outer-object path (Ticker.app, AppGrant.app, Worker.app)', async () => {
+    // These resolvers hand the App over on the strength of the OUTER object's
+    // admission and are deliberately not widened by #2089; the child guard is
+    // what keeps a participant who gets the App this way from its roster.
+    const R = resolvers as any;
+    for (const reach of [
+      () => R.Ticker.app({ appId: app.id }, {}, as(cook.id)),
+      () => R.AppGrant.app({ appId: app.id }, {}, as(cook.id)),
+    ]) {
+      const got = await reach();
+      expect(got?.id).toBe(app.id);
+      for (const f of WITHHELD) expect(await App[f](got, {}, as(cook.id)), f).toBeNull();
+    }
+  });
+
   it('never exposes the stored key material through any field the admitted reader can call', async () => {
     const out = JSON.stringify(await readChildren(await eager(as(boss.id)), as(boss.id)));
     expect(out).not.toContain('ciphertext-not-a-real-key');
