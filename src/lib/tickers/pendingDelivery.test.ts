@@ -96,7 +96,7 @@ describe('complete metadata-only pending enumeration', () => {
     await db.channelReadState.create({ data: { workerId, channelId, lastSeenSeq: 1 } });
     await db.workerDeliveryChannel.create({ data: { workerId, channelId, channelIncarnation: 1, deliveredThroughSeq: 2, deliveredAt: posted } });
     expect((await enumerate()).items.map((m: any) => m.seq)).toEqual([6]);
-    await db.channelReadState.update({ where: { workerId_channelId: { workerId, channelId } }, data: { lastSeenSeq: 6 } });
+    await db.channelReadState.updateMany({ where: { workerId, channelId }, data: { lastSeenSeq: 6 } });
     expect((await enumerate()).items).toEqual([]);
   });
   it('a stale delivery incarnation does not hide the current occupancy', async () => {
@@ -180,6 +180,7 @@ describe('complete metadata-only pending enumeration', () => {
   it('a cursor position cannot substitute another worker into a forced self selection', async () => {
     const other = await addWorker(23, 'Other'); await messages(3, { mentions: ['all'], broadcastWakes: true });
     const page = await enumerate({ hostId: null, workerIds: [workerId], first: 1 });
+    await expect(enumerate({ hostId: null, workerIds: [workerId,workerId], first: 1, after: page.nextAfter })).rejects.toThrow(/exactly one worker/);
     const cursor = JSON.parse(Buffer.from(page.nextAfter!, 'base64url').toString('utf8'));
     cursor.workerId = other.id;
     const forged = Buffer.from(JSON.stringify(cursor)).toString('base64url');
