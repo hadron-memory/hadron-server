@@ -5,7 +5,7 @@ const path = './renderBatch.js';
 const render = async (input: Record<string, unknown>) => (await import(/* @vite-ignore */ path)).renderBatch(input);
 const msg = (seq: number, extra: Record<string, unknown> = {}) => ({
   channelId: 'channel-a', seq, createdAt: new Date(1_700_000_000_000 + seq * 1000),
-  authorName: 'Ada', body: `body-${seq}`, parentSeq: null, mentions: [], ...extra,
+  authorName: 'Ada', body: `body-${seq}`, parentSeq: null, parent: null, mentions: [], ...extra,
 });
 const input = (messages: ReturnType<typeof msg>[], extra = {}) => ({ workerName: 'Liam', messages, ...extra });
 
@@ -31,11 +31,12 @@ describe('renderBatch — S1 shared pure renderer', () => {
     expect(out.text.indexOf('#2 Ada')).toBeLessThan(out.text.indexOf('#3 Ada'));
     expect(out.text.indexOf('#3 Ada')).toBeLessThan(out.text.indexOf('#8 Ada'));
   });
-  it('renders 10 messages and leaves the 11th due with the exact final marker', async () => {
+  it('renders 10 messages and leaves the 11th due with overflow before the last reply hint', async () => {
     const out = await render(input(Array.from({ length: 11 }, (_, i) => msg(i + 1))));
     expect(out.renderedCount).toBe(10);
     expect(out.overflow).toBe(1);
-    expect(out.text).toMatch(/\[\+1 more, next batch\]$/);
+    expect(out.text).toContain('+1 more waiting · read: hadron team chat inbox');
+    expect(out.text).toMatch(/reply: hadron team chat post --reply-to <seq> "@name …"$/);
     expect(out.text).not.toContain('body-11');
     expect(out.ranges).toEqual([{ channelId: 'channel-a', fromSeq: 1, throughSeq: 10, seqs: [1,2,3,4,5,6,7,8,9,10] }]);
   });
@@ -43,14 +44,12 @@ describe('renderBatch — S1 shared pure renderer', () => {
     const out = await render(input(Array.from({ length: 10 }, (_, i) => msg(i + 1))));
     expect(out.renderedCount).toBe(10); expect(out.overflow).toBe(0);
   });
-  it('counts the formatted delivery at the 6000/6001 character boundary', async () => {
-    const baseline = await render(input([msg(1), msg(2, { body: 'x' })]));
-    const fill = 'x'.repeat(6000 - baseline.text.length + 1);
-    const exact = await render(input([msg(1), msg(2, { body: fill })]));
-    expect(exact.text.length).toBe(6000); expect(exact.renderedCount).toBe(2);
-    const over = await render(input([msg(1), msg(2, { body: fill + 'x' })]));
+  it('counts message body text only at 6000/6001, excluding header, hint and overflow', async () => {
+    const exact = await render(input([msg(1, { body: 'x'.repeat(3000) }), msg(2, { body: 'y'.repeat(3000) })]));
+    expect(exact.renderedCount).toBe(2); expect(exact.text.length).toBeGreaterThan(6000);
+    const over = await render(input([msg(1, { body: 'x'.repeat(3000) }), msg(2, { body: 'y'.repeat(3001) })]));
     expect(over.renderedCount).toBe(1); expect(over.overflow).toBe(1);
-    expect(over.text.length).toBeLessThanOrEqual(6000);
+    expect(over.ranges[0].seqs).toEqual([1]);
   });
   it('renders an oversized first message whole and alone, preserving the remainder', async () => {
     const body = 'long '.repeat(1500);
@@ -82,6 +81,40 @@ describe('renderBatch — S1 shared pure renderer', () => {
     const out = await render({ workerName: 'Li\nam', messages: [msg(1, { authorName: 'A\r\nda', body: 'one\ntwo\rthree\u2028four\u2029five' })] });
     expect(out.text).not.toMatch(/[\r\n\u2028\u2029]/);
     expect(out.text).toContain('one two three four five');
+  });
+  it('collapses replies to the same parent into one entry, counting each child and ordering children by seq', async () => {
+    const out = await render(input([
+      msg(9, { parentSeq: 4, body: 'child-nine', createdAt: new Date(1) }),
+      msg(7, { parentSeq: 4, body: 'child-seven', createdAt: new Date(2) }),
+    ]));
+    expect(out.renderedCount).toBe(2);
+    expect(out.text.match(/re #4/g)).toHaveLength(1);
+    expect(out.text.indexOf('child-seven')).toBeLessThan(out.text.indexOf('child-nine'));
+    expect(out.ranges[0]).toEqual({ channelId: 'channel-a', fromSeq: 7, throughSeq: 9, seqs: [7,9] });
+  });
+  it('never collapses same-parent-seq replies from different channels', async () => {
+    const out = await render(input([msg(5, { parentSeq: 1 }), msg(5, { channelId: 'channel-b', parentSeq: 1 })]));
+    expect(out.text.match(/re #1/g)).toHaveLength(2);
+    expect(out.renderedCount).toBe(2); expect(out.ranges).toHaveLength(2);
+  });
+  it('uses only supplied parent metadata, flattens it and limits the excerpt to 80 characters', async () => {
+    const excerpt = 'p'.repeat(80);
+    const out = await render(input([msg(5, { parentSeq: 1, parent: { seq: 1, authorName: 'Gil\nHead', excerpt: excerpt + 'SECRET-TAIL' } })]));
+    expect(out.text).toContain('(re #1 Gil Head: "' + excerpt + '")');
+    expect(out.text).not.toContain('SECRET-TAIL');
+    expect(out.renderedCount).toBe(1); expect(out.ranges[0].seqs).toEqual([5]);
+  });
+  it('uses a seq-only stub when the loader provides no parent metadata', async () => {
+    const out = await render(input([msg(5, { parentSeq: 1, parent: null })]));
+    expect(out.text).toContain('(re #1)');
+    expect(out.text).not.toContain('undefined');
+  });
+  it('exports the sole overflow command and fixed final reply hint', async () => {
+    const module = await import(/* @vite-ignore */ path);
+    expect(module.OVERFLOW_READ_COMMAND).toBe('hadron team chat inbox');
+    expect(module.REPLY_HINT).toBe('reply: hadron team chat post --reply-to <seq> "@name …"');
+    const out = module.renderBatch(input([msg(1), msg(2)], { maxMessages: 1 }));
+    expect(out.text.endsWith(module.REPLY_HINT)).toBe(true);
   });
   it('hashes the actual UTF-8 text, stable across shuffled inputs and sensitive to body changes', async () => {
     const out = await render(input([msg(2), msg(1)]));
