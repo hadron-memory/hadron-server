@@ -56,6 +56,8 @@ export interface NodeForGit {
   /** Required so every incremental producer decides the server-set marker. */
   isPlaceholder: boolean;
   outgoingEdges: Array<{
+    /** `INCLUDE` edges are derived from content and never mirrored (#2040). */
+    governedKind?: string | null;
     target: { id: string; loc?: string | null };
     name: string | null;
     /** The edge's own loc (spec 037), emitted as `edgeLoc`. A scalar column on
