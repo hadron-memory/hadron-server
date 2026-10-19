@@ -12,7 +12,7 @@ import { createCeremony, consumeCeremony } from './ceremony.js';
 
 beforeEach(async () => { await cleanDb(db); });
 
-const input = { purpose: 'SIGN_IN', browserNonceHash: 'a'.repeat(64), ttlSeconds: 300 } as const;
+const input = { purpose: 'SIGN_IN', browserNonceHash: 'a'.repeat(64), ttlSeconds: 300, challengeHash: 'b'.repeat(64) } as const;
 
 describe('#1631 ceremony state', () => {
   it('is single-use: a replay of a consumed ceremony is refused', async () => {

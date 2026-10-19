@@ -14,13 +14,17 @@ export type CeremonyPurpose = 'SIGN_IN' | 'STEP_UP_ONLY';
 /** Open a ceremony for the browser identified by `browserNonceHash`. */
 export async function createCeremony(
   tx: Prisma.TransactionClient,
-  input: { purpose: CeremonyPurpose; browserNonceHash: string; ttlSeconds: number; challengeHash?: string; challengeIsId?: boolean },
+  input: { purpose: CeremonyPurpose; browserNonceHash: string; ttlSeconds: number } & ({ challengeHash: string } | { challengeIsId: true }),
 ): Promise<{ id: string }> {
   if (!/^[0-9a-f]{64}$/.test(input.browserNonceHash)) throw new Error('browser nonce hash must be 64 lowercase hex');
   if (!Number.isInteger(input.ttlSeconds) || input.ttlSeconds < 1) throw new Error('ttlSeconds must be a positive integer');
   const id = randomBytes(32).toString('base64url');
   // challengeIsId: the challenge is the id's own random bytes, so the server stores only its hash.
-  const challengeHash = input.challengeIsId ? createHash('sha256').update(Buffer.from(id, 'base64url')).digest('hex') : input.challengeHash ?? null;
+  const bound = 'challengeIsId' in input && input.challengeIsId ? createHash('sha256').update(Buffer.from(id, 'base64url')).digest('hex')
+    : 'challengeHash' in input ? input.challengeHash : undefined;
+  // A ceremony without a challenge binding could be consumed by an assertion over ANY challenge: refuse to mint one.
+  if (!bound || !/^[0-9a-f]{64}$/.test(bound)) throw new Error('a ceremony must be bound to its challenge (64 lowercase hex)');
+  const challengeHash = bound;
   await tx.$executeRaw`INSERT INTO passkey_ceremonies (id, purpose, browser_nonce_hash, challenge_hash, expires_at)
     VALUES (${id}, ${input.purpose}, ${input.browserNonceHash}, ${challengeHash},
             (clock_timestamp() AT TIME ZONE 'UTC') + make_interval(secs => ${input.ttlSeconds}))`;
@@ -119,7 +123,8 @@ export async function decideCeremonyAssertion(
   const bound = await tx.$queryRaw<Array<{ challenge_hash: string | null }>>`
     SELECT challenge_hash FROM passkey_ceremonies WHERE id = ${d.ceremonyId} FOR UPDATE`;
   if (bound.length !== 1) return null;
-  if (bound[0].challenge_hash !== null && bound[0].challenge_hash !== v.challengeHash) return null;
+  // Fail closed: a ceremony with no recorded challenge binding never matches (and is never consumed here).
+  if (bound[0].challenge_hash === null || bound[0].challenge_hash !== v.challengeHash) return null;
   if (!(await consumeCeremony(tx, { id: d.ceremonyId, browserNonceHash: d.browserNonceHash, purpose: d.purpose }))) return null;
   await tx.$executeRaw`UPDATE passkey_credentials
      SET last_used_at = GREATEST(COALESCE(last_used_at, registered_at), (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3)),

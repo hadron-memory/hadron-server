@@ -3,7 +3,7 @@ CREATE TABLE "passkey_ceremonies" (
     "id" TEXT NOT NULL,
     "purpose" TEXT NOT NULL,
     "browser_nonce_hash" TEXT NOT NULL,
-    "challenge_hash" TEXT,
+    "challenge_hash" TEXT NOT NULL,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
     "expires_at" TIMESTAMP(3) NOT NULL,
     "consumed_at" TIMESTAMP(3),

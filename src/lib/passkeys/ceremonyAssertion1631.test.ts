@@ -35,7 +35,7 @@ const verify = (a: ReturnType<typeof answer>, expected: Buffer, over: { rpId?: s
   verifyCeremonyAssertion({ assertion: a, credential: credential(over.counter), expectedChallenge: expected, rpId: over.rpId ?? RP, origins: over.origins ?? [ORIGIN] });
 /** Verify (outside the write tx) then decide in the caller's tx, passing the verified snapshot. */
 const decide = async (ceremonyId: string, over: { browserNonceHash?: string; purpose?: 'SIGN_IN' | 'STEP_UP_ONLY'; counter?: number; snapshot?: Record<string, unknown> } = {}) => {
-  const c = challenge();
+  const c = issued.get(ceremonyId) ?? challenge();
   const stored = (await db.passkeyCredential.findUniqueOrThrow({ where: { id: passkeyId } })).counter;
   const { snapshot } = await verify(answer(c.seed, { counter: over.counter ?? 1 }), c.expected, { counter: stored });
   return db.$transaction((tx) => decideCeremonyAssertion(tx, {
@@ -43,7 +43,14 @@ const decide = async (ceremonyId: string, over: { browserNonceHash?: string; pur
     verified: { ...snapshot, ...over.snapshot },
   }));
 };
-const open = async (challengeHash?: string) => (await db.$transaction((tx) => createCeremony(tx, { purpose: 'SIGN_IN', browserNonceHash: NONCE, ttlSeconds: 300, challengeHash }))).id;
+const issued = new Map<string, ReturnType<typeof challenge>>();
+/** Open a ceremony with a server-issued challenge bound to it (decide requires the binding). */
+const open = async () => {
+  const c = challenge();
+  const id = (await db.$transaction((tx) => createCeremony(tx, { purpose: 'SIGN_IN', browserNonceHash: NONCE, ttlSeconds: 300, challengeHash: sha(c.expected) }))).id;
+  issued.set(id, c);
+  return id;
+};
 
 describe('verifyCeremonyAssertion (pure crypto)', () => {
   it('accepts a UV webauthn.get over the issued challenge and returns the counter', async () => {
@@ -123,7 +130,7 @@ describe('decideCeremonyAssertion (deciding transaction)', () => {
 
   it('rolls back with the caller: a later refusal leaves the ceremony and counter untouched', async () => {
     const id = await open();
-    const c = challenge();
+    const c = issued.get(id)!;
     const { snapshot } = await verify(answer(c.seed, { counter: 1 }), c.expected);
     await expect(db.$transaction(async (tx) => {
       expect(await decideCeremonyAssertion(tx, { ceremonyId: id, browserNonceHash: NONCE, purpose: 'SIGN_IN', verified: snapshot })).not.toBeNull();
@@ -142,8 +149,8 @@ describe('decideCeremonyAssertion (deciding transaction)', () => {
   });
 
   it('refuses a snapshot whose challenge is not the one issued for the ceremony', async () => {
-    const c = challenge();
-    const id = await open(sha(c.expected));
+    const id = await open();
+    const c = issued.get(id)!;
     const other = challenge();
     const wrong = await verify(answer(other.seed, { counter: 1 }), other.expected);
     expect(await db.$transaction((tx) => decideCeremonyAssertion(tx, { ceremonyId: id, browserNonceHash: NONCE, purpose: 'SIGN_IN', verified: wrong.snapshot }))).toBeNull();
@@ -152,7 +159,7 @@ describe('decideCeremonyAssertion (deciding transaction)', () => {
   });
 
   it('judges expiry at the moment of consuming, not at the caller transaction start (a lock wait can cross it)', async () => {
-    const id = (await db.$transaction((tx) => createCeremony(tx, { purpose: 'SIGN_IN', browserNonceHash: NONCE, ttlSeconds: 1 }))).id;
+    const id = (await db.$transaction((tx) => createCeremony(tx, { purpose: 'SIGN_IN', browserNonceHash: NONCE, ttlSeconds: 1, challengeIsId: true }))).id;
     const c = challenge();
     const { snapshot } = await verify(answer(c.seed, { counter: 1 }), c.expected);
     const decided = await db.$transaction(async (tx) => {
@@ -164,5 +171,15 @@ describe('decideCeremonyAssertion (deciding transaction)', () => {
     const [row] = await db.$queryRaw<Array<{ consumed_at: Date | null }>>`SELECT consumed_at FROM passkey_ceremonies WHERE id = ${id}`;
     expect(row.consumed_at).toBeNull();
     expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: passkeyId } })).counter).toBe(0n);
+  });
+
+  it('the table itself refuses a ceremony with no challenge binding (so decide never meets one)', async () => {
+    const id = randomBytes(32).toString('base64url');
+    await expect(db.$executeRaw`INSERT INTO passkey_ceremonies (id, purpose, browser_nonce_hash, expires_at)
+      VALUES (${id}, 'SIGN_IN', ${NONCE}, (clock_timestamp() AT TIME ZONE 'UTC') + interval '5 minutes')`).rejects.toThrow();
+  });
+
+  it('refuses to create a ceremony with no challenge binding', async () => {
+    await expect(db.$transaction((tx) => createCeremony(tx, { purpose: 'SIGN_IN', browserNonceHash: NONCE, ttlSeconds: 60 } as never))).rejects.toThrow();
   });
 });
