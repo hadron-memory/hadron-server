@@ -252,6 +252,29 @@ describe('#2069 — an outstanding wake absorbs reasons that fall due later', ()
     expect(ids(await due(ctx(manager.id)))).toEqual([]);
   });
 
+  it('one allowance: the old proof then the new one charge the day once, in either order', async () => {
+    for (const oldFirst of [true, false]) {
+      await db.$executeRaw`DELETE FROM app_wake_days`;
+      await db.$executeRaw`DELETE FROM app_wake_reservations`;
+      await db.workerDeliveryChannel.deleteMany({});
+      await db.workerDeliveryTick.deleteMany({});
+      await db.tickerSubscription.deleteMany({});
+      await db.ticker.deleteMany({});
+      await say(channel, `for you ${oldFirst}`, mention('liam'));
+      const first = (await due(ctx(manager.id))).wakes[0];
+      const t = await mkTicker();
+      await subscribe(t.id, liam.id);
+      const union = (await due(ctx(manager.id))).wakes[0];
+      expect(kinds(union)).toEqual(['MENTION', 'TICK']);
+      const order = oldFirst ? [first, union] : [union, first];
+      for (const w of order) await M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(manager.id));
+      const days = await db.$queryRaw<Array<{ wakes: number }>>`SELECT sum(wakes)::int AS wakes FROM app_wake_days`;
+      expect(days[0]!.wakes).toBe(1);
+      const left = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*)::bigint n FROM app_wake_reservations WHERE worker_id = ${liam.id}`;
+      expect(Number(left[0]!.n)).toBe(0);
+    }
+  });
+
   it('the OLD proof, acknowledged first, clears only the mention; the tick stays due', async () => {
     await say(channel, 'for you', mention('liam'));
     const first = (await due(ctx(manager.id))).wakes[0];
