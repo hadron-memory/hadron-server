@@ -2746,8 +2746,10 @@ export const typeDefs = `#graphql
     installedAgentUrn: String
     trainingMode: Boolean!
     surfaces: [String!]!
-    members: [AppMember!]!
-    memberCount: Int!
+    "The App's members. null means WITHHELD from this caller (#2089): a user-owned App's owner-role member reaches the App record but not its roster. Never read null as an empty roster. The App's owning user, and callers of an org-owned App, get the real list (a real empty list included)."
+    members: [AppMember!]
+    "Member count. null means WITHHELD from this caller (#2089), never zero; the real count (a real 0 included) for callers who may see the roster."
+    memberCount: Int
     """
     The App's SHARED app-class memory (#965) — the team space the shared/team
     chat and the worklog live in, provisioned at install since #951. This is
@@ -2772,7 +2774,8 @@ export const typeDefs = `#graphql
     # reads of the App's config named 'default' (legacy columns dropped).
     aiProvider: String
     aiModel: String
-    hasAiApiKey: Boolean!
+    "Whether an AI API key is configured for this App. null means WITHHELD from this caller (#2089): only the owning user of a user-owned App holds its AI configuration. Never read null as false; a real false means no key."
+    hasAiApiKey: Boolean
     expiresAt: DateTime
     # App-original fields
     createUserPermission: CreateUserPermission!
@@ -2797,14 +2800,16 @@ export const typeDefs = `#graphql
     N:M join. Multiple Agents can be installed; one App credential
     routes to all of them via the URN supplied in the request.
     """
-    appAgents: [AppAgent!]!
+    "null means WITHHELD from this caller (#2089): a user-owned App's owner-role member does not see its installation roster. Never read null as no installed Agents."
+    appAgents: [AppAgent!]
     """
     023-app-shape: convenience that returns every installed Agent
     (equivalent to App.appAgents.map(aa => aa.agent)). Previously was
     a soft-deprecated single-element synthesis; now returns the FULL
     multi-Agent set per spec 023 US1.
     """
-    agents: [Agent!]!
+    "null means WITHHELD from this caller (#2089), never no Agents."
+    agents: [Agent!]
     keys: [AppKey!]!
     createdAt: DateTime!
     updatedAt: DateTime

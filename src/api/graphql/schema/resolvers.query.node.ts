@@ -72,6 +72,7 @@ import {
   isAppParticipant,
   resolveAppTeamSpaceMemoryIds,
   isOwnerOrOrgMember,
+  canReadApp,
   canReadMemoryRecord,
   getAccessibleMemoryIds,
   memoryAccessFilter,
@@ -500,7 +501,7 @@ export const nodeQueries = {
           }
           const app = await ctx.db.app.findUnique({
             where: { id },
-            select: { organizationId: true, ownerUserId: true },
+            select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true },
           });
           if (!app) return null;
           // The dedicated app(ref:) query admits any member of the App's org
@@ -509,7 +510,8 @@ export const nodeQueries = {
           // already open directly. isOwnerOrOrgMember covers the
           // global-admin bypass, the App's owner-user, and the
           // revoked-membership (deletedAt) rule.
-          if (!(await isOwnerOrOrgMember(ctx, app))) return null;
+          // #2089: plus a current owner-role member of a user-owned App.
+          if (!(await canReadApp(ctx, app))) return null;
           return { kind: 'app', id, organizationId: app.organizationId };
         }
         case 'user': {

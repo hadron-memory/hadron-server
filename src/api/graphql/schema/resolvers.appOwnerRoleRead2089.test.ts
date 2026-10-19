@@ -192,9 +192,9 @@ describe('#2089 list admission — Query.apps', () => {
 
 describe('#2089 URN resolution', () => {
   it('resolves the App for the owner-role member and answers null otherwise', async () => {
-    expect(await Q.resolveUrn(null, { urn: app.urn }, as(boss.id))).toMatchObject({ kind: 'app', id: app.id });
-    expect(await Q.resolveUrn(null, { urn: app.urn }, as(cook.id))).toBeNull();
-    expect(await Q.resolveUrn(null, { urn: app.urn }, as(stranger.id))).toBeNull();
+    expect(await Q.resolveUrn(null, { urn: `hrn:app:${app.urn}` }, as(boss.id))).toMatchObject({ kind: 'app', id: app.id });
+    expect(await Q.resolveUrn(null, { urn: `hrn:app:${app.urn}` }, as(cook.id))).toBeNull();
+    expect(await Q.resolveUrn(null, { urn: `hrn:app:${app.urn}` }, as(stranger.id))).toBeNull();
   });
 });
 

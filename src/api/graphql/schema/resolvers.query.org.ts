@@ -36,7 +36,7 @@ import {
   canOpenMemoryRecordById,
   isMemoryReadableCached,
   isAuthorizationDenial,
-  requireOwnerOrOrgRole,
+  requireAppRead,
 } from './resolvers.helpers.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
@@ -66,7 +66,7 @@ async function callerCanOpenResource(ctx: Context, resolved: ResolvedResource): 
         // — not the query itself, whose resolution step swallows EVERY error
         // into null and would turn an outage into "not found" (@codex /
         // @copilot, PR #1383).
-        await requireOwnerOrOrgRole(ctx, resolved.app, 'READER');
+        await requireAppRead(ctx, resolved.app);
         return resolved.app;
       case 'agent':
         return agentQueries.agent(null as never, { ref: resolved.agent.id }, ctx);
