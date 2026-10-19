@@ -1315,7 +1315,9 @@ model Node {
   /// holds the principal (the NodeRevision.editedByInfo convention).
   /// `approvalHash` is the full SHA-256 of approval hash v1
   /// (src/lib/approvalHash.ts) at approval time. All five are set together or
-  /// not at all (chk_node_approval_complete).
+  /// not at all (chk_node_approval_complete), except that `approvalHash` alone is
+  /// cleared when the node enters an encrypted memory (#1838): who, when and which
+  /// revision stay, and a hashless approval covers nothing.
   approvedRevNo      Int?      @map("approved_rev_no")
   approvedBy         String?   @map("approved_by")
   approvedByInfo     String?   @map("approved_by_info")
@@ -1564,6 +1566,8 @@ model Edge {
 enum EdgeGovernedKind {
   COMMENT_ANCHOR
   COMMENT_REPLY
+  /// Derived from an include tag in the source node's content (#2040); owned by the content writer, never by a client.
+  INCLUDE
 }
 
 /// #1606 — a comment thread's state (`cor:dmo:110:05`); top-level only.

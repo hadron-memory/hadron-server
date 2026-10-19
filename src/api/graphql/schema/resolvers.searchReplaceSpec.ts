@@ -37,7 +37,9 @@ import {
   type Context,
   requireMemoryWriteAccess,
   concealUnreadableDenial,
+  getAccessibleMemoryIds,
 } from './resolvers.helpers.js';
+import { assertIncludesWritable, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 
 export interface SpecSearchReplaceInput {
   memoryRef: string;
@@ -354,6 +356,7 @@ export async function searchReplaceInSpecNodes(
     return preview.result;
   }
 
+  let readableForIncludes: string[] | null = null;
   const applied = await ctx.db.$transaction(async (tx) => {
     // Channel creation takes this memory key. Lock every selected Node before
     // the Memory row: ordinary node writers take Node then Memory FOR SHARE.
@@ -395,6 +398,13 @@ export async function searchReplaceInSpecNodes(
       data.revisionContentHash = revisionStateHashRefreshMarker();
       Object.assign(data, clearNodeAuthorship());
       await tx.node.update({ where: { id: node.raw.id }, data });
+      // #2040 — a content rewrite re-checks its include tags inside the batch.
+      if (node.contentChanged) {
+        const text = node.plaintext.content;
+        readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+        const tags = await assertIncludesWritable(tx, node.raw, text, readableForIncludes);
+        await syncDerivedIncludesEdges(tx, node.raw, tags, readableForIncludes);
+      }
     }
     return current;
   }, { timeout: 120_000 });

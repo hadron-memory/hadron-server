@@ -379,3 +379,12 @@ describe('#2102 Dara P2-3: freshness is re-checked when the marks are written, n
     expect(await mark(chA)).toBe(seq);
   });
 });
+
+it('a requester-only alteration preserves batch shape/key but cannot keep the original signature', async () => {
+  const p = proofFor([range(chA, [1, 2])]);
+  const [, sig] = signBatchProof(p).split('.');
+  const altered = { ...p, requester: { appKeyId: 'other-requester' } };
+  expect(altered.batchKey).toBe(p.batchKey);
+  const body = Buffer.from(JSON.stringify(altered)).toString('base64url');
+  expect(await code(() => verifyBatchProof(`${body}.${sig}`))).toBe('WAKE_PROOF_INVALID');
+});
