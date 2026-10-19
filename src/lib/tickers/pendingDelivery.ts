@@ -5,7 +5,8 @@
 import { createHash } from 'node:crypto';
 import { Prisma } from '../../generated/prisma/index.js';
 import { batchTiming, loadDeliverySettings } from './batchTiming.js';
-import { loadDeliveryEligibility, type DeliverySelectionArgs, type EligibleDeliveryWorker } from './deliveryBatch.js';
+import { loadDeliveryEligibility, loadEvaluatorEligibility, type DeliverySelectionArgs, type EligibleDeliveryWorker, type EvaluatorSelectionArgs } from './deliveryBatch.js';
+import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 
 export type PendingDeliveryItem = {
   workerId: string; channelId: string; incarnation: number; seq: number; dueSince: Date;
@@ -21,13 +22,45 @@ const invalidCursor = (): never => { throw new Error('Invalid after cursor for p
 
 export async function enumeratePendingDelivery(args: PendingDeliveryArgs): Promise<PendingDeliveryPage> {
   if (args.hostId === null && args.workerIds?.length !== 1) throw new Error('self mode selects exactly one worker');
+  return enumerateWith({
+    db: args.ctx.db, appId: args.app.id, now: args.now, first: args.first, after: args.after, workerIds: args.workerIds,
+    mode: args.hostId === null ? 'self' : 'host',
+    scopeParts: [args.hostId, args.ctx.userId ?? null, args.ctx.appKeyId ?? null, args.ctx.sessionId ?? null],
+    load: (over) => loadDeliveryEligibility({ ...args, ...over }),
+  });
+}
+
+/** The platform evaluator's pending metadata (S5/S13): see {@link loadEvaluatorEligibility}. In-process only; metadata only.
+ * `uncoveredWorkerIds` are workers nobody holds: they are NOT read, so a caller must not certify whole-worker coverage while any
+ * is listed. */
+export async function enumeratePendingForEvaluator(args: EvaluatorSelectionArgs & { now: Date }): Promise<PendingDeliveryPage & { uncoveredWorkerIds: string[] }> {
+  const uncovered = new Set<string>();
+  const page = await enumerateWith({
+    db: args.db, appId: args.app.id, now: args.now, first: args.first, after: args.after, workerIds: args.workerIds,
+    mode: 'evaluator', scopeParts: [],
+    load: async (over) => {
+      const r = await loadEvaluatorEligibility({ db: args.db, app: args.app, workerIds: over.workerIds ?? args.workerIds, first: over.first, after: over.after });
+      for (const id of r.uncoveredWorkerIds) uncovered.add(id);
+      return r;
+    },
+  });
+  return { ...page, uncoveredWorkerIds: [...uncovered].sort() };
+}
+
+type EnumerateCore = {
+  db: Context['db']; appId: string; now: Date; first?: number | null; after?: string | null; workerIds?: string[] | null;
+  mode: 'host' | 'self' | 'evaluator'; scopeParts: unknown[];
+  load: (over: { now?: Date; workerIds?: string[] | null; first?: number | null; after?: string | null }) => Promise<{ workers: EligibleDeliveryWorker[]; nextAfter: string | null }>;
+};
+
+async function enumerateWith(args: EnumerateCore): Promise<PendingDeliveryPage> {
   const now = args.now;
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new Error('Invalid pending delivery now.');
   if (args.first != null && !Number.isSafeInteger(args.first)) throw new Error('Invalid pending delivery first.');
   const first = Math.min(PENDING_DELIVERY_PAGE_MAX, Math.max(1, args.first ?? PENDING_DELIVERY_PAGE_DEFAULT));
+  // The cursor is a scoped position, never authority: it binds the mode, the App, the selection and the same now.
   const scope = createHash('sha256').update(JSON.stringify([
-    args.app.id, args.hostId, args.workerIds == null ? null : [...new Set(args.workerIds)].sort(), now.getTime(),
-    args.ctx.userId ?? null, args.ctx.appKeyId ?? null, args.ctx.sessionId ?? null,
+    args.mode, args.appId, args.workerIds == null ? null : [...new Set(args.workerIds)].sort(), now.getTime(), ...args.scopeParts,
   ])).digest('hex');
   let cursor: Cursor | null = null;
   if (args.after) {
@@ -47,11 +80,11 @@ export async function enumeratePendingDelivery(args: PendingDeliveryArgs): Promi
   let settings: Awaited<ReturnType<typeof loadDeliverySettings>> | undefined;
   const consume = async (worker: EligibleDeliveryWorker, after: Cursor | null) => {
     if (!worker.channels.length) return;
-    settings ??= await loadDeliverySettings(args.ctx.db, args.app.id);
+    settings ??= await loadDeliverySettings(args.db, args.appId);
     // Timing is anchored on the oldest eligible post of the whole worker, even when resuming mid-channel/page.
     let oldest: Date | null = null;
     for (const channel of worker.channels) {
-      const rows = await args.ctx.db.$queryRaw<Array<{ oldest: Date | null }>>(Prisma.sql`
+      const rows = await args.db.$queryRaw<Array<{ oldest: Date | null }>>(Prisma.sql`
         SELECT MIN(n.created_at) AS oldest FROM nodes n WHERE ${channel.predicate}`);
       const at = rows[0]?.oldest;
       if (at && (!oldest || at < oldest)) oldest = at;
@@ -62,7 +95,7 @@ export async function enumeratePendingDelivery(args: PendingDeliveryArgs): Promi
       if (after && compare(channel.channelId, after.channelId) < 0) continue;
       if (after && channel.channelId === after.channelId && channel.incarnation !== after.incarnation) invalidCursor();
       const floor = after && channel.channelId === after.channelId ? Prisma.sql`AND n.seq > ${after.seq}` : Prisma.empty;
-      const rows = await args.ctx.db.$queryRaw<Array<{ seq: number; posted_at: Date }>>(Prisma.sql`
+      const rows = await args.db.$queryRaw<Array<{ seq: number; posted_at: Date }>>(Prisma.sql`
         SELECT n.seq::int AS seq, n.created_at AS posted_at
         FROM nodes n WHERE ${channel.predicate} ${floor}
         ORDER BY n.seq LIMIT ${first + 1 - items.length}`);
@@ -72,12 +105,12 @@ export async function enumeratePendingDelivery(args: PendingDeliveryArgs): Promi
     }
   };
   if (cursor) {
-    const resumed = await loadDeliveryEligibility({ ...args, now, workerIds: [cursor.workerId], first: 1, after: null });
+    const resumed = await args.load({ now, workerIds: [cursor.workerId], first: 1, after: null });
     for (const worker of resumed.workers) await consume(worker, cursor);
   }
   let afterWorker = cursor?.workerId ?? null;
   while (items.length <= first) {
-    const page = await loadDeliveryEligibility({ ...args, now, first: 200, after: afterWorker });
+    const page = await args.load({ now, first: 200, after: afterWorker });
     for (const worker of page.workers) {
       await consume(worker, null);
       if (items.length > first) break;

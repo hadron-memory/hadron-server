@@ -188,3 +188,45 @@ describe('complete metadata-only pending enumeration', () => {
   });
 
 });
+
+describe('platform evaluator selection (S5/S13, #2021): in-process, metadata only', () => {
+  const evaluate = async (extra: Record<string, unknown> = {}) => {
+    const { enumeratePendingForEvaluator } = await import('./pendingDelivery.js');
+    return enumeratePendingForEvaluator({ db, app, now, first: 1000, ...extra } as any);
+  };
+
+  it('reads a held worker with no host key, no session and no host registration, and returns metadata only', async () => {
+    await db.hostRegistrationWorker.deleteMany({});
+    await messages(3);
+    const page = await evaluate();
+    expect(page.items.map((m: any) => m.seq)).toEqual([1, 2, 3]);
+    expect(page.uncoveredWorkerIds).toEqual([]);
+    for (const m of page.items) expect(Object.keys(m).sort()).toEqual(['channelId', 'dueSince', 'incarnation', 'seq', 'state', 'withheldReason', 'workerId']);
+  });
+
+  it('never reads a worker nobody holds through the App alone: it is listed as uncovered, so coverage cannot be certified', async () => {
+    await db.worker.update({ where: { id: workerId }, data: { heldByUserId: null, heldAt: null } });
+    await messages(2);
+    const page = await evaluate();
+    expect(page.items).toEqual([]);
+    expect(page.uncoveredWorkerIds).toEqual([workerId]);
+  });
+
+  it('omits an encrypted channel without a trace', async () => {
+    await messages(2);
+    await db.memory.update({ where: { id: id(6) }, data: { isEncrypted: true } });
+    const page = await evaluate();
+    expect(page.items).toEqual([]);
+  });
+
+  it('binds its cursor to the mode: a host-mode cursor is refused in evaluator mode and the reverse', async () => {
+    await messages(5);
+    const host = await enumerate({ first: 2 });
+    expect(host.nextAfter).not.toBeNull();
+    await expect(evaluate({ first: 2, after: host.nextAfter })).rejects.toThrow('Invalid after cursor');
+    const ev = await evaluate({ first: 2 });
+    expect(ev.nextAfter).not.toBeNull();
+    await expect(enumerate({ first: 2, after: ev.nextAfter })).rejects.toThrow('Invalid after cursor');
+    await expect(evaluate({ first: 2, after: ev.nextAfter, now: new Date(now.getTime() + 1000) })).rejects.toThrow('Invalid after cursor');
+  });
+});

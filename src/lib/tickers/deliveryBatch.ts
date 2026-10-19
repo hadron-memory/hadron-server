@@ -72,8 +72,6 @@ export type EligibleDeliveryWorker = { workerId: string; workerName: string; cha
 export async function loadDeliveryEligibility(args: DeliverySelectionArgs): Promise<{ workers: EligibleDeliveryWorker[]; nextAfter: string | null }> {
   const { ctx, app, hostId } = args;
   const db = ctx.db;
-  const first = Math.min(Math.max(args.first ?? DELIVERY_BATCHES_PAGE_DEFAULT, 1), DELIVERY_BATCHES_PAGE_MAX);
-
   let registrationId: string | null = null;
   if (hostId === null) {
     if (!args.workerIds || args.workerIds.length !== 1) throw new Error('self mode selects exactly one worker');
@@ -82,6 +80,36 @@ export async function loadDeliveryEligibility(args: DeliverySelectionArgs): Prom
     if (!registration) return { workers: [], nextAfter: null };
     registrationId = registration.id;
   }
+  const { workers, nextAfter } = await selectEligibleWorkers(ctx, app, { registrationId, workerIds: args.workerIds, after: args.after, first: args.first, requireHolder: false });
+  return { workers, nextAfter };
+}
+
+/**
+ * The platform evaluator's selection (S5/S13, #2021): every attending worker of ONE App, with no host key, no worker session and
+ * no caller. It is deliberately a different type from {@link DeliverySelectionArgs} and a different function, so the renderer,
+ * the batch loader and every acknowledgement path cannot be handed it, and no transport argument can select it: only in-process
+ * job code calls this. The reach is the App's own (the same App-derived memory fold a pure App key has), intersected with the
+ * worker's own reader; a worker NOBODY holds has no reader of its own and is reported in `uncoveredWorkerIds`, never read
+ * through the App alone, so its absence can never certify coverage. Callers use the pending metadata only (no text, no proof).
+ */
+export type EvaluatorSelectionArgs = {
+  db: Context['db']; app: AppLike; workerIds?: string[] | null; first?: number | null; after?: string | null;
+};
+export async function loadEvaluatorEligibility(args: EvaluatorSelectionArgs): Promise<{ workers: EligibleDeliveryWorker[]; uncoveredWorkerIds: string[]; nextAfter: string | null }> {
+  // The App acting for itself: no user, no key, no session, no roles. NOT an impersonation of a host or a worker.
+  const ctx = { db: args.db, appId: args.app.id, userId: null, roles: [] } as unknown as Context;
+  return selectEligibleWorkers(ctx, args.app, { registrationId: null, workerIds: args.workerIds, after: args.after, first: args.first, requireHolder: true });
+}
+
+async function selectEligibleWorkers(
+  ctx: Context, app: AppLike,
+  sel: { registrationId: string | null; workerIds?: string[] | null; after?: string | null; first?: number | null; requireHolder: boolean },
+): Promise<{ workers: EligibleDeliveryWorker[]; uncoveredWorkerIds: string[]; nextAfter: string | null }> {
+  const db = ctx.db;
+  const registrationId = sel.registrationId;
+  const args = { workerIds: sel.workerIds, after: sel.after };
+  const first = Math.min(Math.max(sel.first ?? DELIVERY_BATCHES_PAGE_DEFAULT, 1), DELIVERY_BATCHES_PAGE_MAX);
+  const uncoveredWorkerIds: string[] = [];
   const workers = await db.worker.findMany({
     where: {
       appId: app.id,
@@ -99,9 +127,11 @@ export async function loadDeliveryEligibility(args: DeliverySelectionArgs): Prom
   const hasMore = workers.length > first;
   const page = workers.slice(0, first);
   const nextAfter = hasMore ? page[page.length - 1]!.id : null;
-  if (page.length === 0) return { workers: [], nextAfter };
+  if (page.length === 0) return { workers: [], uncoveredWorkerIds, nextAfter };
 
   const callerIds = await getAccessibleMemoryIds(ctx);
+  // The caller's reach is never unrestricted for the evaluator: a null here would mean a platform-wide read.
+  if (sel.requireHolder && callerIds === null) throw new Error('evaluator selection must be bounded by the App reach');
   const callerCan = (memoryId: string) => callerIds === null || callerIds.includes(memoryId);
   const holderCache = new Map<string, Set<string> | 'all' | null>();
   const selected: EligibleDeliveryWorker[] = [];
@@ -109,6 +139,7 @@ export async function loadDeliveryEligibility(args: DeliverySelectionArgs): Prom
   for (const w of page) {
     const token = mentionTokenOf(w.name);
     if (!token) continue;
+    if (sel.requireHolder && !w.heldByUserId) { uncoveredWorkerIds.push(w.id); continue; }
     const holder = w.heldByUserId ? await holderAccess(ctx, app, w.heldByUserId, holderCache) : 'all';
     const rows = (await collectRegisterRows(db, { workerId: w.id }))?.rows ?? [];
     const channelIds = [...new Set(rows.filter((r) => r.role !== 'POST').map((r) => r.channelId))];
@@ -137,7 +168,7 @@ export async function loadDeliveryEligibility(args: DeliverySelectionArgs): Prom
     }
     selected.push({ workerId: w.id, workerName: w.name, channels: eligibleChannels });
   }
-  return { workers: selected, nextAfter };
+  return { workers: selected, uncoveredWorkerIds, nextAfter };
 }
 
 export async function loadDeliveryBatches(args: DeliverySelectionArgs): Promise<LoadedBatchPage> {
