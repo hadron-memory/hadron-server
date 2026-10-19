@@ -27,6 +27,8 @@ export interface RenderableRunNode {
     /** Needed by the routing-edge check in assembleRunNodePrompt. */
     name?: string | null;
     loc?: string;
+    /** `INCLUDE` edges (#2040) are derived from the content's own tags, which the template render already inlines. */
+    governedKind?: string | null;
     target: {
       loc: string;
       name: string | null;
@@ -99,6 +101,7 @@ export async function renderRunNodeBundle(
   }
   const topicSections: string[] = [];
   for (const edge of node.outgoingEdges) {
+    if (edge.governedKind === 'INCLUDE') continue;
     const target = edge.target;
     if (target?.content) {
       if (!(await deps.includeTarget(target))) continue;
@@ -166,6 +169,7 @@ export async function assembleRunNodePrompt(
   const topicSections: string[] = [];
   for (const edge of node.outgoingEdges) {
     if (isRoutingName(routingNameOf(edge as never, node.loc))) continue;
+    if (edge.governedKind === 'INCLUDE') continue;
     const target = edge.target;
     if (!target?.content) continue;
     if (!(await deps.includeTarget(target))) continue;

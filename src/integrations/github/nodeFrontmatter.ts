@@ -50,6 +50,8 @@ export interface FrontmatterNodeFields {
  * at runtime.
  */
 export interface EdgeForGit {
+  /** `INCLUDE` marks an edge derived from an include tag (#2040); it is never mirrored (the tag in the content is the source). */
+  governedKind?: string | null;
   target: { id: string; loc?: string | null };
   /** Relationship name (was `label`); emitted on the `rel` key for back-compat. */
   name: string | null;
@@ -181,7 +183,7 @@ export function buildNodeFrontmatter(
  */
 export function buildEdgeFrontmatter(outgoingEdges: EdgeForGit[]): Array<Record<string, unknown>> {
   return outgoingEdges
-    .filter((e) => e && e.target)
+    .filter((e) => e && e.target && e.governedKind !== 'INCLUDE')
     .map((e) => {
       const entry: Record<string, unknown> = { id: e.target.id };
       if (e.target.loc) entry.loc = e.target.loc;
