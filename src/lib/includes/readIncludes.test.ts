@@ -1,0 +1,157 @@
+/**
+ * #2041 S2 — includes resolve on every ordinary read (cor:dmo:150:03/:04/:05),
+ * through the GraphQL `Node.content` field. Written red-first on main d49ae8fb.
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApolloServer } from '@apollo/server';
+import { db } from '../../integrations/db/client.js';
+import { cleanDb } from '../../test/helpers.js';
+import { generateId } from '../id.js';
+import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
+import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { BROKEN_INCLUDE_NOTICE } from './resolveNodeContent.js';
+
+vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
+  writeNodeToGit: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({
+  syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }),
+}));
+
+const server = new ApolloServer<Context>({ typeDefs, resolvers });
+async function run(query: string, ctx: Context, variables?: Record<string, unknown>) {
+  const res = await server.executeOperation({ query, variables }, { contextValue: ctx });
+  if (res.body.kind !== 'single') throw new Error('unexpected incremental result');
+  return res.body.singleResult;
+}
+
+let memoryId: string;
+let memoryUrn: string;
+let foreignUrn: string;
+let reader: { id: string };   // reads the local memory only
+let outsider: { id: string }; // reads nothing here
+const as = (u: { id: string }): Context => ({ db, userId: u.id, roles: [] });
+const urn = (loc: string) => `hrn:node:${memoryUrn}:${loc}`;
+const mk = (loc: string, content: string | null, extra: Record<string, unknown> = {}) =>
+  db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, content, ...extra } });
+
+beforeEach(async () => {
+  await cleanDb(db);
+  const org = await db.organization.create({ data: { id: generateId(), name: 'Rd Org', urn: 'rd.example' } });
+  const other = await db.organization.create({ data: { id: generateId(), name: 'Other Org', urn: 'other.example' } });
+  reader = await db.user.create({ data: { githubId: 204101, githubUsername: 'rd-reader', handle: 'rd-reader', roles: [] } });
+  outsider = await db.user.create({ data: { githubId: 204102, githubUsername: 'rd-out', handle: 'rd-out', roles: [] } });
+  await db.orgMember.create({ data: { organizationId: org.id, userId: reader.id, role: 'ADMIN' } });
+  const gqlAdmin: Context = { db, userId: reader.id, roles: [] };
+  const m = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'rd' }, gqlAdmin);
+  memoryId = m.id; memoryUrn = m.urn;
+  const fm = await db.memory.create({
+    data: { name: 'Foreign', urn: 'other.example:foreign', organizationId: other.id, class: 'knowledge', visibility: 'ORGANIZATION' },
+  });
+  foreignUrn = fm.urn;
+  await db.node.create({ data: { id: generateId(), memoryId: fm.id, loc: 'secret', name: 'secret', content: 'FOREIGN_SECRET' } });
+});
+
+const NODE_Q = `query($ref: ID!, $raw: Boolean) { node(ref: $ref, raw: $raw) { content } }`;
+
+describe('Node.content resolves includes (#2041)', () => {
+  it('node: resolves a loc include in place; raw:true returns the tag as written', async () => {
+    await mk('b', 'B text');
+    await mk('a', 'before {{> b}} after');
+    expect((await run(NODE_Q, as(reader), { ref: urn('a') })).data).toEqual({ node: { content: 'before B text after' } });
+    expect((await run(NODE_Q, as(reader), { ref: urn('a'), raw: true })).data).toEqual({ node: { content: 'before {{> b}} after' } });
+  });
+
+  it('nests through a chain, and resolves a URN target the reader can read', async () => {
+    await mk('c', 'C');
+    await mk('b', '[{{> c}}]');
+    await mk('a', '{{> b}}|{{> ' + urn('c') + '}}');
+    expect((await run(NODE_Q, as(reader), { ref: urn('a') })).data).toEqual({ node: { content: '[C]|C' } });
+  });
+
+  it('missing, deleted and unreadable targets all render the SAME notice', async () => {
+    const d = await mk('gone', 'GONE');
+    await db.node.update({ where: { id: d.id }, data: { deletedAt: new Date() } });
+    await mk('a1', 'x {{> nope}} y');
+    await mk('a2', 'x {{> gone}} y');
+    await mk('a3', `x {{> hrn:node:${foreignUrn}:secret}} y`);
+    const want = `x ${BROKEN_INCLUDE_NOTICE} y`;
+    for (const loc of ['a1', 'a2', 'a3']) {
+      const out = await run(NODE_Q, as(reader), { ref: urn(loc) });
+      expect(out.errors).toBeUndefined();
+      expect(out.data).toEqual({ node: { content: want } });
+    }
+  });
+
+  it('a cycle made after the write, and a too-deep chain, render the notice instead of looping', async () => {
+    await mk('a', 'A{{> b}}');
+    await mk('b', 'B{{> a}}'); // cycle created directly (a write would be refused)
+    const cyc = (await run(NODE_Q, as(reader), { ref: urn('a') })).data as { node: { content: string } };
+    expect(cyc.node.content).toBe(`AB${BROKEN_INCLUDE_NOTICE}`);
+    for (let i = 0; i < 12; i++) await mk(`d${i}`, i < 11 ? `${i}{{> d${i + 1}}}` : '11');
+    const deep = (await run(NODE_Q, as(reader), { ref: urn('d0') })).data as { node: { content: string } };
+    expect(deep.node.content).toContain(BROKEN_INCLUDE_NOTICE);
+    expect(deep.node.content).not.toContain('11');
+  });
+
+  it('raw and resolved aliases in one request never contaminate each other, in either order', async () => {
+    await mk('b', 'B');
+    await mk('a', '{{> b}}');
+    const q = `query($ref: ID!) { node(ref: $ref) { r: content(raw: true) s: content(raw: false) d: content } }`;
+    expect((await run(q, as(reader), { ref: urn('a') })).data).toEqual({ node: { r: '{{> b}}', s: 'B', d: 'B' } });
+    const q2 = `query($ref: ID!) { node(ref: $ref, raw: true) { s: content(raw: false) d: content r: content(raw: true) } }`;
+    expect((await run(q2, as(reader), { ref: urn('a') })).data).toEqual({ node: { s: 'B', d: '{{> b}}', r: '{{> b}}' } });
+  });
+
+  it('a nested Node field resolves too (edge targets), not only the query root', async () => {
+    await mk('b', 'B');
+    const a = await mk('a', '{{> b}}');
+    const t = await mk('t', 'T {{> b}}');
+    await db.edge.create({ data: { id: generateId(), memoryId, sourceId: a.id, targetId: t.id, loc: 'cites:a:t', name: 'cites' } });
+    const q = `query($ref: ID!) { node(ref: $ref) { outgoingEdges { target { content } } } }`;
+    expect((await run(q, as(reader), { ref: urn('a') })).data).toEqual({ node: { outgoingEdges: [{ target: { content: 'T B' } }] } });
+  });
+
+  it('keeps data variables byte for byte, and leaves chat-message/record bodies literal', async () => {
+    await mk('b', 'B');
+    await mk('v', 'Hi {{name}} {{> b}}', { data: { name: 'Zed' } });
+    expect((await run(NODE_Q, as(reader), { ref: urn('v') })).data).toEqual({ node: { content: 'Hi Zed B' } });
+    await mk('m', 'quoted {{> b}}', { nodeType: 'chat-message' });
+    await mk('r', 'quoted {{> b}}', { nodeType: 'record' });
+    for (const loc of ['m', 'r']) {
+      expect((await run(NODE_Q, as(reader), { ref: urn(loc) })).data).toEqual({ node: { content: 'quoted {{> b}}' } });
+    }
+  });
+
+  it('two readers in one process: A\'s resolved read never reaches B, and an unreadable includer is not found', async () => {
+    await mk('b', 'B');
+    await mk('a', '{{> b}}');
+    expect((await run(NODE_Q, as(reader), { ref: urn('a') })).data).toEqual({ node: { content: 'B' } });
+    expect((await run(NODE_Q, as(outsider), { ref: urn('a') })).data).toEqual({ node: null });
+  });
+
+  it('reads change nothing stored: content, hash, revision count and approval stay byte-identical', async () => {
+    await mk('b', 'B');
+    const a = await mk('a', '{{> b}}');
+    const before = await db.node.findUniqueOrThrow({ where: { id: a.id } });
+    const revs = await db.nodeRevision.count({ where: { nodeId: a.id } });
+    for (let i = 0; i < 3; i++) await run(NODE_Q, as(reader), { ref: urn('a') });
+    const after = await db.node.findUniqueOrThrow({ where: { id: a.id } });
+    expect(after.content).toBe('{{> b}}');
+    expect(after.contentHash).toBe(before.contentHash);
+    expect(after.revSeq).toBe(before.revSeq);
+    expect(after.approvalHash).toBe(before.approvalHash);
+    expect(await db.nodeRevision.count({ where: { nodeId: a.id } })).toBe(revs);
+  });
+});
+
+describe('nodeBatch keeps stored text unless the caller asks (R21 A)', () => {
+  const BATCH_Q = `query($refs: [ID!]) { nodeBatch(refs: $refs) { nodes { loc bare: content opted: content(raw: false) stored: content(raw: true) } } }`;
+  it('bare content is stored, raw:false resolves, raw:true is stored', async () => {
+    await mk('b', 'B');
+    await mk('a', '{{> b}}');
+    const out = await run(BATCH_Q, as(reader), { refs: [urn('a')] });
+    expect(out.errors).toBeUndefined();
+    expect(out.data).toEqual({ nodeBatch: { nodes: [{ loc: 'a', bare: '{{> b}}', opted: 'B', stored: '{{> b}}' }] } });
+  });
+});
