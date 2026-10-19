@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1707 — host registrations (cor:agt:070:01): the internal writer, what makes
  * a worker launchable, and the lapse after the App's count of poll intervals (default 3, #1763)
@@ -33,7 +34,7 @@ beforeEach(async () => {
   const agent = await db.agent.create({ data: { id: generateId(), name: 'A', urn: `hosts-agent-${generateId().toLowerCase()}`, ownerUserId: owner.id }, select: { id: true } });
   const worker = (appId: string, name: string) =>
     // #1709: held, so a host can launch them (cor:agt:060:05).
-    db.worker.create({ data: { appId, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: owner.id }, select: { id: true } });
+    db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: owner.id }, select: { id: true } });
   anne = await worker(app.id, 'Anne');
   liam = await worker(app.id, 'Liam');
   rook = await worker(app.id, 'Rook');

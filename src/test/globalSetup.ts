@@ -180,7 +180,7 @@ async function applyTemplateConstraints(client: Client) {
       WHEN "approved_rev_no" IS NULL THEN
         "approved_at" IS NULL AND "approval_hash" IS NULL AND "approved_by" IS NULL AND "approved_by_info" IS NULL
       ELSE
-        "approved_rev_no" > 0 AND "approved_at" IS NOT NULL AND "approval_hash" IS NOT NULL
+        "approved_rev_no" > 0 AND "approved_at" IS NOT NULL
           AND ("approved_by" IS NOT NULL OR "approved_by_info" IS NOT NULL)
       END);
   `);

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1012 — the `X-Hadron-Client-Id` header, over the REAL HTTP boundary.
  *
@@ -84,10 +85,10 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: appA.id, agentId: agent.id } });
   await db.appAgent.create({ data: { appId: appB.id, agentId: agent.id } });
   await db.worker.create({
-    data: { appId: appA.id, agentId: agent.id, name: 'WorkerInAppA', slug: 'worker-in-app-a' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: appA.id, agentId: agent.id, name: 'WorkerInAppA', slug: 'worker-in-app-a' },
   });
   await db.worker.create({
-    data: { appId: appB.id, agentId: agent.id, name: 'WorkerInAppB', slug: 'worker-in-app-b' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: appB.id, agentId: agent.id, name: 'WorkerInAppB', slug: 'worker-in-app-b' },
   });
   ({ rawKey } = await mintUserApiKey(db, {
     userId: user.id,

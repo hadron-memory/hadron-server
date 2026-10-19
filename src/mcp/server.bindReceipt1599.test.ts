@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /** #1599: real MCP receipts identify the session argument separately from the worker. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
@@ -24,7 +25,7 @@ beforeEach(async () => {
   appId = app.id;
   await db.appAgent.create({ data: { appId, agentId: agent.id } });
   await db.appMember.create({ data: { appId, userId, role: 'owner' } });
-  workerId = (await db.worker.create({ data: { appId, agentId: agent.id, name: 'Iris', slug: 'iris' } })).id;
+  workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: agent.id, name: 'Iris', slug: 'iris' } })).id;
 });
 
 afterEach(() => vi.restoreAllMocks());

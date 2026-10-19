@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1706 — alarms and availability on the MCP surface: hadron_alarm_ack,
  * hadron_worker_availability_set, hadron_model_family_availability_set and
@@ -53,8 +54,8 @@ beforeEach(async () => {
   agentId = agent.id;
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `alarmmcp-${n}.example:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
-  anne = await db.worker.create({ data: { appId: app.id, agentId, name: 'Anne', slug: 'anne', heldByUserId: member.id }, select: { id: true } });
-  rook = await db.worker.create({ data: { appId: app.id, agentId, name: 'Rook', slug: 'rook', heldByUserId: member.id }, select: { id: true } });
+  anne = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Anne', slug: 'anne', heldByUserId: member.id }, select: { id: true } });
+  rook = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Rook', slug: 'rook', heldByUserId: member.id }, select: { id: true } });
 });
 
 /** Anne owns a review assigned to Rook, assigned 20 minutes ago and never started: one not-started alarm. */

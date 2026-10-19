@@ -387,3 +387,13 @@ describe('exporter → importer round-trip (frontmatter format)', () => {
     );
   });
 });
+
+describe('derived include edges (#2040)', () => {
+  it('are never mirrored into the nodes: frontmatter', () => {
+    const entries = buildEdgeFrontmatter([
+      { governedKind: 'INCLUDE', target: { id: 'b', loc: 'b' }, name: 'includes', loc: 'includes:a:b' },
+      { target: { id: 'c', loc: 'c' }, name: 'cites', loc: 'a:cites:c' },
+    ]);
+    expect(entries.map((e) => e.id)).toEqual(['c']);
+  });
+});
