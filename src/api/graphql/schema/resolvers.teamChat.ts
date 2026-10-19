@@ -86,6 +86,8 @@ export { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC };
  * link. Typed refusal: TEAM_CHAT_BODY_TOO_LARGE.
  */
 export const TEAM_CHAT_BODY_MAX_CHARS = 65_536;
+/** #2121 option C prototype, pending product choice. */
+export const TEAM_CHAT_BODY_MAX_BYTES = 120_000;
 
 const forbidden = (): GraphQLError =>
   new GraphQLError('You are not authorized to use this App\'s team chat.', {
@@ -910,6 +912,12 @@ function assertBody(body: unknown): asserts body is string {
       { extensions: { code: 'TEAM_CHAT_BODY_TOO_LARGE', maxChars: TEAM_CHAT_BODY_MAX_CHARS } },
     );
   }
+  if (Buffer.byteLength(body, 'utf8') > TEAM_CHAT_BODY_MAX_BYTES) {
+    throw new GraphQLError(
+      `body exceeds the team-chat cap of ${TEAM_CHAT_BODY_MAX_BYTES} UTF-8 bytes. Store large artifacts as their own node and link them.`,
+      { extensions: { code: 'TEAM_CHAT_BODY_TOO_LARGE', maxBytes: TEAM_CHAT_BODY_MAX_BYTES } },
+    );
+  }
 }
 
 /**
@@ -934,6 +942,7 @@ async function postToChannelRoot(
   opts: { system?: boolean; claim?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {},
 ): Promise<TeamChatMessageOut> {
   const { body, replyToSeq, sessionRef } = args;
+  assertBody(body);
   let envelope: Record<string, unknown>;
   let authorLabel: string;
   let authorAgentId: string | null = null;

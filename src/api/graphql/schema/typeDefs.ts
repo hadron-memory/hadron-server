@@ -11309,6 +11309,10 @@ export const typeDefs = `#graphql
     SESSION_WORKER_NOT_IN_APP are retired; CHANNEL_HOST_NOT_WRITABLE is the
     successor code.
 
+    Body is at most 65,536 JavaScript characters AND 120,000 UTF-8 bytes.
+    An over-byte-cap body is refused before append with TEAM_CHAT_BODY_TOO_LARGE
+    and maxBytes: 120000; it is never truncated.
+
     Error codes (extensions.code): TEAM_CHAT_BODY_TOO_LARGE,
     TEAM_CHAT_REPLY_NOT_FOUND, SESSION_NOT_FOUND, SESSION_ENDED,
     SESSION_NOT_WORKER_BOUND, CHANNEL_HOST_NOT_WRITABLE, WORKER_RETIRED,
@@ -11332,7 +11336,7 @@ export const typeDefs = `#graphql
     Spec 049 Phase 8 — post into ANY Channel by ref (its id, or its address —
     \`Channel.chatRootUrn\`, #1171): the
     createTeamChatMessage contract (author derivation, mentions, replyToSeq,
-    the body cap, item J) addressed by Channel. createTeamChatMessage is the
+    the body cap (65,536 characters and 120,000 UTF-8 bytes), item J) addressed by Channel. createTeamChatMessage is the
     appRef → App.defaultChannel convenience over this — one gate, two entry
     points. A Channel you may not read is CHANNEL_NOT_FOUND; one you may read
     but not post into is FORBIDDEN.
