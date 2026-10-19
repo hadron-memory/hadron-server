@@ -55,6 +55,26 @@ describe('the due rule — cor:agt:080:08–:12', () => {
     expect(w?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 6 }]);
   });
 
+  it('#2068: a wakeWithoutChat ticker ticks with nothing unread; one without it stays silent', () => {
+    expect(run([channel('c1', [])], [ticker({ wakeWithoutChat: true })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([], [ticker({ wakeWithoutChat: true })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([channel('c1', [])], [ticker({ wakeWithoutChat: false })])).toBeNull();
+  });
+
+  it('#2068: the option never bypasses the tick rules (acked, disabled, not yet a tick)', () => {
+    expect(run([channel('c1', [])], [{ ...ticker({ wakeWithoutChat: true }), lastAckedTick: 1 }])).toBeNull();
+    expect(run([channel('c1', [])], [ticker({ wakeWithoutChat: true, enabled: false })])).toBeNull();
+    expect(run([channel('c1', [])], [ticker({ wakeWithoutChat: true })], { now: new Date('2026-10-05T09:09:59Z') })).toBeNull();
+  });
+
+  it('#2068: a chat-less tick lists no channel, and a tick with chat still lists its range', () => {
+    const quiet = run([channel('c1', [])], [ticker({ wakeWithoutChat: true })]);
+    expect(quiet?.channels).toEqual([]);
+    expect(quiet?.unread).toBe(0);
+    const busy = run([channel('c1', [msg(3)])], [ticker({ wakeWithoutChat: true })]);
+    expect(busy?.channels).toEqual([expect.objectContaining({ channelId: 'c1', fromSeq: 3, throughSeq: 3 })]);
+  });
+
   it('a disabled ticker does not tick', () => {
     expect(run([channel('c1', [msg(3)])], [ticker({ enabled: false })])).toBeNull();
   });
