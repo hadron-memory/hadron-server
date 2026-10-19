@@ -44,6 +44,7 @@ const M = resolvers.Mutation as unknown as {
   subscribeWorker: Resolver<{ tickerRef: string; workerRef: string }, { subscription: Row; announcement: string | null }>;
   unsubscribeWorker: Resolver<{ tickerRef: string; workerRef: string }, { subscription: Row; announcement: string | null }>;
   setWorkerWakeSettings: Resolver<{ workerRef: string; input: Row }, Row>;
+  reportDeliveryHold: Resolver<{ input: unknown }, Row>;
   acknowledgeWakes: Resolver<{ proofs: string[] }, { acknowledged: number; unchanged: number }>;
   acknowledgeDeliveryBatches: Resolver<{ batchIds: string[]; through?: Array<{ channelId: string; seq: number }> }, { acknowledged: number; unchanged: number }>;
 };
@@ -54,7 +55,7 @@ const FW = tickerFieldResolvers.WorkerWakeSettings;
 export const TICKER_WRITE_TOOLS = [
   'hadron_ticker_create', 'hadron_ticker_update', 'hadron_ticker_delete',
   'hadron_ticker_subscribe', 'hadron_ticker_unsubscribe', 'hadron_ack_wakes',
-  'hadron_delivery_settings_set', 'hadron_ack_delivery_batches',
+  'hadron_delivery_settings_set', 'hadron_ack_delivery_batches', 'hadron_report_delivery_hold',
 ] as const;
 /**
  * Actor-neutral tools (listed in ACTOR_NEUTRAL_TOOLS): each takes its own
@@ -437,6 +438,30 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
         });
       }),
   );
+  // Preserve unknown fields through SDK validation so the shared strict parser refuses,
+  // rather than silently dropping, draft/body/proof metadata. Direct-handler tests use the same parser.
+  const heldShape = {
+    batchId: z.string().describe('The signed id returned by hadron_delivery_batches, not batchKey.'),
+    reason: z.string().describe('draft | isolated | question | screen-unknown | not-submitted | two-agents | binding-mismatch.'),
+    terminalId: z.string().nullable().optional().describe('Opaque term_ identifier, at most 128 safe characters after the prefix; omit/null if unobserved.'),
+    session: SESSION_WRITE,
+  };
+  const heldTool = server.tool(
+    'hadron_report_delivery_hold',
+    'Report a held signed delivery batch (hrn:node:hadronmemory.com:specs:cor:agt:050:26). Receiving host key or own live session only, within 15 minutes. ' +
+      'Never send draft/message text or a separate proof; unknown keys are refused. No delivered/read mark, ack, tick, budget or policy clock moves. ' +
+      'Returns all channel holds atomically, default/hard cap ten from the signed descriptor, exhausted pageInfo; never truncates.',
+    heldShape,
+    async (args) => {
+      const { session, ...input } = args;
+      const call = async (ctx: Context) => JSON.stringify(await M.reportDeliveryHold({}, { input },
+        session ? { ...ctx, sessionId: session, sessionBindingRefused: false } : ctx));
+      if (appKeyCaller(ctxOf())) return readWakes(session, call);
+      return write('hadron_report_delivery_hold', session, call);
+    },
+  );
+  heldTool.inputSchema = z.object(heldShape).passthrough();
+
   server.tool(
     'hadron_ack_delivery_batches',
     'Record that delivery batches were typed (cor:agt:080:16, :17). Pass the ids hadron_delivery_batches gave you. The delivered mark ' +

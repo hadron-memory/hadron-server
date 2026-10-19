@@ -8751,6 +8751,10 @@ export const typeDefs = `#graphql
     """
     acknowledgeDeliveryBatches(batchIds: [String!]!, through: [BatchThrough!]): AcknowledgeWakesResult!
 
+    "#2021 (hrn:node:hadronmemory.com:specs:cor:agt:050:26): report a held signed batch as its receiving host key or own live session. No marks, acknowledgements or policy clocks move. All channel holds commit atomically; output is capped at ten by the signed batch limit, never truncated."
+    reportDeliveryHold(input: DeliveryHoldReportInput!): DeliveryHoldReportResult!
+
+
     """
     #1709 — a host registers, or refreshes, which of its App's workers it can launch, as which model family, and in
     which existing worktrees (hrn:node:hadronmemory.com:specs:cor:agt:070:01). A host key only: an App key holding
@@ -12073,6 +12077,32 @@ export const typeDefs = `#graphql
     ranges: [DeliveryBatchRange!]!
     "Eligible messages left for the next batch."
     overflow: Int!
+  }
+
+  "One signed batch id, the closed held reason and an optional opaque terminal. No message or draft text."
+  input DeliveryHoldReportInput {
+    batchId: String!
+    "draft, isolated, question, screen-unknown, not-submitted, two-agents or binding-mismatch."
+    reason: String!
+    "Null/omitted or term_ followed by 1..128 safe letters, digits, underscore or hyphen."
+    terminalId: String
+  }
+  type DeliveryHoldReportResult {
+    workerId: ID!
+    "All channel holds of this batch. Default/hard cap ten; no partial mutation or truncation."
+    holds: [ReportedDeliveryHold!]!
+    "The bounded descriptor is fully consumed, so hasNextPage is false and endCursor is null."
+    pageInfo: DueWakePageInfo!
+  }
+  type ReportedDeliveryHold {
+    holdId: ID!
+    channelId: ID!
+    channelIncarnation: Int!
+    firstPendingSeq: Int!
+    since: DateTime!
+    observedAt: DateTime!
+    reason: String!
+    terminalId: String
   }
 
   input BatchThrough {

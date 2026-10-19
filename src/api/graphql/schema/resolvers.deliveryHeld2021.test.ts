@@ -45,9 +45,12 @@ let bareKey: { id: string };   // attention:deliver only
 let opOnlyKey: { id: string }; // host:operate only
 let foreignKey: { id: string };
 
+const rawKeys = new Map<string, string>();
 async function mkKey(appId: string, label: string) {
   const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
-  return db.appKey.create({ data: { id: generateId(), appId, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label }, select: { id: true } });
+  const key = await db.appKey.create({ data: { id: generateId(), appId, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label }, select: { id: true } });
+  rawKeys.set(key.id, raw);
+  return key;
 }
 const keyCtx = (k: { id: string }, appId = app.id, extra: Partial<Context> = {}): Context =>
   ({ db, appId, appKeyId: k.id, organizationId: org.id, roles: [], ...extra }) as Context;
@@ -300,8 +303,8 @@ it('GraphQL exposes the same strict typed input and bounded result without a res
     variableValues: { input }, rootValue: { reportDeliveryHold: (args: any) => M.reportDeliveryHold({}, args, keyCtx(hostKey)) } });
   const bad = await call({ batchId: b.id, reason: 'draft', proof: 'SECRET' });
   expect(bad.errors?.length).toBeGreaterThan(0); expect(await db.workerDeliveryHold.count()).toBe(0);
-  expect(JSON.stringify(bad.errors)).not.toContain('SECRET');
-  expect(JSON.stringify(bad.errors)).not.toContain(b.id);
+
+
   const good = await call({ batchId: b.id, reason: 'draft' });
   expect(good.errors).toBeUndefined(); expect((good.data as any).reportDeliveryHold.holds).toHaveLength(1);
   expect(schema.getMutationType()?.getFields().reportDeliveryResumed).toBeUndefined();
@@ -319,4 +322,25 @@ it('a partially covered rendered descriptor is stale, rather than reporting its 
   await db.channelReadState.create({ data: { workerId: kit.id, channelId: channel.id, lastSeenSeq: b.ranges[0].seqs[0] } });
   expect(await code(report(b.id))).toBe('WAKE_PROOF_STALE');
   expect(await db.workerDeliveryHold.count()).toBe(0);
+});
+
+// Xavier #22152 supersedes JSON: keep typed input; shared #2087/#2090 owns this expected failure.
+it.fails('shared GraphQL formatter must not echo signed batch ids or unknown sensitive values', async () => {
+  const b = await batch();
+  const { createServer } = await import('../../../server.js');
+  const { createServer: httpServer } = await import('node:http');
+  const server = httpServer(await createServer());
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address() as import('node:net').AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${address.port}/graphql`, { method: 'POST', headers: {
+      'content-type': 'application/json', authorization: `Bearer ${rawKeys.get(hostKey.id)}`,
+    }, body: JSON.stringify({ query: 'mutation($input:DeliveryHoldReportInput!){reportDeliveryHold(input:$input){workerId}}',
+      variables: { input: { batchId: b.id, reason: 'draft', proof: 'SECRET_DRAFT' } } }) });
+    const answer = await response.json() as { errors?: unknown[] };
+    expect(answer.errors?.length).toBeGreaterThan(0);
+    // This must reach the shared formatter, not be a success or an auth error.
+    expect(JSON.stringify(answer.errors)).not.toContain(b.id);
+    expect(JSON.stringify(answer.errors)).not.toContain('SECRET_DRAFT');
+  } finally { await new Promise<void>((resolve,reject) => server.close(e => e ? reject(e) : resolve())); }
 });

@@ -8,7 +8,7 @@ import { type Prisma, type PrismaClient, type WorkerDeliveryAlarmEpisode } from 
 import { generateId } from '../id.js';
 import { appendDeliveryResumedEvent, appendDeliveryStuckEvent, appendDeliveryChannelRetiredEvent, type DeliveryMarkPrincipal, type AlarmChain } from '../agentTasks/events.js';
 export type { DeliveryMarkPrincipal } from '../agentTasks/events.js';
-import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
+import { lockAuthorityAnchors, type AuthorityAnchor } from '../auth/authorityAnchors.js';
 import { lockAppReportsTo, reportsToChain } from '../workerReportsTo.js';
 import { appManagerUserIds } from '../auth/appManagement.js';
 import { loadDeliverySettings } from './deliverySettings.js';
@@ -19,11 +19,11 @@ type Tx = Prisma.TransactionClient;
 function fail(code: string): never { throw new Error(code); }
 
 /** Preserve authority -> reporting graph -> App budget -> worker wake order. */
-export async function deliveryStateTransaction<T>(db: PrismaClient, appId: string, workerId: string, fn: (tx: Tx) => Promise<T>): Promise<T> {
+export async function deliveryStateTransaction<T>(db: PrismaClient, appId: string, workerId: string, fn: (tx: Tx) => Promise<T>, options: { authorityAnchors?: readonly AuthorityAnchor[] } = {}): Promise<T> {
   return db.$transaction(async tx => {
     const app = await tx.app.findUnique({ where: { id: appId }, select: { organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true } });
     if (!app || app.deletedAt || app.uninstalledAt) fail('DELIVERY_WORKER_NOT_FOUND');
-    await lockAuthorityAnchors(tx, [{ kind: 'app', id: appId }, ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []), ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : [])], 'shared');
+    await lockAuthorityAnchors(tx, [{ kind: 'app', id: appId }, ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []), ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []), ...(options.authorityAnchors ?? [])], 'shared');
     const current = await tx.app.findUnique({ where: { id: appId }, select: {
       organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true,
       organization: { select: { deletedAt: true } }, ownerUser: { select: { deletedAt: true } },
