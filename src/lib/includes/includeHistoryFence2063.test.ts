@@ -123,6 +123,27 @@ describe('#2063 include-history prepared transaction boundary', () => {
 });
 
 describe('#2063 exclusive fence over real Postgres transactions', () => {
+  it('restores lock_timeout on the same pooled connection after the fence commits', async () => {
+    const url = new URL(process.env.DATABASE_URL!);
+    url.searchParams.set('connection_limit', '1');
+    const single = new PrismaClient({ datasourceUrl: url.toString() });
+    const inspect = (tx: Prisma.TransactionClient) => tx.$queryRaw<Array<{ pid: number; timeout: string }>>`
+      SELECT pg_backend_pid() AS pid, current_setting('lock_timeout') AS timeout`;
+    try {
+      const [before] = await single.$transaction(inspect);
+      await withIncludeHistoryTransaction(single, async (prepared) => {
+        const [inside] = await inspect(includeHistoryClient(prepared));
+        expect(inside.pid).toBe(before.pid);
+        expect(inside.timeout).toBe('4321ms');
+      }, { timeoutMs: 4321 });
+      const [after] = await single.$transaction(inspect);
+      expect(after.pid).toBe(before.pid);
+      expect(after.timeout).toBe(before.timeout);
+    } finally {
+      await single.$disconnect();
+    }
+  });
+
   it('completes an eight-call burst on a two-connection pool without a second pooled client', async () => {
     const url = new URL(process.env.DATABASE_URL!);
     url.searchParams.set('connection_limit', '2');
