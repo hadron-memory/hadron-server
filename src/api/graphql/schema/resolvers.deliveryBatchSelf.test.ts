@@ -134,7 +134,7 @@ describe('R57 own-live-session batches', () => {
   });
   it.each(['ended', 'expired', 'idle', 'reaped'])('refuses a %s session without reviving it', async (kind) => {
     const old = new Date(Date.now() - 30 * 86400_000);
-    const s = await ownSession(kind === 'ended' ? { endedAt: new Date() } : kind === 'expired' ? { expiresAt: old } : kind === 'reaped' ? { autoExpiredAt: old } : { startedAt: old, updatedAt: old });
+    const s = await ownSession(kind === 'ended' ? { endedAt: new Date() } : kind === 'expired' ? { expiresAt: old } : kind === 'reaped' ? { startedAt: old, autoExpiredAt: old } : { startedAt: old, updatedAt: old });
     expect(await code(selfRead(s))).toBe('SESSION_NOT_LIVE');
     expect(await db.appLogEntry.count()).toBe(0);
     expect((await db.session.findUniqueOrThrow({ where: { id: s.id } })).updatedAt).toEqual(s.updatedAt);
@@ -185,4 +185,41 @@ describe('R57 own-live-session batches', () => {
     expect(result.batches.map((b: any) => b.workerId)).toEqual([kit.id]);
     expect(text(await server.callTool('hadron_ack_delivery_batches', { batchIds: [result.batches[0].id], session: s.id }))).toBe('Acknowledged 1.');
   });
+  it('a committed membership revocation denies even the same owned session', async () => {
+    const s = await ownSession(); await postForBoth();
+    await db.orgMember.delete({ where: { organizationId_userId: { organizationId: org.id, userId: manager.id } } });
+    expect(await code(selfRead(s))).toBe('APP_NOT_FOUND');
+    expect(await db.appLogEntry.count()).toBe(0);
+  });
+  it('an end that wins between entry and deciding transaction refuses and records nothing', async () => {
+    const s = await ownSession(); await postForBoth();
+    const wrapped = new Proxy(db, { get(target, property) {
+      if (property === '$transaction') return async (...args: any[]) => {
+        await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+        return (target.$transaction as any)(...args);
+      };
+      const value = Reflect.get(target, property); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    expect(await code(selfRead(s, {}, { db: wrapped }))).toBe('SESSION_NOT_LIVE');
+    expect(await db.appLogEntry.count()).toBe(0);
+  });
+  it('a failed self-read audit prevents success and rolls back the record', async () => {
+    const s = await ownSession(); await postForBoth();
+    const wrapped = new Proxy(db, { get(target, property) {
+      if (property === '$transaction') return (fn: any, ...rest: any[]) => target.$transaction(async tx => {
+        const proxy = new Proxy(tx, { get(t, p) {
+          if (p === 'appLogEntry') return new Proxy(t.appLogEntry, { get(model, method) {
+            if (method === 'create') return async () => { throw new Error('audit unavailable'); };
+            return Reflect.get(model, method);
+          } });
+          return Reflect.get(t, p);
+        } });
+        return fn(proxy);
+      }, ...rest);
+      const value = Reflect.get(target, property); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    await expect(selfRead(s, {}, { db: wrapped })).rejects.toThrow('audit unavailable');
+    expect(await db.appLogEntry.count()).toBe(0);
+  });
+
 });
