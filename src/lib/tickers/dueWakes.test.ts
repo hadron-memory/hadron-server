@@ -295,7 +295,7 @@ describe('#2068 (R49/R54) — a ticker with reason every-tick, through the whole
     expect(await db.workerDeliveryTick.count()).toBe(0);
   });
 
-  it('every-tick bypasses none of: pause, dormancy, the per-worker floor, the daily budget', async () => {
+  it('every-tick bypasses none of: pause, dormancy, the daily budget', async () => {
     const t = await everyTick();
     await subscribe(t.id, liam.id);
     // pause
@@ -307,18 +307,32 @@ describe('#2068 (R49/R54) — a ticker with reason every-tick, through the whole
     await db.session.create({ data: { id: generateId(), appId: app.id, userId: holderA.id, workerId: liam.id, agentId: agent.id, type: 'DEVELOPER', startedAt: old, updatedAt: old, endedAt: old } });
     expect(ids(await due(ctx(manager.id)))).toEqual([]);
     await db.session.deleteMany({ where: { workerId: liam.id } });
-    // the floor: a tick acknowledged just now holds the next one back until the window passes
-    const w = (await due(ctx(manager.id))).wakes[0];
-    await M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(manager.id));
-    await db.workerDeliveryTick.updateMany({ data: { ackedAt: new Date() } });
-    expect((await readAt(30_000)).wakes).toEqual([]); // inside the floor
     // the budget
-    await db.workerDeliveryTick.deleteMany();
-    await db.appWakeReservation.deleteMany();
     await db.app.update({ where: { id: app.id }, data: { wakeDailyBudget: 0 } });
     const spent = await due(ctx(manager.id));
     expect(spent.status).toBe('WAKE_BUDGET_EXHAUSTED');
     expect(spent.wakes).toEqual([]);
+  });
+
+  it('every-tick respects the per-worker floor across a NEW tick: withheld inside it, offered after it (with a positive control)', async () => {
+    const floorSeconds = (await db.app.findUniqueOrThrow({ where: { id: app.id }, select: { tickerMinCadenceSeconds: true } })).tickerMinCadenceSeconds;
+    expect(floorSeconds).toBe(120);
+    const now = Date.now();
+    // Ticks fall at anchor + j x 120 s; tick 4 is current now and tick 5 falls 20 s from now.
+    const t = await everyTick({ cadenceSeconds: 120, anchorAt: new Date(now - 5 * 120_000 + 20_000) });
+    await subscribe(t.id, liam.id);
+    const first = (await due(ctx(manager.id))).wakes[0];
+    expect(first.reasons).toHaveLength(1);
+    await M.acknowledgeWakes({}, { proofs: [first.proof] }, ctx(manager.id));
+    await db.workerDeliveryTick.updateMany({ data: { ackedAt: new Date(now) } });
+    const row = await db.workerDeliveryTick.findFirstOrThrow({ where: { tickerId: t.id } });
+    expect(row.lastAckedTick).toBe(4);
+    // Tick 5 is a NEW, otherwise-due tick, 25 s after the acknowledgement: inside the 120 s floor, so it waits.
+    expect((await readAt(25_000)).wakes).toEqual([]);
+    // Positive control: the same tick is offered once the floor has passed, so nothing else was suppressing it.
+    const after = await readAt(125_000);
+    expect(after.wakes).toHaveLength(1);
+    expect(after.wakes[0].wake.reasons).toEqual([expect.objectContaining({ kind: 'TICK', k: 5 })]);
   });
 
   it('a ticker row created before the column existed reads as [read-team-channel] (the migration default), naming no ticker', async () => {
