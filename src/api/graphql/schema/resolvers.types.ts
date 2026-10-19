@@ -1,4 +1,6 @@
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
+import { requireAppKeyManager } from './appKeyManagement.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // typeResolvers — GraphQL type-level field resolvers extracted from resolvers.ts
 // (split step 3). No behavior change.
@@ -1617,8 +1619,10 @@ export const typeResolvers = {
       return (await canReadMemoryRecord(ctx, memory)) ? memory : null;
     },
     keys: async (a: { id: string; keys?: unknown[] }, _: unknown, ctx: Context) => {
-      // Check before serving an eager key list as well as the DB fallback.
-      if (!(await loadReadableNestedApp(ctx, a.id))) return [];
+      // #1744: an App read grants no credential inventory. Check even an eager list.
+      const app = await ctx.db.app.findFirst({ where: { id: a.id, deletedAt: null } });
+      if (!app) throw authorizationDenied();
+      await requireAppKeyManager(ctx, app);
       if (a.keys) return a.keys;
       return ctx.db.appKey.findMany({
         where: { appId: a.id, revokedAt: null },
