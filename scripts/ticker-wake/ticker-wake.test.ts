@@ -152,6 +152,26 @@ describe('selection and delivery', () => {
     expect(f.acked).toEqual([p]);
   });
 
+  // Vera's pin (spec fit at fd5d2f33, cor:agt:080:04/:13): the ack moved no mark, so the mention stays due and the server
+  // offers it again past the floor. The server half is proven live (Coco's stack); this is the loop's half of the sequence:
+  // it must not swallow or ack the re-offered mention, and it must still deliver the next tick that joins it.
+  it('after a joined TICK+MENTION ack, the re-offered MENTION-only wake is left alone and the next joined tick is delivered', () => {
+    const p1 = proof(['T:1'], 'one');
+    f.wakes = [wake('w-ada', 'Ada', [TICK, MENTION], p1)];
+    go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toEqual([p1]);
+    f.wakes = [wake('w-ada', 'Ada', [MENTION], proof([], 'again'))]; // the mention, offered again past the floor
+    go();
+    expect(f.sent, 'a MENTION-only wake must not be typed').toHaveLength(1);
+    expect(f.acked, 'a MENTION-only wake must not be acked').toEqual([p1]);
+    const p2 = proof(['T:2'], 'two');
+    f.wakes = [wake('w-ada', 'Ada', [TICK, MENTION], p2)]; // the next tick joins the still-due mention
+    go();
+    expect(f.sent).toHaveLength(2);
+    expect(f.acked).toEqual([p1, p2]);
+  });
+
   it('TICK+TASK and TICK+unknown are left alone: no nudge, no ack, no receipt (a proof naming task events records them delivered)', () => {
     for (const extra of [TASK, { kind: 'FUTURE', ticker: null }]) {
       f.wakes = [wake('w-ada', 'Ada', [TICK, extra])];

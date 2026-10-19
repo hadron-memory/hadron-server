@@ -82,7 +82,7 @@ function loadReceipts(dir: string): Receipts {
   let raw: string;
   try { raw = readFileSync(receiptsPath(dir), 'utf8'); } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return {};
-    throw new Error(`receipts unreadable (${(e as Error).message}); stopping rather than risk a retype`);
+    throw new Error(`receipts unreadable (${errno(e)}); stopping rather than risk a retype`);
   }
   const bad = (): never => { throw new Error('receipts malformed; stopping rather than risk a retype'); };
   let parsed: any;
