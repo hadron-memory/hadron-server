@@ -888,6 +888,38 @@ describe('diagnostics never carry a proof, typed text or a server message (P2-2)
       clean();
     });
 
+    // Rodolfo's three reproductions at 8154a672 (his checkpoint), all ordinary non-token-shaped text.
+    it('Rodolfo 1: an ordinary terminal-list helper message cannot echo through the outer catch', async () => {
+      await asLoop((argv) => isTerminalList(argv)
+        ? { code: 1, stdout: JSON.stringify({ ok: false, error: { code: 'terminal_list_failed', message: 'PRIVATE_HELPER_TEXT_SENTINEL' } }), stderr: '' }
+        : undefined);
+      expect(log()).not.toContain('PRIVATE_HELPER_TEXT_SENTINEL');
+      expect(f.sent).toEqual([]);
+    });
+
+    it('Rodolfo 2: an arbitrary Orca stage string cannot become log or stored diagnostic text', () => {
+      const text = 'PRIVATE_STAGE_TEXT_SENTINEL';
+      f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+      f.sendReply = () => JSON.stringify({ ok: true, result: { send: { accepted: true, prompt: { requestId: 'r1', stages: ['input_accepted', text] } } } });
+      f.retryReply = f.sendReply;
+      go();
+      expect(log()).not.toContain(text);
+      const entry = JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada'];
+      expect(entry.detail).not.toContain(text);
+      expect(entry.state).toBe('ambiguous'); // still never retyped or acked
+    });
+
+    it('Rodolfo 3: a legacy receipt\'s raw detail is not logged while the worker is held', () => {
+      const text = 'PRIVATE_LEGACY_TEXT_SENTINEL';
+      mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+      writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1'], receiver: 'term_a#inc-1', at: 1, detail: text, text: 'a nudge', handle: 'term_a' } }));
+      f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+      go();
+      expect(log()).not.toContain(text);
+      expect(log()).toContain('unreconciled'); // still held for a human
+      expect(f.sent).toEqual([]);
+    });
+
     it('this script\'s own errors keep their readable message (receipts unreadable stops the pass with a code)', async () => {
       mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
       mkdirSync(receiptsFile()); // a directory where the file should be: EISDIR on read

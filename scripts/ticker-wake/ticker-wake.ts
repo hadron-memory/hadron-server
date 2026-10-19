@@ -131,6 +131,33 @@ export function describeError(e: unknown): string {
 }
 
 /**
+ * Orca's send stages come from its reply, so an unexpected string must not become text: the known stage names pass, anything
+ * else is the class `other` (the length is kept, so the confirmed/uncertain logic is unchanged).
+ */
+const STAGES = new Set(['input_accepted', 'turn_started', 'no_turn_started_yet', 'not_accepted']);
+const stageClass = (s: unknown): string => (typeof s === 'string' && STAGES.has(s) ? s : 'other');
+
+/**
+ * A stored `detail` (it outlives this process, and an older version wrote raw text) is logged only if it is exactly one of the
+ * shapes THIS version writes; anything else is withheld. A same-id retry joins two such shapes.
+ */
+const CODE_SHAPE = '[A-Za-z][A-Za-z0-9_.-]{1,63}';
+const STAGE_SHAPE = '(?:input_accepted|turn_started|no_turn_started_yet|not_accepted|other)';
+const DETAIL_SHAPES: RegExp[] = [
+  /^send intent recorded before submission; outcome unknown$/,
+  /^unparsable send receipt$/,
+  /^unrecognized send receipt$/,
+  new RegExp(`^accepted, turn start not confirmed \\((?:no stages|${STAGE_SHAPE}(?:,${STAGE_SHAPE})*)\\)$`),
+  new RegExp(`^failed with a request identity(?: \\(${CODE_SHAPE}\\))?$`),
+  new RegExp(`^send refused(?:: ${CODE_SHAPE})?$`),
+];
+export function safeDetail(d: unknown): string {
+  const s = typeof d === 'string' ? d : '';
+  const parts = s.split('; same-id retry: ');
+  return parts.length <= 2 && parts.every((p) => DETAIL_SHAPES.some((re) => re.test(p))) ? s : 'recorded detail withheld';
+}
+
+/**
  * Last line of defence at the log sink: anything token-shaped that still reaches a log line (a `body.signature` proof, a
  * long opaque run, a bearer or key prefix) is replaced. The classes above are what keep text and messages out; this
  * catches an accident. Terminal handles (`term_<uuid>`) are left readable.
@@ -194,7 +221,7 @@ function classify(stdout: string): Submission {
   try { data = JSON.parse(stdout); } catch { return { kind: 'uncertain', stages: [], detail: 'unparsable send receipt' }; }
   const requestId = findRequestId(data);
   if (data?.ok && data.result?.send?.accepted) {
-    const stages: string[] = Array.isArray(data.result.send.prompt?.stages) ? data.result.send.prompt.stages : [];
+    const stages: string[] = (Array.isArray(data.result.send.prompt?.stages) ? data.result.send.prompt.stages : []).map(stageClass);
     return stages.includes('turn_started')
       ? { kind: 'confirmed', requestId, stages, detail: stages.join(',') }
       : { kind: 'uncertain', requestId, stages, detail: `accepted, turn start not confirmed (${stages.join(',') || 'no stages'})` };
@@ -298,12 +325,12 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
     // An unreconciled earlier request is reconciled with ITS OWN identity. Reissuing it can still perform input, so it
     // needs the same receiver and the same composer safety as a fresh send; without a request id it stays held for a human.
     if (prior?.state === 'ambiguous') {
-      if (!prior.requestId || dry) { log(`${ts} ${name}: an earlier send is unreconciled (${prior.detail}); not retyped, not acked`); continue; }
+      if (!prior.requestId || dry) { log(`${ts} ${name}: an earlier send is unreconciled (${safeDetail(prior.detail)}); not retyped, not acked`); continue; }
       if (prior.receiver !== receiver) { log(`${ts} ${name}: an earlier send is unreconciled for another receiver (${prior.receiver}); held for a human`); continue; }
       const unsafe = safeToType();
       if (unsafe) { log(`${ts} ${name}: unreconciled request not reissued (held: ${unsafe})`); continue; }
       const r = submit(cfg, run, prior.handle, prior.text, prior.requestId);
-      if (r.kind !== 'confirmed') { log(`${ts} ${name}: earlier request still unreconciled (${r.detail}); not retyped, not acked`); continue; }
+      if (r.kind !== 'confirmed') { log(`${ts} ${name}: earlier request still unreconciled (${safeDetail(r.detail)}); not retyped, not acked`); continue; }
       prior = receipts[id] = { state: 'sent', coverage: prior.coverage, receiver: prior.receiver, at: now };
       saveReceipts(stateDir, receipts);
       log(`${ts} ${name}: earlier request reconciled as delivered`);
@@ -355,14 +382,14 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
       // on disk and the wake is held for a human (fail closed).
       restore();
       try { saveReceipts(stateDir, receipts); } catch (e) { log(`${ts} ${name}: could not withdraw the send intent (${errno(e)}); held for a human`); }
-      log(`${ts} ${name}: ${r.detail}; will retry`);
+      log(`${ts} ${name}: ${safeDetail(r.detail)}; will retry`);
       continue;
     }
     if (r.kind === 'uncertain') {
       // Never an ack, never a fresh type: recorded with its request identity so it can be reconciled.
       receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: r.detail, text, handle, ...(r.requestId ? { requestId: r.requestId } : {}) };
       try { saveReceipts(stateDir, receipts); } catch (e) { log(`${ts} ${name}: could not update the send record (${errno(e)}); the earlier intent stays and holds the wake`); }
-      log(`${ts} ${name}: send not confirmed (${r.detail}); left for reconciliation`);
+      log(`${ts} ${name}: send not confirmed (${safeDetail(r.detail)}); left for reconciliation`);
       continue;
     }
     receipts[id] = { state: 'sent', coverage, receiver, at: now };
