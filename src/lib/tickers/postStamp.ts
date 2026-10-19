@@ -45,6 +45,7 @@ export async function lockStampAuthority(
   ctx: Context,
   tx: Prisma.TransactionClient,
   app: { id: string; organizationId: string | null; ownerUserId: string | null } | null,
+  beforeCallerRows?: () => Promise<void>,
 ): Promise<StampAuthority | null> {
   if (!app) return null;
   // The authority anchors first (the established protocol: anchors before row locks), then the App as it stands NOW:
@@ -63,6 +64,7 @@ export async function lockStampAuthority(
     ],
     'shared',
   );
+  if (beforeCallerRows) await beforeCallerRows();
   if (ctx.userId && !ctx.impersonation) {
     // Held before the roles and memberships are read, so a change to them orders against this post.
     await tx.$queryRaw`SELECT 1 FROM users WHERE id = ${ctx.userId} FOR SHARE`;

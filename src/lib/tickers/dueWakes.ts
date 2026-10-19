@@ -1,3 +1,4 @@
+import { mentionReach, mentionReachSql, reachEnvelopeOf } from '../mentionReach.js';
 // dueWakes — #1748, cor:agt:080:08–:15, :22, :23 (plan §4.2, §4.2a, §6.1).
 //
 // The loading around the pure rule in wakeRule.ts: who the caller may read, the
@@ -165,9 +166,7 @@ function envelopeOf(data: unknown): RoutedMessage | null {
   const e = data as Record<string, unknown>;
   return {
     seq: 0,
-    authorWorkerId: typeof e.authorWorkerId === 'string' ? e.authorWorkerId : null,
-    mentions: Array.isArray(e.mentions) ? e.mentions.filter((v): v is string => typeof v === 'string') : [],
-    broadcastWakes: e.broadcastWakes === true,
+    ...reachEnvelopeOf(e),
     managerPost: e.managerPost === true,
   };
 }
@@ -185,10 +184,9 @@ async function loadMessages(
   if (head <= lo) return [];
   if (!channel.encrypted) {
     const wanted = only && only.length > 0 ? Prisma.sql`AND (${candidatesFor(only)})` : Prisma.empty;
-    const rows = await db.$queryRaw<Array<{ seq: number; author: string | null; mentions: unknown; bw: boolean | null; mp: boolean | null }>>(Prisma.sql`
+    const rows = await db.$queryRaw<Array<{ seq: number; bw: boolean | null; mp: boolean | null; data: unknown }>>(Prisma.sql`
       SELECT n.seq::int AS seq,
-             n.data->>'authorWorkerId' AS author,
-             n.data->'mentions' AS mentions,
+             jsonb_build_object('authorWorkerId', n.data->'authorWorkerId', 'mentions', n.data->'mentions', 'broadcastWakes', n.data->'broadcastWakes', 'teamTagsVersion', n.data->'teamTagsVersion', 'teamBroadcastWorkerIds', n.data->'teamBroadcastWorkerIds') AS data,
              (n.data->>'broadcastWakes') = 'true' AS bw,
              (n.data->>'managerPost') = 'true' AS mp
       FROM nodes n
@@ -201,13 +199,13 @@ async function loadMessages(
       ORDER BY n.seq
       LIMIT ${limit}
     `);
-    return rows.map((r) => ({
-      seq: r.seq,
-      authorWorkerId: r.author,
-      mentions: Array.isArray(r.mentions) ? (r.mentions as unknown[]).filter((v): v is string => typeof v === 'string') : [],
-      broadcastWakes: r.bw === true,
-      managerPost: r.mp === true,
-    }));
+    return rows.map((r) => {
+      const reach = reachEnvelopeOf(r.data);
+      return { seq: r.seq, ...reach,
+        // Preserve the existing plaintext loader for legacy envelopes; S3 stamps are strict.
+        broadcastWakes: reach.teamTagsVersion === 1 ? reach.broadcastWakes : r.bw === true,
+        managerPost: r.mp === true };
+    });
   }
   const rows = await db.$queryRaw<Array<{ seq: number; data: unknown }>>(Prisma.sql`
     SELECT n.seq::int AS seq, n.data
@@ -250,10 +248,14 @@ const BROADCAST = BROADCAST_MENTION_TOKENS as readonly string[];
 /** Could `m` become (part of) a wake for this watcher? The scan's stopping rule: it must be a real path to one, not a superset. */
 function mattersTo(m: RoutedMessage, w: Watcher): boolean {
   if (m.authorWorkerId === w.workerId) return false;
-  const direct = m.mentions.some((t) => w.tokens.includes(t));
-  const broadcast = !direct && m.mentions.some((t) => BROADCAST.includes(t));
-  if (w.immediate && (direct || (broadcast && m.broadcastWakes))) return true;
-  if (w.subCovers && (direct || broadcast)) return true;
+  if (m.teamTagsVersion === 1) {
+    if ((w.immediate || w.subCovers) && mentionReach(m, w.tokens, [w.workerId]) !== null) return true;
+  } else {
+    const direct = m.mentions.some(t => w.tokens.includes(t));
+    const broadcast = !direct && m.mentions.some(t => BROADCAST.includes(t));
+    if (w.immediate && (direct || (broadcast && m.broadcastWakes))) return true;
+    if (w.subCovers && (direct || broadcast)) return true;
+  }
   return w.subAll;
 }
 
@@ -262,9 +264,13 @@ function candidatesFor(unmet: Watcher[]): Prisma.Sql {
   const terms = unmet.map((w) => {
     const notOwn = Prisma.sql`(n.data->>'authorWorkerId') IS DISTINCT FROM ${w.workerId}`;
     const parts: Prisma.Sql[] = [];
-    if (w.immediate || w.subCovers) parts.push(Prisma.sql`jsonb_exists_any(n.data->'mentions', ${w.tokens}::text[])`);
-    if (w.subCovers) parts.push(Prisma.sql`jsonb_exists_any(n.data->'mentions', ${[...BROADCAST]}::text[])`);
-    if (w.immediate) parts.push(Prisma.sql`(jsonb_exists_any(n.data->'mentions', ${[...BROADCAST]}::text[]) AND (n.data->>'broadcastWakes') = 'true')`);
+    if (w.immediate || w.subCovers) {
+      parts.push(Prisma.sql`((n.data->'teamTagsVersion') = '1'::jsonb AND ${mentionReachSql(Prisma.sql`n.data`, Prisma.sql`${w.tokens}::text[]`, Prisma.sql`${[w.workerId]}::text[]`)})`);
+      const legacy: Prisma.Sql[] = [Prisma.sql`jsonb_exists_any(n.data->'mentions', ${w.tokens}::text[])`];
+      if (w.subCovers) legacy.push(Prisma.sql`jsonb_exists_any(n.data->'mentions', ${[...BROADCAST]}::text[])`);
+      if (w.immediate) legacy.push(Prisma.sql`(jsonb_exists_any(n.data->'mentions', ${[...BROADCAST]}::text[]) AND (n.data->>'broadcastWakes') = 'true')`);
+      parts.push(Prisma.sql`((n.data->'teamTagsVersion') IS DISTINCT FROM '1'::jsonb AND (${Prisma.join(legacy, ' OR ')}))`);
+    }
     if (w.subAll) parts.push(Prisma.sql`TRUE`);
     return Prisma.sql`(${notOwn} AND (${Prisma.join(parts, ' OR ')}))`;
   });

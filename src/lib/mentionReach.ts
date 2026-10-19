@@ -21,6 +21,8 @@ export type ReachEnvelope = {
   mentions: readonly string[];
   /** Strictly boolean `true` in the stored envelope; anything else is unstamped. */
   broadcastWakes: boolean;
+  teamTagsVersion?: number;
+  teamBroadcastWorkerIds?: readonly string[];
 };
 
 const BROADCAST = BROADCAST_MENTION_TOKENS as readonly string[];
@@ -32,6 +34,7 @@ export function reachEnvelopeOf(data: unknown): ReachEnvelope {
     authorWorkerId: typeof e.authorWorkerId === 'string' ? e.authorWorkerId : null,
     mentions: Array.isArray(e.mentions) ? e.mentions.filter((v): v is string => typeof v === 'string') : [],
     broadcastWakes: e.broadcastWakes === true,
+    ...(e.teamTagsVersion === 1 ? { teamTagsVersion: 1, teamBroadcastWorkerIds: Array.isArray(e.teamBroadcastWorkerIds) ? e.teamBroadcastWorkerIds.filter((v): v is string => typeof v === 'string') : [] } : {}),
   };
 }
 
@@ -40,9 +43,10 @@ export function reachEnvelopeOf(data: unknown): ReachEnvelope {
  * `'direct'` (one of `tokens`), `'broadcast'` (a stamped broadcast), or null.
  * The SQL twin is {@link mentionReachSql}.
  */
-export function mentionReach(env: Pick<ReachEnvelope, 'mentions' | 'broadcastWakes'>, tokens: readonly string[]): 'direct' | 'broadcast' | null {
+export function mentionReach(env: Pick<ReachEnvelope, 'mentions' | 'broadcastWakes' | 'teamTagsVersion' | 'teamBroadcastWorkerIds'>, tokens: readonly string[], workerIds: readonly string[] = []): 'direct' | 'broadcast' | null {
   if (env.mentions.some((t) => tokens.includes(t))) return 'direct';
-  if (env.broadcastWakes && env.mentions.some((t) => BROADCAST.includes(t))) return 'broadcast';
+  if (env.teamTagsVersion === 1 && env.teamBroadcastWorkerIds?.some(id => workerIds.includes(id))) return 'direct';
+  if (env.broadcastWakes && env.mentions.some((t) => (env.teamTagsVersion === 1 ? t === 'all' : BROADCAST.includes(t)))) return 'broadcast';
   return null;
 }
 
@@ -53,7 +57,7 @@ export function mentionReach(env: Pick<ReachEnvelope, 'mentions' | 'broadcastWak
  */
 export function reachesWorker(env: ReachEnvelope, ownWorkerIds: readonly string[], tokens: readonly string[]): boolean {
   if (env.authorWorkerId !== null && ownWorkerIds.includes(env.authorWorkerId)) return false;
-  return mentionReach(env, tokens) !== null;
+  return mentionReach(env, tokens, ownWorkerIds) !== null;
 }
 
 /**
@@ -62,9 +66,16 @@ export function reachesWorker(env: ReachEnvelope, ownWorkerIds: readonly string[
  * so a string `"true"` is unstamped, exactly as in JS. Authorship is the
  * caller's predicate, as each counting query already carries one.
  */
-export function mentionReachSql(data: Prisma.Sql, tokens: Prisma.Sql): Prisma.Sql {
-  return Prisma.sql`(jsonb_typeof(${data} -> 'mentions') = 'array' AND (
-    (${data} -> 'mentions') ?| ${tokens}
-    OR ((${data} -> 'mentions') ?| ${[...BROADCAST]}::text[] AND (${data} -> 'broadcastWakes') = 'true'::jsonb)
-  ))`;
+export function mentionReachSql(data: Prisma.Sql, tokens: Prisma.Sql, workerIds: Prisma.Sql = Prisma.sql`ARRAY[]::text[]`): Prisma.Sql {
+  return Prisma.sql`(
+    (jsonb_typeof(${data}->'mentions') = 'array' AND (
+      (${data}->'mentions') ?| ${tokens}
+      OR ((${data}->'broadcastWakes') = 'true'::jsonb AND (
+        (${data}->'mentions') ? 'all'
+        OR ((${data}->'teamTagsVersion') IS DISTINCT FROM '1'::jsonb AND (${data}->'mentions') ? 'team')
+      ))
+    ))
+    OR ((${data}->'teamTagsVersion') = '1'::jsonb AND jsonb_typeof(${data}->'teamBroadcastWorkerIds') = 'array'
+      AND (${data}->'teamBroadcastWorkerIds') ?| ${workerIds})
+  )`;
 }
