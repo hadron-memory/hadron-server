@@ -31,3 +31,11 @@ it('retains whole ordinary first messages above the character budget when they f
  const body='x'.repeat(7000);const out=renderBatch({workerName:'Diego',messages:[msg(1,body),msg(2)]});
  expect(out.text).toContain(body);expect(out.text).not.toContain('[oversize');expect(out.overflow).toBe(1);
 });
+it('keeps an exact byte-ceiling envelope whole and stubs the first byte beyond it',()=>{
+ const overhead=Buffer.byteLength(renderBatch({workerName:'Diego',messages:[msg(1,'')]}).text);
+ const body='x'.repeat(128000-overhead);
+ const exact=renderBatch({workerName:'Diego',messages:[msg(1,body)]});
+ expect(Buffer.byteLength(exact.text)).toBe(128000);expect(exact.text).toContain(body);
+ const over=renderBatch({workerName:'Diego',messages:[msg(1,body+'x')]});
+ expect(over.text).toContain('[oversize message omitted');expect(Buffer.byteLength(over.text)).toBeLessThan(128000);
+});

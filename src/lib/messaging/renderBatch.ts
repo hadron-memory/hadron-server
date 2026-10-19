@@ -17,6 +17,24 @@ export const REPLY_HINT = 'reply: hadron team chat post --reply-to <seq> "@name 
 /** C7 owns the eventual command name; all overflow rendering uses this constant. */
 export const OVERFLOW_READ_COMMAND = 'hadron team chat inbox';
 
+/** #2121 option A prototype; not a production ruling. Full text, not body-only. */
+export const MAX_RENDERED_BATCH_BYTES = 128000;
+const bytes = (value: string) => Buffer.byteLength(value, 'utf8');
+function displayPrefix(value: string): string {
+  let out = '';
+  for (const character of oneLine(value)) {
+    if (bytes(out) + bytes(character) > 128) break;
+    out += character;
+  }
+  return out;
+}
+function oversizeStub(message: BatchMessage): BatchMessage {
+  // Channels and sequences are server identities, not user-authored shell text.
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(message.channelId) || !Number.isSafeInteger(message.seq) || message.seq < 1) throw new RangeError('Invalid message identity for oversize stub.');
+  return { ...message, authorName: displayPrefix(message.authorName), parentSeq: null, parent: null,
+    body: `[oversize message omitted: rendered text exceeds transport budget; read full message: hadron channel read '${message.channelId}' --since ${message.seq - 1} --before ${message.seq + 1} --limit 1]` };
+}
+
 function parentHint(message: BatchMessage): string {
   if (message.parentSeq === null) return '';
   const parent = message.parent;
@@ -101,8 +119,17 @@ export function renderBatch(input: RenderInput): RenderOutput {
     bodyCharacters = nextCharacters;
     if (nextCharacters > characterLimit) break;
   }
+  // Measure the complete wire text, including metadata, grouping and overflow.
+  // Remove only the tail: never skip an earlier eligible message for a later one.
+  let text = format(input.workerName, selected, totalEligible - selected.length);
+  while (selected.length > 1 && bytes(text) > MAX_RENDERED_BATCH_BYTES) {
+    selected.pop();
+    text = format(input.workerName, selected, totalEligible - selected.length);
+  }
+  if (selected.length === 1 && bytes(text) > MAX_RENDERED_BATCH_BYTES) {
+    text = format(displayPrefix(input.workerName), [oversizeStub(selected[0])], totalEligible - 1);
+  }
   const overflow = totalEligible - selected.length;
-  const text = format(input.workerName, selected, overflow);
   const channels = new Map<string, number[]>();
   for (const message of selected) {
     const seqs = channels.get(message.channelId) ?? [];

@@ -388,3 +388,17 @@ it('a requester-only alteration preserves batch shape/key but cannot keep the or
   const body = Buffer.from(JSON.stringify(altered)).toString('base64url');
   expect(await code(() => verifyBatchProof(`${body}.${sig}`))).toBe('WAKE_PROOF_INVALID');
 });
+
+it('#2121 option A: acknowledging an oversize stub counts that exact message delivered, preserving stored text and later messages',async()=>{
+ const body='界'.repeat(65536);
+ const first=await say(chA,body),second=await say(chA,'next');
+ const {renderBatch}=await import('../messaging/renderBatch.js');
+ const rendered=renderBatch({workerName:'Liam',messages:[first,second].map(seq=>({channelId:chA.id,seq,createdAt:new Date(seq),authorName:'Ada',body:seq===first?body:'next',parentSeq:null,parent:null,mentions:[]}))});
+ expect(rendered.text).toContain('[oversize message omitted');expect(rendered.ranges[0].seqs).toEqual([first]);
+ const channels=[range(chA,rendered.ranges[0].seqs)];
+ const proof=proofFor(channels,{renderHash:rendered.renderHash,batchKey:batchKeyOf({workerId:worker.id,channels,renderHash:rendered.renderHash})});
+ await ack([{proof:signBatchProof(proof)}]);
+ expect(await mark(chA)).toBe(first);
+ expect((await db.node.findFirstOrThrow({where:{messageChannelId:chA.id,seq:first}})).content).toBe(body);
+ expect(second).toBeGreaterThan((await mark(chA))!);
+});
