@@ -46,8 +46,8 @@ beforeEach(async () => {
   const agentId = (await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx)).id;
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   await db.appAgent.create({ data: { appId: app.id, agentId } });
-  kit = await db.worker.create({ data: { appId: app.id, agentId, name: 'Kit', slug: 'kit' }, select: { id: true } });
-  rook = await db.worker.create({ data: { appId: app.id, agentId, name: 'Rook', slug: 'rook' }, select: { id: true } });
+  kit = await db.worker.create({ data: { appId: app.id, agentId, name: 'Kit', slug: 'kit', signature: '', trailer: '' }, select: { id: true } });
+  rook = await db.worker.create({ data: { appId: app.id, agentId, name: 'Rook', slug: 'rook', signature: '', trailer: '' }, select: { id: true } });
   const memory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agentId } });
   const made = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:team', name: 'team', createdBy: manager.id });
   channel = { id: made.channel.id, memoryId: memory.id, loc: 'chats:team', chatRootNodeId: made.rootId };
