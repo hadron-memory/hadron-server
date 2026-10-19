@@ -47,9 +47,9 @@ it('binds all pages to the transaction, fixed time and exact worker, starting fr
   expect(spy).toHaveBeenCalledTimes(7);
   expect(spy.mock.calls[0]![0].after).toBeNull();
   const client = spy.mock.calls[0]![0].ctx.db;
-  expect(client).not.toBe(db);
+  expect(client === db).toBe(false);
   for (const [args] of spy.mock.calls) {
-    expect(args.ctx.db).toBe(client); expect(args.now).toEqual(now);
+    expect(args.ctx.db === client).toBe(true); expect(args.now).toEqual(now);
     expect(args.workerIds).toEqual([id(9)]); expect(args.hostId).toBe('host-a');
   }
 });
@@ -97,4 +97,15 @@ it('uses canonical encrypted omission and self-unhosted eligibility', async () =
   expect((await self()).messages).toHaveLength(13);
   await db.memory.update({ where: { id: id(6) }, data: { isEncrypted: true } });
   expect(await self()).toEqual({ complete: true, asOf: now, messages: [] });
+});
+it('feeds the complete same-snapshot set to canonical health without certifying policy time', async () => {
+  const { loadDeliveryHealthSnapshot } = await import('./deliveryPendingSnapshot.js');
+  const { beginDeliveryTracking, deliveryStateTransaction, observeDeliveryPolicyThrough } = await import('./deliveryState.js');
+  const read = () => db.$transaction(tx => loadDeliveryHealthSnapshot(tx, { ctx, app, hostId: 'host-a', workerId: id(9), asOf: now, first: 2, limit: 1 }), { isolationLevel: 'RepeatableRead' });
+  await deliveryStateTransaction(db, app.id, id(9), tx => beginDeliveryTracking(tx, id(9), posted));
+  await expect(read()).rejects.toThrow('DELIVERY_WAIT_INCOMPLETE');
+  await deliveryStateTransaction(db, app.id, id(9), tx => observeDeliveryPolicyThrough(tx, id(9), now));
+  const health = await read();
+  expect(health).toMatchObject({ appId: app.id, workerId: id(9), asOf: now, pendingMessageCount: 13, totalChannels: 1, hasMore: false, alarm: null });
+  expect(health.channels[0]).toMatchObject({ pendingMessageCount: 13, candidate: { seq: 1, dueSince: posted, waitedMs: 60_000, suppressionClassification: 'NONE' } });
 });
