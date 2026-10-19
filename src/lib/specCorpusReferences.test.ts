@@ -1,3 +1,5 @@
+import { withIncludeHistoryTransaction } from './includes/includeHistoryFence.js';
+import { waitForLockWaitersOfType } from '../test/lockWait.js';
 /** #1449: backlinks, unresolved references and renumber in a draft spec corpus. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
@@ -1213,5 +1215,33 @@ describe('an ambiguous citation blocks the mint as MISSING (#1505)', () => {
     expect(await unresolvedAt('pas:500')).toEqual(baseline);
     expect(await mintBlocksOn('pas:500')).toBe(baselineMint);
     expect(await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:500' }, as())).toEqual(baselineBacklinks);
+  });
+});
+
+
+describe('#2063 standalone renumber reconciliation boundary', () => {
+  it('waits before reconciling a referencing node; the move and later writer remain separate cuts', async () => {
+    await db.node.update({ where: { id: other.id }, data: { content: (await content('pas:020')) + '\nRaw drift.' } });
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const holder = withIncludeHistoryTransaction(db, async () => { entered(); await gate; });
+    await ready;
+    const pending = specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as());
+    const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1, 750);
+      expect((await db.node.findUniqueOrThrow({ where: { id: other.id } })).revSeq).toBe(1);
+      await db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${other.id} FOR UPDATE NOWAIT`;
+      });
+    } finally {
+      release();
+      await holder;
+      await outcome;
+    }
+    await pending;
+    expect(await content('pas:020')).toContain('pas:040');
   });
 });
