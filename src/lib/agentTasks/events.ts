@@ -421,3 +421,19 @@ export async function appendDeliveryStuckEvent(tx: Prisma.TransactionClient, a: 
       reason: a.reason, terminalId: a.terminalId },
   } });
 }
+
+/** Accepted hold observations carry a hold id, never a synthetic alarm episode. */
+export async function appendDeliveryHeldEvent(tx: Prisma.TransactionClient, a: {
+  appId: string; workerId: string; hold: import('../tickers/deliveryHolds.js').DeliveryHoldSnapshot; now: Date;
+}): Promise<void> {
+  const h = a.hold;
+  const p = h.principal;
+  const principal = p.kind === 'worker' ? { kind: p.kind, workerId: p.workerId, sessionId: p.sessionId } : { kind: p.kind, appKeyId: p.appKeyId, hostId: p.hostId };
+  await tx.agentTeamEvent.create({ data: {
+    id: generateId(), appId: a.appId, type: 'delivery.held', subjectWorkerId: a.workerId,
+    actorWorkerId: p.kind === 'worker' ? p.workerId : null, createdAt: a.now,
+    payload: { holdId: h.holdId, workerId: a.workerId, channelId: h.channelId, channelIncarnation: h.channelIncarnation,
+      firstPendingSeq: h.firstPendingSeq, since: h.since.toISOString(), observedAt: h.observedAt.toISOString(),
+      reason: h.reason, terminalId: h.terminalId, principal },
+  } });
+}

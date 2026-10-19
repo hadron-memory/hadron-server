@@ -3763,6 +3763,7 @@ model Worker {
   deliveryWaitState WorkerDeliveryWaitState?
   deliveryWaitExceptions WorkerDeliveryWaitException[]
   deliveryAlarmEpisode WorkerDeliveryAlarmEpisode?
+  deliveryHolds WorkerDeliveryHold[]
 
 }
 
@@ -5976,4 +5977,22 @@ model WorkerDeliveryAlarmEpisode {
   createdAt DateTime @map("created_at")
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
   @@map("worker_delivery_alarm_episodes")
+}
+
+/// S5 current accepted hold observation, independent of the worker alarm episode.
+model WorkerDeliveryHold {
+  id String @id @default(cuid())
+  workerId String @map("worker_id")
+  channelId String @map("channel_id")
+  channelIncarnation Int @map("channel_incarnation")
+  firstPendingSeq Int @map("first_pending_seq")
+  since DateTime
+  observedAt DateTime @map("observed_at")
+  reason String
+  terminalId String? @map("terminal_id")
+  principal Json
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  @@unique([workerId, channelId, channelIncarnation], map: "delivery_hold_worker_channel_incarnation_key")
+  @@index([workerId, since])
+  @@map("worker_delivery_holds")
 }

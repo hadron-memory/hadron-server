@@ -29,6 +29,25 @@ describe('S5 migration/source contract', () => {
           (id,app_id,type,subject_worker_id,payload) VALUES ('invalid-s5-event','missing','delivery.resumed','missing',$1::jsonb)`, [JSON.stringify(payload)]))
           .rejects.toMatchObject({ code: '23514', constraint: 'chk_delivery_event_payload' });
       }
+      const held = { holdId: 'h', workerId: 'missing', channelId: 'c', channelIncarnation: 1,
+        firstPendingSeq: 1, since: new Date().toISOString(), observedAt: new Date().toISOString(),
+        reason: 'draft', terminalId: null, principal: { kind: 'host-key', appKeyId: 'key', hostId: 'host' } };
+      for (const payload of [
+        { ...held, body: 'forbidden' },
+        { ...held, episodeId: 'synthetic-alarm' },
+        { ...held, reason: 'arbitrary screen text' },
+        { ...held, principal: { ...held.principal, proof: 'forbidden' } },
+      ]) {
+        await expect(db.query(`INSERT INTO agent_team_events
+          (id,app_id,type,subject_worker_id,payload) VALUES ('invalid-held','missing','delivery.held','missing',$1::jsonb)`, [JSON.stringify(payload)]))
+          .rejects.toMatchObject({ code: '23514', constraint: 'chk_delivery_event_payload' });
+      }
+      for (const principal of [{ ...held.principal, proof: 'forbidden' }, { kind: 'worker', workerId: 'other', sessionId: 'session' }]) {
+        await expect(db.query(`INSERT INTO worker_delivery_holds
+          (id,worker_id,channel_id,channel_incarnation,first_pending_seq,since,observed_at,reason,principal)
+          VALUES ('invalid-held','missing','c',1,1,now(),now(),'draft',$1::jsonb)`, [JSON.stringify(principal)]))
+          .rejects.toMatchObject({ code: '23514', constraint: 'chk_delivery_hold' });
+      }
     } finally { await db.end(); }
   });
 });

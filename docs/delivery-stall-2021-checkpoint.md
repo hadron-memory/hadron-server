@@ -4,9 +4,9 @@ Owner: Diego. Branch: `feature/2021-delivery-stall`. This is an unfinished found
 
 ## File reservations
 
-S5 owns its additions to `prisma/schema.prisma`, its delivery-wait migration and invariant SQL, `src/lib/tickers/deliveryWait.ts`, `src/lib/tickers/deliveryState.ts` and their tests, plus delivery event writers in `src/lib/agentTasks/events.ts` and the task/delivery escalation separation in `stall.ts`. Coordinate changes to these files with Diego.
+S5 owns its additions to `prisma/schema.prisma`, its delivery-wait migration and invariant SQL, `src/lib/tickers/deliveryWait.ts`, `src/lib/tickers/deliveryState.ts`, `src/lib/tickers/deliveryHolds.ts`, `src/lib/tickers/deliveryHealthRead.ts` and their tests, plus delivery event writers in `src/lib/agentTasks/events.ts` and the task/delivery escalation separation in `stall.ts`. Coordinate changes to these files with Diego.
 
-Anne owns S13 read projection, GraphQL/SDL/MCP composition and new deliveryHealth2029 tests. No frozen read DTO is promised by this checkpoint; `deliveryAlarmSnapshot` is a candidate internal seam only.
+Anne owns S13 read projection, GraphQL/SDL/MCP composition and new deliveryHealth2029 tests. The complete internal DTO is now exported as `DeliveryHealthSnapshot` by `deliveryHealthRead.ts`. This confirms the read shape for S13 integration; it does not freeze the overall draft or enable an unauthenticated report path.
 
 ## Implemented foundation
 
@@ -18,7 +18,7 @@ Merged current main at `41f6afd7` (merge commit, no rebase), bringing S9's persi
 
 ## Outstanding before freeze
 
-Wire canonical policy producers and authoritative reached-message selection; integrate mark reconciliation with S1/S2, and deliver owner wakes rather than only recording schedules. S1-dependent authenticated delivery.held reporting and channel hold observations remain pending S1. Add integration/race coverage for each connected producer and public gate. Complete S13 safe projection contract with Anne. No production sweep or public report API is enabled here, so incomplete observation cannot silently become zero deducted time.
+Wire canonical policy producers and authoritative reached-message selection; integrate mark reconciliation with S1/S2, and deliver owner wakes rather than only recording schedules. The internal accepted-hold writer and current hold projection exist; S1-dependent authenticated delivery.held reporting remains pending S1. Add integration/race coverage for each connected producer and public gate. Integrate the complete pending enumeration supplied by Anne beside the S1 loader. No production sweep or public report API is enabled here, so incomplete observation cannot silently become zero deducted time.
 
 ## Evidence
 
@@ -26,7 +26,7 @@ Red commits `f420cd61` and `006d5b8f` precede implementation. Targeted standard 
 
 ## Candidate S13 seams (not the complete frozen DTO)
 
-`loadDeliveryWait(tx, message, asOf)` returns `{ waitedMs, waitAsOf, suppressed }` using the ledger and explicit completeness certificate. `deliveryAlarmSnapshot(tx, workerId, asOf)` returns null or `{ episodeId, eventId, channelId, channelIncarnation, firstPendingSeq, waitedMs, waitAsOf, state: ACTIVE | SUPPRESSED, acknowledgedAt }`. Both require authorized callers. They throw `DELIVERY_WAIT_INCOMPLETE` rather than fabricate zero deducted time. Raw exception evidence never leaves these seams. The per-channel hold projection still needs S1 integration, so this is not the complete S13 current-health DTO or an invitation to activate the path.
+`loadDeliveryWait(tx, message, asOf)` returns `{ waitedMs, waitAsOf, suppressed }` using the ledger and explicit completeness certificate. `deliveryAlarmSnapshot(tx, workerId, asOf)` returns null or `{ episodeId, eventId, channelId, channelIncarnation, firstPendingSeq, waitedMs, waitAsOf, state: ACTIVE | SUPPRESSED, acknowledgedAt }`. Both require authorized callers. They throw `DELIVERY_WAIT_INCOMPLETE` rather than fabricate zero deducted time. Raw exception evidence never leaves these seams. Current-alarm reads also exclude anchors already covered by a committed read/delivery mark, without appending or altering history. The per-channel hold projection still needs S1 integration, so this is not the complete S13 current-health DTO or an invitation to activate the path.
 
 The policy-owner seam is `transitionDeliveryException(tx, { workerId, cause, coverage, effectiveAt, active, until? })`, inside the common lock transaction, after re-reading the owning policy. Coverage is whole-worker or exact channel/incarnation/seq range. Policy producers must be integrated before completeness can be certified or the affected evaluator path enabled.
 
@@ -45,3 +45,15 @@ The three new Worker-reference tables install the #1162 MVCC fence through the a
 ## Migration smoke baseline
 
 The smoke workflow now applies main's post-push SQL while main's prisma tree is still checked out, before restoring this PR and deploying its new migration. A schema-only baseline had omitted the already-deployed #1162 function, causing a false 42883 failure when the new S5 triggers called it. An isolated main-to-S5 migrate-deploy replay and the workflow's unchanged drift verification pass; the disposable smoke database was removed. Captured at `hrn:node:hadronmemory.com:hadron-server:findings:migration-smoke-baseline-needs-main-raw-sql`.
+
+## Confirmed S5 read DTO for S13 (internal, complete pending required)
+
+`deliveryHealthSnapshot(tx, { appId, workerId, asOf, pending, limit? })` exports its inferred result as `DeliveryHealthSnapshot`. The caller must use the existing App read gate and one consistent transaction/asOf. The S1 adapter must walk every page for the selected worker at the same `now`, then supply `pending: { complete: true, asOf, messages }`. Each message is `{ workerId, channelId, channelIncarnation, seq, dueSince }`; `dueSince` is post time. Rename S1's `incarnation` at the adapter boundary. Include timing-withheld and rendered-overflow messages, omit encrypted channels without trace. `state=due` is S4 plus timing eligibility, independent of renderer limits; neither that label nor `withheldReason` is evidence of a policy-clock interval. Missing/incomplete/mismatched snapshots fail with `DELIVERY_PENDING_INCOMPLETE`. Missing producer coverage fails with `DELIVERY_WAIT_INCOMPLETE`, including when pending is empty.
+
+The result is `{ appId, workerId, asOf, pendingMessageCount, heldChannelCount, activeAlarmCount, suppressedAlarmCount, alarm, channels, totalChannels, hasMore }`. Counts cover the whole current set; active/suppressed alarm counts are independently 0 or 1. `alarm` is null or `{ episodeId, eventId, anchor: { channelId, channelIncarnation, seq }, state: ACTIVE|SUPPRESSED, waitedMs, waitAsOf, suppressionClassification: NONE|EXCEPTION, acknowledgedAt, acknowledgedBy }`. Ack is independent of currentness/closure. `acknowledgedBy` is null or a typed worker/user id.
+
+Each channel is `{ channelId, channelIncarnation, hold, pendingMessageCount, candidate }`. The candidate is null or `{ channelId, channelIncarnation, seq, dueSince, waitedMs, waitAsOf, suppressionClassification }`. Selection prefers an uncovered qualifying message, then uncovered younger messages, then suppressed messages, in post-time/sequence order. This prevents an older selectively suppressed message from hiding a later qualifying one. Raw ledger evidence is never returned. Details sort by channel id (only one current incarnation/hold per channel), default 50, clamp 1..200; truncation changes neither counts nor the singular alarm.
+
+`recordDeliveryHold` is an internal trusted write primitive under the common worker lock, not an authenticated reporting API. It persists a separate hold id, stable `since`, latest semantically changed `observedAt`, closed reason, opaque nullable terminal id and normalized host-key or self-session principal. Duplicate observations append nothing. Semantic changes retain identity; covering max(read,delivered) starts a new hold identity on the next accepted report. SQL allowlists both mutable row and immutable `delivery.held` payload; held events never invent an alarm episode id. Worker/session references use the #1162 fence. Current reads exclude covered or retired/replaced holds without rewriting history. Full policy-owner/report integration is still required before activation.
+
+Red commit `bbec7d31` fails because the two new service modules do not exist. Green evidence: 168/168 tests in 11 suites, then 21/21 affected tests including the additional mark-covered currentness pin; TypeScript passes, raw migration replay from main plus the existing drift verifier passes; disposable replay database removed. This extends the previous CI-green checkpoint; the new pushed head must finish CI before any freeze claim.

@@ -64,6 +64,23 @@ ALTER TABLE "worker_delivery_wait_exceptions" ADD CONSTRAINT "worker_delivery_wa
 -- AddForeignKey
 ALTER TABLE "worker_delivery_alarm_episodes" ADD CONSTRAINT "worker_delivery_alarm_episodes_worker_id_fkey" FOREIGN KEY ("worker_id") REFERENCES "workers"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
+-- CreateTable
+CREATE TABLE "worker_delivery_holds" (
+  "id" TEXT NOT NULL PRIMARY KEY,
+  "worker_id" TEXT NOT NULL,
+  "channel_id" TEXT NOT NULL,
+  "channel_incarnation" INTEGER NOT NULL,
+  "first_pending_seq" INTEGER NOT NULL,
+  "since" TIMESTAMP(3) NOT NULL,
+  "observed_at" TIMESTAMP(3) NOT NULL,
+  "reason" TEXT NOT NULL,
+  "terminal_id" TEXT,
+  "principal" JSONB NOT NULL,
+  CONSTRAINT "worker_delivery_holds_worker_id_fkey" FOREIGN KEY ("worker_id") REFERENCES "workers"("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE UNIQUE INDEX "delivery_hold_worker_channel_incarnation_key" ON "worker_delivery_holds"("worker_id","channel_id","channel_incarnation");
+CREATE INDEX "worker_delivery_holds_worker_id_since_idx" ON "worker_delivery_holds"("worker_id","since");
+
 -- S5 exception ledger: typed coverage/timestamps; no message content columns.
 ALTER TABLE worker_delivery_wait_states DROP CONSTRAINT IF EXISTS chk_delivery_wait_state;
 ALTER TABLE worker_delivery_wait_states ADD CONSTRAINT chk_delivery_wait_state
@@ -101,10 +118,26 @@ ALTER TABLE agent_team_events DROP CONSTRAINT IF EXISTS chk_delivery_event_paylo
 ALTER TABLE agent_team_events ADD CONSTRAINT chk_delivery_event_payload CHECK (
   type NOT IN ('delivery.held','delivery.stuck','delivery.resumed') OR (
     task_id IS NULL AND subject_worker_id IS NOT NULL AND
-    jsonb_typeof(payload->'episodeId') = 'string' AND payload->>'episodeId' ~ '^[A-Za-z0-9_-]{1,128}$' AND
+    (type = 'delivery.held' OR (jsonb_typeof(payload->'episodeId') = 'string' AND payload->>'episodeId' ~ '^[A-Za-z0-9_-]{1,128}$')) AND
     jsonb_typeof(payload->'channelId') = 'string' AND payload->>'channelId' ~ '^[A-Za-z0-9_-]{1,128}$' AND
     jsonb_typeof(payload->'channelIncarnation') = 'number' AND payload->>'channelIncarnation' ~ '^[0-9]+$' AND
-    CASE WHEN type = 'delivery.resumed' THEN
+    CASE WHEN type = 'delivery.held' THEN
+      severity IS NULL AND episode_start IS NULL AND
+      payload ?& ARRAY['holdId','workerId','channelId','channelIncarnation','firstPendingSeq','since','observedAt','reason','terminalId','principal'] AND
+      payload - ARRAY['holdId','workerId','channelId','channelIncarnation','firstPendingSeq','since','observedAt','reason','terminalId','principal'] = '{}'::jsonb AND
+      jsonb_typeof(payload->'holdId') = 'string' AND payload->>'holdId' ~ '^[A-Za-z0-9_-]{1,128}$' AND
+      jsonb_typeof(payload->'workerId') = 'string' AND payload->>'workerId' = subject_worker_id AND
+      jsonb_typeof(payload->'firstPendingSeq') = 'number' AND payload->>'firstPendingSeq' ~ '^[1-9][0-9]*$' AND
+      jsonb_typeof(payload->'since') = 'string' AND payload->>'since' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$' AND
+      jsonb_typeof(payload->'observedAt') = 'string' AND payload->>'observedAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$' AND
+      payload->>'reason' IN ('draft','isolated','question','screen-unknown','not-submitted','two-agents','binding-mismatch') AND
+      (payload->'terminalId' = 'null'::jsonb OR (jsonb_typeof(payload->'terminalId') = 'string' AND payload->>'terminalId' ~ '^term_[A-Za-z0-9_-]{1,128}$')) AND
+      jsonb_typeof(payload->'principal') = 'object' AND CASE payload->'principal'->>'kind'
+        WHEN 'worker' THEN (payload->'principal') - ARRAY['kind','workerId','sessionId'] = '{}'::jsonb AND jsonb_typeof(payload->'principal'->'workerId') = 'string' AND payload->'principal'->>'workerId' = subject_worker_id AND jsonb_typeof(payload->'principal'->'sessionId') = 'string' AND payload->'principal'->>'sessionId' ~ '^[A-Za-z0-9_-]{1,128}$'
+        WHEN 'host-key' THEN (payload->'principal') - ARRAY['kind','appKeyId','hostId'] = '{}'::jsonb AND jsonb_typeof(payload->'principal'->'appKeyId') = 'string' AND payload->'principal'->>'appKeyId' ~ '^[A-Za-z0-9_-]{1,128}$' AND jsonb_typeof(payload->'principal'->'hostId') = 'string' AND payload->'principal'->>'hostId' ~ '^[A-Za-z0-9_-]{1,128}$'
+        ELSE false
+      END
+    WHEN type = 'delivery.resumed' THEN
       severity IS NULL AND episode_start IS NULL AND
       jsonb_typeof(payload->'resumedAt') = 'string' AND payload->>'resumedAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$' AND
       (
@@ -116,8 +149,7 @@ ALTER TABLE agent_team_events ADD CONSTRAINT chk_delivery_event_payload CHECK (
         (NOT (payload ? 'reason') AND
           jsonb_typeof(payload->'throughSeq') = 'number' AND payload->>'throughSeq' ~ '^[0-9]+$' AND
           payload - ARRAY['episodeId','channelId','channelIncarnation','throughSeq','resumedAt','principal'] = '{}'::jsonb AND
-          jsonb_typeof(payload->'principal') = 'object' AND
-          CASE payload->'principal'->>'kind'
+          jsonb_typeof(payload->'principal') = 'object' AND CASE payload->'principal'->>'kind'
             WHEN 'worker' THEN (payload->'principal') - ARRAY['kind','workerId'] = '{}'::jsonb AND (payload->'principal'->>'workerId') ~ '^[A-Za-z0-9_-]{1,128}$'
             WHEN 'user' THEN (payload->'principal') - ARRAY['kind','userId'] = '{}'::jsonb AND (payload->'principal'->>'userId') ~ '^[A-Za-z0-9_-]{1,128}$'
             WHEN 'host-key' THEN (payload->'principal') - ARRAY['kind','appKeyId','hostId'] = '{}'::jsonb AND (payload->'principal'->>'appKeyId') ~ '^[A-Za-z0-9_-]{1,128}$' AND (payload->'principal'->>'hostId') ~ '^[A-Za-z0-9_-]{1,128}$'
@@ -150,3 +182,22 @@ CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "worker_del
 DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "worker_delivery_alarm_episodes";
 CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "worker_delivery_alarm_episodes"
   FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id');
+
+ALTER TABLE worker_delivery_holds DROP CONSTRAINT IF EXISTS chk_delivery_hold;
+ALTER TABLE worker_delivery_holds ADD CONSTRAINT chk_delivery_hold CHECK ((
+  channel_id ~ '^[A-Za-z0-9_-]{1,128}$' AND channel_incarnation >= 0 AND first_pending_seq > 0 AND observed_at >= since
+  AND reason IN ('draft','isolated','question','screen-unknown','not-submitted','two-agents','binding-mismatch')
+  AND (terminal_id IS NULL OR terminal_id ~ '^term_[A-Za-z0-9_-]{1,128}$')
+  AND CASE principal->>'kind'
+    WHEN 'worker' THEN principal - ARRAY['kind','workerId','sessionId'] = '{}'::jsonb AND jsonb_typeof(principal->'workerId') = 'string' AND principal->>'workerId' = worker_id AND jsonb_typeof(principal->'sessionId') = 'string' AND principal->>'sessionId' ~ '^[A-Za-z0-9_-]{1,128}$'
+    WHEN 'host-key' THEN principal - ARRAY['kind','appKeyId','hostId'] = '{}'::jsonb AND jsonb_typeof(principal->'appKeyId') = 'string' AND principal->>'appKeyId' ~ '^[A-Za-z0-9_-]{1,128}$' AND jsonb_typeof(principal->'hostId') = 'string' AND principal->>'hostId' ~ '^[A-Za-z0-9_-]{1,128}$'
+    ELSE false END
+) IS TRUE);
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "worker_delivery_holds";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "worker_delivery_holds"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id', 'w:$.principal.workerId', 's:$.principal.sessionId');
+
+-- S5 hold self-session provenance joins the existing typed event inventory.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "agent_team_events";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "agent_team_events"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.actor_worker_id', 'w:$.subject_worker_id', 'w:$.acknowledged_by_worker_id', 'w:$.chain[*].workerId', 'w:$.payload.owner.workerId', 'w:$.payload.assignee.workerId', 'w:$.payload.from.workerId', 'w:$.payload.to.workerId', 'w:$.payload.principal.workerId', 's:$.payload.principal.sessionId');

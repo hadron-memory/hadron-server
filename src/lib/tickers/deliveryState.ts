@@ -12,6 +12,7 @@ import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { lockAppReportsTo, reportsToChain } from '../workerReportsTo.js';
 import { appManagerUserIds } from '../auth/appManagement.js';
 import { loadDeliverySettings } from './deliverySettings.js';
+import { deliveryCoveredThrough } from './deliveryHolds.js';
 import { deliveryWait, oldestStuckMessage, nextDeliveryOwnerDue, DELIVERY_EXCEPTION_CAUSES, type DeliveryMessage, type WaitException, type WaitCoverage } from './deliveryWait.js';
 
 type Tx = Prisma.TransactionClient;
@@ -136,6 +137,15 @@ export async function loadDeliveryWait(tx: Tx, message: DeliveryMessage, now: Da
   return deliveryWait(message, exceptions, state, now);
 }
 
+/** One ledger read for the complete pending set; empty still verifies coverage. */
+export async function loadDeliveryWaits(tx: Tx, workerId: string, messages: readonly DeliveryMessage[], asOf: Date) {
+  if (messages.some(m => m.workerId !== workerId)) fail('DELIVERY_WORKER_MISMATCH');
+  const oldest = new Date(messages.reduce((n, m) => Math.min(n, m.dueSince.getTime()), asOf.getTime()));
+  const { state, exceptions } = await waitInputs(tx, workerId, asOf, oldest);
+  if (state.trackedFrom > asOf) fail('DELIVERY_WAIT_INCOMPLETE');
+  return messages.map(m => deliveryWait(m, exceptions, state, asOf));
+}
+
 /** Capture under deliveryStateTransaction's shared reportsTo/authority fences. */
 export async function deliveryAlarmChain(tx: Tx, workerId: string): Promise<AlarmChain> {
   const worker = await tx.worker.findUniqueOrThrow({ where: { id: workerId }, select: { appId: true } });
@@ -250,7 +260,8 @@ export async function advanceDeliveryEscalation(tx: Tx, workerId: string, now: D
 export async function deliveryAlarmSnapshot(tx: Tx, workerId: string, asOf: Date) {
   const active = await tx.workerDeliveryAlarmEpisode.findUnique({ where: { workerId } });
   if (!active || !(await channelStillCurrent(tx, active.channelId, active.channelIncarnation))) return null;
+  if (active.anchorSeq <= await deliveryCoveredThrough(tx, workerId, active.channelId, active.channelIncarnation)) return null;
   const wait = await loadDeliveryWait(tx, { workerId, channelId: active.channelId, channelIncarnation: active.channelIncarnation, seq: active.anchorSeq, dueSince: active.dueSince }, asOf);
-  const event = await tx.agentTeamEvent.findUniqueOrThrow({ where: { id: active.alarmEventId }, select: { acknowledgedAt: true } });
-  return { episodeId: active.episodeId, eventId: active.alarmEventId, channelId: active.channelId, channelIncarnation: active.channelIncarnation, firstPendingSeq: active.anchorSeq, waitedMs: wait.waitedMs, waitAsOf: asOf, state: wait.suppressed ? 'SUPPRESSED' as const : 'ACTIVE' as const, acknowledgedAt: event.acknowledgedAt };
+  const event = await tx.agentTeamEvent.findUniqueOrThrow({ where: { id: active.alarmEventId }, select: { acknowledgedAt: true, acknowledgedByWorkerId: true, acknowledgedByUserId: true } });
+  return { episodeId: active.episodeId, eventId: active.alarmEventId, channelId: active.channelId, channelIncarnation: active.channelIncarnation, firstPendingSeq: active.anchorSeq, waitedMs: wait.waitedMs, waitAsOf: asOf, state: wait.suppressed ? 'SUPPRESSED' as const : 'ACTIVE' as const, acknowledgedAt: event.acknowledgedAt, acknowledgedBy: event.acknowledgedByWorkerId ? { kind: 'worker' as const, workerId: event.acknowledgedByWorkerId } : event.acknowledgedByUserId ? { kind: 'user' as const, userId: event.acknowledgedByUserId } : null };
 }
