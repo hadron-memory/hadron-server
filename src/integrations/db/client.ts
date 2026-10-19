@@ -45,6 +45,8 @@ const MODELS_WITHOUT_ID = new Set<string>([
   'WorkerWakeSettings',
   'WorkerDeliveryChannel',
   'WorkerDeliveryTick', 'AppWakeDay', 'AppWakeReservation',
+  // #2072 — keyed by (worker, wake key).
+  'WorkerWakeAck',
 ]);
 
 const basePrisma = new PrismaClient();
