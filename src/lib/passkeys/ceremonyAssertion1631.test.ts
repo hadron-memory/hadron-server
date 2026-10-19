@@ -159,12 +159,13 @@ describe('decideCeremonyAssertion (deciding transaction)', () => {
   });
 
   it('judges expiry at the moment of consuming, not at the caller transaction start (a lock wait can cross it)', async () => {
-    const id = (await db.$transaction((tx) => createCeremony(tx, { purpose: 'SIGN_IN', browserNonceHash: NONCE, ttlSeconds: 1, challengeIsId: true }))).id;
     const c = challenge();
+    // Bound to the challenge that is verified below, so only EXPIRY can make decide refuse.
+    const id = (await db.$transaction((tx) => createCeremony(tx, { purpose: 'SIGN_IN', browserNonceHash: NONCE, ttlSeconds: 1, challengeHash: sha(c.expected) }))).id;
     const { snapshot } = await verify(answer(c.seed, { counter: 1 }), c.expected);
     const decided = await db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT CURRENT_TIMESTAMP`; // the transaction has started, well inside the ceremony's lifetime
-      await tx.$executeRaw`SELECT pg_sleep(1.6)`;      // stands in for the anchor/row-lock wait; expiry passes inside the transaction
+      await tx.$executeRaw`SELECT pg_sleep(1.6)`;   // stands in for the anchor/row-lock wait; expiry passes inside the transaction
       return decideCeremonyAssertion(tx, { ceremonyId: id, browserNonceHash: NONCE, purpose: 'SIGN_IN', verified: snapshot });
     });
     expect(decided).toBeNull();
@@ -181,5 +182,12 @@ describe('decideCeremonyAssertion (deciding transaction)', () => {
 
   it('refuses to create a ceremony with no challenge binding', async () => {
     await expect(db.$transaction((tx) => createCeremony(tx, { purpose: 'SIGN_IN', browserNonceHash: NONCE, ttlSeconds: 60 } as never))).rejects.toThrow();
+  });
+
+  it('control: the same bound ceremony inside its lifetime is accepted (so the expiry pin refuses for expiry alone)', async () => {
+    const c = challenge();
+    const id = (await db.$transaction((tx) => createCeremony(tx, { purpose: 'SIGN_IN', browserNonceHash: NONCE, ttlSeconds: 60, challengeHash: sha(c.expected) }))).id;
+    const { snapshot } = await verify(answer(c.seed, { counter: 1 }), c.expected);
+    expect(await db.$transaction((tx) => decideCeremonyAssertion(tx, { ceremonyId: id, browserNonceHash: NONCE, purpose: 'SIGN_IN', verified: snapshot }))).not.toBeNull();
   });
 });
