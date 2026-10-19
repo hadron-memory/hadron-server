@@ -345,3 +345,36 @@ describe('#2044 install memory — the one-Agent-per-system-memory assumptions',
     expect((await db.agent.findUniqueOrThrow({ where: { id: f.agent.id } })).systemMemoryId).not.toBe(row!.id);
   });
 });
+
+describe('#2044 install memory — it can never become an Agent\'s brain (Andi P2-1) or sit on an app-class row (P2-2)', () => {
+  it('createAgent and updateAgent refuse an install memory as systemMemoryId, and nothing changes', async () => {
+    const f = await fixture();
+    await f.create(f.admin);
+    const [row] = await f.installRows();
+    await expect(M.createAgent({}, { orgId, name: 'Promoted Install', systemMemoryId: row!.id }, ctxOf(f.admin.id)))
+      .rejects.toThrow(/install memory/i);
+    const plain = await db.agent.create({ data: { id: generateId(), name: 'Plain', urn: `${orgId}:plain`, organizationId: orgId } });
+    await expect(M.updateAgent({}, { ref: plain.id, systemMemoryId: row!.id }, ctxOf(f.admin.id)))
+      .rejects.toThrow(/install memory/i);
+    expect(await db.agent.count({ where: { systemMemoryId: row!.id } })).toBe(0);
+    const after = await db.memory.findUniqueOrThrow({ where: { id: row!.id } });
+    expect(after).toMatchObject({ deletedAt: null, appId: f.app.id, installOfAgentId: f.agent.id });
+    // Deleting an Agent therefore cannot tombstone an App's customisation.
+    await M.deleteAgent({}, { ref: f.agent.id }, ctxOf(f.admin.id)).catch(() => undefined);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: row!.id } })).deletedAt).toBeNull();
+  });
+
+  it('the install discriminator is forbidden on every non-system class, app-class with an App included', async () => {
+    const f = await fixture();
+    for (const cls of ['app', 'knowledge', 'group', 'personal', 'private'] as const) {
+      await expect(db.memory.create({
+        data: {
+          id: generateId(), class: cls, name: `x-${cls}`, urn: `${orgId}:x-${cls}`, organizationId: orgId,
+          appId: f.app.id, installOfAgentId: f.agent.id,
+          ...(cls === 'group' ? { visibility: 'GROUP' as never } : {}),
+          ...(cls === 'personal' || cls === 'private' ? { userId: f.admin.id, userMemoryOfAgentId: f.agent.id } : {}),
+        },
+      }), cls).rejects.toThrow();
+    }
+  });
+});
