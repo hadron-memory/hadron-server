@@ -5,7 +5,9 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import type { Context } from '../../api/graphql/schema/resolvers.js';
-import { loadDeliveryBatches } from './deliveryBatch.js';
+import { batchProofPayload, loadDeliveryBatches } from './deliveryBatch.js';
+import { acknowledgeBatchProofs } from './acknowledge.js';
+import { signBatchProof } from './wakeProof.js';
 import { enumeratePendingDelivery } from './pendingDelivery.js';
 import { StandbyCoverageClassifier, standbyAdmits, standbyAdmitsSql, onStandbySql, workerStandby } from './standby.js';
 
@@ -296,5 +298,21 @@ describe('the assignment raise (R90)', () => {
     for (const f of ['acknowledge.ts', 'wakeProof.ts']) {
       expect(readFileSync(new URL(`./${f}`, import.meta.url), 'utf8'), f).not.toMatch(/standbyAssignment|raiseDeliveredOnAssignment/);
     }
+  });
+});
+
+describe('S7 + S1: an ordinary batch ack never passes a held message (George P2, #2114)', () => {
+  it('held seq 1 + admitted seq 2: after the real batch ack the held message is still in the complete enumeration', async () => {
+    const head = await mkWorker('Head');
+    const target = await mkWorker('Target', { reportsToWorkerId: head.id });
+    await setSwitch(true);
+    await say('peer', { authorWorkerId: (await peer()).id });   // 1 held
+    await say('human', { authorUserId: holderId });             // 2 admitted
+    const mine = (await load()).batches.find((b) => b.workerId === target.id)!;
+    expect(mine.ranges[0]!.seqs).toEqual([2]);
+    const proof = signBatchProof(batchProofPayload(mine, { appId, hostId: 'host-a', appKeyId: caller.appKeyId!, now: ready }));
+    await acknowledgeBatchProofs({ ctx: { ...caller, userId: holderId } as Context, requester: { appKeyId: caller.appKeyId! }, acks: [{ proof }], mayAckBatch: async () => true, now: ready });
+    const after = (await enumerate()).items.filter((i) => i.workerId === target.id).map((i) => i.seq);
+    expect(after, 'the held message was never rendered or counted, so it must stay pending').toContain(1);
   });
 });
