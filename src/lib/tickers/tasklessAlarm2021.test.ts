@@ -105,3 +105,24 @@ it('a covered S5 anchor stops waking while the retained episode/event remain unc
  expect(await db.agentTeamEvent.findUniqueOrThrow({where:{id:e.id}})).toEqual(e);
  expect(await db.workerDeliveryAlarmEpisode.findUniqueOrThrow({where:{workerId:liam.id}})).toEqual(active);
 });
+
+it('real GraphQL execution preserves null-task alarm metadata without non-null bubbling or fake refs',async()=>{
+ const e=await deliveryAlarm();
+ const {makeExecutableSchema}=await import('@graphql-tools/schema');
+ const {graphql}=await import('graphql');
+ const {typeDefs}=await import('../../api/graphql/schema/typeDefs.js');
+ const result=await graphql({schema:makeExecutableSchema({typeDefs,resolvers:resolvers as never}),contextValue:ctx(manager.id),
+  source:'query($app:String!){dueWakes(appRef:$app){wakes{reasons{kind task{id title eventId chainIndex event ref subjectWorkerId}}}}}',variableValues:{app:app.id}});
+ expect(result.errors).toBeUndefined();
+ const answer=JSON.parse(JSON.stringify(result.data));
+ expect(answer.dueWakes.wakes[0].reasons[0].task).toEqual({id:null,title:null,eventId:e.id,chainIndex:0,event:'ALARM',ref:`ALARM:${e.id}:0`,subjectWorkerId:liam.id});
+});
+it('the real MCP due-wakes handler labels a task-less alarm without task null or a fabricated title',async()=>{
+ const e=await deliveryAlarm();
+ const {createTestableMcpServer}=await import('../../mcp/server.js');
+ const server=createTestableMcpServer({userId:manager.id,roles:['READER'],clientId:`user:${manager.id}`},{sessionId:generateId()});
+ const answer=await server.callToolText('hadron_due_wakes',{appRef:app.id});
+ expect(answer).toContain(`alarm ${e.id}`);
+ expect(answer).not.toContain('task null');
+ expect(answer).not.toContain('TASK:null');
+});
