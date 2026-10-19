@@ -546,7 +546,9 @@ describe('typed-once, coverage and ambiguity', () => {
     go();
     expect(f.acked).toEqual([]);
     expect(log()).toContain('send refused');
-    expect(existsSync(receiptsFile())).toBe(false);
+    // The intent written before the send is withdrawn: no entry for the worker remains (the file may exist, empty).
+    const left = existsSync(receiptsFile()) ? JSON.parse(readFileSync(receiptsFile(), 'utf8')) : {};
+    expect(left['w-ada']).toBeUndefined();
     f.sendReply = null;
     go();
     expect(f.acked).toHaveLength(1);
@@ -591,7 +593,9 @@ describe('typed-once, coverage and ambiguity', () => {
 describe('failure and paging', () => {
   it('a GraphQL failure on dueWakes throws and sends and acks nothing', () => {
     f.dueError = 'permission denied';
-    expect(() => go()).toThrow('permission denied');
+    // The server's message is not echoed (P2-2): the class is. Its text can carry a proof or private text.
+    expect(() => go()).toThrow('graphql error');
+    expect(() => go()).not.toThrow('permission denied');
     expect(f.sent).toEqual([]);
   });
 
@@ -627,7 +631,7 @@ describe('CLI entry and single instance', () => {
     f.dueError = 'boom';
     expect(await main(['loop', '--interval', '10'], { ...deps(), maxPasses: 2 })).toBe(0);
     expect(f.pages).toBe(2);
-    expect(log()).toContain('pass failed: boom');
+    expect(log()).toContain('pass failed: graphql error');
     expect(existsSync(join(dir, 'ticker-wake', 'lock'))).toBe(false); // released
   });
 
@@ -734,5 +738,109 @@ describe('GraphQL contract with the server SDL (#2102 / R63)', () => {
   });
   it('the acknowledgeWakes mutation validates', () => {
     expect(validate(schema, parse(ACK)).map((e) => e.message)).toEqual([]);
+  });
+});
+
+// George's two P2s on #2070 (LOCAL REQUEST_CHANGES at fd5d2f33).
+describe('send intent is persisted BEFORE a possible submission (P2-1)', () => {
+  // The temp file saveReceipts writes first. Making it a directory (EISDIR, like the reviewer's repro) is portable:
+  // it fails for root and non-root alike, and it only appears once the send has happened.
+  const tmpPath = () => `${receiptsFile()}.${process.pid}.tmp`;
+
+  it('a confirmed send whose receipt write then fails is never retyped by the next pass', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    f.sendReply = () => { mkdirSync(tmpPath()); return JSON.stringify(CONFIRMED); };
+    try { go(); } catch { /* the old code lets the write failure end the pass */ }
+    expect(f.sent).toHaveLength(1);
+    rmSync(tmpPath(), { recursive: true, force: true }); // the operator clears the fault
+    f.sendReply = null;
+    go();
+    expect(f.sent, 'the same wake was typed a second time').toHaveLength(1);
+    expect(f.acked, 'an unreconciled send must not be acked').toEqual([]);
+    expect(log()).toContain('unreconciled');
+  });
+
+  it('if the intent cannot be recorded, nothing is sent (fail closed)', () => {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    mkdirSync(tmpPath()); // the very first write fails
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    try { go(); } catch { /* may throw or log */ }
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+  });
+
+  it('a send that was refused (nothing typed) leaves no intent behind, so it is retried', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    f.sendReply = () => JSON.stringify({ ok: false, error: { code: 'not_accepted' } });
+    go();
+    expect(f.sent).toHaveLength(1);
+    f.sendReply = null;
+    go();
+    expect(f.sent, 'a refused send must be retried').toHaveLength(2);
+    expect(f.acked).toHaveLength(1);
+  });
+});
+
+describe('diagnostics never carry a proof, typed text or a server message (P2-2)', () => {
+  const PROOF_SENTINEL = 'OPAQUE-PROOF-SENTINEL-8f3a91c2d7';
+  const TEXT_SENTINEL = 'PRIVATE-DRAFT-TEXT-SENTINEL-51b0e4';
+  const clean = () => {
+    const everything = log() + '\n' + (existsSync(receiptsFile()) ? readFileSync(receiptsFile(), 'utf8') : '');
+    expect(everything).not.toContain(PROOF_SENTINEL);
+    expect(everything).not.toContain(TEXT_SENTINEL);
+  };
+
+  it('a failed ack logs its server error CODE but not the server message', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    f.ackReply = () => ({ errors: [{ message: `stale ${PROOF_SENTINEL} ${TEXT_SENTINEL}`, extensions: { code: 'WAKE_PROOF_STALE' } }] });
+    go();
+    expect(log()).toContain('WAKE_PROOF_STALE');
+    clean();
+  });
+
+  it('an unparsable hadron reply does not log its stderr', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    const run = f.run;
+    f.run = (argv) => (argv[0] === 'hadron' && String(argv[2]).includes('acknowledgeWakes')
+      ? { code: 1, stdout: 'not json', stderr: `boom ${PROOF_SENTINEL} ${TEXT_SENTINEL}` }
+      : run(argv));
+    go();
+    clean();
+  });
+
+  it('a refused send does not log the raw send error', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    f.sendReply = () => JSON.stringify({ ok: false, error: { code: 'composer_not_empty', message: `draft: ${TEXT_SENTINEL}` } });
+    go();
+    expect(log()).toContain('composer_not_empty');
+    clean();
+  });
+
+  it('an uncertain send with a request identity keeps the identity but logs and stores no raw error', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    const uncertain = () => JSON.stringify({ ok: false, requestId: 'r-9', error: { message: `echo ${TEXT_SENTINEL} ${PROOF_SENTINEL}` } });
+    f.sendReply = uncertain;
+    f.retryReply = uncertain; // the same-identity retry fails the same way
+    go();
+    clean();
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'ambiguous', requestId: 'r-9' });
+  });
+
+  it('a failed dueWakes read throws a message without the server text', () => {
+    f.dueError = `bad ${TEXT_SENTINEL} ${PROOF_SENTINEL}`;
+    let msg = '';
+    try { go(); } catch (e) { msg = (e as Error).message; }
+    expect(msg).not.toBe('');
+    expect(msg).not.toContain(TEXT_SENTINEL);
+    expect(msg).not.toContain(PROOF_SENTINEL);
+  });
+
+  it('screen-derived reasons are logged as a class, not as screen text', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    f.screen = { source: 'screen', tail: ['❯ ' + TEXT_SENTINEL, RULE, '❯ ' + TEXT_SENTINEL, RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'], draft: TEXT_SENTINEL };
+    go();
+    expect(f.sent).toEqual([]);
+    expect(log()).toContain('held');
+    clean();
   });
 });

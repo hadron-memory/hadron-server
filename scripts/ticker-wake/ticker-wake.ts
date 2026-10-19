@@ -15,7 +15,8 @@
  *    (#2072, cor:agt:080:04/:16) acknowledging a wake moves NO message mark: it
  *    records the tick and spends the reservation, and the mention stays unread
  *    and due (it is delivered by an S1 batch / hadron-chat-send, never by this
- *    script). The nudge tells the worker to read the team channel unfiltered.
+ *    script). The nudge tells the worker to run its standing routine and read only its own
+ *    mentions; it forbids an unfiltered chat catch-up.
  *  - any wake carrying another reason (TASK, unknown): left alone, neither
  *    nudged nor acked. A proof naming task events records them delivered
  *    unseen (T5 receipts), and this script does not deliver tasks.
@@ -104,12 +105,37 @@ function saveReceipts(dir: string, r: Receipts): void {
   renameSync(tmp, receiptsPath(dir));
 }
 
-/** Parse a hadron api reply; throws a readable error on GraphQL/transport failure. */
+/**
+ * Diagnostics are logged and stored as a FIXED CLASS plus, when the server or Orca named one, an error CODE. Never the raw
+ * message, stderr or error object: those can echo an opaque wake proof, a typed nudge, a composer draft or a credential
+ * (#2070 LOCAL P2-2). A code is kept only if it looks like one.
+ */
+const SAFE_CODE = /^[A-Za-z][A-Za-z0-9_.-]{1,63}$/;
+function safeCode(v: unknown): string | undefined { return typeof v === 'string' && SAFE_CODE.test(v) ? v : undefined; }
+const errno = (e: unknown): string => safeCode((e as NodeJS.ErrnoException)?.code) ?? 'error';
+
+/**
+ * Last line of defence at the log sink: anything token-shaped that still reaches a log line (a `body.signature` proof, a
+ * long opaque run, a bearer or key prefix) is replaced. The classes above are what keep text and messages out; this
+ * catches an accident. Terminal handles (`term_<uuid>`) are left readable.
+ */
+export function scrub(s: string): string {
+  return s
+    .replace(/\b[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/g, '[redacted]')
+    .replace(/\b(?!term_)[A-Za-z0-9_-]{48,}\b/g, '[redacted]')
+    .replace(/\b(?:Bearer\s+|hdr_[a-z]+_)[A-Za-z0-9._-]+/gi, '[redacted]')
+    .slice(0, 600);
+}
+
+/** Parse a hadron api reply; throws a class-only error on GraphQL/transport failure (never the server's message). */
 function gql(run: Runner, argv: string[]): any {
   const res = run(argv);
   let data: any;
-  try { data = JSON.parse(res.stdout); } catch { throw new Error(`unparsable reply (${res.stderr.trim().slice(0, 160)})`); }
-  if (data.errors?.length || data.error) throw new Error(String(data.errors?.[0]?.message ?? data.error?.message ?? 'graphql error').slice(0, 200));
+  try { data = JSON.parse(res.stdout); } catch { throw new Error('unparsable reply'); }
+  if (data.errors?.length || data.error) {
+    const code = safeCode(data.errors?.[0]?.extensions?.code) ?? safeCode(data.error?.code);
+    throw new Error(code ? `graphql error ${code}` : 'graphql error');
+  }
   return data.data;
 }
 
@@ -120,7 +146,10 @@ function ack(cfg: Config, run: Runner, proof: string): { ok: boolean; text: stri
     const r = d?.acknowledgeWakes;
     if (!r || typeof r.acknowledged !== 'number') return { ok: false, text: 'no acknowledgement result' };
     return { ok: true, text: JSON.stringify(r) };
-  } catch (e) { return { ok: false, text: (e as Error).message }; }
+  } catch (e) {
+    const m = (e as Error).message;
+    return { ok: false, text: /^(graphql error|unparsable reply)/.test(m) ? m : 'ack failed' };
+  }
 }
 
 /**
@@ -154,8 +183,9 @@ function classify(stdout: string): Submission {
       ? { kind: 'confirmed', requestId, stages, detail: stages.join(',') }
       : { kind: 'uncertain', requestId, stages, detail: `accepted, turn start not confirmed (${stages.join(',') || 'no stages'})` };
   }
-  if (requestId) return { kind: 'uncertain', requestId, stages: [], detail: `failed with a request identity (${JSON.stringify(data?.error ?? null).slice(0, 120)})` };
-  if (data && typeof data === 'object' && data.ok === false && data.error) return { kind: 'refused', stages: [], detail: `send refused: ${JSON.stringify(data.error).slice(0, 160)}` };
+  const code = safeCode(data?.error?.code);
+  if (requestId) return { kind: 'uncertain', requestId, stages: [], detail: `failed with a request identity${code ? ` (${code})` : ''}` };
+  if (data && typeof data === 'object' && data.ok === false && data.error) return { kind: 'refused', stages: [], detail: `send refused${code ? `: ${code}` : ''}` };
   return { kind: 'uncertain', stages: [], detail: 'unrecognized send receipt' };
 }
 
@@ -181,6 +211,8 @@ export function submit(cfg: Config, run: Runner, handle: string, text: string, r
 }
 
 export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = console.log, stateDir = join(cfg.stateDir, 'ticker-wake')): void {
+  const rawLog = log;
+  log = (m: string): void => rawLog(scrub(m));
   const dry = Boolean(opts.dry);
   const now = (opts.now ?? Date.now)();
   const ts = new Date(now).toISOString();
@@ -239,12 +271,12 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
       const term = readScreen(cfg, handle, run);
       const agent = detail === 'claude' || detail === 'codex' ? detail : (screenAgentFamily(term) ?? '');
       const [empty, emptyWhy] = promptIsEmptyFromTerm(term, agent);
-      if (!empty) return `composer not provably empty: ${emptyWhy}`;
+      if (!empty) return 'composer not provably empty';
       if (idleNow) return null;
       const [proof, why] = idleProofAbovePrompt((term?.tail ?? []) as string[], agent);
       if (proof === 'idle') return null;
-      if (proof === 'busy') return now >= busyDeadline ? null : `busy until the server's busyDeadline ${new Date(busyDeadline).toISOString()} (${why})`;
-      return `unknown input state (${why})`;
+      if (proof === 'busy') return now >= busyDeadline ? null : `busy until the server's busyDeadline ${new Date(busyDeadline).toISOString()}`;
+      return 'unknown input state';
     };
 
     // An unreconciled earlier request is reconciled with ITS OWN identity. Reissuing it can still perform input, so it
@@ -288,17 +320,42 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
     const text = `Hadron ticker wake (${[...newTickers].join(', ')}): run your standing routine for this tick, then end your turn. Read only your own mentions; no unfiltered chat catch-up.`;
     if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); continue; }
     const coverage = [...new Set([...covered, ...ticks])].sort();
+
+    // Persist the UNRESOLVED INTENT before anything can be submitted (#2070 LOCAL P2-1). If the process dies, or any later
+    // receipt write fails, after Orca took the input, this entry is what stops the next pass from typing the same wake again:
+    // it is an ambiguous record without a request identity, which is held for a human and never retyped or acked. If the
+    // intent itself cannot be written, nothing is sent.
+    const before = receipts[id];
+    const restore = (): void => { if (before) receipts[id] = before; else delete receipts[id]; };
+    receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: 'send intent recorded before submission; outcome unknown', text, handle };
+    try { saveReceipts(stateDir, receipts); } catch (e) {
+      restore();
+      log(`${ts} ${name}: held (the send intent could not be recorded: ${errno(e)}); nothing sent`);
+      continue;
+    }
     const r = submit(cfg, run, handle, text);
-    if (r.kind === 'refused') { log(`${ts} ${name}: ${r.detail}; will retry`); continue; }
+    if (r.kind === 'refused') {
+      // Orca says nothing was typed: the intent is withdrawn so the next pass retries. If that write fails, the intent stays
+      // on disk and the wake is held for a human (fail closed).
+      restore();
+      try { saveReceipts(stateDir, receipts); } catch (e) { log(`${ts} ${name}: could not withdraw the send intent (${errno(e)}); held for a human`); }
+      log(`${ts} ${name}: ${r.detail}; will retry`);
+      continue;
+    }
     if (r.kind === 'uncertain') {
       // Never an ack, never a fresh type: recorded with its request identity so it can be reconciled.
       receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: r.detail, text, handle, ...(r.requestId ? { requestId: r.requestId } : {}) };
-      saveReceipts(stateDir, receipts);
+      try { saveReceipts(stateDir, receipts); } catch (e) { log(`${ts} ${name}: could not update the send record (${errno(e)}); the earlier intent stays and holds the wake`); }
       log(`${ts} ${name}: send not confirmed (${r.detail}); left for reconciliation`);
       continue;
     }
     receipts[id] = { state: 'sent', coverage, receiver, at: now };
-    saveReceipts(stateDir, receipts);
+    try { saveReceipts(stateDir, receipts); } catch (e) {
+      // Orca confirmed the turn started but the receipt could not be written: the intent on disk still marks the wake as
+      // unreconciled, so it is never retyped; it is not acked either, and waits for a human.
+      log(`${ts} ${name}: nudged ${handle} but the receipt could not be written (${errno(e)}); intent retained, not acked`);
+      continue;
+    }
     const a = ack(cfg, run, w.proof);
     log(`${ts} ${name}: nudged ${handle}; ${a.ok ? 'acked' : 'ack FAILED (retried ack-only next pass)'} ${a.text}`);
     if (a.ok) { delete receipts[id]; saveReceipts(stateDir, receipts); }
@@ -391,10 +448,10 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   const stateDir = join(cfg.stateDir, 'ticker-wake');
   if (dry) { pass(cfg, run, opts, log, stateDir); return 0; }
   let release: () => void;
-  try { release = acquireLock(stateDir); } catch (e) { log(`ticker-wake: ${(e as Error).message}`); return 1; }
+  try { release = acquireLock(stateDir); } catch (e) { log(`ticker-wake: ${scrub((e as Error).message)}`); return 1; }
   try {
     for (let n = 0; ; n++) {
-      try { pass(cfg, run, opts, log, stateDir); } catch (e) { log(`${new Date().toISOString()} pass failed: ${(e as Error).message}`); }
+      try { pass(cfg, run, opts, log, stateDir); } catch (e) { log(`${new Date().toISOString()} pass failed: ${scrub((e as Error).message)}`); }
       if (mode === 'once' || (deps.maxPasses !== undefined && n + 1 >= deps.maxPasses)) return 0;
       await (deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(seconds * 1000);
     }
