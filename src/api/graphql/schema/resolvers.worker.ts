@@ -13,6 +13,7 @@
 // (`roles:<role>` nodes, `data.names`), read at CASTING time — and only when
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
+import { servedPromptOwnerFields } from './resolvers.servedPrompt.js';
 import { GraphQLError } from 'graphql';
 import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -2102,7 +2103,7 @@ async function mayReadUserOwnedAgentTemplate(ctx: Context, workerId: string, age
   return w?.heldByUserId === ctx.userId;
 }
 
-async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boolean> {
+export async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boolean> {
   type Cache = Map<string, Promise<boolean>>;
   const holder = ctx as Context & { workerInternalsCache?: Cache };
   const cache = (holder.workerInternalsCache ??= new Map());
@@ -2276,6 +2277,8 @@ export const workerFieldResolvers = {
       (await canSeeUserPersonalFields(ctx, u.id)) ? (u.name ?? null) : null,
   },
   Worker: {
+    /** #2047: the record of the open session, self-authorized (worker internals). */
+    servedPrompt: servedPromptOwnerFields.workerServedPrompt,
     /**
      * Scalar App identity for cross-App worker pages (#1344). Unlike
      * `Worker.app`, this never returns an App object (and therefore cannot hand
