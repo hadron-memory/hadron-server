@@ -223,6 +223,33 @@ describe('#2063 exclusive fence over real Postgres transactions', () => {
     await expect(withIncludeHistoryTransaction(db, async () => 'next')).resolves.toBe('next');
   });
 
+  it('bounds acquisition while another transaction continues holding the fence', async () => {
+    const holding = latch();
+    const release = latch();
+    const first = withIncludeHistoryTransaction(db, async () => {
+      holding.resolve();
+      await release.promise;
+    });
+    await holding.promise;
+    const work = vi.fn(async () => undefined);
+    const waiting = withIncludeHistoryTransaction(db, work, { timeoutMs: 100 });
+    const outcome = waiting.then(() => 'resolved', () => 'rejected');
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([
+        outcome,
+        new Promise<string>((done) => { timer = setTimeout(() => done('still waiting'), 1_000); }),
+      ]);
+      expect(result).toBe('rejected');
+      expect(work).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(timer);
+      release.resolve();
+      await Promise.allSettled([first, waiting]);
+    }
+    await expect(withIncludeHistoryTransaction(db, async () => 'released')).resolves.toBe('released');
+  });
+
   it('expires a bounded transaction without committing its writes or leaving a usable context', async () => {
     const id = generateId();
     let escaped!: IncludeHistoryTransaction;

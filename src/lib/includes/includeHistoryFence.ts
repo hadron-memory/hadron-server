@@ -72,8 +72,14 @@ export async function withIncludeHistoryTransaction<T>(
   const maxWait = budget(options.maxWaitMs, 5_000);
   return db.$transaction(async (tx) => {
     const expiresAt = performance.now() + timeout;
-    // executeRaw: PostgreSQL's void result cannot be deserialized by queryRaw.
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(2063, 1772)`;
+    // Prisma's transaction timeout does not interrupt an in-flight advisory wait.
+    // Materialization applies the transaction-local lock budget before acquisition,
+    // in the same first statement. executeRaw avoids deserializing PostgreSQL void.
+    await tx.$executeRaw`
+      WITH fence_budget AS MATERIALIZED (
+        SELECT set_config('lock_timeout', ${`${timeout}ms`}, true)
+      )
+      SELECT pg_advisory_xact_lock(2063, 1772) FROM fence_budget`;
     if (performance.now() >= expiresAt) throw new Error('Include-history transaction expired');
     const context = Object.freeze(Object.create(null)) as IncludeHistoryTransaction;
     clients.set(context, { tx, expiresAt });
