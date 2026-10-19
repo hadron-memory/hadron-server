@@ -144,6 +144,7 @@ export const deliveryBatchQueries = {
     requestCtx: Context,
   ) => {
     const ctx = (await liveCaller(requestCtx)) ?? (() => { throw taskError('APP_NOT_FOUND', 'App not found.'); })();
+    if (ctx.sessionBindingRefused && !appKeyCaller(ctx)) throw taskError('SESSION_NOT_LIVE', 'The named session is not live or cannot bind.');
     if (ctx.sessionId && (!appKeyCaller(ctx) || !(await keyHostId(ctx.db, appKeyCaller(ctx)!)))) return selfBatches(ctx, a);
     const { app, host, authorize } = await batchKeyEntry(ctx, a.appRef);
     let only: string[] | null = null;
@@ -192,6 +193,7 @@ export const deliveryBatchMutations = {
     requestCtx: Context,
   ) => {
     const key = appKeyCaller(requestCtx);
+    if (requestCtx.sessionBindingRefused && !key) throw taskError('SESSION_NOT_LIVE', 'The named session is not live or cannot bind.');
     if (requestCtx.sessionId && (!key || !(await keyHostId(requestCtx.db, key)))) {
       const ctx = await liveCaller(requestCtx);
       if (!ctx) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
