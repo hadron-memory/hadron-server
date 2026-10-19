@@ -338,6 +338,9 @@ async function archiveChannelStructuralRow(
     data: { loc: archivedTombstoneLoc(row.loc, row.id), embeddingPendingAt: null },
   });
   await tx.nodeEmbedding.deleteMany({ where: { nodeId: row.id } });
+  // Derived include edges (#2040) are re-derivable from content, and the
+  // governed-edge trigger refuses to soft-delete them: drop them outright.
+  await tx.edge.deleteMany({ where: { governedKind: 'INCLUDE', OR: [{ sourceId: row.id }, { targetId: row.id }] } });
   const edges = await tx.edge.findMany({
     where: { OR: [{ sourceId: row.id }, { targetId: row.id }] },
     select: { id: true, loc: true, deletedAt: true },

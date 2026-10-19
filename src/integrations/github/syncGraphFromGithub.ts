@@ -1,3 +1,4 @@
+import { assertIncludesWritable, prospectiveNodeId, includeRefusalText, storedIncludeTags, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
 import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
@@ -113,6 +114,13 @@ export interface SkippedUndeclaredRole {
   code: 'ROLE_NOT_DECLARED';
 }
 
+/** #2040 — a synced file whose include tags are invalid; the file is skipped, its row kept. */
+export interface SkippedInvalidInclude {
+  loc: string;
+  code: string;
+  message: string;
+}
+
 export function describeSkippedUndeclaredRole(s: SkippedUndeclaredRole): string {
   return `${s.loc} (role "${s.role}", strict parent "${s.strictParent}")`;
 }
@@ -125,6 +133,7 @@ export function describeSkippedUndeclaredRole(s: SkippedUndeclaredRole): string 
 export function describeSyncOutcome(result: {
   nodeCount?: number;
   skippedUndeclaredRoles?: SkippedUndeclaredRole[];
+  skippedInvalidIncludes?: SkippedInvalidInclude[];
   deferredLateRows?: string[];
   heldMoves?: string[];
 }): string {
@@ -135,6 +144,10 @@ export function describeSyncOutcome(result: {
     section(
       result.skippedUndeclaredRoles?.map(describeSkippedUndeclaredRole),
       (n) => `Skipped ${n} file(s), ROLE_NOT_DECLARED (the role is not declared under a strict parent; declare it or change the file):`,
+    ) +
+    section(
+      result.skippedInvalidIncludes?.map((i) => `${i.loc} (${i.code}: ${i.message})`),
+      (n) => `Skipped ${n} file(s) with an invalid include tag (fix the tag; the stored node was kept as it was):`,
     ) +
     section(
       result.deferredLateRows,
@@ -312,6 +325,8 @@ const syncGraphFromGithubAsSystem = async (
    * is kept as it was; every other file still syncs.
    */
   skippedUndeclaredRoles?: SkippedUndeclaredRole[];
+  /** #2040 — files NOT synced because an include tag is malformed, nests too deep or cycles. */
+  skippedInvalidIncludes?: SkippedInvalidInclude[];
   /**
    * #1330 — files left for the next sync because the node they would write
    * arrived after this sync locked its rows (`loc (node <id>)`). Only while
@@ -405,7 +420,7 @@ const syncGraphFromGithubAsSystem = async (
     // Mirror writes use this same checkout. Hold their lock through the read:
     // otherwise a writer can switch to the write branch between checkout and
     // loadGraphFromFs, even when the read branch was selected correctly.
-    const { graph: fsGraph, edges, skippedInvalidLoc, unreadable } = await withMirrorCheckoutLock(graph.id, async () => {
+    const { graph: fsGraph, edges, skippedInvalidLoc, unreadable, rootNode } = await withMirrorCheckoutLock(graph.id, async () => {
       await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
       return loadGraphFromFs(localPath, graphName, ownerRepo);
     });
@@ -428,6 +443,7 @@ const syncGraphFromGithubAsSystem = async (
     const skippedProtected: string[] = [];
     const skippedObjectTypes: string[] = [];
     const skippedUndeclaredRoles: SkippedUndeclaredRole[] = [];
+    const skippedInvalidIncludes: SkippedInvalidInclude[] = [];
     const deferredLateRows: string[] = [];
     const heldMoves: string[] = [];
     // #1411 review — occupants a previous attempt parked and could not settle.
@@ -448,7 +464,7 @@ const syncGraphFromGithubAsSystem = async (
     // deleted-message disclosure.
     const candidateLocs = fsGraph.nodes
       .map((node) => node.loc)
-      .filter((loc): loc is string => typeof loc === 'string' && loc !== '');
+      .filter((loc): loc is string => typeof loc === 'string');
     const rawTargetIds = [...new Set(edges.map((edge) => edge.targetId))];
     const [rawTargets, existingGraphRows] = await Promise.all([
       rawTargetIds.length
@@ -501,7 +517,7 @@ const syncGraphFromGithubAsSystem = async (
     for (;;) {
     // Every accumulator restarts with the attempt: a rolled-back attempt
     // wrote nothing, so nothing it reported is true.
-    for (const acc of [pendingEmbeds, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves]) {
+    for (const acc of [pendingEmbeds, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedInvalidIncludes, deferredLateRows, heldMoves]) {
       acc.length = 0;
     }
     pendingSourceMemories = [];
@@ -527,7 +543,7 @@ const syncGraphFromGithubAsSystem = async (
       const isProtected = (loc: string) => protectedLocs.some((p) => protectedLocCovers(p, loc));
       const writableLocs = fsGraph.nodes
         .map((n) => n.loc)
-        .filter((l): l is string => typeof l === 'string' && l !== '' && !isProtected(l));
+        .filter((l): l is string => typeof l === 'string' && !isProtected(l));
 
       // Declare the COMPLETE loc-key set before taking any of it. Incoming
       // nodes need ancestor keys for create/delete coordination; every edge
@@ -535,6 +551,7 @@ const syncGraphFromGithubAsSystem = async (
       // ancestors + exact loc) so a subtree move cannot relocate it after the
       // sync built its id map but before the edge insert.
       await acquireLockSet(tx, [
+        ...(rootNode ? [{ memoryId: graph.id, loc: rootNode.loc! }, { memoryId: graph.id, loc: '' }] : []),
         ...writableLocs.flatMap((loc) =>
           ancestorLocs(loc).map((ancestor) => ({ memoryId: graph.id, loc: ancestor })),
         ),
@@ -558,12 +575,16 @@ const syncGraphFromGithubAsSystem = async (
       // #1568: refuse before any write if an unreadable file sits on a live
       // node, instead of letting repo-wins cleanup hard-delete it.
       if (unreadable.length > 0) {
+        // An unreadable root may still occupy the pre-#1228 empty address.
+        // Its new derived loc alone cannot vouch for destructive cleanup.
+        const legacyUnreadableRoot = unreadable.some((f) => ['README.md', '.hadron/README.md', '.node/node.yaml', '.hadron/.node/node.yaml'].includes(f.file));
+        const unreadableLocs = [...unreadable.map((f) => f.loc), ...(legacyUnreadableRoot ? [''] : [])];
         const held = await tx.node.findMany({
-          where: { memoryId: graph.id, deletedAt: null, loc: { in: unreadable.map((f) => f.loc) } },
+          where: { memoryId: graph.id, deletedAt: null, loc: { in: unreadableLocs } },
           select: { loc: true },
         });
         const heldLocs = new Set(held.map((row) => row.loc));
-        const blocking = unreadable.filter((f) => heldLocs.has(f.loc));
+        const blocking = unreadable.filter((f) => heldLocs.has(f.loc) || (legacyUnreadableRoot && heldLocs.has('') && ['README.md', '.hadron/README.md', '.node/node.yaml', '.hadron/.node/node.yaml'].includes(f.file)));
         if (blocking.length > 0) throw new GitSyncUnreadableFileError(blocking);
       }
       await lockAncestorsForCreateMany(
@@ -588,6 +609,26 @@ const syncGraphFromGithubAsSystem = async (
         throw new Error('Git sync Read branch changed while syncing; retry with the current Memory config.');
       }
       const memorySchema = memoryState.schema as MemorySchema | null;
+      // #1228: operator-owned rollout prerequisites, judged before any Node
+      // write. Never replace a legacy root via loc fallback or silently park
+      // an API node at an invalid address. README owns the slug after repair.
+      if (rootNode) {
+        if (memoryState.urn !== graph.urn) {
+          throw new Error('Git root README memory was renamed while syncing; retry with the current memory.');
+        }
+        const oldRoot = await tx.node.findUnique({
+          where: { loc_memoryId: { loc: '', memoryId: graph.id } },
+        });
+        if (oldRoot && rootNode.id !== oldRoot.id) {
+          throw new Error('Git root README must carry the existing live root id before migration; add its id to frontmatter.');
+        }
+        const occupant = await tx.node.findUnique({
+          where: { loc_memoryId: { loc: rootNode.loc!, memoryId: graph.id } },
+        });
+        if (occupant && occupant.id !== rootNode.id && occupant.ownerRepo !== ownerRepo) {
+          throw new Error('Git root README slug is occupied by an API node; an authorized operator must move it or delete it if redundant before sync.');
+        }
+      }
 
       // A move that won before these locks were granted invalidates preflight.
       // Retry the whole collection phase so the endpoint's current memory and
@@ -778,6 +819,13 @@ const syncGraphFromGithubAsSystem = async (
       // P2). An id is "settled" once it is mapped OR waiting.
       const idSettled = (id: string): boolean => fileIdToRowId.has(id) || unappliedFileIds.has(id);
 
+      // #2040 — every file of this run, as if already written: a tag is judged
+      // against the graph the sync will leave, so a new file cannot hide a cycle
+      // through another new file.
+      const includeOverlay = {
+        memoryId: graph.id,
+        contents: new Map(fsGraph.nodes.filter((n) => n.loc).map((n) => [n.loc!, n.content ?? null] as const)),
+      };
       for (const node of fsGraph.nodes) {
         const loc = node.loc!;
         if (isProtected(loc)) {
@@ -834,6 +882,24 @@ const syncGraphFromGithubAsSystem = async (
           // which is right: a new node whose file declares no signal has none.
           ...governedSignalsFromMirror(node),
         };
+
+        // #2040 — a push cannot be refused, so a file whose include tags are
+        // invalid is skipped and named in the result; its row stays as it was.
+        {
+          const selfRow = await tx.node.findUnique({
+            where: { loc_memoryId: { loc, memoryId: graph.id } },
+            select: { id: true },
+          });
+          try {
+            await assertIncludesWritable(tx, { id: selfRow?.id ?? prospectiveNodeId(loc), memoryId: graph.id, loc }, update.content, [graph.id], includeOverlay);
+          } catch (e) {
+            const text = includeRefusalText(e);
+            if (!text) throw e;
+            skippedInvalidIncludes.push({ loc, code: String((e as GraphQLError).extensions?.code), message: (e as Error).message });
+            if (selfRow) skippedRowIds.add(selfRow.id);
+            continue;
+          }
+        }
 
         // A repo file can restore a server-exported reservation, but only in
         // the state reserveSpecCitation could have created: a blank spec in a
@@ -1165,6 +1231,13 @@ const syncGraphFromGithubAsSystem = async (
 
       }
 
+      // #2040 — derive include edges once every file of this sync is written, so
+      // a tag may name a file synced later in the same run.
+      for (const written of writtenNodes) {
+        const row = await tx.node.findUnique({ where: { id: written.id }, select: { content: true } });
+        await syncDerivedIncludesEdges(tx, written, storedIncludeTags(row?.content), [graph.id]);
+      }
+
       // Spec 049 S4: never delete a row under (or above) a Channel's address,
       // whether it was skipped this run or was git-owned before the Channel
       // existed — the reservation outlives the mirror.
@@ -1278,6 +1351,29 @@ const syncGraphFromGithubAsSystem = async (
           select: { id: true },
         });
         if (unsettled.length > 0) throw new GitSyncUnsettledParking(unsettled.map((n) => n.id));
+      }
+
+      // #1228: rekey retained incident edges as well as repo-declared edges.
+      // The legacy empty root produced trailing/leading empty atoms. Preserve
+      // edge identity and custom locs; collisions abort the whole transaction.
+      if (rootNode?.id && originalLocs.has(rootNode.id)) {
+        const movedRoot = await tx.node.findUnique({ where: { id: rootNode.id } });
+        if (movedRoot) {
+          const oldLoc = originalLocs.get(rootNode.id)!;
+          const incident = await tx.edge.findMany({
+            where: { OR: [{ sourceId: movedRoot.id }, { targetId: movedRoot.id }] },
+            include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
+          });
+          for (const edge of incident) {
+            const beforeSource = edge.sourceId === movedRoot.id ? oldLoc : edge.source.loc;
+            const beforeTarget = edge.targetId === movedRoot.id ? oldLoc : edge.target.loc;
+            if (edge.loc === deriveEdgeLoc(beforeSource, edge.name, beforeTarget)) {
+              await tx.edge.update({ where: { id: edge.id }, data: {
+                loc: deriveEdgeLoc(edge.source.loc, edge.name, edge.target.loc),
+              } });
+            }
+          }
+        }
       }
 
       // cor:urn:030:01 — compare committed pre-sync addresses with surviving
@@ -1531,12 +1627,17 @@ const syncGraphFromGithubAsSystem = async (
         `Sync of "${graphName}": skipped ${skippedUndeclaredRoles.length} file(s) whose role is not declared under a strict parent (ROLE_NOT_DECLARED): ${skippedUndeclaredRoles.map(describeSkippedUndeclaredRole).join('; ')}`,
       );
     }
+    if (skippedInvalidIncludes.length > 0) {
+      console.warn(
+        `Sync of "${graphName}": skipped ${skippedInvalidIncludes.length} file(s) with an invalid include tag: ${skippedInvalidIncludes.map((i) => `${i.loc} (${i.code})`).join('; ')}`,
+      );
+    }
     if (heldMoves.length > 0) {
       console.warn(
         `Sync of "${graphName}": held ${heldMoves.length} move(s) whose destination's occupant could not be moved out of the way this sync: ${heldMoves.join('; ')}`,
       );
     }
-    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves };
+    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedInvalidIncludes, deferredLateRows, heldMoves };
   } catch (error) {
     // Update sync status to ERROR
     await db.memory.update({

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1767 — availability reads: every App participant and the App's own key, read-only
  * (cor:agt:060:02, :03; the tasks audience, cor:agt:050:23).
@@ -52,7 +53,7 @@ beforeEach(async () => {
   appY = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Y', urn: `${org.urn}:y` } });
   userApp = await db.app.create({ data: { id: generateId(), ownerUserId: ownerUser.id, name: 'U', urn: `av-u-${suffix}` } });
   await db.appMember.create({ data: { appId: userApp.id, userId: memberUser.id, role: 'reader' } });
-  const w = (appId: string, name: string) => db.worker.create({ data: { id: generateId(), appId, agentId: agent.id, name, slug: name.toLowerCase() }, select: { id: true } });
+  const w = (appId: string, name: string) => db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: agent.id, name, slug: name.toLowerCase() }, select: { id: true } });
   workerX = await w(appX.id, 'Anne');
   workerY = await w(appY.id, 'Zed');
   workerU = await w(userApp.id, 'Uma');

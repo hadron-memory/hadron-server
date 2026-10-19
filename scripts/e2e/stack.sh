@@ -8,6 +8,7 @@ if [[ ! "$action" =~ ^(up|down|check|logs)$ || ! "$name" =~ ^[a-z][a-z0-9-]{0,31
 fi
 [[ "${E2E_BIND:-127.0.0.1}" == 127.0.0.1 ]] || { echo 'Host publication must bind 127.0.0.1' >&2; exit 2; }
 project="hadron-e2e-$name"
+. "$ROOT/scripts/e2e/dns-guard.sh"
 state_root="${XDG_STATE_HOME:-$HOME/.local/state}/hadron-e2e"
 state_dir="$state_root/$project"
 requested_backend=${E2E_BACKEND:-auto}
@@ -65,21 +66,8 @@ case "$action" in
     if [[ "$backend" == incus ]]; then
       # Ownership metadata exists even if creation succeeds but boot fails.
       incus launch qa-docker "$project" -c security.nesting=true -c "user.hadron-e2e=$project"
-      # DNS guard (#12129/#12157, Clark): fresh instances are intermittently
-      # born with a dead resolver — systemd-resolved's stub with no upstream
-      # ([::1]:53 refused, Docker Hub unresolvable). The bridge dnsmasq is
-      # healthy when this happens, so it is a per-instance boot race. Probe
-      # resolution BEFORE anything needs the network; if the stub is dead,
-      # seed a public resolver (the proven field workaround) and re-probe.
-      # Fail loud if neither the learned nor the seeded resolver answers —
-      # the old shape failed later and quieter as a slow docker-info wait.
-      dns_ok() { incus exec "$project" -- getent hosts deb.debian.org >/dev/null 2>&1; }
-      if ! dns_ok; then
-        echo "$project: resolver not answering; seeding 1.1.1.1 (dnsmasq race, #12129)" >&2
-        incus exec "$project" -- sh -c 'grep -q "^nameserver 1.1.1.1$" /etc/resolv.conf 2>/dev/null || echo "nameserver 1.1.1.1" >> /etc/resolv.conf'
-      fi
-      for i in {1..30}; do dns_ok && break; sleep 1; done
-      dns_ok || { echo "$project: DNS not answering after seeding; refusing to continue (incus network check next)" >&2; exit 1; }
+      # DNS guard (#12129/#12157; boot race, hadron-server#2051): see dns-guard.sh.
+      e2e_dns_guard "$project" || exit 1
       archive=$(mktemp)
       trap 'rm -- "$archive"' EXIT
       # Staged/tracked files only; never ship untracked notes or secrets.

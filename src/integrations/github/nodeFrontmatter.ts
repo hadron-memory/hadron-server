@@ -1,3 +1,4 @@
+import { InvalidRootMemoryError, rootLocForMemory } from '../localFs/loadNodeFromFs.js';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { parse } from 'yaml';
@@ -49,6 +50,8 @@ export interface FrontmatterNodeFields {
  * at runtime.
  */
 export interface EdgeForGit {
+  /** `INCLUDE` marks an edge derived from an include tag (#2040); it is never mirrored (the tag in the content is the source). */
+  governedKind?: string | null;
   target: { id: string; loc?: string | null };
   /** Relationship name (was `label`); emitted on the `rel` key for back-compat. */
   name: string | null;
@@ -180,7 +183,7 @@ export function buildNodeFrontmatter(
  */
 export function buildEdgeFrontmatter(outgoingEdges: EdgeForGit[]): Array<Record<string, unknown>> {
   return outgoingEdges
-    .filter((e) => e && e.target)
+    .filter((e) => e && e.target && e.governedKind !== 'INCLUDE')
     .map((e) => {
       const entry: Record<string, unknown> = { id: e.target.id };
       if (e.target.loc) entry.loc = e.target.loc;
@@ -241,8 +244,19 @@ function locToSegments(loc: string): string[] {
  *
  * Throws on a malformed loc (empty / `.` / `..` segment) — see `locToSegments`.
  */
-export function nodeFilePath(localPath: string, loc: string): string {
-  if (loc === '') return join(localPath, 'README.md');
+export function nodeFilePath(localPath: string, loc: string, memoryUrn?: string): string {
+  // Compound legacy memories can still export ordinary non-root nodes;
+  // only a valid single slug identifies a root README (#1228).
+  let rootLoc: string | undefined;
+  if (memoryUrn) {
+    try { rootLoc = rootLocForMemory(memoryUrn); } catch (err) {
+      if (!(err instanceof InvalidRootMemoryError)) throw err;
+    }
+  }
+  if (loc === '' || loc === rootLoc) {
+    const hadronRoot = join(localPath, '.hadron', 'README.md');
+    return existsSync(hadronRoot) ? hadronRoot : join(localPath, 'README.md');
+  }
   return join(localPath, ...locToSegments(loc)) + '.md';
 }
 

@@ -1,6 +1,14 @@
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
+import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { generateId } from '../../../lib/id.js';
-import { lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
+import { lockAncestorsForCreateMany, lockLocForWrite } from '../../../lib/nodeSubtreeLock.js';
+import {
+  DATA_HOST_MEMORY_SELECT,
+  declaredMemoryWideFields,
+  isMultiHumanChatHost,
+  mergeTurnExtraction,
+} from '../../../lib/memoryDataView.js';
 import {
   appendChatMessage,
   updateChatRootData,
@@ -19,7 +27,7 @@ import {
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
-import { applyPersonaTemplate } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables } from '../../../lib/personaDescription.js';
 import {
   evaluateEdgeCondition,
   userMessageFor,
@@ -85,7 +93,6 @@ class ChatAuthorityScopeChanged extends Error {}
 async function chatWriteTx(
   ctx: Context,
   memoryId: string,
-  extraGate?: (txCtx: Context) => Promise<void>,
 ): Promise<ChatTxRunner> {
   const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { appId: true } });
   const anchors = memory?.appId ? [{ kind: 'app' as const, id: memory.appId }] : [];
@@ -93,38 +100,29 @@ async function chatWriteTx(
     ctx, memoryId, anchors,
     async (txCtx) => {
       await requireMemoryWriteAccess(txCtx, memoryId);
-      await extraGate?.(txCtx);
     },
     (tx) => fn(tx),
   );
 }
 
 /**
- * Spec 017 — renaming or deleting a chat is author-only regardless of scope
- * (design-discussion D7), with a platform ADMIN/OWNER bypass. A non-author
- * participant of a shared chat can read and post to it, but not rename or
- * delete it. Legacy fallback: pre-feature chats may not have `createdBy` on
- * the chat root, so the historical "memory creator" check applies to them.
- *
- * #1717 (Diego on #1725): runs on the request context as a fast refusal and
- * again on the transaction context, whose platform roles are re-read under
- * the caller's authority anchor — a role revoked during the lock wait must
- * not leave a stale admin bypass behind.
+ * The Agent's own identity bound into its template on the chat path (#2042, cor:dmo:150:08): a chat binds no worker,
+ * so `worker.name` falls back to the Agent's name, `worker.role` to its persona role, `worker.url` is the Agent's
+ * portal URL, and reports-to / signature / trailer are empty. The server calls no model in a chat (the client does),
+ * so `session.llmModel` has no value here and is empty.
  */
-async function requireChatAuthorOrAdmin(
-  c: Context,
-  chatNode: { createdBy: string | null; memoryId: string },
-): Promise<void> {
-  if (c.roles?.includes('ADMIN') || c.roles?.includes('OWNER')) return;
-  if (chatNode.createdBy === c.userId) return;
-  if (chatNode.createdBy === null) {
-    const legacyMem = await c.db.memory.findUniqueOrThrow({
-      where: { id: chatNode.memoryId },
-      select: { createdBy: true },
-    });
-    if (legacyMem.createdBy === c.userId) return;
-  }
-  throw new Error('Forbidden');
+export function bindAgentPrompt(agent: { systemPrompt: string | null; name: string; urn: string; personaRole: string | null }): string {
+  const role = agent.personaRole ?? '';
+  return applyPlatformVariables(agent.systemPrompt ?? '', {
+    'worker.name': agent.name,
+    'worker.role': role,
+    'agent.name': agent.name,
+    'worker.reportsTo.name': '',
+    'worker.signature': '',
+    'worker.trailer': '',
+    'worker.url': portalUrlForUrn(agent.urn) ?? '',
+    'session.llmModel': '',
+  }, { name: agent.name, role });
 }
 
 export const chatMutations = {
@@ -486,7 +484,20 @@ export const chatMutations = {
         }
       } else {
         // Legacy: use the agent's first writable attached memory.
-        targetMemoryId = agent.memoryItems.find((m) => m.role === 'read-write')?.memory.id ?? null;
+        // #1349: one the Agent's tenant can WRITE on its own — a link is a
+        // limit, never a grant (cor:dmo:050:09) — and live on both ends. This
+        // branch has no user, so a personal or private memory is never the
+        // target (Colin on #2002), and an app-class one never is (Riana).
+        const tenant = {
+          organizationId: agent.organizationId, ownerUserId: agent.ownerUserId,
+          appId: ctx.appId ?? null, userId: ctx.userId ?? null,
+        };
+        const writable = await ctx.db.agentMemoryItem.findMany({
+          where: { agentId: resolvedAgentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } },
+          orderBy: { createdAt: 'asc' },
+          select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
+        });
+        targetMemoryId = writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
       }
 
       if (!targetMemoryId) {
@@ -495,16 +506,10 @@ export const chatMutations = {
 
       // Compile the prompt with Mustache against the target memory's data.
       //
-      // Spec 017 D5 — retrieval-time enforcement. compileTemplate spreads
-      // the accessFilter AFTER the literal memoryId, so a permissive
-      // filter (the caller's full memory set) effectively broadens the
-      // ref lookup beyond the chat's holding memory. For SHARED chats
-      // we must constrain to the chat's allowedReadSet (excludes any
-      // personal memory) — see chat-scope.ts:chatScopeAccessFilter for
-      // the full rationale. PRIVATE chats keep the legacy
-      // memoryAccessFilter behavior: no regression for existing
-      // private-chat templates, which can rely on cross-memory refs
-      // within the caller's own access scope.
+      // Spec 017 D5: shared chats keep their allowedReadSet filter (no
+      // personal memories); private chats retain the caller's read filter.
+      // #1835 intersects either filter with targetMemoryId, so bare refs stay
+      // in the holding memory without weakening the chat's authority gate.
       let systemMessage = promptContent;
       if (promptContent.includes('{{')) {
         const access =
@@ -526,7 +531,8 @@ export const chatMutations = {
                 },
               )
             : await memoryAccessFilter(ctx);
-        systemMessage = await compileTemplate(promptContent, null, targetMemoryId, ctx.db, access);
+        // #910: the first prompt reads the starter's own extracted values only.
+        systemMessage = await compileTemplate(promptContent, null, targetMemoryId, ctx.db, access, ctx.userId ?? null);
       }
 
       // Build tool schema from hierarchical extraction spec
@@ -716,7 +722,7 @@ export const chatMutations = {
       // Bind the Agent's own identity on the chat path. Worker briefings bind
       // the same template to the Worker's name and role instead.
       if (agent.systemPrompt) {
-        systemMessage = applyPersonaTemplate(agent.systemPrompt, agent.name, agent.personaRole ?? '') + '\n\n' + systemMessage;
+        systemMessage = bindAgentPrompt(agent) + '\n\n' + systemMessage;
       }
 
       return { chatId: chatLoc, systemMessage, tools, conversationName: convName, stageName: firstStage };
@@ -1027,8 +1033,8 @@ export const chatMutations = {
         // Spec 017 D5 — retrieval-time enforcement: for SHARED chats,
         // narrow the access filter to the chat's allowedReadSet so a
         // Mustache reference cannot resolve against the caller's
-        // personal memory. PRIVATE chats keep the legacy
-        // memoryAccessFilter behavior. See chat-scope.ts:
+        // personal memory. PRIVATE chats keep memoryAccessFilter; #1835
+        // intersects either filter with the holding memory. See chat-scope.ts:
         // chatScopeAccessFilter for the full rationale.
         const isShared = chatData.scope === 'shared';
         let access: Record<string, unknown>;
@@ -1054,14 +1060,16 @@ export const chatMutations = {
           access = await memoryAccessFilter(ctx);
         }
         if (promptContent.includes('{{')) {
-          systemMessage = await compileTemplate(promptContent, null, chatNode.memoryId, ctx.db, access);
+          // #910: the sender's own extracted values, never another participant's
+          // (the same identity the user message is attributed to, #914).
+          systemMessage = await compileTemplate(promptContent, null, chatNode.memoryId, ctx.db, access, senderUserId);
         } else {
           systemMessage = promptContent;
         }
 
         // Rebind on each chat turn so edits to the Agent's prompt take effect.
         if (agent?.systemPrompt) {
-          systemMessage = applyPersonaTemplate(agent.systemPrompt, agent.name, agent.personaRole ?? '') + '\n\n' + systemMessage;
+          systemMessage = bindAgentPrompt(agent) + '\n\n' + systemMessage;
         }
 
         // Build tools from hierarchical extraction spec
@@ -1295,29 +1303,51 @@ export const chatMutations = {
       // Save extracted data to memory's default data node
       // #1717: under the same anchored gate as the turn itself; the write is
       // recorded once it has committed (#1061).
-      if (data && Object.keys(data).length > 0) recordNodeWrite(ctx.db, await inTx(async (tx) => {
+      // #910: in a multi-human host the values are filed per person — the
+      // speaker's under `users.<speakerId>`, declared memory-wide ones flat —
+      // so one member's answer is never another's prompt variable.
+      const hasExtraction = !!data && Object.keys(data).length > 0;
+      const hostMemory = hasExtraction
+        ? await ctx.db.memory.findUniqueOrThrow({
+            where: { id: chatNode.memoryId },
+            select: DATA_HOST_MEMORY_SELECT,
+          })
+        : null;
+      const declaredMemoryWide = hostMemory && isMultiHumanChatHost(hostMemory)
+        ? await declaredMemoryWideFields(ctx.db, hostMemory)
+        : null;
+      const fold = (stored: Record<string, unknown> | null, extracted: Record<string, unknown>) =>
+        declaredMemoryWide
+          ? mergeTurnExtraction(stored, extracted, declaredMemoryWide, ctx.userId ?? null)
+          : { ...(stored ?? {}), ...extracted };
+      if (data && hasExtraction) recordNodeWrite(ctx.db, await inTx(async (tx) => {
+        // #910: two members extract into the same memory from different chats,
+        // under different chat locks. Serialize the read-modify-write on the
+        // `data` loc so neither turn loses the other's bucket.
+        await lockLocForWrite(tx, chatNode.memoryId, 'data');
         const dataNode = await tx.node.findFirst({
           where: { loc: 'data', memoryId: chatNode.memoryId, deletedAt: null },
         });
         if (dataNode) {
           if (memEncInfo.isEncrypted) decryptNodeFields(dataNode, memEncInfo);
           const existingData = (dataNode.data as Record<string, unknown>) ?? {};
-          const merged = { ...existingData, ...data };
+          const merged = fold(existingData, data);
           const encData = encryptNodeFields({ content: null, data: merged }, memEncInfo);
           await tx.node.update({
             where: { id: dataNode.id },
-            data: { data: (encData.data ?? null) as InputJsonValue },
+            data: { data: (encData.data ?? null) as InputJsonValue, updatedBy: ctx.userId ?? null },
           });
           // #1061 — folding extracted data into the memory's `data` node
           // rewrites a real node, so it is its own write.
           return { id: dataNode.id, loc: dataNode.loc, memoryId: dataNode.memoryId };
         } else {
-          const encNew = encryptNodeFields({ content: null, data }, memEncInfo);
+          const encNew = encryptNodeFields({ content: null, data: fold(null, data) }, memEncInfo);
           const dataNodeId = generateId();
           await tx.node.create({
             data: {
               id: dataNodeId, memoryId: chatNode.memoryId,
               loc: 'data', name: 'data', nodeType: 'info',
+              createdBy: ctx.userId ?? null, // cor:dmo:010:01 — submitting principal, independent of Worker lineage.
               data: (encNew.data ?? null) as InputJsonValue,
             },
           });
@@ -1406,12 +1436,14 @@ export const chatMutations = {
               //     chat memory IS the system memory, we skip the
               //     duplicate layer.
               const memoryLayers: MemoryLayerHandle[] = [];
+              // #910: conditions read the turn's own person's values only.
+              const turnPersonId = ctx.userId ?? null;
               memoryLayers.push(await buildPrismaMemoryLayer(
-                ctx.db, 'edge-memory', sysMemId, currentStageLoc,
+                ctx.db, 'edge-memory', sysMemId, currentStageLoc, turnPersonId,
               ));
               if (chatNode.memoryId !== sysMemId) {
                 memoryLayers.push(await buildPrismaMemoryLayer(
-                  ctx.db, 'user-memory', chatNode.memoryId, currentStageLoc,
+                  ctx.db, 'user-memory', chatNode.memoryId, currentStageLoc, turnPersonId,
                 ));
               }
               for (const edge of edges) {
@@ -1601,6 +1633,7 @@ export const chatMutations = {
             loc: summaryLoc, name: summaryName,
             nodeType: 'abstract', content: encSummary.content ?? null, seq: messageCount + 1,
             tags: ['summary'],
+            createdBy: ctx.userId ?? null, // Supplied summary: attribute its submitter, not the chat creator.
           },
         });
         // No chat-root write: the summary is not a message.
@@ -1639,9 +1672,8 @@ export const chatMutations = {
       // lookup's author and memory-creator arms only narrow candidates; they
       // outlive membership, so they must never be the grant.
       await requireMemoryWriteAccess(ctx, chatNode.memoryId);
-      // Spec 017 — author-only rename (D7); re-checked on the transaction.
-      await requireChatAuthorOrAdmin(ctx, chatNode);
-      const inTx = await chatWriteTx(ctx, chatNode.memoryId, (txCtx) => requireChatAuthorOrAdmin(txCtx, chatNode));
+      // #1991: provenance is not authority; the shared gate re-runs in tx.
+      const inTx = await chatWriteTx(ctx, chatNode.memoryId);
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
       // #919: a rename is a whole-blob write like any other, so it goes through
       // the serializer too. Renaming is nowhere near a message append in
@@ -1681,9 +1713,8 @@ export const chatMutations = {
       // lookup's author and memory-creator arms only narrow candidates; they
       // outlive membership, so they must never be the grant.
       await requireMemoryWriteAccess(ctx, chatNode.memoryId);
-      // Spec 017 — author-only deletion (D7); re-checked on the transaction.
-      await requireChatAuthorOrAdmin(ctx, chatNode);
-      const inTx = await chatWriteTx(ctx, chatNode.memoryId, (txCtx) => requireChatAuthorOrAdmin(txCtx, chatNode));
+      // #1991: provenance is not authority; the shared gate re-runs in tx.
+      const inTx = await chatWriteTx(ctx, chatNode.memoryId);
       // Soft-delete the chat node and its messages.
       // #1468 (Codex on #1475) — a legacy chat is an ordinary writable node,
       // so it can carry the spec marker in a minted corpus: the rows are

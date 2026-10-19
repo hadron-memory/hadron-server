@@ -18,6 +18,7 @@
  *     `shared` chat is requested without a resolvable App context.
  */
 
+import { LINK_CAP_MEMORY_SELECT, agentLinkTenant, cappedLinkLevel } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
@@ -74,13 +75,17 @@ export async function sharedChatKnowledgeMemoryIds(
       // userMemoryOfAgentId still makes it per-user, never shared-chat context.
       memory: { class: 'knowledge', deletedAt: null, userMemoryOfAgentId: null },
     },
-    select: { memoryId: true, role: true, memory: { select: { appId: true, ownerUserId: true } } },
+    select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
   });
+  // #1349: an item grounds the chat only as far as the Agent's tenant reaches
+  // the memory on its own (cor:dmo:050:09) — a link is a limit, never a grant.
+  const tenant = { ...(await agentLinkTenant(db, agentId)), appId, userId: callerUserId };
   return items
     .filter(({ role, memory }) =>
       isGrantedAgentMemoryRole(role) &&
       (memory.appId == null || memory.appId === appId) &&
-      (memory.ownerUserId == null || memory.ownerUserId === callerUserId),
+      (memory.ownerUserId == null || memory.ownerUserId === callerUserId) &&
+      cappedLinkLevel(tenant, memory, role) !== null,
     )
     .map(({ memoryId }) => memoryId);
 }
@@ -425,17 +430,12 @@ export async function resolveMemoryRoot(
  * `{ memoryId: { in: <ids> } }` — when spread into a Prisma `where`,
  * it constrains node lookups to the allowed set.
  *
- * Why this is load-bearing: `compileTemplate`'s `where: { loc,
- * memoryId, ...accessFilter }` spreads the filter AFTER the literal
- * `memoryId` argument, which means a permissive `accessFilter`
- * (e.g. `memoryAccessFilter(ctx)`, returning every memory the caller
- * can read) effectively *broadens* the lookup beyond the chat's
- * holding memory. For a `shared` chat this means a Mustache reference
- * like `{{secret-data.field}}` would happily resolve against the
- * caller's own personal memory if a node named `secret-data` lives
- * there. The narrow filter here is the only thing standing between
- * a shared chat and the author's personal data — prompt-level
- * guardrails do not satisfy D5.
+ * #1835: compileTemplate intersects this fragment with the includer's
+ * memoryId; it never spreads it over that id. Bare references therefore stay
+ * local even when knowledge/system memories are in the allowed read-set.
+ * Keep this D5 filter: it is the chat's authority constraint, independent of
+ * the compiler's address constraint, and excludes the author's personal
+ * memories on shared chats. Prompt-level guardrails do not satisfy D5.
  */
 export function chatScopeAccessFilter(
   chat: ChatScopeContext,

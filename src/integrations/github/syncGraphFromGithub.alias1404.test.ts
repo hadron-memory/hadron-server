@@ -28,7 +28,7 @@ vi.mock('../../config.js', async (importOriginal) => {
   return { ...real, get GRAPHS_PATH() { return graphsPath; } };
 });
 
-const repoRoot = () => join(graphsPath, 'test-org', 'test/repo');
+const repoRoot = () => join(graphsPath, 'test-org', 'test-repo');
 const nodeUrn = (loc: string) => `hrn:node:${graph.urn}:${loc}`;
 const aliasesFor = (nodeId: string) => db.urnAlias.findMany({
   where: { entityType: 'NODE', entityId: nodeId },
@@ -64,7 +64,7 @@ beforeEach(async () => {
   });
   graph = await db.memory.update({
     where: { id: created.id },
-    data: { source: 'git@github.com:test/repo.git' },
+    data: { source: 'git@github.com:test/repo.git', urn: 'test-org:test-repo' },
     include: { organization: true },
   });
 });
@@ -184,7 +184,7 @@ describe('#1404 Git-sync node aliases', () => {
     writeFileSync(join(repoRoot(), 'README.md'), `---\nid: ${id}\nname: root\n---\n`);
 
     expect((await syncAndPublish(graph)).error).toBeUndefined();
-    expect(await db.node.findUniqueOrThrow({ where: { id } })).toMatchObject({ loc: '' });
+    expect(await db.node.findUniqueOrThrow({ where: { id } })).toMatchObject({ loc: 'test-repo' });
     expect((await aliasesFor(id)).map((alias) => alias.urn)).toEqual([`${graph.urn}:old`]);
     expect(await resolveNodeRef(db, nodeUrn('old'))).toEqual({ id });
   });

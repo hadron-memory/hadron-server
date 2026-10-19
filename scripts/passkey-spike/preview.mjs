@@ -18,9 +18,17 @@ async function bodyOf(req) {
 
 export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost', basePath = '/', bind = '127.0.0.1', beforeRegistrationVerify,
   sessionTtlSeconds = Number(process.env.PASSKEY_SPIKE_SESSION_TTL_SECONDS ?? 300),
-  pairingTtlSeconds = Number(process.env.PASSKEY_SPIKE_PAIRING_TTL_SECONDS ?? 60) } = {}) {
+  pairingTtlSeconds = Number(process.env.PASSKEY_SPIKE_PAIRING_TTL_SECONDS ?? 60),
+  ceremonyExpirySeconds = Number(process.env.PASSKEY_SPIKE_CEREMONY_EXPIRY_SECONDS ?? 600),
+  browserTimeoutMs = Number(process.env.PASSKEY_SPIKE_BROWSER_TIMEOUT_MS ?? 300000) } = {}) {
   for (const [name, value] of Object.entries({ sessionTtlSeconds, pairingTtlSeconds })) {
     if (!Number.isSafeInteger(value) || value < 1 || value > 86400) throw new Error(`Invalid ${name}: expected 1–86400 seconds`);
+  }
+  for (const [name, value, min, max] of [
+    ['ceremonyExpirySeconds', ceremonyExpirySeconds, 30, 3600],
+    ['browserTimeoutMs', browserTimeoutMs, 20000, 900000],
+  ]) {
+    if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error(`Invalid ${name}: expected integer ${min}–${max}`);
   }
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid PASSKEY_SPIKE_PORT');
   if (!/^\/(?:[a-zA-Z0-9_-]+\/)*$/.test(basePath)) throw new Error('Invalid base path');
@@ -38,7 +46,7 @@ export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost',
     res.setHeader('X-Content-Type-Options', 'nosniff');
     if (req.headers.host !== new URL(origin).host) return json(res, 403, { code: 'HOST_REFUSED' });
     // No persistent state; expiry and caps prevent an unattended demo accumulating credentials.
-    for (const [id, s] of sessions) if (s.expiresAt < Date.now()) sessions.delete(id);
+    for (const [id, s] of sessions) if (s.expiresAt <= Date.now()) sessions.delete(id);
     for (const [code,p] of pairs) if (p.expiresAt < Date.now() || !sessions.has(p.sid)) pairs.delete(code);
     const url = new URL(req.url, origin);
     if (!url.pathname.startsWith(basePath)) return json(res, 404, {code:'NOT_FOUND'});
@@ -50,7 +58,7 @@ export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost',
       const [file, type] = files[url.pathname]; res.writeHead(200, { 'Content-Type': type });
       return res.end(readFileSync(new URL(file, import.meta.url)));
     }
-    if (req.method === 'GET' && url.pathname === '/config') return json(res, 200, { sessionTtlSeconds, pairingTtlSeconds });
+    if (req.method === 'GET' && url.pathname === '/config') return json(res, 200, { sessionTtlSeconds, pairingTtlSeconds, ceremonyExpirySeconds, browserTimeoutMs });
     if (req.method === 'GET' && url.pathname === '/fixture') return json(res, 200, example);
     if (req.method !== 'POST') return json(res, 404, { code: 'NOT_FOUND' });
     if (req.headers.origin && req.headers.origin !== origin) return json(res, 403, { code: 'ORIGIN_REFUSED' });
@@ -88,19 +96,19 @@ export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost',
         if (!registration && !session.credential) return json(res, 400, { code: 'REGISTER_FIRST' });
         const options = registration
           ? await generateRegistrationOptions({ rpName: 'Hadron synthetic AL spike', rpID, userName: `synthetic-retention-user-${session.pickerTag}`, userDisplayName: `AL ${session.pickerTag}`,
-            userID: session.userHandle, attestationType: 'none', timeout: 20000,
+            userID: session.userHandle, attestationType: 'none', timeout: browserTimeoutMs,
             authenticatorSelection: { residentKey: 'required', userVerification: 'required' } })
-          : await generateAuthenticationOptions({ rpID, challenge: Buffer.from(example.challengeHex, 'hex'), timeout: 20000,
+          : await generateAuthenticationOptions({ rpID, challenge: Buffer.from(example.challengeHex, 'hex'), timeout: browserTimeoutMs,
             userVerification: 'required', allowCredentials: [] });
         const id = randomBytes(24).toString('base64url');
-        session.pending.set(id, { type: registration ? 'registration' : 'authentication', challenge: options.challenge, expiresAt: Date.now() + 60000 });
+        session.pending.set(id, { type: registration ? 'registration' : 'authentication', challenge: options.challenge, expiresAt: Math.min(session.expiresAt, Date.now() + ceremonyExpirySeconds * 1000) });
         return json(res, 200, { id, options });
       }
       if (!['/registration/verify', '/authentication/verify'].includes(url.pathname)) return json(res, 404, { code: 'NOT_FOUND' });
       const pending = session.pending.get(body.id);
       // Consume before async verification: failed attempts and concurrent retries cannot reuse it.
       session.pending.delete(body.id);
-      if (!pending || pending.expiresAt < Date.now() || url.pathname !== `/${pending.type}/verify`) return json(res, 400, { code: 'CEREMONY_SPENT' });
+      if (!pending || pending.expiresAt <= Date.now() || url.pathname !== `/${pending.type}/verify`) return json(res, 400, { code: 'CEREMONY_SPENT' });
       if (pending.type === 'registration') {
         if (session.credential || session.registering) return json(res,400,{code:'ALREADY_REGISTERED'});
         session.registering = true;

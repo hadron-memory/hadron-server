@@ -1,5 +1,11 @@
+import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
+import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
+import { requireAppKeyManager } from './appKeyManagement.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // typeResolvers — GraphQL type-level field resolvers extracted from resolvers.ts
 // (split step 3). No behavior change.
+import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import {
@@ -74,7 +80,7 @@ import {
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
   sessionScopeFilter,
-  STORED_NODE_CONTENT,
+  CONTENT_RAW_DEFAULT,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
@@ -588,12 +594,7 @@ async function reconciledNodeForParent(
     if (!current) return null;
     const key = sessionKeyCache.getByMemoryId(current.memoryId);
     if (key) decryptNodeFieldsWithKey(current, key);
-    // Verify against what was STORED: a templated read hands field resolvers
-    // rendered `content`, which would never match the row.
-    const stored = STORED_NODE_CONTENT in n
-      ? { ...n, content: (n as { [STORED_NODE_CONTENT]?: string | null })[STORED_NODE_CONTENT] ?? null }
-      : n;
-    return revisionStateMatchesWithoutAuthorship(stored, current) ? current : null;
+    return revisionStateMatchesWithoutAuthorship(n, current) ? current : null;
   });
   cache.set(n, pending);
   return pending;
@@ -739,6 +740,7 @@ type SessionLivenessParent = {
   autoExpiredAt?: Date | null;
   endedAt?: Date | null;
   deletedAt?: Date | null;
+  expiresAt?: Date | null;
 };
 
 /**
@@ -760,13 +762,13 @@ function readLivenessRowOnce(ctx: Context, id: string) {
   if (!read) {
     read = ctx.db.session.findUnique({
       where: { id },
-      select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true },
+      select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true, expiresAt: true },
     });
     perRequest.set(id, read);
   }
   return read as Promise<{
     id: string; type: SessionType; startedAt: Date; updatedAt: Date | null;
-    autoExpiredAt: Date | null; endedAt: Date | null; deletedAt: Date | null;
+    autoExpiredAt: Date | null; endedAt: Date | null; deletedAt: Date | null; expiresAt: Date | null;
   } | null>;
 }
 
@@ -780,8 +782,8 @@ function readLivenessRowOnce(ctx: Context, id: string) {
 async function sessionLivenessRow(
   ctx: Context,
   s: SessionLivenessParent,
-): Promise<{ id: string; type: SessionType; startedAt: Date; updatedAt: Date | null; autoExpiredAt: Date | null; endedAt: Date | null } | null> {
-  const row = s.type && s.startedAt && s.deletedAt !== undefined
+): Promise<{ id: string; type: SessionType; startedAt: Date; updatedAt: Date | null; autoExpiredAt: Date | null; endedAt: Date | null; expiresAt: Date | null } | null> {
+  const row = s.type && s.startedAt && s.deletedAt !== undefined && s.expiresAt !== undefined
     ? s
     : await readLivenessRowOnce(ctx, s.id);
   if (!row || !row.type || !row.startedAt) return null;
@@ -793,6 +795,7 @@ async function sessionLivenessRow(
     updatedAt: row.updatedAt ?? null,
     autoExpiredAt: row.autoExpiredAt ?? null,
     endedAt: row.endedAt ?? null,
+    expiresAt: row.expiresAt ?? null,
   };
 }
 
@@ -834,6 +837,18 @@ export const typeResolvers = {
     from: (s: { fromAddress: string }) => s.fromAddress,
   },
   Node: {
+    /**
+     * #2041 — the one place a node's include tags resolve for a reader
+     * (cor:dmo:150:03), so every path that reaches `Node.content` is covered
+     * and a new surface can't forget it. The row is never rewritten.
+     */
+    content: async (
+      n: Parameters<typeof resolveNodeContent>[1],
+      args: { raw?: boolean | null },
+      ctx: Context,
+    ) => resolveNodeContent(ctx, n, {
+      raw: args.raw ?? (n as { [CONTENT_RAW_DEFAULT]?: boolean })[CONTENT_RAW_DEFAULT] ?? false,
+    }),
     authorship: async (n: SnapshotSourceNode & { revSeq: number }, _: unknown, ctx: Context) => {
       if (!n.authorshipKind || !n.authoredAt) return null;
       // Start the task lookup before per-node reconciliation so sibling list
@@ -1023,6 +1038,20 @@ export const typeResolvers = {
     },
   },
   NodeRevision: {
+    // #1838 — the per-revision answer, from the one shared derivation.
+    revisionApproval: async (nv: { nodeId: string; revNo: number | null }, _: unknown, ctx: Context) => {
+      const { state, record } = nv.revNo == null
+        ? { state: 'NOT_APPROVED' as const, record: null }
+        : await revisionApprovalOf(ctx.db, nv.nodeId, nv.revNo);
+      return {
+        state,
+        approved: state === 'APPROVED',
+        recordedAtRevision: record?.revision ?? null,
+        approvedBy: record?.approvedBy ?? null,
+        approvedByInfo: record?.approvedByInfo ?? null,
+        approvedAt: record?.approvedAt ?? null,
+      };
+    },
     authorship: (nv: AuthoredState, _: unknown, ctx: Context) => resolveAuthorship(nv, ctx),
     contentValidation: (
       nv: { nodeId: string; memoryId: string | null; revNo: number | null },
@@ -1297,12 +1326,11 @@ export const typeResolvers = {
     },
     // 023-app-shape US3: cross-user grants on this Memory. Empty for
     // non-personal-class memories. Visible to (a) the principal
-    // (memory.userId), (b) an OrgMember of the memory's owning org
-    // with ADMIN/OWNER role, or (c) a platform ADMIN/OWNER.
+    // (memory.userId) alone since #1647: no org-admin or platform-admin branch.
     // Grantees can read their own shares via User.memorySharesGranted
     // (out of scope here; can be added if a portal page needs it).
     shares: async (
-      g: { id: string; class?: string; userId?: string | null; organizationId?: string | null },
+      g: { id: string; class?: string; userId?: string | null },
       _: unknown,
       ctx: Context,
     ) => {
@@ -1314,43 +1342,20 @@ export const typeResolvers = {
       // returning `[]` for a real personal memory (mirrors `members` above).
       let cls = g.class;
       let uId = g.userId;
-      let orgId = g.organizationId;
-      if (cls === undefined || uId === undefined || orgId === undefined) {
+      if (cls === undefined || uId === undefined) {
         const m = await ctx.db.memory.findUnique({
           where: { id: g.id },
-          select: { class: true, userId: true, organizationId: true },
+          select: { class: true, userId: true },
         });
         if (!m) return [];
         cls = m.class;
         uId = m.userId;
-        orgId = m.organizationId;
       }
       if (cls !== 'personal') return [];
-      const isPrincipal = ctx.userId !== undefined && ctx.userId === uId;
-      const isPlatformAdmin =
-        ctx.roles?.includes('ADMIN') === true || ctx.roles?.includes('OWNER') === true;
-      if (!isPrincipal && !isPlatformAdmin) {
-        // Verify the caller is an ADMIN/OWNER of the memory's owning
-        // org. The earlier `ctx.organizationId === g.organizationId`
-        // shortcut was incomplete — most callers don't have
-        // organizationId scoped per-request, which would have made
-        // non-platform org admins fall through to an empty list.
-        if (!ctx.userId) return [];
-        // A user-owned memory (no organizationId) has no org-admin fallback —
-        // only the principal (checked above) can read its shares.
-        if (!orgId) return [];
-        const member = await ctx.db.orgMember.findFirst({
-          where: { organizationId: orgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
-          select: { role: true, deletedAt: true },
-        });
-        if (
-          !member ||
-          member.deletedAt ||
-          (member.role !== 'ADMIN' && member.role !== 'OWNER')
-        ) {
-          return [];
-        }
-      }
+      // #1647 (cor:acl:010:02, strict owner wins): the full share list names every co-grantee, so only the memory's
+      // strict owner reads it. No platform-admin or org-admin branch, no impersonation; a grantee reads their OWN row
+      // through `myShare` and never learns of the others.
+      if (!isStrictOwner(ctx, uId)) return [];
       return ctx.db.memoryShare.findMany({
         where: { memoryId: g.id },
         orderBy: { createdAt: 'asc' },
@@ -1622,8 +1627,10 @@ export const typeResolvers = {
       return (await canReadMemoryRecord(ctx, memory)) ? memory : null;
     },
     keys: async (a: { id: string; keys?: unknown[] }, _: unknown, ctx: Context) => {
-      // Check before serving an eager key list as well as the DB fallback.
-      if (!(await loadReadableNestedApp(ctx, a.id))) return [];
+      // #1744: an App read grants no credential inventory. Check even an eager list.
+      const app = await ctx.db.app.findFirst({ where: { id: a.id, deletedAt: null } });
+      if (!app) throw authorizationDenied();
+      await requireAppKeyManager(ctx, app);
       if (a.keys) return a.keys;
       return ctx.db.appKey.findMany({
         where: { appId: a.id, revokedAt: null },
@@ -1879,6 +1886,8 @@ export const typeResolvers = {
     },
   },
   Session: {
+    /** #1156 / cor:dmo:070:05: no new read gate; the parent Session is authorized. */
+    endReason: sessionEndReason,
     /** #1645: nested events inherit current session and memory read boundaries. */
     events: async (s: { id: string }, _: unknown, ctx: Context) => {
       const session = await ctx.db.session.findFirst({
@@ -1910,8 +1919,8 @@ export const typeResolvers = {
     },
     /**
      * #1617: the deadline beside `isLive` — when this session lapses unless
-     * driven first. `sessionLapsesAt` is the computation `isSessionLive` is
-     * defined by, so the two fields cannot disagree about the same row.
+     * driven first, bounded by its promised hard expiry (#1036). Idle lapse
+     * is inclusive; expiry is exclusive at equality (cor:agt:020:03).
      */
     lapsesAt: async (s: SessionLivenessParent, _: unknown, ctx: Context) => {
       const row = await sessionLivenessRow(ctx, s);

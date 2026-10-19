@@ -1,3 +1,5 @@
+import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
+import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
 import { hardDeleteThreadsOfTargets } from '../../lib/comments/lifecycle.js';
@@ -113,6 +115,12 @@ export interface MergeMemoryArgs {
   /** Audit attribution for version/edit/update columns (#620: user PK vs
    *  fallback principal info are captured separately). */
   editor: SnapshotEditor;
+  /**
+   * #1331 — the caller, for the role writer level of every node the merge writes,
+   * relocates or removes (judged in the memory it leaves and the one it enters).
+   * Omitted only by server-authored callers.
+   */
+  principal?: RoleWriterPrincipal;
   /** Nodes folded / edges drained per inner transaction. Test seam; defaults to MERGE_BATCH_SIZE. */
   batchSize?: number;
   /** Source nodes scanned per classify+relocate page. Test seam; defaults to CLASSIFY_PAGE. */
@@ -522,6 +530,9 @@ async function runMerge(
           // protocol. This first gate acquires them and gives a fast refusal;
           // the second gate below rechecks the authoritative post-loc-lock rows.
           await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
+          if (args.principal) {
+            await assertRoleWritersForNodes(tx, args.principal, rows, { from: sourceMemoryId, to: targetMemoryId });
+          }
           await acquireLockSet(
             tx,
             ids.flatMap((id) => {
@@ -564,6 +575,9 @@ async function runMerge(
           // Reentrant memory locks; fresh governed/protected facts for the rows
           // now serialized by their source + destination address locks.
           await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
+          if (args.principal) {
+            await assertRoleWritersForNodes(tx, args.principal, rows, { from: sourceMemoryId, to: targetMemoryId });
+          }
           // #1323 (@codex P1, PR #1339): reconcile unrevisioned drift as each
           // row's OWN revision before its relocation snapshot, under the row
           // lock, in id order (one global order, so two multi-row operations
@@ -736,6 +750,10 @@ async function runMerge(
       // inside this transaction, under the Channel-memory locks. The Phase-1
       // preflight cannot cover a fold that runs transactions later.
       await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], [...srcRows, ...tgtRows], 'merge');
+      if (args.principal) {
+        await assertRoleWritersForNodes(tx, args.principal, srcRows, { from: sourceMemoryId, to: targetMemoryId });
+        await assertRoleWritersForNodes(tx, args.principal, tgtRows, { from: targetMemoryId });
+      }
       const foldedIds: string[] = []; // source rows actually folded → safe to delete
 
       // -- Fold fields (per colliding node). --
@@ -906,6 +924,11 @@ async function runMerge(
     progress.edgesDroppedCount += batch.dropped;
   }
 
+  // Derived INCLUDE edges (#2040) are not relocated (their loc is id-derived and
+  // the governed-edge trigger forbids rewriting them): drop the source memory's,
+  // then re-derive them for the target's nodes once Phase 3 has settled.
+  await db.edge.deleteMany({ where: { memoryId: sourceMemoryId, governedKind: 'INCLUDE' } });
+
   // === Phase 3: relocate the surviving source-memory edges into the target. ===
   // After Phases 2-3 the source memory holds no live nodes, so every edge
   // still denormalized to it is sourced from a relocated node (its endpoints
@@ -944,6 +967,20 @@ async function runMerge(
     progress.edgesMovedCount += move.length;
     progress.edgesDroppedCount += drop.length;
     if (edges.length < batchSize) break;
+  }
+
+  {
+    // #2040 — re-derive include edges for the target's nodes that carry tags.
+    // Encrypted content is ciphertext and never matches; those wait for their
+    // next content write.
+    const tagged = await db.node.findMany({
+      where: { memoryId: targetMemoryId, deletedAt: null, content: { contains: '{{>' } },
+      select: { id: true },
+    });
+    for (let i = 0; i < tagged.length; i += batchSize) {
+      const ids = tagged.slice(i, i + batchSize).map((n) => n.id);
+      await db.$transaction((tx) => resyncDerivedIncludesForNodes(tx, ids), BATCH_TX_OPTS);
+    }
   }
 
   // === Final: soft-delete the now-empty source memory when asked. ===

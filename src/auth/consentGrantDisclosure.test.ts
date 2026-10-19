@@ -2,7 +2,7 @@
  * #559 / #1261 — consent states the effective grant. The copy is rendered
  * from the validated OAuth scope set so an MCP-only grant is described as
  * limited while the broad account grant keeps the explicit whole-account and
- * non-cascading-revocation warning.
+ * recorded-subtree revocation boundary (#1253).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -30,11 +30,13 @@ describe('#1261 — consent copy matches the effective OAuth grant', () => {
     expect(html).not.toContain('same account access you do');
   });
 
-  it('warns that account grants whole-account access, key minting, and non-cascading revocation', () => {
+  it('discloses account access, minting, and recorded-subtree revocation', () => {
     const html = renderConsent({ ...consentBase, oauthScopes: ['account'] });
     expect(html).toContain('same account access you do');
     expect(html).toContain('create further API keys of its own');
-    expect(html).toContain('Revoking this token does not automatically revoke keys');
+    expect(html).toContain('Revoking this token also revokes keys created with it and their descendants');
+    expect(html).not.toContain('does not automatically revoke');
+    expect(html).toContain('Historical keys with no recorded parent are not included');
   });
 
   it('treats a combined grant as broad account authority', () => {

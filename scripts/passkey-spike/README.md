@@ -20,7 +20,13 @@ independently recompute its SHA-256; the library receives the raw digest as its
 custom challenge, not the hex spelling. RP ID is `localhost`, expected origin
 is the exact server URL. Registration requests a discoverable credential and
 UV; both verifiers require UV. Credential/pending state exists only in memory,
-expires after five minutes (ceremonies after one minute), and is capped.
+expires after five minutes by default, and is capped. Ceremony expiry defaults
+to 600 seconds, capped by the original session, and the browser timeout hint
+defaults to 300000 ms (providers may clamp it). See [AL-PREP.md](AL-PREP.md)
+for validated environment settings, explicit startup-option precedence and AL
+Compose inputs. `timing.test.mjs` checks startup validation and fake-clock HTTP
+boundaries; the browser probe checks both generators and valid registration /
+authentication beyond the old 60-second deadline.
 
 `probe.mjs` launches Chromium with a virtual CTAP2 authenticator. It registers
 through the page's browser SDK, independently checks the resident credential,

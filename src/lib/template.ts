@@ -1,11 +1,28 @@
 import Mustache from 'mustache';
+import { parseIncludeTags } from './includes/parseIncludeTags.js';
+import { spliceIncludes, type SpliceOptions } from './includes/spliceIncludes.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { decryptNodeFields } from './nodeCrypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
+import {
+  DATA_HOST_MEMORY_SELECT,
+  declaredMemoryWideFields,
+  isMultiHumanChatHost,
+  multiHumanDataView,
+} from './memoryDataView.js';
 
-/** Shared literal partial grammar for rendering and automation consent. */
+/**
+ * Shared literal partial grammar for rendering and automation consent: the
+ * same-memory loc targets of the include tags in `content` (#2040 — the one
+ * parser, `parseIncludeTags`; URN targets are S2's). Never throws: a malformed
+ * tag is refused at write time, and a stored one renders as before.
+ */
 export function templatePartialLocs(content: string): string[] {
-  return [...new Set([...content.matchAll(/\{\{>\s*([^}]+)\s*\}\}/g)].map(match => match[1].trim()))];
+  try {
+    return [...new Set(parseIncludeTags(content).filter(t => t.kind === 'loc').map(t => t.target))];
+  } catch {
+    return [...new Set([...content.matchAll(/\{\{>\s*([^}]+)\s*\}\}/g)].map(match => match[1].trim()))];
+  }
 }
 
 /**
@@ -15,20 +32,30 @@ export function templatePartialLocs(content: string): string[] {
  *   1. Node's own data ({{field}})
  *   2. Memory's default data node ({{field}} if not in own data)
  *   3. Cross-node references ({{node-name.field}})
- *   4. Partials ({{> node-loc}}) — includes another node's compiled content
+ *   4. Includes ({{> node-loc}}) — spliced in as text before the above render (#2041)
  *
  * For encrypted memories, this function only produces useful output if the
  * caller already has an active session key in the session key cache. Nodes
  * whose content/data are ciphertext-only (no key available) are skipped.
+ *
+ * `personId` is whose turn this compile is for (#910). In an app-class memory
+ * the default data node holds per-person values, and only `personId`'s own are
+ * read, on top of the explicitly memory-wide ones (`memoryDataView.ts`). Omit
+ * it when there is no attributable person: such a compile reads memory-wide
+ * values only. Single-human memories ignore it.
  */
 export async function compileTemplate(
-  content: string,
+  rawContent: string,
   nodeData: Record<string, unknown> | null,
   memoryId: string,
   db: PrismaClient,
   accessFilter: Record<string, unknown>,
+  personId?: string | null,
+  /** `includer` names the node being compiled so a cycle back through it is caught at once (#2041). */
+  includes: SpliceOptions & { includer?: { id?: string } } = {},
 ): Promise<string> {
-  if (!content.includes('{{')) return content;
+  if (!rawContent.includes('{{')) return rawContent;
+  let content = rawContent;
 
   // Check if the memory is encrypted. If so, we need to decrypt any nodes we
   // load during compilation. No key in the cache → we can't compile, so we
@@ -38,7 +65,7 @@ export async function compileTemplate(
   const memory = db.memory?.findUnique
     ? await db.memory.findUnique({
         where: { id: memoryId },
-        select: { id: true, isEncrypted: true },
+        select: { ...DATA_HOST_MEMORY_SELECT, isEncrypted: true },
       })
     : null;
   const memEncInfo = memory ? { id: memory.id, isEncrypted: memory.isEncrypted } : null;
@@ -49,18 +76,32 @@ export async function compileTemplate(
     return content;
   }
 
+  // Includes first, as plain text: each tag becomes the target's stored text
+  // (nested, the reader's own access, a notice where it can't resolve), so the
+  // variables below render across the whole of it, as a Mustache partial did.
+  content = await spliceIncludes(db, accessFilter, content, { id: includes.includer?.id, memoryId }, includes);
+
   // 1. Build the view: node's own data
   const view: Record<string, unknown> = {};
 
+  // #910: the default data bag and {{data.…}} references both use the
+  // per-person view in a multi-human host.
+  const dataNodeView = async (stored: Record<string, unknown>) =>
+    memory && isMultiHumanChatHost(memory)
+      ? multiHumanDataView(stored, await declaredMemoryWideFields(db, memory), personId)
+      : stored;
+
+  // #1835: retain both the includer's memory and the caller's read filter.
+  // Spreading the filter here could overwrite the literal memoryId.
   // 2. Load memory's default data node (loc: "data")
   const defaultDataNode = await db.node.findFirst({
-    where: { loc: 'data', memoryId, deletedAt: null, ...accessFilter },
+    where: { loc: 'data', memoryId, deletedAt: null, AND: [accessFilter] },
     select: { data: true, content: true, memoryId: true },
   });
   if (defaultDataNode) {
     if (memEncInfo?.isEncrypted) decryptNodeFields(defaultDataNode, memEncInfo);
     if (defaultDataNode.data && typeof defaultDataNode.data === 'object') {
-      Object.assign(view, defaultDataNode.data as Record<string, unknown>);
+      Object.assign(view, await dataNodeView(defaultDataNode.data as Record<string, unknown>));
     }
   }
 
@@ -86,36 +127,21 @@ export async function compileTemplate(
 
   for (const ref of refs) {
     const refNode = await db.node.findFirst({
-      where: { loc: ref, memoryId, deletedAt: null, ...accessFilter },
+      where: { loc: ref, memoryId, deletedAt: null, AND: [accessFilter] },
       select: { data: true, content: true, memoryId: true },
     });
     if (refNode) {
       if (memEncInfo?.isEncrypted) decryptNodeFields(refNode, memEncInfo);
       if (refNode.data && typeof refNode.data === 'object') {
-        view[ref] = refNode.data;
-      }
-    }
-  }
-
-  // 4. Resolve partials ({{> node-loc}})
-  const partials: Record<string, string> = {};
-  const partialRefs = templatePartialLocs(content);
-
-  for (const partialLoc of partialRefs) {
-    const partialNode = await db.node.findFirst({
-      where: { loc: partialLoc, memoryId, deletedAt: null, ...accessFilter },
-      select: { content: true, data: true, memoryId: true },
-    });
-    if (partialNode) {
-      if (memEncInfo?.isEncrypted) decryptNodeFields(partialNode, memEncInfo);
-      if (partialNode.content) {
-        partials[partialLoc] = partialNode.content;
+        view[ref] = ref === 'data'
+          ? await dataNodeView(refNode.data as Record<string, unknown>)
+          : refNode.data;
       }
     }
   }
 
   try {
-    return Mustache.render(content, view, partials);
+    return Mustache.render(content, view);
   } catch {
     // If compilation fails, return the raw content
     return content;

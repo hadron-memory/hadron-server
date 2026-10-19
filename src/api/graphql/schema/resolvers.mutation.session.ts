@@ -1,3 +1,5 @@
+import { storedIncludeTags, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
+import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // sessionMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { ownsSession } from '../../../lib/sessionOwnership.js';
 import { generateId } from '../../../lib/id.js';
@@ -267,7 +269,7 @@ export async function endSessionFirstWins(
     turnCount?: number | null;
     errorCount?: number | null;
   },
-): Promise<{ endedByThisCall: boolean; endedAt: Date | null; autoExpiredAt: Date | null }> {
+): Promise<{ endedByThisCall: boolean; endedAt: Date | null; autoExpiredAt: Date | null; endReason: ReturnType<typeof sessionEndReason> }> {
   const data = {
     ...(metrics.summary !== undefined ? { summary: metrics.summary } : {}),
     ...(metrics.inputTokens !== undefined ? { inputTokens: metrics.inputTokens } : {}),
@@ -277,7 +279,7 @@ export async function endSessionFirstWins(
   };
   const claimed = await db.session.updateMany({
     where: { id, endedAt: null },
-    data: { ...data, endedAt: new Date() },
+    data: { ...data, endedAt: new Date(), endReason: 'ended' },
   });
   if (claimed.count === 0) {
     // Already ended — by an earlier call, or by the reaper a moment ago. The
@@ -286,7 +288,7 @@ export async function endSessionFirstWins(
   }
   const after = await db.session.findUnique({
     where: { id },
-    select: { endedAt: true, autoExpiredAt: true },
+    select: { endedAt: true, autoExpiredAt: true, endReason: true },
   });
   // GraphQL and MCP close through this writer. Release this session's key
   // holdings only after its durable end is confirmed; other sessions holding
@@ -294,6 +296,7 @@ export async function endSessionFirstWins(
   if (after?.endedAt) sessionKeyCache.evict(id);
   return {
     endedByThisCall: claimed.count > 0,
+    endReason: after ? sessionEndReason(after) : null,
     endedAt: after?.endedAt ?? null,
     autoExpiredAt: after?.autoExpiredAt ?? null,
   };
@@ -954,7 +957,7 @@ export const sessionMutations = {
             select: {
               id: true, userId: true, startedAt: true, updatedAt: true,
               // #1114: liveness is DERIVED, so the gate needs the inputs.
-              type: true, autoExpiredAt: true, endedAt: true,
+              type: true, autoExpiredAt: true, endedAt: true, expiresAt: true,
             },
           });
           // #1114 — AN OPEN SESSION IS NOT A LIVE ONE. Nothing ends a session
@@ -1441,7 +1444,7 @@ export const sessionMutations = {
           });
           await tx.session.updateMany({
             where: { id: { in: ids }, endedAt: null },
-            data: { endedAt },
+            data: { endedAt, endReason: 'superseded' },
           });
           supersededIds = ids;
         }
@@ -2007,10 +2010,9 @@ export const sessionMutations = {
         sessionKeyCache.evict(sessionId); // defensive — idempotent
         return true;
       }
-      await ctx.db.session.update({
-        where: { id: sessionId },
-        data: { endedAt: new Date() },
-      });
+      // #1156 / cor:dmo:070:05: share first-end-wins with explicit closes;
+      // an expiry or another end may have won since the read above.
+      await endSessionFirstWins(ctx.db, sessionId, {});
       // Evict the data key from the in-memory cache. Ref counting means the
       // key stays available to any other active session on the same memory.
       sessionKeyCache.evict(sessionId);
@@ -2040,7 +2042,8 @@ export const sessionMutations = {
         select: { id: true },
       })).map((n) => n.id);
       const edges = await ctx.db.edge.findMany({
-        where: { sourceId: { in: nodeIds }, deletedAt: null },
+        // Derived INCLUDE edges (#2040) are not snapshotted: restore re-derives them from content.
+        where: { sourceId: { in: nodeIds }, deletedAt: null, governedKind: null },
         include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
       });
       const edgeSnapshots = edges.map((e) => ({
@@ -2205,7 +2208,7 @@ export const sessionMutations = {
             select: { id: true },
           })).map((n) => n.id);
           await tx.edge.updateMany({
-            where: { sourceId: { in: currentNodeIds }, deletedAt: null },
+            where: { sourceId: { in: currentNodeIds }, deletedAt: null, governedKind: null },
             data: { deletedAt: new Date() },
           });
 
@@ -2273,6 +2276,10 @@ export const sessionMutations = {
               },
             });
             locToId.set(loc, upserted.id);
+            // #2040 — re-derive the include edges from the restored content. No
+            // refusal here: the snapshot was valid when taken, and the walk would
+            // see a half-restored graph.
+            await syncDerivedIncludesEdges(tx, upserted, storedIncludeTags(nodeData.content), [sysMemId]);
           }
 
           // Restore edges from snapshot. Spec 037: derive loc when an older

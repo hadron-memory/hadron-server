@@ -14,6 +14,7 @@
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
 import { GraphQLError } from 'graphql';
+import { WORKER_SIGNATURE_DEFAULTS, normalizeWorkerSignature, withWorkerSignatures } from '../../../lib/workerSignature.js';
 import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -38,7 +39,7 @@ import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
-import { applyPersonaTemplate, templateBindsName } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables, templateBindsName, type PlatformVariableValues } from '../../../lib/personaDescription.js';
 // Spec 049 Phase 6 — the register block, derived data through one composition point.
 import { renderDerivedBlocks, resolveRegister } from '../../../lib/resolveRegister.js';
 import {
@@ -52,6 +53,7 @@ import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
+import { miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx } from './authorizedTx.js';
@@ -165,18 +167,6 @@ export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promis
   }
   if (await isAppParticipant(ctx, app)) return;
   throw forbidden();
-}
-
-/** #1705 — does any agent task name this worker as its owner or assignee? */
-async function workerHasAgentTasks(
-  db: Pick<Context['db'], 'agentTask'>,
-  workerId: string,
-): Promise<boolean> {
-  const row = await db.agentTask.findFirst({
-    where: { OR: [{ ownerWorkerId: workerId }, { assigneeWorkerId: workerId }] },
-    select: { id: true },
-  });
-  return row !== null;
 }
 
 /**
@@ -313,6 +303,8 @@ type WorkerRow = {
   slug: string;
   role: string | null;
   promptOverride: string | null;
+  signature: string;
+  trailer: string;
   memoryId: string | null;
   retiredAt: Date | null;
   /** #1050 — the human holding this name, and since when. */
@@ -349,6 +341,8 @@ async function resolveWorkerRefRow(ctx: Context, workerRef: string): Promise<Wor
       slug: true,
       role: true,
       promptOverride: true,
+      signature: true,
+      trailer: true,
       memoryId: true,
       retiredAt: true,
       heldByUserId: true,
@@ -934,7 +928,7 @@ export const workerMutations = {
             await assertWorkerNameNotConfusable(tx, appId, candidate);
             const slug = await nextFreeWorkerSlug(tx, appId, candidate);
             return tx.worker.create({
-              data: {
+              data: { ...WORKER_SIGNATURE_DEFAULTS,
                 appId,
                 agentId: agent.id,
                 name: candidate,
@@ -1451,10 +1445,40 @@ export const workerMutations = {
    */
   updateWorker: async (
     _: unknown,
-    args: { workerRef: string; promptOverride?: string | null },
+    args: { workerRef: string; promptOverride?: string | null; signature?: string | null; trailer?: string | null },
     ctx: Context,
   ) => {
     const { worker, app } = await resolveReadableWorkerRef(ctx, args.workerRef);
+    const changesSignature = 'signature' in args || 'trailer' in args;
+    if (changesSignature) {
+      const data: { signature?: string; trailer?: string; promptOverride?: string | null } = {};
+      const anchors: AuthorityAnchor[] = [
+        { kind: 'app', id: app.id },
+        ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+        ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+      ];
+      return withAuthorizedTx(ctx, anchors, async txCtx => {
+        const fresh = await txCtx.db.app.findUniqueOrThrow({ where: { id: app.id } });
+        // H26 PROVISIONAL: bound workers do not exercise their holder's manager right.
+        // Headless agent/run callers and impersonation likewise cannot manage these fields.
+        const actor = currentActor();
+        const bound = txCtx.sessionId ? await txCtx.db.session.findUnique({ where: { id: txCtx.sessionId }, select: { workerId: true } }) : null;
+        if (bound?.workerId || txCtx.sessionBindingRefused || actor.workerId || actor.agentId || txCtx.impersonation || !(await managesApp(txCtx, fresh))) throw forbidden();
+        if ('promptOverride' in args) await requireWorkerStaffAccess(txCtx, fresh);
+        for (const field of ['signature', 'trailer'] as const) {
+          if (field in args) data[field] = normalizeWorkerSignature(args[field]);
+        }
+        if ('promptOverride' in args) data.promptOverride = (args.promptOverride ?? '').trim() === '' ? null : args.promptOverride;
+      }, async tx => {
+        const { count } = await tx.worker.updateMany({ where: { id: worker.id, retiredAt: null }, data });
+        if (!count) {
+          const still = await tx.worker.findUnique({ where: { id: worker.id } });
+          if (!still) throw workerNotFound(args.workerRef);
+          throw new GraphQLError('This worker is retired.', { extensions: { code: 'WORKER_RETIRED' } });
+        }
+        return tx.worker.findUniqueOrThrow({ where: { id: worker.id } });
+      });
+    }
     await requireWorkerStaffAccess(ctx, app);
 
     if (worker.retiredAt) {
@@ -1512,83 +1536,51 @@ export const workerMutations = {
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
 
-  /**
-   * deleteWorker — the ONLY removal escape (cor:dmo:050:11): the hard delete
-   * of a never-used miscast. "Never did anything" is checked, not asserted:
-   * no session was EVER bound (ended ones included — chat authorship and
-   * worklog records both require a bound session, so zero sessions implies
-   * zero references), and the working memory (if provisioned) holds no nodes
-   * and no assets. Anything else is WORKER_IN_USE — retire instead.
-   */
+  /** #1162 / cor:dmo:050:11: only an unreferenced, released miscast is removable. */
   deleteWorker: async (
     _: unknown,
-    { workerRef }: { workerRef: string },
+    { workerRef, confirmNoExternalAttribution }: { workerRef: string; confirmNoExternalAttribution?: boolean | null },
     ctx: Context,
   ) => {
     const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
     await requireWorkerStaffAccess(ctx, app);
-
-    const sessions = await ctx.db.session.count({ where: { workerId: worker.id } });
-    if (sessions > 0) {
+    // Auth first: the negative attestation must not open a roster oracle.
+    if (confirmNoExternalAttribution !== true) {
       throw new GraphQLError(
-        'This worker has driven sessions — its name is bound to that history forever. Retire it instead.',
-        { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
+        'Verify that no signed commit, trailer, PR, comment, review or published artifact attributes work to this worker, then explicitly confirm. Database checks cannot prove external absence. If history is known or uncertain, retire instead.',
+        { extensions: { code: 'WORKER_EXTERNAL_ATTRIBUTION_UNCONFIRMED' } },
       );
     }
-    // #1705 — owning or holding an agent task is doing something, too (and
-    // the task's worker reference must not dangle).
-    if (await workerHasAgentTasks(ctx.db, worker.id)) {
-      throw new GraphQLError(
-        'This worker owns or is assigned agent tasks. Retire it instead.',
-        { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
-      );
-    }
-    if (worker.memoryId) {
-      const [nodes, assets] = await Promise.all([
-        ctx.db.node.count({ where: { memoryId: worker.memoryId } }),
-        ctx.db.asset.count({ where: { memoryId: worker.memoryId } }),
-      ]);
-      if (nodes > 0 || assets > 0) {
-        throw new GraphQLError(
-          'This worker\'s working memory holds content — it did something. Retire it instead.',
-          { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
-        );
-      }
-    }
-    // Count-then-act: SERIALIZABLE so a session binding (or memory write)
-    // committing between the checks above and the delete cannot slip a
-    // referenced worker through (conventions:count-then-act-serializable-txn;
-    // the counts re-run inside the transaction).
-    await ctx.db.$transaction(
-      async (tx) => {
-        const inTxSessions = await tx.session.count({ where: { workerId: worker.id } });
-        if (inTxSessions > 0) {
-          throw new GraphQLError(
-            'This worker has driven sessions — its name is bound to that history forever. Retire it instead.',
-            { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
-          );
-        }
-        if (await workerHasAgentTasks(tx, worker.id)) {
-          throw new GraphQLError(
-            'This worker owns or is assigned agent tasks. Retire it instead.',
-            { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
-          );
-        }
+    const refuse = () => new GraphQLError('This worker has persisted references, an unreleased stint, or encrypted attribution that cannot be verified. Retire it instead.', {
+      extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
+    });
+    if (await miscastHasReferences(ctx.db, worker)) throw refuse();
+    try {
+      await ctx.db.$transaction(async (tx) => {
+        // Re-read after acquiring the identity lock; stale pre-wait eligibility
+        // never authorizes destruction. The private MVCC fence
+        // and SERIALIZABLE census jointly reject pre-wait snapshots.
+        await tx.$queryRaw`SELECT id FROM workers WHERE id = ${worker.id} FOR UPDATE`;
+        await tx.$executeRaw`INSERT INTO worker_reference_fences(subject_id) VALUES (${worker.id})
+          ON CONFLICT (subject_id) DO UPDATE SET version = worker_reference_fences.version + 1`;
+        const current = await tx.worker.findUnique({ where: { id: worker.id } });
+        if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
+        if (await miscastHasReferences(tx, current)) throw refuse();
+        await tx.session.deleteMany({ where: { workerId: worker.id } });
         await tx.worker.delete({ where: { id: worker.id } });
-        if (worker.memoryId) {
-          const nodes = await tx.node.count({ where: { memoryId: worker.memoryId } });
-          const assets = await tx.asset.count({ where: { memoryId: worker.memoryId } });
-          if (nodes > 0 || assets > 0) {
-            throw new GraphQLError(
-              'This worker\'s working memory holds content — it did something. Retire it instead.',
-              { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
-            );
-          }
-          await tx.memory.delete({ where: { id: worker.memoryId } });
-        }
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-    );
+        if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      // The fence deliberately makes a stale SERIALIZABLE snapshot abort.
+      // Raw statements report 40001/40P01 as P2010; model writes use P2034.
+      if (error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === 'P2034' || (error.code === 'P2010' && ['40001', '40P01'].includes(String(error.meta?.code))))) {
+        throw new GraphQLError('Worker references changed concurrently. Retry the verified-unused repair, or retire instead.', {
+          extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
+        });
+      }
+      throw error;
+    }
     return true;
   },
 };
@@ -1815,10 +1807,21 @@ export const workerQueries = {
     // Prompt composition mirrors Worker.prompt exactly: the agent's template
     // with {{name}}/{{role}} bound, then the override as its own paragraph.
     const template = agent.systemPrompt ?? null;
-    const bound = template
-      ? applyPersonaTemplate(template, name, workerRole ?? agent.personaRole ?? '')
-      : null;
-    const prompt = bound && override ? `${bound}\n\n${override}` : (override ?? bound);
+    const previewRole = workerRole ?? agent.personaRole ?? '';
+    // No worker row or session exists yet, so url / model / reports-to have nothing to fill.
+    const values = withWorkerSignatures({
+      'worker.name': name,
+      'worker.role': previewRole,
+      'agent.name': agent.name,
+      'worker.reportsTo.name': '',
+      'worker.signature': '',
+      'worker.trailer': '',
+      'worker.url': '',
+      'session.llmModel': '',
+    }, WORKER_SIGNATURE_DEFAULTS);
+    const bound = template ? applyPlatformVariables(template, values, { name, role: previewRole }) : null;
+    const boundOverride = override ? applyPlatformVariables(override, values) : override;
+    const prompt = bound && boundOverride ? `${bound}\n\n${boundOverride}` : (boundOverride ?? bound);
 
     return {
       name,
@@ -1918,6 +1921,7 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
   // (cor:agt:020:11 — reader and binder share one predicate).
   const sessionLive = Prisma.sql`(
              s.ended_at IS NULL
+             AND (s.expires_at IS NULL OR s.expires_at > ${toNaiveUtc(now)}::timestamp)
              AND ${activityAt} >= (CASE s.type::text
                          WHEN 'DEVELOPER'  THEN ${toNaiveUtc(cut.DEVELOPER)}::timestamp
                          WHEN 'CHATBOT'    THEN ${toNaiveUtc(cut.CHATBOT)}::timestamp
@@ -2046,7 +2050,8 @@ export async function loadAppWorkerActivity(
  */
 export async function composeWorkerPrompt(
   ctx: Context,
-  worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null },
+  worker: { id: string; appId: string; agentId: string; name: string; slug?: string; role: string | null; promptOverride: string | null; signature: string; trailer: string; reportsToWorkerId?: string | null },
+  opts?: { llmModel?: string | null },
 ): Promise<{ text: string | null; renderedAt: Date; roleAgentUpdatedAt: Date | null }> {
   // Working-state path: the composed boot prompt embeds the agent's persona
   // template, which this loads WITHOUT the Agent read gate — so every caller
@@ -2057,7 +2062,7 @@ export async function composeWorkerPrompt(
   }
   const agent = await ctx.db.agent.findUnique({
     where: { id: worker.agentId },
-    select: { systemPrompt: true, personaRole: true, updatedAt: true, ownerUserId: true },
+    select: { systemPrompt: true, personaRole: true, updatedAt: true, ownerUserId: true, name: true, urn: true },
   });
   // #1764 (Riana P1): the App's participants now include a user-owned App's members, but a USER-owned Agent stays
   // owner-only (spec 047) — its template is read by the owner, or by whoever holds the worker cast from it (the person
@@ -2068,8 +2073,12 @@ export async function composeWorkerPrompt(
   }
   const template = agent?.systemPrompt ?? null;
   const role = worker.role ?? agent?.personaRole ?? '';
-  const bound = template ? applyPersonaTemplate(template, worker.name, role) : null;
-  const authored = bound && worker.promptOverride ? `${bound}\n\n${worker.promptOverride}` : (worker.promptOverride ?? bound);
+  // #2042 (cor:dmo:150:08): the platform variables, filled now, at this bind, from the worker being bound.
+  const platform = await workerPlatformValues(ctx, worker, agent, role, opts?.llmModel);
+  // One pass over each authored text (blind review P2-1/P2-2): the override is boot-prompt text too.
+  const bound = template ? applyPlatformVariables(template, platform, { name: worker.name, role }) : null;
+  const override = worker.promptOverride ? applyPlatformVariables(worker.promptOverride, platform) : worker.promptOverride;
+  const authored = bound && override ? `${bound}\n\n${override}` : (override ?? bound);
   // Spec 049 Phase 6: the register block is DERIVED data appended through the
   // one composition point (`renderDerivedBlocks`), never authored prompt text
   // — evaluated for the Worker's durable holder, so an admin reading another
@@ -2082,6 +2091,42 @@ export async function composeWorkerPrompt(
   // render time. Down here, renderedAt is a lower bound the printed text and
   // its Agent stamp both satisfy.
   return { text, renderedAt: new Date(), roleAgentUpdatedAt: agent?.updatedAt ?? null };
+}
+
+/**
+ * #2042 — the values of the platform variables for a worker bind. Bottom-up: the worker's own value, else the Agent's.
+ * Stored signature/trailer templates are pre-rendered without recursive expansion (#1602). The reports-to name rides the
+ * worker-visibility gate the caller already passed (same App), and `session.llmModel` is the bind's session model:
+ * passed in by the bind that just created the session, else the newest open session's.
+ */
+async function workerPlatformValues(
+  ctx: Context,
+  worker: { id: string; slug?: string; appId: string; name: string; signature: string; trailer: string; reportsToWorkerId?: string | null },
+  agent: { name: string; urn: string; personaRole: string | null } | null,
+  role: string,
+  llmModel: string | null | undefined,
+): Promise<PlatformVariableValues> {
+  const reportsTo = worker.reportsToWorkerId
+    ? await ctx.db.worker.findFirst({ where: { id: worker.reportsToWorkerId, appId: worker.appId }, select: { name: true } })
+    : null;
+  const model = llmModel !== undefined
+    ? llmModel
+    : (await ctx.db.session.findFirst({
+        where: { workerId: worker.id, endedAt: null },
+        orderBy: { startedAt: 'desc' },
+        select: { llmModel: true },
+      }))?.llmModel;
+  const urn = worker.slug ? await resolveWorkerUrnField({ appId: worker.appId, slug: worker.slug }, ctx) : null;
+  return withWorkerSignatures({
+    'worker.name': worker.name,
+    'worker.role': role,
+    'agent.name': agent?.name ?? '',
+    'worker.reportsTo.name': reportsTo?.name ?? '',
+    'worker.signature': '',
+    'worker.trailer': '',
+    'worker.url': (urn ? portalUrlForUrn(urn) : null) ?? '',
+    'session.llmModel': model ?? '',
+  }, worker);
 }
 
 /** The owner of a user-owned Agent, or the person holding the worker cast from it; never under impersonation. */
@@ -2395,6 +2440,10 @@ export const workerFieldResolvers = {
       return affinity.get(worker.role.toLowerCase()) ?? [];
     },
     /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
+    signature: async (worker: { appId: string; signature: string }, _: unknown, ctx: Context) =>
+      (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.signature : null,
+    trailer: async (worker: { appId: string; trailer: string }, _: unknown, ctx: Context) =>
+      (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.trailer : null,
     promptOverride: async (
       worker: { appId: string; promptOverride: string | null },
       _: unknown,
@@ -2605,7 +2654,7 @@ export const workerFieldResolvers = {
      * and the worker no override.
      */
     prompt: async (
-      worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null },
+      worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null; signature: string; trailer: string },
       _: unknown,
       ctx: Context,
     ) => (await composeWorkerPrompt(ctx, worker)).text,

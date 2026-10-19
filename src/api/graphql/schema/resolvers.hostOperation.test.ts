@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1709 (Task Management T6, slice 1) — the host-operation queue and the
  * `host:operate` App-key scope bound to one host. Scenarios of
@@ -89,9 +90,9 @@ beforeEach(async () => {
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true, urn: true } });
   otherApp = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other` }, select: { id: true } });
   for (const id of [holder.id, adaHolder.id, member.id]) await db.appMember.create({ data: { appId: app.id, userId: id, role: 'member' } });
-  ada = await db.worker.create({ data: { appId: app.id, agentId, name: 'Ada', slug: 'ada', heldByUserId: adaHolder.id }, select: { id: true } });
-  kit = await db.worker.create({ data: { appId: app.id, agentId, name: 'Kit', slug: 'kit', heldByUserId: holder.id, reportsToWorkerId: ada.id }, select: { id: true } });
-  zed = await db.worker.create({ data: { appId: otherApp.id, agentId, name: 'Zed', slug: 'zed' }, select: { id: true } });
+  ada = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Ada', slug: 'ada', heldByUserId: adaHolder.id }, select: { id: true } });
+  kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Kit', slug: 'kit', heldByUserId: holder.id, reportsToWorkerId: ada.id }, select: { id: true } });
+  zed = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: otherApp.id, agentId, name: 'Zed', slug: 'zed' }, select: { id: true } });
   orca1 = await mkKey(app.id, 'orca1');
   orca2 = await mkKey(app.id, 'orca2');
   plainKey = await mkKey(app.id, 'plain');

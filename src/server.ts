@@ -36,6 +36,7 @@ import {
   resolveAppleUser,
 } from './auth/index.js';
 import { issueLoginCode, redeemLoginCode } from './auth/authHandoff.js';
+import { startUserDeletionNoticeLoop } from './jobs/sendUserDeletionNotices.js';
 import {
   createPendingLoginState,
   claimPendingLoginState,
@@ -45,10 +46,10 @@ import {
 } from './auth/pendingLoginState.js';
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
+import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
 import {
   oauthSurfaceRefusal,
   oauthSurfaceRefusalMessage,
-  getCurrentUserRoles,
   hasCurrentPlatformAdminRole,
   resolveAuthContext,
 } from './middleware/auth.js';
@@ -57,7 +58,8 @@ import { assertProductionSigningSecret } from './auth/signingSecret.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
 import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
-import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
+import { requireOrgRole, requireSessionWriteAccess } from './api/graphql/schema/resolvers.helpers.js';
+import type { Context } from './api/graphql/schema/resolvers.js';
 import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
 import {
   formatGraphQLError,
@@ -1043,6 +1045,7 @@ export async function createServer(): Promise<Express> {
   // #792 — dev-only login (triple-gated: DEV_LOGIN_ENABLED + non-production
   // NODE_ENV + localhost Host; otherwise indistinguishable from a 404).
   mountDevLoginRoutes(app, db);
+  mountPasskeyCeremonyRoutes(app);
 
   // #477 Sink 1 — login handoff exchange. The portal's server `load` (NOT the
   // browser) POSTs the one-time code from /auth/callback?code=… here and gets
@@ -1133,6 +1136,8 @@ export async function createServer(): Promise<Express> {
 
   const { typeDefs, resolvers: deploymentResolvers } = deploymentSchema();
   const apollo = new ApolloServer({
+    // #2087: concealed errors must not depend on the deployment's NODE_ENV.
+    includeStacktraceInErrorResponses: false,
     typeDefs,
     resolvers: deploymentResolvers,
     plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin],
@@ -1277,15 +1282,12 @@ export async function createServer(): Promise<Express> {
    * credential half was never implemented — the route has had no auth since
    * its first commit (6c3cfd1, the same day as the design).
    *
-   * ## What is deliberately NOT here
+   * ## What changed in #1647 (supersedes the "any session" reading above)
    *
-   * No per-session ownership check. The design rejects it in as many words —
-   * "any machine client ... can report outcomes for any session ... keeps edge
-   * devices and CRM webhooks on equal footing" — because the reporter is
-   * typically a THIRD system (a CRM, a feedback form store) that has no
-   * relationship to the session beyond holding its id. #556 asks for tenancy
-   * scoping here; that is a product change to a deliberate decision, raised
-   * with the project lead rather than made in a security pass.
+   * The per-session ownership check #556 asked for now exists, on Holger's rulings (cor:dmo:070:05): an outcome is a
+   * session WRITE, so it takes the shared `requireSessionWriteAccess` gate, and strict-owner binding (cor:acl:010:02)
+   * binds platform admins too. The "third system holding only the id" case is served by a pure App key reporting on
+   * its own App's user-less session; it no longer reaches sessions a person is behind.
    */
   app.post('/sessions/:id/outcome', async (req, res) => {
     const { id } = req.params;
@@ -1308,20 +1310,30 @@ export async function createServer(): Promise<Express> {
         return;
       }
 
-      // An App key IS the machine credential this endpoint was designed for —
-      // "any machine client with a valid key" — so it qualifies on its own.
-      // A human principal is held to the documented CONTRIBUTOR-or-higher bar,
-      // read from the current user row rather than a token or transport
-      // snapshot (#1251).
-      let mayReport = !!auth.appId;
-      if (!mayReport) {
-        const roles = await getCurrentUserRoles(db, auth);
-        mayReport = (roles ?? []).some((r) =>
-          r === 'CONTRIBUTOR' || r === 'ADMIN' || r === 'OWNER',
-        );
+      // #1647 (cor:dmo:070:05): the outcome of a session is a WRITE to it, so the target goes through the one shared
+      // session-write gate (`requireSessionWriteAccess`): the attributed user, or a pure App key for its own App's
+      // eligible user-less, non-host-launched session, or a platform admin on a session that is not bound to another
+      // user's personal/private memory (strict owner wins, cor:acl:010:02). Contributor status, a hybrid active-App
+      // selection or any App key no longer admits. The principal must still hold SOME credential: an anonymous request
+      // is a 401, not a 403.
+      if (!auth.userId && !auth.appId) {
+        res.status(401).json({ error: 'A credential is required' });
+        return;
       }
-      if (!mayReport) {
-        res.status(401).json({ error: 'A contributor-or-higher credential is required' });
+      const target = await db.session.findUnique({
+        where: { id },
+        select: { appId: true, userId: true, launchOperationId: true, memoryId: true, deletedAt: true },
+      });
+      if (!target || target.deletedAt) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
+      try {
+        await requireSessionWriteAccess({ db, ...auth } as Context, target);
+      } catch (refusal) {
+        if ((refusal as { extensions?: { code?: string } })?.extensions?.code !== 'FORBIDDEN') throw refusal;
+        // A refusal returns before any write: no outcome, metadata or liveness moves.
+        res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' });
         return;
       }
 
@@ -1815,6 +1827,11 @@ export async function createServer(): Promise<Express> {
   // (cor:api:010:02), in bounded batches. Live proofs and sealed receipts stay.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
     startMergeConsentSweepLoop(db);
+  }
+
+  // #1647 — resume pending notices of admin-initiated account erasures (restart-safe outbox).
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_USER_DELETION_NOTICES !== 'true') {
+    startUserDeletionNoticeLoop(db);
   }
 
   // Background job: purge soft-deleted assets past their 24h recovery

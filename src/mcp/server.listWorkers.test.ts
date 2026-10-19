@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #997 — hadron_list_workers: the MCP roster read.
  *
@@ -59,7 +60,7 @@ function hybridAuth(userId = user.id): AuthContext {
 
 const worker = (name: string, slug: string, extra: Record<string, unknown> = {}) =>
   db.worker.create({
-    data: { appId: app.id, agentId: agent.id, name, slug, role: 'backend-engineer', ...extra },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name, slug, role: 'backend-engineer', ...extra },
   });
 
 describe('#997 — hadron_list_workers', () => {

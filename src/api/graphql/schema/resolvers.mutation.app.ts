@@ -1,3 +1,4 @@
+import { requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import {
@@ -186,11 +187,8 @@ export const appMutations = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveAppRef(ctx.db, appRef);
       const existing = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
-      // spec 047 (blocker 3): route unconditionally through the shared gate. It
-      // grants a platform admin on an ORG-owned App (its own admin branch) but
-      // enforces OWNER-ONLY on a user-owned App — the old `if (!isPlatformAdmin)`
-      // skip bypassed that owner-only rule.
-      await requireOwnerOrOrgRole(ctx, existing, 'ADMIN');
+      // #1744 / cor:dmo:050:05: rotation is one revoke plus mint, with the same audience.
+      await requireAppKeyManager(ctx, existing);
       const rawKey = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
       const keyHash = createHash('sha256').update(rawKey).digest('hex');
       return withAuthorizedTx(
@@ -203,7 +201,7 @@ export const appMutations = {
           if (current.organizationId !== existing.organizationId || current.ownerUserId !== existing.ownerUserId) {
             throw new Error('App ownership changed; retry key regeneration');
           }
-          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
+          await requireAppKeyManager(txCtx, current);
         },
         async (tx) => {
           // Revocation and replacement are one atomic authority change.
@@ -227,7 +225,7 @@ export const appMutations = {
           return { app: fresh, rawKey };
         },
         { lockMode: 'exclusive', afterLock: async (tx) => {
-          await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedId} FOR SHARE`;
+          await lockAppKeyManagerMemberships(tx, ctx, existing);
         } },
       );
     },
@@ -1295,7 +1293,7 @@ export const appMutations = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      await requireAppKeyManager(ctx, app);
       // Raw key format: hdr_app_<64 hex chars> (256 bits of entropy)
       const rawKey = APP_KEY_PREFIX + randomBytes(32).toString('hex');
       const keyHash = hashAppKey(rawKey);
@@ -1310,7 +1308,7 @@ export const appMutations = {
           if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
             throw new Error('App ownership changed; retry key creation');
           }
-          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
+          await requireAppKeyManager(txCtx, current);
         },
         (tx) => tx.appKey.create({
           data: {
@@ -1322,7 +1320,7 @@ export const appMutations = {
           },
         }),
         { afterLock: async (tx) => {
-          await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+          await lockAppKeyManagerMemberships(tx, ctx, app);
         } },
       );
       return { key: appKey, rawKey };
@@ -1333,7 +1331,7 @@ export const appMutations = {
         where: { id },
         include: { app: true },
       });
-      await requireOwnerOrOrgRole(ctx, key.app, 'ADMIN');
+      await requireAppKeyManager(ctx, key.app);
       await withAuthorizedTx(
         ctx,
         [
@@ -1346,10 +1344,10 @@ export const appMutations = {
           if (current.organizationId !== key.app.organizationId || current.ownerUserId !== key.app.ownerUserId) {
             throw new Error('App ownership changed; retry key revocation');
           }
-          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
+          await requireAppKeyManager(txCtx, current);
         },
         (tx) => tx.appKey.update({ where: { id }, data: { revokedAt: new Date() } }),
-        { lockMode: 'exclusive' },
+        { lockMode: 'exclusive', afterLock: (tx) => lockAppKeyManagerMemberships(tx, ctx, key.app) },
       );
       return true;
     },
@@ -1359,8 +1357,8 @@ export const appMutations = {
     // rejected. The raw key is returned exactly once; only the hash is
     // persisted. `createdBy` is the actor's User.id (REV-2 reversal —
     // matches the schema-wide audit-actor convention); `issuedVia` is
-    // the path discriminator (REV-2 — `'portal'` here, `'oauth:<id>'`
-    // for /oauth/token-issued tokens in Phase 2).
+    // the issuance identity (portal under sign-in, or inherited from the
+    // authenticated minting credential, including oauth:<client_id>).
     createUserApiKey: async (
       _: unknown,
       { label }: { label?: string | null },
@@ -1399,12 +1397,31 @@ export const appMutations = {
             throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
           }
         },
-        (tx) => mintUserApiKeyInTx(tx, {
-          userId: ctx.userId!,
-          label: label ?? null,
-          createdBy: ctx.userId!,
-          issuedVia: 'portal',
-        }),
+        async (tx, txCtx) => {
+          // Use the live credential under the user authority anchor, never
+          // clientId (the user's identity) or a caller-supplied parent ref.
+          const parent = txCtx.apiKeyId ? await tx.userApiKey.findFirst({
+            where: { id: txCtx.apiKeyId, userId: txCtx.userId, revokedAt: null },
+          }) : null;
+          if (txCtx.apiKeyId && !parent) {
+            throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+          }
+          // Recheck the persisted immutable scope rather than trusting an
+          // earlier request/transport projection at this mint boundary.
+          const persistedRefusal = parent ? oauthSurfaceRefusal(parent, 'account') : null;
+          if (persistedRefusal) {
+            throw new GraphQLError('This credential cannot create API keys.', {
+              extensions: { code: 'FORBIDDEN', ...persistedRefusal },
+            });
+          }
+          return mintUserApiKeyInTx(tx, {
+            userId: txCtx.userId!,
+            label: label ?? null,
+            createdBy: txCtx.userId!,
+            issuedVia: parent ? parent.issuedVia : 'portal',
+            mintedByKeyId: parent?.id,
+          });
+        },
       );
       return { userApiKey, rawKey };
     },
@@ -1414,10 +1431,8 @@ export const appMutations = {
     // already-revoked keys.
     //
     // **Atomic + no-info-leak design** (PR #145 review):
-    // - The updateMany-with-conditional pattern (`where: { id, userId,
-    //   revokedAt: null }`) makes the write race-safe: under concurrent
-    //   calls, only one wins the revokedAt timestamp; the loser's
-    //   updateMany returns count=0 and no overwrite happens.
+    // - The exclusive user anchor serializes mints and revocations; the
+    //   conditional subtree UPDATE preserves each existing revokedAt.
     // - Scoping the subsequent read to `{ id, userId }` collapses the
     //   cross-user case to NOT_FOUND, closing the id-enumeration
     //   channel that a separate FORBIDDEN branch would have opened
@@ -1434,10 +1449,8 @@ export const appMutations = {
           { extensions: { code: 'UNAUTHENTICATED' } },
         );
       }
-      // Atomic conditional revoke: only flips revokedAt on rows that
-      // (a) match the id, (b) are owned by the caller, AND
-      // (c) are not already revoked. Returns count=0 for any
-      // non-matching row, which we disambiguate below.
+      // Revoke the owned key and every recorded descendant atomically.
+      // Unknown legacy ancestry remains unknown; no prefix/provenance guess.
       const row = await withAuthorizedTx(
         ctx,
         [{ kind: 'user', id: ctx.userId }],
@@ -1447,10 +1460,20 @@ export const appMutations = {
           }
         },
         async (tx) => {
-          await tx.userApiKey.updateMany({
-            where: { id, userId: ctx.userId, revokedAt: null },
-            data: { revokedAt: new Date() },
-          });
+          // The exclusive user anchor serializes the complete traversal
+          // with every mint. A mint that wins is in this subtree; one that
+          // waits rechecks its now-revoked credential before inserting.
+          // UNION (rather than UNION ALL) also terminates on corrupt cycles.
+          await tx.$executeRaw`
+            WITH RECURSIVE subtree AS (
+              SELECT id FROM user_api_keys WHERE id = ${id} AND user_id = ${ctx.userId}
+              UNION
+              SELECT child.id FROM user_api_keys child
+              JOIN subtree parent ON child.minted_by_key_id = parent.id
+              WHERE child.user_id = ${ctx.userId}
+            )
+            UPDATE user_api_keys SET revoked_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+            WHERE id IN (SELECT id FROM subtree) AND revoked_at IS NULL`;
           return tx.userApiKey.findFirst({ where: { id, userId: ctx.userId } });
         },
         { lockMode: 'exclusive' },
@@ -1458,8 +1481,7 @@ export const appMutations = {
       // Read back via findFirst scoped to `{ id, userId }`. If the row
       // is missing, the id is either unknown OR belongs to a different
       // user — collapse both to NOT_FOUND. If present, return it
-      // unchanged (idempotent path: revokedAt was already set, so
-      // updateMany did nothing).
+      // unchanged when already revoked; descendants are still traversed.
       if (!row) {
         throw new GraphQLError(`UserApiKey ${id} not found.`, {
           extensions: { code: 'NOT_FOUND' },

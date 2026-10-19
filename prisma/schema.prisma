@@ -1293,6 +1293,14 @@ model Node {
   /// A revisioned edit snapshots the pre-edit state at this number, then
   /// atomically advances the live row to the next number.
   revSeq             Int       @default(1) @map("rev_seq")
+  /// #1611 (cor:dmo:120:04) — the revision at which the approval-hashed fields
+  /// (title, abstract, content under approval-hash v1) last changed through a
+  /// SANCTIONED writer; maintained by the `nodes_initialize_revision_content_hash`
+  /// trigger on the same 'refresh' marker as `revisionContentHash`. An approval
+  /// recorded at `approvedRevNo` is still valid iff `contentRevSeq <= approvedRevNo`:
+  /// metadata-only revisions advance `revSeq` but not this. A write outside the
+  /// revision system never moves it, so such a change stays TAMPERED.
+  contentRevSeq      Int       @default(1) @map("content_rev_seq")
   /// #1323: host-independent MD5 of the complete at-rest revisioned state.
   /// Internal safeguard only (never an artifact fingerprint): an exposed read
   /// reconciles a mismatch by taking a server-authored revision. Included
@@ -1301,13 +1309,15 @@ model Node {
   /// #1591 — the node's LATEST approval, kept here rather than only on a
   /// NodeRevision row because the live revision has no row (rows are pre-edit
   /// snapshots) and rows are prunable and deletable. The current revision is
-  /// approved iff `approvedRevNo = revSeq`; an older number means it was
-  /// edited since. `approvedBy` is a User.id when one is known, with no FK so a
+  /// approved iff `approvedRevNo >= contentRevSeq` (#1611); a lower number
+  /// means its content changed since. `approvedBy` is a User.id when one is known, with no FK so a
   /// user deletion cannot rewrite who approved; otherwise `approvedByInfo`
   /// holds the principal (the NodeRevision.editedByInfo convention).
   /// `approvalHash` is the full SHA-256 of approval hash v1
   /// (src/lib/approvalHash.ts) at approval time. All five are set together or
-  /// not at all (chk_node_approval_complete).
+  /// not at all (chk_node_approval_complete), except that `approvalHash` alone is
+  /// cleared when the node enters an encrypted memory (#1838): who, when and which
+  /// revision stay, and a hashless approval covers nothing.
   approvedRevNo      Int?      @map("approved_rev_no")
   approvedBy         String?   @map("approved_by")
   approvedByInfo     String?   @map("approved_by_info")
@@ -1556,6 +1566,8 @@ model Edge {
 enum EdgeGovernedKind {
   COMMENT_ANCHOR
   COMMENT_REPLY
+  /// Derived from an include tag in the source node's content (#2040); owned by the content writer, never by a client.
+  INCLUDE
 }
 
 /// #1606 — a comment thread's state (`cor:dmo:110:05`); top-level only.
@@ -1651,6 +1663,13 @@ model PendingEdge {
 /// Tracks a unit of work by an App: an AI/agent conversation, a
 /// chatbot interaction, an automation run. Sessions are the top-level
 /// tracking concept; UsageEvent rows are recorded within a session.
+/// #1156 / cor:dmo:070:05: only an end writer supplies a cause; legacy NULL stays unknown.
+enum SessionEndReason {
+  ended
+  superseded
+  expired
+}
+
 model Session {
   id              String      @id // caller-generated (e.g. UUID from h-start-session)
   type            SessionType @default(DEVELOPER)
@@ -1740,6 +1759,8 @@ model Session {
   outcomeMeta     Json?       @map("outcome_meta")
   startedAt       DateTime    @default(now()) @map("started_at")
   endedAt         DateTime?   @map("ended_at")
+  /// First end wins. NULL on legacy ended rows is exposed as unknown, never backfilled.
+  endReason       SessionEndReason? @map("end_reason")
   /// Set by the reaper (#930) when the session was auto-expired — meaning
   /// past `expiresAt`, and since #1114 nothing else. It no longer records an
   /// idle-window expiry, because there is no longer such a thing: inactivity
@@ -3137,6 +3158,12 @@ model App {
   /// `chk_apps_ticker_settings` (prisma/ticker-invariants.sql).
   /// The cadence floor, also the wake-rate ceiling: >= 60.
   tickerMinCadenceSeconds           Int  @default(120) @map("ticker_min_cadence_seconds")
+  /// #2025 / cor:agt:080:05 — Proposed bounds: 1..86400 whole seconds.
+  deliveryBusyDelaySeconds          Int @default(600) @map("delivery_busy_delay_seconds")
+  /// Proposed bounds: 1..604800; strictly greater than busy delay + cadence floor.
+  deliveryStuckWindowSeconds        Int @default(900) @map("delivery_stuck_window_seconds")
+  /// Stored OFF; enabling is refused until #2023 supplies standby behavior.
+  deliveryStandbyEnabled            Boolean @default(false) @map("delivery_standby_enabled")
   /// The fastest ticker a worker may subscribe ITSELF to: [floor, 86400].
   tickerSelfSubscribeCadenceSeconds Int  @default(600) @map("ticker_self_subscribe_cadence_seconds")
   /// How many live tickers the App may have: [1, 100].
@@ -3650,6 +3677,10 @@ model Worker {
   /// (cor:agt:020:01) — nullable; two castings of one agent share the
   /// template and nothing else.
   promptOverride String?   @map("prompt_override")
+  /// Per-worker signature template, delivered through S4 (cor:agt:040:04).
+  signature      String
+  /// Per-worker commit trailer template, delivered through S4 (cor:agt:040:04).
+  trailer        String
   /// #974 — the worker-scoped working memory in the App's container
   /// (`hrn:mem:<owner>:<app-slug>:<worker-slug>`), provisioned at cast.
   /// Identity is THIS column, never the memory's URN (the #723 rule).
@@ -3723,6 +3754,7 @@ model Worker {
   deliveryChannels    WorkerDeliveryChannel[]
   deliveryTicks       WorkerDeliveryTick[]
   deliveryTaskEvents  WorkerDeliveryTaskEvent[]
+  wakeAcks            WorkerWakeAck[]
   wakeReservation     AppWakeReservation?
   appGrants           AppGrant[]
   launchableVia      HostRegistrationWorker[]
@@ -3848,10 +3880,9 @@ model UserApiKey {
   /// the actor. For self-service v1 this equals `userId`; the column
   /// exists for future admin-issued paths (where actor != owner).
   createdBy  String?   @map("created_by")
-  /// Issuance-path discriminator: `'portal'` for createUserApiKey
-  /// GraphQL mutation; `'oauth:<client_id>'` for /oauth/token-issued
-  /// tokens. Distinct from `createdBy` so the audit-actor convention
-  /// is preserved.
+  /// Issuance identity: portal for direct sign-in, oauth:<client_id> for
+  /// OAuth issuance, inherited from an authenticated minting key. Nullable
+  /// historical provenance remains unknown. Distinct from the User actor.
   issuedVia  String?   @map("issued_via")
   /// Immutable OAuth scopes copied from the authorization code at token
   /// redemption. Empty means an unrestricted portal/legacy user key. There is
@@ -3860,9 +3891,16 @@ model UserApiKey {
   lastUsedAt DateTime? @map("last_used_at")
   revokedAt  DateTime? @map("revoked_at")
 
+  /// Authenticated credential that minted this key (#1253). Null means
+  /// direct issuance or unknown legacy ancestry; never inferred/backfilled.
+  mintedByKeyId String? @map("minted_by_key_id")
+  mintedByKey UserApiKey? @relation("UserKeyLineage", fields: [mintedByKeyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  mintedKeys UserApiKey[] @relation("UserKeyLineage")
+
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([mintedByKeyId])
   @@map("user_api_keys")
 }
 
@@ -4010,6 +4048,22 @@ model AuthCode {
   @@index([userId])
   @@index([clientId])
   @@map("auth_codes")
+}
+
+/// #1631 S2a: one browser-bound, purpose-bound, single-use ceremony step.
+/// Expiry and consumption are decided on the database clock.
+model PasskeyCeremony {
+  id               String    @id
+  purpose          String
+  browserNonceHash String    @map("browser_nonce_hash")
+  /// SHA-256 hex of the challenge issued for this ceremony: every ceremony is bound to one.
+  challengeHash    String    @map("challenge_hash")
+  createdAt        DateTime  @default(dbgenerated("(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  expiresAt        DateTime  @map("expires_at")
+  consumedAt       DateTime? @map("consumed_at")
+
+  @@index([expiresAt])
+  @@map("passkey_ceremonies")
 }
 
 /// #1631 schema-first: shared credential registry (cor:aut:040:05), no enrollment route yet.
@@ -5609,6 +5663,9 @@ model Ticker {
   channelIds        String[]  @default([]) @map("channel_ids")
   /// 'ALL' | 'MENTIONS'.
   relevance         String    @default("ALL")
+  /// #2068 (cor:agt:080:01, :10, R49): why the ticker fires, a closed set: 'read-team-channel' (relevant unread, as before) and
+  /// 'every-tick' (unconditional). Empty = never fires; any-of when several (Decided, R54).
+  reasons           String[]  @default(["read-team-channel"]) @map("reasons")
   enabled           Boolean   @default(true)
   ownerUserId       String?   @map("owner_user_id")
   ownerWorkerId     String?   @map("owner_worker_id")
@@ -5703,6 +5760,26 @@ model WorkerDeliveryChannel {
   @@map("worker_delivery_channels")
 }
 
+/// #2072 (Holger R53, cor:agt:080:04/:13/:15) — the receipt of an acknowledged wake, per (worker, wake key). A wake
+/// carries no message text, so its acknowledgement moves no message mark; this row is what it records instead: the
+/// floor's clock (`ackedAt`) and the budget's once-per-wake test. A row is (re)written only by an acknowledgement of a
+/// proof issued AFTER the receipt last recorded for that key, so a repeat or an older proof's replay changes nothing
+/// while the same wake offered again after the floor counts again.
+model WorkerWakeAck {
+  workerId        String   @map("worker_id")
+  wakeKey         String   @map("wake_key")
+  ackedAt         DateTime @map("acked_at")
+  ackedByUserId   String?  @map("acked_by_user_id")
+  ackedByWorkerId String?  @map("acked_by_worker_id")
+  ackedByAppKeyId String?  @map("acked_by_app_key_id")
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@id([workerId, wakeKey])
+  @@index([workerId, ackedAt])
+  @@map("worker_wake_acks")
+}
+
 /// #1747 — the delivery record, part 2: the last tick acknowledged per ticker.
 /// WRITTEN ONLY by S2.
 model WorkerDeliveryTick {
@@ -5781,6 +5858,9 @@ model AppWakeReservation {
   wakeKey    String   @map("wake_key")
   /// The wake itself, so an outstanding one is handed out again, exactly, until it is consumed or lapses.
   wake       Json     @map("wake")
+  /// #2069: the wake keys this reservation absorbed (a tick or task that fell due after them). An earlier proof whose key
+  /// is listed shares this reservation's allowance and is not charged again; any other proof is unrelated to it.
+  absorbedKeys String[] @default([]) @map("absorbed_keys")
 
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
@@ -5844,4 +5924,58 @@ model AppKeyWakeRead {
 
   @@index([appKeyId, readAt])
   @@map("app_key_wake_reads")
+}
+
+/// #1647 (cor:aut:020:03): one row per erasure a platform admin performs on ANOTHER user's account. Written in the
+/// deletion's own SERIALIZABLE transaction, so the audit and the erasure commit or roll back together. User ids are
+/// plain columns, deliberately NOT foreign keys: the audit must outlive any cascade. Immutable (trigger in
+/// post-push.sql + the migration) and exposed on no read surface.
+model UserDeletionAudit {
+  id           String   @id @map("id")
+  actorUserId  String   @map("actor_user_id")
+  targetUserId String   @unique @map("target_user_id")
+  reason       String
+  completedAt  DateTime @default(now()) @map("completed_at")
+
+  notice UserDeletionNotice?
+
+  @@map("user_deletion_audits")
+}
+
+enum UserDeletionNoticeStatus {
+  PENDING
+  SENT
+  FAILED
+  UNAVAILABLE
+}
+
+/// #1647: the outbox for the deleted user's notice. Written in the deletion's transaction with the recipient address
+/// encrypted (tokenCrypto); a post-commit worker sends it and clears the ciphertext at a terminal state. The notice
+/// text never carries the audit reason.
+model UserDeletionNotice {
+  auditId             String                   @id @map("audit_id")
+  status              UserDeletionNoticeStatus @default(PENDING)
+  recipientCiphertext String?                  @map("recipient_ciphertext")
+  attempts            Int                      @default(0)
+  /// Exclusive send lease: while `leaseUntil` is in the future only the holder of `claimToken` is sending.
+  leaseUntil          DateTime?                @map("lease_until")
+  claimToken          String?                  @map("claim_token")
+  createdAt           DateTime                 @default(now()) @map("created_at")
+  updatedAt           DateTime                 @updatedAt @map("updated_at")
+
+  audit UserDeletionAudit @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("user_deletion_notices")
+}
+
+/// #1162: internal MVCC coordination, not authored history or a Worker FK.
+/// Writers and miscast deletion update this version in their own transaction.
+/// Retained after deletion to fence older snapshots; no public API.
+/// The key is an immutable Worker id.
+model WorkerReferenceFence {
+  subjectId String @id @map("subject_id")
+  version   BigInt @default(0)
+
+  @@map("worker_reference_fences")
 }

@@ -539,14 +539,14 @@ ALTER TABLE "nodes" ADD CONSTRAINT "chk_node_mint_complete" CHECK (CASE
       AND ("minted_rev_no" IS NULL) = ("minted_hash" IS NULL)
       AND ("minted_rev_no" IS NULL OR "minted_rev_no" > 0)
   END);
--- #1591: an approval is complete or absent. Synced with the migration and
+-- #1591: an approval is complete or absent (#1838: the hash alone may be NULL, an approval ended on encrypted entry). Synced with the migration and
 -- src/test/globalSetup.ts.
 ALTER TABLE "nodes" DROP CONSTRAINT IF EXISTS "chk_node_approval_complete";
 ALTER TABLE "nodes" ADD CONSTRAINT "chk_node_approval_complete" CHECK (CASE
   WHEN "approved_rev_no" IS NULL THEN
     "approved_at" IS NULL AND "approval_hash" IS NULL AND "approved_by" IS NULL AND "approved_by_info" IS NULL
   ELSE
-    "approved_rev_no" > 0 AND "approved_at" IS NOT NULL AND "approval_hash" IS NOT NULL
+    "approved_rev_no" > 0 AND "approved_at" IS NOT NULL
       AND ("approved_by" IS NOT NULL OR "approved_by_info" IS NOT NULL)
   END);
 ALTER TABLE "node_content_validation_reports" DROP CONSTRAINT IF EXISTS "chk_node_content_validation_revisions_positive";
@@ -599,6 +599,22 @@ LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP = 'INSERT' OR NEW."revision_content_hash" = 'refresh' THEN
     NEW."revision_content_hash" := hadron_node_revision_state_hash(NEW);
+    -- #1611 (cor:dmo:120:04): the content-change boundary moves only through a
+    -- SANCTIONED writer (the same 'refresh' marker as the fingerprint above) and
+    -- only when the three approval-hashed fields change under approval-hash v1
+    -- normalization (CRLF and lone CR become LF; nothing else). A write outside
+    -- the revision system never moves it, so its content change stays
+    -- detectable as TAMPERED instead of passing for a supported edit.
+    IF TG_OP = 'INSERT' THEN
+      NEW."content_rev_seq" := NEW."rev_seq";
+    ELSIF replace(replace(NEW."name", E'\r\n', E'\n'), E'\r', E'\n')
+         IS DISTINCT FROM replace(replace(OLD."name", E'\r\n', E'\n'), E'\r', E'\n')
+      OR replace(replace(NEW."abstract", E'\r\n', E'\n'), E'\r', E'\n')
+         IS DISTINCT FROM replace(replace(OLD."abstract", E'\r\n', E'\n'), E'\r', E'\n')
+      OR replace(replace(NEW."content", E'\r\n', E'\n'), E'\r', E'\n')
+         IS DISTINCT FROM replace(replace(OLD."content", E'\r\n', E'\n'), E'\r', E'\n') THEN
+      NEW."content_rev_seq" := NEW."rev_seq";
+    END IF;
   END IF;
   RETURN NEW;
 END;
@@ -645,6 +661,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- and the App ticker-settings bounds. One source, shared verbatim with migration
 -- 20261011020000_tickers (pinned by src/lib/tickers/invariants.test.ts).
 \ir ticker-invariants.sql
+\ir delivery-settings-invariants.sql
 
 -- #1749: App key scopes (cor:aut:010:03). One source, shared verbatim with migration
 -- 20261011190000_app_key_scopes (pinned by src/lib/appKeyScopes/appKeyScopes.test.ts).
@@ -682,3 +699,21 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- (ops:alpha:incident-2026-10-14-pool-exhaustion-liveness-query).
 CREATE INDEX IF NOT EXISTS usage_events_session_activity_idx
   ON usage_events (session_id, created_at) WHERE counts_as_activity;
+
+-- #1647: the admin-erasure audit is append-only and its reason is trimmed, 1-500 code points
+-- (Prisma can model neither; the migration carries the same statements).
+ALTER TABLE user_deletion_audits DROP CONSTRAINT IF EXISTS chk_user_deletion_reason;
+ALTER TABLE user_deletion_audits ADD CONSTRAINT chk_user_deletion_reason
+  CHECK (reason = btrim(reason) AND char_length(reason) BETWEEN 1 AND 500);
+CREATE OR REPLACE FUNCTION hadron_user_deletion_audit_immutable() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'user_deletion_audits is append-only';
+END $$;
+DROP TRIGGER IF EXISTS user_deletion_audits_immutable ON user_deletion_audits;
+CREATE TRIGGER user_deletion_audits_immutable
+  BEFORE UPDATE OR DELETE ON user_deletion_audits
+  FOR EACH ROW EXECUTE FUNCTION hadron_user_deletion_audit_immutable();
+
+-- #1162: newly introduced typed Worker/session references fence hard deletion.
+\ir worker-reference-invariants.sql

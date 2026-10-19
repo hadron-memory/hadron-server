@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1747 — the ticker tools on the MCP surface.
  *
@@ -58,8 +59,8 @@ beforeEach(async () => {
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.id.toLowerCase()}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
   await db.appMember.create({ data: { appId: app.id, userId: holder.id, role: 'member' } });
-  anne = await db.worker.create({ data: { appId: app.id, agentId, name: 'Anne', slug: 'anne', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
-  liam = await db.worker.create({ data: { appId: app.id, agentId, name: 'Liam', slug: 'liam', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
+  anne = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Anne', slug: 'anne', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
+  liam = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Liam', slug: 'liam', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
   post = vi.spyOn(teamChatMutations, 'createTeamChatMessage').mockResolvedValue({} as never);
 });
 
@@ -102,6 +103,26 @@ describe('ticker tools: who acts', () => {
     ]);
     expect([a.ownerUserId, a.ownerWorkerId]).toEqual([member.id, null]);
     expect([b.ownerUserId, b.ownerWorkerId, b.createdByWorkerId]).toEqual([null, anne.id, anne.id]);
+  });
+
+  it('#2068 reasons over MCP: create, list, update, and the widening refusal carries the GraphQL code', async () => {
+    const s = mcp(authOf(member.id));
+    const sh = mcp(authOf(holder.id));
+    const plain = await session({ userId: member.id });
+    const holderPlain = await session({ userId: holder.id });
+    const created = text(await s.callTool('hadron_ticker_create', { appRef: app.id, name: 'Fast', cadenceSeconds: 120, session: plain.id }));
+    expect(created).toMatch(/· reasons read-team-channel/);
+    const t = await db.ticker.findFirstOrThrow({ where: { slug: 'fast' } });
+    expect(text(await sh.callTool('hadron_ticker_subscribe', { ref: t.id, workerRef: liam.id, session: holderPlain.id }))).toMatch(/^Subscribed\./);
+    // The owner could not subscribe Liam at the new terms (every-tick costs more), so the edit is refused and changes nothing.
+    expect(code(text(await s.callTool('hadron_ticker_update', { ref: t.id, reasons: ['every-tick'], session: plain.id })))).toBe('TICKER_CADENCE_NEEDS_CONSENT');
+    expect((await db.ticker.findUniqueOrThrow({ where: { id: t.id } })).reasons).toEqual(['read-team-channel']);
+    // A manager, who could subscribe Liam at the new terms, may; the list shows it; narrowing back is free for the owner.
+    const sa = mcp(authOf(admin.id));
+    const adminPlain = await session({ userId: admin.id });
+    expect(text(await sa.callTool('hadron_ticker_update', { ref: t.id, reasons: ['read-team-channel', 'every-tick'], session: adminPlain.id }))).toMatch(/Updated\.[\s\S]*· reasons read-team-channel\+every-tick/);
+    expect(text(await s.callTool('hadron_ticker_list', { appRef: app.id }))).toMatch(/· reasons read-team-channel\+every-tick/);
+    expect(text(await s.callTool('hadron_ticker_update', { ref: t.id, reasons: ['read-team-channel'], session: plain.id }))).toMatch(/· reasons read-team-channel(?!\+)/);
   });
 
   it('a full flow through the tools, with the GraphQL refusal codes', async () => {

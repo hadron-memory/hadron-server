@@ -427,15 +427,23 @@ describe('encryptMemory — locked conversion (#1346)', () => {
   });
 
   it('pages more than 200 old snapshots and encrypts tombstone history', async () => {
+    // encryptMemory pages 200 snapshots. Keep exactly one beyond that boundary
+    // (#1999), with tombstone history on the second page. The fixture is already
+    // at the boundary minimum, yet it still took 5.1 s alone at host load ~94
+    // (#2003), so the case carries an explicit 20 s limit (about 4x the worst
+    // observed time; a candidate margin, waits not instrumented). A hang still fails.
+    const snapshotCount = 201;
     const deleted = await db.node.create({
       data: {
         id: generateId(), memoryId, loc: 'deleted-history', name: 'deleted history',
         content: 'deleted live', deletedAt: new Date(),
       },
     });
-    const history = Array.from({ length: 205 }, (_, index) => ({
-      id: generateId(), nodeId: index === 204 ? deleted.id : nodeId,
-      memoryId, loc: index === 204 ? 'deleted-history' : 'entry-1',
+    // UUIDv7's random suffix does not order IDs generated in the same millisecond.
+    const snapshotIds = Array.from({ length: snapshotCount }, () => generateId()).sort();
+    const history = snapshotIds.map((id, index) => ({
+      id, nodeId: index === snapshotCount - 1 ? deleted.id : nodeId,
+      memoryId, loc: index === snapshotCount - 1 ? 'deleted-history' : 'entry-1',
       name: 'history', content: `historical ${index}`,
     }));
     await db.nodeRevision.createMany({ data: history });
@@ -443,12 +451,17 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
 
     const rows = await db.nodeRevision.findMany({ where: { id: { in: history.map((r) => r.id) } } });
-    expect(rows).toHaveLength(205);
+    expect(rows).toHaveLength(snapshotCount);
     expect(rows.every((revision) => isCiphertext(revision.content))).toBe(true);
     const tombstoneHistory = rows.find((revision) => revision.nodeId === deleted.id)!;
-    expect(decryptNodeFieldsWithKey(tombstoneHistory, parseDataKey(dataKey)).content).toBe('historical 204');
-  });
+    expect(decryptNodeFieldsWithKey(tombstoneHistory, parseDataKey(dataKey)).content).toBe(`historical ${snapshotCount - 1}`);
+  }, 20_000);
 
+  // #2003: same 201-row fixture and `encryptMemory` as the case above, which
+  // timed out at vitest's 5 s default on the shared agent host in one
+  // reporter's full runs (reported, not reproduced here: 1.1 s quiet, 3.6 s
+  // once at host load ~90). 20 s is a candidate margin, waits were not
+  // instrumented; a hang still fails, later.
   it('continues past a pruned page-boundary snapshot', async () => {
     const history = Array.from({ length: 201 }, (_, index) => ({
       id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'history',
@@ -479,7 +492,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     const remaining = await db.nodeRevision.findMany({ where: { nodeId } });
     expect(remaining).toHaveLength(200);
     expect(remaining.every((revision) => isCiphertext(revision.content))).toBe(true);
-  });
+  }, 20_000);
 
   it('rechecks legacy ownership when a node moves after the revision page read', async () => {
     const destination = await db.memory.create({

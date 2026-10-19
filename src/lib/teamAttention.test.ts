@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /** #1353 — loss-safe compact attention, worker-owned reads and switchover. */
 
 import { createHmac } from 'node:crypto';
@@ -92,7 +93,7 @@ async function previewPaged(ctx: Context, appRef: string) {
 
 const userCtx = (extra: Partial<Context> = {}): Context => ({ db, userId: user.id, roles: ['READER'], ...extra }) as Context;
 
-async function post(body: string, options: { authorWorkerId?: string; mentions?: string[] } = {}) {
+async function post(body: string, options: { authorWorkerId?: string; mentions?: string[]; broadcastWakes?: boolean } = {}) {
   const enc = await getMemoryEncryptionInfo(db, channel.memoryId);
   return appendChatMessage(
     db,
@@ -111,6 +112,7 @@ async function post(body: string, options: { authorWorkerId?: string; mentions?:
         data: {
           mentions: options.mentions ?? [],
           ...(options.authorWorkerId ? { authorWorkerId: options.authorWorkerId } : {}),
+          ...(options.broadcastWakes !== undefined ? { broadcastWakes: options.broadcastWakes } : {}),
         },
       },
     }),
@@ -120,7 +122,7 @@ async function post(body: string, options: { authorWorkerId?: string; mentions?:
 
 async function addWorker(name: string) {
   const made = await db.worker.create({
-    data: { id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase() },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase() },
   });
   await db.registerEntry.create({
     data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: made.id, role: 'BOTH' },
@@ -155,7 +157,7 @@ beforeEach(async () => {
       sharedMemoryOfAgentId: agent.id,
     },
   });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
   const made = await ensureChannelWithRoot(db, {
     memoryId: memory.id,
     loc: 'chats:team',
@@ -377,15 +379,18 @@ describe('signed attention poll', () => {
     });
     await post('ordinary unread');
     await post('@dara relevant', { mentions: ['dara'] });
-    await post('@all broadcast', { mentions: ['all'] });
-    await post('@team broadcast', { mentions: ['team'] });
+    // #2020: a broadcast is a mention when the server stamped it at post time.
+    await post('@all broadcast', { mentions: ['all'], broadcastWakes: true });
+    await post('@team broadcast', { mentions: ['team'], broadcastWakes: true });
     await post('@someone unrelated', { mentions: ['someone'] });
     await post('@dara by Dara', { mentions: ['dara'], authorWorkerId: worker.id });
+    // Unstamped, it is ordinary unread and never a mention (cor:agt:080:08/:14).
+    await post('@all quoted', { mentions: ['all'] });
 
     const result = await pollPaged(userCtx(), app.id);
     expect(result.workers).toHaveLength(1);
     expect(result.workers[0].channels).toEqual([
-      expect.objectContaining({ unread: 5, unreadMentions: 3, firstUnreadSeq: 1, lastSeq: 6 }),
+      expect.objectContaining({ unread: 6, unreadMentions: 3, firstUnreadSeq: 1, lastSeq: 7 }),
     ]);
   });
 
@@ -395,8 +400,8 @@ describe('signed attention poll', () => {
       where: { appId: app.id, channelId: channel.id },
       data: { mentionOnly: true },
     });
-    await post('@all @team by Dara', { mentions: ['all', 'team'], authorWorkerId: worker.id });
-    await post('@all @team by Mira', { mentions: ['all', 'team'], authorWorkerId: mira.id });
+    await post('@all @team by Dara', { mentions: ['all', 'team'], authorWorkerId: worker.id, broadcastWakes: true });
+    await post('@all @team by Mira', { mentions: ['all', 'team'], authorWorkerId: mira.id, broadcastWakes: true });
 
     const result = await pollPaged(userCtx(), app.id);
     expect(result.workers).toHaveLength(2);

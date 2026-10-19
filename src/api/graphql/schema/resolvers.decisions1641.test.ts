@@ -1,3 +1,4 @@
+import { observeTransactionBackend, waitForAdvisoryWaiter } from '../../../test/advisoryWaiter.js';
 import { approvedMergeProof } from '../../../test/mergeConsent.js';
 /**
  * #1641 S1 — decision nodes: the log and decision doors, the reads, and the
@@ -8,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { PrismaClient } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createDbWorkerAttribution } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { decisionDataSchema, decisionLogDataSchema, type DecisionData } from '../../../lib/decisions/codec.js';
@@ -45,8 +46,8 @@ const errorOf = async (p: Promise<unknown>): Promise<GraphQLError> => {
   throw new Error('expected a refusal');
 };
 
-const createLog = (extra: Record<string, unknown> = {}, userId = admin.id) =>
-  M.createDecisionLog(null, { memoryRef: memory.id, loc: 'decisions', defaultDeciders: [holger.id], ...extra }, as(userId));
+const createLog = (extra: Record<string, unknown> = {}, userId = admin.id, context: Partial<Context> = {}) =>
+  M.createDecisionLog(null, { memoryRef: memory.id, loc: 'decisions', defaultDeciders: [holger.id], ...extra }, as(userId, context));
 
 const simple = (extra: Record<string, unknown> = {}) => ({
   title: 'Ship the codec?',
@@ -185,16 +186,6 @@ describe("the log gate admits whoever manages the App (Holger's ruling, team cha
 });
 
 describe('the App owner arm under concurrent revocation (#1690 review: Rook P3-1, Chip R7)', () => {
-  /** Resolves once some transaction waits on an advisory lock it can't have. */
-  async function untilAdvisoryWaiter(): Promise<void> {
-    for (let i = 0; i < 200; i++) {
-      const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
-      if (n > 0n) return;
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    throw new Error('no transaction ever waited on the path lock');
-  }
-
   it("a demotion can't commit between the in-transaction gate and the log write: it waits for the write", async () => {
     const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Team', urn: 'decision.example:team' } });
     await db.memory.update({ where: { id: memory.id }, data: { appId: app.id, class: 'app', visibility: null } });
@@ -212,12 +203,15 @@ describe('the App owner arm under concurrent revocation (#1690 review: Rook P3-1
     }, { timeout: 30_000 });
     await isLocked;
 
-    const create = createLog({ defaultDeciders: [reader.id] }, reader.id);
+    const observed = observeTransactionBackend(db);
+    const create = createLog({ defaultDeciders: [reader.id] }, reader.id, { db: observed.db });
+    void create.catch(() => {});
     let demoted = false;
     let demotion: Promise<void> = Promise.resolve();
     let demotedWhileHeld = false;
     try {
-      await untilAdvisoryWaiter();
+      const pid = await observed.backendFor(create);
+      await waitForAdvisoryWaiter(db, { pid, key: { form: 'int-pair', first: memory.id, second: 'decisions' } });
       demotion = db.appMember.update({
         where: { appId_userId: { appId: app.id, userId: reader.id } }, data: { role: 'member' },
       }).then(() => { demoted = true; });
@@ -227,6 +221,7 @@ describe('the App owner arm under concurrent revocation (#1690 review: Rook P3-1
       demotedWhileHeld = demoted;
       release();
       await holder;
+      await Promise.allSettled([create, demotion]);
     }
     expect(demotedWhileHeld).toBe(false);
     const log = await create;
@@ -258,6 +253,7 @@ describe('the App owner arm under concurrent revocation (#1690 review: Rook P3-1
 describe('askDecision (§4, §5, §7)', () => {
   it('a writer asks; the server issues DA, renders the content, and the state is OPEN and verifiable', async () => {
     const log = await createLog();
+    await createDbWorkerAttribution(db, writer.id, 'worker-ada');
     const d = await runAsActor({ workerId: 'worker-ada', agentId: null }, () => ask(log.row.id, simple({
       urgency: 'URGENT', context: 'Background.', blocks: [{ ref: 'hadron-server#1641' }],
     })));
@@ -635,6 +631,7 @@ describe('Rook §10 on #1690 — the asker worker arm needs a person (P3-3)', ()
   it('an App key bound to the asking worker\'s session is not the asker', async () => {
     const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Team', urn: `${orgId.toLowerCase()}:team` } });
     const log = await createLog();
+    await createDbWorkerAttribution(db, writer.id, 'worker-ada');
     const d = await runAsActor({ workerId: 'worker-ada', agentId: null }, () => ask(log.row.id));
     // An admin-role App key, so the memory write gate passes and the asker check is what decides.
     const key = { db, appId: app.id, roles: ['ADMIN'] } as Context;

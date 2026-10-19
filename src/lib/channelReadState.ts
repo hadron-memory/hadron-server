@@ -31,7 +31,8 @@ import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { generateId } from './id.js';
-import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from './mentionToken.js';
+import { mentionTokenOf } from './mentionToken.js';
+import { mentionReachSql } from './mentionReach.js';
 import { parseRunRegisterSnapshot, type RegisterAttendee } from './resolveRegister.js';
 import { escapePrismaLikePattern } from './literalLocPrefix.js';
 
@@ -77,16 +78,17 @@ export async function readStatesFor(db: Db, attendee: RegisterAttendee, channelI
   return new Map(rows.map((r) => [r.channelId, r.lastSeenSeq]));
 }
 
-/** The mention tokens that address an attendee — broadcasts plus its own Worker token(s). */
+/**
+ * The mention tokens that name an attendee — its own Worker token(s). A
+ * broadcast is not one of them (#2020): it reaches the attendee only when the
+ * server stamped it at post time, which `mentionReach` / `mentionReachSql` decide.
+ */
 export async function attendeeMentionTokens(db: Db, attendee: RegisterAttendee): Promise<string[]> {
   const workers =
     'workerId' in attendee
       ? await db.worker.findMany({ where: { id: attendee.workerId }, select: { name: true } })
       : await db.worker.findMany({ where: { agentId: attendee.agentId, appId: attendee.appId, retiredAt: null }, select: { name: true } });
-  return [...new Set([
-    ...BROADCAST_MENTION_TOKENS,
-    ...workers.map((w) => mentionTokenOf(w.name)).filter((t): t is string => !!t),
-  ])];
+  return [...new Set(workers.map((w) => mentionTokenOf(w.name)).filter((t): t is string => !!t))];
 }
 
 /**
@@ -191,22 +193,14 @@ export async function renderAttentionSection(
       continue;
     }
     if (row.mentionOnly) {
-      // Only new messages that name the attendee count — counted in SQL, so
-      // nothing is materialized however large the window.
-      const mentions = tokens.length
-        ? (
-            await db.$queryRaw<Array<{ n: number }>>`
-              SELECT count(*)::int AS n
-              ${othersInWindow(
-                c,
-                seen,
-                Prisma.sql`AND EXISTS (
-                  SELECT 1 FROM jsonb_array_elements_text(${JSON.stringify(tokens)}::jsonb) AS wanted(token)
-                  WHERE COALESCE(node.data->'mentions', '[]'::jsonb) ? wanted.token
-                )`,
-              )}`
-          )[0]?.n ?? 0
-        : 0;
+      // Only new messages that reach the attendee count (#2020: its names, or a
+      // broadcast stamped at post time) — counted in SQL, so nothing is
+      // materialized however large the window.
+      const mentions = (
+        await db.$queryRaw<Array<{ n: number }>>`
+          SELECT count(*)::int AS n
+          ${othersInWindow(c, seen, Prisma.sql`AND ${mentionReachSql(Prisma.sql`node.data`, Prisma.sql`${tokens}::text[]`)}`)}`
+      )[0]?.n ?? 0;
       lines.push(
         mentions > 0
           ? `- ${c.name} (${where}): ${mentions} new mention${mentions === 1 ? '' : 's'} of you since seq ${seen} (channel is at ${c.lastSeq})`

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /**
  * Spec 049 Phase 7 — read-state and the attention section, what is pinned:
  *   - advances are MONOTONIC and keyed on the attendee: a lower seq is a
@@ -64,21 +65,21 @@ function deps(llm = vi.fn(async () => ({ text: 'ok', tokensIn: 10, tokensOut: 5,
   };
 }
 
-async function post(body: string, mentions: string[] = []) {
+async function post(body: string, mentions: string[] = [], extra: Record<string, unknown> = {}) {
   const enc = await getMemoryEncryptionInfo(db, channel.memoryId);
   const chat = { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc };
   return appendChatMessage(
     db, chat, enc,
     async ({ tx, seq, msgNum }) =>
       tx.node.create({
-        data: { id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, content: body, data: { mentions } },
+        data: { id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, content: body, data: { mentions, ...extra } },
       }),
     { asChannel: true },
   );
 }
 
 /** A post carrying routing metadata: no authorWorkerId is a human's post. */
-async function postAs(body: string, mentions: string[], authorWorkerId?: string) {
+async function postAs(body: string, mentions: string[], authorWorkerId?: string, extra: Record<string, unknown> = {}) {
   const enc = await getMemoryEncryptionInfo(db, channel.memoryId);
   return appendChatMessage(
     db,
@@ -89,7 +90,7 @@ async function postAs(body: string, mentions: string[], authorWorkerId?: string)
         data: {
           id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`, name: msgNum,
           nodeType: 'chat-message', seq, content: body,
-          data: { mentions, ...(authorWorkerId ? { authorWorkerId } : {}) },
+          data: { mentions, ...(authorWorkerId ? { authorWorkerId } : {}), ...extra },
         },
       }),
     { asChannel: true },
@@ -113,7 +114,7 @@ beforeEach(async () => {
   appMem = await db.memory.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agent.id },
   });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
   const made = await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app.id });
   channel = { id: made.channel.id, loc: 'chats:team', memoryId: appMem.id, chatRootNodeId: made.rootId };
   const node = await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'tasks:go', name: 'go', nodeType: 'task', content: 'go', isRunnable: true } });
@@ -166,12 +167,15 @@ describe('read-state', () => {
     const section = await renderAttentionSection(db, run1);
     expect(section.text).toContain('nothing new for you (mention-only; channel is at 1)');
     await post('@iris look', ['iris']);
-    await post('@all look', ['all']);
-    await post('@team look', ['team']);
+    // #2020: a broadcast is a mention when the server stamped it at post time.
+    await post('@all look', ['all'], { broadcastWakes: true });
+    await post('@team look', ['team'], { broadcastWakes: true });
     await post('@someone else', ['someone']);
-    expect((await renderAttentionSection(db, run1)).text).toContain('3 new mentions of you since seq 0 (channel is at 5)');
+    // An unstamped broadcast is ordinary unread, never a mention (cor:agt:080:08/:14).
+    await post('@all unstamped', ['all']);
+    expect((await renderAttentionSection(db, run1)).text).toContain('3 new mentions of you since seq 0 (channel is at 6)');
     await advanceReadState(db, { agentId: agent.id, appId: app.id }, channel.id, 2);
-    expect((await renderAttentionSection(db, run1)).text).toContain('2 new mentions of you since seq 2 (channel is at 5)');
+    expect((await renderAttentionSection(db, run1)).text).toContain('2 new mentions of you since seq 2 (channel is at 6)');
   });
 
   it('an encrypted Channel\'s mention-only row reports new messages instead of "nothing new for you" (#1362 review)', async () => {
@@ -211,17 +215,20 @@ describe('read-state', () => {
   it('an attendee\'s own broadcast is not attention for it; someone else\'s is (#1362 review)', async () => {
     await db.registerEntry.updateMany({ where: { appId: app.id }, data: { mentionOnly: true } });
     // Iris is cast from this run's Agent: her team-wide post is the attendee's own.
-    await postAs('@all heads up', ['all'], worker.id);
+    await postAs('@all heads up', ['all'], worker.id, { broadcastWakes: true });
     const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     expect((await renderAttentionSection(db, run)).text).toContain('nothing new for you (mention-only; channel is at 1)');
-    await postAs('@all from a human', ['all']);
+    await postAs('@all from a human', ['all'], undefined, { broadcastWakes: true });
     expect((await renderAttentionSection(db, run)).text).toContain('1 new mention of you since seq 0 (channel is at 2)');
+    // #2020: an unstamped one from a human is not a mention.
+    await postAs('@all quoted by a human', ['all']);
+    expect((await renderAttentionSection(db, run)).text).toContain('1 new mention of you since seq 0 (channel is at 3)');
   });
 
   it('an unfiltered row: the attendee\'s own posts are never new to it; a human\'s or another Agent\'s are (#1388)', async () => {
     const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     // Iris is cast from this run's Agent, and a retired sibling's posts are still its own.
-    const retired = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Old', slug: 'old', retiredAt: new Date() } });
+    const retired = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Old', slug: 'old', retiredAt: new Date() } });
     await postAs('done with the build', [], worker.id);
     await postAs('old note', [], retired.id);
     const own = await renderAttentionSection(db, run);
@@ -234,7 +241,7 @@ describe('read-state', () => {
     // So is another Agent's Worker, once the human's post has been seen.
     await advanceReadState(db, { agentId: agent.id, appId: app.id }, channel.id, 3);
     const otherAgent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'other', urn: `${org.urn}:other`, visibility: 'ORGANIZATION' } });
-    const stranger = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: otherAgent.id, name: 'Zed', slug: 'zed' } });
+    const stranger = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: otherAgent.id, name: 'Zed', slug: 'zed' } });
     await postAs('mine now', [], worker.id);
     expect((await renderAttentionSection(db, run)).text).toContain('nothing new from others since seq 3 (channel is at 4)');
     // A deleted post is no news either.

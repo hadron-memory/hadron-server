@@ -7,7 +7,7 @@
 // the read position and the delivered-through seq.
 
 import { BROADCAST_MENTION_TOKENS } from '../mentionToken.js';
-import { currentTick, type TickerSchedule } from './ticks.js';
+import { currentTick, oldestUnackedTickAt, type TickerSchedule } from './ticks.js';
 
 /** One chat message, reduced to what routing needs. Never a body, author name or mention text outside this module. */
 export type RoutedMessage = {
@@ -18,6 +18,8 @@ export type RoutedMessage = {
   broadcastWakes: boolean;
   /** Server-written at post time: the author manages the App (cor:agt:080:15 budget exemption). */
   managerPost: boolean;
+  /** R63: when the message was posted (ms since epoch); the anchor of a mention. Optional so pure-rule fixtures need not carry it. */
+  postedAtMs?: number;
 };
 
 export type ChannelInput = {
@@ -30,7 +32,7 @@ export type ChannelInput = {
 };
 
 export type SubscriptionInput = {
-  ticker: TickerSchedule & { id: string; relevance: 'ALL' | 'MENTIONS'; channelIds: string[] };
+  ticker: TickerSchedule & { id: string; relevance: 'ALL' | 'MENTIONS'; channelIds: string[]; /** #2068: why it fires (cor:agt:080:10). Default read-team-channel. */ reasons?: readonly string[] };
   lastAckedTick: number;
 };
 
@@ -53,7 +55,7 @@ export type TaskWakeReason = {
 export type WakeReason = { kind: 'MENTION' } | { kind: 'TICK'; tickerId: string; k: number } | TaskWakeReason;
 
 /** A task wake handed to the rule: already gated for the requester, oldest first. */
-export type TaskWakeInput = Omit<TaskWakeReason, 'kind'>;
+export type TaskWakeInput = Omit<TaskWakeReason, 'kind'> & { /** R63: the task event's time (ms), the anchor of a task reason. */ atMs?: number };
 
 export type WorkerWake = {
   reasons: WakeReason[];
@@ -62,6 +64,11 @@ export type WorkerWake = {
   unreadMentions: number;
   /** A manager-authored mention is among the reasons: exempt from the daily budget. */
   exempt: boolean;
+  /**
+   * R63 (#2017): when the earliest waiting reason became due (ms): a mention's first still-due post, a tick's OLDEST
+   * unacknowledged tick time, a task event's time. Null when no reason carries a time. Never restarted by a re-offer or a join.
+   */
+  anchorAtMs?: number | null;
 };
 
 type Stats = {
@@ -115,6 +122,7 @@ export function workerWake(args: {
   /** channelId → the contributing flag; a channel is listed only when some reason points at it. */
   const included = new Set<string>();
   let exempt = false;
+  const anchors: number[] = [];
 
   // cor:agt:080:09 — a relevant mention wakes at once, regardless of quiet hours and subscriptions.
   if (args.mentionsImmediate) {
@@ -124,6 +132,7 @@ export function workerWake(args: {
       any = true;
       included.add(ch.channelId);
       if (s.immediate.some((m) => m.managerPost)) exempt = true;
+      for (const m of s.immediate) if (m.postedAtMs !== undefined) anchors.push(m.postedAtMs);
     }
     if (any) reasons.push({ kind: 'MENTION' });
   }
@@ -141,11 +150,18 @@ export function workerWake(args: {
       any = true;
       included.add(ch.channelId);
     }
-    if (any) reasons.push({ kind: 'TICK', tickerId: sub.ticker.id, k });
+    // #2068 (Holger R49): the ticker's reasons decide whether it fires; any one that holds fires it. Every other tick rule
+    // above (schedule, acknowledged tick) still holds. No reasons = never.
+    const why = sub.ticker.reasons ?? ['read-team-channel'];
+    if (why.includes('every-tick') || (why.includes('read-team-channel') && any)) {
+      reasons.push({ kind: 'TICK', tickerId: sub.ticker.id, k });
+      anchors.push(oldestUnackedTickAt(sub.ticker, sub.lastAckedTick, k).getTime());
+    }
   }
 
   for (const t of args.tasks ?? []) {
     reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title });
+    if (t.atMs !== undefined) anchors.push(t.atMs);
   }
 
   if (reasons.length === 0) return null;
@@ -170,5 +186,6 @@ export function workerWake(args: {
     unread: out.reduce((n, c) => n + c.unread, 0),
     unreadMentions: out.reduce((n, c) => n + c.unreadMentions, 0),
     exempt,
+    anchorAtMs: anchors.length > 0 ? Math.min(...anchors) : null,
   };
 }

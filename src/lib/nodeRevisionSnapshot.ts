@@ -22,7 +22,9 @@ import { Prisma, type NodeAuthorshipKind } from '../generated/prisma/index.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from './id.js';
 import { clearNodeAuthorship } from './nodeAuthorship.js';
+import { normalizeRole } from './enforceNodeSchema.js';
 import { isDecisionFamilyRole } from './decisions/index.js';
+import { computeApprovalHash } from './approvalHash.js';
 
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
@@ -260,9 +262,33 @@ export async function ensureCurrentNodeRevisionInTransaction(
     where: { id: node.id },
     // The fingerprint computed above included the stale stamp. Recompute it
     // from the cleared live state, or the next read sees a second false drift.
-    data: { ...clearNodeAuthorship(), revisionContentHash: revisionStateHashRefreshMarker() },
+    data: {
+      ...clearNodeAuthorship(),
+      revisionContentHash: revisionStateHashRefreshMarker(),
+      // #1611: an approval that still claims the text, but whose hash the found
+      // text no longer matches, was changed outside the revision system. The
+      // reconcile is not a supported content change, so it does not move the
+      // boundary by itself; do it here so the approval reads as no longer
+      // covering the text (never APPROVED) while verify, which also reads this
+      // reconcile snapshot, keeps reporting TAMPERED.
+      ...(await approvalContradictedBy(tx, node) ? { contentRevSeq: node.revSeq + 1 } : {}),
+    },
   });
   return node.revSeq + 1;
+}
+
+/**
+ * Whether `node` holds an approval that still claims its text (#1611) yet the
+ * text hashes differently. An encrypted memory has no approvals to contradict.
+ */
+async function approvalContradictedBy(
+  tx: Prisma.TransactionClient,
+  node: { memoryId: string; name: string; abstract: string | null; content: string | null; approvedRevNo: number | null; approvalHash: string | null; contentRevSeq: number },
+): Promise<boolean> {
+  if (node.approvedRevNo == null || node.approvalHash == null || node.contentRevSeq > node.approvedRevNo) return false;
+  const memory = await tx.memory.findUnique({ where: { id: node.memoryId }, select: { isEncrypted: true } });
+  if (!memory || memory.isEncrypted) return false;
+  return computeApprovalHash({ title: node.name, abstract: node.abstract, content: node.content }) !== node.approvalHash;
 }
 
 /** The live node's approval columns (#1591). */
@@ -376,12 +402,9 @@ export async function createNodeRevision(
   )[0];
   if (!cutoff) return; // fewer than `max` rows for this memory → nothing to prune
 
-  // #1632 (cor:dmo:130:05, Holger #9901): automatic pruning never removes a
-  // revision a signature was made on; deliberate history clears still may.
-  // A legacy row with no revNo can carry no signature and stays prunable.
-  const signedRevisions = (await db.nodeSignature.findMany({
-    where: { nodeId: data.nodeId }, select: { revision: true }, distinct: ['revision'],
-  })).map((s) => s.revision);
+  // Automatic pruning never removes a revision in the exempt set (see
+  // revisionsExemptFromPruning); deliberate history clears still may.
+  const exempt = [...(await revisionsExemptFromPruning(db, data.nodeId, memoryId))];
   await db.nodeRevision.deleteMany({
     where: {
       nodeId: data.nodeId,
@@ -391,10 +414,42 @@ export async function createNodeRevision(
           { createdAt: { lt: cutoff.createdAt } },
           { createdAt: cutoff.createdAt, id: { lt: cutoff.id } },
         ] },
-        ...(signedRevisions.length ? [{ OR: [{ revNo: null }, { revNo: { notIn: signedRevisions } }] }] : []),
+        ...(exempt.length ? [{ OR: [{ revNo: null }, { revNo: { notIn: exempt } }] }] : []),
       ],
     },
   });
+}
+
+/**
+ * The revision numbers of a node that automatic cap-pruning must keep: the ONE
+ * seam every retention reason joins (#1838; #2063's include-relied revisions
+ * and #2047's served revisions add their sets here, never a second prune rule).
+ *
+ * - #1632 (cor:dmo:130:05, Holger #9901): a revision a signature was made on.
+ * - #1838 (cor:dmo:060:04, R7): a revision whose row carries a recorded
+ *   approval (a hash), because that row is the evidence identical-content
+ *   revisions are judged approved by.
+ *
+ * Deliberate deletion (`deleteNodeRevision`, `clearNodeHistory`, restore) is
+ * not governed by this and stays allowed. A legacy row with no revNo can carry
+ * neither a signature nor a pinnable approval, so it is never in the set and
+ * stays prunable.
+ */
+export async function revisionsExemptFromPruning(
+  db: Pick<PrismaClient, 'nodeSignature' | 'nodeRevision'> | Prisma.TransactionClient,
+  nodeId: string,
+  memoryId: string,
+): Promise<Set<number>> {
+  const [signed, carriers] = await Promise.all([
+    db.nodeSignature.findMany({ where: { nodeId }, select: { revision: true }, distinct: ['revision'] }),
+    db.nodeRevision.findMany({
+      where: { nodeId, memoryId, approvalHash: { not: null }, revNo: { not: null } },
+      select: { revNo: true },
+    }),
+  ]);
+  const out = new Set<number>(signed.map((s) => s.revision));
+  for (const c of carriers) if (c.revNo != null) out.add(c.revNo);
+  return out;
 }
 
 /**
@@ -569,7 +624,10 @@ export function restorableNodeFields(revision: {
     // still marked `role: 'review'`, so the restore silently disagrees with the
     // revision it claims to reproduce. A field in the curated subset has to
     // round-trip both ways or it is decoration.
-    role: revision.role,
+    // #1219: a historical '' (stored before the normalization) is the one
+    // exception — restoring it RAW would resurrect a shape no write path can
+    // produce anymore, so it restores as what it always meant: no role.
+    role: normalizeRole(revision.role) ?? null,
     llmModel: revision.llmModel,
     aiAgent: revision.aiAgent,
     authorshipKind: revision.authorshipKind,

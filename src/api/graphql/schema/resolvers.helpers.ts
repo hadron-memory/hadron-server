@@ -1,3 +1,4 @@
+import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { systemMemoryReadGrants } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 // Helpers extracted from resolvers.ts (Step 1 of the resolver split).
@@ -85,14 +86,15 @@ import { isUserOwnedAgentDefinition } from '../../../lib/auth/userOwnedAgentDefi
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
 
 /**
- * The STORED (uncompiled) content of a Node whose `content` a read resolver
- * replaced with rendered Mustache output (`node(ref:)` / `nextNode` without
- * `raw`). Field resolvers that verify the parent against the database —
- * `Node.authorship`'s and `Node.revision`'s reconcile — must compare stored
- * state, not presentation. A Symbol key is never serialized by GraphQL, so the
- * wire shape is unchanged (#1326 review, Codex on #1397 `138e8185`).
+ * Marks a Node row whose `content` field answers with the STORED text unless a
+ * query asks otherwise: `node(raw: true)` / `nextNode(raw: true)` set it for
+ * the node they return, and `nodeBatch` sets it on every node (R21 A: a bulk
+ * read resolves only for `content(raw: false)`). `Node.content` reads it as its
+ * default; an explicit `content(raw:)` wins. The row itself is never rewritten,
+ * so field resolvers that verify the parent against the database see stored
+ * text. A Symbol key is never serialized by GraphQL (#2041).
  */
-export const STORED_NODE_CONTENT: unique symbol = Symbol('storedNodeContent');
+export const CONTENT_RAW_DEFAULT: unique symbol = Symbol('contentRawDefault');
 
 export interface Context {
   login?: import('../../../auth/jwt.js').HadronJwtPayload['login'];
@@ -2347,9 +2349,16 @@ export async function getAccessibleMemoryIds(
  */
 export async function requireSessionWriteAccess(
   ctx: Context,
-  session: { appId: string | null; userId: string | null; launchOperationId: string | null },
+  session: { appId: string | null; userId: string | null; launchOperationId: string | null; memoryId: string | null },
 ): Promise<void> {
-  if (isPlatformAdmin(ctx)) return;
+  // #1647 (cor:acl:010:02, strict owner wins; Holger's A, #13061): a platform admin's authority stops at a session bound
+  // to ANOTHER user's personal/private memory, and stops TERMINALLY. The admin role confers nothing there, and neither
+  // does an attribution that role could otherwise fall back on (the admin's own session bound to someone else's memory
+  // is refused too). `memoryId` is REQUIRED so a caller that forgot to select it fails to compile.
+  if (isPlatformAdmin(ctx)) {
+    if (await boundToForeignStrictMemory(ctx, session.memoryId)) throw authorizationDenied();
+    return;
+  }
   // App branch: PURE App-key principals only (#932 Codex P1). A hybrid
   // principal — a user with an active-App selection, the MCP auth shape —
   // must NOT inherit App authority, or any co-member of an App could end
@@ -2367,6 +2376,14 @@ export async function requireSessionWriteAccess(
   }
   if (session.userId === ctx.userId && !ctx.impersonation) return;
   throw authorizationDenied();
+}
+
+/** Is the memory another user's personal/private one, which no admin role or impersonation reaches? */
+async function boundToForeignStrictMemory(ctx: Context, memoryId: string | null): Promise<boolean> {
+  if (!memoryId) return false;
+  const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { class: true, userId: true } });
+  if (!memory || (memory.class !== 'personal' && memory.class !== 'private')) return false;
+  return !isStrictOwner(ctx, memory.userId);
 }
 
 /** Prisma `where` clause that restricts sessions to the caller's scope. */
@@ -3637,10 +3654,17 @@ export async function resolveAssetTargetMemoryId(
   if (userMemory) return { memoryId: userMemory.id };
 
   // Fallback: first agent-attached memory (single-user agent case).
-  const agentMemory = await db.agentMemoryItem.findFirst({
-    where: { agentId, deletedAt: null, role: 'read-write' },
-    select: { memoryId: true },
+  // #1349: only a link the agent's own tenant can WRITE on its own
+  // (cor:dmo:050:09 — a link is a limit, never a grant), so a legacy
+  // read-write link to another tenant's memory is never an upload target.
+  const agent = await db.agent.findUnique({ where: { id: agentId }, select: { organizationId: true, ownerUserId: true } });
+  const tenant = { organizationId: agent?.organizationId ?? null, ownerUserId: agent?.ownerUserId ?? null, userId };
+  const writableLinks = await db.agentMemoryItem.findMany({
+    where: { agentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } },
+    orderBy: { createdAt: 'asc' },
+    select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
   });
+  const agentMemory = writableLinks.find((item) => linkWriteTargetAdmits(tenant, item.memory, item.role));
   if (agentMemory) return { memoryId: agentMemory.memoryId };
 
   throw new Error('NO_TARGET_MEMORY: no writable memory available for this agent');

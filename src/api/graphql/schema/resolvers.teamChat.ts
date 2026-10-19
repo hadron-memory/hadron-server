@@ -57,6 +57,7 @@ import {
 import { isSessionLive, loadLastEventBySession, touchLiveSession } from '../../../lib/sessionActivity.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf, BROADCAST_MENTION_TOKENS } from '../../../lib/mentionToken.js';
+import { reachesWorker } from '../../../lib/mentionReach.js';
 import { extractMentions } from '../../../lib/teamChatMentions.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
@@ -359,6 +360,12 @@ export interface TeamChatMessageOut {
   sessionId: string | null;
   replyToSeq: number | null;
   mentions: string[];
+  /**
+   * #2020: the post-time stamp (cor:agt:080:14) — the author could wake
+   * everyone. Internal routing input for the reach rule (`lib/mentionReach.ts`);
+   * deliberately not in the SDL.
+   */
+  broadcastWakes: boolean;
 }
 
 type MessageRow = {
@@ -412,6 +419,7 @@ function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo, memBa
     sessionId: typeof env.sessionId === 'string' ? env.sessionId : null,
     replyToSeq: typeof env.replyToSeq === 'number' ? env.replyToSeq : null,
     mentions: Array.isArray(env.mentions) ? env.mentions.filter((m): m is string => typeof m === 'string') : [],
+    broadcastWakes: env.broadcastWakes === true,
   };
 }
 
@@ -436,10 +444,10 @@ async function resolveSessionAuthor(
   app: AppRow | null,
   hostMemoryId: string,
   sessionRef: string,
-): Promise<{ workerId: string; name: string; sessionId: string; workerAppId: string; crossApp: boolean; resume: boolean }> {
+): Promise<{ workerId: string; agentId: string | null; name: string; sessionId: string; workerAppId: string; crossApp: boolean; resume: boolean }> {
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
-    select: { id: true, appId: true, userId: true, workerId: true, endedAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true },
+    select: { id: true, appId: true, userId: true, workerId: true, agentId: true, endedAt: true, expiresAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true, memoryId: true },
   });
   if (!session) {
     throw new GraphQLError(`Session "${sessionRef}" not found.`, {
@@ -458,9 +466,16 @@ async function resolveSessionAuthor(
   // session of App A must not author in App B) is subsumed by the one check
   // below: the Worker's App is the Channel's, or the driver may write the
   // Channel's host memory.
-  if (session.endedAt) {
+  const now = new Date();
+  const hardExpired = session.expiresAt && now.getTime() >= session.expiresAt.getTime();
+  if (session.endedAt || hardExpired) {
+    // #1036: only persisted reap evidence or the expiry promise proves a cause.
+    const cause = session.autoExpiredAt
+      ? `was auto-expired by the server at ${session.autoExpiredAt.toISOString()}`
+      : !session.endedAt && hardExpired ? `expired at its promised deadline ${session.expiresAt!.toISOString()}`
+        : 'has ended (cause not recorded)';
     throw new GraphQLError(
-      `Session "${sessionRef}" has ended — its worker can no longer author messages through it.`,
+      `Session "${sessionRef}" ${cause}. Its holder must start a new session for this worker to continue; recovering their own session requires no force override.`,
       { extensions: { code: 'SESSION_ENDED' } },
     );
   }
@@ -469,7 +484,6 @@ async function resolveSessionAuthor(
   // outside its idle window is not ended, but nobody is driving it — and a
   // GraphQL caller gets no MCP heartbeat (Copilot on PR #1169). The same
   // predicate the bind refuses WORKER_TAKEN on and the roster reports.
-  const now = new Date();
   const events = await loadLastEventBySession(ctx.db as never, [session.id]);
   // #1617 B (Holger, 2026-10-05): a LAPSED session is not refused yet. Its own
   // driver may resume it by this post, which is decided at the END, once every
@@ -565,7 +579,7 @@ async function resolveSessionAuthor(
   } else if (await mayStillDriveWorkerApp(ctx, worker.appId)) {
     await touchLiveSession(ctx.db, session.id);
   }
-  return { workerId: worker.id, name: worker.name, sessionId: session.id, workerAppId: worker.appId, crossApp, resume: lapsed };
+  return { workerId: worker.id, agentId: session.agentId, name: worker.name, sessionId: session.id, workerAppId: worker.appId, crossApp, resume: lapsed };
 }
 
 /**
@@ -607,12 +621,17 @@ function sessionNotLiveError(sessionRef: string, dormant = false): GraphQLError 
  * nonexistent one, so a worker ref only resolves within THIS App's staff, and
  * a user ref only when the user is an AppMember of it (or the caller
  * themself).
+ *
+ * #2020: a worker ref also carries the worker's id, because what the filter
+ * returns for a worker is what REACHES it ({@link reachesWorker}: its name and
+ * replies, plus a broadcast stamped at post time, never its own post). A user
+ * ref keeps matching the handle alone: S1 pushes only to workers.
  */
 async function resolveMentionTokens(
   ctx: Context,
   appId: string,
   mentionsRef: string,
-): Promise<string[] | null> {
+): Promise<{ tokens: string[]; workerId: string | null } | null> {
   // Worker path: the App's own staff only — matched in memory on PK or
   // case-insensitive name (never a LIKE-backed filter,
   // findings:prisma-string-filters-are-unescaped-like). The staff list of one
@@ -626,9 +645,11 @@ async function resolveMentionTokens(
     (w) => w.id === mentionsRef.trim() || w.name.toLowerCase() === refLower,
   );
   if (workerMatch) {
+    // A resolved worker whose name yields no token (e.g. "!!!") has no direct
+    // name to match, but stamped broadcasts and replies-by-fold still reach it
+    // (Riana §10 P2 on #2058) — so it is NOT the unresolved-ref empty page.
     const token = mentionTokenOf(workerMatch.name);
-    if (token) return [token];
-    return null;
+    return { tokens: token ? [token] : [], workerId: workerMatch.id };
   }
   // User path: accept an id, an hrn:user:<handle> URN, or (as a convenience
   // for the MCP tool) a BARE handle — resolveUserRef rejects a bare handle as
@@ -649,7 +670,7 @@ async function resolveMentionTokens(
       if (!isSelf && !member) return null;
       const user = await ctx.db.user.findUnique({ where: { id }, select: { handle: true } });
       const token = user?.handle ? mentionTokenOf(user.handle) : null;
-      if (token) return [token];
+      if (token) return { tokens: [token], workerId: null };
       return null;
     } catch {
       // try the next spelling
@@ -915,6 +936,7 @@ async function postToChannelRoot(
   const { body, replyToSeq, sessionRef } = args;
   let envelope: Record<string, unknown>;
   let authorLabel: string;
+  let authorAgentId: string | null = null;
   // #1617 B: the lapsed session this post resumes, inside its append transaction.
   let resumeSessionId: string | null = null;
   if (opts.system) {
@@ -924,6 +946,7 @@ async function postToChannelRoot(
     const author = await resolveSessionAuthor(ctx, app, root.memoryId, sessionRef);
     if (author.resume) resumeSessionId = author.sessionId;
     authorLabel = author.name;
+    authorAgentId = author.agentId;
     envelope = {
       authorWorkerId: author.workerId,
       authorName: author.name,
@@ -1102,6 +1125,10 @@ async function postToChannelRoot(
         // to it forever (Andi #3280: fixtures stamping this field masked
         // the production path).
         messageChannelId: incarnation.id,
+        // #1162: explicit sessionRef attribution must survive ciphertext and
+        // must not inherit a different/absent ambient request Worker.
+        createdByWorkerId: typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null,
+        createdByAgentId: authorAgentId,
         // #914: the SENDER's user id — for worker posts, the human driver.
         createdBy,
       },
@@ -1148,6 +1175,7 @@ async function postToChannelRoot(
     sessionId: (envelope.sessionId as string | undefined) ?? null,
     replyToSeq: replyToSeq ?? null,
     mentions,
+    broadcastWakes: envelope.broadcastWakes === true,
   };
 }
 
@@ -1306,14 +1334,18 @@ async function readChannelRoot(
   };
 
   if (mentionsRef) {
-    const tokens = appId === null ? null : await resolveMentionTokens(ctx, appId, mentionsRef);
-    if (!tokens) return { items: [], total: 0 };
+    const resolved = appId === null ? null : await resolveMentionTokens(ctx, appId, mentionsRef);
+    if (!resolved) return { items: [], total: 0 };
+    const { tokens, workerId } = resolved;
+    // #2020: a worker sees what reaches it (lib/mentionReach.ts); a user, its handle.
+    const matches = (msg: TeamChatMessageOut): boolean =>
+      workerId !== null ? reachesWorker(msg, [workerId], tokens) : msg.mentions.some((t) => tokens.includes(t));
     // Always scanned ASCENDING regardless of paging direction: this branch
     // filters in memory, so the direction is applied to the RESULT below.
     const rows = await ctx.db.node.findMany({ where, orderBy, select });
     const matching = rows
       .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo, memBareUrn) }))
-      .filter((m) => m.msg.mentions.some((t) => tokens.includes(t)));
+      .filter((m) => matches(m.msg));
     const page =
       take === 0
         ? []

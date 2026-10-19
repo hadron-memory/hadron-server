@@ -1,3 +1,5 @@
+import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
+import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { decisionContainedError, isDecisionFamilyRole } from '../../lib/decisions/index.js';
 import { assertBatchMutable } from '../../lib/bulkMutationGate.js';
@@ -55,6 +57,8 @@ import type { MemoryClass, MemoryVisibility } from '../../generated/prisma/index
  */
 
 export interface ExtractParentNodeArgs {
+  /** #1331 — the caller, for the role writer level of a MOVE's source nodes. Omitted by server-authored callers. */
+  principal?: RoleWriterPrincipal;
   /** Source memory the subtree currently lives in. */
   sourceMemoryId: string;
   /** Loc of the parent node — the subtree root to extract. */
@@ -167,6 +171,12 @@ export async function extractParentNodeGraph(
       // refresh the earlier read. That is precisely why `assertBatchMutable`
       // re-reads the signals and hands them back for the carry to copy — a
       // reader must not lean on this snapshot being current.
+      // #1331 — a MOVE removes the subtree from its source memory: each node's role
+      // needs its writer level there. A copy writes into a brand-new memory that has
+      // no rulebook yet, so nothing narrows it (and it never changes the source).
+      if (args.move && args.principal) {
+        await assertRoleWritersForNodes(tx, args.principal, selectedNodes, { from: args.sourceMemoryId });
+      }
       const freshSignals = await assertBatchMutable(
         tx,
         [args.sourceMemoryId],
@@ -363,6 +373,8 @@ export async function extractParentNodeGraph(
           deletedAt: null,
           sourceId: { in: movedIds },
           targetId: { in: movedIds },
+          // Derived INCLUDE edges (#2040) are re-derived for the copies, not copied.
+          OR: [{ governedKind: null }, { governedKind: { not: 'INCLUDE' } }],
         },
       });
       const usedEdgeLocs = new Set<string>();
@@ -389,6 +401,8 @@ export async function extractParentNodeGraph(
       if (edgeRows.length > 0) {
         await tx.edge.createMany({ data: edgeRows });
       }
+      // #2040 — the copies' include edges are re-derived from their content.
+      await resyncDerivedIncludesForNodes(tx, nodeRows.map((r) => r.id as string));
 
       // ── Move disposition ─────────────────────────────────────────────────
       // Soft-delete the source subtree so the parent is truly relocated.
@@ -399,6 +413,14 @@ export async function extractParentNodeGraph(
         // edges to nodes outside the subtree. Incoming cross-memory edges
         // (memoryId = another memory) are left untouched — soft-deleting them
         // would mutate a memory the caller has no write access to.
+        // Derived include edges (#2040) are dropped, not soft-deleted: the
+        // governed-edge trigger refuses a soft delete, and content re-derives them.
+        await tx.edge.deleteMany({
+          where: {
+            governedKind: 'INCLUDE',
+            OR: [{ sourceId: { in: movedIds } }, { targetId: { in: movedIds } }],
+          },
+        });
         await tx.edge.updateMany({
           where: {
             memoryId: args.sourceMemoryId,

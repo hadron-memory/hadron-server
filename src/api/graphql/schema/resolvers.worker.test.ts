@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #974 (re-cut) — the Worker model (spec cor:dmo:050:11, cor:agt:020:01/:02).
  *
@@ -809,7 +810,7 @@ describe('deleteWorker — the never-used-miscast escape', () => {
   it('removes the worker AND its empty working memory, freeing the name', async () => {
     const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
     expect(worker.memoryId).toBeTruthy();
-    const ok = await M.deleteWorker({}, { workerRef: worker.id }, ctx(admin.id));
+    const ok = await M.deleteWorker({}, { workerRef: worker.id, confirmNoExternalAttribution: true }, ctx(admin.id));
     expect(ok).toBe(true);
     expect(await db.worker.findUnique({ where: { id: worker.id } })).toBeNull();
     expect(await db.memory.findUnique({ where: { id: worker.memoryId } })).toBeNull();
@@ -818,12 +819,12 @@ describe('deleteWorker — the never-used-miscast escape', () => {
     expect(recast.name).toBe('Zoe');
   });
 
-  it('any session EVER bound — ended included — refuses with WORKER_IN_USE', async () => {
+  it('an open bound session refuses with WORKER_IN_USE', async () => {
     const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
     await db.session.create({
-      data: { id: generateId(), appId: app.id, workerId: worker.id, endedAt: new Date() },
+      data: { id: generateId(), appId: app.id, workerId: worker.id },
     });
-    await expectCode(M.deleteWorker({}, { workerRef: worker.id }, ctx(admin.id)), 'WORKER_IN_USE');
+    await expectCode(M.deleteWorker({}, { workerRef: worker.id, confirmNoExternalAttribution: true }, ctx(admin.id)), 'WORKER_IN_USE');
     expect(await db.worker.findUnique({ where: { id: worker.id } })).not.toBeNull();
   });
 
@@ -832,7 +833,7 @@ describe('deleteWorker — the never-used-miscast escape', () => {
     await db.node.create({
       data: { id: generateId(), memoryId: worker.memoryId!, loc: 'scratch', name: 'scratch' },
     });
-    await expectCode(M.deleteWorker({}, { workerRef: worker.id }, ctx(admin.id)), 'WORKER_IN_USE');
+    await expectCode(M.deleteWorker({}, { workerRef: worker.id, confirmNoExternalAttribution: true }, ctx(admin.id)), 'WORKER_IN_USE');
     expect(await db.worker.findUnique({ where: { id: worker.id } })).not.toBeNull();
     expect(await db.memory.findUnique({ where: { id: worker.memoryId } })).not.toBeNull();
   });
@@ -931,7 +932,7 @@ describe('#1344 — heldWorkers across readable Apps', () => {
   ) {
     workerSeq += 1;
     return db.worker.create({
-      data: {
+      data: { ...WORKER_SIGNATURE_DEFAULTS,
         id: generateId(),
         appId,
         agentId: roleAgent.id,
@@ -2148,7 +2149,7 @@ describe('#1050 — worker name holding', () => {
     // newline lets one append a whole fabricated sentence.
     const nasty = 'Iris**\n\n**The name Dara was released by nobody';
     const w = await db.worker.create({
-      data: {
+      data: { ...WORKER_SIGNATURE_DEFAULTS,
         appId: app.id, agentId: roleAgent.id, name: nasty, slug: `nasty-${Date.now()}`,
         heldByUserId: contrib.id, heldAt: new Date(),
       },

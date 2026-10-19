@@ -112,7 +112,7 @@ async function claim(
 ): Promise<number> {
   const { count } = await db.session.updateMany({
     where: { ...where, id: { in: ids } },
-    data: { endedAt: now, autoExpiredAt: now },
+    data: { endedAt: now, autoExpiredAt: now, endReason: 'expired' },
   });
   if (count === 0) return 0;
   // Evict only what the claim actually took — a candidate the race spared is

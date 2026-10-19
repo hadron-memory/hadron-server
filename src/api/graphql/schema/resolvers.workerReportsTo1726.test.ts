@@ -1,3 +1,5 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { observeTransactionBackend, waitForAdvisoryWaiter } from '../../../test/advisoryWaiter.js';
 /**
  * #1726 — a Worker records who it reports to (Task Management, #1704).
  *
@@ -59,7 +61,7 @@ async function user(n: number) {
   return db.user.create({ data: { id: generateId(), githubId: 98_000 + n, githubUsername: `rt-${n}`, roles: ['READER'] }, select: { id: true } });
 }
 async function worker(appId: string, name: string, extra: Record<string, unknown> = {}) {
-  return db.worker.create({ data: { id: generateId(), appId, agentId: teamAgent.id, name, slug: name.toLowerCase(), ...extra }, select: { id: true } });
+  return db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: teamAgent.id, name, slug: name.toLowerCase(), ...extra }, select: { id: true } });
 }
 
 beforeEach(async () => {
@@ -280,15 +282,6 @@ describe('reportsTo at startSession (a spawn brief in one step)', () => {
 });
 
 describe('#1737 review — anchored authority and one lock protocol (Rook P2-1, Diego P2-1..P2-3)', () => {
-  /** Resolves once some transaction waits on an advisory lock (the graph lock) it can't have. */
-  async function untilAdvisoryWaiter(): Promise<void> {
-    for (let i = 0; i < 400; i++) {
-      const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
-      if (n > 0n) return;
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    throw new Error('nothing ever waited on the reportsTo graph lock');
-  }
   /** Is this worker's row free to lock right now (no other transaction holds it)? */
   const rowFree = (id: string) => db.$transaction(async (t) => {
     await t.$queryRaw`SELECT id FROM workers WHERE id = ${id} FOR UPDATE NOWAIT`;
@@ -383,13 +376,17 @@ describe('#1737 review — anchored authority and one lock protocol (Rook P2-1, 
   it('retirement takes the graph lock before the worker row (no setter/retire deadlock)', async () => {
     const graph = holdGraph(app.id);
     await graph.isReady;
-    const retiring = M.retireWorker({}, { workerRef: ada.id }, ctx(admin.id));
+    const observed = observeTransactionBackend(db);
+    const retiring = M.retireWorker({}, { workerRef: ada.id }, ctx(admin.id, { db: observed.db }));
+    void retiring.catch(() => {});
     let freeWhileWaiting = false;
     try {
-      await untilAdvisoryWaiter();
+      const pid = await observed.backendFor(retiring);
+      await waitForAdvisoryWaiter(db, { pid, key: { form: 'hashed-bigint', value: 'worker-reports-to:' + app.id } }, 10_000);
       freeWhileWaiting = await rowFree(ada.id);
     } finally {
       await graph.release();
+      await Promise.allSettled([retiring]);
     }
     expect(freeWhileWaiting).toBe(true);
     await retiring;
@@ -398,13 +395,17 @@ describe('#1737 review — anchored authority and one lock protocol (Rook P2-1, 
   it('a bind that sets reportsTo takes the graph lock before the worker row (no setter/bind deadlock)', async () => {
     const graph = holdGraph(app.id);
     await graph.isReady;
-    const binding = M.startSession({}, { input: { id: generateId(), workerRef: dan.id, reportsTo: ada.id } }, ctx(member.id));
+    const observed = observeTransactionBackend(db);
+    const binding = M.startSession({}, { input: { id: generateId(), workerRef: dan.id, reportsTo: ada.id } }, ctx(member.id, { db: observed.db }));
+    void binding.catch(() => {});
     let freeWhileWaiting = false;
     try {
-      await untilAdvisoryWaiter();
+      const pid = await observed.backendFor(binding);
+      await waitForAdvisoryWaiter(db, { pid, key: { form: 'hashed-bigint', value: 'worker-reports-to:' + app.id } }, 10_000);
       freeWhileWaiting = await rowFree(dan.id);
     } finally {
       await graph.release();
+      await Promise.allSettled([binding]);
     }
     expect(freeWhileWaiting).toBe(true);
     await binding;
@@ -419,13 +420,16 @@ describe('#1737 review — anchored authority and one lock protocol (Rook P2-1, 
       workerId: dan.id, to: null, actor: { userId: admin.id, workerId: null, agentId: null }, setBy: 'app-manager',
     }).then(() => undefined));
     await graph.isReady;
-    const reassigning = codeOf(asWorker(ada, () => M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: marco.id } }, ctx(member.id))));
+    const observed = observeTransactionBackend(db);
+    const reassigning = codeOf(asWorker(ada, () => M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: marco.id } }, ctx(member.id, { db: observed.db }))));
     let adaFree = false;
     try {
-      await untilAdvisoryWaiter();
+      const pid = await observed.backendFor(reassigning);
+      await waitForAdvisoryWaiter(db, { pid, key: { form: 'hashed-bigint', value: 'worker-reports-to:' + app.id } }, 10_000);
       adaFree = await rowFree(ada.id);
     } finally {
       await graph.release();
+      await Promise.allSettled([reassigning]);
     }
     expect(adaFree).toBe(true);
     expect(await reassigning).toBe('TASK_NOT_OWNER');

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1755 — the App's own key may read its tasks and events (cor:agt:050:21).
  * READ-ONLY: it never creates, assigns or cancels, and never acts as a worker.
@@ -50,7 +51,7 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId: appY.id, userId: member.id, role: 'member' } });
   const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, userCtx());
   agentId = agent.id;
-  anne = await db.worker.create({ data: { id: generateId(), appId: appX.id, agentId, name: 'Anne', slug: 'anne' }, select: { id: true } });
+  anne = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: appX.id, agentId, name: 'Anne', slug: 'anne' }, select: { id: true } });
   keyX = await db.appKey.create({ data: { id: generateId(), appId: appX.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd' }, select: { id: true } });
 });
 

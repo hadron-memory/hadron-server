@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /**
  * #1779 — a complete teamAttentionPage scan must not cost O(backlog / 50)
  * round trips each re-resolving the whole roster.
@@ -13,7 +14,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, createDbWorkerAttribution } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
@@ -87,7 +88,7 @@ beforeEach(async () => {
   channel = { id: made.channel.id, memoryId: memory.id, loc: 'chats:team' };
   workerIds = [];
   for (let i = 0; i < WORKERS; i++) {
-    const w = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: `W${String(i).padStart(2, '0')}`, slug: `w${i}` } });
+    const w = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: `W${String(i).padStart(2, '0')}`, slug: `w${i}` } });
     workerIds.push(w.id);
     await db.registerEntry.create({
       data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: w.id, role: 'BOTH', mentionOnly: i % 10 === 9 },
@@ -157,7 +158,11 @@ describe('#1779 — the SQL aggregate counts exactly what the row walk counted',
     const rows: Array<{ seq: number; data: unknown; deleted?: boolean }> = [];
     for (let seq = 1; seq <= 700; seq++) {
       let data: unknown = { mentions: [] };
-      if (seq % 11 === 0) data = { mentions: ['all'] };
+      // #2020: a broadcast is a mention only with a strictly boolean post-time stamp.
+      if (seq % 22 === 0) data = { mentions: ['all'], broadcastWakes: true };
+      else if (seq % 11 === 0) data = { mentions: ['all'] };
+      else if (seq % 29 === 0) data = { mentions: ['team'], broadcastWakes: 'true' };
+      else if (seq % 31 === 0) data = { mentions: ['team'], broadcastWakes: true };
       else if (seq % 13 === 0) data = { mentions: [named(3)] };
       else if (seq % 17 === 0) data = { mentions: 'w09' };
       else if (seq % 19 === 0) data = null;
@@ -191,15 +196,16 @@ describe('#1779 — the SQL aggregate counts exactly what the row walk counted',
 
     for (let i = 0; i < WORKERS; i++) {
       const mentionOnly = i % 10 === 9;
-      const tokens = ['all', 'team', named(i)];
+      const tokens = [named(i)];
       let unread = 0; let ment = 0; let first = 0;
       for (const r of rows) {
         if (r.deleted || r.seq <= seenOf(i)) continue;
-        const d = (r.data && typeof r.data === 'object') ? r.data as { mentions?: unknown; authorWorkerId?: string } : {};
+        const d = (r.data && typeof r.data === 'object') ? r.data as { mentions?: unknown; authorWorkerId?: string; broadcastWakes?: unknown } : {};
         if (d.authorWorkerId === workerIds[i]) continue;
         unread++;
         if (first === 0) first = r.seq;
-        if (Array.isArray(d.mentions) && d.mentions.some((m) => typeof m === 'string' && tokens.includes(m))) ment++;
+        const ms = Array.isArray(d.mentions) ? d.mentions.filter((m): m is string => typeof m === 'string') : [];
+        if (ms.some((m) => tokens.includes(m)) || (d.broadcastWakes === true && ms.some((m) => m === 'all' || m === 'team'))) ment++;
       }
       const item = got.get(workerIds[i]);
       if (unread === 0) { expect(item).toBeUndefined(); continue; }
@@ -310,7 +316,7 @@ describe('#1779 — an empty target list is a no-op, not a malformed query', () 
 
 describe('#1783 — aggregatePlaintextWindow edge semantics', () => {
   const target = (over: Partial<Parameters<typeof aggregatePlaintextWindow>[4][number]> = {}) => ({
-    index: 0, seen: 0, head: 100, workerId: 'w-target', mentionOnly: false, tokens: ['all', 'team', 'w00'], ...over,
+    index: 0, seen: 0, head: 100, workerId: 'w-target', mentionOnly: false, tokens: ['w00'], ...over,
   });
   const put = (seq: number, data: object, locSuffix = String(seq)) => db.node.create({
     data: {
@@ -341,6 +347,7 @@ describe('#1783 — aggregatePlaintextWindow edge semantics', () => {
     // walk skipped, so the counted frontier is the lower-loc row.
     await put(4, { mentions: [] });
     await put(5, { mentions: [] }, '5a');
+    await createDbWorkerAttribution(db, user.id, 'w-target');
     await put(5, { authorWorkerId: 'w-target', mentions: [] }, '5b');
     const r = await aggregatePlaintextWindow(db, channel.id, 0, 10, [target()]);
     expect(r.frontierLoc).toBe(`${channel.loc}:messages:5a`);

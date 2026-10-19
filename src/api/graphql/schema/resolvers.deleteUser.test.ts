@@ -16,7 +16,7 @@
  *   - App-key caller → UNAUTHENTICATED.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Request } from 'express';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
@@ -319,7 +319,7 @@ describe('Mutation.deleteUser — authorization', () => {
 
     const result = await resolvers.Mutation.deleteUser(
       {},
-      { userRef: victim.id },
+      { userRef: victim.id, reason: 'test erasure' },
       userCtx(admin),
     );
     expect(result).toBe(true);
@@ -355,5 +355,243 @@ describe('Mutation.deleteUser — authorization', () => {
       expect(e).toBeInstanceOf(GraphQLError);
       expect((e as GraphQLError).extensions.code).toBe('UNAUTHENTICATED');
     }
+  });
+});
+
+// ── #1647 (cor:aut:020:03): reason, audit, notification ────────────────
+import { processUserDeletionNotices, MAX_NOTICE_ATTEMPTS, NOTICE_LEASE_MS } from '../../../jobs/sendUserDeletionNotices.js';
+import { decryptToken } from '../../../lib/tokenCrypto.js';
+
+describe('deleteUser reason + audit + notice (#1647)', () => {
+  const del = (args: Record<string, unknown>, caller: { id: string; roles?: string[] }) =>
+    resolvers.Mutation.deleteUser({}, args, userCtx(caller));
+  const codeOf = async (p: Promise<unknown>) => {
+    try { await p; } catch (e) { return (e as GraphQLError).extensions?.code; }
+    return 'NO_ERROR';
+  };
+
+  it('requires a reason when an admin deletes ANOTHER user, and the user survives the refusal', async () => {
+    const admin = await makeUser({ roles: ['ADMIN'] });
+    const victim = await makeUser();
+    for (const reason of [undefined, '', '   ', 'x'.repeat(501)]) {
+      expect(await codeOf(del({ userRef: victim.id, reason }, admin))).toBe('BAD_USER_INPUT');
+    }
+    expect((await db.user.findUniqueOrThrow({ where: { id: victim.id } })).deletedAt).toBeNull();
+    expect(await db.userDeletionAudit.count()).toBe(0);
+  });
+
+  it('counts Unicode code points, not UTF-16 units, and trims', async () => {
+    const admin = await makeUser({ roles: ['ADMIN'] });
+    const victim = await makeUser();
+    const reason = '😀'.repeat(500); // 1000 UTF-16 units, 500 code points
+    expect(await codeOf(del({ userRef: victim.id, reason: `  ${reason}  ` }, admin))).toBe('NO_ERROR');
+    const audit = await db.userDeletionAudit.findFirstOrThrow();
+    expect(audit.reason).toBe(reason);
+    expect(audit.actorUserId).toBe(admin.id);
+    expect(audit.targetUserId).toBe(victim.id);
+  });
+
+  it('a non-admin learns nothing: FORBIDDEN comes before reason validation, for real and unknown targets alike', async () => {
+    const caller = await makeUser();
+    const victim = await makeUser();
+    expect(await codeOf(del({ userRef: victim.id }, caller))).toBe('FORBIDDEN');
+    expect(await codeOf(del({ userRef: 'hrn:user:nobody-1647', reason: 'x'.repeat(900) }, caller))).toBe('FORBIDDEN');
+    expect(await db.userDeletionAudit.count()).toBe(0);
+  });
+
+  it('self-delete needs no reason and writes no audit or notice', async () => {
+    const user = await makeUser();
+    expect(await del({}, user)).toBe(true);
+    expect(await db.userDeletionAudit.count()).toBe(0);
+    expect(await db.userDeletionNotice.count()).toBe(0);
+  });
+
+  it('a second call on an erased account yields no second audit or erasure', async () => {
+    const admin = await makeUser({ roles: ['ADMIN'] });
+    const victim = await makeUser();
+    await del({ userRef: victim.id, reason: 'first' }, admin);
+    await codeOf(del({ userRef: victim.id, reason: 'second' }, admin));
+    const rows = await db.userDeletionAudit.findMany();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].reason).toBe('first');
+  });
+
+  it('concurrent calls complete one operation', async () => {
+    const admin = await makeUser({ roles: ['ADMIN'] });
+    const victim = await makeUser();
+    await Promise.allSettled([
+      del({ userRef: victim.id, reason: 'a' }, admin),
+      del({ userRef: victim.id, reason: 'b' }, admin),
+    ]);
+    expect(await db.userDeletionAudit.count()).toBe(1);
+    expect(await db.userDeletionNotice.count()).toBe(1);
+  });
+
+  it('the audit is immutable', async () => {
+    const admin = await makeUser({ roles: ['ADMIN'] });
+    const victim = await makeUser();
+    await del({ userRef: victim.id, reason: 'r' }, admin);
+    await expect(db.userDeletionAudit.updateMany({ data: { reason: 'edited' } })).rejects.toThrow();
+    await expect(db.userDeletionAudit.deleteMany()).rejects.toThrow();
+  });
+
+  it('a failure after the audit write rolls the audit, the notice and the erasure back together', async () => {
+    const admin = await makeUser({ roles: ['ADMIN'] });
+    const victim = await makeUser();
+    // A blocking org makes the deletion throw AFTER earlier steps ran.
+    const org = await makeOrgWithMember(victim.id, 'OWNER');
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: (await makeUser()).id, role: 'READER' } });
+    expect(await codeOf(del({ userRef: victim.id, reason: 'r' }, admin))).toBe('SOLE_ORG_OWNER');
+    expect(await db.userDeletionAudit.count()).toBe(0);
+    expect(await db.userDeletionNotice.count()).toBe(0);
+    expect((await db.user.findUniqueOrThrow({ where: { id: victim.id } })).deletedAt).toBeNull();
+  });
+
+  describe('notice outbox', () => {
+    const ok = { configured: () => true, send: async () => {} };
+
+    it('stores the address encrypted (not in the audit), then SENT on ack and clears the ciphertext; the notice has no reason', async () => {
+      const admin = await makeUser({ roles: ['ADMIN'] });
+      const victim = await makeUser();
+      await del({ userRef: victim.id, reason: 'secret-reason-1647' }, admin);
+      const pending = await db.userDeletionNotice.findFirstOrThrow();
+      expect(pending.status).toBe('PENDING');
+      expect(pending.recipientCiphertext).not.toContain(victim.email!);
+      expect(decryptToken(pending.recipientCiphertext!)).toBe(victim.email);
+      expect(JSON.stringify(await db.userDeletionAudit.findMany())).not.toContain(victim.email!);
+
+      const sent: string[] = [];
+      await processUserDeletionNotices(db, { configured: () => true, send: async (to) => { sent.push(to); } });
+      expect(sent).toEqual([victim.email]);
+      const done = await db.userDeletionNotice.findFirstOrThrow();
+      expect(done.status).toBe('SENT');
+      expect(done.recipientCiphertext).toBeNull();
+      // A further pass sends nothing.
+      await processUserDeletionNotices(db, { configured: () => true, send: async (to) => { sent.push(to); } });
+      expect(sent).toHaveLength(1);
+    });
+
+    it('retries up to 3 times then FAILED, clearing the ciphertext', async () => {
+      const admin = await makeUser({ roles: ['ADMIN'] });
+      const victim = await makeUser();
+      await del({ userRef: victim.id, reason: 'r' }, admin);
+      let calls = 0;
+      const bad = { configured: () => true, send: async () => { calls += 1; throw new Error('boom'); } };
+      for (let i = 0; i < MAX_NOTICE_ATTEMPTS + 2; i++) await processUserDeletionNotices(db, bad);
+      expect(calls).toBe(MAX_NOTICE_ATTEMPTS);
+      const row = await db.userDeletionNotice.findFirstOrThrow();
+      expect(row.status).toBe('FAILED');
+      expect(row.recipientCiphertext).toBeNull();
+    });
+
+    it('a failed first try stays PENDING and a restart (a new pass) resumes it', async () => {
+      const admin = await makeUser({ roles: ['ADMIN'] });
+      const victim = await makeUser();
+      await del({ userRef: victim.id, reason: 'r' }, admin);
+      await processUserDeletionNotices(db, { configured: () => true, send: async () => { throw new Error('once'); } });
+      expect((await db.userDeletionNotice.findFirstOrThrow()).status).toBe('PENDING');
+      await processUserDeletionNotices(db, ok);
+      expect((await db.userDeletionNotice.findFirstOrThrow()).status).toBe('SENT');
+    });
+
+    it('no recipient is UNAVAILABLE at once; no configured sender is UNAVAILABLE at send time', async () => {
+      const admin = await makeUser({ roles: ['ADMIN'] });
+      const noMail = await makeUser();
+      await db.user.update({ where: { id: noMail.id }, data: { email: null } });
+      const victim = await makeUser();
+      await del({ userRef: noMail.id, reason: 'r' }, admin);
+      await del({ userRef: victim.id, reason: 'r' }, admin);
+      const before = await db.userDeletionNotice.findMany({ orderBy: { createdAt: 'asc' } });
+      expect(before.map((n) => n.status)).toEqual(['UNAVAILABLE', 'PENDING']);
+      await processUserDeletionNotices(db, { configured: () => false, send: async () => { throw new Error('never'); } });
+      const after = await db.userDeletionNotice.findMany();
+      expect(after.every((n) => n.status === 'UNAVAILABLE' && n.recipientCiphertext === null)).toBe(true);
+    });
+  });
+});
+
+describe('notice outbox claim / lease (#1647 fix head)', () => {
+  const t0 = new Date('2026-10-16T06:00:00.000Z');
+  const later = (ms: number) => () => new Date(t0.getTime() + ms);
+  async function pendingNotice() {
+    const admin = await makeUser({ roles: ['ADMIN'] });
+    const victim = await makeUser();
+    await resolvers.Mutation.deleteUser({}, { userRef: victim.id, reason: 'r' }, userCtx(admin));
+    return db.userDeletionNotice.findFirstOrThrow();
+  }
+  const deferred = () => {
+    let resolve!: () => void; let reject!: (e: Error) => void;
+    const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  };
+
+  it('no pass reclaims a notice while another pass has a send in flight', async () => {
+    await pendingNotice();
+    const held = deferred();
+    let calls = 0;
+    const sender = { configured: () => true, send: () => { calls += 1; return held.promise; } };
+    const first = processUserDeletionNotices(db, sender, () => t0);
+    await vi.waitFor(() => expect(calls).toBe(1));
+    await processUserDeletionNotices(db, sender, later(1000)); // overlapping pass, lease live
+    await processUserDeletionNotices(db, sender, later(2000));
+    expect(calls).toBe(1);
+    held.resolve();
+    await first;
+    expect((await db.userDeletionNotice.findFirstOrThrow()).status).toBe('SENT');
+  });
+
+  it('a crashed final try is FAILED after the lease, never a 4th send', async () => {
+    const n = await pendingNotice();
+    await db.userDeletionNotice.update({ where: { auditId: n.auditId }, data: { attempts: MAX_NOTICE_ATTEMPTS, leaseUntil: t0, claimToken: 'dead' } });
+    let calls = 0;
+    await processUserDeletionNotices(db, { configured: () => true, send: async () => { calls += 1; } }, later(60 * 60 * 1000));
+    const row = await db.userDeletionNotice.findFirstOrThrow();
+    expect(calls).toBe(0);
+    expect(row.status).toBe('FAILED');
+    expect(row.recipientCiphertext).toBeNull();
+  });
+
+  it('a live lease on the last try is left alone (no early FAILED while the 3rd send is in flight)', async () => {
+    const n = await pendingNotice();
+    await db.userDeletionNotice.update({ where: { auditId: n.auditId }, data: { attempts: MAX_NOTICE_ATTEMPTS, leaseUntil: new Date(t0.getTime() + 60_000), claimToken: 'live' } });
+    await processUserDeletionNotices(db, { configured: () => true, send: async () => {} }, () => t0);
+    expect((await db.userDeletionNotice.findFirstOrThrow()).status).toBe('PENDING');
+  });
+
+  it("a late success is not overwritten by a newer claim's failure", async () => {
+    await pendingNotice();
+    const heldA = deferred();
+    let aCalls = 0;
+    const slow = { configured: () => true, send: () => { aCalls += 1; return heldA.promise; } };
+    const a = processUserDeletionNotices(db, slow, () => t0); // claim 1, then hangs
+    await vi.waitFor(() => expect(aCalls).toBe(1));
+    // The lease lapses; a second pass claims try 2 and fails.
+    await processUserDeletionNotices(db, { configured: () => true, send: async () => { throw new Error('boom'); } }, later(NOTICE_LEASE_MS + 1000));
+    expect((await db.userDeletionNotice.findFirstOrThrow()).status).toBe('PENDING');
+    heldA.resolve(); // the first send finally acknowledges
+    await a;
+    const row = await db.userDeletionNotice.findFirstOrThrow();
+    expect(row.status).toBe('SENT');
+    expect(row.recipientCiphertext).toBeNull();
+  });
+
+  it("an older claim's failure cannot fail or release a newer claim", async () => {
+    await pendingNotice();
+    const heldA = deferred();
+    let aCalls = 0;
+    const a = processUserDeletionNotices(db, { configured: () => true, send: () => { aCalls += 1; return heldA.promise; } }, () => t0);
+    await vi.waitFor(() => expect(aCalls).toBe(1));
+    const heldB = deferred();
+    let bCalls = 0;
+    const b = processUserDeletionNotices(db, { configured: () => true, send: () => { bCalls += 1; return heldB.promise; } }, later(NOTICE_LEASE_MS + 1000));
+    await vi.waitFor(() => expect(bCalls).toBe(1));
+    heldA.reject(new Error('stale failure')); // A fails while B's claim is live
+    await a;
+    const mid = await db.userDeletionNotice.findFirstOrThrow();
+    expect(mid.status).toBe('PENDING');
+    expect(mid.leaseUntil).not.toBeNull(); // B's lease intact
+    heldB.resolve();
+    await b;
+    expect((await db.userDeletionNotice.findFirstOrThrow()).status).toBe('SENT');
   });
 });
