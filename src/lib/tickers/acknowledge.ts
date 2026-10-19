@@ -155,10 +155,19 @@ export async function acknowledgeWakes(args: {
       // Only the reservation of THIS wake is spent or void: the one carrying this proof's wake key. A re-read of an
       // unchanged wake shares the key, so it is freed whichever proof is acknowledged; a replay of an old, unchanged
       // proof matches nothing newer, so it can never cancel the allowance of a wake issued after it (Diego cycle 2, P2-3).
-      await tx.$executeRaw(Prisma.sql`DELETE FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND wake_key = ${wakeIdentity(p)}`);
+      const spent = await tx.$executeRaw(Prisma.sql`DELETE FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND wake_key = ${wakeIdentity(p)}`);
       // Counted against the day's budget only when it moved something: a repeat acknowledgement is not another wake.
       if (!advanced) { unchanged++; continue; }
       acknowledged++;
+      // #2069: ONE allowance per outstanding wake. A reservation that absorbed a later reason carries a newer key than an
+      // older proof of the same worker; that older proof may still advance what it names, but the slot belongs to the
+      // reservation still outstanding, which is spent (and charged) by ITS proof. Charged unless this proof's key is in the
+      // absorbed lineage of the reservation still outstanding (that reservation owns the slot); an unrelated reservation, or
+      // none, leaves today's behavior untouched.
+      if (spent === 0) {
+        const [{ n }] = await tx.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`SELECT count(*)::bigint AS n FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND ${wakeIdentity(p)} = ANY(absorbed_keys)`);
+        if (Number(n) > 0) continue;
+      }
       if (!p.exempt) {
         const dayText = now.toISOString().slice(0, 10);
         await tx.$executeRaw(Prisma.sql`
