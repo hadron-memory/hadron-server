@@ -2,7 +2,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { parse, Kind } from 'graphql';
 import { createServer } from '../../../server.js';
 import { db } from '../../../integrations/db/client.js';
@@ -273,13 +273,15 @@ async function anonymousWithHistory() {
   return { memoryId, node, revision };
 }
 async function provisioningSnapshot() {
-  return {
+  const rows = {
     users: await db.user.findMany({ orderBy: { id: 'asc' } }),
     memories: await db.memory.findMany({ orderBy: { id: 'asc' } }),
     sessions: await db.session.findMany({ orderBy: { id: 'asc' } }),
     nodes: await db.node.findMany({ orderBy: { id: 'asc' } }),
     revisions: await db.nodeRevision.findMany({ orderBy: { id: 'asc' } }),
   };
+  // Full-row equality without dumping verifier/ciphertext material on a mutant failure.
+  return createHash('sha256').update(JSON.stringify(rows)).digest('hex');
 }
 async function expectPromotionKey(fixture: Awaited<ReturnType<typeof anonymousWithHistory>>) {
   const memory = await db.memory.findUniqueOrThrow({ where: { id: fixture.memoryId } });
@@ -357,7 +359,10 @@ describe('#2108 request-operation key versus ambient cache and mounted MCP', () 
     const result = await request(linkQuery, { memory: fixture.memoryId, user: 'plain-cache-promotion' });
     expect(result.body.errors).toBeUndefined();
     const after = await db.memory.findUniqueOrThrow({ where: { id: fixture.memoryId } });
-    expect(after).toMatchObject({ isEncrypted: false, keyVerifier: null, class: 'app', anonymousExpiresAt: null });
+    expect(after.isEncrypted).toBe(false);
+    expect(after.keyVerifier === null).toBe(true);
+    expect(after.class).toBe('app');
+    expect(after.anonymousExpiresAt).toBeNull();
     expect(after.urn).not.toBe(before.urn);
     expect(await db.user.count({ where: { externalAppId: appId, externalId: 'plain-cache-promotion' } })).toBe(1);
     expect(await db.node.findUniqueOrThrow({ where: { id: fixture.node.id } })).toEqual(fixture.node);
@@ -387,7 +392,7 @@ describe('#2108 request-operation key versus ambient cache and mounted MCP', () 
     const linked = await request(linkQuery, { memory: fixture.memoryId, user: 'after-mcp-plain' });
     expect(linked.body.errors).toBeUndefined();
     expect(linked.body.data?.linkMemoryToUser).toMatchObject({ id: fixture.memoryId, isEncrypted: false });
-    expect((await db.memory.findUniqueOrThrow({ where: { id: fixture.memoryId } })).keyVerifier).toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: fixture.memoryId } })).keyVerifier === null).toBe(true);
     expect(await db.node.findUniqueOrThrow({ where: { id: fixture.node.id } })).toEqual(fixture.node);
   });
 
