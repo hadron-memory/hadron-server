@@ -196,3 +196,31 @@ describe('every authentication consumer is DB-aware (static inventory)', () => {
   });
 });
 void vi;
+
+describe('MCP delegation keeps the sign-in root (Rodolfo, #2116)', () => {
+  it('every MCP bridge that forwards the presented key also forwards the sign-in root', () => {
+    const dir = 'src/mcp';
+    const files = readdirSync(dir).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'));
+    for (const f of files) {
+      const src = readFileSync(`${dir}/${f}`, 'utf8');
+      const keys = (src.match(/apiKeyId: auth\.apiKeyId/g) ?? []).length;
+      const roots = (src.match(/signInId: auth\.signInId/g) ?? []).length;
+      expect({ f, roots }).toEqual({ f, roots: keys });
+    }
+  });
+  it('a captured sign-in JWT request is refused at an MCP delegated write once the sign-in ends', async () => {
+    const { resolvers } = await import('../api/graphql/schema/resolvers.js');
+    const { createTestableMcpServer } = await import('../mcp/server.js');
+    const org = await db.organization.create({ data: { urn: `review-${generateId()}.example`, name: 'Synthetic' } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
+    const agent = await (resolvers.Mutation as any).createAgent({}, { orgId: org.id, name: 'Review' }, { db, userId, roles: [] });
+    const node = await db.node.create({ data: { memoryId: agent.systemMemoryId, loc: 'tasks:index', name: 'Index', content: 'Synthetic' } });
+    const si = await signIn();
+    const auth = await resolveAuthContext(bearer(await jwtFor(userId, si.id)), db);
+    expect(auth.signInId).toBe(si.id);
+    await revoke(passkeyId);
+    await db.$transaction((tx) => endSignInsCompletedBy(tx, passkeyId));
+    await createTestableMcpServer(auth).callToolText('hadron_agent_set_index_refs', { agentRef: agent.id, tasksIndexRef: node.id });
+    expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).tasksIndexRef).toBeNull();
+  }, 30000);
+});
