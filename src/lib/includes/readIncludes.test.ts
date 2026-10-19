@@ -10,6 +10,7 @@ import { generateId } from '../id.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { BROKEN_INCLUDE_NOTICE } from './resolveNodeContent.js';
+import { createTestableMcpServer } from '../../mcp/server.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -153,5 +154,42 @@ describe('nodeBatch keeps stored text unless the caller asks (R21 A)', () => {
     const out = await run(BATCH_Q, as(reader), { refs: [urn('a')] });
     expect(out.errors).toBeUndefined();
     expect(out.data).toEqual({ nodeBatch: { nodes: [{ loc: 'a', bare: '{{> b}}', opted: 'B', stored: '{{> b}}' }] } });
+  });
+});
+
+describe('MCP content tools resolve includes like GraphQL (#2041)', () => {
+  const mcp = (u: { id: string }) => createTestableMcpServer({ userId: u.id, roles: [], clientId: `user:${u.id}` });
+  const bodyOf = (text: string) => text.split('\n\n---\n\n').slice(1).join('\n\n---\n\n');
+
+  it('hadron_get_node: resolves by default, raw:true returns the tag, same text as GraphQL', async () => {
+    await mk('b', 'B');
+    await mk('a', 'x {{> b}} y {{> nope}}');
+    const text = await mcp(reader).callToolText('hadron_get_node', { urn: urn('a') });
+    expect(bodyOf(text)).toBe(`x B y ${BROKEN_INCLUDE_NOTICE}`);
+    const gql = (await run(NODE_Q, as(reader), { ref: urn('a') })).data as { node: { content: string } };
+    expect(bodyOf(text)).toBe(gql.node.content);
+    expect(bodyOf(await mcp(reader).callToolText('hadron_get_node', { urn: urn('a'), raw: true }))).toBe('x {{> b}} y {{> nope}}');
+  });
+
+  it('hadron_get_nodes and hadron_get_next_node resolve; raw:true keeps the stored text', async () => {
+    await mk('b', 'B');
+    await mk('p', null);
+    await mk('p:1', 'first {{> b}}');
+    const batch = await mcp(reader).callToolText('hadron_get_nodes', { refs: [urn('p:1')] });
+    expect(batch).toContain('first B');
+    expect(batch).not.toContain('{{> b}}');
+    expect(await mcp(reader).callToolText('hadron_get_nodes', { refs: [urn('p:1')], raw: true })).toContain('first {{> b}}');
+    const next = await mcp(reader).callToolText('hadron_get_next_node', { parent: urn('p') });
+    expect(bodyOf(next)).toBe('first B');
+    expect(bodyOf(await mcp(reader).callToolText('hadron_get_next_node', { parent: urn('p'), raw: true }))).toBe('first {{> b}}');
+  });
+
+  it('an include the reader cannot read is the notice on MCP too, identical to a missing one', async () => {
+    await mk('a1', `x {{> hrn:node:${foreignUrn}:secret}} y`);
+    await mk('a2', 'x {{> nope}} y');
+    const a1 = bodyOf(await mcp(reader).callToolText('hadron_get_node', { urn: urn('a1') }));
+    const a2 = bodyOf(await mcp(reader).callToolText('hadron_get_node', { urn: urn('a2') }));
+    expect(a1).toBe(a2);
+    expect(a1).not.toContain('FOREIGN_SECRET');
   });
 });
