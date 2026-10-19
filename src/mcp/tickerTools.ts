@@ -411,13 +411,15 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     'Ready delivery batches (cor:agt:080:22, :26): your own worker through its live session, or workers registered on YOUR host with an App key ' +
       'holding attention:deliver AND host:operate. Returns JSON: each batch has `id` (a signed proof), `worker`, `text` (one line, ' +
       'written by the server: type it UNCHANGED), `deliverAfter`, `busyDeadline`, `ranges` and `overflow`. Reading moves nothing; ' +
-      'pass the ids to hadron_team_chat_inbox_ack after typing, within 15 minutes.',
+      'Display the shared text, then call hadron_team_chat_inbox_ack separately within 15 minutes. A lost read response acknowledges nothing. ' +
+      'The opaque proof is returned ONLY in batches[].id; never copy it into other output, errors or logs. No credentials are returned. ' +
+      'Encrypted channels are omitted, even when unlocked.',
     {
       appRef: z.string().describe('The team App (id or URN).'),
-      workerRefs: z.array(z.string()).optional().describe('Only these workers. Omit for every worker on your host.'),
+      workerRefs: z.array(z.string()).optional().describe('Only these workers. Self mode: only your bound worker. Host mode: omit for workers registered on your host.'),
       first: z.number().int().optional().describe('Workers per page (default 50, max 200).'),
       after: z.string().optional().describe('The previous page\'s endCursor.'),
-      session: SESSION_READ,
+      session: z.string().optional().describe('Self: your own live bound worker session. Host key: omit session and use attention:deliver plus host:operate.'),
     },
     async ({ session, ...rest }) =>
       readWakes(session, async (ctx) => {
@@ -443,11 +445,12 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     'Record that delivery batches were typed (cor:agt:080:16, :17). Pass the ids hadron_team_chat_inbox gave you. The delivered mark ' +
       'rises to the end of each rendered range; with `through` (ONE batch only) only the listed channels move, each to a rendered seq of ' +
       'its own. NEVER moves a read position. Only the receiving host key or own live session may acknowledge it, within 15 minutes; a stale, foreign or ' +
-      'forged id is refused and nothing is written. A batch you do not acknowledge stays due.',
+      'forged id is refused and nothing is written. A batch you do not acknowledge stays due. If the ack response is lost, retry the same ' +
+      'batchIds: repeated/concurrent acknowledgements are idempotent. Never log or echo a proof in errors or other output.',
     {
       batchIds: z.array(z.string()).describe('Batch ids from hadron_team_chat_inbox.'),
       through: z.array(z.object({ channelId: z.string(), seq: z.number().int() })).optional().describe('Partial acknowledgement of a single batch.'),
-      session: SESSION_WRITE,
+      session: z.string().optional().describe('Self: required, the same live bound worker session that received the batch. Host key: omit session and use the receiving key.'),
     },
     async ({ session, batchIds, through }) => {
       const ack = async (ctx: Context) => {
