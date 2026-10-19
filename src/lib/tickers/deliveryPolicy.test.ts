@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
-import { beginDeliveryTracking, deliveryStateTransaction, loadDeliveryWait, observeDeliveryPolicyThrough, transitionDeliveryException } from './deliveryState.js';
+import { beginDeliveryTracking, deliveryStateTransaction, loadDeliveryWait, observeDeliveryPolicyThrough, transitionDeliveryException, deliveryAlarmChain } from './deliveryState.js';
 
 const db = new PrismaClient();
 const at = (minute: number) => new Date(Date.UTC(2026, 9, 19, 10, minute));
@@ -45,5 +45,27 @@ it('does not certify policy time for a worker whose owning organization was dele
     await expect(run(tx => observeDeliveryPolicyThrough(tx, workerId, at(50)))).rejects.toThrow('DELIVERY_WORKER_NOT_FOUND');
   } finally {
     await db.organization.update({ where: { id: orgId }, data: { deletedAt: null } });
+  }
+});
+
+
+it('captures the reportsTo chain nearest first, falling back to current managers only when no reporting line exists', async () => {
+  const managerId = generateId(), leadId = generateId(), headId = generateId();
+  await db.user.create({ data: { id: managerId, roles: ['READER'] } });
+  await db.orgMember.create({ data: { organizationId: orgId, userId: managerId, role: 'ADMIN' } });
+  await db.worker.create({ data: { id: headId, appId, agentId, name: 'Head', slug: 'head' } });
+  await db.worker.create({ data: { id: leadId, appId, agentId, name: 'Lead', slug: 'lead', reportsToWorkerId: headId } });
+  await db.worker.update({ where: { id: workerId }, data: { reportsToWorkerId: leadId } });
+  try {
+    expect(await run(tx => deliveryAlarmChain(tx, workerId))).toEqual([{ workerId: leadId }, { workerId: headId }]);
+    await db.worker.update({ where: { id: workerId }, data: { reportsToWorkerId: null } });
+    expect(await run(tx => deliveryAlarmChain(tx, workerId))).toEqual([{ userId: managerId, via: 'manager' }]);
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: managerId } }, data: { deletedAt: at(60) } });
+    expect(await run(tx => deliveryAlarmChain(tx, workerId))).toEqual([]);
+  } finally {
+    await db.worker.update({ where: { id: workerId }, data: { reportsToWorkerId: null } });
+    await db.worker.deleteMany({ where: { id: { in: [leadId, headId] } } });
+    await db.orgMember.deleteMany({ where: { userId: managerId } });
+    await db.user.delete({ where: { id: managerId } });
   }
 });
