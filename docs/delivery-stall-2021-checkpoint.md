@@ -146,3 +146,10 @@ Merged current main fcd5bf67 (including #2070) without conflicts/rebase. The new
 Added four cross-slice pins: real signed batch ack and actual own-mentions read, each for mention-only/full attendance. Both cover delivered-through; only mention-only also moves read. S5 then projects zero pending/held/current alarms, rejects re-reporting the covered descriptor, and retains stored hold/episode history without fabricating delivery.resumed. This is current read projection, not completion of the separate mark-transaction reconciliation hook.
 
 Provisional integration evidence with temporary canonical-default overlay in the two upstream S2 fixtures:203/203 across14 suites and tsc pass. Those two overlay edits were then removed to respect Elena ownership. This is NOT a green final-branch/full-CI claim until her main repair is integrated. Initial126 test failures/17 type errors were missing required fixture signature/trailer, before one-mark assertions; no production mark defect inferred. No database defaults or empty-signature workaround introduced. #2121 options remain separate unmerged branches.
+
+
+## Landed fixture repair integration (#2128)
+
+Merged landed main repair4ed72f69c19966e5291dc45ee7c983bd8c81d8d5 without rebase/conflicts at46aff5d6. The two S2 fixture edits now come from the actual reviewed main ancestry, with no local overlay or duplicate fix. This also imports the independent worker-roster wording fix; its four-case suite is included below.
+
+Exact combined source passes207/207 across15 suites: all prior S5/S2/held/read/ack/clock controls plus worker activity output. The deliberate failing-read-write rollback pin logs its injected error while passing. No production mark logic changed in S5. Typecheck and diff check pass on the actual landed source. The previous203-test/typecheck overlay result remains historical and is superseded by this verification. Main red-trunk release remains the coordinator's separate live-main verification; S5 local results do not release it.
