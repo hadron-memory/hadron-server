@@ -8,7 +8,7 @@ import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
 import { nudgeText,
   type Config, type Runner, type RunResult, type Terminal, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce,
-  promptLineIsEmpty, resolveTerminal, runCommand, screenAgentFamily, status,
+  promptIsEmptyFromTerm, promptLineIsEmpty, resolveTerminal, runCommand, screenAgentFamily, status,
   CALL_TIMEOUT_MS, MIN_CALL_TIMEOUT_MS,
 } from './router.js';
 
@@ -1113,36 +1113,16 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     expect(adopted(c)).toBeNull();
   });
 
-  it('a STALE draft does not pin a Claude worker: a screen that proves the composer empty refutes it (#6736)', () => {
+  it('any Orca draft pins a Claude worker: Orca blanks the box, so the screen cannot refute it (cli#907 c02/c09)', () => {
     const c = cfg(['w-eli', 'Eli']);
     fake.terminal('eli');
     fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 2, relevant: 110 })];
-    // Orca's draft carries text no client shows; the rendered box is bare and
-    // the agents hint is up — Claude draws typed text on the ❯ line, so this
-    // draft cannot be pending input.
-    fake.screens.set('term_eli', { tail: CLAUDE_IDLE, draft: 'mark #1625 ready, do not wait' });
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE, draft: 'SCRATCH-907 draft probe one' });
     const out = poll(c);
-    expect(out).toMatchObject({ nudged: ['Eli'], adopted: true });
-    expect(fake.sent).toHaveLength(1);
-    expect(logs.join('\n')).toContain('Eli: stale Orca draft discarded');
-    expect(logs.join('\n')).not.toContain('mark #1625'); // the draft's text is never logged
-  });
-
-  it('the stale-discard note logs once per token, and a draft that matches the box still pins (Claude)', () => {
-    const c = cfg(['w-eli', 'Eli'], ['w-baloo', 'Baloo']);
-    fake.terminal('eli');
-    fake.terminal('baloo');
-    fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 110 }), worker('w-baloo', 'Baloo', { relevant: 115 })];
-    fake.screens.set('term_eli', { tail: CLAUDE_IDLE, draft: 'anything stale' });
-    // Baloo's box RENDERS text — the draft is corroborated, not refuted.
-    fake.screens.set('term_baloo', { tail: withPrompt(CLAUDE_IDLE, '❯', 'typed words'), draft: 'typed words' });
-    const first = poll(c);
-    expect(first).toMatchObject({ nudged: ['Eli'] });
-    expect(first.held.Baloo).toContain('text in the composer draft');
-    expect(logs.filter((l) => l.includes('stale Orca draft discarded'))).toHaveLength(1);
-    fake.attention.workers = [worker('w-baloo', 'Baloo', { relevant: 120 })];
-    poll(c);
-    expect(logs.filter((l) => l.includes('stale Orca draft discarded'))).toHaveLength(1); // once per token
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('text in the composer draft');
+    expect(fake.sent).toEqual([]);
+    expect(logs.join('\n')).not.toContain('SCRATCH-907'); // the draft's text is never logged
   });
 
   it('a Codex draft stays authoritative: its composer renders empty while text is pending', () => {
@@ -1788,14 +1768,17 @@ describe('Orca attention router — a human typing: never appended to; hold the 
     expect(promptLineIsEmpty([RULE, 'output', RULE, '❯ old turn', RULE, '❯', RULE, CLAUDE_HINT], 'claude')).toBe(true);
   });
 
-  it('Claude: a box that looks empty holds whitespace unless the empty-input hint shows (Chip #5756, live 2026-10-01)', () => {
-    // Three spaces typed: the box renders a bare `❯`, and only the hint vanished.
-    expect(promptLineIsEmpty([RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'], 'claude')).toBe(false);
-    // The hint is present in every permission mode while empty.
-    for (const mode of ['⏵⏵ auto mode on (shift+tab to cycle)', '⏸ manual mode on', '⏵⏵ accept edits on (shift+tab to cycle)', '⏸ plan mode on (shift+tab to cycle)']) {
+  it('Claude: a bare box over exactly ONE mode footer is empty, with or without the transient agents suffix (cli#907 bcabaf4)', () => {
+    // 9 of 12 live terminals had no `· ← for agents` on 2026-10-18.
+    expect(promptLineIsEmpty([RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'], 'claude')).toBe(true);
+    for (const mode of ['⏵⏵ auto mode on (shift+tab to cycle)', '⏵⏵ accept edits on (shift+tab to cycle)', '⏵⏵ plan mode on (shift+tab to cycle)']) {
       expect(promptLineIsEmpty([RULE, '❯', RULE, `  ${mode} · ← for agents`], 'claude')).toBe(true);
-      expect(promptLineIsEmpty([RULE, '❯', RULE, `  ${mode}`], 'claude')).toBe(false);
+      expect(promptLineIsEmpty([RULE, '❯', RULE, `  ${mode}`], 'claude')).toBe(true);
     }
+    // Not the mode line, or more than one footer row: not proof.
+    expect(promptLineIsEmpty([RULE, '❯', RULE, '  ctrl+g to edit in Vim'], 'claude')).toBe(false);
+    expect(promptLineIsEmpty([RULE, '❯', RULE, '  ⏵⏵ auto mode on (shift+tab to cycle)', '  esc to interrupt'], 'claude')).toBe(false);
+    expect(promptLineIsEmpty([RULE, '❯', RULE, '  ⏸ manual mode on'], 'claude')).toBe(false);
     // No status line at all cannot prove it.
     expect(promptLineIsEmpty([RULE, '❯', RULE], 'claude')).toBe(false);
   });
@@ -2605,5 +2588,22 @@ describe('#1940 cycle 2 — ANY proc.error is fail-closed (Andi #12271, Chip #12
     const res = runCommand([process.execPath, '-e', 'process.stdout.write(JSON.stringify({ok:true}))']);
     expect(res.code).toBe(0);
     expect(JSON.parse(res.stdout)).toEqual({ ok: true });
+  });
+});
+
+describe('Orca attention router — empty-composer rule pinned to the real cli#907 captures (bcabaf4)', () => {
+  const load = (name: string): Record<string, any> =>
+    JSON.parse(readFileSync(new URL(`./testdata/cli907-scratch-2026-10-18/${name}.json`, import.meta.url), 'utf8')).result.terminal;
+  it.each([
+    ['c01-start', 'claude', true],
+    ['c30-restart', 'claude', true],
+    ['c33-bs-on-empty', 'claude', true],
+    ['c02-draft', 'claude', false],
+    ['c09-multiline', 'claude', false],
+    ['c20-askuser', 'claude', false],
+    ['x01-start', 'codex', true],
+    ['x02-draft', 'codex', false],
+  ] as const)('%s (%s) empty=%s', (name, agent, empty) => {
+    expect(promptIsEmptyFromTerm(load(name), agent)[0]).toBe(empty);
   });
 });

@@ -33,6 +33,7 @@
 // succession of cor:agt:080:18 (Proposed).
 
 import { GraphQLError } from 'graphql';
+import { loadDeliverySettings, parseDeliverySettingsPatch, validateDeliverySettings, type DeliverySettings } from '../../../lib/tickers/deliverySettings.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { type Context, getAccessibleMemoryIds } from './resolvers.helpers.js';
 import {
@@ -135,6 +136,7 @@ type TickerSettings = {
 };
 const SETTINGS_SELECT = {
   tickerMinCadenceSeconds: true, tickerSelfSubscribeCadenceSeconds: true, tickerLiveCap: true, wakeDailyBudget: true,
+  deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true,
 } as const;
 
 function checkCadence(cadence: unknown, settings: TickerSettings): number {
@@ -440,69 +442,10 @@ const crudMutations = {
 
   setAppTickerSettings: async (
     _: unknown,
-    { appRef, input }: {
-      appRef: string;
-      input: {
-        minCadenceSeconds?: number | null;
-        selfSubscribeCadenceSeconds?: number | null;
-        liveCap?: number | null;
-        wakeDailyBudget?: number | null;
-        clearWakeDailyBudget?: boolean | null;
-      };
-    },
+    { appRef, input }: { appRef: string; input: AppTickerSettingsPatch },
     ctx: Context,
-  ) => {
-    const { app, actor } = await resolveParticipatedApp(ctx, appRef);
-    if (input.wakeDailyBudget != null && input.clearWakeDailyBudget) {
-      throw badInput('Send wakeDailyBudget or clearWakeDailyBudget, not both.');
-    }
-    await writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
-      // cor:agt:080:19: whoever manages the App. Anyone else who can see the App is told so.
-      if (!(await actorManagesApp(txCtx, fresh, actor))) {
-        throw taskError('FORBIDDEN', 'Only whoever manages this App can change its ticker settings.');
-      }
-      await lockAppTickers(tx, fresh.id);
-      const cur = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: SETTINGS_SELECT });
-      const floor = input.minCadenceSeconds ?? cur.tickerMinCadenceSeconds;
-      const self = input.selfSubscribeCadenceSeconds ?? cur.tickerSelfSubscribeCadenceSeconds;
-      const cap = input.liveCap ?? cur.tickerLiveCap;
-      const budget = input.clearWakeDailyBudget ? null : input.wakeDailyBudget ?? cur.wakeDailyBudget;
-      const out = (message: string) => taskError('TICKER_SETTINGS_OUT_OF_RANGE', message);
-      const whole = (n: number) => Number.isInteger(n);
-      if (!whole(floor) || floor < TICKER_HARD_FLOOR_SECONDS) {
-        throw out(`The cadence floor is a whole number of seconds, at least ${TICKER_HARD_FLOOR_SECONDS}.`);
-      }
-      if (!whole(self) || self < floor || self > TICKER_MAX_CADENCE_SECONDS) {
-        throw out(`The self-subscription cadence is between the floor (${floor}) and ${TICKER_MAX_CADENCE_SECONDS} seconds.`);
-      }
-      if (!whole(cap) || cap < 1 || cap > TICKER_CAP_CEILING) throw out(`The live-ticker cap is from 1 to ${TICKER_CAP_CEILING}.`);
-      if (budget !== null && (!whole(budget) || budget < 0)) throw out('The daily wake budget is a whole number, 0 or more.');
-      // Raising the floor above a live ticker's cadence is refused, naming the
-      // tickers in the way, so none is ever silently out of bounds.
-      if (floor > cur.tickerMinCadenceSeconds) {
-        const inTheWay = await tx.ticker.findMany({
-          where: { appId: fresh.id, deletedAt: null, cadenceSeconds: { lt: floor } },
-          select: { name: true, slug: true, cadenceSeconds: true },
-          orderBy: { name: 'asc' },
-        });
-        if (inTheWay.length) {
-          throw taskError(
-            'TICKER_SETTINGS_CONFLICT',
-            `The floor ${floor}s is above the cadence of: ${inTheWay.map((t) => `${t.name} (${t.cadenceSeconds}s)`).join(', ')}. Slow or delete them first.`,
-            { tickers: inTheWay.map((t) => t.slug) },
-          );
-        }
-      }
-      await tx.app.update({
-        where: { id: fresh.id },
-        data: {
-          tickerMinCadenceSeconds: floor, tickerSelfSubscribeCadenceSeconds: self,
-          tickerLiveCap: cap, wakeDailyBudget: budget,
-        },
-      });
-    }, { lockMode: 'exclusive' });
-    return settingsOut(ctx.db, app.id);
-  },
+  ) => (await writeAppSettings(ctx, appRef, input)).ticker,
+
 };
 
 /**
@@ -573,9 +516,88 @@ async function requireMayEdit(
   }
 }
 
+type AppTickerSettingsPatch = {
+  minCadenceSeconds?: number | null;
+  selfSubscribeCadenceSeconds?: number | null;
+  liveCap?: number | null;
+  wakeDailyBudget?: number | null;
+  clearWakeDailyBudget?: boolean | null;
+};
+
+/** #2025: both settings entry points use one manager/lock/validation/write transaction.
+ * The App anchor is EXCLUSIVE before any other row, preserving existing ticker lock order.
+ * Return the persisted projections while the deciding authority is still held.
+ */
+export async function writeAppSettings(
+  ctx: Context, appRef: string, input: AppTickerSettingsPatch, rawDeliveryPatch?: unknown,
+) {
+  const { app, actor } = await resolveParticipatedApp(ctx, appRef);
+  if (input.wakeDailyBudget != null && input.clearWakeDailyBudget) {
+    throw badInput('Send wakeDailyBudget or clearWakeDailyBudget, not both.');
+  }
+  return writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
+    // cor:agt:080:19: whoever manages the App. Anyone else who can see the App is told so.
+    if (!(await actorManagesApp(txCtx, fresh, actor))) {
+      throw taskError('FORBIDDEN', 'Only whoever manages this App can change its settings.');
+    }
+    const patch = rawDeliveryPatch === undefined ? {} : parseDeliverySettingsPatch(rawDeliveryPatch);
+    await lockAppTickers(tx, fresh.id);
+    const cur = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: SETTINGS_SELECT });
+    const floor = patch.batchWindowSeconds ?? input.minCadenceSeconds ?? cur.tickerMinCadenceSeconds;
+    const self = input.selfSubscribeCadenceSeconds ?? cur.tickerSelfSubscribeCadenceSeconds;
+    const cap = input.liveCap ?? cur.tickerLiveCap;
+    const budget = input.clearWakeDailyBudget ? null : input.wakeDailyBudget ?? cur.wakeDailyBudget;
+    const out = (message: string) => taskError('TICKER_SETTINGS_OUT_OF_RANGE', message);
+    const whole = (n: number) => Number.isInteger(n);
+    if (!whole(floor) || floor < TICKER_HARD_FLOOR_SECONDS) {
+      throw out(`The cadence floor is a whole number of seconds, at least ${TICKER_HARD_FLOOR_SECONDS}.`);
+    }
+    if (!whole(self) || self < floor || self > TICKER_MAX_CADENCE_SECONDS) {
+      throw out(`The self-subscription cadence is between the floor (${floor}) and ${TICKER_MAX_CADENCE_SECONDS} seconds.`);
+    }
+    if (!whole(cap) || cap < 1 || cap > TICKER_CAP_CEILING) throw out(`The live-ticker cap is from 1 to ${TICKER_CAP_CEILING}.`);
+    if (budget !== null && (!whole(budget) || budget < 0)) throw out('The daily wake budget is a whole number, 0 or more.');
+    // Raising the floor above a live ticker's cadence is refused, naming the
+    // tickers in the way, so none is ever silently out of bounds.
+    if (floor > cur.tickerMinCadenceSeconds) {
+      const inTheWay = await tx.ticker.findMany({
+        where: { appId: fresh.id, deletedAt: null, cadenceSeconds: { lt: floor } },
+        select: { name: true, slug: true, cadenceSeconds: true },
+        orderBy: { name: 'asc' },
+      });
+      if (inTheWay.length) {
+        throw taskError(
+          'TICKER_SETTINGS_CONFLICT',
+          `The floor ${floor}s is above the cadence of: ${inTheWay.map((t) => `${t.name} (${t.cadenceSeconds}s)`).join(', ')}. Slow or delete them first.`,
+          { tickers: inTheWay.map((t) => t.slug) },
+        );
+      }
+    }
+    const delivery: DeliverySettings = {
+      batchWindowSeconds: floor,
+      busyDelaySeconds: patch.busyDelaySeconds ?? cur.deliveryBusyDelaySeconds,
+      stuckWindowSeconds: patch.stuckWindowSeconds ?? cur.deliveryStuckWindowSeconds,
+      standbyEnabled: patch.standbyEnabled ?? cur.deliveryStandbyEnabled,
+      standbyEffective: false,
+    };
+    validateDeliverySettings(delivery, patch);
+    await tx.app.update({
+      where: { id: fresh.id },
+      data: {
+        tickerMinCadenceSeconds: floor, tickerSelfSubscribeCadenceSeconds: self,
+        tickerLiveCap: cap, wakeDailyBudget: budget,
+        deliveryBusyDelaySeconds: delivery.busyDelaySeconds,
+        deliveryStuckWindowSeconds: delivery.stuckWindowSeconds,
+        deliveryStandbyEnabled: delivery.standbyEnabled,
+      },
+    });
+    return { ticker: await settingsOut(tx, fresh.id), delivery: await loadDeliverySettings(tx, fresh.id) };
+  }, { lockMode: 'exclusive' });
+}
+
 // ── Settings projections ──────────────────────────────────────────────────
 
-async function settingsOut(db: Context['db'], appId: string) {
+async function settingsOut(db: Pick<Context['db'], 'app' | 'worker'>, appId: string) {
   const s = await db.app.findUniqueOrThrow({ where: { id: appId }, select: SETTINGS_SELECT });
   let budget = s.wakeDailyBudget;
   const derived = budget === null;
