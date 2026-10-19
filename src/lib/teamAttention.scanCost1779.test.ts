@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /**
  * #1779 — a complete teamAttentionPage scan must not cost O(backlog / 50)
  * round trips each re-resolving the whole roster.
@@ -87,7 +88,7 @@ beforeEach(async () => {
   channel = { id: made.channel.id, memoryId: memory.id, loc: 'chats:team' };
   workerIds = [];
   for (let i = 0; i < WORKERS; i++) {
-    const w = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: `W${String(i).padStart(2, '0')}`, slug: `w${i}` } });
+    const w = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: `W${String(i).padStart(2, '0')}`, slug: `w${i}` } });
     workerIds.push(w.id);
     await db.registerEntry.create({
       data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: w.id, role: 'BOTH', mentionOnly: i % 10 === 9 },

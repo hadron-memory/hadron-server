@@ -42,6 +42,7 @@ import {
   splitNodeUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
+import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -78,7 +79,7 @@ import {
   memoryAccessFilter,
   isMemoryReadableCached,
   loadMemoryUrn,
-  STORED_NODE_CONTENT,
+  CONTENT_RAW_DEFAULT,
 } from './resolvers.helpers.js';
 import { getAppMemoryAccess, filterReadableMemoryIds } from '../../../mcp/access-control.js';
 import { type AuthContext } from '../../../middleware/auth.js';
@@ -695,16 +696,10 @@ export const nodeQueries = {
         // unresolvable template reference), and the caller then gets an error
         // instead of content (PR #1062 review — Copilot).
         await decryptNodesBatch(ctx.db, [node]);
-        if (!raw && node.content?.includes('{{')) {
-          const compiled = await compileTemplate(
-            node.content, node.data as Record<string, unknown> | null, node.memoryId, ctx.db, access,
-          );
-          recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
-          // Keep the stored template for parent-verifying field resolvers.
-          return { ...node, content: compiled, [STORED_NODE_CONTENT]: node.content };
-        }
         recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
-        return node;
+        // Includes and variables resolve in the `Node.content` field (#2041);
+        // the row keeps its stored text. `raw` only picks that field's default.
+        return raw ? Object.assign(node, { [CONTENT_RAW_DEFAULT]: true }) : node;
       };
 
       // Form 1: primary key. #391: a soft-deleted node must not resolve by PK
@@ -879,13 +874,21 @@ export const nodeQueries = {
 
       const fmt: NodeExportFormat = format ?? 'MD';
 
+      // cor:dmo:150:03 (R40/R47): `full` is the restore export and reads with
+      // resolution off, so a round trip keeps its include tags; a presentation
+      // render (PDF, or `full: false`) reads like any reader, with includes
+      // resolved by the exporter's access. Variables stay as stored in both.
+      const exportContent = fmt === 'PDF' || full === false
+        ? await resolveNodeContent(ctx, node, { mode: 'includes' })
+        : node.content;
+
       // PDF is a presentation render produced by the external hadrontool-pdf
       // service from the node's (already-decrypted) Markdown content. Unlike
       // MD/JSON it is not the canonical round-trippable file, so `full` /
       // `sections` do not apply. Delivered BASE64.
       if (fmt === 'PDF') {
         const markdown =
-          node.content && node.content.trim().length > 0 ? node.content : `# ${node.name}`;
+          exportContent && exportContent.trim().length > 0 ? exportContent : `# ${node.name}`;
         const { base64, bytes } = await renderMarkdownToPdf(markdown, { title: node.name });
         const leaf = node.loc ? node.loc.split(':').pop() || node.loc : node.name || 'node';
         recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
@@ -911,7 +914,7 @@ export const nodeQueries = {
           description: node.description,
           abstract: node.abstract,
           abstractOriginHash: node.abstractOriginHash,
-          content: node.content,
+          content: exportContent,
           tags: deserializeTags(node.tags) as string[],
           seq: node.seq,
           role: node.role,
@@ -2045,7 +2048,7 @@ export const nodeQueries = {
           omitted.push(echo(n.id));
           continue;
         }
-        nodes.push(n);
+        nodes.push(Object.assign(n, { [CONTENT_RAW_DEFAULT]: true }));
         bytes += size;
       }
 

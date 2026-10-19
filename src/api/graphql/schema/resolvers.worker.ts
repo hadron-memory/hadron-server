@@ -14,6 +14,7 @@
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
 import { GraphQLError } from 'graphql';
+import { WORKER_SIGNATURE_DEFAULTS, normalizeWorkerSignature, withWorkerSignatures } from '../../../lib/workerSignature.js';
 import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -302,6 +303,8 @@ type WorkerRow = {
   slug: string;
   role: string | null;
   promptOverride: string | null;
+  signature: string;
+  trailer: string;
   memoryId: string | null;
   retiredAt: Date | null;
   /** #1050 — the human holding this name, and since when. */
@@ -338,6 +341,8 @@ async function resolveWorkerRefRow(ctx: Context, workerRef: string): Promise<Wor
       slug: true,
       role: true,
       promptOverride: true,
+      signature: true,
+      trailer: true,
       memoryId: true,
       retiredAt: true,
       heldByUserId: true,
@@ -923,7 +928,7 @@ export const workerMutations = {
             await assertWorkerNameNotConfusable(tx, appId, candidate);
             const slug = await nextFreeWorkerSlug(tx, appId, candidate);
             return tx.worker.create({
-              data: {
+              data: { ...WORKER_SIGNATURE_DEFAULTS,
                 appId,
                 agentId: agent.id,
                 name: candidate,
@@ -1440,10 +1445,40 @@ export const workerMutations = {
    */
   updateWorker: async (
     _: unknown,
-    args: { workerRef: string; promptOverride?: string | null },
+    args: { workerRef: string; promptOverride?: string | null; signature?: string | null; trailer?: string | null },
     ctx: Context,
   ) => {
     const { worker, app } = await resolveReadableWorkerRef(ctx, args.workerRef);
+    const changesSignature = 'signature' in args || 'trailer' in args;
+    if (changesSignature) {
+      const data: { signature?: string; trailer?: string; promptOverride?: string | null } = {};
+      const anchors: AuthorityAnchor[] = [
+        { kind: 'app', id: app.id },
+        ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+        ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+      ];
+      return withAuthorizedTx(ctx, anchors, async txCtx => {
+        const fresh = await txCtx.db.app.findUniqueOrThrow({ where: { id: app.id } });
+        // H26 PROVISIONAL: bound workers do not exercise their holder's manager right.
+        // Headless agent/run callers and impersonation likewise cannot manage these fields.
+        const actor = currentActor();
+        const bound = txCtx.sessionId ? await txCtx.db.session.findUnique({ where: { id: txCtx.sessionId }, select: { workerId: true } }) : null;
+        if (bound?.workerId || txCtx.sessionBindingRefused || actor.workerId || actor.agentId || txCtx.impersonation || !(await managesApp(txCtx, fresh))) throw forbidden();
+        if ('promptOverride' in args) await requireWorkerStaffAccess(txCtx, fresh);
+        for (const field of ['signature', 'trailer'] as const) {
+          if (field in args) data[field] = normalizeWorkerSignature(args[field]);
+        }
+        if ('promptOverride' in args) data.promptOverride = (args.promptOverride ?? '').trim() === '' ? null : args.promptOverride;
+      }, async tx => {
+        const { count } = await tx.worker.updateMany({ where: { id: worker.id, retiredAt: null }, data });
+        if (!count) {
+          const still = await tx.worker.findUnique({ where: { id: worker.id } });
+          if (!still) throw workerNotFound(args.workerRef);
+          throw new GraphQLError('This worker is retired.', { extensions: { code: 'WORKER_RETIRED' } });
+        }
+        return tx.worker.findUniqueOrThrow({ where: { id: worker.id } });
+      });
+    }
     await requireWorkerStaffAccess(ctx, app);
 
     if (worker.retiredAt) {
@@ -1774,7 +1809,7 @@ export const workerQueries = {
     const template = agent.systemPrompt ?? null;
     const previewRole = workerRole ?? agent.personaRole ?? '';
     // No worker row or session exists yet, so url / model / reports-to have nothing to fill.
-    const values: PlatformVariableValues = {
+    const values = withWorkerSignatures({
       'worker.name': name,
       'worker.role': previewRole,
       'agent.name': agent.name,
@@ -1783,7 +1818,7 @@ export const workerQueries = {
       'worker.trailer': '',
       'worker.url': '',
       'session.llmModel': '',
-    };
+    }, WORKER_SIGNATURE_DEFAULTS);
     const bound = template ? applyPlatformVariables(template, values, { name, role: previewRole }) : null;
     const boundOverride = override ? applyPlatformVariables(override, values) : override;
     const prompt = bound && boundOverride ? `${bound}\n\n${boundOverride}` : (boundOverride ?? bound);
@@ -2015,7 +2050,7 @@ export async function loadAppWorkerActivity(
  */
 export async function composeWorkerPrompt(
   ctx: Context,
-  worker: { id: string; appId: string; agentId: string; name: string; slug?: string; role: string | null; promptOverride: string | null; reportsToWorkerId?: string | null },
+  worker: { id: string; appId: string; agentId: string; name: string; slug?: string; role: string | null; promptOverride: string | null; signature: string; trailer: string; reportsToWorkerId?: string | null },
   opts?: { llmModel?: string | null },
 ): Promise<{ text: string | null; renderedAt: Date; roleAgentUpdatedAt: Date | null }> {
   // Working-state path: the composed boot prompt embeds the agent's persona
@@ -2060,13 +2095,13 @@ export async function composeWorkerPrompt(
 
 /**
  * #2042 — the values of the platform variables for a worker bind. Bottom-up: the worker's own value, else the Agent's.
- * `signature` / `trailer` have no storage until S5 (#1602), so they are empty. The reports-to name rides the
+ * Stored signature/trailer templates are pre-rendered without recursive expansion (#1602). The reports-to name rides the
  * worker-visibility gate the caller already passed (same App), and `session.llmModel` is the bind's session model:
  * passed in by the bind that just created the session, else the newest open session's.
  */
 async function workerPlatformValues(
   ctx: Context,
-  worker: { id: string; slug?: string; appId: string; name: string; reportsToWorkerId?: string | null },
+  worker: { id: string; slug?: string; appId: string; name: string; signature: string; trailer: string; reportsToWorkerId?: string | null },
   agent: { name: string; urn: string; personaRole: string | null } | null,
   role: string,
   llmModel: string | null | undefined,
@@ -2082,7 +2117,7 @@ async function workerPlatformValues(
         select: { llmModel: true },
       }))?.llmModel;
   const urn = worker.slug ? await resolveWorkerUrnField({ appId: worker.appId, slug: worker.slug }, ctx) : null;
-  return {
+  return withWorkerSignatures({
     'worker.name': worker.name,
     'worker.role': role,
     'agent.name': agent?.name ?? '',
@@ -2091,7 +2126,7 @@ async function workerPlatformValues(
     'worker.trailer': '',
     'worker.url': (urn ? portalUrlForUrn(urn) : null) ?? '',
     'session.llmModel': model ?? '',
-  };
+  }, worker);
 }
 
 /** The owner of a user-owned Agent, or the person holding the worker cast from it; never under impersonation. */
@@ -2405,6 +2440,10 @@ export const workerFieldResolvers = {
       return affinity.get(worker.role.toLowerCase()) ?? [];
     },
     /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
+    signature: async (worker: { appId: string; signature: string }, _: unknown, ctx: Context) =>
+      (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.signature : null,
+    trailer: async (worker: { appId: string; trailer: string }, _: unknown, ctx: Context) =>
+      (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.trailer : null,
     promptOverride: async (
       worker: { appId: string; promptOverride: string | null },
       _: unknown,
@@ -2618,7 +2657,7 @@ export const workerFieldResolvers = {
      * and the worker no override.
      */
     prompt: async (
-      worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null },
+      worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null; signature: string; trailer: string },
       _: unknown,
       ctx: Context,
     ) => (await composeWorkerPrompt(ctx, worker)).text,

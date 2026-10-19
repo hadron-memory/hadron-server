@@ -38,6 +38,7 @@
  * surface returns node CONTENT, which is the thing a read gate exists to
  * protect.
  */
+import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { GraphQLError } from 'graphql';
 import { createHash } from 'node:crypto';
 import { BATCH_READ_MAX_BYTES } from '../../../lib/batchRead.js';
@@ -883,6 +884,20 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
         return declaration !== null || malformed.length > 0;
     }) as (SkillNode & { _id: string; revSeq: number })[];
 
+    // cor:dmo:150:03 (R9): an export reads like any reader, so its body is the
+    // node's text with include tags resolved by the EXPORTER's access; `{{var}}`
+    // stays verbatim (mode 'includes'). Lint keeps judging the stored text, and
+    // the hash below covers the body actually exported, so a changed include
+    // target reads as a stale file rather than an up-to-date one.
+    const rowById = new Map(actionableRows.map((r) => [r.id, r]));
+    const exportBodies = new Map<string, string>();
+    for (const n of skillNodes) {
+      const row = rowById.get(n._id);
+      if (!row || lockedIds.has(n._id) || !row.content) continue;
+      exportBodies.set(n._id, (await resolveNodeContent(ctx, row, { mode: 'includes' })) ?? '');
+    }
+    const bodyOf = (n: { _id: string; content: string }) => exportBodies.get(n._id) ?? n.content;
+
     // ── Lint: per node, plus the corpus-wide collision rule ──────────────
     // Keyed by node ID, never URN: two DIFFERENT nodes can emit one URN (the
     // emitter flattens a compound memory), and a URN key made them share a
@@ -936,7 +951,7 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
           n.urn,
           name,
           declaration?.description ?? '',
-          n.content,
+          bodyOf(n as SkillNode & { _id: string }),
         ),
         revision: n.revSeq,
         collides: collidingIds.has((n as SkillNode & { _id: string })._id),
@@ -1062,7 +1077,7 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
             name,
             nf.urn,
             nf.declaration?.description ?? '',
-            findContent(skillNodes, nf.id),
+            exportBodies.get(nf.id) ?? findContent(skillNodes, nf.id),
             nf.revision,
           );
         } catch (error) {

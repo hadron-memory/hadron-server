@@ -1,8 +1,9 @@
 /** #2025 / cor:agt:080:05 — one cadence/window dial and App delivery settings.
  * Busy/stuck bounds and their strict relation are Proposed, approved to build
- * by the scoped #2025 gate; standby behavior belongs to #2023, not this slice.
+ * by the scoped #2025 gate; standby behavior is #2023's (standby.ts).
  */
 import { GraphQLError } from 'graphql';
+import { s7Available } from './s7Availability.js';
 import type { Prisma } from '../../generated/prisma/index.js';
 
 export const DELIVERY_BUSY_MIN_SECONDS = 1;
@@ -53,8 +54,8 @@ export function validateDeliverySettings(settings: DeliverySettings, patch: Deli
   if (settings.stuckWindowSeconds <= settings.busyDelaySeconds + settings.batchWindowSeconds) {
     throw error('DELIVERY_SETTINGS_CONFLICT', 'stuckWindowSeconds must be greater than busyDelaySeconds + the shared cadence floor (batchWindowSeconds / minCadenceSeconds).');
   }
-  if (patch.standbyEnabled === true) {
-    throw error('DELIVERY_STANDBY_UNAVAILABLE', 'Standby cannot be enabled until standby delivery behavior is available (S7).');
+  if (patch.standbyEnabled === true && !s7Available()) {
+    throw error('DELIVERY_STANDBY_UNAVAILABLE', 'Standby cannot be enabled until standby delivery behavior is available (S7b).');
   }
 }
 
@@ -66,6 +67,6 @@ export async function loadDeliverySettings(db: Pick<Prisma.TransactionClient, 'a
     busyDelaySeconds: s.deliveryBusyDelaySeconds,
     stuckWindowSeconds: s.deliveryStuckWindowSeconds,
     standbyEnabled: s.deliveryStandbyEnabled,
-    standbyEffective: false, // #2023 owns activation and filtering. Configuration alone never enables behavior.
+    standbyEffective: s7Available() && s.deliveryStandbyEnabled, // inert until S7b (s7Availability.ts)
   };
 }

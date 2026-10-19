@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1747 — Tickers S1 (epic #1659): models, App settings, CRUD, the §5
  * authorization matrix, the may-subscribe-workers grant and its announcement.
@@ -73,7 +74,7 @@ async function user(suffix: string, n: number) {
 
 async function worker(appId: string, name: string, extra: Record<string, unknown> = {}) {
   return db.worker.create({
-    data: { id: generateId(), appId, agentId: teamAgent.id, name, slug: name.toLowerCase(), ...extra },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: teamAgent.id, name, slug: name.toLowerCase(), ...extra },
     select: { id: true },
   });
 }

@@ -218,6 +218,8 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
+import { resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
+import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
@@ -1008,6 +1010,22 @@ async function lockOutgoingEdgeMemories(
   ]);
 }
 
+/**
+ * #2040 — include tags: refuse a bad one and sync the derived INCLUDE edges, in
+ * the writer's own transaction on the plaintext it holds, so a refusal rolls
+ * back the content, revision and edges together.
+ */
+async function applyIncludesInTransaction(
+  tx: Prisma.TransactionClient,
+  node: { id: string; loc: string; memoryId: string },
+  plaintextContent: string | null,
+  auth: AuthContext,
+): Promise<void> {
+  const readable = plaintextContent?.includes('{{>') ? await getAccessibleMemoryIds(db, auth) : null;
+  const tags = await assertIncludesWritable(tx, node, plaintextContent, readable);
+  await syncDerivedIncludesEdges(tx, node, tags, readable);
+}
+
 async function replaceOutgoingEdgesInTransaction(
   tx: Prisma.TransactionClient,
   args: {
@@ -1033,7 +1051,8 @@ async function replaceOutgoingEdgesInTransaction(
   const missing = args.resolved.find((edge) => !live.has(edge.targetNodeId));
   if (missing) return `Edge target not found: "${missing.targetNodeId}"`;
 
-  await tx.edge.deleteMany({ where: { sourceId: args.sourceNodeId } });
+  // Derived INCLUDE edges (#2040) belong to the content writer.
+  await tx.edge.deleteMany({ where: { sourceId: args.sourceNodeId, governedKind: null } });
   await tx.pendingEdge.deleteMany({ where: { sourceId: args.sourceNodeId } });
   if (args.resolved.length > 0) {
     const { count } = await tx.edge.createMany({
@@ -1411,6 +1430,8 @@ type ReadProjectionNode = {
   approvedBy: string | null;
   approvedByInfo: string | null;
   approvedAt: Date | null;
+  /** #1838 — null once the approval ended on encrypted entry; a hashless record authorizes nothing. */
+  approvalHash?: string | null;
   /** #1591 — the mint record. */
   mintedAt: Date | null;
   mintedBy: string | null;
@@ -1809,7 +1830,7 @@ async function renderNodeReadProjection(
   // #1591: the approval line. Approver by handle when a user is known, else
   // the stored principal info.
   let approvalLine = opts.encryptedMemory ? 'Approval: not applicable (encrypted memory)' : `Approval: not approved (r${revision})`;
-  if (!opts.encryptedMemory && node.approvedRevNo != null && node.approvedAt) {
+  if (!opts.encryptedMemory && node.approvedRevNo != null && node.approvedAt && node.approvalHash !== null) {
     const handle = node.approvedBy
       ? (opts.batch
         ? opts.batch.humanNames.get(node.approvedBy)
@@ -1825,7 +1846,7 @@ async function renderNodeReadProjection(
   }
 
   if (inheritedFrom) {
-    approvalLine = node.approvedRevNo != null && node.contentRevSeq <= node.approvedRevNo
+    approvalLine = node.approvedRevNo != null && node.approvalHash !== null && node.contentRevSeq <= node.approvedRevNo
       ? `Approval: approved r${node.approvedRevNo}`
       : `Approval: not approved (r${revision})`;
   }
@@ -4058,6 +4079,7 @@ export function createMcpServerInstance(
             ...upsertArgs,
             update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
+          await applyIncludesInTransaction(tx, row, content, auth);
           return row.id;
         });
       } catch (e) {
@@ -4065,6 +4087,8 @@ export function createMcpServerInstance(
         if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        const includeText = includeRefusalText(e);
+        if (includeText) return textResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return textResult(writerRefusal);
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
@@ -4614,8 +4638,12 @@ export function createMcpServerInstance(
         .enum(['content', 'abstract', 'all'])
         .optional()
         .describe("Selects what the response includes. 'content' (default): meta block + body, with abstract substituted into the body slot when content is null/empty (Source: abstract-fallback line appears). 'abstract': meta block + abstract, no body. 'all': meta block + abstract + body."),
+      raw: z
+        .boolean()
+        .optional()
+        .describe('Return the stored text with include tags ({{> loc}}) as written instead of resolving them (cor:dmo:150:03). Default false: includes resolve with your own read access.'),
     },
-    async ({ urn: rawUrn, contentScope }) => {
+    async ({ urn: rawUrn, contentScope, raw }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -4778,7 +4806,11 @@ export function createMcpServerInstance(
       const lockState = mcpDecryptOrMark(current);
       // Shared with hadron_get_nodes (batch) so the per-node projection can never
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
-      const projection = await renderNodeReadProjection(current, scope, {
+      // #2041 — include tags resolve with the caller's own read access; `raw` skips it.
+      const served = lockState === 'locked' || raw
+        ? current
+        : { ...current, content: await resolveNodeContent(scopeCtx(), current, { raw }) };
+      const projection = await renderNodeReadProjection(served, scope, {
         locked: lockState === 'locked',
         encryptedMemory: lockState !== 'plaintext',
         auth,
@@ -4850,8 +4882,12 @@ export function createMcpServerInstance(
         .enum(['content', 'abstract', 'all'])
         .optional()
         .describe("Per-node projection scope, as on hadron_get_node. Default 'content'."),
+      raw: z
+        .boolean()
+        .optional()
+        .describe('Return the stored text with include tags ({{> loc}}) as written instead of resolving them (cor:dmo:150:03). Default false: includes resolve with your own read access.'),
     },
-    async ({ refs, memoryUrn, locPrefix, contentScope }) => {
+    async ({ refs, memoryUrn, locPrefix, contentScope, raw }) => {
       // Defensive contentScope validation — parity with hadron_get_node (covers
       // direct-handler callers that bypass the transport's zod parsing).
       if (
@@ -5234,13 +5270,17 @@ export function createMcpServerInstance(
         openThreadCounts(db, visible.map((n) => n.id)),
       ]);
       const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures };
+      const batchReadCtx = scopeCtx(); // one memo for the whole call (#2041)
       for (const n of visible) {
         if (truncated) {
           omitted.push(await nodeUrn(n.loc, n.memoryId, memoryUrnOf));
           continue;
         }
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
-        const projection = await renderNodeReadProjection(n, scope, {
+        const served = lockState === 'locked' || raw
+          ? n
+          : { ...n, content: await resolveNodeContent(batchReadCtx, n, { raw }) };
+        const projection = await renderNodeReadProjection(served, scope, {
           locked: lockState === 'locked',
           encryptedMemory: lockState !== 'plaintext',
           auth,
@@ -5301,8 +5341,12 @@ export function createMcpServerInstance(
     {
       parent: z.string().describe('Fully-qualified parent node URN, e.g. "hrn:node:acme.com:mmdata:sections"'),
       current: z.string().optional().describe('Fully-qualified current child node URN (must be in the same memory as `parent`)'),
+      raw: z
+        .boolean()
+        .optional()
+        .describe('Return the stored text with include tags ({{> loc}}) as written instead of resolving them (cor:dmo:150:03). Default false: includes resolve with your own read access.'),
     },
-    async ({ parent: rawParent, current: rawCurrent }) => {
+    async ({ parent: rawParent, current: rawCurrent, raw }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawParent, 'node');
@@ -5415,7 +5459,8 @@ export function createMcpServerInstance(
         .filter(Boolean)
         .join('\n');
 
-      return textResult(meta + '\n\n---\n\n' + (node.content || ''));
+      const body = raw ? node.content : await resolveNodeContent(scopeCtx(), node, { raw });
+      return textResult(meta + '\n\n---\n\n' + (body || ''));
     },
   );
 
@@ -6309,6 +6354,7 @@ export function createMcpServerInstance(
             });
             if (edgeError) throw new InlineEdgeEndpointError(edgeError);
           }
+          await applyIncludesInTransaction(tx, written, content ?? null, auth);
           return written;
         });
       } catch (e) {
@@ -6317,6 +6363,8 @@ export function createMcpServerInstance(
           return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
         if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+        const includeText = includeRefusalText(e);
+        if (includeText) return textResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return textResult(writerRefusal);
         if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
@@ -6741,6 +6789,7 @@ export function createMcpServerInstance(
               });
               if (edgeError) throw new InlineEdgeEndpointError(edgeError);
             }
+            if (content !== undefined) await applyIncludesInTransaction(tx, updated, content, auth);
           });
         } catch (e) {
           if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
@@ -6751,7 +6800,9 @@ export function createMcpServerInstance(
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
           if (e instanceof EdgeLocConflictError) return textResult(e.message);
           if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
-          const writerRefusal = roleWriterRefusalText(e);
+          const includeText = includeRefusalText(e);
+        if (includeText) return textResult(includeText);
+        const writerRefusal = roleWriterRefusalText(e);
           if (writerRefusal) return textResult(writerRefusal);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
             return textResult(`[spec_minted_permanent] ${e.message}`);
@@ -7999,6 +8050,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (e instanceof SubtreeMoveSourceChangedError) {
           return textResult('The node was moved concurrently; re-read it and retry.');
         }
+        const includeText = includeRefusalText(e);
+        if (includeText) return textResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return textResult(writerRefusal);
         if (
@@ -10617,7 +10670,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // is the answer and an age beside it invites reading the age as
             // presence, which is #1034's confusion in a new place.
             if (!act?.lastActiveAt) flags.push('never driven');
-            else if (!act.hasLiveSession) flags.push(`last driven ${ageOf(act.lastActiveAt)}`);
+            else if (!act.hasLiveSession) flags.push(`last recorded activity ${ageOf(act.lastActiveAt)}`);
             // #1026 — built from the SAME page-shared URN above, so the roster
             // costs no extra lookup per worker (the PR #1000 rule that pulled
             // the App URN out of the per-item path in the first place).
@@ -10714,7 +10767,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // template changes, which is why the contract forbids caching it.
         // #1090: one composition supplies the text AND its freshness facts —
         // the stamps below describe exactly this rendering.
-        const [briefing, workerUrn, agent, override, continuity] = await Promise.all([
+        const [briefing, workerUrn, agent, override, continuity, signature, trailer] = await Promise.all([
           composeWorkerPrompt(ctx, worker),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
@@ -10731,6 +10784,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
           // lost its context lost the handoff with it, and is the least likely
           // reader to know one exists.
           resolvers.Worker.continuity(worker, {}, ctx),
+          resolvers.Worker.signature(worker, {}, ctx),
+          resolvers.Worker.trailer(worker, {}, ctx),
         ]);
         const prompt = briefing.text;
         const agentName = (agent as { name?: string } | null)?.name ?? null;
@@ -10833,6 +10888,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // Shown separately from the briefing, and labelled as the editable
             // part, so hadron_update_worker's replace semantics have something
             // correct to be given back.
+            (signature != null ? `\nSignature template:\n${signature}\n` : '') +
+            (trailer != null ? `\nTrailer template:\n${trailer}\n` : '') +
             (override
               ? `\nPrompt override (the editable part — pass THIS text, amended, to hadron_update_worker; the briefing below is it composed with the shared template):\n\n${override}\n`
               : '') +
@@ -10879,7 +10936,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   server.tool(
     'hadron_update_worker',
-    "Amend a worker's promptOverride — the per-worker individuality layered over the role agent's shared template (#1010). Use it to record what a worker has become: authorship of a body of work, a standing specialisation, anything true of THIS casting and not of every casting of the same role. It reaches the worker at its next bind, live, with nothing to republish. The override was previously fixed at casting time, which sealed a worker's individuality before the work that defines it. promptOverride REPLACES the whole override (it is not appended) — to extend one, read the worker with hadron_get_worker and amend the text under 'Prompt override', NOT the composed boot briefing below it (pasting the briefing back would fold the shared template into the override, and it would then be prepended again on every render). Omit it to change nothing; pass an empty string to clear it. Everything else about a casting is immutable: the name is permanent, and a different role is a different casting. Refuses for a retired worker, which takes no new bindings and so could never receive it.",
+    "Amend a worker's promptOverride — the per-worker individuality layered over the role agent's shared template (#1010). Use it to record what a worker has become: authorship of a body of work, a standing specialisation, anything true of THIS casting and not of every casting of the same role. It reaches the worker at its next bind, live, with nothing to republish. The override was previously fixed at casting time, which sealed a worker's individuality before the work that defines it. promptOverride REPLACES the whole override (it is not appended) — to extend one, read the worker with hadron_get_worker and amend the text under 'Prompt override', NOT the composed boot briefing below it (pasting the briefing back would fold the shared template into the override, and it would then be prepended again on every render). Omit it to change nothing; pass an empty string to clear it. signature and trailer edit the per-worker signing templates (App managers only; worker-session edits provisionally refused under H26). Omit to preserve; null is refused; blank stores empty text. Everything else about a casting is immutable: the name is permanent, and a different role is a different casting. Refuses for a retired worker, which takes no new bindings and so could never receive it.",
     {
       workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN, or its id.'),
       // Optional, matching the description's "omit it to change nothing" and
@@ -10889,10 +10946,17 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // schema-validation error — the one failure mode worse than the tool not
       // offering the option at all.
       promptOverride: z.string().optional().describe("The worker's new individuality text, REPLACING any current override. Pass an empty string to clear it; omit it to leave the override untouched."),
+      signature: z.string().nullable().optional().describe('Per-worker signature template. Omit preserves; null refuses; blank delivers nothing. App managers only.'),
+      trailer: z.string().nullable().optional().describe('Per-worker trailer template, same manager and omission rules as signature.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
       session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so its DERIVED liveness stays current while you are working (#1081; #1114 — inactivity no longer reaps anything, it only decides whether a session reads as live).'),
     },
-    async ({ workerRef, promptOverride, app, session }) => {
+    async ({ workerRef, promptOverride, signature, trailer, app, session }) => {
+      // This tool owns `session`, so the common actor gate leaves invalid names to us.
+      // Refuse before heartbeat or edits instead of falling back to the human principal.
+      if (session !== undefined && !(await validateSessionBinding(db, auth, session))) {
+        return { ...textResult('[session_not_bound] The named session cannot bind. Nothing was written.'), isError: true };
+      }
       // #1081 — the caller just drove this session, so it is alive. The
       // touch is explicit here rather than a side effect of whichever tool
       // happens to write the Session row (see heartbeatSession).
@@ -10926,6 +10990,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
+        sessionBindingRefused: auth.sessionBindingRefused,
         roles: auth.roles as Context['roles'],
         organizationId: auth.organizationId ?? undefined,
       };
@@ -10944,11 +11009,14 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // override of every caller who omitted it. Making the zod arg optional
         // without this would have converted a loud validation error into a
         // silent data loss — strictly worse.
-        const mutationArgs: { workerRef: string; promptOverride?: string } = {
+        const mutationArgs: { workerRef: string; promptOverride?: string; signature?: string | null; trailer?: string | null } = {
           workerRef: target.id,
         };
-        const changing = promptOverride !== undefined;
-        if (changing) mutationArgs.promptOverride = promptOverride;
+        const overrideChanged = promptOverride !== undefined;
+        const changing = overrideChanged || signature !== undefined || trailer !== undefined;
+        if (promptOverride !== undefined) mutationArgs.promptOverride = promptOverride;
+        if (signature !== undefined) mutationArgs.signature = signature;
+        if (trailer !== undefined) mutationArgs.trailer = trailer;
 
         const worker = await resolvers.Mutation.updateWorker({}, mutationArgs, ctx);
         // Echo the RESOLVED prompt, not the override alone: what the caller
@@ -10956,12 +11024,14 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // bind, and that is the template plus the override, composed.
         const prompt = await resolvers.Worker.prompt(worker, {}, ctx);
         return textResult(
-          (changing ? `Updated **${worker.name}**.\n` : `**${worker.name}** — no change requested (promptOverride omitted).\n`) +
+          (changing ? `Updated **${worker.name}**.\n` : `**${worker.name}** — no change requested (editable fields omitted).\n`) +
             (worker.promptOverride
-              ? `\nPrompt override${changing ? ' now' : ''}:\n\n${worker.promptOverride}\n`
-              : changing
+              ? `\nPrompt override${overrideChanged ? ' now' : ''}:\n\n${worker.promptOverride}\n`
+              : overrideChanged
                 ? '\nPrompt override cleared.\n'
                 : '\nThis worker has no prompt override.\n') +
+            (signature !== undefined ? `\nSignature template now:\n\n${worker.signature}\n` : '') +
+            (trailer !== undefined ? `\nTrailer template now:\n\n${worker.trailer}\n` : '') +
             (prompt
               ? `\nResolved boot briefing (what ${worker.name} receives at its next bind):\n\n${prompt}`
               : ''),

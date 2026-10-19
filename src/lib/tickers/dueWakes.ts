@@ -20,6 +20,7 @@
 // and budget, and are acknowledged per event through the v2 proof.
 
 import { Prisma } from '../../generated/prisma/index.js';
+import { batchTiming, loadDeliverySettings } from './batchTiming.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { getAccessibleMemoryIds, isAppParticipant } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
@@ -27,6 +28,8 @@ import { recordInEffect } from '../agentTasks/availability.js';
 import { collectRegisterRows } from '../resolveRegister.js';
 import { decryptNodeFields } from '../nodeCrypto.js';
 import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from '../mentionToken.js';
+import { onStandbySql, standbyAdmitsSql } from './standby.js';
+import { s7Available } from './s7Availability.js';
 import { isWorkerDormant, toNaiveUtc } from '../sessionActivity.js';
 import {
   relevantMentionCount,
@@ -65,6 +68,8 @@ export type DueWakeOut = {
   wake: WorkerWake;
   availability: { state: string; reason: string | null; until: Date | null; setAt: Date } | null;
   proof: string;
+  /** R63 (#2017): when the wake may be typed and the latest a busy worker may be made to wait, from the earliest waiting reason. */
+  timing: { anchorAt: Date; deliverAfter: Date; busyDeadline: Date };
 };
 
 export type DueWakesResult = {
@@ -75,6 +80,15 @@ export type DueWakesResult = {
   nextAfter: string | null;
   /** Set once per UTC day when the budget is spent: the caller posts the notice. */
   budgetNotice: { appId: string; day: Date; withheld: number } | null;
+};
+
+/** #2069: the reasons a wake carries that a delivery must name: a mention, one tick of one ticker, one task event. */
+const reasonKeys = (wake: WorkerWake): Set<string> =>
+  new Set(wake.reasons.map((r) => (r.kind === 'MENTION' ? 'M' : r.kind === 'TICK' ? `T:${r.tickerId}:${r.k}` : `K:${r.eventId}:${r.chainIndex}`)));
+/** True when `fresh` carries a TICK or TASK reason the outstanding wake lacks. A grown mention range alone is not one. */
+const absorbsNewReason = (outstanding: WorkerWake, fresh: WorkerWake): boolean => {
+  const had = reasonKeys(outstanding);
+  return [...reasonKeys(fresh)].some((k) => k !== 'M' && !had.has(k));
 };
 
 const tasksOf = (wake: WorkerWake) =>
@@ -103,7 +117,7 @@ export function defaultWakeBudget(roster: number, selfSubscribeCadenceSeconds: n
 
 type Reader = { manager: boolean; userId: string | null };
 
-type AppLike = { id: string; organizationId: string | null; ownerUserId: string | null };
+export type AppLike = { id: string; organizationId: string | null; ownerUserId: string | null };
 
 /** Workers of the App the caller may read wakes for: all of them for a manager, else the ones the caller holds. */
 async function readableWorkers(
@@ -137,7 +151,7 @@ async function holderParticipates(ctx: Context, app: AppLike, holderId: string):
   return (await isAppParticipant(actor, app)) ? holder : null;
 }
 
-async function holderAccess(
+export async function holderAccess(
   ctx: Context,
   app: AppLike,
   holderId: string,
@@ -158,7 +172,7 @@ async function holderAccess(
   return result;
 }
 
-const mayRead = (set: Set<string> | 'all' | null, memoryId: string): boolean => set === 'all' || (set !== null && set.has(memoryId));
+export const mayRead = (set: Set<string> | 'all' | null, memoryId: string): boolean => set === 'all' || (set !== null && set.has(memoryId));
 
 function envelopeOf(data: unknown): RoutedMessage | null {
   if (!data || typeof data !== 'object') return null;
@@ -169,6 +183,7 @@ function envelopeOf(data: unknown): RoutedMessage | null {
     mentions: Array.isArray(e.mentions) ? e.mentions.filter((v): v is string => typeof v === 'string') : [],
     broadcastWakes: e.broadcastWakes === true,
     managerPost: e.managerPost === true,
+    humanAuthored: e.authorSystem !== true && typeof e.authorWorkerId !== 'string' && typeof e.authorUserId === 'string',
   };
 }
 
@@ -185,12 +200,15 @@ async function loadMessages(
   if (head <= lo) return [];
   if (!channel.encrypted) {
     const wanted = only && only.length > 0 ? Prisma.sql`AND (${candidatesFor(only)})` : Prisma.empty;
-    const rows = await db.$queryRaw<Array<{ seq: number; author: string | null; mentions: unknown; bw: boolean | null; mp: boolean | null }>>(Prisma.sql`
+    const rows = await db.$queryRaw<Array<{ seq: number; author: string | null; mentions: unknown; bw: boolean | null; mp: boolean | null; human: boolean | null; at: Date }>>(Prisma.sql`
       SELECT n.seq::int AS seq,
              n.data->>'authorWorkerId' AS author,
              n.data->'mentions' AS mentions,
              (n.data->>'broadcastWakes') = 'true' AS bw,
-             (n.data->>'managerPost') = 'true' AS mp
+             (n.data->>'managerPost') = 'true' AS mp,
+             ((n.data->'authorSystem') IS DISTINCT FROM 'true'::jsonb AND jsonb_typeof(n.data->'authorWorkerId') IS DISTINCT FROM 'string'
+               AND jsonb_typeof(n.data->'authorUserId') = 'string') AS human,
+             n.created_at AS at
       FROM nodes n
       WHERE n.message_channel_id = ${channel.id}
         AND n.node_type = 'chat-message'
@@ -207,10 +225,12 @@ async function loadMessages(
       mentions: Array.isArray(r.mentions) ? (r.mentions as unknown[]).filter((v): v is string => typeof v === 'string') : [],
       broadcastWakes: r.bw === true,
       managerPost: r.mp === true,
+      humanAuthored: r.human === true,
+      postedAtMs: new Date(r.at).getTime(),
     }));
   }
-  const rows = await db.$queryRaw<Array<{ seq: number; data: unknown }>>(Prisma.sql`
-    SELECT n.seq::int AS seq, n.data
+  const rows = await db.$queryRaw<Array<{ seq: number; data: unknown; at: Date }>>(Prisma.sql`
+    SELECT n.seq::int AS seq, n.data, n.created_at AS at
     FROM nodes n
     WHERE n.message_channel_id = ${channel.id}
       AND n.node_type = 'chat-message'
@@ -231,7 +251,7 @@ async function loadMessages(
       data = {};
     }
     const m = envelopeOf(data) ?? { seq: 0, authorWorkerId: null, mentions: [], broadcastWakes: false, managerPost: false };
-    out.push({ ...m, seq: r.seq });
+    out.push({ ...m, seq: r.seq, postedAtMs: new Date(r.at).getTime() });
   }
   return out;
 }
@@ -243,7 +263,8 @@ async function loadMessages(
  *   subAll     — and an ALL ticker covers it on an entry that is not mention-only, so any message not their own counts.
  * A worker for whom none holds is not watched.
  */
-type Watcher = { floor: number; workerId: string; tokens: string[]; immediate: boolean; subCovers: boolean; subAll: boolean };
+/** `standbyHead` is set for a worker on standby: only a direct mention from a person or that head can wake it (ticks are not due). */
+type Watcher = { floor: number; workerId: string; tokens: string[]; immediate: boolean; subCovers: boolean; subAll: boolean; standbyHead?: string | null };
 
 const BROADCAST = BROADCAST_MENTION_TOKENS as readonly string[];
 
@@ -251,6 +272,7 @@ const BROADCAST = BROADCAST_MENTION_TOKENS as readonly string[];
 function mattersTo(m: RoutedMessage, w: Watcher): boolean {
   if (m.authorWorkerId === w.workerId) return false;
   const direct = m.mentions.some((t) => w.tokens.includes(t));
+  if (w.standbyHead) return direct && (m.humanAuthored === true || m.authorWorkerId === w.standbyHead);
   const broadcast = !direct && m.mentions.some((t) => BROADCAST.includes(t));
   if (w.immediate && (direct || (broadcast && m.broadcastWakes))) return true;
   if (w.subCovers && (direct || broadcast)) return true;
@@ -260,6 +282,7 @@ function mattersTo(m: RoutedMessage, w: Watcher): boolean {
 /** The SQL twin of {@link mattersTo}, for the rows still worth fetching: one OR-ed term per unmet watcher. */
 function candidatesFor(unmet: Watcher[]): Prisma.Sql {
   const terms = unmet.map((w) => {
+    if (w.standbyHead) return standbyAdmitsSql(Prisma.sql`n.data`, Prisma.sql`${w.tokens}::text[]`, w.standbyHead);
     const notOwn = Prisma.sql`(n.data->>'authorWorkerId') IS DISTINCT FROM ${w.workerId}`;
     const parts: Prisma.Sql[] = [];
     if (w.immediate || w.subCovers) parts.push(Prisma.sql`jsonb_exists_any(n.data->'mentions', ${w.tokens}::text[])`);
@@ -338,7 +361,7 @@ export async function computeDueWakes(args: {
   const nextAfter = hasMore ? workers[workers.length - 1]!.id : null;
   const ids = workers.map((w) => w.id);
 
-  const [wakeSettings, availability, activity, subs, deliveryChannels, deliveryTicks, readStates, deliveryTasks] = await Promise.all([
+  const [wakeSettings, availability, activity, subs, deliveryChannels, deliveryTicks, readStates, deliveryTasks, wakeAcks] = await Promise.all([
     db.workerWakeSettings.findMany({ where: { workerId: { in: ids } } }),
     db.workerAvailability.findMany({ where: { workerId: { in: ids } } }),
     loadWorkersActivity(ctx, ids, now),
@@ -351,9 +374,16 @@ export async function computeDueWakes(args: {
     db.channelReadState.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, channelId: true, lastSeenSeq: true } }),
     // #1708: the latest task-event delivery per worker, for the floor (cor:agt:080:13).
     db.workerDeliveryTaskEvent.groupBy({ by: ['workerId'], where: { workerId: { in: ids }, deliveredAt: { not: null } }, _max: { deliveredAt: true } }),
+    // #2072 (R53): the latest acknowledged wake per worker. A textless wake moves no mark, so its receipt is the floor's clock.
+    db.workerWakeAck.groupBy({ by: ['workerId'], where: { workerId: { in: ids } }, _max: { ackedAt: true } }),
   ]);
   const taskDeliveredOf = new Map(deliveryTasks.map((d) => [d.workerId, d._max.deliveredAt?.getTime() ?? 0]));
+  const wakeAckedOf = new Map(wakeAcks.map((d) => [d.workerId, d._max.ackedAt?.getTime() ?? 0]));
   const settingsOf = new Map(wakeSettings.map((s) => [s.workerId, s]));
+  // S7: who is on standby, evaluated in this read (never cached), in one query.
+  const standbyRows = await db.$queryRaw<Array<{ id: string; head: string }>>(Prisma.sql`
+    SELECT w.id, w.reports_to_worker_id AS head FROM workers w WHERE w.id IN (${Prisma.join(ids)}) AND ${onStandbySql(Prisma.sql`w`)}`);
+  const standbyHeadOf = new Map(standbyRows.map((r) => [r.id, r.head]));
   const availabilityOf = new Map(availability.map((a) => [a.workerId, a]));
   const subsOf = new Map<string, typeof subs>();
   for (const s of subs) subsOf.set(s.workerId, [...(subsOf.get(s.workerId) ?? []), s]);
@@ -424,7 +454,7 @@ export async function computeDueWakes(args: {
       if (!mentionsImmediate && !subCovers) continue;
       watchersOf.set(c.channelId, [
         ...(watchersOf.get(c.channelId) ?? []),
-        { floor: Math.max(c.seen, c.delivered), workerId: w.id, tokens: own ? [own] : [], immediate: mentionsImmediate, subCovers, subAll },
+        { floor: Math.max(c.seen, c.delivered), workerId: w.id, tokens: own ? [own] : [], immediate: mentionsImmediate, subCovers, subAll, standbyHead: standbyHeadOf.get(w.id) ?? null },
       ]);
     }
   }
@@ -446,26 +476,30 @@ export async function computeDueWakes(args: {
       appId: app.id,
       workerId,
       requester,
-      channels: wake.channels.map((c) => ({ channelId: c.channelId, incarnation: c.incarnation, through: c.throughSeq })),
+      // #2072 (R53): no channel range. The display channels stay on the wake; the proof carries the wake's identity.
+      channels: [],
       ticks: wake.reasons.flatMap((r) => (r.kind === 'TICK' ? [{ tickerId: r.tickerId, k: r.k }] : [])),
       tasks: tasksOf(wake),
       exempt: wake.exempt,
       issuedAt: now.getTime(),
+      wakeKey: wakeIdentity(identityOf(wake)),
     });
-  const issued: Array<DueWakeOut & { exempt: boolean }> = [];
+  const issued: Array<Omit<DueWakeOut, 'timing'> & { exempt: boolean }> = [];
   const dormant: Array<{ workerId: string; mentions: number }> = [];
 
   for (const w of workers) {
     const ws = settingsOf.get(w.id);
     const own = mentionTokenOf(w.name);
     const workerTokens = own ? [own] : [];
+    const standbyHead = standbyHeadOf.get(w.id) ?? null;
     const inputs: ChannelInput[] = (countedOf.get(w.id) ?? []).map((c) => {
       const lo = Math.max(c.seen, c.delivered);
       return {
         channelId: c.channelId,
         incarnation: channelOf.get(c.channelId)!.incarnation,
         mentionOnly: c.mentionOnly,
-        messages: (messagesOf.get(c.channelId) ?? []).filter((m) => m.seq > lo && m.seq <= c.head),
+        messages: (messagesOf.get(c.channelId) ?? []).filter((m) => m.seq > lo && m.seq <= c.head
+          && (!standbyHead || (m.mentions.some((t) => workerTokens.includes(t)) && (m.humanAuthored === true || m.authorWorkerId === standbyHead)))),
       };
     });
 
@@ -476,8 +510,10 @@ export async function computeDueWakes(args: {
       continue; // never due
     }
     if (ws?.pausedUntil && ws.pausedUntil.getTime() > now.getTime()) continue; // a pause silences ticks AND mentions (Q2)
+    if (s7Available() && ws?.isolatedUntil && ws.isolatedUntil.getTime() > now.getTime()) continue; // S7 R85: a live isolation, its own state
 
-    const subscriptions: SubscriptionInput[] = (subsOf.get(w.id) ?? []).map((s) => ({
+    // S7: a TICK is not one of the four kinds a standby worker is sent.
+    const subscriptions: SubscriptionInput[] = (standbyHead ? [] : subsOf.get(w.id) ?? []).map((s) => ({
       ticker: {
         id: s.ticker.id,
         anchorAt: s.ticker.anchorAt,
@@ -499,7 +535,7 @@ export async function computeDueWakes(args: {
       subscriptions,
       tasks: tasksFor(w.id)
         .slice(0, WAKE_TASK_REASONS_MAX)
-        .map(({ taskId, eventId, chainIndex, event, title }) => ({ taskId, eventId, chainIndex, event, title })),
+        .map(({ taskId, eventId, chainIndex, event, title, at, standbyHeld }) => ({ taskId, eventId, chainIndex, event, title, atMs: at.getTime(), ...(standbyHeld ? { standbyHeld } : {}) })),
       now,
     });
     if (!wake) continue;
@@ -510,6 +546,7 @@ export async function computeDueWakes(args: {
       ...deliveryChannels.filter((d) => d.workerId === w.id).map((d) => d.deliveredAt.getTime()),
       ...deliveryTicks.filter((d) => d.workerId === w.id).map((d) => d.ackedAt.getTime()),
       taskDeliveredOf.get(w.id) ?? 0,
+      wakeAckedOf.get(w.id) ?? 0,
     );
     if (last > 0 && now.getTime() - last < floorMs) continue;
 
@@ -542,7 +579,12 @@ export async function computeDueWakes(args: {
   );
   let withheld = 0;
   const wakes: DueWakeOut[] = [];
-  const passes = (i: (typeof issued)[number]) => { const { exempt: _e, ...out } = i; wakes.push(out); };
+  const deliverySettings = await loadDeliverySettings(db, app.id);
+  const passes = (i: (typeof issued)[number]) => {
+    const { exempt: _e, ...out } = i;
+    const anchorMs = i.wake.anchorAtMs ?? now.getTime();
+    wakes.push({ ...out, timing: { anchorAt: new Date(anchorMs), ...batchTiming(deliverySettings, { oldestPostedAt: new Date(anchorMs) }) } });
+  };
   if (issued.length > 0) {
     await db.$transaction(async (tx) => {
       // #1708 (Riana P2-1 on #1859): task reasons are decided again HERE, under the authority anchors a revoker takes
@@ -591,11 +633,11 @@ export async function computeDueWakes(args: {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + app.id}, 0))`;
       const used = (await tx.appWakeDay.findUnique({ where: { appId_day: { appId: app.id, day } } }))?.wakes ?? 0;
       const cutoff = toNaiveUtc(new Date(now.getTime() - WAKE_PROOF_MAX_AGE_MS));
-      const rows = await tx.$queryRaw<Array<{ worker_id: string; wake_key: string; wake: WorkerWake }>>(Prisma.sql`
-        SELECT worker_id, wake_key, wake FROM app_wake_reservations WHERE app_id = ${app.id} AND reserved_at > ${cutoff}::timestamp`);
+      const rows = await tx.$queryRaw<Array<{ worker_id: string; wake_key: string; wake: WorkerWake; absorbed_keys: string[] }>>(Prisma.sql`
+        SELECT worker_id, wake_key, wake, absorbed_keys FROM app_wake_reservations WHERE app_id = ${app.id} AND reserved_at > ${cutoff}::timestamp`);
       const live = new Map(rows.map((r) => [r.worker_id, r]));
       let consumed = used + live.size;
-      const reserve: Array<{ workerId: string; key: string; wake: WorkerWake }> = [];
+      const reserve: Array<{ workerId: string; key: string; wake: WorkerWake; absorbed?: string[] }> = [];
       wakes.length = 0;
       withheld = 0;
       for (const i of issued) {
@@ -635,12 +677,26 @@ export async function computeDueWakes(args: {
           // or its proof lapses: a second, different wake would be a second delivery against one allowance (and
           // inside one floor), which no acknowledgement-side refusal can undo once the nudge is sent (Diego cycle 3,
           // P2-1). What arrived since stays due, and is the next wake after this one is consumed.
+          // #2069: but a reason that fell due AFTER the outstanding wake was issued (a tick, a task event) is not "what
+          // arrived since" to wait on a consumer that may never come: an unacknowledged MENTION wake would otherwise hide
+          // every later TICK and TASK for as long as it stays outstanding (a dark team). The reservation is rewritten to
+          // the current wake: still ONE reservation and ONE slot for the worker, and the old proof still acknowledges
+          // exactly what it names.
+          if (absorbsNewReason(have.wake, i.wake)) {
+            // The descendant remembers every key it absorbed: that lineage, not "some reservation exists", is what lets an
+            // earlier proof of the same wake be acknowledged without a second charge (acknowledge.ts).
+            reserve.push({ workerId: i.workerId, key: wakeIdentity(identityOf(i.wake)), wake: i.wake, absorbed: [...new Set([...have.absorbed_keys, have.wake_key])] });
+            passes(i);
+            continue;
+          }
           if (have.wake_key !== wakeIdentity(identityOf(i.wake))) {
+            // A reservation made before R63 carries no anchor: it takes the fresh one. One that has it keeps it (never restarted).
+            have.wake.anchorAtMs ??= i.wake.anchorAtMs ?? null;
             i.wake = have.wake;
             i.exempt = have.wake.exempt;
             i.proof = signFor(i.workerId, have.wake);
           }
-          reserve.push({ workerId: i.workerId, key: have.wake_key, wake: have.wake });
+          reserve.push({ workerId: i.workerId, key: have.wake_key, wake: have.wake, absorbed: have.absorbed_keys });
           passes(i);
           continue;
         }
@@ -652,12 +708,13 @@ export async function computeDueWakes(args: {
         passes(i);
       }
       const nowNaive = toNaiveUtc(now);
-      for (const { workerId, key, wake } of reserve) {
+      for (const { workerId, key, wake, absorbed } of reserve) {
         await tx.$executeRaw(Prisma.sql`
-          INSERT INTO app_wake_reservations (worker_id, app_id, reserved_at, wake_key, wake)
-          VALUES (${workerId}, ${app.id}, ${nowNaive}::timestamp, ${key}, ${JSON.stringify(wake)}::jsonb)
+          INSERT INTO app_wake_reservations (worker_id, app_id, reserved_at, wake_key, wake, absorbed_keys)
+          VALUES (${workerId}, ${app.id}, ${nowNaive}::timestamp, ${key}, ${JSON.stringify(wake)}::jsonb,
+                  ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(absorbed ?? [])}::jsonb)))
           ON CONFLICT (worker_id) DO UPDATE SET reserved_at = EXCLUDED.reserved_at, app_id = EXCLUDED.app_id,
-            wake_key = EXCLUDED.wake_key, wake = EXCLUDED.wake`);
+            wake_key = EXCLUDED.wake_key, wake = EXCLUDED.wake, absorbed_keys = EXCLUDED.absorbed_keys`);
       }
     });
   }

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * Phase 3a-2 (US3) of the Station -> App migration: GraphQL App-shaped
  * surface tests.
@@ -1288,7 +1289,7 @@ describe('appNodes', () => {
       },
     });
     await db.worker.create({
-      data: {
+      data: { ...WORKER_SIGNATURE_DEFAULTS,
         appId: app.id,
         agentId,
         name: `Iris-${Date.now()}`,

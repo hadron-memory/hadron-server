@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1009 / #1006 — the MCP surface tells the truth about itself.
  *
@@ -75,7 +76,7 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'owner' } });
   worker = await db.worker.create({
-    data: { appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' },
   });
 });
 

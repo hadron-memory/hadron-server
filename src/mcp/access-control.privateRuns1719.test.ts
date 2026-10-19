@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /** #1719 R5a: principal-kind refusal, independent of memory shape or trigger input. */
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -51,7 +52,7 @@ for (const scoped of [false, true]) {
     it('retains private reach for direct credentials and user-bound worker sessions', async () => {
       const f = await fixture('private', scoped);
       const sessionMemory = await db.memory.create({ data: { name: 'Session', urn: 'r5.test:session', class: 'app', organizationId: f.org.id, appId: f.app.id } });
-      const worker = await db.worker.create({ data: { appId: f.app.id, agentId: f.agent.id, name: 'Owner worker', slug: 'owner-worker', heldByUserId: f.owner.id } });
+      const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: f.app.id, agentId: f.agent.id, name: 'Owner worker', slug: 'owner-worker', heldByUserId: f.owner.id } });
       const session = await db.session.create({ data: { id: generateId(), appId: f.app.id, agentId: f.agent.id, workerId: worker.id, userId: f.owner.id, memoryId: sessionMemory.id } });
       for (const sessionId of [undefined, session.id]) {
         const auth = { ...f.auth, clientId: 'user:owner', sessionId };
@@ -145,7 +146,7 @@ it('personal dependencies remain in a run prompt, while own user/worker-session 
     const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.owner.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:r5.test:flow:entry' } });
     if (cls === 'personal') expect(await makeProdRunDeps(db).assemble(run, run.entryNodeUrn, {})).toContain('unchanged');
     const sessionMem = await db.memory.create({ data: { name: 'Work', urn: 'r5.test:work', class: 'app', appId: f.app.id, organizationId: f.org.id } });
-    const worker = await db.worker.create({ data: { appId: f.app.id, agentId: f.agent.id, name: 'W', slug: 'w', heldByUserId: f.owner.id } });
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: f.app.id, agentId: f.agent.id, name: 'W', slug: 'w', heldByUserId: f.owner.id } });
     const session = await db.session.create({ data: { id: generateId(), appId: f.app.id, workerId: worker.id, agentId: f.agent.id, memoryId: sessionMem.id, userId: f.owner.id } });
     for (const sessionId of [undefined, session.id]) {
       const prompt = await resolvers.Mutation.runTask({}, { nodeRef: run.entryNodeUrn }, { db, userId: f.owner.id, clientId: 'user:owner', appId: f.app.id, sessionId, roles: [] });

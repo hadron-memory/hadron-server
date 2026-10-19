@@ -136,7 +136,7 @@ export async function dueWakesFor(
         ticker: r.kind === 'TICK' ? tickers.get(r.tickerId) ?? null : null,
         // #1708: the task is gated in computeDueWakes (a reader of the App's tasks only), so it is shown as is.
         task: r.kind === 'TASK'
-          ? { id: r.taskId, eventId: r.eventId, chainIndex: r.chainIndex, event: r.event, title: r.title, ref: taskReasonRef(r.taskId, r.event) }
+          ? { id: r.taskId, eventId: r.eventId, chainIndex: r.chainIndex, event: r.event, title: r.title, ref: taskReasonRef(r.taskId, r.event), ...(r.standbyHeld ? { standbyHeld: r.standbyHeld } : {}) }
           : null,
       })),
       channels: w.wake.channels.map((c) => ({
@@ -149,6 +149,9 @@ export async function dueWakesFor(
       unreadMentions: w.wake.unreadMentions,
       availability: w.availability,
       proof: w.proof,
+      anchorAt: w.timing.anchorAt,
+      deliverAfter: w.timing.deliverAfter,
+      busyDeadline: w.timing.busyDeadline,
     })),
     dormant: result.dormant.map((d) => ({ worker: workers.get(d.workerId)!, mentions: d.mentions })),
     pageInfo: { hasNextPage: result.nextAfter !== null, endCursor: result.nextAfter },

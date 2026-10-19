@@ -1,7 +1,9 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /** #2025 / cor:agt:080:05,:19 — settings and the real S1/S5 typed timing seams. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { setS7AvailableForTest } from '../../../lib/tickers/s7Availability.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
@@ -34,7 +36,7 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId, userId: owner.id, role: 'owner' } });
   await db.appMember.create({ data: { appId, userId: member.id, role: 'member' } });
   agentId = (await db.agent.create({ data: { name: 'Agent', urn: `${org.urn}:agent`, organizationId: orgId } })).id;
-  workerId = (await db.worker.create({ data: { appId, agentId, name: 'Builder', slug: 'builder', heldByUserId: manager.id, heldAt: new Date() } })).id;
+  workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId, name: 'Builder', slug: 'builder', heldByUserId: manager.id, heldAt: new Date() } })).id;
 });
 
 describe('delivery settings #2025', () => {
@@ -88,9 +90,16 @@ describe('delivery settings #2025', () => {
     await M.createTicker({}, { appRef: appId, input: { name: 'Fast', cadenceSeconds: 120 } }, ctx(member.id));
     await code(set({ batchWindowSeconds: 180 }), 'TICKER_SETTINGS_CONFLICT');
   });
-  it('does not expose an enabled-but-ineffective standby switch', async () => {
-    await code(set({ busyDelaySeconds: 500, standbyEnabled: true }), 'DELIVERY_STANDBY_UNAVAILABLE');
+  it('S7a is inert: enabling standby is refused with the typed error and nothing is written', async () => {
+    await code(set({ standbyEnabled: true }), 'DELIVERY_STANDBY_UNAVAILABLE');
     expect(await set({ standbyEnabled: false })).toEqual(defaults);
+  });
+  it('S7: the standby switch is accepted and effective once on (S7b); off restores the defaults', async () => {
+    setS7AvailableForTest(true);
+    try {
+    expect(await set({ standbyEnabled: true })).toEqual({ ...defaults, standbyEnabled: true, standbyEffective: true });
+    expect(await set({ standbyEnabled: false })).toEqual(defaults);
+    } finally { setS7AvailableForTest(false); }
   });
   it('refuses ordinary members, keys, impersonation, invalid bindings and foreign Apps', async () => {
     await code(set({ busyDelaySeconds: 500 }, ctx(member.id)), 'FORBIDDEN');
