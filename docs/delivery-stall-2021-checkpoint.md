@@ -41,3 +41,7 @@ R56 confirms that either committed read or delivery coverage ends the episode. R
 The current-alarm read seam returns null for a retired/replaced channel even before the next write reconciliation; a read itself appends nothing. The lifecycle transaction/evaluator still needs integration before activation. S13 should project this canonical currentness rather than treating a retained anchor row as an active alarm. R65 adds no draft-cleared event.
 
 The three new Worker-reference tables install the #1162 MVCC fence through the additive S5 SQL source. The already-deployed #1162 migration remains unchanged; its closed inventory test includes the newer source. This closes the first draft CI failure.
+
+## Migration smoke baseline
+
+The smoke workflow now applies main's post-push SQL while main's prisma tree is still checked out, before restoring this PR and deploying its new migration. A schema-only baseline had omitted the already-deployed #1162 function, causing a false 42883 failure when the new S5 triggers called it. An isolated main-to-S5 migrate-deploy replay and the workflow's unchanged drift verification pass; the disposable smoke database was removed. Captured at `hrn:node:hadronmemory.com:hadron-server:findings:migration-smoke-baseline-needs-main-raw-sql`.
