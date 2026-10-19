@@ -13,7 +13,7 @@ import { lockEdgeEndpointMemories } from './edgeEndpointLock.js';
 import { generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
-import { archiveTombstone } from './tombstoneArchive.js';
+import { archiveTombstone, discoverArchivePlan, validateArchivePlan } from './tombstoneArchive.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -364,7 +364,9 @@ describe('reserving over a deleted spec (@codex P2 on #1452)', () => {
     const pause = new Promise<void>((resolve) => { resume = resolve; });
     const archive = db.$transaction(async (tx) => {
       await lockEdgeEndpointMemories(tx, [draft.id]);
-      await acquireLockSet(tx, [...ancestorLocs(parent.loc), parent.loc].map((loc) => ({ memoryId: draft.id, loc })));
+      const plan = await discoverArchivePlan(tx, draft.id, parent.loc);
+      await acquireLockSet(tx, [...ancestorLocs(parent.loc), parent.loc, ...plan.descendantLocs].map((loc) => ({ memoryId: draft.id, loc })));
+      await validateArchivePlan(tx, plan);
       const gatedTx = new Proxy(tx, {
         get(target, key, receiver) {
           if (key !== 'node') return Reflect.get(target, key, receiver);
@@ -381,7 +383,7 @@ describe('reserving over a deleted spec (@codex P2 on #1452)', () => {
           });
         },
       });
-      await archiveTombstone(gatedTx, { id: parent.id, loc: parent.loc, memoryId: draft.id });
+      await archiveTombstone(gatedTx, { id: parent.id, loc: parent.loc, memoryId: draft.id }, plan);
     }, { timeout: 20_000 });
     await scannedPromise;
     try {

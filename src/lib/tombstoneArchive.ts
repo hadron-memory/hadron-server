@@ -11,6 +11,50 @@ export function archivedTombstoneLoc(loc: string, id: string): string {
   return `${loc}__deleted-${id}`;
 }
 
+/** Speculative metadata only, authorized by the caller before discovery. */
+export type TombstoneArchivePlan = {
+  memoryId: string; loc: string;
+  occupant: { id: string; deletedAt: Date | null } | null;
+  descendantLocs: string[];
+};
+export class ArchivePlanStaleError extends Error {
+  constructor() { super('Archive address plan changed'); this.name = 'ArchivePlanStaleError'; }
+}
+export class ArchivePlanExhaustedError extends Error {
+  constructor() { super('Node addresses changed concurrently; re-read and retry.'); this.name = 'ArchivePlanExhaustedError'; }
+}
+
+/** Discover before the FIRST address acquisition, never extend a held set. */
+export async function discoverArchivePlan(tx: Prisma.TransactionClient, memoryId: string, loc: string): Promise<TombstoneArchivePlan> {
+  const occupant = await tx.node.findUnique({ where: { loc_memoryId: { loc, memoryId } }, select: { id: true, deletedAt: true } });
+  const descendants = await tx.node.findMany({ where: { memoryId, loc: { startsWith: `${loc}:` } }, select: { loc: true }, orderBy: { loc: 'asc' } });
+  return { memoryId, loc, occupant, descendantLocs: descendants.map(n => n.loc) };
+}
+
+/** Under the root and complete initial set, before any mutation. READ COMMITTED supplies a fresh view. */
+export async function validateArchivePlan(tx: Prisma.TransactionClient, plan: TombstoneArchivePlan): Promise<void> {
+  const fresh = await discoverArchivePlan(tx, plan.memoryId, plan.loc);
+  if (fresh.occupant?.id !== plan.occupant?.id ||
+      fresh.occupant?.deletedAt?.getTime() !== plan.occupant?.deletedAt?.getTime() ||
+      JSON.stringify(fresh.descendantLocs) !== JSON.stringify(plan.descendantLocs)) throw new ArchivePlanStaleError();
+}
+
+/** Stale metadata only: rollback completes before the next attempt. One outer deadline,
+ * never retry permission errors, 40P01, timeouts, or an already-mutated operation. */
+export async function withArchivePlanRetries<T>(attempt: (remainingMs: number) => Promise<T>, budgetMs = 120_000): Promise<T> {
+  const entered = performance.now();
+  for (let i = 0; i < 3; i++) {
+    const remainingMs = Math.ceil(budgetMs - (performance.now() - entered));
+    if (remainingMs <= 0) throw new Error('Transaction timed out');
+    try { return await attempt(remainingMs); }
+    catch (error) {
+      if (!(error instanceof ArchivePlanStaleError)) throw error;
+      if (i === 2) throw new ArchivePlanExhaustedError();
+    }
+  }
+  throw new Error('Unreachable archive retry state');
+}
+
 /**
  * Re-stamp a TOMBSTONE and deleted descendant branches under
  * {@link archivedTombstoneLoc} so a fresh node can take its address without
@@ -42,19 +86,20 @@ export function archivedTombstoneLoc(loc: string, id: string): string {
 export async function archiveTombstone(
   tx: Prisma.TransactionClient,
   tombstone: { id: string; loc: string; memoryId: string },
+  plan: TombstoneArchivePlan,
 ): Promise<string> {
   const { id, loc, memoryId } = tombstone;
+  if (plan.memoryId !== memoryId || plan.loc !== loc || plan.occupant?.id !== id) throw new Error('Archive plan does not cover its target');
   const archived = archivedTombstoneLoc(loc, id);
   const addresses = await tx.node.findMany({
     where: { memoryId, loc: { startsWith: `${loc}:` } },
     select: { loc: true },
   });
-  // The root address lock held by the caller fences new descendants. Existing
-  // descendants can still be deleted or revived at their own addresses, so
-  // acquire those keys in root-to-leaf order and re-read their rows under a
-  // lock. A deletion that commits after the first list is then classified
-  // from its committed state, not the stale list (@codex P2, PR #1494).
-  await acquireLockSet(tx, addresses.map((node) => ({ memoryId, loc: node.loc })));
+  // The root now fences new descendants. Verify that no helper can expand the
+  // validated set; this invariant failure is NOT a retry sentinel after eviction.
+  const planned = new Set(plan.descendantLocs);
+  if (addresses.some(n => !planned.has(n.loc))) throw new Error('Archive address coverage changed after validation');
+  await acquireLockSet(tx, addresses.map(node => ({ memoryId, loc: node.loc })));
   const prefix = `${loc}:`;
   const descendants = await tx.$queryRaw<Array<{ id: string; loc: string; deletedAt: Date | null }>>`
     SELECT id, loc, deleted_at AS "deletedAt"
