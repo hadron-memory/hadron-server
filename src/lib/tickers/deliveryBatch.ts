@@ -53,11 +53,15 @@ const oneLine = (s: string): string => s.replace(/\r\n|[\r\n\u2028\u2029]/g, ' '
 /**
  * The batches due now for the workers registered on `hostId`. `ctx` is the caller (a host key); the caller's reading
  * right is one of the two readers a channel must pass.
+ *
+ * SELF MODE (R57, cor:agt:080:22): `hostId` null selects exactly one worker, `workerIds: [self]`, WITHOUT the host-registration
+ * join (a worker no host launches is still entitled to its own batches). The caller's gate (a live session of that very
+ * worker) is the resolver's and runs before this; every other rule is the same pipeline.
  */
 export async function loadDeliveryBatches(args: {
   ctx: Context;
   app: AppLike;
-  hostId: string;
+  hostId: string | null;
   now?: Date;
   workerIds?: string[] | null;
   first?: number | null;
@@ -68,15 +72,23 @@ export async function loadDeliveryBatches(args: {
   const now = args.now ?? new Date();
   const first = Math.min(Math.max(args.first ?? DELIVERY_BATCHES_PAGE_DEFAULT, 1), DELIVERY_BATCHES_PAGE_MAX);
 
-  const registration = await db.hostRegistration.findFirst({ where: { appId: app.id, hostId, lostAt: null }, select: { id: true } });
-  if (!registration) return { batches: [], nextAfter: null };
+  let registrationId: string | null = null;
+  if (hostId === null) {
+    if (!args.workerIds || args.workerIds.length !== 1) throw new Error('self mode selects exactly one worker');
+  } else {
+    const registration = await db.hostRegistration.findFirst({ where: { appId: app.id, hostId, lostAt: null }, select: { id: true } });
+    if (!registration) return { batches: [], nextAfter: null };
+    registrationId = registration.id;
+  }
   const workers = await db.worker.findMany({
     where: {
       appId: app.id,
       retiredAt: null,
-      launchableVia: { some: { registrationId: registration.id } },
-      ...(args.workerIds ? { id: { in: args.workerIds } } : {}),
-      ...(args.after ? { id: { gt: args.after } } : {}),
+      ...(registrationId ? { launchableVia: { some: { registrationId } } } : {}),
+      AND: [
+        ...(args.workerIds ? [{ id: { in: args.workerIds } }] : []),
+        ...(args.after ? [{ id: { gt: args.after } }] : []),
+      ],
     },
     orderBy: { id: 'asc' },
     take: first + 1,
