@@ -159,6 +159,20 @@ function checkQuietHours(input: unknown): Prisma.InputJsonObject {
   return v.value as unknown as Prisma.InputJsonObject;
 }
 
+/** The closed set of ticker reasons (cor:agt:080:01). Stored kebab-case; the GraphQL enum spells them in capitals. */
+export const TICKER_REASONS = ['read-team-channel', 'every-tick'] as const;
+function checkReasons(list: unknown): string[] {
+  if (!Array.isArray(list) || list.length === 0) throw badInput('reasons must name at least one reason: a ticker with none would never fire.');
+  const out = new Set<string>();
+  for (const x of list) {
+    const k = typeof x === 'string' ? x.toLowerCase().replace(/_/g, '-') : '';
+    if (!(TICKER_REASONS as readonly string[]).includes(k)) throw badInput(`reasons are from: ${TICKER_REASONS.join(', ')}.`);
+    out.add(k);
+  }
+  return TICKER_REASONS.filter((k) => out.has(k));
+}
+const reasonEnum = (k: string) => k.toUpperCase().replace(/-/g, '_');
+
 function checkRelevance(r: unknown): string {
   if (typeof r !== 'string' || !(TICKER_RELEVANCE as readonly string[]).includes(r)) {
     throw badInput(`relevance is one of ${TICKER_RELEVANCE.join(', ')}.`);
@@ -285,6 +299,7 @@ type TickerInput = {
   quietHours?: unknown;
   channelIds?: string[] | null;
   relevance?: string | null;
+  reasons?: string[] | null;
   enabled?: boolean | null;
 };
 type TickerPatch = Partial<TickerInput> & { clearQuietHours?: boolean | null; clearChannels?: boolean | null };
@@ -340,6 +355,7 @@ const crudMutations = {
     const quiet = input.quietHours == null ? null : checkQuietHours(input.quietHours);
     const channelIds = input.channelIds == null ? [] : await checkChannels(ctx, input.channelIds);
     const relevance = input.relevance == null ? 'ALL' : checkRelevance(input.relevance);
+    const reasons = input.reasons == null ? ['read-team-channel'] : checkReasons(input.reasons);
     const anchorAt = input.anchorAt == null ? new Date() : parseDate(input.anchorAt, 'anchorAt');
     return writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
       await lockAppTickers(tx, fresh.id);
@@ -359,6 +375,7 @@ const crudMutations = {
         data: {
           appId: fresh.id, name, slug, cadenceSeconds: cadence, anchorAt,
           quietHours: quiet ?? Prisma.DbNull, channelIds, relevance,
+          reasons,
           enabled: input.enabled ?? true,
           // The owner is whoever made the call, never an argument (cor:agt:080:18).
           ownerWorkerId: actor.kind === 'worker' ? actor.workerId : null,
@@ -377,6 +394,7 @@ const crudMutations = {
     const quiet = input.quietHours == null ? undefined : checkQuietHours(input.quietHours);
     const channelIds = input.channelIds == null ? undefined : await checkChannels(ctx, input.channelIds);
     const relevance = input.relevance == null ? undefined : checkRelevance(input.relevance);
+    const reasons = input.reasons == null ? undefined : checkReasons(input.reasons);
     const anchorAt = input.anchorAt == null ? undefined : parseDate(input.anchorAt, 'anchorAt');
     return writeInApp(ctx, app, actor, () => tickerNotFound(ref), async (tx, txCtx, fresh) => {
       // The App-wide lock first: a rename races a create or another rename for the
@@ -393,7 +411,7 @@ const crudMutations = {
       // subscriber. Each must be one the editor could subscribe at the new terms
       // (cor:agt:080:20, R3); otherwise the edit is a way round the subscribe rule.
       const faster = cadence !== undefined && cadence < t.cadenceSeconds;
-      const wider = relevance === 'ALL' && t.relevance !== 'ALL';
+      const wider = (relevance === 'ALL' && t.relevance !== 'ALL') || (reasons !== undefined && reasons.includes('every-tick') && !t.reasons.includes('every-tick'));
       if (faster || wider) {
         await requireSubscribersCovered(tx, txCtx, fresh, actor, t, cadence ?? t.cadenceSeconds, settings);
       }
@@ -406,6 +424,7 @@ const crudMutations = {
           ...(quiet !== undefined ? { quietHours: quiet } : input.clearQuietHours ? { quietHours: Prisma.DbNull } : {}),
           ...(channelIds !== undefined ? { channelIds } : input.clearChannels ? { channelIds: [] } : {}),
           ...(relevance !== undefined ? { relevance } : {}),
+          ...(reasons !== undefined ? { reasons } : {}),
           ...(input.enabled != null ? { enabled: input.enabled } : {}),
           ...updatedStamp(txCtx),
         },
@@ -875,6 +894,7 @@ export const tickerFieldResolvers = {
     },
     app: (t: TickerRow, _: unknown, ctx: Context) => ctx.db.app.findUnique({ where: { id: t.appId } }),
     quietHours: (t: TickerRow) => t.quietHours ?? null,
+    reasons: (t: TickerRow) => t.reasons.map(reasonEnum),
     nextTickAt: (t: TickerRow) => nextTickAfter(t, new Date()),
     lastTickAt: (t: TickerRow) => {
       const k = currentTick(t, new Date());
