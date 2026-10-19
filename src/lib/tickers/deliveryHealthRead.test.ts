@@ -91,3 +91,13 @@ it('R62 excludes retired occupancy from current holds and pending without rewrit
   expect(health).toMatchObject({ pendingMessageCount: 0, heldChannelCount: 0, totalChannels: 0, channels: [], alarm: null });
   expect(await db.agentTeamEvent.count({ where: { appId, type: 'delivery.held' } })).toBe(1);
 });
+
+it('a committed covering read hides the current alarm before write reconciliation, without changing its history', async () => {
+  await run(tx => reconcileDeliveryAlarm(tx, { workerId, candidates: [message('aaa', 1)], now: at(20), hold: null }));
+  const active = await db.workerDeliveryAlarmEpisode.findUniqueOrThrow({ where: { workerId } });
+  await db.channelReadState.create({ data: { workerId, channelId: 'aaa', lastSeenSeq: 1 } });
+  const health = await run(tx => deliveryHealthSnapshot(tx, { appId, workerId, asOf: at(20), pending: pending([]) }));
+  expect(health.alarm).toBeNull();
+  expect(await db.agentTeamEvent.findUnique({ where: { id: active.alarmEventId } })).not.toBeNull();
+  expect(await db.agentTeamEvent.count({ where: { appId, type: 'delivery.resumed' } })).toBe(0);
+});
