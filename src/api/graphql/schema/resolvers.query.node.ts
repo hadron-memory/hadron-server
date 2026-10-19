@@ -42,6 +42,7 @@ import {
   splitNodeUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
+import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -871,13 +872,21 @@ export const nodeQueries = {
 
       const fmt: NodeExportFormat = format ?? 'MD';
 
+      // cor:dmo:150:03 (R40/R47): `full` is the restore export and reads with
+      // resolution off, so a round trip keeps its include tags; a presentation
+      // render (PDF, or `full: false`) reads like any reader, with includes
+      // resolved by the exporter's access. Variables stay as stored in both.
+      const exportContent = fmt === 'PDF' || full === false
+        ? await resolveNodeContent(ctx, node, { mode: 'includes' })
+        : node.content;
+
       // PDF is a presentation render produced by the external hadrontool-pdf
       // service from the node's (already-decrypted) Markdown content. Unlike
       // MD/JSON it is not the canonical round-trippable file, so `full` /
       // `sections` do not apply. Delivered BASE64.
       if (fmt === 'PDF') {
         const markdown =
-          node.content && node.content.trim().length > 0 ? node.content : `# ${node.name}`;
+          exportContent && exportContent.trim().length > 0 ? exportContent : `# ${node.name}`;
         const { base64, bytes } = await renderMarkdownToPdf(markdown, { title: node.name });
         const leaf = node.loc ? node.loc.split(':').pop() || node.loc : node.name || 'node';
         recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
@@ -903,7 +912,7 @@ export const nodeQueries = {
           description: node.description,
           abstract: node.abstract,
           abstractOriginHash: node.abstractOriginHash,
-          content: node.content,
+          content: exportContent,
           tags: deserializeTags(node.tags) as string[],
           seq: node.seq,
           role: node.role,

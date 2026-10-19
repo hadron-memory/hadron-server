@@ -193,3 +193,16 @@ describe('MCP content tools resolve includes like GraphQL (#2041)', () => {
     expect(a1).not.toContain('FOREIGN_SECRET');
   });
 });
+
+describe('exports (cor:dmo:150:03, R40/R47)', () => {
+  it('nodeExport full keeps the include tag for a round trip; full:false resolves like a reader', async () => {
+    await mk('b', 'B');
+    const a = await mk('a', 'x {{> b}} y');
+    const exp = (full: boolean | null) => resolvers.Query.nodeExport({}, { id: a.id, full }, as(reader));
+    expect((await exp(true)).data).toContain('x {{> b}} y');
+    expect((await exp(null)).data).toContain('x {{> b}} y');
+    const presented = (await exp(false)).data as string;
+    expect(presented).toContain('x B y');
+    expect(presented).not.toContain('{{> b}}');
+  });
+});
