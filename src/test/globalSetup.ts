@@ -532,7 +532,7 @@ async function applyTemplateConstraints(client: Client) {
 
 }
 
-async function provisionParallel(admin: Client, base: string, runId: string) {
+export async function provisionParallel(admin: Client, base: string, runId: string) {
   await dropOrphanWorkerDbs(admin, base, runId);
 
   // Snapshot the shared template into a RUN-SCOPED one, while still holding the
@@ -607,7 +607,7 @@ async function provisionParallel(admin: Client, base: string, runId: string) {
  * dropping it there is precisely the bug being fixed. That rule now has no
  * exceptions: a clone this sweep cannot prove is dead is left alone.
  */
-async function dropOrphanWorkerDbs(admin: Client, base: string, runId: string): Promise<void> {
+export async function dropOrphanWorkerDbs(admin: Client, base: string, runId: string): Promise<void> {
   const { rows } = await admin.query<{ datname: string }>('SELECT datname FROM pg_database');
   const datnames = rows.map((r) => r.datname);
 
