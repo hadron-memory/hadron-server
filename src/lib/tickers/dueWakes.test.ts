@@ -252,6 +252,16 @@ describe('#2069 — an outstanding wake absorbs reasons that fall due later', ()
     expect(ids(await due(ctx(manager.id)))).toEqual([]);
   });
 
+  it('control: a mention that only GROWS the outstanding wake does not rewrite it (the new one waits, as before)', async () => {
+    await say(channel, 'first', mention('liam'));
+    const first = (await due(ctx(manager.id))).wakes[0];
+    await say(channel, 'second', mention('liam'));
+    const again = (await due(ctx(manager.id))).wakes[0];
+    const body = (proof: string) => JSON.parse(Buffer.from(proof.split('.')[0]!, 'base64url').toString());
+    expect(body(again.proof).channels).toEqual(body(first.proof).channels);
+    expect(again.channels[0]).toMatchObject({ fromSeq: 1, throughSeq: 1 });
+  });
+
   it('one allowance: the old proof then the new one charge the day once, in either order', async () => {
     for (const oldFirst of [true, false]) {
       await db.$executeRaw`DELETE FROM app_wake_days`;
