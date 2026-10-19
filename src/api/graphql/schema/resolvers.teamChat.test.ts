@@ -1584,3 +1584,27 @@ describe('#1874 — the reply fold on an ENCRYPTED team chat (cor:agt:020:04 has
     expect(env.mentions).toBeUndefined();
   });
 });
+
+describe('#2121 option C UTF-8 post body boundary',()=>{
+ it('accepts exactly 120000 UTF-8 bytes without changing the stored body',async()=>{
+  const body='界'.repeat(40000);
+  expect(Buffer.byteLength(body)).toBe(120000);
+  const out=await post(ctx(appMember.id),{body});
+  expect(out.body).toBe(body);
+ });
+ it('refuses one byte over on both posting doors before any append effects',async()=>{
+  await post(ctx(appMember.id),{body:'seed'});
+  const channel=await db.channel.findFirstOrThrow({where:{memory:{appId:app.id}}});
+  const before={nodes:await db.node.count(),channel:await db.channel.findUnique({where:{id:channel.id}})};
+  const body='界'.repeat(40000)+'x';
+  for(const call of [()=>post(ctx(appMember.id),{body}),()=>M.createChannelMessage({}, {channelRef:channel.id,body},ctx(appMember.id))]){
+   await expect(call()).rejects.toMatchObject({extensions:{code:'TEAM_CHAT_BODY_TOO_LARGE',maxBytes:120000}});
+   expect({nodes:await db.node.count(),channel:await db.channel.findUnique({where:{id:channel.id}})}).toEqual(before);
+  }
+ });
+ it('counts astral UTF-8 bytes rather than JavaScript string length',async()=>{
+  const body='😀'.repeat(30000)+'a';
+  expect(body.length).toBeLessThan(65536);
+  await expect(post(ctx(appMember.id),{body})).rejects.toMatchObject({extensions:{code:'TEAM_CHAT_BODY_TOO_LARGE',maxBytes:120000}});
+ });
+});
