@@ -312,6 +312,13 @@ describe('#2089 child withholding for the newly admitted reader', () => {
     }
   });
 
+  it('keeps #2080\'s independent key-manager gate: the owner-role member (a manager) lists keys, a participant does not', async () => {
+    await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd' } });
+    const parent = await eager(as(boss.id));
+    expect(await App.keys(parent, {}, as(boss.id))).toHaveLength(1);
+    await expect(App.keys(parent, {}, as(cook.id))).rejects.toBeDefined();
+  });
+
   it('never exposes the stored key material through any field the admitted reader can call', async () => {
     const out = JSON.stringify(await readChildren(await eager(as(boss.id)), as(boss.id)));
     expect(out).not.toContain('ciphertext-not-a-real-key');
