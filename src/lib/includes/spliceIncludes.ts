@@ -96,8 +96,11 @@ async function expandTag(
   db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, opts: SpliceOptions,
   tag: IncludeTag, includerMemoryId: string, trail: ReadonlySet<string>, level: number,
 ): Promise<string> {
-  // S3 (#1838) owns "approved" and "signed" qualification: until it lands, no revision qualifies.
-  if (tag.settings.approved || tag.settings.signed) return BROKEN_INCLUDE_NOTICE;
+  // `approved` is a staged build: its qualification is #2083's predicate plus Basil's
+  // newest-approved selector (#2119), wired in a follow-up, so until then no revision
+  // qualifies. `signed` is stored and ignored until the signing ceremony ships
+  // (cor:dmo:150:02, Vera's D7): it serves as if absent, and `approved signed` as `approved`.
+  if (tag.settings.approved) return BROKEN_INCLUDE_NOTICE;
   if (level > MAX_RESOLVE_DEPTH) return BROKEN_INCLUDE_NOTICE;
   let memoryId = includerMemoryId;
   let loc = tag.target;

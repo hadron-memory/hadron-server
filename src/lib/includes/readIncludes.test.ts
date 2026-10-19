@@ -233,14 +233,15 @@ describe('traversal-safe memoization (Xavier GAPS item 3)', () => {
     expect(again).toBe(`BD${BROKEN_INCLUDE_NOTICE}CD${BROKEN_INCLUDE_NOTICE}`);
   });
 
-  it('two revision settings for one target serve two revisions, and approved/signed (S3, #1838) are the notice for now', async () => {
+  it('two revision settings serve two revisions; signed is ignored until signing ships (D7); approved is the staged notice', async () => {
     const t = await mk('t', 'v2');
     await db.nodeRevision.create({
       data: { id: generateId(), nodeId: t.id, memoryId, revNo: 1, loc: 't', name: 't', content: 'v1', tags: [] },
     });
-    await mk('a', '{{> t}} {{> t rev=1}} {{> t rev=9}} {{> t approved}} {{> t signed}}');
+    await mk('a', '{{> t}} {{> t rev=1}} {{> t rev=9}} {{> t signed}} {{> t rev=1 signed}} {{> t approved}} {{> t approved signed}}');
     const out = (await run(NODE_Q, as(reader), { ref: urn('a') })).data as { node: { content: string } };
-    expect(out.node.content).toBe(`v2 v1 ${BROKEN_INCLUDE_NOTICE} ${BROKEN_INCLUDE_NOTICE} ${BROKEN_INCLUDE_NOTICE}`);
+    const N = BROKEN_INCLUDE_NOTICE;
+    expect(out.node.content).toBe(`v2 v1 ${N} v2 v1 ${N} ${N}`);
   });
 
   it('readers with different access in one process never share a result', async () => {
