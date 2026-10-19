@@ -56,3 +56,12 @@ it('S8: an older budget/standby-covered message cannot hide a later uncovered me
   const event = await db.agentTeamEvent.findUniqueOrThrow({ where: { id: result.raised! } });
   expect(event.payload).toMatchObject({ firstPendingSeq: 2, reason: 'draft', terminalId: 'term_s5-test' });
 });
+
+it('loads a nondefault persisted S9 window for the deciding App', async () => {
+  await db.app.update({ where: { id: appId }, data: { deliveryStuckWindowSeconds: 1_800 } });
+  await run(tx => observeDeliveryPolicyThrough(tx, workerId, at(30)));
+  expect(await evaluate(15)).toEqual({ raised: null, resumed: null });
+  expect((await evaluate(30)).raised).toBeTruthy();
+  const event = await db.agentTeamEvent.findFirstOrThrow({ where: { appId, type: 'delivery.stuck' } });
+  expect(event.payload).toMatchObject({ windowSeconds: 1_800 });
+});
