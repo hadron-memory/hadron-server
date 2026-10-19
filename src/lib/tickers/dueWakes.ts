@@ -20,6 +20,7 @@
 // and budget, and are acknowledged per event through the v2 proof.
 
 import { Prisma } from '../../generated/prisma/index.js';
+import { batchTiming, loadDeliverySettings } from './batchTiming.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { getAccessibleMemoryIds, isAppParticipant } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
@@ -65,6 +66,8 @@ export type DueWakeOut = {
   wake: WorkerWake;
   availability: { state: string; reason: string | null; until: Date | null; setAt: Date } | null;
   proof: string;
+  /** R63 (#2017): when the wake may be typed and the latest a busy worker may be made to wait, from the earliest waiting reason. */
+  timing: { anchorAt: Date; deliverAfter: Date; busyDeadline: Date };
 };
 
 export type DueWakesResult = {
@@ -103,7 +106,7 @@ export function defaultWakeBudget(roster: number, selfSubscribeCadenceSeconds: n
 
 type Reader = { manager: boolean; userId: string | null };
 
-type AppLike = { id: string; organizationId: string | null; ownerUserId: string | null };
+export type AppLike = { id: string; organizationId: string | null; ownerUserId: string | null };
 
 /** Workers of the App the caller may read wakes for: all of them for a manager, else the ones the caller holds. */
 async function readableWorkers(
@@ -137,7 +140,7 @@ async function holderParticipates(ctx: Context, app: AppLike, holderId: string):
   return (await isAppParticipant(actor, app)) ? holder : null;
 }
 
-async function holderAccess(
+export async function holderAccess(
   ctx: Context,
   app: AppLike,
   holderId: string,
@@ -158,7 +161,7 @@ async function holderAccess(
   return result;
 }
 
-const mayRead = (set: Set<string> | 'all' | null, memoryId: string): boolean => set === 'all' || (set !== null && set.has(memoryId));
+export const mayRead = (set: Set<string> | 'all' | null, memoryId: string): boolean => set === 'all' || (set !== null && set.has(memoryId));
 
 function envelopeOf(data: unknown): RoutedMessage | null {
   if (!data || typeof data !== 'object') return null;
@@ -185,12 +188,13 @@ async function loadMessages(
   if (head <= lo) return [];
   if (!channel.encrypted) {
     const wanted = only && only.length > 0 ? Prisma.sql`AND (${candidatesFor(only)})` : Prisma.empty;
-    const rows = await db.$queryRaw<Array<{ seq: number; author: string | null; mentions: unknown; bw: boolean | null; mp: boolean | null }>>(Prisma.sql`
+    const rows = await db.$queryRaw<Array<{ seq: number; author: string | null; mentions: unknown; bw: boolean | null; mp: boolean | null; at: Date }>>(Prisma.sql`
       SELECT n.seq::int AS seq,
              n.data->>'authorWorkerId' AS author,
              n.data->'mentions' AS mentions,
              (n.data->>'broadcastWakes') = 'true' AS bw,
-             (n.data->>'managerPost') = 'true' AS mp
+             (n.data->>'managerPost') = 'true' AS mp,
+             n.created_at AS at
       FROM nodes n
       WHERE n.message_channel_id = ${channel.id}
         AND n.node_type = 'chat-message'
@@ -207,10 +211,11 @@ async function loadMessages(
       mentions: Array.isArray(r.mentions) ? (r.mentions as unknown[]).filter((v): v is string => typeof v === 'string') : [],
       broadcastWakes: r.bw === true,
       managerPost: r.mp === true,
+      postedAtMs: new Date(r.at).getTime(),
     }));
   }
-  const rows = await db.$queryRaw<Array<{ seq: number; data: unknown }>>(Prisma.sql`
-    SELECT n.seq::int AS seq, n.data
+  const rows = await db.$queryRaw<Array<{ seq: number; data: unknown; at: Date }>>(Prisma.sql`
+    SELECT n.seq::int AS seq, n.data, n.created_at AS at
     FROM nodes n
     WHERE n.message_channel_id = ${channel.id}
       AND n.node_type = 'chat-message'
@@ -231,7 +236,7 @@ async function loadMessages(
       data = {};
     }
     const m = envelopeOf(data) ?? { seq: 0, authorWorkerId: null, mentions: [], broadcastWakes: false, managerPost: false };
-    out.push({ ...m, seq: r.seq });
+    out.push({ ...m, seq: r.seq, postedAtMs: new Date(r.at).getTime() });
   }
   return out;
 }
@@ -452,7 +457,7 @@ export async function computeDueWakes(args: {
       exempt: wake.exempt,
       issuedAt: now.getTime(),
     });
-  const issued: Array<DueWakeOut & { exempt: boolean }> = [];
+  const issued: Array<Omit<DueWakeOut, 'timing'> & { exempt: boolean }> = [];
   const dormant: Array<{ workerId: string; mentions: number }> = [];
 
   for (const w of workers) {
@@ -498,7 +503,7 @@ export async function computeDueWakes(args: {
       subscriptions,
       tasks: tasksFor(w.id)
         .slice(0, WAKE_TASK_REASONS_MAX)
-        .map(({ taskId, eventId, chainIndex, event, title }) => ({ taskId, eventId, chainIndex, event, title })),
+        .map(({ taskId, eventId, chainIndex, event, title, at }) => ({ taskId, eventId, chainIndex, event, title, atMs: at.getTime() })),
       now,
     });
     if (!wake) continue;
@@ -541,7 +546,12 @@ export async function computeDueWakes(args: {
   );
   let withheld = 0;
   const wakes: DueWakeOut[] = [];
-  const passes = (i: (typeof issued)[number]) => { const { exempt: _e, ...out } = i; wakes.push(out); };
+  const deliverySettings = await loadDeliverySettings(db, app.id);
+  const passes = (i: (typeof issued)[number]) => {
+    const { exempt: _e, ...out } = i;
+    const anchorMs = i.wake.anchorAtMs ?? now.getTime();
+    wakes.push({ ...out, timing: { anchorAt: new Date(anchorMs), ...batchTiming(deliverySettings, { oldestPostedAt: new Date(anchorMs) }) } });
+  };
   if (issued.length > 0) {
     await db.$transaction(async (tx) => {
       // #1708 (Riana P2-1 on #1859): task reasons are decided again HERE, under the authority anchors a revoker takes
@@ -635,6 +645,8 @@ export async function computeDueWakes(args: {
           // inside one floor), which no acknowledgement-side refusal can undo once the nudge is sent (Diego cycle 3,
           // P2-1). What arrived since stays due, and is the next wake after this one is consumed.
           if (have.wake_key !== wakeIdentity(identityOf(i.wake))) {
+            // A reservation made before R63 carries no anchor: it takes the fresh one. One that has it keeps it (never restarted).
+            have.wake.anchorAtMs ??= i.wake.anchorAtMs ?? null;
             i.wake = have.wake;
             i.exempt = have.wake.exempt;
             i.proof = signFor(i.workerId, have.wake);

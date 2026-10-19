@@ -26,7 +26,10 @@ import { currentActor } from '../requestActor.js';
 import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
 import type { AuthorityAnchor } from '../auth/authorityAnchors.js';
 import { toNaiveUtc } from '../sessionActivity.js';
-import { sameRequester, verifyWakeProof, wakeIdentity, WAKE_PROOF_MAX_AGE_MS, type WakeProof, type WakeRequester } from './wakeProof.js';
+import {
+  sameBatchRequester, sameRequester, verifyBatchProof, verifyWakeProof, wakeIdentity, WAKE_PROOF_MAX_AGE_MS,
+  type BatchProof, type BatchRequester, type WakeProof, type WakeRequester,
+} from './wakeProof.js';
 
 export const ACK_MAX_PROOFS = 200;
 
@@ -69,21 +72,14 @@ export async function acknowledgeWakes(args: {
   // (findings:prisma-naive-timestamp-raw-sql).
   const nowNaive = toNaiveUtc(now);
   const by = currentActor();
-  const ackedBy = {
+  const ackedBy: AckedBy = {
     ackedByUserId: 'userId' in requester ? requester.userId : null,
     ackedByWorkerId: by.workerId ?? null,
     ackedByAppKeyId: 'appKeyId' in requester ? requester.appKeyId : null,
   };
 
-  // The authority the acknowledgement rests on, anchored BEFORE any row or advisory lock (Diego cycle 2, P2-1): every
-  // App in the batch, its org and its owner. Revokers of that authority take the same anchors exclusively.
   const appIds = [...new Set(proofs.map((p) => p.appId))].sort();
-  const apps = await ctx.db.app.findMany({ where: { id: { in: appIds } }, select: { id: true, organizationId: true, ownerUserId: true } });
-  const anchors: AuthorityAnchor[] = apps.flatMap((a) => [
-    { kind: 'app' as const, id: a.id },
-    ...(a.organizationId ? [{ kind: 'org' as const, id: a.organizationId }] : []),
-    ...(a.ownerUserId ? [{ kind: 'user' as const, id: a.ownerUserId }] : []),
-  ]);
+  const anchors = await authorityAnchorsOf(ctx, appIds);
 
   try {
     return await withAuthorizedTx(ctx, anchors, async () => undefined, (tx, txCtx) => writeAcks(tx, txCtx));
@@ -120,31 +116,7 @@ export async function acknowledgeWakes(args: {
       for (const c of p.channels) {
         const row = await tx.workerDeliveryChannel.findUnique({ where: { workerId_channelId: { workerId: p.workerId, channelId: c.channelId } } });
         if (!row || row.channelIncarnation !== c.incarnation || c.through > row.deliveredThroughSeq) advanced = true;
-        // GREATEST: delivered-through only rises, unless the channel was recreated (then it restarts).
-        await tx.$executeRaw`
-          INSERT INTO worker_delivery_channels
-            (worker_id, channel_id, channel_incarnation, delivered_through_seq, delivered_at,
-             acked_by_user_id, acked_by_worker_id, acked_by_app_key_id)
-          VALUES (${p.workerId}, ${c.channelId}, ${c.incarnation}, ${c.through}, ${nowNaive}::timestamp,
-                  ${ackedBy.ackedByUserId}, ${ackedBy.ackedByWorkerId}, ${ackedBy.ackedByAppKeyId})
-          ON CONFLICT (worker_id, channel_id) DO UPDATE SET
-            delivered_through_seq = CASE WHEN worker_delivery_channels.channel_incarnation = EXCLUDED.channel_incarnation
-                                         THEN GREATEST(worker_delivery_channels.delivered_through_seq, EXCLUDED.delivered_through_seq)
-                                         ELSE EXCLUDED.delivered_through_seq END,
-            -- A repeat of what is already delivered changes NOTHING, neither the ceiling's clock nor who delivered it (Diego P2-3).
-            delivered_at = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
-                                  OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
-                                THEN EXCLUDED.delivered_at ELSE worker_delivery_channels.delivered_at END,
-            acked_by_user_id = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
-                                      OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
-                                    THEN EXCLUDED.acked_by_user_id ELSE worker_delivery_channels.acked_by_user_id END,
-            acked_by_worker_id = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
-                                        OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
-                                      THEN EXCLUDED.acked_by_worker_id ELSE worker_delivery_channels.acked_by_worker_id END,
-            acked_by_app_key_id = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
-                                         OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
-                                       THEN EXCLUDED.acked_by_app_key_id ELSE worker_delivery_channels.acked_by_app_key_id END,
-            channel_incarnation = EXCLUDED.channel_incarnation`;
+        await raiseDeliveryMark(tx, { workerId: p.workerId, channelId: c.channelId, incarnation: c.incarnation, through: c.through }, nowNaive, ackedBy);
       }
       for (const t of p.ticks) {
         const row = await tx.workerDeliveryTick.findUnique({ where: { workerId_tickerId: { workerId: p.workerId, tickerId: t.tickerId } } });
@@ -196,4 +168,177 @@ export async function acknowledgeWakes(args: {
     }
     return { acknowledged, unchanged };
   }
+}
+
+type AckedBy = { ackedByUserId: string | null; ackedByWorkerId: string | null; ackedByAppKeyId: string | null };
+
+/**
+ * The authority an acknowledgement rests on, anchored BEFORE any row or advisory lock (Diego cycle 2, P2-1): every App
+ * in the call, its org and its owner. Revokers of that authority take the same anchors exclusively.
+ */
+async function authorityAnchorsOf(ctx: Context, appIds: string[]): Promise<AuthorityAnchor[]> {
+  const apps = await ctx.db.app.findMany({ where: { id: { in: appIds } }, select: { id: true, organizationId: true, ownerUserId: true } });
+  return apps.flatMap((a) => [
+    { kind: 'app' as const, id: a.id },
+    ...(a.organizationId ? [{ kind: 'org' as const, id: a.organizationId }] : []),
+    ...(a.ownerUserId ? [{ kind: 'user' as const, id: a.ownerUserId }] : []),
+  ]);
+}
+
+/**
+ * Raise one worker's delivered-through mark on one channel. GREATEST: it only rises, unless the channel was recreated
+ * (then it restarts at the new incarnation). The one writer of `worker_delivery_channels` for wakes and batches alike.
+ */
+async function raiseDeliveryMark(
+  tx: Prisma.TransactionClient,
+  m: { workerId: string; channelId: string; incarnation: number; through: number },
+  nowNaive: string,
+  ackedBy: AckedBy,
+): Promise<void> {
+  await tx.$executeRaw`
+    INSERT INTO worker_delivery_channels
+      (worker_id, channel_id, channel_incarnation, delivered_through_seq, delivered_at,
+       acked_by_user_id, acked_by_worker_id, acked_by_app_key_id)
+    VALUES (${m.workerId}, ${m.channelId}, ${m.incarnation}, ${m.through}, ${nowNaive}::timestamp,
+            ${ackedBy.ackedByUserId}, ${ackedBy.ackedByWorkerId}, ${ackedBy.ackedByAppKeyId})
+    ON CONFLICT (worker_id, channel_id) DO UPDATE SET
+      delivered_through_seq = CASE WHEN worker_delivery_channels.channel_incarnation = EXCLUDED.channel_incarnation
+                                   THEN GREATEST(worker_delivery_channels.delivered_through_seq, EXCLUDED.delivered_through_seq)
+                                   ELSE EXCLUDED.delivered_through_seq END,
+      -- A repeat of what is already delivered changes NOTHING, neither the ceiling's clock nor who delivered it (Diego P2-3).
+      delivered_at = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
+                            OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
+                          THEN EXCLUDED.delivered_at ELSE worker_delivery_channels.delivered_at END,
+      acked_by_user_id = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
+                                OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
+                              THEN EXCLUDED.acked_by_user_id ELSE worker_delivery_channels.acked_by_user_id END,
+      acked_by_worker_id = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
+                                  OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
+                                THEN EXCLUDED.acked_by_worker_id ELSE worker_delivery_channels.acked_by_worker_id END,
+      acked_by_app_key_id = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
+                                   OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
+                                 THEN EXCLUDED.acked_by_app_key_id ELSE worker_delivery_channels.acked_by_app_key_id END,
+      channel_incarnation = EXCLUDED.channel_incarnation`;
+}
+
+// acknowledgeBatchProofs — #2017 (S1), cor:agt:080:12/:16/:17.
+//
+// The host types a rendered delivery batch, then hands back its signed id. In ONE transaction each channel's
+// delivered-through mark rises to the end of the range the batch rendered, or, with a partial `through`, to the listed
+// rendered seq of each LISTED channel (an omitted channel moves nothing and stays due). It writes only
+// WorkerDeliveryChannel: no ChannelReadState, no tick, no wake budget or reservation (a batch is not a wake). A repeat
+// changes nothing. The host/scope authority is re-derived by the caller's `mayAckBatch` inside the transaction.
+//
+// Refusals: a forged, malformed or wrong-kind id, or a range past the channel's head → WAKE_PROOF_INVALID; an id issued
+// to somebody else, or authority gone → WAKE_PROOF_REQUESTER_MISMATCH; older than 15 minutes, issued in the future, a
+// channel recreated or deleted, a worker gone, or a range that starts above the worker's delivered mark (it would
+// acknowledge an unseen prefix) → WAKE_PROOF_STALE (the batch stays due and the next read re-derives it); a `through`
+// naming a channel not in the batch, a channel twice, or a seq the batch did not render → BAD_USER_INPUT. Nothing is
+// written unless every id in the call passes.
+
+export type BatchThrough = { channelId: string; seq: number };
+export type BatchAck = { proof: string; through?: BatchThrough[] };
+
+export async function acknowledgeBatchProofs(args: {
+  ctx: Context;
+  requester: BatchRequester;
+  acks: BatchAck[];
+  /**
+   * Decides, per batch and INSIDE the transaction (after the worker's wake lock), that the requester may still
+   * acknowledge this worker's batches: the S1 host/scope re-derivation (slice c). Same contract as `mayReadWorker`.
+   */
+  mayAckBatch: (proof: BatchProof, tx: Prisma.TransactionClient, txCtx: Context) => Promise<boolean>;
+  now?: Date;
+}): Promise<AcknowledgeResult> {
+  const { ctx, requester } = args;
+  const now = args.now ?? new Date();
+  if (args.acks.length === 0) return { acknowledged: 0, unchanged: 0 };
+  if (args.acks.length > ACK_MAX_PROOFS) refuse('BAD_USER_INPUT', `Acknowledge at most ${ACK_MAX_PROOFS} batches at a time.`);
+
+  const batches = args.acks.map((a) => {
+    const proof = verifyBatchProof(a.proof);
+    if (!sameBatchRequester(proof, requester)) refuse('WAKE_PROOF_REQUESTER_MISMATCH', 'This delivery batch was issued to someone else.');
+    if (now.getTime() - proof.issuedAt > WAKE_PROOF_MAX_AGE_MS || proof.issuedAt > now.getTime() + 60_000) {
+      refuse('WAKE_PROOF_STALE', 'This delivery batch id is too old. Read the batch again.');
+    }
+    return { proof, marks: marksOf(proof, a.through) };
+  });
+
+  const nowNaive = toNaiveUtc(now);
+  // Who delivered: a host key (and the worker session behind the request, if any), or, on the self arm, the worker itself
+  // through its own session, stamped with the person driving that session (cor:agt:020:03; Vera, team chat #21429, as
+  // S2's own-read delivered row). Attribution only: whether the session may acknowledge is mayAckBatch's decision.
+  const ackedByOf = (p: BatchProof, sessionUserId: string | null): AckedBy => ('appKeyId' in requester
+    ? { ackedByUserId: null, ackedByWorkerId: currentActor().workerId ?? null, ackedByAppKeyId: requester.appKeyId }
+    : { ackedByUserId: sessionUserId, ackedByWorkerId: p.workerId, ackedByAppKeyId: null });
+  const appIds = [...new Set(batches.map((b) => b.proof.appId))].sort();
+  const anchors = await authorityAnchorsOf(ctx, appIds);
+
+  try {
+    return await withAuthorizedTx(ctx, anchors, async () => undefined, (tx, txCtx) => writeBatchAcks(tx, txCtx));
+  } catch (e) {
+    if (e instanceof Error && e.message === 'Forbidden') refuse('WAKE_PROOF_REQUESTER_MISMATCH', 'This delivery batch was issued to someone else.');
+    throw e;
+  }
+
+  async function writeBatchAcks(tx: Prisma.TransactionClient, txCtx: Context): Promise<AcknowledgeResult> {
+    let acknowledged = 0;
+    let unchanged = 0;
+    const sessionUserId = 'sessionId' in requester
+      ? (await tx.session.findUnique({ where: { id: requester.sessionId }, select: { userId: true } }))?.userId ?? null
+      : null;
+    // The lock order of acknowledgeWakes: the Apps' budget locks, then the per-worker wake locks by worker id. A batch
+    // spends no budget, but sharing the order means a batch ack, a wake ack and an issue never wait in a cycle.
+    for (const appId of appIds) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + appId}, 0))`;
+    for (const { proof: p, marks } of [...batches].sort((a, b) => a.proof.workerId.localeCompare(b.proof.workerId))) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + p.workerId}, 0))`;
+      if (!(await args.mayAckBatch(p, tx, txCtx))) refuse('WAKE_PROOF_REQUESTER_MISMATCH', 'This delivery batch was issued to someone else.');
+      const worker = await tx.worker.findUnique({ where: { id: p.workerId }, select: { appId: true, retiredAt: true } });
+      if (!worker || worker.appId !== p.appId || worker.retiredAt) refuse('WAKE_PROOF_STALE', 'The worker of this delivery batch is gone.');
+
+      const live = await tx.channel.findMany({
+        where: { id: { in: p.channels.map((c) => c.channelId) }, deletedAt: null },
+        select: { id: true, incarnation: true, lastSeq: true },
+      });
+      for (const c of p.channels) {
+        const cur = live.find((l) => l.id === c.channelId);
+        if (!cur || cur.incarnation !== c.incarnation) refuse('WAKE_PROOF_STALE', 'A channel of this delivery batch was recreated since it was read.');
+        // Seqs only rise within an incarnation, so a range past the head was never issued here.
+        if (c.through > cur!.lastSeq) refuse('WAKE_PROOF_INVALID', 'Not a valid delivery batch id.');
+      }
+
+      let advanced = false;
+      for (const m of marks) {
+        const row = await tx.workerDeliveryChannel.findUnique({ where: { workerId_channelId: { workerId: p.workerId, channelId: m.channelId } } });
+        const sameIncarnation = row?.channelIncarnation === m.incarnation;
+        // The batch covers from..through. A mark below from - 1 would leave seqs between it and from unseen yet
+        // acknowledged; the loader issues from = mark + 1 and the mark only rises, so this is a batch to re-read.
+        if (row && sameIncarnation && row.deliveredThroughSeq < m.from - 1) {
+          refuse('WAKE_PROOF_STALE', 'This delivery batch no longer starts at the delivered mark. Read the batch again.');
+        }
+        if (!row || !sameIncarnation || m.through > row.deliveredThroughSeq) advanced = true;
+        await raiseDeliveryMark(tx, { workerId: p.workerId, channelId: m.channelId, incarnation: m.incarnation, through: m.through }, nowNaive, ackedByOf(p, sessionUserId));
+      }
+      if (advanced) acknowledged++; else unchanged++;
+    }
+    return { acknowledged, unchanged };
+  }
+}
+
+/**
+ * The marks one batch ack moves. Without `through`, every channel to its range end. With it, ONLY the listed
+ * channels, each to its listed seq, which must be one the batch rendered (so the covered prefix is the batch's own
+ * start through a shown message, never a gap). Validated before any lock: a bad `through` is the caller's error.
+ */
+function marksOf(proof: BatchProof, through: BatchThrough[] | undefined): Array<{ channelId: string; incarnation: number; from: number; through: number }> {
+  if (through === undefined) return proof.channels.map((c) => ({ channelId: c.channelId, incarnation: c.incarnation, from: c.from, through: c.through }));
+  const seen = new Set<string>();
+  return through.map((t) => {
+    const c = proof.channels.find((x) => x.channelId === t.channelId);
+    if (!c) return refuse('BAD_USER_INPUT', `Channel ${t.channelId} is not in this delivery batch.`);
+    if (seen.has(t.channelId)) return refuse('BAD_USER_INPUT', `Channel ${t.channelId} is listed twice in through.`);
+    seen.add(t.channelId);
+    if (!c.seqs.includes(t.seq)) return refuse('BAD_USER_INPUT', `Seq ${t.seq} is not a message this delivery batch rendered in channel ${t.channelId}.`);
+    return { channelId: c.channelId, incarnation: c.incarnation, from: c.from, through: t.seq };
+  });
 }
