@@ -202,10 +202,10 @@ it('MCP delegates self reports and rejects unknown metadata instead of discardin
   expect(good.isError).not.toBe(true); expect(JSON.parse(good.content[0].text).holds).toHaveLength(1);
 });
 
-async function secondChannel() {
+async function secondChannel(name = 'second') {
   const old = channel;
-  const made = await ensureChannelWithRoot(db, { memoryId: old.memoryId, loc: 'chats:second', name: 'second', createdBy: manager.id });
-  const next = { id: made.channel.id, memoryId: old.memoryId, loc: 'chats:second', chatRootNodeId: made.rootId };
+  const made = await ensureChannelWithRoot(db, { memoryId: old.memoryId, loc: `chats:${name}`, name, createdBy: manager.id });
+  const next = { id: made.channel.id, memoryId: old.memoryId, loc: `chats:${name}`, chatRootNodeId: made.rootId };
   await db.registerEntry.create({ data: { appId: app.id, channelId: next.id, attendeeWorkerId: kit.id, role: 'BOTH' } });
   channel = next; await postForBoth(); channel = old;
   return next;
@@ -343,4 +343,21 @@ it.fails('shared GraphQL formatter must not echo signed batch ids or unknown sen
     expect(JSON.stringify(answer.errors)).not.toContain(b.id);
     expect(JSON.stringify(answer.errors)).not.toContain('SECRET_DRAFT');
   } finally { await new Promise<void>((resolve,reject) => server.close(e => e ? reject(e) : resolve())); }
+});
+
+it('verifier boundary caps the atomic result at ten channels and refuses an eleven-seq descriptor loudly', async () => {
+  await postForBoth();
+  for (let i=0; i<9; i++) await secondChannel(`cap${i}`);
+  const b = (await read(hostKey)).batches[0];
+  expect(b.ranges).toHaveLength(10);
+  expect((await report(b.id)).holds).toHaveLength(10);
+  const { verifyBatchProof, signBatchProof, batchKeyOf } = await import('../../../lib/tickers/wakeProof.js');
+  const proof = verifyBatchProof(b.id);
+  const channels = [...proof.channels, { channelId: generateId(), incarnation: 1, from: 1, through: 1, seqs: [1] }];
+  const larger = { ...proof, channels };
+  const token = signBatchProof({ ...larger, batchKey: batchKeyOf(larger) });
+  const before = await db.agentTeamEvent.count({ where: { type: 'delivery.held' } });
+  expect(await code(report(token))).toBe('WAKE_PROOF_INVALID');
+  expect(await db.workerDeliveryHold.count()).toBe(10);
+  expect(await db.agentTeamEvent.count({ where: { type: 'delivery.held' } })).toBe(before);
 });
