@@ -45,29 +45,29 @@ describe('S5 persisted transitions and races', () => {
     expect((await run(tx => loadDeliveryWait(tx, message(), stamp(65)))).waitedMs).toBe(10 * 60_000);
   });
   it('concurrent evaluation selects one worker alarm across channels; duplicate raises do nothing', async () => {
-    const input = { workerId, candidates: [message(), { ...message(2), channelId: 'other' }], now: stamp(70), stuckWindowSeconds: 900, hold: null };
+    const input = { workerId, candidates: [message(), { ...message(2), channelId: 'other' }], now: stamp(70), hold: null };
     const results = await Promise.all([run(tx => reconcileDeliveryAlarm(tx, input)), run(tx => reconcileDeliveryAlarm(tx, input))]);
     expect(results.filter(r => r.raised)).toHaveLength(1);
     expect(await db.workerDeliveryAlarmEpisode.count({ where: { workerId } })).toBe(1);
     expect(await db.agentTeamEvent.count({ where: { appId, type: 'delivery.stuck' } })).toBe(1);
     await run(tx => recordDeliveryException(tx, { workerId, cause: 'isolated', coverage: { kind: 'worker' }, startedAt: stamp(80), endedAt: stamp(100) }));
     await run(tx => observeDeliveryPolicyThrough(tx, workerId, stamp(130)));
-    expect(await run(tx => advanceDeliveryEscalation(tx, workerId, stamp(104), 900))).toBe(false);
-    const advances = await Promise.all([run(tx => advanceDeliveryEscalation(tx, workerId, stamp(105), 900)), run(tx => advanceDeliveryEscalation(tx, workerId, stamp(105), 900))]);
+    expect(await run(tx => advanceDeliveryEscalation(tx, workerId, stamp(104)))).toBe(false);
+    const advances = await Promise.all([run(tx => advanceDeliveryEscalation(tx, workerId, stamp(105))), run(tx => advanceDeliveryEscalation(tx, workerId, stamp(105)))]);
     expect(advances.filter(Boolean)).toHaveLength(1);
     const active = await db.workerDeliveryAlarmEpisode.findUniqueOrThrow({ where: { workerId } });
     await db.agentTeamEvent.update({ where: { id: active.alarmEventId }, data: { acknowledgedAt: stamp(106), acknowledgedByWorkerId: workerId } });
-    expect(await run(tx => advanceDeliveryEscalation(tx, workerId, stamp(130), 900))).toBe(false);
+    expect(await run(tx => advanceDeliveryEscalation(tx, workerId, stamp(130)))).toBe(false);
   });
   it('does not infer resolution from missing candidates or a different incarnation', async () => {
     const before = await db.workerDeliveryAlarmEpisode.findUniqueOrThrow({ where: { workerId } });
-    await run(tx => reconcileDeliveryAlarm(tx, { workerId, candidates: [], now: stamp(71), stuckWindowSeconds: 900, hold: null }));
+    await run(tx => reconcileDeliveryAlarm(tx, { workerId, candidates: [], now: stamp(71), hold: null }));
     expect((await db.workerDeliveryAlarmEpisode.findUniqueOrThrow({ where: { workerId } })).episodeId).toBe(before.episodeId);
     expect(await db.agentTeamEvent.count({ where: { appId, type: 'delivery.resumed' } })).toBe(0);
   });
   it('only covering marks close once, preserve history and allow an already-aged successor', async () => {
     const before = await db.agentTeamEvent.findFirstOrThrow({ where: { appId, type: 'delivery.stuck' } });
-    const input = { workerId, candidates: [message(2)], now: stamp(72), stuckWindowSeconds: 900, hold: null,
+    const input = { workerId, candidates: [message(2)], now: stamp(72), hold: null,
       mark: { channelId: 'channel-s5', channelIncarnation: 1, throughSeq: 1, principal: { kind: 'worker' as const, workerId } } };
     await db.workerDeliveryChannel.create({ data: { workerId, channelId: 'channel-s5', channelIncarnation: 1, deliveredThroughSeq: 1, deliveredAt: stamp(72) } });
     await run(tx => reconcileDeliveryAlarm(tx, input));

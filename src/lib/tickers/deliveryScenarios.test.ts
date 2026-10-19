@@ -25,7 +25,7 @@ afterEach(async () => {
 });
 const message = (seq: number, minute = 0) => ({ workerId, channelId: 'scenario-channel', channelIncarnation: 1, seq, dueSince: at(minute) });
 const evaluate = (minute: number, candidates = [message(1)]) => run(tx => reconcileDeliveryAlarm(tx, {
-  workerId, candidates, now: at(minute), stuckWindowSeconds: 900, hold: null,
+  workerId, candidates, now: at(minute), hold: null,
 }));
 
 it('S7: a 10:05–11:00 pause preserves prior five minutes across reload; alarm begins exactly at 11:10', async () => {
@@ -48,7 +48,7 @@ it('S8: an older budget/standby-covered message cannot hide a later uncovered me
   await run(tx => recordDeliveryException(tx, { workerId, cause: 'standby', coverage: { kind: 'range', channelId: 'scenario-channel', channelIncarnation: 1, fromSeq: 1, throughSeq: 1 }, startedAt: at(0), endedAt: null }));
   await run(tx => observeDeliveryPolicyThrough(tx, workerId, at(20)));
   const result = await run(tx => reconcileDeliveryAlarm(tx, {
-    workerId, candidates: [message(1), message(2, 2)], now: at(20), stuckWindowSeconds: 900,
+    workerId, candidates: [message(1), message(2, 2)], now: at(20),
     hold: { reason: 'draft', terminalId: 'term_s5-test' },
   }));
   expect(result.raised).toBeTruthy();

@@ -11,6 +11,7 @@ export type { DeliveryMarkPrincipal } from '../agentTasks/events.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { lockAppReportsTo, reportsToChain } from '../workerReportsTo.js';
 import { appManagerUserIds } from '../auth/appManagement.js';
+import { loadDeliverySettings } from './deliverySettings.js';
 import { deliveryWait, oldestStuckMessage, nextDeliveryOwnerDue, DELIVERY_EXCEPTION_CAUSES, type DeliveryMessage, type WaitException, type WaitCoverage } from './deliveryWait.js';
 
 type Tx = Prisma.TransactionClient;
@@ -150,7 +151,7 @@ export async function deliveryAlarmChain(tx: Tx, workerId: string): Promise<Alar
 }
 
 export type DeliveryAlarmInput = {
-  workerId: string; candidates: DeliveryMessage[]; now: Date; stuckWindowSeconds: number;
+  workerId: string; candidates: DeliveryMessage[]; now: Date;
   hold: { reason: 'draft' | 'isolated' | 'question' | 'screen-unknown' | 'not-submitted' | 'two-agents' | 'binding-mismatch'; terminalId: string | null } | null;
   /** S1/S2 supply provenance only AFTER persisting marks. Claimed ranges are verified below. */
   mark?: { channelId: string; channelIncarnation: number; throughSeq: number; principal: DeliveryMarkPrincipal };
@@ -163,6 +164,7 @@ export async function reconcileDeliveryAlarm(tx: Tx, input: DeliveryAlarmInput):
   const chain = await deliveryAlarmChain(tx, workerId);
   const principal = input.mark ? (p => p.kind === 'worker' ? { kind: p.kind, workerId: safeId(p.workerId) } : p.kind === 'user' ? { kind: p.kind, userId: safeId(p.userId) } : { kind: p.kind, appKeyId: safeId(p.appKeyId), hostId: safeId(p.hostId) })(input.mark.principal) : null;
   const worker = await tx.worker.findUniqueOrThrow({ where: { id: workerId }, select: { appId: true } });
+  const { stuckWindowSeconds } = await loadDeliverySettings(tx, worker.appId);
   if (input.candidates.some(m => m.workerId !== workerId)) fail('DELIVERY_WORKER_MISMATCH');
   let active = await tx.workerDeliveryAlarmEpisode.findUnique({ where: { workerId } });
   const oldestDueAt = new Date(input.candidates.reduce((oldest, m) => Math.min(oldest, m.dueSince.getTime()), Math.min(now.getTime(), active?.dueSince.getTime() ?? now.getTime())));
@@ -187,14 +189,14 @@ export async function reconcileDeliveryAlarm(tx: Tx, input: DeliveryAlarmInput):
   }
   if (active) return { raised: null, resumed };
   const candidates = input.candidates.filter(m => !(input.mark && m.channelId === input.mark.channelId && m.channelIncarnation === input.mark.channelIncarnation && m.seq <= coveredThrough));
-  const selected = oldestStuckMessage(candidates, exceptions, state, now, input.stuckWindowSeconds);
+  const selected = oldestStuckMessage(candidates, exceptions, state, now, stuckWindowSeconds);
   if (!selected) return { raised: null, resumed };
   if (input.hold?.terminalId && !/^term_[A-Za-z0-9_-]{1,128}$/.test(input.hold.terminalId)) fail('DELIVERY_TERMINAL_INVALID');
   const episodeId = generateId(), eventId = generateId();
   const m = selected.message;
   await appendDeliveryStuckEvent(tx, { id: eventId, appId: worker.appId, workerId, episodeId,
     channelId: m.channelId, channelIncarnation: m.channelIncarnation, firstPendingSeq: m.seq,
-    dueSince: m.dueSince, windowSeconds: input.stuckWindowSeconds,
+    dueSince: m.dueSince, windowSeconds: stuckWindowSeconds,
     reason: input.hold?.reason ?? null, terminalId: input.hold?.terminalId ?? null,
     chain: chain as AlarmChain, now });
   await tx.workerDeliveryAlarmEpisode.create({ data: { workerId, episodeId, channelId: m.channelId, channelIncarnation: m.channelIncarnation, anchorSeq: m.seq, dueSince: m.dueSince, alarmEventId: eventId, createdAt: now } });
@@ -205,9 +207,11 @@ export async function reconcileDeliveryAlarm(tx: Tx, input: DeliveryAlarmInput):
 }
 
 /** Delivery alarms do not participate in the task evaluator's wall-clock escalation. */
-export async function advanceDeliveryEscalation(tx: Tx, workerId: string, now: Date, stuckWindowSeconds: number): Promise<boolean> {
+export async function advanceDeliveryEscalation(tx: Tx, workerId: string, now: Date): Promise<boolean> {
   const active = await tx.workerDeliveryAlarmEpisode.findUnique({ where: { workerId } });
   if (!active) return false;
+  const worker = await tx.worker.findUniqueOrThrow({ where: { id: workerId }, select: { appId: true } });
+  const { stuckWindowSeconds } = await loadDeliverySettings(tx, worker.appId);
   const [event] = await tx.$queryRaw<{ acknowledgedAt: Date | null }[]>`
     SELECT acknowledged_at AS "acknowledgedAt" FROM agent_team_events WHERE id = ${active.alarmEventId} FOR SHARE`;
   if (!event || event.acknowledgedAt) return false;
