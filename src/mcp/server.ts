@@ -8877,7 +8877,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           : null;
         const boundUrl = workerPortalUrl(boundUrn);
         workerLine =
-          `\nWorking as ${worker?.name ?? 'worker'} (${session.workerId}).` +
+          `\nWorking as ${worker?.name ?? 'worker'} (worker id: ${session.workerId}).` +
           (boundUrn ? `\n${boundUrn}` : '') +
           (boundUrl ? `\nURL: ${boundUrl}` : '') +
           // A worker whose agent carries no template and who has no override
@@ -8891,11 +8891,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           renderWorkerContinuity(continuity as RenderableContinuity | null);
       } catch {
         workerLine =
-          `\nWorking as worker ${session.workerId}.` +
+          `\nWorking as worker (worker id: ${session.workerId}).` +
           '\n\n(The boot briefing could not be rendered just now — the session IS started and bound. Retry with hadron_get_node on the role agent, or start again after ending this session; do NOT retry hadron_start_session, which would refuse WORKER_TAKEN.)';
       }
     }
-    return `${sharedConnectionNote}${workerLine}`;
+    // #1599: the session argument is never the adjacent worker identity.
+    const sessionLabel = session.workerId ? 'Worker session id' : 'Session id';
+    return `${sharedConnectionNote}\n${sessionLabel}: ${session.id} (pass as \`session\` to team tools)${workerLine}`;
   }
 
   // ── hadron_start_session ──────────────────────────────────────────────────────
@@ -9433,12 +9435,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // identifier cannot disagree.
         const url = workerPortalUrl(urn);
         return (
-          `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}\n` +
+          `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}${s.workerId ? ' (worker session id; pass as `session` to team tools)' : ' (session id)'}\n` +
           (s.endedAt ? `    ended: ${s.endedAt.toISOString()} · end reason: ${sessionEndReason(s)}\n` : '') +
           // The un-bound case is the one worth calling out: it is the shape in
           // which a team-chat post silently lands under the human's name.
           (worker
-            ? `    working as: ${worker.name}${worker.role ? ` (${worker.role})` : ''}${urn ? `\n    ${urn}` : ''}${url ? `\n    URL: ${url}` : ''}\n`
+            ? `    working as: ${worker.name}${worker.role ? ` (${worker.role})` : ''} (worker id: ${worker.id})${urn ? `\n    ${urn}` : ''}${url ? `\n    URL: ${url}` : ''}\n`
             : '    working as: nobody — this session is NOT bound to a worker, so anything it posts is attributed to you, not a teammate.\n') +
           (app ? `    app: ${app.name}\n` : '') +
           `    started: ${s.startedAt.toISOString()}${s.type ? ` · ${s.type}` : ''}` +
@@ -10839,7 +10841,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // is otherwise stays behind the takeover refusal, which is a
             // deliberate act rather than a listing (hadron_list_workers' rule).
             (mine
-              ? `Your active session: ${mine.id} (since ${mine.startedAt.toISOString()})\n`
+              ? `Your active session: ${mine.id} (worker session id; pass as \`session\` to team tools; since ${mine.startedAt.toISOString()})\n`
               : '') +
             // Shown separately from the briefing, and labelled as the editable
             // part, so hadron_update_worker's replace semantics have something
