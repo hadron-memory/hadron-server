@@ -10930,6 +10930,11 @@ function ageOf(at: Date, now: Date = new Date()): string {
       session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so its DERIVED liveness stays current while you are working (#1081; #1114 — inactivity no longer reaps anything, it only decides whether a session reads as live).'),
     },
     async ({ workerRef, promptOverride, signature, trailer, app, session }) => {
+      // This tool owns `session`, so the common actor gate leaves invalid names to us.
+      // Refuse before heartbeat or edits instead of falling back to the human principal.
+      if (session !== undefined && !(await validateSessionBinding(db, auth, session))) {
+        return { ...textResult('[session_not_bound] The named session cannot bind. Nothing was written.'), isError: true };
+      }
       // #1081 — the caller just drove this session, so it is alive. The
       // touch is explicit here rather than a side effect of whichever tool
       // happens to write the Session row (see heartbeatSession).
@@ -10963,6 +10968,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
+        sessionBindingRefused: auth.sessionBindingRefused,
         roles: auth.roles as Context['roles'],
         organizationId: auth.organizationId ?? undefined,
       };
@@ -10984,7 +10990,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
         const mutationArgs: { workerRef: string; promptOverride?: string; signature?: string | null; trailer?: string | null } = {
           workerRef: target.id,
         };
-        const changing = promptOverride !== undefined || signature !== undefined || trailer !== undefined;
+        const overrideChanged = promptOverride !== undefined;
+        const changing = overrideChanged || signature !== undefined || trailer !== undefined;
         if (promptOverride !== undefined) mutationArgs.promptOverride = promptOverride;
         if (signature !== undefined) mutationArgs.signature = signature;
         if (trailer !== undefined) mutationArgs.trailer = trailer;
@@ -10995,12 +11002,14 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // bind, and that is the template plus the override, composed.
         const prompt = await resolvers.Worker.prompt(worker, {}, ctx);
         return textResult(
-          (changing ? `Updated **${worker.name}**.\n` : `**${worker.name}** — no change requested (promptOverride omitted).\n`) +
+          (changing ? `Updated **${worker.name}**.\n` : `**${worker.name}** — no change requested (editable fields omitted).\n`) +
             (worker.promptOverride
-              ? `\nPrompt override${changing ? ' now' : ''}:\n\n${worker.promptOverride}\n`
-              : changing
+              ? `\nPrompt override${overrideChanged ? ' now' : ''}:\n\n${worker.promptOverride}\n`
+              : overrideChanged
                 ? '\nPrompt override cleared.\n'
                 : '\nThis worker has no prompt override.\n') +
+            (signature !== undefined ? `\nSignature template now:\n\n${worker.signature}\n` : '') +
+            (trailer !== undefined ? `\nTrailer template now:\n\n${worker.trailer}\n` : '') +
             (prompt
               ? `\nResolved boot briefing (what ${worker.name} receives at its next bind):\n\n${prompt}`
               : ''),
