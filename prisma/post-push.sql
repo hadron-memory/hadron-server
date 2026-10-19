@@ -717,3 +717,6 @@ CREATE TRIGGER user_deletion_audits_immutable
 
 -- #1162: newly introduced typed Worker/session references fence hard deletion.
 \ir worker-reference-invariants.sql
+
+-- #2014: final closed task-less alarm composition (after S5).
+\ir chat-post-invariants.sql
