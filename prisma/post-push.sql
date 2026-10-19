@@ -31,7 +31,7 @@ ALTER TABLE memories
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_class_app_id
   CHECK (
-    (class = 'app' AND app_id IS NOT NULL)
+    (class = 'app' AND app_id IS NOT NULL AND install_of_agent_id IS NULL)
     OR (class = 'system' AND app_id IS NULL AND install_of_agent_id IS NULL)
     OR (class = 'system' AND app_id IS NOT NULL AND install_of_agent_id IS NOT NULL)
     OR (class IN ('knowledge', 'group', 'personal', 'private') AND install_of_agent_id IS NULL)

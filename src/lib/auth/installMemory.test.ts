@@ -91,9 +91,10 @@ describe('#2044 install memory — read / write / delete audience (live App)', (
     for (const [who, canRead, canWrite] of expectations) {
       const u = (f[who] as { id: string }).id;
       expect(await canReadMemory(db, auth(u), f.install.id), `${who} read`).toBe(canRead);
-      expect(await canWriteToMemory(db, auth(u), f.install.id), `${who} write`).toBe(canWrite);
+      // The MCP point gate never writes it: the fenced door is the GraphQL one (`install` target).
+      expect(await canWriteToMemory(db, auth(u), f.install.id), `${who} mcp write`).toBe(false);
       const map = await getMemoryAccess(db, auth(u));
-      expect(map.get(f.install.id) ?? null, `${who} map`).toBe(canWrite ? 'READ_WRITE' : canRead ? 'READ_ONLY' : null);
+      expect(map.get(f.install.id) ?? null, `${who} map`).toBe(canRead ? 'READ_ONLY' : null);
       expect((await getAccessibleMemoryIds(gql(u), f.install.id))?.includes(f.install.id) ?? false, `${who} gql ids`).toBe(canRead);
       expect(await canReadMemoryRecord(gql(u), f.install), `${who} record`).toBe(canRead);
       const eff = await computeEffectiveAccess(db, { id: u, roles: [] }, { kind: 'memory', memory: { ...(await db.memory.findUniqueOrThrow({ where: { id: f.install.id }, include: { workerOf: true } })) } as never });
@@ -213,7 +214,8 @@ describe('#2044 install memory — user-owned App', () => {
     expect(await canReadMemory(db, auth(member.id), install.id)).toBe(true);
     expect(await canWriteToMemory(db, auth(member.id), install.id)).toBe(false);
     expect(await canReadMemory(db, auth(owner.id), install.id)).toBe(true);
-    expect(await canWriteToMemory(db, auth(owner.id), install.id)).toBe(true);
+    expect(await canWriteToMemory(db, auth(owner.id), install.id)).toBe(false);
+    await expect(requireMemoryWriteAccess(gql(owner.id), install.id)).resolves.toBeUndefined();
     await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
     // The owner-column blanket (READ_WRITE on everything user-owned) must not outlive the App.
     expect(await canReadMemory(db, auth(owner.id), install.id)).toBe(false);

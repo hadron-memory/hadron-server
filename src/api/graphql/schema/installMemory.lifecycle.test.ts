@@ -378,3 +378,106 @@ describe('#2044 install memory — it can never become an Agent\'s brain (Andi P
     }
   });
 });
+
+// ── Every write into an EXISTING install memory carries the same fence (Diego P2 on #2064) ──────
+describe('#2044 install memory — existing-node writes versus revocation', () => {
+  async function racedWrite(
+    write: (f: Awaited<ReturnType<typeof fixture>>, memoryId: string) => Promise<unknown>,
+    revoke: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0], f: Awaited<ReturnType<typeof fixture>>) => Promise<unknown>,
+    anchors: (f: Awaited<ReturnType<typeof fixture>>) => Array<{ kind: 'app' | 'org' | 'agent' | 'user'; id: string }>,
+  ) {
+    const f = await fixture();
+    await f.create(f.admin, 'prompts:lane');
+    const [row] = await f.installRows();
+    const holder = await hold(async (tx) => {
+      await lockAuthorityAnchors(tx, anchors(f), 'exclusive');
+      await revoke(tx, f);
+    });
+    const outcome = write(f, row!.id).then(() => 'wrote', (e: Error) => e);
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      holder.release();
+      await holder.done;
+    }
+    return { f, row: row!, result: await outcome };
+  }
+  const update = (f: Awaited<ReturnType<typeof fixture>>) =>
+    M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'late' } }, ctxOf(f.admin.id));
+  const createByMemoryId = (f: Awaited<ReturnType<typeof fixture>>, memoryId: string) =>
+    M.createNode({}, { input: { memoryId, loc: 'prompts:other', name: 'o', content: 'late' } }, ctxOf(f.admin.id));
+
+  for (const [label, write] of [['updateNode(install)', (f: any) => update(f)], ['createNode(memoryId)', (f: any, id: string) => createByMemoryId(f, id)]] as const) {
+    it(`${label} vs deleteApp: refused, nothing committed`, async () => {
+      const { f, row, result } = await racedWrite(write as never,
+        (tx, f) => tx.app.update({ where: { id: f.app.id }, data: { deletedAt: new Date() } }),
+        (f) => [{ kind: 'app', id: f.app.id }, { kind: 'org', id: orgId }]);
+      expect(result).not.toBe('wrote');
+      expect(await db.node.count({ where: { memoryId: row.id, content: 'late' } })).toBe(0);
+      expect(await f.installRows()).toHaveLength(1);
+    });
+    it(`${label} vs uninstall: refused, nothing committed`, async () => {
+      const { row, result } = await racedWrite(write as never,
+        (tx, f) => tx.appAgent.deleteMany({ where: { appId: f.app.id, agentId: f.agent.id } }),
+        (f) => [{ kind: 'app', id: f.app.id }, { kind: 'agent', id: f.agent.id }]);
+      expect(result).not.toBe('wrote');
+      expect(await db.node.count({ where: { memoryId: row.id, content: 'late' } })).toBe(0);
+    });
+    it(`${label} vs the writer's demotion: refused on the CURRENT authority`, async () => {
+      const { row, result } = await racedWrite(write as never,
+        (tx, f) => tx.orgMember.updateMany({ where: { organizationId: orgId, userId: f.admin.id }, data: { role: 'READER' } }),
+        (f) => [{ kind: 'org', id: orgId }, { kind: 'user', id: f.admin.id }]);
+      expect(result).not.toBe('wrote');
+      expect(await db.node.count({ where: { memoryId: row.id, content: 'late' } })).toBe(0);
+    });
+  }
+
+  it('CONTROL: with no revocation in flight the same writes land', async () => {
+    const { f, row, result } = await racedWrite((f) => update(f), async () => undefined, (f) => [{ kind: 'app', id: f.app.id }]);
+    expect(result).toBe('wrote');
+    expect(await createByMemoryId(f, row.id)).toBeTruthy();
+  });
+
+  it('the other ordering: a revoker waits behind an in-flight write holding the fence, then proceeds', async () => {
+    const f = await fixture();
+    await f.create(f.admin);
+    const writer = await hold((tx) => lockAuthorityAnchors(tx, [{ kind: 'app', id: f.app.id }, { kind: 'org', id: orgId }], 'shared'));
+    const deleting = M.deleteApp({}, { ref: f.app.id }, ctxOf(f.admin.id)).then(() => 'deleted', (e: Error) => e);
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      expect((await db.app.findUniqueOrThrow({ where: { id: f.app.id } })).deletedAt).toBeNull();
+    } finally {
+      writer.release();
+      await writer.done;
+    }
+    expect(await deleting).toBe('deleted');
+  });
+});
+
+describe('#2044 install memory — the cleanup delete carries the fence too (Xan on #2064)', () => {
+  it('a manager demoted while the delete waits is refused on the CURRENT role, and the memory stays', async () => {
+    const f = await fixture();
+    await f.create(f.admin);
+    const [row] = await f.installRows();
+    const holder = await hold(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'org', id: orgId }, { kind: 'user', id: f.admin.id }], 'exclusive');
+      await tx.orgMember.updateMany({ where: { organizationId: orgId, userId: f.admin.id }, data: { role: 'READER' } });
+    });
+    const deleting = M.deleteMemory({}, { id: row!.id }, ctxOf(f.admin.id)).then(() => 'deleted', (e: Error) => e);
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      holder.release();
+      await holder.done;
+    }
+    expect(await deleting).not.toBe('deleted');
+    expect((await db.memory.findUniqueOrThrow({ where: { id: row!.id } })).deletedAt).toBeNull();
+  });
+
+  it('CONTROL: with nothing in flight the same manager deletes', async () => {
+    const f = await fixture();
+    await f.create(f.admin);
+    const [row] = await f.installRows();
+    await expect(M.deleteMemory({}, { id: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
+  });
+});

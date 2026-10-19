@@ -83,7 +83,8 @@ import {
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isUserOwnedAgentDefinition } from '../../../lib/auth/userOwnedAgentDefinition.js';
-import { installMemoryAudience, isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
+import { isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
+import { installWriteAllowed } from './installMemory.js';
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
 
 /**
@@ -2556,7 +2557,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     // #2044: an install memory has its own write audience; no platform-role
     // shortcut below may reach it (a deleted App's memory takes no write at all).
     if (isInstallMemoryRow(memory)) {
-      if ((await installMemoryAudience(ctx.db, ctx, memory)).write) return;
+      if (await installWriteAllowed(ctx, memory)) return;
       throw memoryWriteForbidden();
     }
     const strictOwner = memory.class === 'personal' || memory.class === 'private';
@@ -2593,7 +2594,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
 
   // #2044: see the App-keyed branch above.
   if (isInstallMemoryRow(memory)) {
-    if ((await installMemoryAudience(ctx.db, ctx, memory)).write) return;
+    if (await installWriteAllowed(ctx, memory)) return;
     throw memoryWriteForbidden();
   }
 

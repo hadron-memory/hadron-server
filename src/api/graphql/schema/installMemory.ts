@@ -23,7 +23,9 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { withAuthorizedTx } from './authorizedTx.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { NO_INSTALL_AUDIENCE, installMemoryAudience } from '../../../lib/auth/installMemory.js';
+import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { resolveMemoryRoot, sharedMemoryName } from './chat-scope.js';
 import { isAppParticipant, memoryWriteForbidden, type Context } from './resolvers.helpers.js';
 
@@ -172,4 +174,56 @@ export async function ensureInstallMemory(
     },
     select: { id: true },
   });
+}
+
+/**
+ * May the caller WRITE this install memory, decided on the authority as it stands NOW?
+ *
+ * Every writer re-runs its write gate inside its own transaction, so that is where the
+ * fence belongs (Diego P2 on #2064). On a transaction client this takes the anchors the
+ * revokers hold exclusively (the App, its Agent, its tenant, the actor) and the rows they
+ * change, FOR SHARE, and only then reads the audience with the actor's CURRENT platform
+ * roles: a `deleteApp`, uninstall or demotion either committed before (the write is
+ * refused) or waits for this write's commit. On the pooled client (a cheap pre-flight)
+ * there is nothing to hold, so it just evaluates; the in-transaction recheck decides.
+ */
+export async function installWriteAllowed(ctx: Context, memory: InstallMemoryRef): Promise<boolean> {
+  return (await fencedInstallAudience(ctx, memory)).write;
+}
+
+/** The manual-deletion twin (R45, Xan on #2064): same fence, so a demoted or revoked manager cannot delete. */
+export async function installDeleteAllowed(ctx: Context, memory: InstallMemoryRef): Promise<boolean> {
+  return (await fencedInstallAudience(ctx, memory)).delete;
+}
+
+type InstallMemoryRef = { id: string; class: string; appId: string | null; installOfAgentId: string | null; organizationId: string | null; ownerUserId: string | null };
+
+async function fencedInstallAudience(ctx: Context, memory: InstallMemoryRef) {
+  const db = ctx.db as unknown as Prisma.TransactionClient & { $transaction?: unknown };
+  if (typeof db.$transaction === 'function' || !memory.appId || !memory.installOfAgentId) {
+    return installMemoryAudience(ctx.db as never, ctx, memory);
+  }
+  const tx = db as Prisma.TransactionClient;
+  const app = await tx.app.findUnique({
+    where: { id: memory.appId },
+    select: { organizationId: true, ownerUserId: true },
+  });
+  if (!app) return NO_INSTALL_AUDIENCE;
+  await lockAuthorityAnchors(tx, [
+    { kind: 'app', id: memory.appId },
+    { kind: 'agent', id: memory.installOfAgentId },
+    ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+    ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+  ], 'shared');
+  await tx.$queryRaw`SELECT id FROM apps WHERE id = ${memory.appId} FOR SHARE`;
+  await tx.$queryRaw`SELECT app_id FROM app_agents WHERE app_id = ${memory.appId} AND agent_id = ${memory.installOfAgentId} FOR SHARE`;
+  if (ctx.userId && !ctx.impersonation) {
+    await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${memory.appId} AND user_id = ${ctx.userId} FOR SHARE`;
+    if (app.organizationId) {
+      await tx.$queryRaw`SELECT 1 FROM org_members WHERE organization_id = ${app.organizationId} AND user_id = ${ctx.userId} FOR SHARE`;
+    }
+  }
+  const live = await liveTxContext(ctx, tx);
+  return installMemoryAudience(tx as never, live, memory);
 }

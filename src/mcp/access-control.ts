@@ -37,7 +37,7 @@ import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { LINK_CAP_MEMORY_SELECT, cappedLinkLevel, type LinkCapMemory } from '../lib/auth/agentMemoryLinkCap.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
-import { installMemoryAudience, isInstallMemoryRow, readableInstallMemoryIds, writableInstallMemoryIds } from '../lib/auth/installMemory.js';
+import { installMemoryAudience, isInstallMemoryRow, readableInstallMemoryIds } from '../lib/auth/installMemory.js';
 
 // ---------------------------------------------------------------------------
 // Shared fold algorithm
@@ -776,7 +776,6 @@ export async function getMemoryAccess(
 
     // ── #2044: install memories — read for participants, write for managers ──
     for (const id of await readableInstallMemoryIds(db, auth)) access.set(id, 'READ_ONLY');
-    for (const id of await writableInstallMemoryIds(db, auth)) access.set(id, 'READ_WRITE');
   }
 
   return access;
@@ -922,7 +921,9 @@ export async function canWriteToMemory(
   if (!memory) return false;
   // #2044: an install memory has its own audience (installMemory.ts) and no
   // role shortcut below reaches it: not a platform role, not the owner arm.
-  if (isInstallMemoryRow(memory)) return (await installMemoryAudience(db, auth, { id: memoryId, ...memory })).write;
+  // Writes to it go through the GraphQL door (`install: { app, agent }`), which holds the
+  // authority fence (Diego P2 on #2064); an inline MCP writer cannot, so it gets no write.
+  if (isInstallMemoryRow(memory)) return false;
 
   if (memory.class === 'personal' || memory.class === 'private') {
     if (auth.userId !== memory.userId || auth.impersonation) return false;

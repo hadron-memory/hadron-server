@@ -154,7 +154,8 @@ import {
   type MergeMemoriesInput,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
-import { installMemoryAudience, isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
+import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
+import { installDeleteAllowed } from './installMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /**
@@ -1244,7 +1245,7 @@ export const memoryMutations = {
             // #2044, R45: whoever manages the App (its owner, an OWNER-role member,
             // an org admin) deletes its install memory by hand, also after the App
             // was soft-deleted. Not content access: the record is all this opens.
-            if (!(await installMemoryAudience(authCtx.db, authCtx, current)).delete) {
+            if (!(await installDeleteAllowed(authCtx, current))) {
               throw new Error('Forbidden: only whoever manages the App can delete its install memory');
             }
             return;
