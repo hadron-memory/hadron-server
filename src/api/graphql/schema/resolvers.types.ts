@@ -1,3 +1,5 @@
+import { liveTxContext } from './authorizedTx.js';
+import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
@@ -31,7 +33,7 @@ import { parseRunRegisterSnapshot, resolveRegister, snapshotRowsAsEntries, toGql
 import { userUrn } from '../../../lib/userHandle.js';
 import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
 import {
-  ensureCurrentNodeRevisionInTransaction,
+  reconcileNodeWithIncludeHistory,
   RECONCILE_EDITOR_INFO,
   revisionStateMatches,
   type SnapshotSourceNode,
@@ -576,7 +578,11 @@ async function reconciledNodeForParent(
   const cache = ctx.nodeReconcileCache ??= new WeakMap();
   const existing = cache.get(n);
   if (existing) return existing;
-  const pending = ctx.db.$transaction(async (tx) => {
+  const pending = withIncludeHistoryTransaction(ctx.db, async (history) => {
+    const tx = includeHistoryClient(history);
+    const fresh = await liveTxContext(ctx, tx);
+    const inherited = (n as typeof n & { inheritedFrom?: InheritedFrom }).inheritedFrom;
+    if (!(await isMemoryReadableCached(fresh, inherited?.via ?? n.memoryId))) return null;
     // A newer number is safe only when every intervening revision came from
     // another reader's reconcile. An authored or edge write may have changed
     // the parent's state even when its tracked fields happen to look equal.
@@ -589,13 +595,13 @@ async function reconciledNodeForParent(
       });
       if (reconciles !== pre.revSeq - n.revSeq) return null;
     }
-    if ((await ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: n.memoryId })) == null) return null;
+    if ((await reconcileNodeWithIncludeHistory(history, n.id, { expectedMemoryId: n.memoryId })) == null) return null;
     const current = await tx.node.findUnique({ where: { id: n.id } });
     if (!current) return null;
     const key = sessionKeyCache.getByMemoryId(current.memoryId);
     if (key) decryptNodeFieldsWithKey(current, key);
     return revisionStateMatchesWithoutAuthorship(n, current) ? current : null;
-  });
+  }, { timeoutMs: 5_000, maxWaitMs: 2_000 });
   cache.set(n, pending);
   return pending;
 }

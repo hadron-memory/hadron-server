@@ -5,6 +5,8 @@ import { cleanDb } from '../../test/helpers.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { createTestableMcpServer } from '../../mcp/server.js';
+import { reconcileNodeWithIncludeHistory } from '../nodeRevisionSnapshot.js';
 import { withIncludeHistoryTransaction } from './includeHistoryFence.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -20,7 +22,7 @@ beforeEach(async () => {
   memoryId = (await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: 'read-fence.example:mem', name: 'Read fence', class: 'knowledge' } })).id;
 });
 
-async function underHeldFence<T>(work: () => Promise<T>, whileWaiting: () => Promise<void>) {
+async function underHeldFence<T>(work: () => Promise<T>, whileWaiting: (pending: Promise<T>) => Promise<void>) {
   let entered!: () => void;
   let release!: () => void;
   const ready = new Promise<void>((r) => { entered = r; });
@@ -32,7 +34,7 @@ async function underHeldFence<T>(work: () => Promise<T>, whileWaiting: () => Pro
   const settled = result.then((value) => ({ value }), (error: unknown) => ({ error }));
   try {
     await waitForLockWaitersOfType(db, 'advisory', 1, 750);
-    await whileWaiting();
+    await whileWaiting(result);
   } finally {
     release();
     await holder;
@@ -48,13 +50,19 @@ async function drifted() {
 }
 
 describe('outer-fenced reconciliation read callers', () => {
-  it.each(['node', 'revision'] as const)('%s waits before touching revision state, then reconciles', async (surface) => {
+  it.each(['node', 'revision', 'batch', 'mcp', 'mcp-batch'] as const)('%s waits before touching revision state, then reconciles', async (surface) => {
     const n = await drifted();
     const parent = await db.node.findUniqueOrThrow({ where: { id: n.id } });
     const result = await underHeldFence(
-      async () => surface === 'node'
-        ? resolvers.Query.node(null, { ref: n.id, raw: true }, ctx())
-        : resolvers.Node.revision(parent as never, {}, ctx()),
+      async () => {
+        if (surface === 'node') return resolvers.Query.node(null, { ref: n.id, raw: true }, ctx());
+        if (surface === 'revision') return resolvers.Node.revision(parent as never, {}, ctx());
+        if (surface === 'batch') return resolvers.Query.nodeBatch(null, { refs: [n.id] }, ctx());
+        const mcp = createTestableMcpServer({ userId, roles: ['ADMIN'], clientId: `user:${userId}` });
+        return surface === 'mcp'
+          ? mcp.callToolText('hadron_get_node', { urn: 'hrn:node:read-fence.example:mem:drift' })
+          : mcp.callToolText('hadron_get_nodes', { refs: ['hrn:node:read-fence.example:mem:drift'] });
+      },
       async () => {
         expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).revSeq).toBe(1);
         expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
@@ -65,7 +73,81 @@ describe('outer-fenced reconciliation read callers', () => {
         });
       },
     );
-    expect(surface === 'revision' ? result : (result as { revSeq: number }).revSeq).toBe(2);
+    expect(result).not.toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).revSeq).toBe(2);
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(1);
   });
+  it('refuses a raw client before any reconcile mutation', async () => {
+    const n = await drifted();
+    await expect(reconcileNodeWithIncludeHistory(db as never, n.id, { expectedMemoryId: memoryId })).rejects.toThrow(/prepared/);
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).revSeq).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it('rechecks the selected memory after the fence wait', async () => {
+    const n = await drifted();
+    const other = await db.memory.create({ data: { urn: 'read-fence.example:other', name: 'Other', class: 'personal', ownerUserId: userId, userId } });
+    const result = await underHeldFence(
+      async () => resolvers.Query.node(null, { ref: n.id, raw: true }, ctx()),
+      async () => { await db.node.update({ where: { id: n.id }, data: { memoryId: other.id } }); },
+    );
+    expect(result).toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).revSeq).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it('cancels a reader waiting for the fence without reconciling, and later reads still work', async () => {
+    const n = await drifted();
+    await expect(underHeldFence(
+      async () => resolvers.Query.node(null, { ref: n.id, raw: true }, ctx()),
+      async (pending) => {
+        const [waiter] = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
+            AND classid = 2063 AND objid = 1772 AND objsubid = 2
+            AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database())`;
+        expect(waiter).toBeDefined();
+        const [{ cancelled }] = await db.$queryRaw<Array<{ cancelled: boolean }>>`SELECT pg_cancel_backend(${waiter!.pid}::int) AS cancelled`;
+        expect(cancelled).toBe(true);
+        // Observe cancellation while the holder still owns the fence; releasing
+        // immediately could let acquisition win before the cancel is delivered.
+        await expect(pending).rejects.toThrow();
+      },
+    )).rejects.toThrow();
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).revSeq).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+    const after = await resolvers.Query.node(null, { ref: n.id, raw: true }, ctx());
+    expect(after?.revSeq).toBe(2);
+  });
+
+  it.each(['node', 'mcp'] as const)('%s rechecks live authority after the fence wait, before reconciling', async (surface) => {
+    const n = await drifted();
+    const result = await underHeldFence(
+      async () => surface === 'node'
+        ? resolvers.Query.node(null, { ref: n.id, raw: true }, ctx())
+        : createTestableMcpServer({ userId, roles: ['ADMIN'], clientId: `user:${userId}` }).callToolText('hadron_get_node', { urn: 'hrn:node:read-fence.example:mem:drift' }),
+      async () => {
+        await db.user.update({ where: { id: userId }, data: { roles: [] } });
+        await db.orgMember.deleteMany({ where: { userId } });
+      },
+    );
+    if (surface === 'node') expect(result).toBeNull();
+    else expect(result).not.toContain('raw change');
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).revSeq).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it('refuses an escaped prepared context before reconciliation', async () => {
+    const n = await drifted();
+    const escaped = await withIncludeHistoryTransaction(db, async (history) => history);
+    await expect(reconcileNodeWithIncludeHistory(escaped, n.id, { expectedMemoryId: memoryId })).rejects.toThrow(/prepared/);
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).revSeq).toBe(1);
+  });
+
+  it('concurrent canonical readers finish without nested pooled work or duplicate snapshots', async () => {
+    const n = await drifted();
+    const results = await Promise.all(Array.from({ length: 4 }, () => resolvers.Query.node(null, { ref: n.id, raw: true }, ctx())));
+    expect(results.every((row) => row?.revSeq === 2 && row.content === 'raw change')).toBe(true);
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(1);
+  });
+
 });

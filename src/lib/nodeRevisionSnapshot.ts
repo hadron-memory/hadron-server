@@ -25,6 +25,7 @@ import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { normalizeRole } from './enforceNodeSchema.js';
 import { isDecisionFamilyRole } from './decisions/index.js';
 import { computeApprovalHash } from './approvalHash.js';
+import { includeHistoryClient, type IncludeHistoryTransaction } from './includes/includeHistoryFence.js';
 
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
@@ -203,6 +204,17 @@ export function revisionStateHashRefreshMarker(): string {
 
 /** `NodeRevision.editedByInfo` of a server-authored drift reconcile — one spelling for writer and reader. */
 export const RECONCILE_EDITOR_INFO = 'system:revision-reconcile';
+
+/** #2063 caller cut: a reconciliation read must carry the outer fence's live context.
+ * Existing writer callers are migrated in later cuts; this entry has no raw-client fallback.
+ */
+export async function reconcileNodeWithIncludeHistory(
+  history: IncludeHistoryTransaction,
+  nodeId: string,
+  opts: { expectedMemoryId: string },
+): Promise<number | null> {
+  return ensureCurrentNodeRevisionInTransaction(includeHistoryClient(history), nodeId, opts);
+}
 
 /**
  * Row-lock and reconcile one node inside the caller's transaction. Callers that

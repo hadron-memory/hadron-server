@@ -1,3 +1,5 @@
+import { liveTxContext } from './authorizedTx.js';
+import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { contentScopeWhere, effectiveContentScope, type ContentScope } from '../../../lib/comments/scope.js';
 import { isConcealedCommentHistory } from './resolvers.comments.js';
@@ -89,7 +91,7 @@ import {
   toUsageNodeRef,
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
-import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
+import { reconcileNodeWithIncludeHistory } from '../../../lib/nodeRevisionSnapshot.js';
 import { approvalStatePrismaWhere, mintedPrismaWhere, type NodeApprovalState } from '../../../lib/nodeApproval.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
@@ -666,10 +668,13 @@ export const nodeQueries = {
         // The lookup above selects the address. Reconcile and re-fetch while
         // holding its row lock so Node.revision and every sibling field come
         // from one database state (never old body + new counter).
-        const current = await ctx.db.$transaction(async (tx) => {
-          if ((await ensureCurrentNodeRevisionInTransaction(tx, selected.id, { expectedMemoryId: selected.memoryId })) == null) return null;
+        const current = await withIncludeHistoryTransaction(ctx.db, async (history) => {
+          const tx = includeHistoryClient(history);
+          const fresh = await liveTxContext(ctx, tx);
+          if (!(await isMemoryReadableCached(fresh, inheritedFrom?.via ?? selected.memoryId))) return null;
+          if ((await reconcileNodeWithIncludeHistory(history, selected.id, { expectedMemoryId: selected.memoryId })) == null) return null;
           return tx.node.findUnique({ where: { id: selected.id }, include });
-        });
+        }, { timeoutMs: 5_000, maxWaitMs: 2_000 });
         if (
           !current ||
           current.deletedAt ||
@@ -1827,6 +1832,7 @@ export const nodeQueries = {
       }> = [];
       const unavailable: string[] = [];
       let batchInheritance: Awaited<ReturnType<typeof effectiveScope>> | null = null;
+      let readViaMemoryId: string | null = null;
       // Explicit-set form only: resolved node id -> the caller's ref string, so
       // `unavailable` / `omitted` report back what the caller actually sent.
       // Null for the prefix form, where there are no caller refs (ids there).
@@ -1940,6 +1946,7 @@ export const nodeQueries = {
         // silently returning a truncated subtree.
         // #1885 (cor:dmo:050:14) — the subtree of an Agent's system memory
         // reads as its effective memory, as MCP hadron_get_nodes does.
+        readViaMemoryId = memId;
         batchInheritance = await effectiveScope(ctx.db, [memId]);
         const rows = await ctx.db.node.findMany({
           where: {
@@ -1969,9 +1976,15 @@ export const nodeQueries = {
       const selectedById = new Map(ordered.map((n) => [n.id, n]));
       const liveIds: string[] = [];
       for (const id of [...selectedById.keys()].sort()) {
-        const live = await ctx.db.$transaction(
-          (tx) => ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: selectedById.get(id)!.memoryId }),
-          { timeout: 60_000, maxWait: 15_000 },
+        const live = await withIncludeHistoryTransaction(ctx.db,
+          async (history) => {
+            const tx = includeHistoryClient(history);
+            const fresh = await liveTxContext(ctx, tx);
+            const via = explicitInherited.get(id)?.via ?? readViaMemoryId ?? selectedById.get(id)!.memoryId;
+            if (!(await isMemoryReadableCached(fresh, via))) return null;
+            return reconcileNodeWithIncludeHistory(history, id, { expectedMemoryId: selectedById.get(id)!.memoryId });
+          },
+          { timeoutMs: 60_000, maxWaitMs: 15_000 },
         );
         if (live != null) liveIds.push(id);
       }
