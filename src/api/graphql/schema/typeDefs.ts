@@ -6943,6 +6943,12 @@ export const typeDefs = `#graphql
     workerWakeSettings(workerRef: String!): WorkerWakeSettings!
     "#1748 — the wakes due now (hrn:node:hadronmemory.com:specs:cor:agt:080:08). Counts and seq ranges only; reads nothing it does not return."
     dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String): DueWakePage!
+    """
+    #2017 (S1) — the ready-to-deliver batches of the workers registered on the calling host (hrn:node:hadronmemory.com:specs:cor:agt:080:22, :26).
+    A host key only: an App key holding attention:deliver AND host:operate; the host is the key's, the request names none. A worker not
+    on this host is absent. The text is written by the server and typed unchanged. Reading moves nothing; acknowledge the batch ids.
+    """
+    deliveryBatches(appRef: String!, workerRefs: [String!], first: Int, after: String): DeliveryBatchPage!
 
     "#1709 — the App's host registrations, liveness derived now (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Whoever reads the App's tasks and events, the App's own key included."
     hostRegistrations(appRef: String!): [HostRegistration!]!
@@ -12030,6 +12036,38 @@ export const typeDefs = `#graphql
     "Dormant workers with relevant mentions, and how many: withheld, never dropped silently."
     dormant: [DormantWithheld!]!
     pageInfo: DueWakePageInfo!
+  }
+
+  "#2017 (S1) — one page of delivery batches."
+  type DeliveryBatchPage {
+    batches: [DeliveryBatch!]!
+    pageInfo: DueWakePageInfo!
+  }
+
+  "One ready-to-type delivery for one worker. The id is a signed proof bound to the key, the host and the rendered ranges: hand it back to acknowledgeDeliveryBatches after typing."
+  type DeliveryBatch {
+    id: String!
+    worker: Worker!
+    "The whole delivery, one line, written by the server (hrn:node:hadronmemory.com:specs:cor:agt:080:26). Type it unchanged."
+    text: String!
+    "Not before this moment (the batching window / busy deadline of the oldest waiting message)."
+    deliverAfter: DateTime!
+    "The latest moment a busy worker may be made to wait for this delivery."
+    busyDeadline: DateTime!
+    "Always false until stop signals ship (S6)."
+    interrupt: Boolean!
+    ranges: [DeliveryBatchRange!]!
+    "Eligible messages left for the next batch."
+    overflow: Int!
+  }
+
+  type DeliveryBatchRange {
+    channel: Channel!
+    incarnation: Int!
+    fromSeq: Int!
+    throughSeq: Int!
+    "Exactly the message seqs this batch rendered."
+    seqs: [Int!]!
   }
 
   type DueWakePageInfo {
