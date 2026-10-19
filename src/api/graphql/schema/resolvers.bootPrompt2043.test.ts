@@ -80,7 +80,7 @@ describe('guard A: a generic write never touches a compiled node (#2043)', () =>
     expect(await codeOf(resolvers.Mutation.createNode(null, {
       input: { memoryId: memory.id, loc: 'x:1', name: 'X', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
     }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
-    expect(await db.node.count({ where: { loc: 'x:1' } })).toBe(0);
+    expect(await db.node.count({ where: { memoryId: memory.id, loc: 'x:1' } })).toBe(0);
   });
 
   it('restoreNodeRevision of a compiled node is refused', async () => {
@@ -142,7 +142,7 @@ describe('guard B: a worker session never edits a boot prompt (#2043, cor:agt:04
     expect(await refused(() => resolvers.Mutation.deleteNode(null, { nodeRef: s.id }, ctx())))
       .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
     expect(await snapshot(s.id)).toEqual(before);
-    expect(await db.node.count({ where: { loc: 'b:2' } })).toBe(0);
+    expect(await db.node.count({ where: { memoryId: memory.id, loc: 'b:2' } })).toBe(0);
     // controls: ordinary node edits by the same session; the manager as themselves.
     expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { id: plain.id, content: 'ok' } }, ctx()))).toBe('NO_ERROR');
     expect(await codeOf(resolvers.Mutation.updateNode(null, { input: { id: s.id, content: 'by the manager' } }, ctx()))).toBe('NO_ERROR');
