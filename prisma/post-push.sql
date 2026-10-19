@@ -549,14 +549,14 @@ ALTER TABLE "nodes" ADD CONSTRAINT "chk_node_mint_complete" CHECK (CASE
       AND ("minted_rev_no" IS NULL) = ("minted_hash" IS NULL)
       AND ("minted_rev_no" IS NULL OR "minted_rev_no" > 0)
   END);
--- #1591: an approval is complete or absent. Synced with the migration and
+-- #1591: an approval is complete or absent (#1838: the hash alone may be NULL, an approval ended on encrypted entry). Synced with the migration and
 -- src/test/globalSetup.ts.
 ALTER TABLE "nodes" DROP CONSTRAINT IF EXISTS "chk_node_approval_complete";
 ALTER TABLE "nodes" ADD CONSTRAINT "chk_node_approval_complete" CHECK (CASE
   WHEN "approved_rev_no" IS NULL THEN
     "approved_at" IS NULL AND "approval_hash" IS NULL AND "approved_by" IS NULL AND "approved_by_info" IS NULL
   ELSE
-    "approved_rev_no" > 0 AND "approved_at" IS NOT NULL AND "approval_hash" IS NOT NULL
+    "approved_rev_no" > 0 AND "approved_at" IS NOT NULL
       AND ("approved_by" IS NOT NULL OR "approved_by_info" IS NOT NULL)
   END);
 ALTER TABLE "node_content_validation_reports" DROP CONSTRAINT IF EXISTS "chk_node_content_validation_revisions_positive";
