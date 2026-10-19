@@ -10962,7 +10962,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         userId: auth.userId ?? undefined,
         apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
-        sessionId: session ?? auth.sessionId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
         organizationId: auth.organizationId ?? undefined,
       };
