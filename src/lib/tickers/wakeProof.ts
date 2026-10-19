@@ -123,7 +123,11 @@ export const BATCH_PROOF_VERSION = 1;
 /** The most rendered seqs one batch carries, across all its channels (renderBatch's message cap). */
 export const BATCH_PROOF_MAX_SEQS = 10;
 
-export type BatchRequester = { appKeyId: string };
+/**
+ * Who a batch is issued to: a host's App key (cor:agt:080:22's host arm), or a worker's own live session (R57's self
+ * arm, which has no host). Exactly one; a proof issued to one never acknowledges as the other, nor as another session.
+ */
+export type BatchRequester = { appKeyId: string } | { sessionId: string };
 
 export type BatchProofChannel = {
   channelId: string;
@@ -141,7 +145,8 @@ export type BatchProof = {
   kind: 'batch-proof';
   appId: string;
   workerId: string;
-  hostId: string;
+  /** The host of a host-key batch; null exactly when the requester is a session (the self arm has no host). */
+  hostId: string | null;
   requester: BatchRequester;
   channels: BatchProofChannel[];
   /** SHA-256 (hex) of the rendered text. */
@@ -178,6 +183,26 @@ function wellFormedChannel(c: Partial<BatchProofChannel> | null | undefined): bo
   return c.from <= seqs[0]! && seqs[seqs.length - 1] === c.through;
 }
 
+const principal = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+
+/** Exactly one principal, paired with its host: an App key with a host id, a session with none. */
+function wellPairedRequester(r: unknown, hostId: unknown): boolean {
+  if (!r || typeof r !== 'object') return false;
+  const { appKeyId, sessionId, ...rest } = r as { appKeyId?: unknown; sessionId?: unknown };
+  if (Object.keys(rest).length > 0) return false;
+  if (appKeyId !== undefined && sessionId === undefined) return principal(appKeyId) && principal(hostId);
+  if (sessionId !== undefined && appKeyId === undefined) return principal(sessionId) && hostId === null;
+  return false;
+}
+
+/** Is `who` the principal the batch was issued to? Same arm and same principal, never across arms. */
+export function sameBatchRequester(proof: BatchProof, who: BatchRequester): boolean {
+  const r = proof.requester;
+  if ('appKeyId' in r && 'appKeyId' in who) return r.appKeyId === who.appKeyId;
+  if ('sessionId' in r && 'sessionId' in who) return r.sessionId === who.sessionId;
+  return false;
+}
+
 /** The proof's payload, or WAKE_PROOF_INVALID. Signature first, then kind and version, then shape and batchKey. */
 export function verifyBatchProof(token: unknown): BatchProof {
   const invalid = () => refuse('WAKE_PROOF_INVALID', 'Not a valid delivery batch id.');
@@ -196,8 +221,8 @@ export function verifyBatchProof(token: unknown): BatchProof {
   if (value.kind !== 'batch-proof' || value.v !== BATCH_PROOF_VERSION) return invalid();
   const channels = value.channels;
   if (
-    typeof value.appId !== 'string' || typeof value.workerId !== 'string' || typeof value.hostId !== 'string' ||
-    typeof value.issuedAt !== 'number' || typeof value.requester?.appKeyId !== 'string' ||
+    typeof value.appId !== 'string' || typeof value.workerId !== 'string' ||
+    typeof value.issuedAt !== 'number' || !wellPairedRequester(value.requester, value.hostId) ||
     typeof value.renderHash !== 'string' || !/^[0-9a-f]{64}$/.test(value.renderHash) ||
     typeof value.batchKey !== 'string' ||
     !Array.isArray(channels) || channels.length === 0 || !channels.every(wellFormedChannel) ||

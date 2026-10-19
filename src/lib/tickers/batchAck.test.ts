@@ -274,3 +274,63 @@ describe('acknowledgeBatchProofs: partial through', () => {
     expect(await mark(chA)).toBe(3);
   });
 });
+
+describe('R57 self arm: a worker acknowledges its own batches through its own live session (cor:agt:080:17/:22)', () => {
+  const SELF = { sessionId: 'session-a' };
+  const selfProof = (channels: BatchProof['channels'], over: Partial<BatchProof> = {}) =>
+    proofFor(channels, { requester: SELF, hostId: null, ...over } as Partial<BatchProof>);
+  const ackAs = (requester: unknown, acks: Array<{ proof: string }>, extra: Record<string, unknown> = {}) =>
+    acknowledgeBatchProofs({ ctx: ctx(manager.id), requester: requester as never, acks, mayAckBatch: allow, ...extra });
+
+  it('decodes exactly one principal: a session requester pairs with a null hostId, an App key with a host', async () => {
+    const ok = selfProof([range(chA, [1])]);
+    expect(verifyBatchProof(signBatchProof(ok))).toEqual(ok);
+    const bad = [
+      proofFor([range(chA, [1])], { requester: { appKeyId: 'k', sessionId: 's' } as never }),
+      proofFor([range(chA, [1])], { requester: {} as never }),
+      proofFor([range(chA, [1])], { requester: { sessionId: '' } as never, hostId: null as never }),
+      proofFor([range(chA, [1])], { requester: { appKeyId: '' } }),
+      proofFor([range(chA, [1])], { requester: SELF as never }), // a session with a host
+      proofFor([range(chA, [1])], { hostId: null as never }), // an App key without one
+      proofFor([range(chA, [1])], { hostId: '' }),
+    ];
+    for (const p of bad) expect(await code(() => verifyBatchProof(signBatchProof(p)))).toBe('WAKE_PROOF_INVALID');
+  });
+
+  it('its own session acknowledges; the mark records the worker, the session\'s user and no App key', async () => {
+    const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id }, select: { agentId: true } });
+    await db.session.create({ data: { id: SELF.sessionId, appId: app.id, userId: manager.id, workerId: worker.id, agentId: w.agentId, type: 'DEVELOPER', startedAt: new Date() } });
+    await say(chA); await say(chA);
+    const seen: unknown[] = [];
+    const mayAckBatch = vi.fn(async (p: BatchProof) => { seen.push(p.requester); return true; });
+    expect(await ackAs(SELF, [{ proof: signBatchProof(selfProof([range(chA, [1, 2])])) }], { mayAckBatch })).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(seen).toEqual([SELF]); // liveness and "its own worker" are decided by the callback, inside the transaction
+    expect(await db.workerDeliveryChannel.findUnique({ where: { workerId_channelId: { workerId: worker.id, channelId: chA.id } } }))
+      .toMatchObject({ deliveredThroughSeq: 2, ackedByWorkerId: worker.id, ackedByAppKeyId: null, ackedByUserId: manager.id });
+  });
+
+  it('another session (same worker, same holder), a host key, or a session acking a host proof is a mismatch; nothing moves', async () => {
+    await say(chA);
+    const self = signBatchProof(selfProof([range(chA, [1])]));
+    const host = signBatchProof(proofFor([range(chA, [1])]));
+    expect(await code(ackAs({ sessionId: 'session-b' }, [{ proof: self }]))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await code(ackAs(KEY, [{ proof: self }]))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await code(ackAs(SELF, [{ proof: host }]))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await mark(chA)).toBeNull();
+  });
+
+  it('the session arm keeps every other refusal: stale, recreated channel, all-or-nothing', async () => {
+    await say(chA); await say(chB);
+    expect(await code(ackAs(SELF, [{ proof: signBatchProof(selfProof([range(chA, [1])], { issuedAt: Date.now() - 16 * MIN })) }]))).toBe('WAKE_PROOF_STALE');
+    await db.channel.update({ where: { id: chB.id }, data: { incarnation: 2 } });
+    expect(await code(ackAs(SELF, [
+      { proof: signBatchProof(selfProof([range(chA, [1])])) },
+      { proof: signBatchProof(selfProof([range(chB, [1])])) },
+    ]))).toBe('WAKE_PROOF_STALE');
+    expect([await mark(chA), await mark(chB)]).toEqual([null, null]);
+  });
+
+  it('batchKey does not depend on the requester: host and self reads of the same batch share it', async () => {
+    expect(selfProof([range(chA, [1, 2])]).batchKey).toBe(proofFor([range(chA, [1, 2])]).batchKey);
+  });
+});

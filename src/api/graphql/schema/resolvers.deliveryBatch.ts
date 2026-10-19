@@ -226,7 +226,9 @@ export const deliveryBatchMutations = {
       requester: { appKeyId: key.appKeyId },
       acks,
       mayAckBatch: async (p: BatchProof, tx: Prisma.TransactionClient, txCtx: Context) => {
-        if (p.appId !== key.appId || p.hostId === null) return false;
+        if (p.appId !== key.appId) return false;
+        // A self proof (hostId null) is never a host key's to acknowledge (R57).
+        if (p.hostId === null) return false;
         const app = await loadApp(txCtx, p.appId);
         if (!app || app.deletedAt || app.uninstalledAt) return false;
         await lockAuthorityAnchors(tx, appAnchors(app), 'shared');
