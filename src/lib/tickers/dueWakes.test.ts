@@ -229,8 +229,8 @@ describe('ticks and relevance through the whole loader', () => {
   });
 });
 
-describe('#2068 — a ticker that wakes without chat, through the whole loader', () => {
-  it('ticks with no unread at all, acknowledges, and is not due again until the next tick; without the option it stays silent', async () => {
+describe('#2068 (R49/R54) — a ticker with reason every-tick, through the whole loader', () => {
+  it('ticks with no unread at all, acknowledges, and is not due again until the next tick; read-team-channel alone stays silent', async () => {
     const quiet = await mkTicker();
     await subscribe(quiet.id, liam.id);
     expect(ids(await due(ctx(manager.id)))).toEqual([]);
@@ -250,11 +250,82 @@ describe('#2068 — a ticker that wakes without chat, through the whole loader',
     expect(later.wakes).toHaveLength(1);
   });
 
-  it('never bypasses a pause or the per-worker floor', async () => {
-    const t = await mkTicker({ reasons: ['every-tick'] });
+  const everyTick = (over: Record<string, unknown> = {}) => mkTicker({ reasons: ['every-tick'], ...over });
+  const appLike2 = () => ({ id: app.id, organizationId: org.id, ownerUserId: null });
+  const readAt = (ms: number) => computeDueWakes({ ctx: ctx(manager.id), app: appLike2(), reader: { manager: true, userId: manager.id }, requester: { userId: manager.id }, now: new Date(Date.now() + ms) });
+
+  it('every-tick ignores relevance: a MENTIONS ticker and an ALL ticker both tick with nothing unread; read-team-channel on a MENTIONS ticker needs a mention', async () => {
+    const mine = await mkTicker({ relevance: 'MENTIONS', reasons: ['read-team-channel'], name: 'M' });
+    await subscribe(mine.id, liam.id);
+    await say(channel, 'plain news');
+    expect(ids(await due(ctx(manager.id)))).toEqual([]); // MENTIONS + read-team-channel: plain chat does not count
+    await db.ticker.update({ where: { id: mine.id }, data: { reasons: ['every-tick'] } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([liam.id]);
+    // Legacy control: a normal ALL read-team-channel ticker with relevant unread still ticks.
+    await db.appWakeReservation.deleteMany();
+    await db.ticker.update({ where: { id: mine.id }, data: { relevance: 'ALL', reasons: ['read-team-channel'] } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([liam.id]);
+  });
+
+  it('a channel-empty TICK proof acknowledges exactly its tick: no chat mark, no read position, no other ticker', async () => {
+    const mine = await everyTick({ name: 'Mine' });
+    const other = await mkTicker({ name: 'Other' });
+    await subscribe(mine.id, liam.id);
+    await subscribe(other.id, liam.id);
+    const w = (await due(ctx(manager.id))).wakes[0];
+    expect(w.reasons.map((r: any) => r.ticker.id)).toEqual([mine.id]); // the read-team-channel ticker has nothing to say
+    expect(w.channels).toEqual([]);
+    expect(await M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(manager.id))).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect(await db.channelReadState.count()).toBe(0);
+    expect(await db.workerDeliveryTick.findMany({ select: { tickerId: true } })).toEqual([{ tickerId: mine.id }]);
+    await db.workerDeliveryTick.updateMany({ data: { ackedAt: new Date(Date.now() - 3600_000) } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([]); // the acknowledged tick is not due
+    expect((await readAt(600_001)).wakes).toHaveLength(1); // the next one is
+  });
+
+  it('a channel-empty proof is refused when forged, foreign, stale or for another worker; nothing is written', async () => {
+    const t = await everyTick();
     await subscribe(t.id, liam.id);
+    const w = (await due(ctx(holderA.id))).wakes[0];
+    expect(await code(M.acknowledgeWakes({}, { proofs: [`${w.proof}x`] }, ctx(holderA.id)))).toBe('WAKE_PROOF_INVALID');
+    expect(await code(M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(holderB.id)))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    const p = verifyWakeProof(w.proof);
+    expect(await code(M.acknowledgeWakes({}, { proofs: [signWakeProof({ ...p, issuedAt: Date.now() - 16 * 60_000 })] }, ctx(holderA.id)))).toBe('WAKE_PROOF_STALE');
+    expect(await db.workerDeliveryTick.count()).toBe(0);
+  });
+
+  it('every-tick bypasses none of: pause, dormancy, the per-worker floor, the daily budget', async () => {
+    const t = await everyTick();
+    await subscribe(t.id, liam.id);
+    // pause
     await db.workerWakeSettings.create({ data: { workerId: liam.id, pausedUntil: new Date(Date.now() + 3600_000) } });
     expect(ids(await due(ctx(manager.id)))).toEqual([]);
+    await db.workerWakeSettings.update({ where: { workerId: liam.id }, data: { pausedUntil: null } });
+    // dormancy
+    const old = new Date(Date.now() - 100 * DAY);
+    await db.session.create({ data: { id: generateId(), appId: app.id, userId: holderA.id, workerId: liam.id, agentId: agent.id, type: 'DEVELOPER', startedAt: old, updatedAt: old, endedAt: old } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([]);
+    await db.session.deleteMany({ where: { workerId: liam.id } });
+    // the floor: a tick acknowledged just now holds the next one back until the window passes
+    const w = (await due(ctx(manager.id))).wakes[0];
+    await M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(manager.id));
+    await db.workerDeliveryTick.updateMany({ data: { ackedAt: new Date() } });
+    expect((await readAt(30_000)).wakes).toEqual([]); // inside the floor
+    // the budget
+    await db.workerDeliveryTick.deleteMany();
+    await db.appWakeReservation.deleteMany();
+    await db.app.update({ where: { id: app.id }, data: { wakeDailyBudget: 0 } });
+    const spent = await due(ctx(manager.id));
+    expect(spent.status).toBe('WAKE_BUDGET_EXHAUSTED');
+    expect(spent.wakes).toEqual([]);
+  });
+
+  it('a ticker row created before the column existed reads as [read-team-channel] (the migration default), naming no ticker', async () => {
+    const id = generateId();
+    await db.$executeRaw`INSERT INTO tickers (id, app_id, name, slug, cadence_seconds, anchor_at, channel_ids, relevance, enabled, owner_user_id, created_at)
+      VALUES (${id}, ${app.id}, 'Old', 'old', 600, now(), '{}', 'ALL', true, ${manager.id}, now())`;
+    expect((await db.ticker.findUniqueOrThrow({ where: { id } })).reasons).toEqual(['read-team-channel']);
   });
 });
 

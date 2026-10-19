@@ -921,4 +921,15 @@ describe('#2068 (R49/R54) — a ticker has reasons: a closed, never-empty list',
     // Narrowing back to read-team-channel is never a widening.
     await expect(M.updateTicker({}, { ref: fast.id, input: { reasons: ['READ_TEAM_CHANNEL'] } }, ctx(member.id))).resolves.toMatchObject({ reasons: ['read-team-channel'] });
   });
+
+  it('who may set reasons is who may edit the ticker: a non-owner is refused, an outsider and another App concealed, nothing changes', async () => {
+    const t = await createTicker(ctx(member.id), { name: 'Guarded' });
+    await expectCode(M.updateTicker({}, { ref: t.id, input: { reasons: ['EVERY_TICK'] } }, ctx(coordHolder.id)), 'FORBIDDEN');
+    await expectCode(M.updateTicker({}, { ref: t.id, input: { reasons: ['EVERY_TICK'] } }, ctx(outsider.id)), 'TICKER_NOT_FOUND');
+    await expectCode(createTicker(ctx(outsider.id), { name: 'X', reasons: ['EVERY_TICK'] }), 'APP_NOT_FOUND');
+    expect((await db.ticker.findUniqueOrThrow({ where: { id: t.id } })).reasons).toEqual(['read-team-channel']);
+    // The list and the single read show the same reasons to a participant.
+    const listed = (await Q.tickers({}, { appRef: app.id }, ctx(member.id))).find((x: any) => x.id === t.id);
+    expect(await F.Ticker.reasons(listed)).toEqual(['READ_TEAM_CHANNEL']);
+  });
 });
