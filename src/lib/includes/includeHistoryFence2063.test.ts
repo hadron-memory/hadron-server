@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+import { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import { generateId } from '../id.js';
@@ -55,6 +55,18 @@ describe('#2063 include-history prepared transaction boundary', () => {
     expect(work).not.toHaveBeenCalled();
   });
 
+  it('does not run work after the entire transaction budget was spent waiting for the fence', async () => {
+    const { client, tx } = recordedClient();
+    vi.mocked(tx.$executeRaw).mockImplementationOnce((async () => {
+      await new Promise((done) => setTimeout(done, 30));
+      return 1;
+    }) as unknown as typeof tx.$executeRaw);
+    const work = vi.fn();
+    await expect(withIncludeHistoryTransaction(client, work, { timeoutMs: 10 }))
+      .rejects.toThrow(/expired/i);
+    expect(work).not.toHaveBeenCalled();
+  });
+
   it('refuses forged contexts, pooled clients, and raw transaction clients before any query', () => {
     const { client, tx } = recordedClient();
     for (const value of [undefined, null, {}, client, tx]) {
@@ -77,6 +89,20 @@ describe('#2063 include-history prepared transaction boundary', () => {
     expect(() => includeHistoryClient(escaped)).toThrow(/prepared include-history transaction/i);
   });
 
+  it('refuses a context whose transaction budget expired while its callback was still running', async () => {
+    const { client } = recordedClient();
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+    try {
+      await withIncludeHistoryTransaction(client, async (prepared) => {
+        expect(includeHistoryClient(prepared)).toBeDefined();
+        clock.mockReturnValue(30_100);
+        expect(() => includeHistoryClient(prepared)).toThrow(/prepared include-history transaction/i);
+      });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('refuses a nested pooled wrapper instead of waiting for another connection behind its own fence', async () => {
     const { client } = recordedClient();
     await withIncludeHistoryTransaction(client, async () => {
@@ -97,6 +123,33 @@ describe('#2063 include-history prepared transaction boundary', () => {
 });
 
 describe('#2063 exclusive fence over real Postgres transactions', () => {
+  it('completes an eight-call burst on a two-connection pool without a second pooled client', async () => {
+    const url = new URL(process.env.DATABASE_URL!);
+    url.searchParams.set('connection_limit', '2');
+    const limited = new PrismaClient({ datasourceUrl: url.toString() });
+    const started = performance.now();
+    let active = 0;
+    let maximum = 0;
+    try {
+      const results = await Promise.all(Array.from({ length: 8 }, (_, i) =>
+        withIncludeHistoryTransaction(limited, async (prepared) => {
+          active += 1;
+          maximum = Math.max(maximum, active);
+          try {
+            await includeHistoryClient(prepared).$executeRaw`SELECT pg_sleep(0.005)`;
+            return i;
+          } finally {
+            active -= 1;
+          }
+        })));
+      expect(results).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+      expect(maximum).toBe(1);
+      console.info(`#2063 serialized burst: 8 transactions / pool 2 / ${Math.round(performance.now() - started)}ms`);
+    } finally {
+      await limited.$disconnect();
+    }
+  });
+
   it('serializes two outer transactions and reads commits made during the wait', async () => {
     const user = await db.user.create({ data: { email: `fence-${generateId()}@example.test` } });
     const holding = latch();
@@ -159,7 +212,7 @@ describe('#2063 exclusive fence over real Postgres transactions', () => {
           AND l.classid = 2063 AND l.objid = 1772 AND l.objsubid = 2 AND NOT l.granted`;
       expect(rows).toHaveLength(1);
       const [{ cancelled }] = await db.$queryRaw<Array<{ cancelled: boolean }>>`
-        SELECT pg_cancel_backend(${rows[0].pid}) AS cancelled`;
+        SELECT pg_cancel_backend(${rows[0].pid}::int) AS cancelled`;
       expect(cancelled).toBe(true);
       expect(await outcome).toBeInstanceOf(Error);
       expect(work).not.toHaveBeenCalled();
@@ -177,6 +230,7 @@ describe('#2063 exclusive fence over real Postgres transactions', () => {
       escaped = prepared;
       await includeHistoryClient(prepared).user.create({ data: { id, email: `timeout-${id}@example.test` } });
       await new Promise((done) => setTimeout(done, 250));
+      expect(() => includeHistoryClient(prepared)).toThrow(/prepared include-history transaction/i);
     }, { timeoutMs: 100 })).rejects.toThrow(/expired|closed|timeout/i);
     expect(await db.user.findUnique({ where: { id } })).toBeNull();
     expect(() => includeHistoryClient(escaped)).toThrow(/prepared include-history transaction/i);
