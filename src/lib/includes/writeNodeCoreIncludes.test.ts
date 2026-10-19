@@ -165,9 +165,8 @@ describe('copy paths conceal foreign targets (#2040, §10)', () => {
     const foreign = await db.memory.create({ data: { id: generateId(), name: 'secret', urn: 'foreign.example:secret', class: 'knowledge', organizationId: foreignOrg.id } });
     await db.node.create({ data: { id: generateId(), memoryId: foreign.id, loc: 'hidden', name: 'hidden', content: 'H' } });
     await create('local', 'L');
-    // Stored directly: a write with an unreadable target is now refused (#2041, cor:dmo:150:04),
-    // and this test is about what a COPY of such stored content does.
-    await db.node.create({ data: { id: generateId(), memoryId, loc: 'src', name: 'src', content: '{{> local}} {{> hrn:node:foreign.example:secret:hidden}} {{> hrn:node:foreign.example:secret:absent}}' } });
+    await create('src', '{{> local}} {{> hrn:node:foreign.example:secret:hidden}} {{> hrn:node:foreign.example:secret:absent}}');
+    expect((await includeEdges('src')).map(e => e.target.loc)).toEqual(['local']);
     const org = await db.organization.findFirstOrThrow({ where: { urn: 'inc.example' } });
     const clone = await M.cloneMemory(null, { ref: memoryId, targetUrn: `hrn:mem:${org.urn}:copy` }, as());
     const edges = await db.edge.findMany({ where: { memoryId: clone.id, governedKind: 'INCLUDE' }, include: { source: true, target: true } });
