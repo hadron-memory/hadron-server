@@ -5,7 +5,8 @@
 -- 20261010100000_comment_rulings, then the anchor CHECK in #1857
 -- 20261013170000_encrypted_comment_anchor_nullable, then #1869's insert check in
 -- 20261013180000_encrypted_anchor_hash_scrub, then #1935's commentable system
--- memories in 20261015100000_system_memories_commentable. Change it only together with a new
+-- memories in 20261015100000_system_memories_commentable, then #2040's kind-aware
+-- governed-edge triggers (INCLUDE) in 20261018230100_include_edges_lifecycle. Change it only together with a new
 -- migration that carries the new text. Idempotent.
 --
 -- The application path refuses every case first with a typed error; these are
@@ -87,7 +88,7 @@ BEGIN
   ELSE
     want_kind := 'COMMENT_ANCHOR'; want_target := m.target_node_id;
   END IF;
-  SELECT count(*) INTO edge_count FROM edges WHERE source_id = p_node_id AND governed_kind IS NOT NULL;
+  SELECT count(*) INTO edge_count FROM edges WHERE source_id = p_node_id AND governed_kind IN ('COMMENT_ANCHOR', 'COMMENT_REPLY');
   IF edge_count <> 1 OR NOT EXISTS (
     SELECT 1 FROM edges WHERE source_id = p_node_id AND governed_kind = want_kind AND target_id = want_target
   ) THEN
@@ -148,7 +149,7 @@ CREATE CONSTRAINT TRIGGER comment_meta_changed AFTER INSERT OR UPDATE OR DELETE 
 DROP TRIGGER IF EXISTS edges_governed_insert ON "edges";
 CREATE CONSTRAINT TRIGGER edges_governed_insert AFTER INSERT ON "edges"
   DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
-  WHEN (NEW.governed_kind IS NOT NULL)
+  WHEN (NEW.governed_kind IN ('COMMENT_ANCHOR', 'COMMENT_REPLY'))
   EXECUTE FUNCTION hadron_comment_node_changed();
 DROP TRIGGER IF EXISTS memories_comment_class ON "memories";
 CREATE CONSTRAINT TRIGGER memories_comment_class AFTER UPDATE OF class ON "memories"
@@ -163,8 +164,16 @@ CREATE OR REPLACE FUNCTION hadron_edges_governed_immutable() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP = 'UPDATE' THEN
-    IF OLD.governed_kind IS DISTINCT FROM NEW.governed_kind
-       OR (OLD.governed_kind IS NOT NULL AND (
+    -- A kind never changes once set (INCLUDE rows included), and a comment edge
+    -- keeps its identity. INCLUDE rows (#2040) are replaced by delete + insert
+    -- by the derived-edge sync, never rewritten in place.
+    IF OLD.governed_kind = 'INCLUDE' AND NEW.governed_kind IS NOT DISTINCT FROM 'INCLUDE' THEN
+      IF OLD.source_id <> NEW.source_id OR OLD.target_id <> NEW.target_id OR OLD.loc <> NEW.loc
+         OR OLD.name IS DISTINCT FROM NEW.name OR OLD.deleted_at IS DISTINCT FROM NEW.deleted_at THEN
+        RAISE EXCEPTION 'COMMENT_INVARIANT: derived include edge % is immutable (replace it by delete and insert)', OLD.id USING ERRCODE = 'check_violation';
+      END IF;
+    ELSIF OLD.governed_kind IS DISTINCT FROM NEW.governed_kind
+       OR (OLD.governed_kind IN ('COMMENT_ANCHOR', 'COMMENT_REPLY') AND (
          OLD.source_id <> NEW.source_id OR OLD.target_id <> NEW.target_id OR OLD.loc <> NEW.loc
          OR OLD.anchor_rev_no IS DISTINCT FROM NEW.anchor_rev_no
          OR OLD.anchor_approval_hash IS DISTINCT FROM NEW.anchor_approval_hash
@@ -174,7 +183,7 @@ BEGIN
     END IF;
     RETURN NEW;
   END IF;
-  IF OLD.governed_kind IS NOT NULL
+  IF OLD.governed_kind IN ('COMMENT_ANCHOR', 'COMMENT_REPLY')
      AND EXISTS (SELECT 1 FROM nodes WHERE id = OLD.source_id)
      AND EXISTS (SELECT 1 FROM memories WHERE id = OLD.memory_id) THEN
     RAISE EXCEPTION 'COMMENT_INVARIANT: governed comment edge % is removed only with its comment', OLD.id USING ERRCODE = 'check_violation';

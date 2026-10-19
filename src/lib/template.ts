@@ -1,4 +1,5 @@
 import Mustache from 'mustache';
+import { parseIncludeTags } from './includes/parseIncludeTags.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { decryptNodeFields } from './nodeCrypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
@@ -9,9 +10,18 @@ import {
   multiHumanDataView,
 } from './memoryDataView.js';
 
-/** Shared literal partial grammar for rendering and automation consent. */
+/**
+ * Shared literal partial grammar for rendering and automation consent: the
+ * same-memory loc targets of the include tags in `content` (#2040 — the one
+ * parser, `parseIncludeTags`; URN targets are S2's). Never throws: a malformed
+ * tag is refused at write time, and a stored one renders as before.
+ */
 export function templatePartialLocs(content: string): string[] {
-  return [...new Set([...content.matchAll(/\{\{>\s*([^}]+)\s*\}\}/g)].map(match => match[1].trim()))];
+  try {
+    return [...new Set(parseIncludeTags(content).filter(t => t.kind === 'loc').map(t => t.target))];
+  } catch {
+    return [...new Set([...content.matchAll(/\{\{>\s*([^}]+)\s*\}\}/g)].map(match => match[1].trim()))];
+  }
 }
 
 /**

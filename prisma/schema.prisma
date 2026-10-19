@@ -1588,6 +1588,8 @@ model Edge {
 enum EdgeGovernedKind {
   COMMENT_ANCHOR
   COMMENT_REPLY
+  /// Derived from an include tag in the source node's content (#2040); owned by the content writer, never by a client.
+  INCLUDE
 }
 
 /// #1606 — a comment thread's state (`cor:dmo:110:05`); top-level only.
