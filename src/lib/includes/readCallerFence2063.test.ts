@@ -150,4 +150,33 @@ describe('outer-fenced reconciliation read callers', () => {
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(1);
   });
 
+  it.each([
+    ['node', 'missing'], ['node', 'deleted'], ['mcp', 'missing'], ['mcp', 'deleted'],
+  ] as const)('%s refuses a %s actor after the fence wait without history mutation', async (surface, state) => {
+    const n = await drifted();
+    const result = await underHeldFence(
+      async () => {
+        try {
+          return surface === 'node'
+            ? await resolvers.Query.node(null, { ref: n.id, raw: true }, ctx())
+            : await createTestableMcpServer({ userId, roles: ['ADMIN'], clientId: `user:${userId}` }).callToolText('hadron_get_node', { urn: 'hrn:node:read-fence.example:mem:drift' });
+        } catch (error) { return error; }
+      },
+      async () => {
+        if (state === 'missing') await db.user.delete({ where: { id: userId } });
+        else await db.user.update({ where: { id: userId }, data: { deletedAt: new Date() } });
+      },
+    );
+    if (surface === 'node') {
+      expect(result).toBeInstanceOf(Error);
+      expect((result as { extensions: { code: string } }).extensions.code).toBe('FORBIDDEN');
+    } else {
+      expect(result).toEqual(expect.any(String));
+      expect(result).not.toContain('raw change');
+      expect(result).toMatch(/not found/i);
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).revSeq).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
 });
