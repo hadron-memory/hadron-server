@@ -11,7 +11,6 @@
 // message is eligible when it REACHES the worker (src/lib/mentionReach.ts, the one S4 predicate) and lies above both the
 // read position and the delivered-through mark of the channel's current incarnation.
 
-import { createHash } from 'node:crypto';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { getAccessibleMemoryIds } from '../../api/graphql/schema/resolvers.helpers.js';
 import { collectRegisterRows } from '../resolveRegister.js';
@@ -21,6 +20,7 @@ import { renderBatch, type BatchMessage } from '../messaging/renderBatch.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { batchTiming, loadDeliverySettings } from './batchTiming.js';
 import { holderAccess, mayRead, type AppLike } from './dueWakes.js';
+import { batchKeyOf, type BatchProof } from './wakeProof.js';
 
 export const DELIVERY_BATCHES_PAGE_DEFAULT = 50;
 export const DELIVERY_BATCHES_PAGE_MAX = 200;
@@ -110,6 +110,7 @@ export async function loadDeliveryBatches(args: {
 
     const messages: BatchMessage[] = [];
     const incarnationOf = new Map<string, number>();
+    const markOf = new Map<string, number>();
     for (const ch of channels) {
       if (ch.memory.isEncrypted) continue; // ruled: no text for encrypted channels
       if (!callerCan(ch.memoryId) || !mayRead(holder, ch.memoryId)) continue;
@@ -118,6 +119,7 @@ export async function loadDeliveryBatches(args: {
       const lo = Math.max(seen.find((x) => x.channelId === ch.id)?.lastSeenSeq ?? 0, mark);
       if (ch.lastSeq <= lo) continue;
       incarnationOf.set(ch.id, ch.incarnation);
+      markOf.set(ch.id, mark);
       const eligible = await eligibleMessages(db, ch, lo, w.id, token);
       messages.push(...eligible);
     }
@@ -128,13 +130,20 @@ export async function loadDeliveryBatches(args: {
     if (timing.deliverAfter.getTime() > now.getTime()) continue;
 
     const out = renderBatch({ workerName: w.name, messages });
-    const ranges: LoadedBatchRange[] = out.ranges.map((r) => ({ ...r, incarnation: incarnationOf.get(r.channelId)! }));
+    // The range starts right after the delivered mark: the messages below the first rendered one that do not reach the worker
+    // (its own posts, chatter) are covered by the acknowledgement, and no eligible one above the last rendered one is.
+    const ranges: LoadedBatchRange[] = out.ranges.map((r) => ({
+      ...r, incarnation: incarnationOf.get(r.channelId)!, fromSeq: markOf.get(r.channelId)! + 1,
+    }));
     batches.push({
       workerId: w.id,
       workerName: w.name,
       text: out.text,
       renderHash: out.renderHash,
-      batchKey: createHash('sha256').update(JSON.stringify([w.id, out.renderHash, ranges.map((r) => [r.channelId, r.incarnation, r.seqs])])).digest('hex'),
+      batchKey: batchKeyOf({
+        workerId: w.id, renderHash: out.renderHash,
+        channels: ranges.map((r) => ({ channelId: r.channelId, incarnation: r.incarnation, from: r.fromSeq, through: r.throughSeq, seqs: r.seqs })),
+      }),
       deliverAfter: timing.deliverAfter,
       busyDeadline: timing.busyDeadline,
       interrupt: false,
@@ -192,27 +201,11 @@ const replyToOf = (data: unknown): number | null => {
   return typeof v === 'number' ? v : null;
 };
 
-/**
- * The payload the batch's signed id carries (slice b signs and verifies it: src/lib/tickers/batchProof.ts). Domain-separated
- * from the wake proof. `seqs` are exactly the rendered messages; `batchKey` is the stable re-derivation key.
- */
-export type BatchProofPayload = {
-  v: 1;
-  kind: 'batch-proof';
-  appId: string;
-  workerId: string;
-  hostId: string;
-  requester: { appKeyId: string };
-  channels: Array<{ channelId: string; incarnation: number; from: number; through: number; seqs: number[] }>;
-  renderHash: string;
-  batchKey: string;
-  issuedAt: number;
-};
-
+/** The payload the batch's signed id carries (slice b signs it: signBatchProof in wakeProof.ts). */
 export function batchProofPayload(
   batch: LoadedBatch,
   who: { appId: string; hostId: string; appKeyId: string; now: Date },
-): BatchProofPayload {
+): BatchProof {
   return {
     v: 1,
     kind: 'batch-proof',
