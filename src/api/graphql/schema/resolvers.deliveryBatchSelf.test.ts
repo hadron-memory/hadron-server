@@ -343,3 +343,11 @@ describe('R57 own-live-session batches', () => {
   });
 
 });
+
+it('self proof uses the same current register policy as host proof after read', async () => {
+  const s = await ownSession(); await postForBoth();
+  const [b] = (await selfRead(s)).batches;
+  await db.registerEntry.updateMany({ where: { attendeeWorkerId: kit.id }, data: { role: 'POST' } });
+  expect(await code(selfAck(s, [b.id]))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+  expect(await db.workerDeliveryChannel.count()).toBe(0);
+});

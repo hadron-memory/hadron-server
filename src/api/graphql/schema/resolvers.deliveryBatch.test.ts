@@ -245,7 +245,7 @@ describe('#2102 current host delivery policy at the deciding transaction', () =>
     expect((await Q.deliveryBatches({}, { appRef: app.id }, c)).batches).toEqual([]);
   });
 
-  it.each(['register', 'encrypted', 'holder'] as const)('read omits a channel after %s authority is revoked in the gap', async (kind) => {
+  it.each(['register', 'encrypted', 'holder', 'caller'] as const)('read omits a channel after %s authority is revoked in the gap', async (kind) => {
     await db.worker.update({ where: { id: kit.id }, data: { heldByUserId: manager.id } });
     await postForBoth();
     const c = beforeDecision(() => revoke(kind));
@@ -253,13 +253,14 @@ describe('#2102 current host delivery policy at the deciding transaction', () =>
     expect(await db.workerDeliveryChannel.count()).toBe(0);
   });
 
-  async function revoke(kind: 'register' | 'encrypted' | 'holder') {
+  async function revoke(kind: 'register' | 'encrypted' | 'holder' | 'caller') {
     if (kind === 'register') return db.registerEntry.updateMany({ where: { attendeeWorkerId: kit.id }, data: { role: 'POST' } });
     if (kind === 'encrypted') return db.memory.update({ where: { id: channel.memoryId }, data: { isEncrypted: true } });
+    if (kind === 'caller') return db.memory.update({ where: { id: channel.memoryId }, data: { class: 'private', userId: manager.id, appId: null, sharedMemoryOfAgentId: null, userMemoryOfAgentId: null } });
     return db.orgMember.update({ where: { organizationId_userId: { organizationId: org.id, userId: manager.id } }, data: { deletedAt: new Date() } });
   }
 
-  it.each(['register', 'encrypted', 'holder'] as const)('old host proof refuses after %s authority loss, including at transaction entry', async (kind) => {
+  it.each(['register', 'encrypted', 'holder', 'caller'] as const)('old host proof refuses after %s authority loss, including at transaction entry', async (kind) => {
     await db.worker.update({ where: { id: kit.id }, data: { heldByUserId: manager.id } });
     await postForBoth();
     const [b] = (await read(hostKey)).batches;
@@ -267,5 +268,46 @@ describe('#2102 current host delivery policy at the deciding transaction', () =>
     expect(await code(M.acknowledgeDeliveryBatches({}, { batchIds: [b.id] }, c))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
     expect(await db.workerDeliveryChannel.count()).toBe(0);
     expect((await read(hostKey)).batches).toEqual([]);
+  });
+});
+
+describe('#2102 proof policy after an actual worker wake-lock wait', () => {
+  it.each(['register', 'encrypted'] as const)('a committed %s revocation while ack waits refuses with zero marks', async (kind) => {
+    await postForBoth();
+    const [b] = (await read(hostKey)).batches;
+    let held!: () => void; const holding = new Promise<void>(r => { held = r; });
+    let release!: () => void; const released = new Promise<void>(r => { release = r; });
+    let entering!: () => void; const waiting = new Promise<void>(r => { entering = r; });
+    const blocker = db.$transaction(async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + kit.id}, 0))`;
+      held(); await released;
+    });
+    await holding;
+    const original = db.$transaction.bind(db);
+    const hooked = new Proxy(db, { get(target, prop) {
+      if (prop !== '$transaction') return Reflect.get(target, prop);
+      return (body: any, ...options: any[]) => (original as any)(async (tx: any) => body(new Proxy(tx, { get(t, key) {
+        if (key !== '$executeRaw') return Reflect.get(t, key);
+        return (...args: any[]) => {
+          if (args.includes('wake:' + kit.id)) entering();
+          return t.$executeRaw(...args);
+        };
+      }})), ...options);
+    }});
+    const pending = M.acknowledgeDeliveryBatches({}, { batchIds: [b.id] }, keyCtx(hostKey, app.id, { db: hooked }));
+    try {
+      await waiting;
+      // Observe a real blocked PostgreSQL advisory lock, not a timed sleep.
+      let blocked = false;
+      for (let i = 0; i < 100 && !blocked; i++) {
+        const rows = await db.$queryRaw<Array<{ waiting: boolean }>>`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())) AS waiting`;
+        blocked = rows[0]!.waiting;
+      }
+      expect(blocked).toBe(true);
+      if (kind === 'register') await db.registerEntry.updateMany({ where: { attendeeWorkerId: kit.id }, data: { role: 'POST' } });
+      else await db.memory.update({ where: { id: channel.memoryId }, data: { isEncrypted: true } });
+    } finally { release(); await blocker; }
+    expect(await code(pending)).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
   });
 });

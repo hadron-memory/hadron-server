@@ -102,21 +102,16 @@ export async function loadDeliveryEligibility(args: DeliverySelectionArgs): Prom
   if (page.length === 0) return { workers: [], nextAfter };
 
   const callerIds = await getAccessibleMemoryIds(ctx);
-  const callerCan = (memoryId: string) => callerIds === null || callerIds.includes(memoryId);
   const holderCache = new Map<string, Set<string> | 'all' | null>();
   const selected: EligibleDeliveryWorker[] = [];
 
   for (const w of page) {
     const token = mentionTokenOf(w.name);
     if (!token) continue;
-    const holder = w.heldByUserId ? await holderAccess(ctx, app, w.heldByUserId, holderCache) : 'all';
     const rows = (await collectRegisterRows(db, { workerId: w.id }))?.rows ?? [];
-    const channelIds = [...new Set(rows.filter((r) => r.role !== 'POST').map((r) => r.channelId))];
+    const channelIds = [...new Set(rows.filter(r => r.role !== 'POST').map(r => r.channelId))];
     if (channelIds.length === 0) continue;
-    const channels = await db.channel.findMany({
-      where: { id: { in: channelIds }, deletedAt: null },
-      select: { id: true, memoryId: true, lastSeq: true, incarnation: true, memory: { select: { isEncrypted: true } } },
-    });
+    const channels = await loadDeliveryChannelPolicy(ctx, app, w, { callerIds, holderCache, channelIds });
     const [seen, delivered] = await Promise.all([
       db.channelReadState.findMany({ where: { workerId: w.id, channelId: { in: channelIds } }, select: { channelId: true, lastSeenSeq: true } }),
       db.workerDeliveryChannel.findMany({ where: { workerId: w.id, channelId: { in: channelIds } } }),
@@ -124,7 +119,6 @@ export async function loadDeliveryEligibility(args: DeliverySelectionArgs): Prom
 
     const eligibleChannels: EligibleDeliveryChannel[] = [];
     for (const ch of channels) {
-      if (ch.memory.isEncrypted || !callerCan(ch.memoryId) || !mayRead(holder, ch.memoryId)) continue;
       const d = delivered.find(x => x.channelId === ch.id);
       const mark = d && d.channelIncarnation === ch.incarnation ? d.deliveredThroughSeq : 0;
       const lo = Math.max(seen.find(x => x.channelId === ch.id)?.lastSeenSeq ?? 0, mark);
@@ -138,6 +132,31 @@ export async function loadDeliveryEligibility(args: DeliverySelectionArgs): Prom
     selected.push({ workerId: w.id, workerName: w.name, channels: eligibleChannels });
   }
   return { workers: selected, nextAfter };
+}
+
+/** Current channel policy shared by rendering and BOTH proof-ack arms.
+ * Deliberately ignores read/delivery marks: a repeated ack still has authority
+ * after its own mark moved. The caller supplies a fresh transaction context.
+ */
+export async function loadDeliveryChannelPolicy(
+  ctx: Context,
+  app: AppLike,
+  worker: { id: string; heldByUserId: string | null },
+  readers?: { callerIds: string[] | null; holderCache: Map<string, Set<string> | 'all' | null>; channelIds: string[] },
+) {
+  const callerIds = readers ? readers.callerIds : await getAccessibleMemoryIds(ctx);
+  const holder = worker.heldByUserId
+    ? await holderAccess(ctx, app, worker.heldByUserId, readers?.holderCache ?? new Map())
+    : 'all';
+  const rows = readers ? [] : (await collectRegisterRows(ctx.db, { workerId: worker.id }))?.rows ?? [];
+  const channelIds = readers?.channelIds ?? [...new Set(rows.filter(r => r.role !== 'POST').map(r => r.channelId))];
+  if (!channelIds.length) return [];
+  const channels = await ctx.db.channel.findMany({
+    where: { id: { in: channelIds }, deletedAt: null },
+    select: { id: true, memoryId: true, lastSeq: true, incarnation: true, memory: { select: { isEncrypted: true } } },
+  });
+  return channels.filter(c => !c.memory.isEncrypted
+    && (callerIds === null || callerIds.includes(c.memoryId)) && mayRead(holder, c.memoryId));
 }
 
 export async function loadDeliveryBatches(args: DeliverySelectionArgs): Promise<LoadedBatchPage> {
