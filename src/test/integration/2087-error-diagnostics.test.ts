@@ -54,7 +54,7 @@ beforeAll(async () => {
   await db.orgMember.create({data:{organizationId:org.id,userId:manager.id,role:'ADMIN'}});
   appId=(await db.app.create({data:{name:'Own',urn:'diagnostics2087.example:own',organizationId:org.id}})).id;
   await db.app.create({data:{name:'Foreign',urn:'diagnostics2087.example:foreign',ownerUserId:other.id}});
-  sid=(await db.session.create({data:{userId:manager.id,appId}})).id;
+  sid=(await db.session.create({data:{id:generateId(),userId:manager.id,appId}})).id;
   token=await signJwt({sub:manager.id,roles:['READER']});
   server=httpServer(await createServer()); await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
   origin=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -85,6 +85,16 @@ describe('#2087 development diagnostic boundaries',()=>{
     expect(await db.app.findMany({orderBy:{id:'asc'}})).toEqual(before);
     const success=await tool(id,name,args(appId)); expect(success.isError).not.toBe(true); expect(JSON.parse(success.content[0].text)).toMatchObject({busyDelaySeconds:name.endsWith('_set')?502:501,standbyEnabled:false});
     if(name.endsWith('_set')) expect((await db.app.findUniqueOrThrow({where:{id:appId}})).deliveryBusyDelaySeconds).toBe(502);
+  });
+  it.each([
+    ['hadron_task_list','agentTasks',{appRef:absent}],
+    ['hadron_get_comment','comment',{commentRef:'hrn:node:diagnostics2087.example:kb:comment'}],
+  ])('MCP %s also strips diagnostics without changing public fields',async(name,resolver,args)=>{
+    const id=await mcpOpen();
+    const spy=vi.spyOn(resolvers.Query as any,resolver).mockRejectedValueOnce(new GraphQLError('refused',{extensions:{code:'FORBIDDEN',appRef:absent,...diagnostics}}));
+    const result=await tool(id,name,args);
+    spy.mockRestore(); expect(result.content[0].text).toContain('[forbidden] refused');
+    expect(result.content[0].text).toContain(`appRef: ${absent}`); noDiagnostics(result);
   });
   it('MCP typed-error mapping strips supplied diagnostic extensions, preserving public extras',async()=>{
     const id=await mcpOpen();
