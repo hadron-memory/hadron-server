@@ -135,6 +135,10 @@ describe.each(CASES)('$name', ({ R, expectInverted }) => {
     expect(res.dl, "real callers must not deadlock").toBe(0);
     expect(res.ra.status).toBe("fulfilled");
     expect(res.rb.status).toBe("fulfilled");
+    if (res.ra.status === 'fulfilled') expect(String(res.ra.value)).not.toMatch(/internal_server_error|deadlock|40P01/i);
+    if (res.rb.status === 'fulfilled') expect(String(res.rb.value)).toContain('URN_ALREADY_EXISTS:');
+    expect(await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: D, memoryId: memory.id } } })).toMatchObject({ content: 'from create', deletedAt: null });
+    expect(await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'xsrc1', memoryId: memory.id } } })).toMatchObject({ deletedAt: null });
   }, 60_000);
 
   it('S2: MCP hadron_move_node onto tombstone R (archiveTombstone, live descendant D) vs GraphQL moveNode D->q', async () => {
@@ -149,6 +153,9 @@ describe.each(CASES)('$name', ({ R, expectInverted }) => {
     expect(res.dl, "real callers must not deadlock").toBe(0);
     expect(res.ra.status).toBe("fulfilled");
     expect(res.rb.status).toBe("fulfilled");
+    if (res.ra.status === 'fulfilled') expect(String(res.ra.value)).not.toMatch(/internal_server_error|deadlock|40P01/i);
+    expect((await db.node.findUniqueOrThrow({ where: { id: d.id } })).loc).toBe('qdest');
+    expect(await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: R, memoryId: memory.id } } })).toMatchObject({ content: 'xsrc2', deletedAt: null });
   }, 60_000);
   it('S3: reserveSpecCitation tombstone with live child versus GraphQL move',async()=>{
     await mkNode(R,{deletedAt:new Date(),deletedBy:admin.id});
