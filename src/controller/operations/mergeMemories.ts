@@ -737,6 +737,9 @@ async function runMerge(
       await lockMergeMemoryRows(tx);
       // #1468 — the folded source rows are deleted below: authoritative here.
       await assertNoMintedSpecRemoval(tx, sourceMemoryId, srcRows.map((r) => r.id), 'merge out of its corpus');
+      // #2043 — boot-prompt guard on the node-locked source+target rows BEFORE reconciliation
+      // mints any revision; the post-read check below covers rows re-read after it.
+      await assertNoBootPromptRows(tx, foldIds, 'merge');
       for (const id of foldIds) {
         const reconciled = await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: foldMemory.get(id)! });
         if (reconciled == null) throw new Error(`merge node ${id} moved or vanished during the fold; retry the merge`);
