@@ -39,16 +39,49 @@ export async function deliveryStateTransaction<T>(db: PrismaClient, appId: strin
   }, { timeout: 30_000 });
 }
 
+type DeliveryLockSet = { appId: string; workers: ReadonlySet<string>; acquired: boolean };
+const deliveryLockSets = new WeakMap<Tx, DeliveryLockSet>();
+
+/**
+ * Caller already holds its complete authority set and reporting graph in the
+ * required mode. Acquire this transaction's COMPLETE worker set before any
+ * deciding membership/Worker rows. Planned cast IDs need not exist yet.
+ * No authority, graph upgrade, row lookup or nested transaction happens here.
+ */
+export async function lockDeliveryWorkers(tx: Tx, appId: string, workerIds: readonly string[]): Promise<void> {
+  if (typeof (tx as unknown as { $transaction?: unknown }).$transaction === 'function') fail('DELIVERY_TRANSACTION_REQUIRED');
+  if (!appId || !workerIds.every(id => typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id))) fail('DELIVERY_LOCK_SET_STALE');
+  const workers = new Set(workerIds);
+  const prior = deliveryLockSets.get(tx);
+  if (prior) {
+    if (!prior.acquired || prior.appId !== appId || [...workers].some(id => !prior.workers.has(id))) fail('DELIVERY_LOCK_SET_STALE');
+    return;
+  }
+  // Seal before waiting: concurrent calls cannot expand the set or use a
+  // partially acquired set. A failed acquisition poisons this transaction.
+  const held: DeliveryLockSet = { appId, workers, acquired: false };
+  deliveryLockSets.set(tx, held);
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + appId}, 0))`;
+  for (const id of [...workers].sort()) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + id}, 0))`;
+  held.acquired = true;
+}
+
+/** Producer writes may only touch the predeclared worker set of this tx. */
+export function assertDeliveryWorkerLocked(tx: Tx, workerId: string): void {
+  const held = deliveryLockSets.get(tx);
+  if (!held?.acquired || !held.workers.has(workerId)) fail('DELIVERY_LOCK_NOT_HELD');
+}
+
 /** After the caller holds its authority/owner rows, share the canonical graph -> budget -> worker order. */
 export async function lockDeliveryState(tx: Tx, appId: string, workerId: string): Promise<void> {
     await lockAppReportsTo(tx, appId, 'shared');
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + appId}, 0))`;
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + workerId}, 0))`;
+    await lockDeliveryWorkers(tx, appId, [workerId]);
     const worker = await tx.worker.findFirst({ where: { id: workerId, appId, retiredAt: null, app: { deletedAt: null, uninstalledAt: null } }, select: { id: true } });
     if (!worker) fail('DELIVERY_WORKER_NOT_FOUND');
 }
 
 export async function beginDeliveryTracking(tx: Tx, workerId: string, at: Date): Promise<void> {
+  assertDeliveryWorkerLocked(tx, workerId);
   await tx.workerDeliveryWaitState.upsert({ where: { workerId }, create: { workerId, trackedFrom: at, observedThrough: at }, update: {} });
 }
 
@@ -71,6 +104,7 @@ function validateCoverageCause(cause: WaitException['cause'], coverage: WaitCove
 
 /** Idempotent effective-time producer write. Caller holds worker lock and knows exact coverage. */
 export async function recordDeliveryException(tx: Tx, e: WaitException): Promise<void> {
+  assertDeliveryWorkerLocked(tx, e.workerId);
   if (!(DELIVERY_EXCEPTION_CAUSES as readonly string[]).includes(e.cause) || !Number.isFinite(e.startedAt.getTime()) || (e.endedAt && (!Number.isFinite(e.endedAt.getTime()) || e.endedAt < e.startedAt))) fail('DELIVERY_EXCEPTION_INVALID');
   const state = await tx.workerDeliveryWaitState.findUnique({ where: { workerId: e.workerId } });
   if (!state || e.startedAt < state.trackedFrom) fail('DELIVERY_WAIT_INCOMPLETE');
@@ -100,6 +134,7 @@ export async function transitionDeliveryException(tx: Tx, change: {
   effectiveAt: Date; active: boolean; until?: Date | null;
 }): Promise<void> {
   const { workerId, cause, coverage, effectiveAt, active } = change;
+  assertDeliveryWorkerLocked(tx, workerId);
   const until = change.until ?? null;
   if (!(DELIVERY_EXCEPTION_CAUSES as readonly string[]).includes(cause) ||
       !Number.isFinite(effectiveAt.getTime()) ||
@@ -135,6 +170,7 @@ export async function transitionDeliveryException(tx: Tx, change: {
 
 /** Completeness certificate from the integrated policy producer, not the evaluator's clock. */
 export async function observeDeliveryPolicyThrough(tx: Tx, workerId: string, through: Date): Promise<void> {
+  assertDeliveryWorkerLocked(tx, workerId);
   if (!Number.isFinite(through.getTime())) fail('DELIVERY_WAIT_INVALID');
   await tx.workerDeliveryWaitState.updateMany({ where: { workerId, observedThrough: { lt: through } }, data: { observedThrough: through } });
 }
