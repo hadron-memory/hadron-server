@@ -222,6 +222,8 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
   it('the concealment holds at EVERY address of the same write: memoryId+loc and id, not only install+loc (Andi)', async () => {
     const f = await fixture();
     const node = await f.create(f.admin);
+    const { emitNodeUrnV2 } = await import('../../../lib/urnEmit.js');
+    const nodeUrn = emitNodeUrnV2((await f.installRows())[0]!.urn, 'prompts:lane');
     const platform = await f.user('platform-outsider-2');
     await db.user.update({ where: { id: platform.id }, data: { roles: ['ADMIN'] } });
     const ctx = ctxOf(platform.id, { roles: ['ADMIN'] });
@@ -234,6 +236,7 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
       for (const input of [
         { memoryId: node.memoryId, loc: 'prompts:lane', name: 'by-memory-loc' },
         { id: node.id, name: 'by-id' },
+        { id: nodeUrn, name: 'by-urn' },
       ]) {
         const result = await server.executeOperation(
           { query: 'mutation($i:UpdateNodeInput!){updateNode(input:$i){id name content description}}', variables: { i: input } },
@@ -249,6 +252,8 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     expect(viaMemory.content).toBe('replacement');
     const viaId = await M.updateNode({}, { input: { id: node.id, name: 'p2' } }, ctxOf(f.admin.id));
     expect(viaId.content).toBe('replacement');
+    const viaUrn = await M.updateNode({}, { input: { id: nodeUrn, name: 'p3' } }, ctxOf(f.admin.id));
+    expect(viaUrn.content).toBe('replacement');
   });
 
   it('a participant manager still gets the content back from an update (positive control)', async () => {
