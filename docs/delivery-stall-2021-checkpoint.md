@@ -153,3 +153,12 @@ Provisional integration evidence with temporary canonical-default overlay in the
 Merged landed main repair4ed72f69c19966e5291dc45ee7c983bd8c81d8d5 without rebase/conflicts at46aff5d6. The two S2 fixture edits now come from the actual reviewed main ancestry, with no local overlay or duplicate fix. This also imports the independent worker-roster wording fix; its four-case suite is included below.
 
 Exact combined source passes207/207 across15 suites: all prior S5/S2/held/read/ack/clock controls plus worker activity output. The deliberate failing-read-write rollback pin logs its injected error while passing. No production mark logic changed in S5. Typecheck and diff check pass on the actual landed source. The previous203-test/typecheck overlay result remains historical and is superseded by this verification. Main red-trunk release remains the coordinator's separate live-main verification; S5 local results do not release it.
+
+
+## S7-only versus S5 integrated QA (Ada25368)
+
+Coco's existing single stack at S7 fafec5ba tests S7 alone: isolation, standby admission and current held identity through StandbyCoverageClassifier. transitionDeliveryException is not in that artifact; this is an explicit scope exclusion, not a S7 QA failure. No second stack is authorized.
+
+S5 cannot freeze before S7 merges. S5's one later frozen-head stack must use the actual merged canonical S7 classifier with S5 transitionDeliveryException and complete metadata/health: standby entry/exit, fixed historical head and atomic head split, prior earned wait after exit, held versus allowed messages before/during/after spans, isolation/self-pause effective expiry, exact-range budget control, read/batch mark coverage and retained history, rollback and lock-set revalidation. Keep authorization/caller mask, stale/revoked identities, no raw-stamp/proof echo, and no mark/budget effects from held reporting. Record the actual S7 dependency commit and S5 head; standalone author/QA receipts do not silently carry to composition. S6 notice-lane pin remains separately pending its lane.
+
+Pre-integration source gap at fafec5ba: the classifier first checks current workerStandby and requires its current head to match the requested head. S5's persisted closed historical spans can require classification after exit or a head change, so that current-only precondition cannot fulfill the historical S5 clock contract. Owner coordination is required before integrated readiness; no competing classifier edit or S7-only QA failure inferred here.
