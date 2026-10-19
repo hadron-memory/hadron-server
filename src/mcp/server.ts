@@ -5803,6 +5803,38 @@ export function createMcpServerInstance(
     },
   );
 
+  // #2044 (cor:agt:040:06): `install: { app, agent }` on hadron_create_node / hadron_update_node
+  // targets an App's install memory. Both delegate to the GraphQL createNode / updateNode, so the
+  // first-customisation create, the authority anchors and the gates are the ones the portal uses.
+  const writeInstallNodeViaGraphql = async (
+    op: 'create' | 'update',
+    install: { app: string; agent: string },
+    fields: Record<string, unknown>,
+  ) => {
+    const ctx: Context = {
+      db,
+      transport: 'mcp',
+      governedCanReplay: () => true,
+      clientId: auth.clientId ?? undefined,
+      userId: auth.userId ?? undefined,
+      apiKeyId: auth.apiKeyId ?? undefined,
+      appId: auth.appId ?? undefined,
+      sessionId: auth.sessionId ?? undefined,
+      roles: auth.roles as Context['roles'],
+      organizationId: auth.organizationId ?? undefined,
+    };
+    const input = { ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)), install: { appRef: install.app, agentRef: install.agent } };
+    try {
+      const node = op === 'create'
+        ? await resolvers.Mutation.createNode({}, { input: input as never }, ctx)
+        : await resolvers.Mutation.updateNode({}, { input: input as never }, ctx);
+      const urn = await nodeUrn(node.loc, node.memoryId);
+      return textResult(`${op === 'create' ? 'Node created' : 'Node updated'} in the App's install memory: ${urn} (id: ${node.id})`);
+    } catch (e) {
+      return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : `${op} failed`}`, `hadron_${op}_node:install`);
+    }
+  };
+
   // ── hadron_create_node ───────────────────────────────────────────────────────────
 
   server.tool(
@@ -5831,8 +5863,21 @@ export function createMcpServerInstance(
         description: z.string().optional().describe(EDGE_DESCRIPTION_DOC),
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('Outgoing edges (replaces the full set on the source node)'),
+      install: z.object({
+        app: z.string().describe('The App: its ID or fully-qualified URN.'),
+        agent: z.string().describe('The Agent the App customises: its ID or fully-qualified URN.'),
+      }).optional().describe('#2044 — write into an App\'s INSTALL MEMORY (where it keeps its customisation of an installed Agent, cor:agt:040:06) instead of a memory named by `urn`. When set, `urn` is just the node\'s LOC (e.g. "prompts:lane"), not a URN. The first create finds-or-creates the install memory in the same step as the write; later calls reuse it. Only whoever manages the App may write, while the App is live and the Agent installed. Not supported with `edges`, `isRunnable` or `abstractStillAccurate`.'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, install }) => {
+      // #2044: an App's install memory is written through the GraphQL operation (one write path
+      // for the first-customisation create), not this inline parity writer.
+      if (install) {
+        if (edges || isRunnable) return textResult('`install` does not support `edges` or `isRunnable`; write those with a plain memory node.');
+        return writeInstallNodeViaGraphql('create', install, {
+          loc: rawUrn, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
+          properties, data: nodeData, llmModel, aiAgent,
+        });
+      }
       // #1219 — this tool is an inline parity writer, NOT a writeNodeCore
       // delegate (#206), so the core's role normalization does not reach it:
       // normalize here, before the governance probe and the payload build.
@@ -6407,8 +6452,19 @@ export function createMcpServerInstance(
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
+      install: z.object({
+        app: z.string().describe('The App: its ID or fully-qualified URN.'),
+        agent: z.string().describe('The Agent the App customises: its ID or fully-qualified URN.'),
+      }).optional().describe('#2044 — write into an App\'s INSTALL MEMORY (where it keeps its customisation of an installed Agent, cor:agt:040:06) instead of a memory named by `urn`. When set, `urn` is just the node\'s LOC (e.g. "prompts:lane"), not a URN. The first create finds-or-creates the install memory in the same step as the write; later calls reuse it. Only whoever manages the App may write, while the App is live and the Agent installed. Creates nothing: the memory exists once the first hadron_create_node with `install` has run. Not supported with `edges`, `isRunnable` or `abstractStillAccurate`.'),
     },
-    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install }) => {
+      if (install) {
+        if (edges || isRunnable || abstractStillAccurate) return textResult('`install` does not support `edges`, `isRunnable` or `abstractStillAccurate`.');
+        return writeInstallNodeViaGraphql('update', install, {
+          loc: rawUrn, expectedRevision, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
+          properties, data: nodeData, llmModel, aiAgent, reason,
+        });
+      }
       // #1219 — inline parity writer, not a writeNodeCore delegate (#206):
       // normalize before mergedGovernedState, the door replay and the payload.
       const role = normalizeRole(rawRole);

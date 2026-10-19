@@ -371,3 +371,67 @@ export async function resolveInheritedEdges(
   }
   return out;
 }
+
+/**
+ * #2044 (S7), cor:agt:040:16 / cor:dmo:050:14 (R8) — the chain a COMPILE reads for
+ * an App's installed Agent, nearest first: the App's INSTALL MEMORY (when the App
+ * has customised the Agent and is live), then the Agent's own system memory, then
+ * each base. ONE resolver for inheritance and install overrides, so the two cannot
+ * drift into different notions of "nearest".
+ *
+ * Deliberately NOT {@link systemMemoryChain}: ordinary reads of the Agent's system
+ * memory never see an install memory (#1840 stays deferred), and only a compile
+ * calls this. `exemptThrough` is how many leading links are NOT bases: the install
+ * memory and the Agent's own memory are the App's and the Agent's own, so their
+ * boot prompts and comments stay candidates; only a base's boot prompt is dropped
+ * (cor:agt:040:05), and it hides nothing (it isn't a candidate at all).
+ *
+ * A full node URN names exactly that node and never goes through this chain.
+ */
+export async function compileChain(
+  db: Db,
+  target: { appId: string; agentId: string },
+): Promise<{ links: ChainLink[]; exemptThrough: number; installMemoryId: string | null }> {
+  const agent = await (db as Pick<PrismaClient, '$queryRaw'>).$queryRaw<Array<{ urn: string; system_memory_id: string | null }>>`
+    SELECT urn, system_memory_id FROM agents WHERE id = ${target.agentId} AND deleted_at IS NULL`;
+  const own = agent[0];
+  if (!own) return { links: [], exemptThrough: 0, installMemoryId: null };
+  const install = await (db as Pick<PrismaClient, '$queryRaw'>).$queryRaw<Array<{ id: string }>>`
+    SELECT m.id FROM memories m JOIN apps a ON a.id = m.app_id
+    WHERE m.app_id = ${target.appId} AND m.install_of_agent_id = ${target.agentId}
+      AND m.class = 'system' AND m.deleted_at IS NULL
+      AND a.deleted_at IS NULL AND a.uninstalled_at IS NULL
+      AND EXISTS (SELECT 1 FROM app_agents aa WHERE aa.app_id = a.id AND aa.agent_id = ${target.agentId})`;
+  const links: ChainLink[] = [];
+  if (install[0]) links.push({ agentId: target.agentId, agentUrn: own.urn, memoryId: install[0].id });
+  const base = own.system_memory_id ? await systemMemoryChain(db, own.system_memory_id) : [];
+  links.push(...base);
+  // The install memory and the Agent's own memory (first of `base`) are not bases.
+  return { links, exemptThrough: (install[0] ? 1 : 0) + (base.length > 0 ? 1 : 0), installMemoryId: install[0]?.id ?? null };
+}
+
+/**
+ * The node a bare `loc` names in a COMPILE for `(App, Agent)`: the nearest of
+ * {@link compileChain}'s links that holds a live node there. Null when none does.
+ * A link past `exemptThrough` is a base, so its boot prompts and comments don't count.
+ */
+export async function findCompileNodeIdByLoc(
+  db: Db,
+  target: { appId: string; agentId: string },
+  loc: string,
+): Promise<{ id: string; memoryId: string; fromInstall: boolean } | null> {
+  const { links, exemptThrough, installMemoryId } = await compileChain(db, target);
+  if (links.length === 0) return null;
+  const memIds = links.map((l) => l.memoryId);
+  const rows = await (db as Pick<PrismaClient, '$queryRaw'>).$queryRaw<Array<{ id: string; memory_id: string; pos: number }>>`
+    SELECT n.id, n.memory_id, c.pos::int AS pos
+    FROM unnest(${memIds}::text[]) WITH ORDINALITY AS c(memory_id, pos)
+    JOIN nodes n ON n.memory_id = c.memory_id
+    WHERE n.loc = ${loc} AND n.deleted_at IS NULL
+      AND (c.pos <= ${exemptThrough} OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
+      AND (c.pos <= ${exemptThrough} OR n.node_type <> ${COMMENT_NODE_TYPE})
+    ORDER BY c.pos LIMIT 1`;
+  const hit = rows[0];
+  if (!hit) return null;
+  return { id: hit.id, memoryId: hit.memory_id, fromInstall: hit.memory_id === installMemoryId };
+}

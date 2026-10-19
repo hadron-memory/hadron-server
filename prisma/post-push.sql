@@ -31,9 +31,10 @@ ALTER TABLE memories
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_class_app_id
   CHECK (
-    (class = 'app' AND app_id IS NOT NULL)
-    OR (class = 'system' AND app_id IS NULL)
-    OR (class IN ('knowledge', 'group', 'personal', 'private'))
+    (class = 'app' AND app_id IS NOT NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+    OR (class = 'system' AND app_id IS NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+    OR (class = 'system' AND app_id IS NOT NULL AND is_install_memory = true)
+    OR (class IN ('knowledge', 'group', 'personal', 'private') AND install_of_agent_id IS NULL AND is_install_memory = false)
   );
 
 -- #723: shared_memory_of_agent_id IDENTIFIES an App's runtime `shared`
@@ -46,6 +47,15 @@ ALTER TABLE memories
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_shared_agent_scope
   CHECK (shared_memory_of_agent_id IS NULL OR (class = 'app' AND app_id IS NOT NULL));
+
+-- #2044 (S7): an App's INSTALL MEMORY is a class='system' row with BOTH app_id
+-- and install_of_agent_id set (cor:agt:040:06); the CHECK above carries the
+-- all-or-nothing pair. ONE live install memory per (App, Agent); a soft-deleted
+-- one never blocks its replacement (Prisma cannot model the WHERE). Synced with
+-- the 20261019090000 migration and src/test/globalSetup.ts.
+CREATE UNIQUE INDEX IF NOT EXISTS memories_install_memory_live_uniq
+  ON memories (app_id, install_of_agent_id)
+  WHERE install_of_agent_id IS NOT NULL AND deleted_at IS NULL;
 
 -- 023-app-shape FR-024: bidirectional invariant — class='group' ⇔
 -- visibility='GROUP'.
