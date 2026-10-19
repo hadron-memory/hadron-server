@@ -157,3 +157,46 @@ describe('every read is recorded (cor:agt:070:07)', () => {
     expect(await db.workerDeliveryChannel.count()).toBe(0);
   });
 });
+
+const ack = (k: { id: string }, batchIds: string[], through?: Array<{ channelId: string; seq: number }>) =>
+  M.acknowledgeDeliveryBatches({}, { batchIds, ...(through ? { through } : {}) }, keyCtx(k));
+
+describe('acknowledging a batch', () => {
+  it('moves the delivered mark to the rendered range; the next read is empty; a repeat changes nothing; it is recorded', async () => {
+    await postForBoth();
+    const [b] = (await read(hostKey)).batches;
+    expect(await ack(hostKey, [b.id])).toEqual({ acknowledged: 1, unchanged: 0 });
+    const mark = await db.workerDeliveryChannel.findFirstOrThrow({ where: { workerId: kit.id, channelId: channel.id } });
+    expect(mark.deliveredThroughSeq).toBe(b.ranges[0].throughSeq);
+    expect((await read(hostKey)).batches).toEqual([]);
+    expect(await ack(hostKey, [b.id])).toEqual({ acknowledged: 0, unchanged: 1 });
+    expect(await db.hostKeyUse.count({ where: { appKeyId: hostKey.id, action: 'deliver' } })).toBeGreaterThanOrEqual(3);
+  });
+
+  it('another host key, a bare key, a person and a session-bound call cannot acknowledge it', async () => {
+    await postForBoth();
+    const [b] = (await read(hostKey)).batches;
+    expect(await code(ack(otherHostKey, [b.id]))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await code(M.acknowledgeDeliveryBatches({}, { batchIds: [b.id] }, ctx(manager.id)))).toBe('HOST_KEY_REQUIRED');
+    expect(await code(runAsActor({ workerId: kit.id, agentId }, () => ack(hostKey, [b.id])))).toBe('APP_KEY_SESSION_BOUND');
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+  });
+
+  it('authority is re-derived at the acknowledgement: a revoked host scope or a lost registration refuses and moves nothing', async () => {
+    await postForBoth();
+    const [b] = (await read(hostKey)).batches;
+    await M.revokeAppKeyScope({}, { id: hostKey.id, scope: 'attention:deliver' }, ctx(manager.id));
+    expect(await code(ack(hostKey, [b.id]))).toBe('APP_KEY_SCOPE_REQUIRED');
+    await M.grantAppKeyScope({}, { id: hostKey.id, scope: 'attention:deliver' }, ctx(manager.id));
+    await db.hostRegistration.updateMany({ where: { appId: app.id, hostId: 'orca1' }, data: { lostAt: new Date() } });
+    expect(await code(ack(hostKey, [b.id]))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+  });
+
+  it('through applies to one batch only; a forged id is invalid', async () => {
+    await postForBoth();
+    const [b] = (await read(hostKey)).batches;
+    expect(await code(ack(hostKey, [b.id, b.id], [{ channelId: channel.id, seq: b.ranges[0].throughSeq }]))).toBe('BAD_USER_INPUT');
+    expect(await code(ack(hostKey, [`${b.id}x`]))).toBe('WAKE_PROOF_INVALID');
+  });
+});

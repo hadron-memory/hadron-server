@@ -8744,6 +8744,12 @@ export const typeDefs = `#graphql
     setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!): WorkerWakeSettings!
     "#1748 — record that wakes were delivered (hrn:node:hadronmemory.com:specs:cor:agt:080:16). Never moves a read position."
     acknowledgeWakes(proofs: [String!]!): AcknowledgeWakesResult!
+    """
+    #2017 (S1) — record that delivery batches were typed (hrn:node:hadronmemory.com:specs:cor:agt:080:16, :17). Only the host key the ids name.
+    The delivered mark rises to the end of each rendered range; with through (one batch only), only the listed channels move, each to a
+    rendered seq of its own. Writes no read position, tick or budget. A repeat changes nothing.
+    """
+    acknowledgeDeliveryBatches(batchIds: [String!]!, through: [BatchThrough!]): AcknowledgeWakesResult!
 
     """
     #1709 — a host registers, or refreshes, which of its App's workers it can launch, as which model family, and in
@@ -12059,6 +12065,12 @@ export const typeDefs = `#graphql
     ranges: [DeliveryBatchRange!]!
     "Eligible messages left for the next batch."
     overflow: Int!
+  }
+
+  input BatchThrough {
+    channelId: ID!
+    "A seq this batch rendered in that channel."
+    seq: Int!
   }
 
   type DeliveryBatchRange {

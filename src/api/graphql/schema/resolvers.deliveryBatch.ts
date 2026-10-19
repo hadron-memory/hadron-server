@@ -19,7 +19,8 @@ import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/au
 import { keyHostId, recordHostKeyUse, type HostKey } from '../../../lib/hostOperations/hostKey.js';
 import { liveCaller } from '../../../lib/tickers/liveCaller.js';
 import { batchProofPayload, loadDeliveryBatches } from '../../../lib/tickers/deliveryBatch.js';
-import { signBatchProof } from '../../../lib/tickers/wakeProof.js';
+import { signBatchProof, type BatchProof } from '../../../lib/tickers/wakeProof.js';
+import { acknowledgeBatchProofs, type BatchAck } from '../../../lib/tickers/acknowledge.js';
 
 const appAnchors = (app: TaskApp): AuthorityAnchor[] => [
   { kind: 'app', id: app.id },
@@ -105,5 +106,57 @@ export const deliveryBatchQueries = {
       })),
       pageInfo: { hasNextPage: page.nextAfter !== null, endCursor: page.nextAfter },
     };
+  },
+};
+
+/**
+ * Acknowledge typed batches (cor:agt:080:16/:17). Only the key the id names, with the authority re-derived INSIDE the
+ * transaction (after the worker's wake lock) under the App's anchor: both scopes held now, the key still the same host,
+ * the host's registration live, and the worker still one of its registered workers. Records the use like a read does.
+ * `through` (one batch only) acknowledges a prefix: only the listed channels move, each to its listed rendered seq.
+ */
+export const deliveryBatchMutations = {
+  acknowledgeDeliveryBatches: async (
+    _: unknown,
+    a: { batchIds: string[]; through?: Array<{ channelId: string; seq: number }> | null },
+    requestCtx: Context,
+  ) => {
+    const key = appKeyCaller(requestCtx);
+    if (!key) throw taskError('HOST_KEY_REQUIRED', 'Delivery batches are acknowledged by a host, with its App key.');
+    if (a.through && a.through.length > 0 && a.batchIds.length !== 1) {
+      throw taskError('BAD_USER_INPUT', 'through applies to exactly one batch; acknowledge a partial batch on its own.');
+    }
+    await requireKeyScope(requestCtx.db, key, 'attention:deliver');
+    refuseSessionBound(requestCtx);
+    if (currentActor().workerId) throw taskError('APP_KEY_SESSION_BOUND', 'A host key does not act as a worker. Send no session.');
+    const acks: BatchAck[] = a.batchIds.map((proof) => ({ proof, ...(a.through && a.through.length > 0 ? { through: a.through } : {}) }));
+    return acknowledgeBatchProofs({
+      ctx: requestCtx,
+      requester: { appKeyId: key.appKeyId },
+      acks,
+      mayAckBatch: async (p: BatchProof, tx: Prisma.TransactionClient, txCtx: Context) => {
+        if (p.appId !== key.appId) return false;
+        const app = await loadApp(txCtx, p.appId);
+        if (!app || app.deletedAt || app.uninstalledAt) return false;
+        await lockAuthorityAnchors(tx, appAnchors(app), 'shared');
+        try {
+          await requireKeyScope(tx, key, 'attention:deliver');
+        } catch {
+          return false;
+        }
+        if ((await keyHostId(tx, key)) !== p.hostId) return false;
+        const rows = await tx.$queryRaw<Array<{ ok: number }>>`
+          SELECT 1 AS ok
+          FROM host_registrations r
+          JOIN host_registration_workers rw ON rw.registration_id = r.id
+          JOIN workers w ON w.id = rw.worker_id
+          WHERE r.app_id = ${p.appId} AND r.host_id = ${p.hostId} AND r.lost_at IS NULL
+            AND rw.worker_id = ${p.workerId} AND w.retired_at IS NULL
+          FOR SHARE OF r`;
+        if (rows.length === 0) return false;
+        await recordHostKeyUse(tx, { appKeyId: key.appKeyId, appId: key.appId, hostId: p.hostId }, 'deliver', { count: p.channels.reduce((n, c) => n + c.seqs.length, 0) });
+        return true;
+      },
+    });
   },
 };
