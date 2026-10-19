@@ -1,3 +1,4 @@
+import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
@@ -79,7 +80,7 @@ import {
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
   sessionScopeFilter,
-  STORED_NODE_CONTENT,
+  CONTENT_RAW_DEFAULT,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
@@ -593,12 +594,7 @@ async function reconciledNodeForParent(
     if (!current) return null;
     const key = sessionKeyCache.getByMemoryId(current.memoryId);
     if (key) decryptNodeFieldsWithKey(current, key);
-    // Verify against what was STORED: a templated read hands field resolvers
-    // rendered `content`, which would never match the row.
-    const stored = STORED_NODE_CONTENT in n
-      ? { ...n, content: (n as { [STORED_NODE_CONTENT]?: string | null })[STORED_NODE_CONTENT] ?? null }
-      : n;
-    return revisionStateMatchesWithoutAuthorship(stored, current) ? current : null;
+    return revisionStateMatchesWithoutAuthorship(n, current) ? current : null;
   });
   cache.set(n, pending);
   return pending;
@@ -841,6 +837,18 @@ export const typeResolvers = {
     from: (s: { fromAddress: string }) => s.fromAddress,
   },
   Node: {
+    /**
+     * #2041 — the one place a node's include tags resolve for a reader
+     * (cor:dmo:150:03), so every path that reaches `Node.content` is covered
+     * and a new surface can't forget it. The row is never rewritten.
+     */
+    content: async (
+      n: Parameters<typeof resolveNodeContent>[1],
+      args: { raw?: boolean | null },
+      ctx: Context,
+    ) => resolveNodeContent(ctx, n, {
+      raw: args.raw ?? (n as { [CONTENT_RAW_DEFAULT]?: boolean })[CONTENT_RAW_DEFAULT] ?? false,
+    }),
     authorship: async (n: SnapshotSourceNode & { revSeq: number }, _: unknown, ctx: Context) => {
       if (!n.authorshipKind || !n.authoredAt) return null;
       // Start the task lookup before per-node reconciliation so sibling list
