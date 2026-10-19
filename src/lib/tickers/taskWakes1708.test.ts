@@ -212,7 +212,8 @@ describe('acknowledgement per event (wake proof v2)', () => {
     const { eventId } = await assignedTo(liam);
     const page = await dueFor();
     const proof = verifyWakeProof(page.wakes[0]!.proof);
-    expect(proof.v).toBe(2);
+    expect(proof.v).toBe(3); // #2072: v3 carries the wake key and no channel range
+    expect(proof.channels).toEqual([]);
     expect(proof.tasks).toEqual([{ eventId, chainIndex: 0 }]);
     await ack(page.wakes[0]!.proof);
     const row = await db.workerDeliveryTaskEvent.findUnique({ where: { workerId_eventId_chainIndex: { workerId: liam.id, eventId, chainIndex: 0 } } });
@@ -231,6 +232,8 @@ describe('acknowledgement per event (wake proof v2)', () => {
   it('a v1 proof (issued before this deploy) still verifies and acknowledges', async () => {
     const v1 = signWakeProof({ v: 1, kind: 'wake-proof', appId: app.id, workerId: liam.id, requester: { userId: manager.id }, channels: [], ticks: [], exempt: false, issuedAt: Date.now() } as any);
     expect(verifyWakeProof(v1).tasks).toEqual([]);
+    // #2072 (R53): its wake's receipt is recorded once, though it names nothing; a repeat changes nothing.
+    expect(await ack(v1)).toEqual({ acknowledged: 1, unchanged: 0 });
     expect(await ack(v1)).toEqual({ acknowledged: 0, unchanged: 1 });
   });
 

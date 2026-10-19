@@ -6964,6 +6964,12 @@ export const typeDefs = `#graphql
     workerWakeSettings(workerRef: String!): WorkerWakeSettings!
     "#1748 — the wakes due now (hrn:node:hadronmemory.com:specs:cor:agt:080:08). Counts and seq ranges only; reads nothing it does not return."
     dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String): DueWakePage!
+    """
+    #2017 (S1) — the ready-to-deliver batches of the workers registered on the calling host (hrn:node:hadronmemory.com:specs:cor:agt:080:22, :26).
+    An own live session reads only its bound worker. A host App key needs attention:deliver AND host:operate;
+    the host is the key's, the request names none, and a worker not on that host is absent. The text is written by the server and typed unchanged. Reading moves nothing; acknowledge the batch ids.
+    """
+    deliveryBatches(appRef: String!, workerRefs: [String!], first: Int, after: String): DeliveryBatchPage!
 
     "#1709 — the App's host registrations, liveness derived now (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Whoever reads the App's tasks and events, the App's own key included."
     hostRegistrations(appRef: String!): [HostRegistration!]!
@@ -8761,6 +8767,12 @@ export const typeDefs = `#graphql
     setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!): WorkerWakeSettings!
     "#1748 — record that wakes were delivered (hrn:node:hadronmemory.com:specs:cor:agt:080:16). Never moves a read position."
     acknowledgeWakes(proofs: [String!]!): AcknowledgeWakesResult!
+    """
+    #2017 (S1) — record that delivery batches were typed (hrn:node:hadronmemory.com:specs:cor:agt:080:16, :17). Only the receiving host key or the worker's own receiving live session, within 15 minutes.
+    The delivered mark rises to the end of each rendered range; with through (one batch only), only the listed channels move, each to a
+    rendered seq of its own. Writes no read position, tick or budget. A repeat changes nothing.
+    """
+    acknowledgeDeliveryBatches(batchIds: [String!]!, through: [BatchThrough!]): AcknowledgeWakesResult!
 
     """
     #1709 — a host registers, or refreshes, which of its App's workers it can launch, as which model family, and in
@@ -12082,6 +12094,44 @@ export const typeDefs = `#graphql
     pageInfo: DueWakePageInfo!
   }
 
+  "#2017 (S1) — one page of delivery batches."
+  type DeliveryBatchPage {
+    batches: [DeliveryBatch!]!
+    pageInfo: DueWakePageInfo!
+  }
+
+  "One ready-to-type delivery for one worker. The id is a signed proof bound to the key, the host and the rendered ranges: hand it back to acknowledgeDeliveryBatches after typing."
+  type DeliveryBatch {
+    id: String!
+    worker: Worker!
+    "The whole delivery, one line, written by the server (hrn:node:hadronmemory.com:specs:cor:agt:080:26). Type it unchanged."
+    text: String!
+    "Not before this moment (the batching window / busy deadline of the oldest waiting message)."
+    deliverAfter: DateTime!
+    "The latest moment a busy worker may be made to wait for this delivery."
+    busyDeadline: DateTime!
+    "Always false until stop signals ship (S6)."
+    interrupt: Boolean!
+    ranges: [DeliveryBatchRange!]!
+    "Eligible messages left for the next batch."
+    overflow: Int!
+  }
+
+  input BatchThrough {
+    channelId: ID!
+    "A seq this batch rendered in that channel."
+    seq: Int!
+  }
+
+  type DeliveryBatchRange {
+    channel: Channel!
+    incarnation: Int!
+    fromSeq: Int!
+    throughSeq: Int!
+    "Exactly the message seqs this batch rendered."
+    seqs: [Int!]!
+  }
+
   type DueWakePageInfo {
     hasNextPage: Boolean!
     endCursor: String
@@ -12098,6 +12148,15 @@ export const typeDefs = `#graphql
     availability: DueWakeAvailability
     "Hand this back to acknowledgeWakes after delivering. Bound to the requester; good for 15 minutes."
     proof: String!
+    """
+    #2017 R63 — when the earliest waiting reason became due: a mention's first still-due post, a tick's OLDEST unacknowledged
+    tick time, a task event's time. Never restarted by a re-offer or a join (hrn:node:hadronmemory.com:specs:cor:agt:080:27).
+    """
+    anchorAt: DateTime!
+    "Not before this moment: the anchor plus the App's batching window (the shared cadence floor)."
+    deliverAfter: DateTime!
+    "The latest a busy worker may be made to wait: the anchor plus the App's busy delay."
+    busyDeadline: DateTime!
   }
 
   type DueWakeAvailability {
