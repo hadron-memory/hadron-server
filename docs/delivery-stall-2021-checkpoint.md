@@ -10,7 +10,7 @@ Anne owns S13 read projection, GraphQL/SDL/MCP composition and new deliveryHealt
 
 ## Implemented foundation
 
-Metadata-only per-message interval union, selective range coverage, explicit rollout/completeness state, one worker alarm anchor, persisted uncovered-wait escalation baselines, acknowledgment stopping escalation, committed-mark-only closure, and immediate aged successor selection. Policy writes and alarm evaluation share authority/App-budget/worker locks. SQL rejects invalid coverage and extra delivery-event metadata. Historical events remain immutable. The effective transition seam now supports early cancellation/replacement of a future policy expiry without changing certified past time. Alarm owners are derived from the canonical reportsTo walk under its shared graph lock, with current-manager fallback only when no reporting line exists. Interval reads are restricted to time intersecting the pending candidates or active anchor.
+Metadata-only per-message interval union, selective range coverage, explicit rollout/completeness state, one worker alarm anchor, persisted uncovered-wait escalation baselines, acknowledgment stopping escalation, committed-mark or R62 channel-lifecycle closure, and immediate aged successor selection. Policy writes and alarm evaluation share authority/App-budget/worker locks. SQL rejects invalid coverage and extra delivery-event metadata. Historical events remain immutable. The effective transition seam now supports early cancellation/replacement of a future policy expiry without changing certified past time. Alarm owners are derived from the canonical reportsTo walk under its shared graph lock, with current-manager fallback only when no reporting line exists. Interval reads are restricted to time intersecting the pending candidates or active anchor.
 
 ## Integrated dependency
 
@@ -22,7 +22,7 @@ Wire canonical policy producers and authoritative reached-message selection; int
 
 ## Evidence
 
-Red commits `f420cd61` and `006d5b8f` precede implementation. Targeted standard Vitest run: 156/156 passing across deliveryWait, deliveryState, deliveryPolicy, deliveryScenarios, deliveryInvariants, existing task stall and task invariant suites, and S9 settings/resolver suites. Persisted S7 pause carry and S8 selective-coverage pins reload state between deciding transactions. TypeScript check passed. Tests use an isolated local PostgreSQL database and repository-managed per-run clones.
+Red commits `f420cd61` and `006d5b8f` precede implementation. Targeted standard Vitest run: 163/163 passing across deliveryWait, deliveryState, deliveryPolicy, deliveryScenarios, deliveryInvariants, existing task stall and task invariant suites, S9 settings/resolver suites, and the closed Worker-reference fence inventory. Persisted S7 pause carry and S8 selective-coverage pins reload state between deciding transactions. TypeScript check passed. Tests use an isolated local PostgreSQL database and repository-managed per-run clones.
 
 ## Candidate S13 seams (not the complete frozen DTO)
 
@@ -33,3 +33,11 @@ The policy-owner seam is `transitionDeliveryException(tx, { workerId, cause, cov
 ## Test-harness finding
 
 Negative delivery SQL pins now use PostgreSQL structured code/constraint fields, avoiding Prisma source-decorated error-text false positives. Numeric payload slots and timestamp shapes are checked, not just root key names. Captured at `hrn:node:hadronmemory.com:hadron-server:findings:prisma-source-snippet-false-positive-constraint-test`.
+
+## R56/R62 alignment (050:26 rev 12)
+
+R56 confirms that either committed read or delivery coverage ends the episode. R62 also ends it when its channel is deleted, physically removed, or replaced by another incarnation. A missing candidate alone still proves nothing. The platform reconciliation writer records one `delivery.resumed` with `reason: channel-deleted`, the old channel/incarnation, server timestamp and `principal: { kind: platform }`; it deliberately omits `throughSeq`, since channel retirement is no mark movement. Encoding this end as resumed retains the spec's explicit Proposed status. The history row is immutable. Stale candidates cannot re-raise an episode for the old occupancy, and escalation also reconciles this end before requiring additional clock coverage.
+
+The current-alarm read seam returns null for a retired/replaced channel even before the next write reconciliation; a read itself appends nothing. The lifecycle transaction/evaluator still needs integration before activation. S13 should project this canonical currentness rather than treating a retained anchor row as an active alarm. R65 adds no draft-cleared event.
+
+The three new Worker-reference tables install the #1162 MVCC fence through the additive S5 SQL source. The already-deployed #1162 migration remains unchanged; its closed inventory test includes the newer source. This closes the first draft CI failure.

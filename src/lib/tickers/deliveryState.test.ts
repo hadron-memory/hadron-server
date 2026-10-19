@@ -18,6 +18,9 @@ beforeAll(async () => {
   await db.memory.create({ data: { id: memoryId, organizationId: orgId, name: 'S5 channel host', urn: `s5-${orgId}.example:channels`, class: 'knowledge' } });
   await db.node.create({ data: { id: rootId, memoryId, loc: 'chats:scenario', name: 'Scenario root', nodeType: 'chat' } });
   await db.channel.create({ data: { id: 'channel-s5', memoryId, loc: 'chats:scenario', name: 'Scenario channel', chatRootNodeId: rootId } });
+  const otherRootId = generateId();
+  await db.node.create({ data: { id: otherRootId, memoryId, loc: 'chats:other', name: 'Other root', nodeType: 'chat' } });
+  await db.channel.create({ data: { id: 'other', memoryId, loc: 'chats:other', name: 'Other channel', chatRootNodeId: otherRootId } });
   for (const id of managers) {
     await db.user.create({ data: { id, roles: ['READER'] } });
     await db.orgMember.create({ data: { organizationId: orgId, userId: id, role: 'ADMIN' } });
@@ -64,7 +67,7 @@ describe('S5 persisted transitions and races', () => {
     await db.agentTeamEvent.update({ where: { id: active.alarmEventId }, data: { acknowledgedAt: stamp(106), acknowledgedByWorkerId: workerId } });
     expect(await run(tx => advanceDeliveryEscalation(tx, workerId, stamp(130)))).toBe(false);
   });
-  it('does not infer resolution from missing candidates or a different incarnation', async () => {
+  it('does not infer resolution from missing candidates alone', async () => {
     const before = await db.workerDeliveryAlarmEpisode.findUniqueOrThrow({ where: { workerId } });
     await run(tx => reconcileDeliveryAlarm(tx, { workerId, candidates: [], now: stamp(71), hold: null }));
     expect((await db.workerDeliveryAlarmEpisode.findUniqueOrThrow({ where: { workerId } })).episodeId).toBe(before.episodeId);

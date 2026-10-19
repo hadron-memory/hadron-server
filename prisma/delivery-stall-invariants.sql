@@ -40,16 +40,24 @@ ALTER TABLE agent_team_events ADD CONSTRAINT chk_delivery_event_payload CHECK (
     jsonb_typeof(payload->'channelIncarnation') = 'number' AND payload->>'channelIncarnation' ~ '^[0-9]+$' AND
     CASE WHEN type = 'delivery.resumed' THEN
       severity IS NULL AND episode_start IS NULL AND
-      jsonb_typeof(payload->'throughSeq') = 'number' AND payload->>'throughSeq' ~ '^[0-9]+$' AND
       jsonb_typeof(payload->'resumedAt') = 'string' AND payload->>'resumedAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$' AND
-      payload - ARRAY['episodeId','channelId','channelIncarnation','throughSeq','resumedAt','principal'] = '{}'::jsonb AND
-      jsonb_typeof(payload->'principal') = 'object' AND
-      CASE payload->'principal'->>'kind'
-        WHEN 'worker' THEN (payload->'principal') - ARRAY['kind','workerId'] = '{}'::jsonb AND (payload->'principal'->>'workerId') ~ '^[A-Za-z0-9_-]{1,128}$'
-        WHEN 'user' THEN (payload->'principal') - ARRAY['kind','userId'] = '{}'::jsonb AND (payload->'principal'->>'userId') ~ '^[A-Za-z0-9_-]{1,128}$'
-        WHEN 'host-key' THEN (payload->'principal') - ARRAY['kind','appKeyId','hostId'] = '{}'::jsonb AND (payload->'principal'->>'appKeyId') ~ '^[A-Za-z0-9_-]{1,128}$' AND (payload->'principal'->>'hostId') ~ '^[A-Za-z0-9_-]{1,128}$'
-        ELSE false
-      END
+      (
+        -- R62: channel lifecycle is not evidence of any delivery/read mark.
+        ((payload->>'reason') = 'channel-deleted' AND
+          payload - ARRAY['episodeId','channelId','channelIncarnation','resumedAt','principal','reason'] = '{}'::jsonb AND
+          payload->'principal' = '{"kind":"platform"}'::jsonb)
+        OR
+        (NOT (payload ? 'reason') AND
+          jsonb_typeof(payload->'throughSeq') = 'number' AND payload->>'throughSeq' ~ '^[0-9]+$' AND
+          payload - ARRAY['episodeId','channelId','channelIncarnation','throughSeq','resumedAt','principal'] = '{}'::jsonb AND
+          jsonb_typeof(payload->'principal') = 'object' AND
+          CASE payload->'principal'->>'kind'
+            WHEN 'worker' THEN (payload->'principal') - ARRAY['kind','workerId'] = '{}'::jsonb AND (payload->'principal'->>'workerId') ~ '^[A-Za-z0-9_-]{1,128}$'
+            WHEN 'user' THEN (payload->'principal') - ARRAY['kind','userId'] = '{}'::jsonb AND (payload->'principal'->>'userId') ~ '^[A-Za-z0-9_-]{1,128}$'
+            WHEN 'host-key' THEN (payload->'principal') - ARRAY['kind','appKeyId','hostId'] = '{}'::jsonb AND (payload->'principal'->>'appKeyId') ~ '^[A-Za-z0-9_-]{1,128}$' AND (payload->'principal'->>'hostId') ~ '^[A-Za-z0-9_-]{1,128}$'
+            ELSE false
+          END)
+      )
     ELSE
       payload ?& ARRAY['episodeId','workerId','channelId','channelIncarnation','firstPendingSeq','oldestDueAt','windowSeconds','reason','terminalId'] AND
       jsonb_typeof(payload->'workerId') = 'string' AND payload->>'workerId' = subject_worker_id AND

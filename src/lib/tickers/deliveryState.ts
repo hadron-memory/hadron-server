@@ -4,9 +4,9 @@
  * There is deliberately no hold/resumed reporting API or activation sweep yet.
  * No request body, proof, draft, screen or rendered message enters this module.
  */
-import { type Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+import { type Prisma, type PrismaClient, type WorkerDeliveryAlarmEpisode } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
-import { appendDeliveryResumedEvent, appendDeliveryStuckEvent, type DeliveryMarkPrincipal, type AlarmChain } from '../agentTasks/events.js';
+import { appendDeliveryResumedEvent, appendDeliveryStuckEvent, appendDeliveryChannelRetiredEvent, type DeliveryMarkPrincipal, type AlarmChain } from '../agentTasks/events.js';
 export type { DeliveryMarkPrincipal } from '../agentTasks/events.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { lockAppReportsTo, reportsToChain } from '../workerReportsTo.js';
@@ -157,7 +157,23 @@ export type DeliveryAlarmInput = {
   mark?: { channelId: string; channelIncarnation: number; throughSeq: number; principal: DeliveryMarkPrincipal };
 };
 
-/** One active worker episode, mark-only closure, immediate already-aged successor. */
+async function channelStillCurrent(tx: Tx, channelId: string, incarnation: number): Promise<boolean> {
+  const channel = await tx.channel.findUnique({ where: { id: channelId }, select: { deletedAt: true, incarnation: true } });
+  return !!channel && !channel.deletedAt && channel.incarnation === incarnation;
+}
+
+/** R62: recorded lifecycle evidence, never missing candidates or policy suppression. */
+async function closeRetiredChannelAlarm(tx: Tx, appId: string, active: WorkerDeliveryAlarmEpisode, now: Date): Promise<string | null> {
+  if (await channelStillCurrent(tx, active.channelId, active.channelIncarnation)) return null;
+  const resumed = await appendDeliveryChannelRetiredEvent(tx, {
+    appId, workerId: active.workerId, episodeId: active.episodeId,
+    channelId: active.channelId, channelIncarnation: active.channelIncarnation, now,
+  });
+  await tx.workerDeliveryAlarmEpisode.delete({ where: { workerId: active.workerId } });
+  return resumed;
+}
+
+/** One active worker episode; covering marks or R62 lifecycle closure, immediate aged successor. */
 export async function reconcileDeliveryAlarm(tx: Tx, input: DeliveryAlarmInput): Promise<{ raised: string | null; resumed: string | null }> {
   const { workerId, now } = input;
   const safeId = (id: string) => typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : fail('DELIVERY_METADATA_INVALID');
@@ -167,9 +183,8 @@ export async function reconcileDeliveryAlarm(tx: Tx, input: DeliveryAlarmInput):
   const { stuckWindowSeconds } = await loadDeliverySettings(tx, worker.appId);
   if (input.candidates.some(m => m.workerId !== workerId)) fail('DELIVERY_WORKER_MISMATCH');
   let active = await tx.workerDeliveryAlarmEpisode.findUnique({ where: { workerId } });
-  const oldestDueAt = new Date(input.candidates.reduce((oldest, m) => Math.min(oldest, m.dueSince.getTime()), Math.min(now.getTime(), active?.dueSince.getTime() ?? now.getTime())));
-  const { state, exceptions } = await waitInputs(tx, workerId, now, oldestDueAt);
-  let resumed: string | null = null;
+  let resumed = active ? await closeRetiredChannelAlarm(tx, worker.appId, active, now) : null;
+  if (resumed) active = null;
   let coveredThrough = -1;
   if (input.mark) {
     const mark = input.mark;
@@ -188,7 +203,12 @@ export async function reconcileDeliveryAlarm(tx: Tx, input: DeliveryAlarmInput):
     }
   }
   if (active) return { raised: null, resumed };
-  const candidates = input.candidates.filter(m => !(input.mark && m.channelId === input.mark.channelId && m.channelIncarnation === input.mark.channelIncarnation && m.seq <= coveredThrough));
+  const liveChannels = await tx.channel.findMany({ where: { id: { in: [...new Set(input.candidates.map(m => m.channelId))] }, deletedAt: null }, select: { id: true, incarnation: true } });
+  const current = new Map(liveChannels.map(c => [c.id, c.incarnation]));
+  const candidates = input.candidates.filter(m => current.get(m.channelId) === m.channelIncarnation && !(input.mark && m.channelId === input.mark.channelId && m.channelIncarnation === input.mark.channelIncarnation && m.seq <= coveredThrough));
+  if (!candidates.length) return { raised: null, resumed };
+  const oldestDueAt = new Date(candidates.reduce((oldest, m) => Math.min(oldest, m.dueSince.getTime()), now.getTime()));
+  const { state, exceptions } = await waitInputs(tx, workerId, now, oldestDueAt);
   const selected = oldestStuckMessage(candidates, exceptions, state, now, stuckWindowSeconds);
   if (!selected) return { raised: null, resumed };
   if (input.hold?.terminalId && !/^term_[A-Za-z0-9_-]{1,128}$/.test(input.hold.terminalId)) fail('DELIVERY_TERMINAL_INVALID');
@@ -211,6 +231,7 @@ export async function advanceDeliveryEscalation(tx: Tx, workerId: string, now: D
   const active = await tx.workerDeliveryAlarmEpisode.findUnique({ where: { workerId } });
   if (!active) return false;
   const worker = await tx.worker.findUniqueOrThrow({ where: { id: workerId }, select: { appId: true } });
+  if (await closeRetiredChannelAlarm(tx, worker.appId, active, now)) return false;
   const { stuckWindowSeconds } = await loadDeliverySettings(tx, worker.appId);
   const [event] = await tx.$queryRaw<{ acknowledgedAt: Date | null }[]>`
     SELECT acknowledged_at AS "acknowledgedAt" FROM agent_team_events WHERE id = ${active.alarmEventId} FOR SHARE`;
@@ -228,7 +249,7 @@ export async function advanceDeliveryEscalation(tx: Tx, workerId: string, now: D
 /** S13's read seam: return safe currentness/wait only, never the raw coverage ledger. */
 export async function deliveryAlarmSnapshot(tx: Tx, workerId: string, asOf: Date) {
   const active = await tx.workerDeliveryAlarmEpisode.findUnique({ where: { workerId } });
-  if (!active) return null;
+  if (!active || !(await channelStillCurrent(tx, active.channelId, active.channelIncarnation))) return null;
   const wait = await loadDeliveryWait(tx, { workerId, channelId: active.channelId, channelIncarnation: active.channelIncarnation, seq: active.anchorSeq, dueSince: active.dueSince }, asOf);
   const event = await tx.agentTeamEvent.findUniqueOrThrow({ where: { id: active.alarmEventId }, select: { acknowledgedAt: true } });
   return { episodeId: active.episodeId, eventId: active.alarmEventId, channelId: active.channelId, channelIncarnation: active.channelIncarnation, firstPendingSeq: active.anchorSeq, waitedMs: wait.waitedMs, waitAsOf: asOf, state: wait.suppressed ? 'SUPPRESSED' as const : 'ACTIVE' as const, acknowledgedAt: event.acknowledgedAt };

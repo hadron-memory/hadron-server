@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
-import { beginDeliveryTracking, deliveryStateTransaction, observeDeliveryPolicyThrough, recordDeliveryException, reconcileDeliveryAlarm, deliveryAlarmSnapshot } from './deliveryState.js';
+import { beginDeliveryTracking, deliveryStateTransaction, observeDeliveryPolicyThrough, recordDeliveryException, reconcileDeliveryAlarm, deliveryAlarmSnapshot, advanceDeliveryEscalation } from './deliveryState.js';
 
 const db = new PrismaClient();
 const at = (minute: number) => new Date(Date.UTC(2026, 9, 19, 10, minute));
@@ -78,9 +78,11 @@ it.each(['deleted', 'replaced', 'removed'] as const)('R62: a channel %s ends the
   const alarm = await db.agentTeamEvent.findUniqueOrThrow({ where: { id: raised.raised! } });
   if (change === 'removed') await db.channel.delete({ where: { id: 'scenario-channel' } });
   else await db.channel.update({ where: { id: 'scenario-channel' }, data: change === 'deleted' ? { deletedAt: at(16) } : { incarnation: 2 } });
-  const ended = await evaluate(16, []);
-  expect(ended.resumed).toBeTruthy();
-  expect(await evaluate(17, [])).toEqual({ raised: null, resumed: null });
+  expect(await run(tx => deliveryAlarmSnapshot(tx, workerId, at(16)))).toBeNull();
+  const endings = await Promise.all([evaluate(16, []), evaluate(16, [])]);
+  expect(endings.filter(result => result.resumed)).toHaveLength(1);
+  // A stale S1 candidate from the former occupancy cannot re-raise it.
+  expect(await evaluate(17, [message(1)])).toEqual({ raised: null, resumed: null });
   expect(await db.workerDeliveryAlarmEpisode.count({ where: { workerId } })).toBe(0);
   const history = await db.agentTeamEvent.findMany({ where: { appId, type: 'delivery.resumed' } });
   expect(history).toHaveLength(1);
@@ -88,4 +90,14 @@ it.each(['deleted', 'replaced', 'removed'] as const)('R62: a channel %s ends the
   expect(history[0]!.payload).not.toHaveProperty('throughSeq');
   expect(await db.agentTeamEvent.findUnique({ where: { id: alarm.id } })).toEqual(alarm);
   expect(await db.workerDeliveryChannel.count({ where: { workerId } })).toBe(0);
+});
+
+
+it('R62: escalation reconciles a deleted channel before needing a new wait certificate', async () => {
+  await run(tx => observeDeliveryPolicyThrough(tx, workerId, at(15)));
+  expect((await evaluate(15)).raised).toBeTruthy();
+  await db.channel.update({ where: { id: 'scenario-channel' }, data: { deletedAt: at(16) } });
+  expect(await run(tx => advanceDeliveryEscalation(tx, workerId, at(60)))).toBe(false);
+  expect(await db.workerDeliveryAlarmEpisode.count({ where: { workerId } })).toBe(0);
+  expect(await db.agentTeamEvent.count({ where: { appId, type: 'delivery.resumed' } })).toBe(1);
 });

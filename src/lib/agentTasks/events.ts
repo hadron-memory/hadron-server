@@ -393,6 +393,19 @@ export async function appendDeliveryResumedEvent(tx: Prisma.TransactionClient, a
   return row.id;
 }
 
+/** R62: platform lifecycle reconciliation, never a reported or invented mark. */
+export async function appendDeliveryChannelRetiredEvent(tx: Prisma.TransactionClient, a: {
+  appId: string; workerId: string; episodeId: string; channelId: string;
+  channelIncarnation: number; now: Date;
+}): Promise<string> {
+  const row = await tx.agentTeamEvent.create({ data: {
+    id: generateId(), appId: a.appId, type: 'delivery.resumed', subjectWorkerId: a.workerId,
+    payload: { episodeId: a.episodeId, channelId: a.channelId, channelIncarnation: a.channelIncarnation,
+      reason: 'channel-deleted', resumedAt: a.now.toISOString(), principal: { kind: 'platform' } }, createdAt: a.now,
+  } });
+  return row.id;
+}
+
 export async function appendDeliveryStuckEvent(tx: Prisma.TransactionClient, a: {
   id: string; appId: string; workerId: string; episodeId: string; channelId: string;
   channelIncarnation: number; firstPendingSeq: number; dueSince: Date; windowSeconds: number;
