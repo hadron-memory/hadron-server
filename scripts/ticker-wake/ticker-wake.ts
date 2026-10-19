@@ -159,7 +159,11 @@ export function submit(cfg: Config, run: Runner, handle: string, text: string, r
   // An ambiguous transport failure that names its request is reissued ONCE with that same request identity.
   if (!retryRequestId && first.kind === 'uncertain' && first.requestId && !first.stages.length) {
     const again = classify(run([...argv, '--retry-request', first.requestId]).stdout);
-    return { ...again, requestId: again.requestId ?? first.requestId };
+    const requestId = again.requestId ?? first.requestId;
+    // Once a request may have been submitted, only a confirmation resolves it. A failed same-id retry (even a structured
+    // refusal that carries no id) does not prove the original never submitted: it stays uncertain.
+    if (again.kind === 'confirmed') return { ...again, requestId };
+    return { kind: 'uncertain', requestId, stages: again.stages, detail: `${first.detail}; same-id retry: ${again.detail}` };
   }
   return first;
 }
@@ -205,10 +209,23 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
     const term0 = terminals.find((t) => t.handle === handle) as any;
     const receiver = `${handle}#${term0?.incarnationId ?? ''}`;
 
-    // An unreconciled earlier request is reconciled with ITS OWN identity (Orca never types twice for one request id);
-    // without a request identity it stays held for a human.
+    /** The idle proof plus the final empty-composer/no-draft read: required before ANYTHING that can type into this terminal. */
+    const safeToType = (): string | null => {
+      const [idle, why] = provesIdle(cfg, handle, detail, undefined, cfg.busyWaitMs, run);
+      if (!idle) return why;
+      const term = readScreen(cfg, handle, run);
+      const agent = detail === 'claude' || detail === 'codex' ? detail : (screenAgentFamily(term) ?? '');
+      const [empty, emptyWhy] = promptIsEmptyFromTerm(term, agent);
+      return empty ? null : `composer not provably empty: ${emptyWhy}`;
+    };
+
+    // An unreconciled earlier request is reconciled with ITS OWN identity. Reissuing it can still perform input, so it
+    // needs the same receiver and the same composer safety as a fresh send; without a request id it stays held for a human.
     if (prior?.state === 'ambiguous') {
       if (!prior.requestId || dry) { log(`${ts} ${name}: an earlier send is unreconciled (${prior.detail}); not retyped, not acked`); continue; }
+      if (prior.receiver !== receiver) { log(`${ts} ${name}: an earlier send is unreconciled for another receiver (${prior.receiver}); held for a human`); continue; }
+      const unsafe = safeToType();
+      if (unsafe) { log(`${ts} ${name}: unreconciled request not reissued (held: ${unsafe})`); continue; }
       const r = submit(cfg, run, prior.handle, prior.text, prior.requestId);
       if (r.kind !== 'confirmed') { log(`${ts} ${name}: earlier request still unreconciled (${r.detail}); not retyped, not acked`); continue; }
       prior = receipts[id] = { state: 'sent', coverage: prior.coverage, receiver: prior.receiver, at: now };
@@ -238,13 +255,8 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
     }
     if (!newTickers.size) { log(`${ts} ${name}: held (the uncovered tick work cannot be identified; reconcile rather than repeat covered work)`); continue; }
 
-    const [idle, why] = provesIdle(cfg, handle, detail, undefined, cfg.busyWaitMs, run);
-    if (!idle) { log(`${ts} ${name}: held (${why})`); continue; }
-    // Final composer check, even when tui-idle held: the idle helper does not read the draft.
-    const term = readScreen(cfg, handle, run);
-    const agent = detail === 'claude' || detail === 'codex' ? detail : (screenAgentFamily(term) ?? '');
-    const [empty, emptyWhy] = promptIsEmptyFromTerm(term, agent);
-    if (!empty) { log(`${ts} ${name}: held (composer not provably empty: ${emptyWhy})`); continue; }
+    const unsafe = safeToType();
+    if (unsafe) { log(`${ts} ${name}: held (${unsafe})`); continue; }
     const text = `Hadron ticker wake (${[...newTickers].join(', ')}): run your standing routine for this tick, then end your turn. Read only your own mentions; no unfiltered chat catch-up.`;
     if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); continue; }
     const coverage = [...new Set([...covered, ...ticks])].sort();
@@ -278,7 +290,8 @@ export interface LockHooks { afterJudgedStale?: () => void; beforeUnlink?: () =>
  *  - Fresh acquisition is atomic: the owner's pid goes into a private temp file hard-linked to `lock` (fails if it exists).
  *  - A stale lock (dead owner) is only ever removed by a contender holding the exclusive `lock.takeover` file, and only
  *    after re-reading `lock` under it: a replacement owner that arrived meanwhile is never unlinked. A contender that
- *    cannot take `lock.takeover` (another takeover is in progress) is refused.
+ *    cannot take `lock.takeover` is refused, and a takeover file left behind by a dead process fails closed for
+ *    operator cleanup (no recursive stale recovery).
  */
 export function acquireLock(dir: string, pid = process.pid, hooks: LockHooks = {}): () => void {
   mkdirSync(dir, { recursive: true });
@@ -296,15 +309,14 @@ export function acquireLock(dir: string, pid = process.pid, hooks: LockHooks = {
     const held = ownerOf(lock);
     if (held !== null && held !== pid && pidAlive(held)) throw new Error(`another ticker-wake (pid ${held}) holds ${lock}`);
     hooks.afterJudgedStale?.();
-    // Take the takeover right; if a dead process left it behind, clear that one stale file and try once more.
-    let have = linked(tmp, takeover);
-    if (!have) {
+    // Take the takeover right. A takeover file that already exists is never cleaned up here, live owner or not: removing
+    // it would repeat the check/unlink race one level down. A dead owner's file needs explicit operator cleanup.
+    if (!linked(tmp, takeover)) {
       const t = ownerOf(takeover);
-      if (t !== null && t !== pid && pidAlive(t)) throw new Error(`another starter is taking over ${lock}`);
-      try { if (ownerOf(takeover) === t) unlinkSync(takeover); } catch { /* raced */ }
-      have = linked(tmp, takeover);
+      throw new Error(t !== null && t !== pid && pidAlive(t)
+        ? `another starter is taking over ${lock}`
+        : `${takeover} was left behind (owner ${t ?? 'unknown'}); an operator must remove it after checking that no ticker-wake is starting`);
     }
-    if (!have) throw new Error(`could not take ${lock}: another starter is taking over`);
     try {
       hooks.beforeUnlink?.();
       const now = ownerOf(lock);

@@ -395,6 +395,38 @@ describe('typed-once, coverage and ambiguity', () => {
     expect(f.sent).toHaveLength(1); // not retyped
   });
 
+  it('uncertain with an id, then a same-id retry that fails WITHOUT an id, stays uncertain across restarts: no fresh type, no ack', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+    f.retryReply = () => JSON.stringify({ ok: false, error: { code: 'invalid_argument' } });
+    go();
+    expect(f.sent).toHaveLength(1);
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'ambiguous', requestId: 'r1' });
+    for (let i = 0; i < 3; i++) go(); // "restarts": every pass rereads the receipts
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('still unreconciled');
+    expect(log()).not.toContain('will retry'); // never downgraded to a fresh-send refusal
+    f.retryReply = () => JSON.stringify(CONFIRMED); // a same-id confirmation may still promote it
+    go();
+    expect(f.acked).toHaveLength(1);
+  });
+
+  it('reissuing an unresolved request keeps the receiver and composer guard: no retry while a draft is pending or the receiver changed', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+    go();
+    f.screen = { source: 'screen', tail: CLAUDE_IDLE, draft: 'half typed' };
+    go();
+    expect(f.retries).toEqual([]);
+    expect(log()).toContain('not reissued');
+    f.screen = { source: 'screen', tail: CLAUDE_IDLE };
+    f.incarnation = 'inc-2';
+    go();
+    expect(f.retries).toEqual([]);
+    expect(log()).toContain('another receiver');
+  });
+
   it('an ambiguous receipt older than a day is still kept (no silent expiry)', () => {
     mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
     writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1'], receiver: 'term_a#inc-1', at: 1, detail: 'old', text: 't', handle: 'term_a' } }));
@@ -553,11 +585,15 @@ describe('CLI entry and single instance', () => {
     } finally { holder.kill(); }
   });
 
-  it('a takeover file left by a dead process does not wedge acquisition', () => {
+  it('a takeover file left behind by a dead process fails closed for operator cleanup, and is not removed', () => {
     const stateDir = join(dir, 'ticker-wake');
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, 'lock'), '999999999');
     writeFileSync(join(stateDir, 'lock.takeover'), '999999998');
+    expect(() => acquireLock(stateDir)).toThrow('operator must remove');
+    expect(readFileSync(join(stateDir, 'lock.takeover'), 'utf8')).toBe('999999998');
+    expect(readFileSync(join(stateDir, 'lock'), 'utf8')).toBe('999999999');
+    rmSync(join(stateDir, 'lock.takeover')); // the operator cleanup
     const release = acquireLock(stateDir);
     expect(readFileSync(join(stateDir, 'lock'), 'utf8')).toBe(String(process.pid));
     release();
