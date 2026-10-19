@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Config, Runner } from '../orca-attention-router/router.js';
-import { pass, main, acquireLock, wakeIdentity } from './ticker-wake.js';
+import { pass, main, acquireLock, proofTicks } from './ticker-wake.js';
 
 const RULE = '─'.repeat(112);
 // A finished Claude Code 2.1.303 turn over an empty composer (shapes from the cli#907 captures): the
@@ -16,22 +17,27 @@ const CLAUDE_IDLE = [
 const TICK = { kind: 'TICK', ticker: { name: 'coordinator-tick' } };
 const MENTION = { kind: 'MENTION', ticker: null };
 const TASK = { kind: 'TASK', ticker: null };
+const CONFIRMED = { ok: true, result: { send: { accepted: true, prompt: { requestId: 'r1', stages: ['input_accepted', 'turn_started'] } } } };
+const ACCEPTED_ONLY = { ok: true, result: { send: { accepted: true, prompt: { requestId: 'r1', stages: ['input_accepted'] } } } };
+
+/** A proof whose payload carries the given ticks ("T:k"), like the server's (opaque to everything else). */
+const proof = (ticks: string[], salt = 'x') =>
+  `${Buffer.from(JSON.stringify({ ticks: ticks.map((t) => ({ tickerId: t.split(':')[0], k: Number(t.split(':')[1]) })), issuedAt: salt })).toString('base64url')}.sig`;
 
 interface Fake {
   run: Runner;
   wakes: any[];
-  subscribers: string[];
-  subsTruncated: boolean;
   acked: string[];
   sent: string[];
   idle: boolean;
   screen: Record<string, any>;
   dueQueries: string[];
-  pages: number; // dueWakes calls made
+  pages: number;
   alwaysMore: boolean;
   ackReply: (() => unknown) | null;
-  sendReply: (() => unknown) | null;
+  sendReply: (() => string) | null;
   dueError: string | null;
+  incarnation: string;
 }
 
 let dir: string;
@@ -40,9 +46,9 @@ let lines: string[];
 
 function fake(): Fake {
   const f: Fake = {
-    wakes: [], subscribers: [], subsTruncated: false, acked: [], sent: [], idle: true,
-    screen: { source: 'screen', tail: CLAUDE_IDLE }, dueQueries: [], pages: 0, alwaysMore: false,
-    ackReply: null, sendReply: null, dueError: null, run: undefined as any,
+    wakes: [], acked: [], sent: [], idle: true, screen: { source: 'screen', tail: CLAUDE_IDLE },
+    dueQueries: [], pages: 0, alwaysMore: false, ackReply: null, sendReply: null, dueError: null,
+    incarnation: 'inc-1', run: undefined as any,
   };
   f.run = (argv) => {
     const out = (o: unknown) => ({ code: 0, stdout: JSON.stringify(o), stderr: '' });
@@ -60,20 +66,17 @@ function fake(): Fake {
         if (f.dueError) return out({ errors: [{ message: f.dueError }] });
         return out({ data: { dueWakes: { wakes: f.wakes, pageInfo: { hasNextPage: f.alwaysMore, endCursor: 'c' } } } });
       }
-      if (q.includes('tickers(')) {
-        return out({ data: { tickers: [{ subscribers: { items: f.subscribers.map((id) => ({ worker: { id } })), hasNextPage: f.subsTruncated } }] } });
-      }
     }
     if (argv[0] === 'orca' && argv[1] === 'terminal') {
       if (argv[2] === 'list') {
-        return out({ ok: true, result: { terminals: [{ handle: 'term_a', worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }] } });
+        return out({ ok: true, result: { terminals: [{ handle: 'term_a', incarnationId: f.incarnation, worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }] } });
       }
       if (argv[2] === 'wait') return out({ ok: f.idle, result: { wait: { satisfied: f.idle } }, error: f.idle ? undefined : { code: 'timeout' } });
       if (argv[2] === 'read') return out({ ok: true, result: { terminal: f.screen } });
       if (argv[2] === 'send') {
         f.sent.push(argv[argv.indexOf('--text') + 1]);
-        if (f.sendReply) return { code: 0, stdout: String(f.sendReply()), stderr: '' };
-        return out({ ok: true, result: { send: { accepted: true } } });
+        if (f.sendReply) return { code: 0, stdout: f.sendReply(), stderr: '' };
+        return out(CONFIRMED);
       }
     }
     throw new Error(`unexpected call ${JSON.stringify(argv)}`);
@@ -81,27 +84,27 @@ function fake(): Fake {
   return f;
 }
 
-const wake = (id: string, name: string, reasons: any[], channels: any[] = [], proof = `proof-${name}`) => ({
-  worker: { id, name }, reasons, channels, proof,
-});
+const wake = (id: string, name: string, reasons: any[], p = proof(['T:1']), channels: any[] = []) => ({ worker: { id, name }, reasons, channels, proof: p });
 const cfg = (): Config => ({
   app: 'hrn:app:test:team', channel: 'chan', hadronCli: 'hadron', orcaCli: 'orca', stateDir: dir,
   roster: [{ worker: 'w-ada', name: 'Ada', worktree: dir, terminal: 'term_a' }],
   busyWaitMs: 10, submitWaitS: 1, coordinatorWatchMinutes: 20,
 } as Config);
-const go = (opts: { dry?: boolean; ackMentions?: boolean } = {}) => pass(cfg(), f.run, opts, (l) => lines.push(l));
+const go = (opts: { dry?: boolean } = {}) => pass(cfg(), f.run, opts, (l) => lines.push(l));
 const log = () => lines.join('\n');
+const receiptsFile = () => join(dir, 'ticker-wake', 'receipts.json');
 
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'ticker-wake-')); f = fake(); lines = []; });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 describe('selection and delivery', () => {
-  it('delivers a TICK wake and acks it by its own proof', () => {
-    f.wakes = [wake('w-ada', 'Ada', [TICK], [{ fromSeq: 1, throughSeq: 2 }], 'proof-ada-1')];
+  it('delivers a TICK-only wake and acks it by its own proof', () => {
+    const p = proof(['T:1'], 'a');
+    f.wakes = [wake('w-ada', 'Ada', [TICK], p, [{ fromSeq: 1, throughSeq: 2 }])];
     go();
     expect(f.sent).toHaveLength(1);
     expect(f.sent[0]).toContain('coordinator-tick');
-    expect(f.acked).toEqual(['proof-ada-1']);
+    expect(f.acked).toEqual([p]);
   });
 
   it('a MENTION-only wake is neither nudged nor acked', () => {
@@ -113,26 +116,33 @@ describe('selection and delivery', () => {
   });
 
   it('delivers a TICK wake with empty channels (#2068) and never asks for channels', () => {
-    f.wakes = [wake('w-ada', 'Ada', [TICK], [])];
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [])];
     go();
     expect(f.sent).toHaveLength(1);
-    expect(f.acked).toEqual(['proof-Ada']);
+    expect(f.acked).toHaveLength(1);
     expect(f.dueQueries[0]).not.toContain('channels');
   });
 
-  it('a merged MENTION+TICK wake is delivered once and acked once', () => {
-    f.wakes = [wake('w-ada', 'Ada', [MENTION, TICK])];
-    go();
-    expect(f.sent).toHaveLength(1);
-    expect(f.acked).toEqual(['proof-Ada']);
-  });
-
-  it('a wake carrying TASK (alone with TICK, or with MENTION) is left alone: no nudge, no ack', () => {
-    f.wakes = [wake('w-ada', 'Ada', [TICK, TASK])];
-    go();
+  it('TICK+MENTION, TICK+TASK and TICK+unknown are left alone: no nudge, no ack, no receipt', () => {
+    for (const extra of [MENTION, TASK, { kind: 'FUTURE', ticker: null }]) {
+      f.wakes = [wake('w-ada', 'Ada', [TICK, extra])];
+      go();
+    }
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
     expect(log()).toContain('left alone');
+    expect(existsSync(receiptsFile())).toBe(false);
+  });
+
+  it('a joined proof after an earlier delivery is still untouched (no send, no ack)', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    f.ackReply = () => ({ errors: [{ message: 'down' }] });
+    go(); // typed, ack lost: a sent receipt exists
+    f.ackReply = null;
+    f.wakes = [wake('w-ada', 'Ada', [TICK, MENTION], proof(['T:1']))];
+    go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toEqual([]);
   });
 
   it('a worker not on the roster is skipped without an ack', () => {
@@ -143,9 +153,18 @@ describe('selection and delivery', () => {
     expect(log()).toContain('Zed: not on roster');
   });
 
+  it('a proof whose tick coverage cannot be decoded is held', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], 'opaque')];
+    go();
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('tick coverage cannot be established');
+  });
+
   it('a roster/identity mismatch holds: the worktree is bound to another worker', () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
-    mkdirSyncGit(dir, 'w-someone-else');
+    mkdirSync(join(dir, '.git'), { recursive: true });
+    writeFileSync(join(dir, '.git', 'hadron-team-session.json'), JSON.stringify({ workerId: 'w-someone-else' }));
     go();
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
@@ -158,57 +177,13 @@ describe('selection and delivery', () => {
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
     expect(log()).toContain('WOULD nudge');
-    expect(existsSync(join(dir, 'ticker-wake', 'receipts.json'))).toBe(false);
-  });
-});
-
-function mkdirSyncGit(root: string, workerId: string): void {
-  // boundWorker() reads <worktree>/.git (a dir here) / hadron-team-session.json
-  mkdirSync(join(root, '.git'), { recursive: true });
-  writeFileSync(join(root, '.git', 'hadron-team-session.json'), JSON.stringify({ workerId }));
-}
-
-describe('--ack-mentions', () => {
-  beforeEach(() => {
-    f.subscribers = ['w-ada'];
-    f.wakes = [wake('w-ada', 'Ada', [MENTION], [], 'proof-stuck'), wake('w-eve', 'Eve', [MENTION], [], 'proof-eve')];
+    expect(existsSync(receiptsFile())).toBe(false);
   });
 
-  it('is OFF by default: no ack', () => {
-    go();
-    expect(f.acked).toEqual([]);
-  });
-
-  it('when set, acks only a subscriber\'s MENTION-only wake on the roster, with no nudge', () => {
-    go({ ackMentions: true });
-    expect(f.acked).toEqual(['proof-stuck']); // Eve is neither subscriber nor on the roster
-    expect(f.sent).toEqual([]);
-  });
-
-  it('never consumes TASK or other unseen reasons', () => {
-    f.wakes = [wake('w-ada', 'Ada', [TASK], [], 'p1'), wake('w-ada', 'Ada', [MENTION, TASK], [], 'p2')];
-    go({ ackMentions: true });
-    expect(f.acked).toEqual([]);
-  });
-
-  it('a subscriber off the roster is not acked', () => {
-    f.subscribers = ['w-eve'];
-    f.wakes = [wake('w-eve', 'Eve', [MENTION], [], 'proof-eve')];
-    go({ ackMentions: true });
-    expect(f.acked).toEqual([]);
-  });
-
-  it('a truncated subscriber list skips the workaround entirely', () => {
-    f.subsTruncated = true;
-    go({ ackMentions: true });
-    expect(f.acked).toEqual([]);
-    expect(log()).toContain('subscriber list truncated');
-  });
-
-  it('--dry only reports', () => {
-    go({ ackMentions: true, dry: true });
-    expect(f.acked).toEqual([]);
-    expect(log()).toContain('WOULD ack mention-only');
+  it('proofTicks decodes the tick set, sorted, and returns null for an opaque proof', () => {
+    expect(proofTicks(proof(['B:2', 'A:1']))).toEqual(['A:1', 'B:2']);
+    expect(proofTicks('opaque')).toBeNull();
+    expect(proofTicks(`${Buffer.from(JSON.stringify({ ticks: [] })).toString('base64url')}.s`)).toBeNull();
   });
 });
 
@@ -242,7 +217,7 @@ describe('idle gate (C1 rule)', () => {
     f.idle = false;
     go();
     expect(f.sent).toHaveLength(1);
-    expect(f.acked).toEqual(['proof-Ada']);
+    expect(f.acked).toHaveLength(1);
   });
 
   it('screen fallback with an Orca draft holds and the wake stays due', () => {
@@ -269,58 +244,116 @@ describe('idle gate (C1 rule)', () => {
   });
 });
 
-describe('typed-once and ack recovery', () => {
-  beforeEach(() => { f.wakes = [wake('w-ada', 'Ada', [TICK])]; });
+describe('typed-once, coverage and ambiguity', () => {
+  const lostAck = () => { f.ackReply = () => ({ errors: [{ message: 'upstream 502' }] }); };
 
-  it('a confirmed send whose ack fails is retried ack-only and never retyped', () => {
-    f.ackReply = () => ({ errors: [{ message: 'upstream 502' }] });
+  it('a confirmed send whose ack fails is retried ack-only for a fully covered proof, never retyped', () => {
+    const p = proof(['T:1']);
+    f.wakes = [wake('w-ada', 'Ada', [TICK], p)];
+    lostAck();
     go();
     expect(f.sent).toHaveLength(1);
     expect(log()).toContain('ack FAILED');
-    expect(log()).not.toMatch(/ nudged term_a; acked/);
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'sent', coverage: ['T:1'], receiver: 'term_a#inc-1' });
     f.ackReply = null;
     lines = [];
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'reissued'))]; // a re-read proof: same ticks, new bytes
     go();
-    expect(f.sent).toHaveLength(1); // not retyped
-    expect(f.acked).toEqual(['proof-Ada']);
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toHaveLength(1);
     expect(log()).toContain('ack-only recovery acked');
-    go(); // receipt cleared: a new identical-identity wake would be a new send, but none is due after the ack in real life
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))).toEqual({});
+  });
+
+  it('new ticks beyond the receipt are NOT covered: a fresh nudge, and coverage is the union', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    lostAck();
+    go();
+    f.ackReply = null;
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1', 'T:2']))];
+    go();
+    expect(f.sent).toHaveLength(2);
+    expect(f.acked).toHaveLength(1);
+  });
+
+  it('a changed receiver (replacement terminal) does not inherit the old receipt: no ack on it', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    lostAck();
+    go();
+    f.ackReply = null;
+    f.incarnation = 'inc-2';
+    go();
+    expect(f.sent).toHaveLength(2); // the new terminal never received the first nudge
   });
 
   it('an ack reply without an acknowledgement result is not reported as acked', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.ackReply = () => ({ data: {} });
     go();
     expect(log()).toContain('ack FAILED');
     expect(log()).not.toMatch(/; acked /);
   });
 
-  it('an ambiguous send is never retyped and never acked', () => {
-    f.sendReply = () => 'not json';
+  it('accepted without a confirmed submission is ambiguous: never acked, never retyped, kept across passes', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
     go();
     expect(f.sent).toHaveLength(1);
+    expect(f.acked).toEqual([]);
     f.sendReply = null;
     lines = [];
     go();
+    go();
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toEqual([]);
-    expect(log()).toContain('ambiguous');
+    expect(log()).toContain('unreconciled');
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada'].state).toBe('ambiguous');
+  });
+
+  it('an unparsable send receipt is ambiguous too', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    f.sendReply = () => 'not json';
+    go();
+    f.sendReply = null;
+    go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toEqual([]);
+  });
+
+  it('an ambiguous receipt older than a day is still kept (no silent expiry)', () => {
+    writeFileSync(join(dir, 'x'), '');
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1'], receiver: 'term_a#inc-1', at: 1, detail: 'old' } }));
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    go();
+    expect(f.sent).toEqual([]);
+    expect(log()).toContain('unreconciled');
   });
 
   it('a refused send leaves the wake due and retypes later', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.sendReply = () => JSON.stringify({ ok: false, error: { code: 'busy' } });
     go();
     expect(f.acked).toEqual([]);
-    expect(log()).toContain('send not confirmed');
+    expect(log()).toContain('send refused');
     f.sendReply = null;
     go();
-    expect(f.acked).toEqual(['proof-Ada']);
+    expect(f.acked).toHaveLength(1);
   });
 
-  it('identity is stable across a re-read proof: worker + ticker ticks', () => {
-    const payload = (k: number, iat: number) => `${Buffer.from(JSON.stringify({ ticks: [{ tickerId: 'T', k }], issuedAt: iat })).toString('base64url')}.sig`;
-    expect(wakeIdentity('w', payload(5, 1))).toBe(wakeIdentity('w', payload(5, 999)));
-    expect(wakeIdentity('w', payload(5, 1))).not.toBe(wakeIdentity('w', payload(6, 1)));
-    expect(wakeIdentity('w', 'opaque')).toBe('w|proof:opaque');
+  it('unreadable or malformed receipt state stops the pass: nothing is sent or acked', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    writeFileSync(receiptsFile(), '{not json');
+    expect(() => go()).toThrow('malformed');
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'sent' } }));
+    expect(() => go()).toThrow('malformed');
+    writeFileSync(receiptsFile(), '{}');
+    chmodSync(receiptsFile(), 0o000);
+    if (process.getuid?.() !== 0) expect(() => go()).toThrow('unreadable');
+    chmodSync(receiptsFile(), 0o600);
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
   });
 });
 
@@ -343,9 +376,9 @@ describe('failure and paging', () => {
 describe('CLI entry and single instance', () => {
   const deps = () => ({ load: cfg, run: f.run, log: (l: string) => lines.push(l), sleep: async () => {} });
 
-  it('rejects an unknown mode, flag, or a bad interval with exit 2 and does nothing', async () => {
+  it('rejects an unknown mode or flag, --ack-mentions, loop --dry or a bad interval with exit 2 and does nothing', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
-    for (const argv of [['bogus'], [], ['once', '--nope'], ['loop', '--dry'], ['loop', '--interval', '0'], ['loop', '--interval', 'x'], ['loop', '--interval', 'Infinity'], ['loop', '--interval'], ['once', '--interval', '30']]) {
+    for (const argv of [['bogus'], [], ['once', '--nope'], ['once', '--ack-mentions'], ['loop', '--ack-mentions'], ['loop', '--dry'], ['loop', '--interval', '0'], ['loop', '--interval', 'x'], ['loop', '--interval', 'Infinity'], ['loop', '--interval'], ['once', '--interval', '30']]) {
       expect(await main(argv, deps())).toBe(2);
     }
     expect(f.sent).toEqual([]);
@@ -360,7 +393,6 @@ describe('CLI entry and single instance', () => {
   });
 
   it('loop runs passes until stopped and survives a failing pass', async () => {
-    f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.dueError = 'boom';
     expect(await main(['loop', '--interval', '10'], { ...deps(), maxPasses: 2 })).toBe(0);
     expect(f.pages).toBe(2);
@@ -382,7 +414,7 @@ describe('CLI entry and single instance', () => {
     } finally { holder.kill(); }
   });
 
-  it('a stale lock (dead pid) is taken over', () => {
+  it('a stale lock (dead pid) is taken over and released', () => {
     const stateDir = join(dir, 'ticker-wake');
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, 'lock'), '999999999');
@@ -391,4 +423,22 @@ describe('CLI entry and single instance', () => {
     release();
     expect(existsSync(join(stateDir, 'lock'))).toBe(false);
   });
+
+  it('simultaneous starters: exactly one process wins the lock', async () => {
+    const stateDir = join(dir, 'ticker-wake');
+    const mod = fileURLToPath(new URL('./ticker-wake.ts', import.meta.url));
+    const start = Date.now() + 1500; // all children spin until the same instant, then race
+    const child = () => new Promise<string>((resolve) => {
+      const p = spawn(process.execPath, ['--import', 'tsx', '-e',
+        `const m = await import(${JSON.stringify(mod)}); while (Date.now() < ${start}) {}; ` +
+        `try { m.acquireLock(${JSON.stringify(stateDir)}); console.log('GOT'); await new Promise(r => setTimeout(r, 2500)); } catch (e) { console.log('DENIED'); }`,
+        'ticker-wake'], { stdio: ['ignore', 'pipe', 'ignore'], cwd: process.cwd() });
+      let out = '';
+      p.stdout.on('data', (d) => { out += d; });
+      p.on('close', () => resolve(out.trim()));
+    });
+    const results = await Promise.all(Array.from({ length: 6 }, child));
+    expect(results.filter((r) => r === 'GOT')).toHaveLength(1);
+    expect(results.filter((r) => r === 'DENIED')).toHaveLength(5);
+  }, 30_000);
 });
