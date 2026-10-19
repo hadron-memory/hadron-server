@@ -1,11 +1,17 @@
 // acknowledgeWakes — #1748, cor:agt:080:16/:17 (plan §4.3, R4).
 //
 // The router delivers a nudge, then hands back the wake proof. In ONE
-// transaction this raises deliveredThroughSeq (monotonic: GREATEST), records
-// each ticker's tick, records who acknowledged, and counts the wake against the
+// transaction this records each ticker's tick, records who acknowledged, and
+// counts the wake against the
 // App's daily budget unless the proof says it was exempt (releasing the
 // reservation dueWakes made for it). A repeat changes nothing. It NEVER touches
 // ChannelReadState: delivery and reading are different facts.
+//
+// #2072 (Holger R53 / A′, cor:agt:080:04/:16): a wake carries no message text, so acknowledging it moves NO message
+// mark, neither delivered-through nor the read position, whatever the proof's version. Only an S1 text batch
+// (acknowledgeBatchProofs) or the worker's own read moves them. A v1/v2 proof that still names channel ranges is
+// validated as before (a recreated channel is stale) and its ranges are otherwise ignored; its reservation key is
+// still derived from them, so it spends the reservation it was issued against.
 //
 // #1708 (T5): a v2 proof also names task events. Each is recorded delivered on
 // (worker, event, chain position), once. That is a receipt, NEVER an alarm
@@ -27,7 +33,7 @@ import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
 import type { AuthorityAnchor } from '../auth/authorityAnchors.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import {
-  sameBatchRequester, sameRequester, verifyBatchProof, verifyWakeProof, wakeIdentity, WAKE_PROOF_MAX_AGE_MS,
+  proofWakeKey, sameBatchRequester, sameRequester, verifyBatchProof, verifyWakeProof, WAKE_PROOF_MAX_AGE_MS,
   type BatchProof, type BatchRequester, type WakeProof, type WakeRequester,
 } from './wakeProof.js';
 
@@ -113,11 +119,6 @@ export async function acknowledgeWakes(args: {
       }
 
       let advanced = false;
-      for (const c of p.channels) {
-        const row = await tx.workerDeliveryChannel.findUnique({ where: { workerId_channelId: { workerId: p.workerId, channelId: c.channelId } } });
-        if (!row || row.channelIncarnation !== c.incarnation || c.through > row.deliveredThroughSeq) advanced = true;
-        await raiseDeliveryMark(tx, { workerId: p.workerId, channelId: c.channelId, incarnation: c.incarnation, through: c.through }, nowNaive, ackedBy);
-      }
       for (const t of p.ticks) {
         const row = await tx.workerDeliveryTick.findUnique({ where: { workerId_tickerId: { workerId: p.workerId, tickerId: t.tickerId } } });
         if (!row || t.k > row.lastAckedTick) advanced = true;
@@ -152,23 +153,53 @@ export async function acknowledgeWakes(args: {
           WHERE worker_delivery_task_events.delivered_at IS NULL`;
         if (moved > 0) advanced = true;
       }
+      // #2072 (R53): the wake's receipt, which is what a textless acknowledgement records (cor:agt:080:04): the floor's
+      // clock (080:13) and the once-per-wake budget test (080:15). Written only when no receipt of this key was recorded
+      // at or after this proof's issue: a repeat, or an older proof's replay, changes nothing (Diego P2-3), while the
+      // same wake offered again after the floor (a fresh issue) is a new delivery, floored and charged again (Vera, #2072).
+      const issuedNaive = toNaiveUtc(new Date(p.issuedAt));
+      const delivered = (await tx.$executeRaw`
+        INSERT INTO worker_wake_acks (worker_id, wake_key, acked_at, acked_by_user_id, acked_by_worker_id, acked_by_app_key_id)
+        VALUES (${p.workerId}, ${proofWakeKey(p)}, ${nowNaive}::timestamp,
+                ${ackedBy.ackedByUserId}, ${ackedBy.ackedByWorkerId}, ${ackedBy.ackedByAppKeyId})
+        ON CONFLICT (worker_id, wake_key) DO UPDATE SET
+          acked_at = EXCLUDED.acked_at,
+          acked_by_user_id = EXCLUDED.acked_by_user_id,
+          acked_by_worker_id = EXCLUDED.acked_by_worker_id,
+          acked_by_app_key_id = EXCLUDED.acked_by_app_key_id
+        WHERE worker_wake_acks.acked_at < ${issuedNaive}::timestamp`) > 0;
       // Only the reservation of THIS wake is spent or void: the one carrying this proof's wake key. A re-read of an
-      // unchanged wake shares the key, so it is freed whichever proof is acknowledged; a replay of an old, unchanged
-      // proof matches nothing newer, so it can never cancel the allowance of a wake issued after it (Diego cycle 2, P2-3).
-      const spent = await tx.$executeRaw(Prisma.sql`DELETE FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND wake_key = ${wakeIdentity(p)}`);
-      // Counted against the day's budget only when it moved something: a repeat acknowledgement is not another wake.
-      if (!advanced) { unchanged++; continue; }
+      // unchanged wake shares the key, so it is freed whichever proof is acknowledged. Under R53 a mark no longer moves,
+      // so the same wake offered again after the floor carries the SAME key: only a delivering acknowledgement frees
+      // it, and an old proof's replay (refused by the receipt above) can never cancel the allowance of a wake issued
+      // after it (Diego cycle 2, P2-3). Every earlier reservation of the key was freed by the receipt's own write.
+      let spent: string[] | null = null;
+      if (delivered) {
+        const freed = await tx.$queryRaw<Array<{ absorbed_keys: string[] }>>(Prisma.sql`
+          DELETE FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND wake_key = ${proofWakeKey(p)} RETURNING absorbed_keys`);
+        if (freed.length > 0) {
+          spent = freed[0]!.absorbed_keys ?? [];
+          // #2069 + R53 (Xavier, #21593): a wake that absorbed earlier reasons covers its ancestors. Their keys get a receipt
+          // now (never overwriting one), so an ancestor's proof acknowledged AFTER this one finds a receipt at or after its
+          // issue and is neither a delivery nor another charge; the floor already counts from this acknowledgement.
+          for (const k of spent) {
+            await tx.$executeRaw`
+              INSERT INTO worker_wake_acks (worker_id, wake_key, acked_at, acked_by_user_id, acked_by_worker_id, acked_by_app_key_id)
+              VALUES (${p.workerId}, ${k}, ${nowNaive}::timestamp, ${ackedBy.ackedByUserId}, ${ackedBy.ackedByWorkerId}, ${ackedBy.ackedByAppKeyId})
+              ON CONFLICT (worker_id, wake_key) DO NOTHING`;
+          }
+        }
+      }
+      if (!delivered && !advanced) { unchanged++; continue; }
       acknowledged++;
-      // #2069: ONE allowance per outstanding wake. A reservation that absorbed a later reason carries a newer key than an
-      // older proof of the same worker; that older proof may still advance what it names, but the slot belongs to the
-      // reservation still outstanding, which is spent (and charged) by ITS proof. Charged unless this proof's key is in the
-      // absorbed lineage of the reservation still outstanding (that reservation owns the slot); an unrelated reservation, or
-      // none, leaves today's behavior untouched.
-      if (spent === 0) {
-        const [{ n }] = await tx.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`SELECT count(*)::bigint AS n FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND ${wakeIdentity(p)} = ANY(absorbed_keys)`);
+      // #2069: ONE allowance per outstanding wake. An ancestor proof (its key absorbed into the reservation still outstanding)
+      // may deliver what it names, but the slot belongs to the descendant, which is spent and charged by ITS proof.
+      if (delivered && spent === null) {
+        const [{ n }] = await tx.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`SELECT count(*)::bigint AS n FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND ${proofWakeKey(p)} = ANY(absorbed_keys)`);
         if (Number(n) > 0) continue;
       }
-      if (!p.exempt) {
+      // Counted against the day's budget once per delivered wake: a repeat acknowledgement is not another wake.
+      if (delivered && !p.exempt) {
         const dayText = now.toISOString().slice(0, 10);
         await tx.$executeRaw(Prisma.sql`
           INSERT INTO app_wake_days (app_id, day, wakes) VALUES (${p.appId}, ${dayText}::date, 1)
