@@ -142,7 +142,7 @@ it.each([
   const b = await batch(), before = await effects();
   try { await report(b.id, extra); throw new Error('accepted'); }
   catch (e) { expect(e).toBeInstanceOf(GraphQLError); expect((e as GraphQLError).extensions.code).toBe('BAD_USER_INPUT'); expect((e as Error).message).not.toContain('SECRET'); }
-  expect(await db.workerDeliveryHold.count()).toBe(0); expect(await db.agentTeamEvent.count()).toBe(0); expect(await effects()).toEqual(before);
+  expect(await db.workerDeliveryHold.count()).toBe(0); expect(await db.agentTeamEvent.count({ where: { type: { in: ['delivery.held', 'delivery.resumed', 'delivery.stuck'] } } })).toBe(0); expect(await effects()).toEqual(before);
 });
 it.each(['forged', 'identity', 'future', 'expired'])('refuses %s descriptors without effects', async kind => {
   const b = await batch(); const { verifyBatchProof, signBatchProof } = await import('../../../lib/tickers/wakeProof.js');
@@ -152,7 +152,7 @@ it.each(['forged', 'identity', 'future', 'expired'])('refuses %s descriptors wit
   if (kind === 'future') token = signBatchProof({ ...p, issuedAt: Date.now()+60_000 });
   if (kind === 'expired') token = signBatchProof({ ...p, issuedAt: Date.now()-16*60_000 });
   expect(await code(report(token))).toBe(kind === 'future' || kind === 'expired' ? 'WAKE_PROOF_STALE' : 'WAKE_PROOF_INVALID');
-  expect(await db.workerDeliveryHold.count()).toBe(0); expect(await db.agentTeamEvent.count()).toBe(0);
+  expect(await db.workerDeliveryHold.count()).toBe(0); expect(await db.agentTeamEvent.count({ where: { type: { in: ['delivery.held', 'delivery.resumed', 'delivery.stuck'] } } })).toBe(0);
 });
 it('refuses another key, foreign App key, bare scope and another host worker', async () => {
   const b = await batch();
@@ -172,7 +172,7 @@ it.each(['read', 'delivery', 'incarnation', 'encrypted', 'deleted'])('refuses %s
   if (kind === 'deleted') await db.channel.update({ where: { id: channel.id }, data: { deletedAt: new Date() } });
   const before = await effects();
   expect(await code(report(b.id))).toBe('WAKE_PROOF_STALE');
-  expect(await db.workerDeliveryHold.count()).toBe(0); expect(await db.agentTeamEvent.count()).toBe(0); expect(await effects()).toEqual(before);
+  expect(await db.workerDeliveryHold.count()).toBe(0); expect(await db.agentTeamEvent.count({ where: { type: { in: ['delivery.held', 'delivery.resumed', 'delivery.stuck'] } } })).toBe(0); expect(await effects()).toEqual(before);
 });
 it('self can report its own unhosted batch, but cannot cross replay host or sibling-session descriptors', async () => {
   const s = await ownSession(); const b = await batch(); const self = (await selfRead(s)).batches[0];
@@ -197,4 +197,126 @@ it('MCP delegates self reports and rejects unknown metadata instead of discardin
   expect(bad.isError).toBe(true); expect(bad.content[0].text).toContain('[bad_user_input]'); expect(bad.content[0].text).not.toContain('SECRET');
   const good: any = await server.callTool('hadron_report_delivery_hold', { batchId: b.id, reason: 'draft', session: s.id });
   expect(good.isError).not.toBe(true); expect(JSON.parse(good.content[0].text).holds).toHaveLength(1);
+});
+
+async function secondChannel() {
+  const old = channel;
+  const made = await ensureChannelWithRoot(db, { memoryId: old.memoryId, loc: 'chats:second', name: 'second', createdBy: manager.id });
+  const next = { id: made.channel.id, memoryId: old.memoryId, loc: 'chats:second', chatRootNodeId: made.rootId };
+  await db.registerEntry.create({ data: { appId: app.id, channelId: next.id, attendeeWorkerId: kit.id, role: 'BOTH' } });
+  channel = next; await postForBoth(); channel = old;
+  return next;
+}
+it('multi-channel reports return every hold atomically within the signed ten-seq hard cap', async () => {
+  await postForBoth(); const other = await secondChannel();
+  const b = (await read(hostKey)).batches[0]; expect(b.ranges).toHaveLength(2);
+  const result = await report(b.id); expect(result.holds).toHaveLength(2);
+  expect(new Set(result.holds.map((h: any) => h.channelId))).toEqual(new Set([channel.id, other.id]));
+  expect(result.pageInfo).toEqual({ hasNextPage: false, endCursor: null });
+  expect(await db.agentTeamEvent.count({ where: { type: 'delivery.held' } })).toBe(2);
+});
+it('a stale later channel refuses the whole batch with no earlier hold/event/audit', async () => {
+  await postForBoth(); const other = await secondChannel(); const b = (await read(hostKey)).batches[0];
+  const before = await db.hostKeyUse.count();
+  await db.channel.update({ where: { id: other.id }, data: { incarnation: 2 } });
+  expect(await code(report(b.id))).toBe('WAKE_PROOF_STALE');
+  expect(await db.workerDeliveryHold.count()).toBe(0); expect(await db.agentTeamEvent.count({ where: { type: { in: ['delivery.held', 'delivery.resumed', 'delivery.stuck'] } } })).toBe(0); expect(await db.hostKeyUse.count()).toBe(before);
+});
+it('a later hold persistence failure rolls back earlier holds/events and host-use audit', async () => {
+  await postForBoth(); await secondChannel(); const b = (await read(hostKey)).batches[0];
+  const before = await db.hostKeyUse.count();
+  const failing = new Proxy(db, { get(target, prop) {
+    if (prop === '$transaction') return (fn: any, options: any) => target.$transaction(async tx => {
+      let created = 0;
+      return fn(new Proxy(tx, { get(t, p) {
+        if (p === 'workerDeliveryHold') return new Proxy(t.workerDeliveryHold, { get(delegate, method) {
+          if (method === 'create') return async (args: any) => { if (++created === 2) throw new Error('injected hold failure'); return delegate.create(args); };
+          return Reflect.get(delegate, method, delegate);
+        } });
+        return Reflect.get(t, p, t);
+      } }));
+    }, options);
+    return Reflect.get(target, prop, target);
+  } });
+  await expect(report(b.id, {}, keyCtx(hostKey, app.id, { db: failing }))).rejects.toThrow('injected hold failure');
+  expect(await db.workerDeliveryHold.count()).toBe(0); expect(await db.agentTeamEvent.count({ where: { type: { in: ['delivery.held', 'delivery.resumed', 'delivery.stuck'] } } })).toBe(0); expect(await db.hostKeyUse.count()).toBe(before);
+});
+it.each(['scope', 'self-end', 'incarnation', 'expiry'])('rechecks %s after an authority-lock wait', async kind => {
+  const s = await ownSession(); await postForBoth();
+  let b = kind === 'self-end' ? (await selfRead(s)).batches[0] : (await read(hostKey)).batches[0];
+  if (kind === 'expiry') {
+    const { signBatchProof, verifyBatchProof } = await import('../../../lib/tickers/wakeProof.js');
+    b = { ...b, id: signBatchProof({ ...verifyBatchProof(b.id), issuedAt: Date.now()-15*60_000+5 }) };
+  }
+  const { lockAuthorityAnchors } = await import('../../../lib/auth/authorityAnchors.js');
+  const { waitForLockWaitersOfType } = await import('../../../test/lockWait.js');
+  let release!: () => void, held!: () => void;
+  const gate = new Promise<void>(r => { release = r; }), ready = new Promise<void>(r => { held = r; });
+  const revoker = db.$transaction(async tx => {
+    await lockAuthorityAnchors(tx, [{ kind: 'app', id: app.id }], 'exclusive');
+    if (kind === 'scope') await tx.appKeyScope.updateMany({ where: { appKeyId: hostKey.id, scope: 'attention:deliver' }, data: { revokedAt: new Date(), revokedByUserId: manager.id } });
+    if (kind === 'self-end') await tx.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+    if (kind === 'incarnation') await tx.channel.update({ where: { id: channel.id }, data: { incarnation: 2 } });
+    held(); await gate;
+  }, { timeout: 20_000 });
+  await Promise.race([ready, revoker]);
+  const result = code(report(b.id, {}, kind === 'self-end' ? selfCtx(s) : keyCtx(hostKey)));
+  try { await waitForLockWaitersOfType(db, 'advisory', 1); } finally { release(); await revoker; }
+  expect(await result).toBe(kind === 'scope' ? 'APP_KEY_SCOPE_REQUIRED' : kind === 'self-end' ? 'SESSION_NOT_LIVE' : 'WAKE_PROOF_STALE');
+  expect(await db.workerDeliveryHold.count()).toBe(0); expect(await db.agentTeamEvent.count({ where: { type: { in: ['delivery.held', 'delivery.resumed', 'delivery.stuck'] } } })).toBe(0);
+});
+it('the actual MCP SDK preserves unknown keys for sanitized refusal, then accepts the same signed id', async () => {
+  const s = await ownSession(); await postForBoth(); const b = (await selfRead(s)).batches[0];
+  const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+  const { registerTickerTools } = await import('../../../mcp/tickerTools.js');
+  const server = new McpServer({ name: 'held-test', version: '1' });
+  registerTickerTools(server, { db, auth: { userId: manager.id, roles: ['READER'] } as never });
+  const client = new Client({ name: 'held-test-client', version: '1' });
+  const [a, z] = InMemoryTransport.createLinkedPair();
+  await server.connect(z); await client.connect(a);
+  try {
+    const bad: any = await client.callTool({ name: 'hadron_report_delivery_hold', arguments: { batchId: b.id, reason: 'draft', session: s.id, draft: 'SECRET_DRAFT' } });
+    expect(bad.isError).toBe(true); expect(bad.content[0].text).toContain('[bad_user_input]'); expect(bad.content[0].text).not.toContain('SECRET');
+    expect(await db.workerDeliveryHold.count()).toBe(0);
+    const good: any = await client.callTool({ name: 'hadron_report_delivery_hold', arguments: { batchId: b.id, reason: 'draft', session: s.id } });
+    expect(good.isError).not.toBe(true); expect(JSON.parse(good.content[0].text).holds).toHaveLength(1);
+  } finally { await client.close(); await server.close(); }
+});
+
+it('a retired worker or removed App refuses without exposing an internal transaction error', async () => {
+  const b = await batch();
+  await db.worker.update({ where: { id: kit.id }, data: { retiredAt: new Date() } });
+  expect(await code(report(b.id))).toBe('WAKE_PROOF_STALE');
+  expect(await db.workerDeliveryHold.count()).toBe(0);
+});
+it('GraphQL exposes the same strict typed input and bounded result without a resumed door', async () => {
+  const b = await batch();
+  const { graphql, buildSchema } = await import('graphql');
+  const { typeDefs } = await import('./typeDefs.js');
+  const schema = buildSchema(typeDefs);
+  const call = (input: unknown) => graphql({ schema, source: 'mutation($input: DeliveryHoldReportInput!) { reportDeliveryHold(input:$input) { workerId holds { holdId channelId reason } pageInfo { hasNextPage endCursor } } }',
+    variableValues: { input }, rootValue: { reportDeliveryHold: (args: any) => M.reportDeliveryHold({}, args, keyCtx(hostKey)) } });
+  const bad = await call({ batchId: b.id, reason: 'draft', proof: 'SECRET' });
+  expect(bad.errors?.length).toBeGreaterThan(0); expect(await db.workerDeliveryHold.count()).toBe(0);
+  expect(JSON.stringify(bad.errors)).not.toContain('SECRET');
+  expect(JSON.stringify(bad.errors)).not.toContain(b.id);
+  const good = await call({ batchId: b.id, reason: 'draft' });
+  expect(good.errors).toBeUndefined(); expect((good.data as any).reportDeliveryHold.holds).toHaveLength(1);
+  expect(schema.getMutationType()?.getFields().reportDeliveryResumed).toBeUndefined();
+});
+it('another live key on the same host cannot reuse the receiving key proof', async () => {
+  const b = await batch(), sibling = await mkKey(app.id, 'same-host');
+  await M.grantAppKeyScope({}, { id: sibling.id, scope: 'attention:deliver' }, ctx(manager.id));
+  await M.grantAppKeyScope({}, { id: sibling.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
+  expect(await code(report(b.id, {}, keyCtx(sibling)))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+  expect(await db.workerDeliveryHold.count()).toBe(0);
+});
+it('a partially covered rendered descriptor is stale, rather than reporting its old first seq', async () => {
+  await postForBoth(); await postForBoth(); const b = (await read(hostKey)).batches[0];
+  expect(b.ranges[0].seqs).toHaveLength(2);
+  await db.channelReadState.create({ data: { workerId: kit.id, channelId: channel.id, lastSeenSeq: b.ranges[0].seqs[0] } });
+  expect(await code(report(b.id))).toBe('WAKE_PROOF_STALE');
+  expect(await db.workerDeliveryHold.count()).toBe(0);
 });
