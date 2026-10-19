@@ -20,6 +20,12 @@ export async function deliveryStateTransaction<T>(db: PrismaClient, appId: strin
     const app = await tx.app.findUnique({ where: { id: appId }, select: { organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true } });
     if (!app || app.deletedAt || app.uninstalledAt) fail('DELIVERY_WORKER_NOT_FOUND');
     await lockAuthorityAnchors(tx, [{ kind: 'app', id: appId }, ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []), ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : [])], 'shared');
+    const current = await tx.app.findUnique({ where: { id: appId }, select: {
+      organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true,
+      organization: { select: { deletedAt: true } }, ownerUser: { select: { deletedAt: true } },
+    } });
+    if (!current || current.deletedAt || current.uninstalledAt || current.organization?.deletedAt || current.ownerUser?.deletedAt) fail('DELIVERY_WORKER_NOT_FOUND');
+    if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) fail('DELIVERY_AUTHORITY_CHANGED');
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + appId}, 0))`;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + workerId}, 0))`;
     const worker = await tx.worker.findFirst({ where: { id: workerId, appId, retiredAt: null, app: { deletedAt: null, uninstalledAt: null } }, select: { id: true } });
