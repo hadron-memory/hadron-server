@@ -37,9 +37,11 @@ ALTER TABLE agent_team_events ADD CONSTRAINT chk_delivery_event_payload CHECK (
     task_id IS NULL AND subject_worker_id IS NOT NULL AND
     jsonb_typeof(payload->'episodeId') = 'string' AND payload->>'episodeId' ~ '^[A-Za-z0-9_-]{1,128}$' AND
     jsonb_typeof(payload->'channelId') = 'string' AND payload->>'channelId' ~ '^[A-Za-z0-9_-]{1,128}$' AND
-    jsonb_typeof(payload->'channelIncarnation') = 'number' AND
+    jsonb_typeof(payload->'channelIncarnation') = 'number' AND payload->>'channelIncarnation' ~ '^[0-9]+$' AND
     CASE WHEN type = 'delivery.resumed' THEN
       severity IS NULL AND episode_start IS NULL AND
+      jsonb_typeof(payload->'throughSeq') = 'number' AND payload->>'throughSeq' ~ '^[0-9]+$' AND
+      jsonb_typeof(payload->'resumedAt') = 'string' AND payload->>'resumedAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$' AND
       payload - ARRAY['episodeId','channelId','channelIncarnation','throughSeq','resumedAt','principal'] = '{}'::jsonb AND
       jsonb_typeof(payload->'principal') = 'object' AND
       CASE payload->'principal'->>'kind'
@@ -49,6 +51,11 @@ ALTER TABLE agent_team_events ADD CONSTRAINT chk_delivery_event_payload CHECK (
         ELSE false
       END
     ELSE
+      payload ?& ARRAY['episodeId','workerId','channelId','channelIncarnation','firstPendingSeq','oldestDueAt','windowSeconds','reason','terminalId'] AND
+      jsonb_typeof(payload->'workerId') = 'string' AND payload->>'workerId' = subject_worker_id AND
+      jsonb_typeof(payload->'firstPendingSeq') = 'number' AND payload->>'firstPendingSeq' ~ '^[1-9][0-9]*$' AND
+      jsonb_typeof(payload->'windowSeconds') = 'number' AND payload->>'windowSeconds' ~ '^[1-9][0-9]*$' AND
+      jsonb_typeof(payload->'oldestDueAt') = 'string' AND payload->>'oldestDueAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$' AND
       payload - ARRAY['episodeId','workerId','channelId','channelIncarnation','firstPendingSeq','oldestDueAt','windowSeconds','reason','terminalId'] = '{}'::jsonb AND
       (payload->>'reason' IS NULL OR payload->>'reason' IN ('draft','isolated','question','screen-unknown','not-submitted','two-agents','binding-mismatch')) AND
       (payload->>'terminalId' IS NULL OR payload->>'terminalId' ~ '^term_[A-Za-z0-9_-]{1,128}$') AND
