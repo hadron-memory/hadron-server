@@ -304,3 +304,20 @@ describe('anonymous promotion ends approvals in its flip transaction (#1838, QA 
     expect(revs.some((r) => r.approvedBy === admin.id && r.approvedAt)).toBe(true);
   });
 });
+
+describe('entry clears snapshots captured elsewhere for a node now resident (#1838, blind P2)', () => {
+  it('approve in A, metadata edit, move to B, encrypt B: A-captured hashes are cleared too', async () => {
+    const b = await resolvers.Mutation.createMemory(null, { orgId, name: 'move-target', memoryClass: 'private' }, as());
+    const n = await mk('m:1');
+    await approve(n.id);
+    await touchMeta(n.id, ['x']); // snapshot of rev 1 captured in A carries the record
+    const carried = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id, approvalHash: { not: null } } });
+    expect(carried.memoryId).toBe(memory.id);
+    await db.node.update({ where: { id: n.id }, data: { memoryId: b.id } });
+    await db.$transaction((tx) => endApprovalsOnEncryptedEntry(tx, { memoryId: b.id }));
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).approvalHash).toBeNull();
+    const after = await db.nodeRevision.findUniqueOrThrow({ where: { id: carried.id } });
+    expect(after.approvalHash).toBeNull();
+    expect(after.approvedBy).toBe(admin.id);
+  });
+});

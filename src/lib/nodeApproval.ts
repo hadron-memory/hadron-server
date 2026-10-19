@@ -452,12 +452,13 @@ export async function endApprovalsOnEncryptedEntry(
 ): Promise<void> {
   if ('nodeIds' in scope && scope.nodeIds.length === 0) return;
   // By memory: every node the memory holds (tombstones included) and every
-  // snapshot captured in it, wherever its node lives now.
+  // snapshot of those nodes, whichever memory captured it (a node moved in
+  // keeps modern snapshots from where it lived), plus snapshots captured here.
   const nodeWhere: Prisma.NodeWhereInput = 'nodeIds' in scope
     ? { id: { in: scope.nodeIds } } : { memoryId: scope.memoryId };
   const revisionWhere: Prisma.NodeRevisionWhereInput = 'nodeIds' in scope
     ? { nodeId: { in: scope.nodeIds } }
-    : { OR: [{ memoryId: scope.memoryId }, { memoryId: null, node: { memoryId: scope.memoryId } }] };
+    : { OR: [{ memoryId: scope.memoryId }, { node: { memoryId: scope.memoryId } }] };
   await tx.node.updateMany({ where: { ...nodeWhere, approvalHash: { not: null } }, data: { approvalHash: null } });
   await tx.nodeRevision.updateMany({ where: { ...revisionWhere, approvalHash: { not: null } }, data: { approvalHash: null } });
 }
