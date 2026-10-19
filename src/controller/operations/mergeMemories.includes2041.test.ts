@@ -99,4 +99,32 @@ describe('#2041 D5 — mergeMemories include read check', () => {
     expect(e.extensions).toMatchObject({ code: 'INCLUDE_TARGET_UNAVAILABLE' });
     expect((await db.node.findFirstOrThrow({ where: { memoryId: dst.id, loc: 'page' } })).content).toBe('target body');
   });
+
+  it('retry control: after the drift refusal, restoring readability and re-running finishes the merge', async () => {
+    await node(src.id, '00000000000000000000000000000001', 'a', 'plain');
+    await node(src.id, 'ffffffffffffffffffffffffffffff09', 'page', `see {{> ${readableMem.urn}:ok }}`);
+    const orgId = (await db.memory.findUniqueOrThrow({ where: { id: readableMem.id } })).organizationId!;
+    const otherId = (await db.organization.findFirstOrThrow({ where: { urn: 'd5other.example' } })).id;
+    const transaction = db.$transaction.bind(db);
+    let moved = false;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...args: unknown[]) => {
+      if (!moved && (await live(src.id)) === 1) {
+        moved = true;
+        await db.memory.update({ where: { id: readableMem.id }, data: { organizationId: otherId } });
+      }
+      return (transaction as (...a: unknown[]) => unknown)(...args);
+    }) as never);
+    try { await errorOf(merge()); } finally { spy.mockRestore(); }
+    await db.memory.update({ where: { id: readableMem.id }, data: { organizationId: orgId } });
+    await merge();
+    expect(await live(src.id)).toBe(0);
+    expect(await db.node.count({ where: { memoryId: dst.id, loc: 'page', deletedAt: null } })).toBe(1);
+  });
+
+  it('a relative include whose loc relocates in the same merge is not refused (judged against the destination)', async () => {
+    await node(src.id, generateId(), 'intro', 'intro body');
+    await node(src.id, generateId(), 'page', 'see {{> intro }}');
+    await merge();
+    expect(await db.node.count({ where: { memoryId: dst.id, loc: { in: ['intro', 'page'] }, deletedAt: null } })).toBe(2);
+  });
 });
