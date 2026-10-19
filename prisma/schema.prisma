@@ -1315,7 +1315,9 @@ model Node {
   /// holds the principal (the NodeRevision.editedByInfo convention).
   /// `approvalHash` is the full SHA-256 of approval hash v1
   /// (src/lib/approvalHash.ts) at approval time. All five are set together or
-  /// not at all (chk_node_approval_complete).
+  /// not at all (chk_node_approval_complete), except that `approvalHash` alone is
+  /// cleared when the node enters an encrypted memory (#1838): who, when and which
+  /// revision stay, and a hashless approval covers nothing.
   approvedRevNo      Int?      @map("approved_rev_no")
   approvedBy         String?   @map("approved_by")
   approvedByInfo     String?   @map("approved_by_info")
@@ -1564,6 +1566,8 @@ model Edge {
 enum EdgeGovernedKind {
   COMMENT_ANCHOR
   COMMENT_REPLY
+  /// Derived from an include tag in the source node's content (#2040); owned by the content writer, never by a client.
+  INCLUDE
 }
 
 /// #1606 — a comment thread's state (`cor:dmo:110:05`); top-level only.
@@ -3746,6 +3750,7 @@ model Worker {
   deliveryChannels    WorkerDeliveryChannel[]
   deliveryTicks       WorkerDeliveryTick[]
   deliveryTaskEvents  WorkerDeliveryTaskEvent[]
+  wakeAcks            WorkerWakeAck[]
   wakeReservation     AppWakeReservation?
   appGrants           AppGrant[]
   launchableVia      HostRegistrationWorker[]
@@ -4039,6 +4044,22 @@ model AuthCode {
   @@index([userId])
   @@index([clientId])
   @@map("auth_codes")
+}
+
+/// #1631 S2a: one browser-bound, purpose-bound, single-use ceremony step.
+/// Expiry and consumption are decided on the database clock.
+model PasskeyCeremony {
+  id               String    @id
+  purpose          String
+  browserNonceHash String    @map("browser_nonce_hash")
+  /// SHA-256 hex of the challenge issued for this ceremony: every ceremony is bound to one.
+  challengeHash    String    @map("challenge_hash")
+  createdAt        DateTime  @default(dbgenerated("(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  expiresAt        DateTime  @map("expires_at")
+  consumedAt       DateTime? @map("consumed_at")
+
+  @@index([expiresAt])
+  @@map("passkey_ceremonies")
 }
 
 /// #1631 schema-first: shared credential registry (cor:aut:040:05), no enrollment route yet.
@@ -5735,6 +5756,26 @@ model WorkerDeliveryChannel {
   @@map("worker_delivery_channels")
 }
 
+/// #2072 (Holger R53, cor:agt:080:04/:13/:15) — the receipt of an acknowledged wake, per (worker, wake key). A wake
+/// carries no message text, so its acknowledgement moves no message mark; this row is what it records instead: the
+/// floor's clock (`ackedAt`) and the budget's once-per-wake test. A row is (re)written only by an acknowledgement of a
+/// proof issued AFTER the receipt last recorded for that key, so a repeat or an older proof's replay changes nothing
+/// while the same wake offered again after the floor counts again.
+model WorkerWakeAck {
+  workerId        String   @map("worker_id")
+  wakeKey         String   @map("wake_key")
+  ackedAt         DateTime @map("acked_at")
+  ackedByUserId   String?  @map("acked_by_user_id")
+  ackedByWorkerId String?  @map("acked_by_worker_id")
+  ackedByAppKeyId String?  @map("acked_by_app_key_id")
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@id([workerId, wakeKey])
+  @@index([workerId, ackedAt])
+  @@map("worker_wake_acks")
+}
+
 /// #1747 — the delivery record, part 2: the last tick acknowledged per ticker.
 /// WRITTEN ONLY by S2.
 model WorkerDeliveryTick {
@@ -5813,6 +5854,9 @@ model AppWakeReservation {
   wakeKey    String   @map("wake_key")
   /// The wake itself, so an outstanding one is handed out again, exactly, until it is consumed or lapses.
   wake       Json     @map("wake")
+  /// #2069: the wake keys this reservation absorbed (a tick or task that fell due after them). An earlier proof whose key
+  /// is listed shares this reservation's allowance and is not charged again; any other proof is unrelated to it.
+  absorbedKeys String[] @default([]) @map("absorbed_keys")
 
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)

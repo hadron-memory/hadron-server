@@ -1487,7 +1487,13 @@ export const typeDefs = `#graphql
     backoff ceiling and likely needs operator attention). System-managed.
     """
     embeddingAttempts: Int!
-    content: String
+    """
+    The node's text. Include tags and data variables resolve for the reader
+    (hrn:node:hadronmemory.com:specs:cor:dmo:150:03); pass raw: true for the stored text with its tags as
+    written. Through nodeBatch, an omitted raw returns the stored text
+    permanently (R21 A) and raw: false resolves.
+    """
+    content(raw: Boolean): String
     tokens: Int
     tags: [String!]!
     properties: JSON
@@ -2654,7 +2660,21 @@ export const typeDefs = `#graphql
     approvedAt: DateTime
     "#1591 — approval hash v1 recorded when this revision was approved."
     approvalHash: String
+    "#1838 — was THIS revision approved (for pinning)? Not whether the node is approved now (that is Node.approvalStatus). A revision counts as approved when some recorded approval covers exactly its hashed content, whichever revision the approval was recorded on (Holger's R7, hrn:node:hadronmemory.com:specs:cor:dmo:060:04)."
+    revisionApproval: RevisionApproval!
     createdAt: DateTime!
+  }
+
+  "#1838 — whether one revision was approved, and by which recorded approval."
+  type RevisionApproval {
+    "NOT_APPLICABLE inside an encrypted memory; APPROVED or NOT_APPROVED otherwise (never SUPERSEDED: that is about the live text)."
+    state: NodeApprovalState!
+    approved: Boolean!
+    "The revision the covering approval was recorded at; it can differ from this revision when only metadata changed, or the text recurs."
+    recordedAtRevision: Int
+    approvedBy: String
+    approvedByInfo: String
+    approvedAt: DateTime
   }
 
   type User {
@@ -2805,6 +2825,7 @@ export const typeDefs = `#graphql
     multi-Agent set per spec 023 US1.
     """
     agents: [Agent!]!
+    "Key inventory, only for whoever manages the App as themselves, never through a bound worker session (hrn:node:hadronmemory.com:specs:cor:dmo:050:05)."
     keys: [AppKey!]!
     createdAt: DateTime!
     updatedAt: DateTime
@@ -6943,6 +6964,12 @@ export const typeDefs = `#graphql
     workerWakeSettings(workerRef: String!): WorkerWakeSettings!
     "#1748 — the wakes due now (hrn:node:hadronmemory.com:specs:cor:agt:080:08). Counts and seq ranges only; reads nothing it does not return."
     dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String): DueWakePage!
+    """
+    #2017 (S1) — the ready-to-deliver batches of the workers registered on the calling host (hrn:node:hadronmemory.com:specs:cor:agt:080:22, :26).
+    An own live session reads only its bound worker. A host App key needs attention:deliver AND host:operate;
+    the host is the key's, the request names none, and a worker not on that host is absent. The text is written by the server and typed unchanged. Reading moves nothing; acknowledge the batch ids.
+    """
+    deliveryBatches(appRef: String!, workerRefs: [String!], first: Int, after: String): DeliveryBatchPage!
 
     "#1709 — the App's host registrations, liveness derived now (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Whoever reads the App's tasks and events, the App's own key included."
     hostRegistrations(appRef: String!): [HostRegistration!]!
@@ -7946,7 +7973,9 @@ export const typeDefs = `#graphql
     appAIConfig(appRef: ID!): AppAIConfig
 
     """
-    List keys for an App (org ADMIN of the App's org).
+    List keys for an App, only for whoever manages the App
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request.
 
     Accepts the entity's ID or URN.
     """
@@ -8738,6 +8767,12 @@ export const typeDefs = `#graphql
     setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!): WorkerWakeSettings!
     "#1748 — record that wakes were delivered (hrn:node:hadronmemory.com:specs:cor:agt:080:16). Never moves a read position."
     acknowledgeWakes(proofs: [String!]!): AcknowledgeWakesResult!
+    """
+    #2017 (S1) — record that delivery batches were typed (hrn:node:hadronmemory.com:specs:cor:agt:080:16, :17). Only the receiving host key or the worker's own receiving live session, within 15 minutes.
+    The delivered mark rises to the end of each rendered range; with through (one batch only), only the listed channels move, each to a
+    rendered seq of its own. Writes no read position, tick or budget. A repeat changes nothing.
+    """
+    acknowledgeDeliveryBatches(batchIds: [String!]!, through: [BatchThrough!]): AcknowledgeWakesResult!
 
     """
     #1709 — a host registers, or refreshes, which of its App's workers it can launch, as which model family, and in
@@ -8959,6 +8994,12 @@ export const typeDefs = `#graphql
     already exists at (memoryId, loc) — creating is create-only (spec 039
     Phase 0 D1); a soft-deleted node at the target loc is resurrected.
     'name' is required here and only here (D4).
+    Include tags (#2040): content may carry {{> target settings}} tags. Writes
+    that make a tag malformed refuse INVALID_INCLUDE, one that would make the
+    node include itself INCLUDE_CYCLE, and a chain deeper than 10
+    INCLUDE_TOO_DEEP; nothing is written. Each tag's target gets a derived edge
+    (governed kind INCLUDE) that only the content owns: editing or deleting it
+    directly refuses INCLUDE_EDGE_DERIVED.
     """
     createNode(input: CreateNodeInput!): Node!
 
@@ -9115,6 +9156,12 @@ export const typeDefs = `#graphql
     moveNode's job, D3). Every content field is optional — omitted fields are
     preserved ('name' included, D4; 'abstract' keeps its omit/null/string
     contract; omitted 'tags' are preserved, issue #235).
+    Include tags (#2040): content may carry {{> target settings}} tags. Writes
+    that make a tag malformed refuse INVALID_INCLUDE, one that would make the
+    node include itself INCLUDE_CYCLE, and a chain deeper than 10
+    INCLUDE_TOO_DEEP; nothing is written. Each tag's target gets a derived edge
+    (governed kind INCLUDE) that only the content owns: editing or deleting it
+    directly refuses INCLUDE_EDGE_DERIVED.
     """
     updateNode(input: UpdateNodeInput!): Node!
 
@@ -9655,7 +9702,9 @@ export const typeDefs = `#graphql
 
     """
     App key management — revoke all active keys for an App and mint a
-    fresh one. (See createAppKey / revokeAppKey / deleteApp below.)
+    fresh one. Only whoever manages the App, as themselves
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request. The replacement key holds no scopes.
 
     Accepts the entity's ID or URN.
     """
@@ -11709,13 +11758,18 @@ export const typeDefs = `#graphql
     removeAgentImport(parentAgentRef: ID!, importedAgentRef: ID!): Boolean!
 
     """
-    Mint a new AppKey for an App.
+    Mint a new AppKey for an App. Only whoever manages the App, as themselves
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request; new keys hold no scopes.
+    Granting or revoking scopes uses the same manager audience.
 
     Accepts the entity's ID or URN.
     """
     createAppKey(appRef: ID!, label: String): AppKeyCreated!
     """
-    AppKey is keyed by raw ID — no urn column. Stays ID-only.
+    Revoke an AppKey. Only whoever manages the App, as themselves
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request. AppKey has no URN; the id is raw ID-only.
     """
     revokeAppKey(id: ID!): Boolean!
     """
@@ -12040,6 +12094,44 @@ export const typeDefs = `#graphql
     pageInfo: DueWakePageInfo!
   }
 
+  "#2017 (S1) — one page of delivery batches."
+  type DeliveryBatchPage {
+    batches: [DeliveryBatch!]!
+    pageInfo: DueWakePageInfo!
+  }
+
+  "One ready-to-type delivery for one worker. The id is a signed proof bound to the key, the host and the rendered ranges: hand it back to acknowledgeDeliveryBatches after typing."
+  type DeliveryBatch {
+    id: String!
+    worker: Worker!
+    "The whole delivery, one line, written by the server (hrn:node:hadronmemory.com:specs:cor:agt:080:26). Type it unchanged."
+    text: String!
+    "Not before this moment (the batching window / busy deadline of the oldest waiting message)."
+    deliverAfter: DateTime!
+    "The latest moment a busy worker may be made to wait for this delivery."
+    busyDeadline: DateTime!
+    "Always false until stop signals ship (S6)."
+    interrupt: Boolean!
+    ranges: [DeliveryBatchRange!]!
+    "Eligible messages left for the next batch."
+    overflow: Int!
+  }
+
+  input BatchThrough {
+    channelId: ID!
+    "A seq this batch rendered in that channel."
+    seq: Int!
+  }
+
+  type DeliveryBatchRange {
+    channel: Channel!
+    incarnation: Int!
+    fromSeq: Int!
+    throughSeq: Int!
+    "Exactly the message seqs this batch rendered."
+    seqs: [Int!]!
+  }
+
   type DueWakePageInfo {
     hasNextPage: Boolean!
     endCursor: String
@@ -12056,6 +12148,15 @@ export const typeDefs = `#graphql
     availability: DueWakeAvailability
     "Hand this back to acknowledgeWakes after delivering. Bound to the requester; good for 15 minutes."
     proof: String!
+    """
+    #2017 R63 — when the earliest waiting reason became due: a mention's first still-due post, a tick's OLDEST unacknowledged
+    tick time, a task event's time. Never restarted by a re-offer or a join (hrn:node:hadronmemory.com:specs:cor:agt:080:27).
+    """
+    anchorAt: DateTime!
+    "Not before this moment: the anchor plus the App's batching window (the shared cadence floor)."
+    deliverAfter: DateTime!
+    "The latest a busy worker may be made to wait: the anchor plus the App's busy delay."
+    busyDeadline: DateTime!
   }
 
   type DueWakeAvailability {

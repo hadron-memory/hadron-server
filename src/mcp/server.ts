@@ -218,6 +218,8 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
+import { resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
+import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
@@ -1008,6 +1010,22 @@ async function lockOutgoingEdgeMemories(
   ]);
 }
 
+/**
+ * #2040 — include tags: refuse a bad one and sync the derived INCLUDE edges, in
+ * the writer's own transaction on the plaintext it holds, so a refusal rolls
+ * back the content, revision and edges together.
+ */
+async function applyIncludesInTransaction(
+  tx: Prisma.TransactionClient,
+  node: { id: string; loc: string; memoryId: string },
+  plaintextContent: string | null,
+  auth: AuthContext,
+): Promise<void> {
+  const readable = plaintextContent?.includes('{{>') ? await getAccessibleMemoryIds(db, auth) : null;
+  const tags = await assertIncludesWritable(tx, node, plaintextContent, readable);
+  await syncDerivedIncludesEdges(tx, node, tags, readable);
+}
+
 async function replaceOutgoingEdgesInTransaction(
   tx: Prisma.TransactionClient,
   args: {
@@ -1033,7 +1051,8 @@ async function replaceOutgoingEdgesInTransaction(
   const missing = args.resolved.find((edge) => !live.has(edge.targetNodeId));
   if (missing) return `Edge target not found: "${missing.targetNodeId}"`;
 
-  await tx.edge.deleteMany({ where: { sourceId: args.sourceNodeId } });
+  // Derived INCLUDE edges (#2040) belong to the content writer.
+  await tx.edge.deleteMany({ where: { sourceId: args.sourceNodeId, governedKind: null } });
   await tx.pendingEdge.deleteMany({ where: { sourceId: args.sourceNodeId } });
   if (args.resolved.length > 0) {
     const { count } = await tx.edge.createMany({
@@ -1411,6 +1430,8 @@ type ReadProjectionNode = {
   approvedBy: string | null;
   approvedByInfo: string | null;
   approvedAt: Date | null;
+  /** #1838 — null once the approval ended on encrypted entry; a hashless record authorizes nothing. */
+  approvalHash?: string | null;
   /** #1591 — the mint record. */
   mintedAt: Date | null;
   mintedBy: string | null;
@@ -1809,7 +1830,7 @@ async function renderNodeReadProjection(
   // #1591: the approval line. Approver by handle when a user is known, else
   // the stored principal info.
   let approvalLine = opts.encryptedMemory ? 'Approval: not applicable (encrypted memory)' : `Approval: not approved (r${revision})`;
-  if (!opts.encryptedMemory && node.approvedRevNo != null && node.approvedAt) {
+  if (!opts.encryptedMemory && node.approvedRevNo != null && node.approvedAt && node.approvalHash !== null) {
     const handle = node.approvedBy
       ? (opts.batch
         ? opts.batch.humanNames.get(node.approvedBy)
@@ -1825,7 +1846,7 @@ async function renderNodeReadProjection(
   }
 
   if (inheritedFrom) {
-    approvalLine = node.approvedRevNo != null && node.contentRevSeq <= node.approvedRevNo
+    approvalLine = node.approvedRevNo != null && node.approvalHash !== null && node.contentRevSeq <= node.approvedRevNo
       ? `Approval: approved r${node.approvedRevNo}`
       : `Approval: not approved (r${revision})`;
   }
@@ -4058,6 +4079,7 @@ export function createMcpServerInstance(
             ...upsertArgs,
             update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
+          await applyIncludesInTransaction(tx, row, content, auth);
           return row.id;
         });
       } catch (e) {
@@ -4065,6 +4087,8 @@ export function createMcpServerInstance(
         if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        const includeText = includeRefusalText(e);
+        if (includeText) return textResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return textResult(writerRefusal);
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
@@ -4614,8 +4638,12 @@ export function createMcpServerInstance(
         .enum(['content', 'abstract', 'all'])
         .optional()
         .describe("Selects what the response includes. 'content' (default): meta block + body, with abstract substituted into the body slot when content is null/empty (Source: abstract-fallback line appears). 'abstract': meta block + abstract, no body. 'all': meta block + abstract + body."),
+      raw: z
+        .boolean()
+        .optional()
+        .describe('Return the stored text with include tags ({{> loc}}) as written instead of resolving them (cor:dmo:150:03). Default false: includes resolve with your own read access.'),
     },
-    async ({ urn: rawUrn, contentScope }) => {
+    async ({ urn: rawUrn, contentScope, raw }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -4778,7 +4806,11 @@ export function createMcpServerInstance(
       const lockState = mcpDecryptOrMark(current);
       // Shared with hadron_get_nodes (batch) so the per-node projection can never
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
-      const projection = await renderNodeReadProjection(current, scope, {
+      // #2041 — include tags resolve with the caller's own read access; `raw` skips it.
+      const served = lockState === 'locked' || raw
+        ? current
+        : { ...current, content: await resolveNodeContent(scopeCtx(), current, { raw }) };
+      const projection = await renderNodeReadProjection(served, scope, {
         locked: lockState === 'locked',
         encryptedMemory: lockState !== 'plaintext',
         auth,
@@ -4850,8 +4882,12 @@ export function createMcpServerInstance(
         .enum(['content', 'abstract', 'all'])
         .optional()
         .describe("Per-node projection scope, as on hadron_get_node. Default 'content'."),
+      raw: z
+        .boolean()
+        .optional()
+        .describe('Return the stored text with include tags ({{> loc}}) as written instead of resolving them (cor:dmo:150:03). Default false: includes resolve with your own read access.'),
     },
-    async ({ refs, memoryUrn, locPrefix, contentScope }) => {
+    async ({ refs, memoryUrn, locPrefix, contentScope, raw }) => {
       // Defensive contentScope validation — parity with hadron_get_node (covers
       // direct-handler callers that bypass the transport's zod parsing).
       if (
@@ -5234,13 +5270,17 @@ export function createMcpServerInstance(
         openThreadCounts(db, visible.map((n) => n.id)),
       ]);
       const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures };
+      const batchReadCtx = scopeCtx(); // one memo for the whole call (#2041)
       for (const n of visible) {
         if (truncated) {
           omitted.push(await nodeUrn(n.loc, n.memoryId, memoryUrnOf));
           continue;
         }
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
-        const projection = await renderNodeReadProjection(n, scope, {
+        const served = lockState === 'locked' || raw
+          ? n
+          : { ...n, content: await resolveNodeContent(batchReadCtx, n, { raw }) };
+        const projection = await renderNodeReadProjection(served, scope, {
           locked: lockState === 'locked',
           encryptedMemory: lockState !== 'plaintext',
           auth,
@@ -5301,8 +5341,12 @@ export function createMcpServerInstance(
     {
       parent: z.string().describe('Fully-qualified parent node URN, e.g. "hrn:node:acme.com:mmdata:sections"'),
       current: z.string().optional().describe('Fully-qualified current child node URN (must be in the same memory as `parent`)'),
+      raw: z
+        .boolean()
+        .optional()
+        .describe('Return the stored text with include tags ({{> loc}}) as written instead of resolving them (cor:dmo:150:03). Default false: includes resolve with your own read access.'),
     },
-    async ({ parent: rawParent, current: rawCurrent }) => {
+    async ({ parent: rawParent, current: rawCurrent, raw }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawParent, 'node');
@@ -5415,7 +5459,8 @@ export function createMcpServerInstance(
         .filter(Boolean)
         .join('\n');
 
-      return textResult(meta + '\n\n---\n\n' + (node.content || ''));
+      const body = raw ? node.content : await resolveNodeContent(scopeCtx(), node, { raw });
+      return textResult(meta + '\n\n---\n\n' + (body || ''));
     },
   );
 
@@ -6309,6 +6354,7 @@ export function createMcpServerInstance(
             });
             if (edgeError) throw new InlineEdgeEndpointError(edgeError);
           }
+          await applyIncludesInTransaction(tx, written, content ?? null, auth);
           return written;
         });
       } catch (e) {
@@ -6317,6 +6363,8 @@ export function createMcpServerInstance(
           return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
         if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+        const includeText = includeRefusalText(e);
+        if (includeText) return textResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return textResult(writerRefusal);
         if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
@@ -6741,6 +6789,7 @@ export function createMcpServerInstance(
               });
               if (edgeError) throw new InlineEdgeEndpointError(edgeError);
             }
+            if (content !== undefined) await applyIncludesInTransaction(tx, updated, content, auth);
           });
         } catch (e) {
           if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
@@ -6751,7 +6800,9 @@ export function createMcpServerInstance(
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
           if (e instanceof EdgeLocConflictError) return textResult(e.message);
           if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
-          const writerRefusal = roleWriterRefusalText(e);
+          const includeText = includeRefusalText(e);
+        if (includeText) return textResult(includeText);
+        const writerRefusal = roleWriterRefusalText(e);
           if (writerRefusal) return textResult(writerRefusal);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
             return textResult(`[spec_minted_permanent] ${e.message}`);
@@ -7999,6 +8050,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (e instanceof SubtreeMoveSourceChangedError) {
           return textResult('The node was moved concurrently; re-read it and retry.');
         }
+        const includeText = includeRefusalText(e);
+        if (includeText) return textResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return textResult(writerRefusal);
         if (
@@ -8877,7 +8930,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           : null;
         const boundUrl = workerPortalUrl(boundUrn);
         workerLine =
-          `\nWorking as ${worker?.name ?? 'worker'} (${session.workerId}).` +
+          `\nWorking as ${worker?.name ?? 'worker'} (worker id: ${session.workerId}).` +
           (boundUrn ? `\n${boundUrn}` : '') +
           (boundUrl ? `\nURL: ${boundUrl}` : '') +
           // A worker whose agent carries no template and who has no override
@@ -8891,11 +8944,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           renderWorkerContinuity(continuity as RenderableContinuity | null);
       } catch {
         workerLine =
-          `\nWorking as worker ${session.workerId}.` +
+          `\nWorking as worker (worker id: ${session.workerId}).` +
           '\n\n(The boot briefing could not be rendered just now — the session IS started and bound. Retry with hadron_get_node on the role agent, or start again after ending this session; do NOT retry hadron_start_session, which would refuse WORKER_TAKEN.)';
       }
     }
-    return `${sharedConnectionNote}${workerLine}`;
+    // #1599: the session argument is never the adjacent worker identity.
+    const sessionLabel = session.workerId ? 'Worker session id' : 'Session id';
+    return `${sharedConnectionNote}\n${sessionLabel}: ${session.id} (pass as \`session\` to team tools)${workerLine}`;
   }
 
   // ── hadron_start_session ──────────────────────────────────────────────────────
@@ -9433,12 +9488,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // identifier cannot disagree.
         const url = workerPortalUrl(urn);
         return (
-          `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}\n` +
+          `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}${s.workerId ? ' (worker session id; pass as `session` to team tools)' : ' (session id)'}\n` +
           (s.endedAt ? `    ended: ${s.endedAt.toISOString()} · end reason: ${sessionEndReason(s)}\n` : '') +
           // The un-bound case is the one worth calling out: it is the shape in
           // which a team-chat post silently lands under the human's name.
           (worker
-            ? `    working as: ${worker.name}${worker.role ? ` (${worker.role})` : ''}${urn ? `\n    ${urn}` : ''}${url ? `\n    URL: ${url}` : ''}\n`
+            ? `    working as: ${worker.name}${worker.role ? ` (${worker.role})` : ''} (worker id: ${worker.id})${urn ? `\n    ${urn}` : ''}${url ? `\n    URL: ${url}` : ''}\n`
             : '    working as: nobody — this session is NOT bound to a worker, so anything it posts is attributed to you, not a teammate.\n') +
           (app ? `    app: ${app.name}\n` : '') +
           `    started: ${s.startedAt.toISOString()}${s.type ? ` · ${s.type}` : ''}` +
@@ -10826,7 +10881,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // is otherwise stays behind the takeover refusal, which is a
             // deliberate act rather than a listing (hadron_list_workers' rule).
             (mine
-              ? `Your active session: ${mine.id} (since ${mine.startedAt.toISOString()})\n`
+              ? `Your active session: ${mine.id} (worker session id; pass as \`session\` to team tools; since ${mine.startedAt.toISOString()})\n`
               : '') +
             // Shown separately from the briefing, and labelled as the editable
             // part, so hadron_update_worker's replace semantics have something
