@@ -170,6 +170,10 @@ describe('database invariants', () => {
     await expect(db.$executeRaw`UPDATE sign_ins SET user_id=${otherUserId} WHERE id=${si.id}`).rejects.toThrow();
     await expect(db.$executeRaw`DELETE FROM sign_ins WHERE id=${si.id}`).rejects.toThrow();
     await expect(db.$executeRaw`INSERT INTO user_api_keys (id,user_id,key_hash,key_preview,oauth_scopes,created_at,origin_sign_in_id) VALUES (${generateId()},${otherUserId},${generateId()},'abcd',ARRAY[]::text[],now(),${si.id})`).rejects.toThrow();
+    // Baloo P2-1: the completing credential must belong to the sign-in's own user.
+    const foreignPasskey = await seedPasskey(otherUserId, 'foreign');
+    await expect(db.$executeRaw`INSERT INTO sign_ins (id, user_id, method, completed_by_passkey_id, expires_at) VALUES (${generateId()}, ${userId}, 'email', ${foreignPasskey}, now() + interval '1 day')`).rejects.toThrow();
+    await expect(db.$transaction((tx) => createSignIn(tx, { userId: otherUserId, method: 'email', passkeyId }))).rejects.toThrow();
     await db.$executeRaw`UPDATE sign_ins SET ended_at=now(), end_reason='x' WHERE id=${si.id}`;
     await expect(db.$executeRaw`UPDATE sign_ins SET ended_at=NULL, end_reason=NULL WHERE id=${si.id}`).rejects.toThrow();
   });

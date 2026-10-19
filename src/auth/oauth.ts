@@ -1679,10 +1679,11 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
     outcome = await db.$transaction(async (tx): Promise<TokenOutcome> => {
       await lockAuthorityAnchors(tx, [{ kind: 'user', id: authCode.userId }], 'shared');
       const claim = await tx.authCode.updateMany({
-        where: { codeHash, redeemedAt: null },
+        // Expiry is re-checked HERE, after any wait for the anchor: the read above is from before it.
+        where: { codeHash, redeemedAt: null, expiresAt: { gt: new Date() } },
         data: { redeemedAt: new Date() },
       });
-      // Lost the race. The other side just minted a token; we don't.
+      // Lost the race (or the code expired while this waited on the anchor). The other side just minted a token; we don't.
       if (claim.count !== 1) return { kind: 'lost' };
       const live = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT id FROM users WHERE id = ${authCode.userId} AND deleted_at IS NULL FOR SHARE`;
