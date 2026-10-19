@@ -57,6 +57,51 @@ export async function recordDeliveryException(tx: Tx, e: WaitException): Promise
   });
 }
 
+/**
+ * Policy-owner seam for an effective change, including cancellation of a stored
+ * future expiry. Call after re-reading that policy under the shared authority /
+ * budget / worker locks; this is not a client-supplied reporting operation.
+ * Changes may replace unobserved future time, never certified past time.
+ * Other causes and selective ranges remain independent.
+ */
+export async function transitionDeliveryException(tx: Tx, change: {
+  workerId: string; cause: WaitException['cause']; coverage: WaitCoverage;
+  effectiveAt: Date; active: boolean; until?: Date | null;
+}): Promise<void> {
+  const { workerId, cause, coverage, effectiveAt, active } = change;
+  const until = change.until ?? null;
+  if (!(DELIVERY_EXCEPTION_CAUSES as readonly string[]).includes(cause) ||
+      !Number.isFinite(effectiveAt.getTime()) ||
+      (until && (!Number.isFinite(until.getTime()) || until <= effectiveAt))) fail('DELIVERY_EXCEPTION_INVALID');
+  if (['standby', 'wake-budget'].includes(cause) && coverage.kind !== 'range') fail('DELIVERY_COVERAGE_INVALID');
+  const key = coverageKey(coverage);
+  const state = await tx.workerDeliveryWaitState.findUnique({ where: { workerId } });
+  if (!state || effectiveAt < state.trackedFrom) fail('DELIVERY_WAIT_INCOMPLETE');
+  if (effectiveAt < state.observedThrough) fail('DELIVERY_POLICY_LATE');
+  const spans = await tx.workerDeliveryWaitException.findMany({ where: {
+    workerId, cause, coverageKey: key, startedAt: { lte: effectiveAt },
+    OR: [{ endedAt: null }, { endedAt: { gt: effectiveAt } }],
+  } });
+  // A repeated active notification must not split/reset the persisted clock.
+  if (active && spans.length === 1 && spans[0]!.endedAt?.getTime() === until?.getTime()) return;
+  for (const span of spans) {
+    await tx.workerDeliveryWaitException.update({ where: { id: span.id }, data: { endedAt: effectiveAt } });
+  }
+  if (!active) return;
+  // A policy correction at the same effective instant replaces only that
+  // instant's span, retaining its identity and all earlier elapsed intervals.
+  const identity = { workerId, cause, coverageKey: key, startedAt: effectiveAt };
+  const c = coverage;
+  await tx.workerDeliveryWaitException.upsert({
+    where: { workerId_cause_coverageKey_startedAt: identity },
+    create: { id: generateId(), ...identity, endedAt: until,
+      channelId: c.kind === 'range' ? c.channelId : null,
+      channelIncarnation: c.kind === 'range' ? c.channelIncarnation : null,
+      fromSeq: c.kind === 'range' ? c.fromSeq : null, throughSeq: c.kind === 'range' ? c.throughSeq : null },
+    update: { endedAt: until },
+  });
+}
+
 /** Completeness certificate from the integrated policy producer, not the evaluator's clock. */
 export async function observeDeliveryPolicyThrough(tx: Tx, workerId: string, through: Date): Promise<void> {
   if (!Number.isFinite(through.getTime())) fail('DELIVERY_WAIT_INVALID');
