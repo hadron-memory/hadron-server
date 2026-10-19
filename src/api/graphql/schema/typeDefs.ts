@@ -8745,6 +8745,14 @@ export const typeDefs = `#graphql
     the App, in either direction. Never the may-subscribe-workers grant.
     """
     setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!): WorkerWakeSettings!
+    """
+    S7 (#2023, R85) — isolate a worker until a time (default 2 hours, at most 7 days; a later time extends, an earlier one shortens).
+    Only a person managing the App or holding the worker, acting as themselves; a worker session (even a manager's), an App key or an
+    impersonation is refused with WORKER_ISOLATION_FORBIDDEN. Never touches the worker's own pause.
+    """
+    isolateWorker(workerRef: String!, until: DateTime): WorkerWakeSettings!
+    "S7 — lift an isolation (same audience). Clearing when none is set changes nothing."
+    clearWorkerIsolation(workerRef: String!): WorkerWakeSettings!
     "#1748 — record that wakes were delivered (hrn:node:hadronmemory.com:specs:cor:agt:080:16). Never moves a read position."
     acknowledgeWakes(proofs: [String!]!): AcknowledgeWakesResult!
     """
@@ -12244,6 +12252,13 @@ export const typeDefs = `#graphql
     effectiveCadenceSeconds: Int
     "None of the worker's sessions has had activity within the App's dormancy period (hrn:node:hadronmemory.com:specs:cor:agt:080:07). A dormant worker is never woken."
     dormant: Boolean!
+    "S7 (#2023, R85) — isolation is its own state, never pausedUntil. While live the worker gets no chat batches or ordinary wakes and is not matched."
+    isolatedUntil: DateTime
+    isolatedAt: DateTime
+    "The handle of the person who set it: only a person managing the App or holding the worker, acting as themselves, can."
+    isolatedByHandle: String
+    "Live: isolatedUntil is in the future."
+    isolated: Boolean!
   }
 
   "Delivery timing per App. Busy/stuck bounds and relation are Proposed (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."

@@ -18,6 +18,8 @@ export type RoutedMessage = {
   broadcastWakes: boolean;
   /** Server-written at post time: the author manages the App (cor:agt:080:15 budget exemption). */
   managerPost: boolean;
+  /** S7 (#2023): a person, not a worker or the system, wrote it. Read only for a worker on standby (standby.ts). */
+  humanAuthored?: boolean;
   /** R63: when the message was posted (ms since epoch); the anchor of a mention. Optional so pure-rule fixtures need not carry it. */
   postedAtMs?: number;
 };

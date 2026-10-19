@@ -197,3 +197,31 @@ describe('StandbyCoverageClassifier (S5 seam)', () => {
     await expect(ask(99)).rejects.toThrow(/STANDBY_COVERAGE_MISMATCH/);
   });
 });
+
+describe('legacy wakes (dueWakes)', () => {
+  const wakesFor = async (id: string) => {
+    const { computeDueWakes } = await import('./dueWakes.js');
+    const res = await computeDueWakes({ ctx: { db, userId: holderId, roles: ['READER'] } as Context, app, reader: { manager: true, userId: holderId }, requester: { userId: holderId }, now: new Date(Date.now() + 3_600_000) });
+    return res.wakes.filter((w: any) => w.workerId === id || w.worker?.id === id);
+  };
+  it('a live isolation makes the worker not due; an expired one does not', async () => {
+    const target = await mkWorker('Target');
+    await say('hello', { authorUserId: holderId });
+    expect(await wakesFor(target.id)).toHaveLength(1);
+    await db.agentTeamEvent.deleteMany({}); await db.workerWakeAck.deleteMany({});
+    await db.workerWakeSettings.create({ data: { workerId: target.id, isolatedUntil: new Date(Date.now() + 7_200_000) } });
+    expect(await wakesFor(target.id)).toHaveLength(0);
+    await db.workerWakeSettings.update({ where: { workerId: target.id }, data: { isolatedUntil: new Date(Date.now() - 1000) } });
+    expect(await wakesFor(target.id)).toHaveLength(1);
+  });
+  it('a standby worker is woken only by a direct mention from a person or its head', async () => {
+    const head = await mkWorker('Head');
+    const target = await mkWorker('Target', { reportsToWorkerId: head.id });
+    await setSwitch(true);
+    await say('peer', { authorWorkerId: (await peer()).id });
+    await say('broadcast', { mentions: ['all'], broadcastWakes: true, authorUserId: holderId });
+    expect(await wakesFor(target.id), 'only held kinds').toHaveLength(0);
+    await say('from head', { authorWorkerId: head.id });
+    expect(await wakesFor(target.id)).toHaveLength(1);
+  });
+});

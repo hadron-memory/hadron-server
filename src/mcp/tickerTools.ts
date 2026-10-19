@@ -45,6 +45,8 @@ const M = resolvers.Mutation as unknown as {
   subscribeWorker: Resolver<{ tickerRef: string; workerRef: string }, { subscription: Row; announcement: string | null }>;
   unsubscribeWorker: Resolver<{ tickerRef: string; workerRef: string }, { subscription: Row; announcement: string | null }>;
   setWorkerWakeSettings: Resolver<{ workerRef: string; input: Row }, Row>;
+  isolateWorker: Resolver<{ workerRef: string; until?: string }, Row>;
+  clearWorkerIsolation: Resolver<{ workerRef: string }, Row>;
   acknowledgeWakes: Resolver<{ proofs: string[] }, { acknowledged: number; unchanged: number }>;
   acknowledgeDeliveryBatches: Resolver<{ batchIds: string[]; through?: Array<{ channelId: string; seq: number }> }, { acknowledged: number; unchanged: number }>;
 };
@@ -56,6 +58,7 @@ export const TICKER_WRITE_TOOLS = [
   'hadron_ticker_create', 'hadron_ticker_update', 'hadron_ticker_delete',
   'hadron_ticker_subscribe', 'hadron_ticker_unsubscribe', 'hadron_ack_wakes',
   'hadron_delivery_settings_set', 'hadron_team_chat_inbox_ack',
+  'hadron_isolate_worker', 'hadron_clear_worker_isolation',
 ] as const;
 /**
  * Actor-neutral tools (listed in ACTOR_NEUTRAL_TOOLS): each takes its own
@@ -352,7 +355,8 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
         }
         return [
           `${verb ? `${verb}.\n` : ''}${worker ? worker.name : s.workerId}: mentions ${s.mentions}` +
-            `${s.pausedUntil ? `, paused until ${iso(s.pausedUntil)}` : ', not paused'}`,
+            `${s.pausedUntil ? `, paused until ${iso(s.pausedUntil)}` : ', not paused'}` +
+            `${FW.isolated(s as never) ? `, isolated by ${s.isolatedByUserId ? await FW.isolatedByHandle(s as never, {}, ctx) ?? 'unknown' : 'unknown'} until ${iso(s.isolatedUntil)}` : ''}`,
           `subscriptions: ${names.length ? names.join(', ') : 'none'} · effective cadence ${cadence ? `${cadence}s` : 'none'}`,
         ].join('\n');
       };
@@ -363,6 +367,27 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       return write('hadron_worker_wake_settings', session, async (ctx) =>
         render(ctx, await M.setWorkerWakeSettings({}, { workerRef: w, input }, ctx), 'Updated'));
     },
+  );
+  const isolationText = (verb: string, s: Row) =>
+    `${verb}. ${s.isolatedUntil && new Date(s.isolatedUntil).getTime() > Date.now() ? `Isolated until ${iso(s.isolatedUntil)}: no chat batches or ordinary wakes, and no task matching.` : 'Not isolated.'}`;
+  server.tool(
+    'hadron_isolate_worker',
+    'Isolate a worker (S7, #2023): until the time you give (default 2 hours, at most 7 days; a later time extends, an earlier one shortens). ' +
+      'While isolated it gets no chat batches or ordinary wakes and is not matched for work; at the end everything held comes as one batch. ' +
+      'Needs session. ONLY a person managing the App or holding the worker, acting as themselves with a plain session: a worker session ' +
+      '(even a manager\'s), an App key or an impersonation is refused WORKER_ISOLATION_FORBIDDEN. The worker\'s own pause is untouched.',
+    { workerRef, until: z.string().optional().describe('ISO date-time the isolation ends. Default: two hours from now.'), session: SESSION_WRITE },
+    async ({ session, workerRef: w, until }) =>
+      write('hadron_isolate_worker', session, async (ctx) =>
+        isolationText('Isolated', await M.isolateWorker({}, { workerRef: w, ...(until ? { until } : {}) }, ctx))),
+  );
+  server.tool(
+    'hadron_clear_worker_isolation',
+    'Lift a worker\'s isolation (S7, #2023): the same audience as hadron_isolate_worker. Clearing when none is set changes nothing.',
+    { workerRef, session: SESSION_WRITE },
+    async ({ session, workerRef: w }) =>
+      write('hadron_clear_worker_isolation', session, async (ctx) =>
+        isolationText('Cleared', await M.clearWorkerIsolation({}, { workerRef: w }, ctx))),
   );
   server.tool(
     'hadron_due_wakes',

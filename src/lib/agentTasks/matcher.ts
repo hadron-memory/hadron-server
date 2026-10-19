@@ -193,8 +193,10 @@ export function freeFamiliesOf(w: {
   openTaskCount: number;
   families: string[];
   availability: WorkerAvailabilityView;
+  /** S7 (R87): a live isolation. An assignment an isolated worker cannot receive would only stall. */
+  isolated?: boolean;
 }): string[] {
-  if (w.retired || w.openTaskCount > 0 || w.availability.ownInEffect) return [];
+  if (w.retired || w.isolated || w.openTaskCount > 0 || w.availability.ownInEffect) return [];
   return w.families.filter((f) => w.availability.familyAvailable.get(f) === true);
 }
 
@@ -244,11 +246,13 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
       families: familiesOf({ bound, bindingFamily, launchableFamilies }),
     };
   });
+  const isolatedRows = await db.workerWakeSettings.findMany({ where: { workerId: { in: ids }, isolatedUntil: { gt: now } }, select: { workerId: true } });
+  const isolatedIds = new Set(isolatedRows.map((r) => r.workerId));
   const avail = await loadAvailabilityByFamily(db, partial.map((w) => ({ id: w.id, appId, families: w.families })), now);
   return partial.map((w) => {
     const availability = avail.get(w.id) as WorkerAvailabilityView;
     const openTaskCount = openBy.get(w.id) ?? 0;
-    const freeFamilies = freeFamiliesOf({ retired: false, openTaskCount, families: w.families, availability });
+    const freeFamilies = freeFamiliesOf({ retired: false, isolated: isolatedIds.has(w.id), openTaskCount, families: w.families, availability });
     return {
       ...w, availability, openTaskCount, freeFamilies, free: freeFamilies.length > 0,
       lastAssignedAt: lastAssigned.get(w.id) ?? null,
@@ -277,7 +281,8 @@ async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId
   const families = familiesOf({ bound, bindingFamily: activity?.bindingFamily ?? null, launchableFamilies: launchable });
   if (!families.includes(family)) return false;
   const availability = (await loadAvailabilityByFamily(tx, [{ id: workerId, appId, families: [family] }], now)).get(workerId) as WorkerAvailabilityView;
-  return freeFamiliesOf({ retired: false, openTaskCount, families: [family], availability }).length > 0;
+  const isolated = (await tx.workerWakeSettings.count({ where: { workerId, isolatedUntil: { gt: now } } })) > 0;
+  return freeFamiliesOf({ retired: false, isolated, openTaskCount, families: [family], availability }).length > 0;
 }
 
 // ── Assigning ─────────────────────────────────────────────────────────────
