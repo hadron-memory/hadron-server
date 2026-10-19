@@ -1382,7 +1382,7 @@ async function mintMemoryNodes(
         minted_rev_no = rev_seq,
         minted_hash = approval_hash
       WHERE memory_id = ${id} AND deleted_at IS NULL AND minted_at IS NULL
-        AND id = ANY(${ids}::text[]) AND approved_rev_no >= content_rev_seq`;
+        AND id = ANY(${ids}::text[]) AND approved_rev_no >= content_rev_seq AND approval_hash IS NOT NULL`;
     if (mintedCount !== ids.length) {
       // Unreachable under the fence; refuse rather than mint a partial set.
       throw new Error(`Mint stamped ${mintedCount} of ${ids.length} nodes; the memory changed under the fence`);
