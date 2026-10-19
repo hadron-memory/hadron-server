@@ -6,7 +6,7 @@
  * (R53, pinned in legacyAckNoMarks2072.test.ts).
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../../integrations/db/client.js';
@@ -19,9 +19,20 @@ import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { appendChatMessage } from '../../../lib/chatRoot.js';
 import { getMemoryEncryptionInfo } from '../../../lib/nodeCrypto.js';
 import { resolvers, type Context } from './resolvers.js';
+import { maybeAdvanceOwnChannelRead } from '../../../lib/teamAttention.js';
+import { recordMentionsWorker } from '../../../lib/mentionsReadResolution.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
+// Rollback pin: a read-position write that fails after delivered was raised must leave both marks where they were.
+const failRead = vi.hoisted(() => ({ on: false }));
+vi.mock('../../../lib/channelReadState.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../../lib/channelReadState.js')>();
+  return { ...real, advanceReadState: vi.fn(async (...a: Parameters<typeof real.advanceReadState>) => {
+    if (failRead.on) throw new Error('read write failed');
+    return real.advanceReadState(...a);
+  }) };
+});
 
 const M = resolvers.Mutation as any;
 const Q = resolvers.Query as any;
@@ -237,5 +248,86 @@ describe('#2018 S2: an own mentions read', () => {
     await say('@kit a', { mentions: ['kit'] });
     await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, limit: 20 }, selfCtx(s));
     expect(await marks()).toEqual({ delivered: 0, read: 1 });
+  });
+});
+
+describe('#2018 S2: authority, exclusions, atomicity', () => {
+  afterEach(() => { failRead.on = false; });
+
+  it('the App convenience read (teamChatMessages) moves the marks the same way', async () => {
+    const s = await ownSession();
+    await mentionOnly();
+    await say('@kit a', { mentions: ['kit'] });
+    const page = await Q.teamChatMessages({}, { appRef: app.id, mentionsRef: kit.id, sinceSeq: 0, limit: 20 }, selfCtx(s));
+    expect(page.items.map((m: any) => m.seq)).toEqual([1]);
+    expect(await marks()).toEqual({ delivered: 1, read: 1 });
+  });
+
+  it('an ended session, or none, moves nothing; the page is still returned', async () => {
+    const s = await ownSession({ endedAt: new Date() });
+    await say('@kit a', { mentions: ['kit'] });
+    const page = await mentionsRead(s, { sinceSeq: 0, limit: 20 }).catch(() => ({ items: [] }));
+    expect(await marks()).toEqual({ delivered: 0, read: 0 });
+    await Q.channelMessages({}, { channelRef: channel.id, mentionsRef: kit.id, sinceSeq: 0, limit: 20 }, ctx(manager.id));
+    expect(await marks()).toEqual({ delivered: 0, read: 0 });
+    expect(page).toBeDefined();
+  });
+
+  it('a session of a worker the channel does not register moves nothing for anyone', async () => {
+    await db.registerEntry.deleteMany({ where: { attendeeWorkerId: kit.id } });
+    const s = await ownSession();
+    await say('@kit a', { mentions: ['kit'] });
+    await mentionsRead(s, { sinceSeq: 0, limit: 20 });
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect(await db.channelReadState.count()).toBe(0);
+  });
+
+  it('an encrypted channel is excluded: the advance moves no mark even for a page filtered by the worker', async () => {
+    // Called directly: without a session key the read itself refuses first, which would make this pin vacuous.
+    const s = await ownSession();
+    await mentionOnly();
+    await say('@kit a', { mentions: ['kit'] });
+    const page = { items: [{ seq: 1 }], total: 1 };
+    recordMentionsWorker(page, kit.id);
+    const args = { channelId: channel.id, capturedHead: 1, mentionsRef: kit.id, sinceSeq: 0, limit: 20, page };
+    await db.memory.update({ where: { id: channel.memoryId }, data: { isEncrypted: true } });
+    await maybeAdvanceOwnChannelRead(selfCtx(s), args);
+    expect(await marks()).toEqual({ delivered: 0, read: 0 });
+    // Control: the same call on the plaintext channel moves both.
+    await db.memory.update({ where: { id: channel.memoryId }, data: { isEncrypted: false } });
+    await maybeAdvanceOwnChannelRead(selfCtx(s), args);
+    expect(await marks()).toEqual({ delivered: 1, read: 1 });
+  });
+
+  it('a failing read-position write rolls back the delivered raise (own read), and the page is still returned', async () => {
+    const s = await ownSession();
+    await mentionOnly();
+    await say('@kit a', { mentions: ['kit'] });
+    failRead.on = true;
+    const page = await mentionsRead(s, { sinceSeq: 0, limit: 20 });
+    expect(page.items).toHaveLength(1);
+    expect(await marks()).toEqual({ delivered: 0, read: 0 });
+  });
+
+  it('a failing read-position write rolls back the whole batch ack', async () => {
+    await mentionOnly();
+    await say('@kit a', { mentions: ['kit'] });
+    await aged();
+    const b = (await read(hostKey)).batches[0];
+    failRead.on = true;
+    await expect(M.acknowledgeDeliveryBatches({}, { batchIds: [b.id] }, keyCtx(hostKey))).rejects.toThrow();
+    expect(await marks()).toEqual({ delivered: 0, read: 0 });
+  });
+
+  it.each(['read first', 'ack first'])('an own read and a batch ack racing (%s) end at the max of both, without deadlock', async (order) => {
+    const s = await ownSession();
+    await mentionOnly();
+    for (const t of ['a', 'b', 'c']) await say(`@kit ${t}`, { mentions: ['kit'] });
+    await aged();
+    const b = (await read(hostKey)).batches[0];
+    const ack = () => M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelId: channel.id, seq: 2 }] }, keyCtx(hostKey));
+    const own = () => mentionsRead(s, { sinceSeq: 0, limit: 20 });
+    await Promise.all(order === 'read first' ? [own(), ack()] : [ack(), own()]);
+    expect(await marks()).toEqual({ delivered: 3, read: 3 });
   });
 });

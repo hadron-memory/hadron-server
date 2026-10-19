@@ -25,6 +25,8 @@ import { composeWorkerUrn } from './entityRef/workerRef.js';
 import { normalizeUrnForLookup } from './urn.js';
 import { resolveRegister } from './resolveRegister.js';
 import { advanceReadState } from './channelReadState.js';
+import { raiseDeliveryMark, raiseReadIfMentionOnly } from './workerMarks.js';
+import { mentionsWorkerOf } from './mentionsReadResolution.js';
 import { mentionTokenOf } from './mentionToken.js';
 import { mentionReach, mentionReachSql, reachEnvelopeOf } from './mentionReach.js';
 import { escapePrismaLikePattern } from './literalLocPrefix.js';
@@ -44,6 +46,7 @@ import {
   touchLiveSession,
   isSessionDormant,
   DEFAULT_SESSION_DORMANCY_DAYS,
+  toNaiveUtc,
 } from './sessionActivity.js';
 
 // #1496: aligned with MAX_TARGETS/OPEN_SESSION_SCAN_CAP as the single scope
@@ -1661,9 +1664,11 @@ async function ownLiveSessionWorker(
 }
 
 /**
- * Advance only a contiguous, unfiltered forward page. A skipped offset,
- * cursor-less tail, backward window, mentions filter, count-only read, or
- * sinceSeq gap is not evidence that the unseen interval was consumed.
+ * Advance only a contiguous forward page. A skipped offset, cursor-less tail,
+ * backward window, count-only read, or sinceSeq gap is not evidence that the
+ * unseen interval was consumed. An unfiltered page moves the read position; an
+ * own mentions page moves delivered-through instead (#2018, see
+ * {@link advanceOwnMentionsRead}).
  */
 export async function maybeAdvanceOwnChannelRead(
   ctx: Context,
@@ -1698,7 +1703,8 @@ export async function maybeAdvanceOwnChannelRead(
   // #1628: attribution is activity even when the caller will acknowledge only
   // after validating and delivering the page. Never skip the heartbeat above.
   if (args.advanceReadState === false) return null;
-  if (args.mentionsRef || args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return null;
+  if (args.mentionsRef) return advanceOwnMentionsRead(ctx, session.workerId, args);
+  if (args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return null;
   // #1536: no cursor and no offset now selects the newest page. Even when
   // total says it is complete, count and fetch are separate queries: a post
   // between them could make the fetched tail skip earlier unseen messages.
@@ -1732,6 +1738,80 @@ export async function maybeAdvanceOwnChannelRead(
   through = Math.min(args.capturedHead, through);
   if (through <= seen) return seen;
   return advanceReadState(ctx.db, { workerId }, args.channelId, through);
+}
+
+/**
+ * #2018 (S2, D-2026-10-16-001; cor:agt:080:16 as V1 rewrites it): a worker's OWN mentions read counts as delivery of
+ * what it returned. It raises delivered-through, and on a mention-only attendance the read position too (ruling A), in
+ * one transaction under the worker's wake lock, ONLY when every one of these holds; otherwise nothing moves:
+ * - the page was filtered by exactly this worker's reach (`mentionsWorkerOf`, recorded by the read itself);
+ * - a forward read: `sinceSeq` given, no `beforeSeq`, offset 0, limit > 0 (the caller checked `advanceReadState`);
+ * - no gap: `sinceSeq` <= max(read, delivered) for this channel's live incarnation, the floor due-ness uses;
+ * - a plaintext channel (R13/R43 exclude encrypted team chat from S1/S2);
+ * - no ALL-relevance ticker covers a full attendance of the channel: there any message is due (`dueWakes` subAll), so a
+ *   mentions page does not cover what is due.
+ * It raises to the highest seq the page returned, or to the captured head when the page holds every reaching message
+ * above `sinceSeq`, never past the head captured before the read, and one short at a duplicate-seq edge.
+ */
+async function advanceOwnMentionsRead(
+  ctx: Context,
+  workerId: string,
+  args: {
+    channelId: string; capturedHead: number; sinceSeq?: number | null; beforeSeq?: number | null;
+    limit?: number | null; offset?: number | null; page: { items: Array<{ seq: number }>; total: number };
+  },
+): Promise<number | null> {
+  if (mentionsWorkerOf(args.page) !== workerId) return null;
+  if (args.sinceSeq == null || args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return null;
+  const view = await resolveRegister(ctx.db, { attendee: { workerId }, actor: ctx });
+  const row = view?.rows.find((r) => r.channel.id === args.channelId);
+  if (!row || row.entry.role === 'POST' || !row.canRead || row.channel.deleted) return null;
+  const channel = await ctx.db.channel.findFirst({
+    where: { id: args.channelId, deletedAt: null },
+    select: { incarnation: true, memory: { select: { isEncrypted: true } } },
+  });
+  if (!channel || channel.memory.isEncrypted) return null;
+  if (!row.entry.mentionOnly) {
+    const allTicker = await ctx.db.tickerSubscription.findFirst({
+      where: {
+        workerId, endedAt: null,
+        ticker: { deletedAt: null, enabled: true, relevance: { not: 'MENTIONS' }, OR: [{ channelIds: { isEmpty: true } }, { channelIds: { has: args.channelId } }] },
+      },
+      select: { id: true },
+    });
+    if (allTicker) return null;
+  }
+  const exhausted = args.page.total <= args.page.items.length;
+  const visible = args.page.items.reduce((max, item) => Math.max(max, item.seq), 0);
+  let through = exhausted ? args.capturedHead : visible;
+  if (!exhausted && visible > 0 && row.channel.hostMemoryId) {
+    // A duplicate seq at the page edge (a backfilled pre-#919 Channel): stop one short, as the unfiltered path does.
+    const returnedAtEdge = args.page.items.filter((item) => item.seq === visible).length;
+    const atEdge = await ctx.db.node.count({
+      where: {
+        memoryId: row.channel.hostMemoryId,
+        loc: { startsWith: escapePrismaLikePattern(`${row.channel.loc}:messages:`) },
+        nodeType: 'chat-message', deletedAt: null, seq: visible,
+      },
+    });
+    if (atEdge > returnedAtEdge) through = visible - 1;
+  }
+  through = Math.min(args.capturedHead, through);
+  const sinceSeq = args.sinceSeq;
+  return ctx.db.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + workerId}, 0))`;
+    const d = await tx.workerDeliveryChannel.findUnique({ where: { workerId_channelId: { workerId, channelId: args.channelId } } });
+    const delivered = d && d.channelIncarnation === channel.incarnation ? d.deliveredThroughSeq : 0;
+    const seen = (await tx.channelReadState.findFirst({ where: { workerId, channelId: args.channelId }, select: { lastSeenSeq: true } }))?.lastSeenSeq ?? 0;
+    if (sinceSeq > Math.max(seen, delivered)) return null;
+    if (through <= delivered) return seen;
+    const session = await tx.session.findUnique({ where: { id: ctx.sessionId ?? '' }, select: { userId: true } });
+    await raiseDeliveryMark(tx, { workerId, channelId: args.channelId, incarnation: channel.incarnation, through }, toNaiveUtc(new Date()), {
+      ackedByUserId: session?.userId ?? ctx.userId ?? null, ackedByWorkerId: workerId, ackedByAppKeyId: null,
+    });
+    await raiseReadIfMentionOnly(tx, { workerId, channelId: args.channelId, through });
+    return (await tx.channelReadState.findFirst({ where: { workerId, channelId: args.channelId }, select: { lastSeenSeq: true } }))?.lastSeenSeq ?? seen;
+  });
 }
 
 export async function markOwnTeamChatRead(
