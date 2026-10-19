@@ -332,12 +332,17 @@ describe('delivery record: acknowledging, never reading', () => {
     expect(await code(M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(holderB.id)))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
     expect(await code(M.acknowledgeWakes({}, { proofs: ['garbage'] }, ctx(holderA.id)))).toBe('WAKE_PROOF_INVALID');
     const p = verifyWakeProof(w.proof);
-    expect(await code(M.acknowledgeWakes({}, { proofs: [signWakeProof({ ...p, v: 3 } as never)] }, ctx(holderA.id)))).toBe('WAKE_PROOF_INVALID');
+    expect(await code(M.acknowledgeWakes({}, { proofs: [signWakeProof({ ...p, v: 4 } as never)] }, ctx(holderA.id)))).toBe('WAKE_PROOF_INVALID');
+    // #2072: a v3 proof names no channel; one that does was not issued here.
+    expect(await code(M.acknowledgeWakes({}, { proofs: [signWakeProof({ ...p, channels: [{ channelId: channel.id, incarnation: 1, through: 1 }] })] }, ctx(holderA.id)))).toBe('WAKE_PROOF_INVALID');
     const old = signWakeProof({ ...p, issuedAt: Date.now() - 16 * 60_000 });
     expect(await code(M.acknowledgeWakes({}, { proofs: [old] }, ctx(holderA.id)))).toBe('WAKE_PROOF_STALE');
-    // A channel recreated since issue.
+    // A channel recreated since issue: still refused for an old-format (v2) proof that names it (#2072 keeps that
+    // validation; a v3 proof names no channel and writes no mark).
+    const ch = await db.channel.findUniqueOrThrow({ where: { id: channel.id } });
+    const v2 = signWakeProof({ ...p, v: 2, wakeKey: undefined, channels: [{ channelId: channel.id, incarnation: ch.incarnation, through: 1 }] });
     await db.channel.update({ where: { id: channel.id }, data: { incarnation: { increment: 1 } } });
-    expect(await code(M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(holderA.id)))).toBe('WAKE_PROOF_STALE');
+    expect(await code(M.acknowledgeWakes({}, { proofs: [v2] }, ctx(holderA.id)))).toBe('WAKE_PROOF_STALE');
     expect(await db.workerDeliveryChannel.count()).toBe(0);
   });
 
