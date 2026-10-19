@@ -1,15 +1,21 @@
-// S1 (#2017) — ready-to-deliver batches for the workers of ONE host (cor:agt:080:22–:26).
+// S1 (#2017) — one host's batches, or a live session's own worker (cor:agt:080:22–:26, R57).
 //
 // WHO MAY READ: an App key that holds BOTH attention:deliver and a live host:operate scope bound to a host (the host id is
 // the key's, never the request's), carries no session, and acts in its own App. A bare App-wide attention:deliver key keeps
 // dueWakes and is refused here (cor:agt:080:22, R4). The decision is re-made inside the transaction that records the read,
 // under the App's authority anchor held shared, so a revoked scope, key or registration refuses from its next call. Every
-// read writes a host-key use row (action 'deliver') in that same transaction.
+// host read writes a host-key use row (action 'deliver') in that same transaction. R57 self calls use the validated
+// session's own worker, recheck ownership/liveness in the transaction, and record reads in app_log instead.
 //
 // The batch is DERIVED (src/lib/tickers/deliveryBatch.ts); its id is a signed proof (src/lib/tickers/batchProof.ts).
 
 import type { Prisma } from '../../../generated/prisma/index.js';
-import type { Context } from './resolvers.helpers.js';
+import { getAccessibleMemoryIds, type Context } from './resolvers.helpers.js';
+import { withAuthorizedTx } from './authorizedTx.js';
+import { holderAccess, mayRead } from '../../../lib/tickers/dueWakes.js';
+import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
+import { ownsSession, appPrincipalMayWriteSession } from '../../../lib/sessionOwnership.js';
+import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
 import { loadApp, taskError, type TaskApp } from './resolvers.agentTask.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -68,6 +74,69 @@ export async function batchKeyEntry(ctx: Context, appRef: string): Promise<{ app
   };
 }
 
+/** R57: identity comes from the validated request binding, never a requested worker or an admin role. */
+async function ownBatchSession(ctx: Context, expectedAppId?: string, lock = false) {
+  if (!ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
+  const initial = await ctx.db.session.findUnique({ where: { id: ctx.sessionId } });
+  if (!initial || initial.deletedAt || !ownsSession(ctx, initial)) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
+  if (expectedAppId && initial.appId !== expectedAppId) throw taskError('APP_NOT_FOUND', 'App not found.');
+  if (lock) {
+    if (ctx.userId && initial.appId) await ctx.db.$queryRaw`SELECT user_id FROM app_members WHERE app_id = ${initial.appId} AND user_id = ${ctx.userId} FOR SHARE`;
+    // Existing session protocol: authority/App, then Worker, then Session. End/rebind that wins is re-read below.
+    if (initial.workerId) await ctx.db.$queryRaw`SELECT id FROM workers WHERE id = ${initial.workerId} FOR SHARE`;
+    await ctx.db.$queryRaw`SELECT id FROM sessions WHERE id = ${initial.id} FOR SHARE`;
+  }
+  const session = await ctx.db.session.findUnique({ where: { id: initial.id } });
+  if (!session || session.deletedAt || !ownsSession(ctx, session)) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
+  if (session.appId !== initial.appId || session.workerId !== initial.workerId) throw taskError('SESSION_NOT_LIVE', 'Session binding changed.');
+  if (!ctx.userId) {
+    const key = ctx.appKeyId ? await ctx.db.appKey.findUnique({ where: { id: ctx.appKeyId } }) : null;
+    if (!key || key.revokedAt || key.appId !== session.appId || !(await appPrincipalMayWriteSession(ctx.db, ctx, session))) {
+      throw taskError('SESSION_NOT_FOUND', 'Session not found.');
+    }
+  }
+  const events = await loadLastEventBySession(ctx.db as never, [session.id]);
+  if (!isSessionLive(session, events.get(session.id), new Date())) throw taskError('SESSION_NOT_LIVE', 'Session is not live.');
+  const worker = session.workerId ? await ctx.db.worker.findUnique({ where: { id: session.workerId } }) : null;
+  if (!worker || worker.retiredAt || worker.appId !== session.appId) throw taskError('WORKER_NOT_FOUND', 'Worker not found.');
+  if (!(await mayStillDriveWorkerApp(ctx, worker.appId))) throw taskError('APP_NOT_FOUND', 'App not found.');
+  return { session, worker };
+}
+
+async function selfBatches(ctx: Context, a: { appRef: string; workerRefs?: string[] | null }) {
+  const initial = await ownBatchSession(ctx);
+  let appId: string;
+  try { appId = (await resolveAppRef(ctx.db, a.appRef)).id; } catch { throw taskError('APP_NOT_FOUND', 'App not found.'); }
+  if (appId !== initial.session.appId) throw taskError('APP_NOT_FOUND', 'App not found.');
+  const app = await loadApp(ctx, appId);
+  if (!app || app.deletedAt || app.uninstalledAt) throw taskError('APP_NOT_FOUND', 'App not found.');
+  if (a.workerRefs?.length) {
+    for (const ref of a.workerRefs) {
+      const id = await resolveWorkerRef(ctx.db, ref).then(r => r.id, () => null);
+      if (id !== initial.worker.id) throw taskError('WORKER_NOT_FOUND', 'Worker not found.');
+    }
+  }
+  return withAuthorizedTx(ctx, appAnchors(app), async () => undefined, async (tx, txCtx) => {
+    const { session, worker } = await ownBatchSession(txCtx, app.id, true);
+    if (worker.id !== initial.worker.id) throw taskError('WORKER_NOT_FOUND', 'Worker not found.');
+    const now = new Date();
+    const page = await loadDeliveryBatches({ ctx: txCtx, app, hostId: null, workerIds: [worker.id], now });
+    // Re-check the clock after loading too: a long read must not return after its promised expiry.
+    await ownBatchSession(txCtx, app.id);
+    await tx.appLogEntry.create({ data: { appId: app.id, sessionId: session.id, level: 'INFO', message: 'delivery.batch.read', detail: { workerId: worker.id, count: page.batches.length } } });
+    const channels = new Map((await tx.channel.findMany({ where: { id: { in: page.batches.flatMap(b => b.ranges.map(r => r.channelId)) } } })).map(c => [c.id, c]));
+    return {
+      batches: page.batches.map(b => ({
+        id: signBatchProof({ v: 1, kind: 'batch-proof', appId: app.id, workerId: worker.id, hostId: null, requester: { sessionId: session.id },
+          channels: b.ranges.map(r => ({ channelId: r.channelId, incarnation: r.incarnation, from: r.fromSeq, through: r.throughSeq, seqs: r.seqs })),
+          renderHash: b.renderHash, batchKey: b.batchKey, issuedAt: now.getTime() }),
+        worker, text: b.text, deliverAfter: b.deliverAfter, busyDeadline: b.busyDeadline, interrupt: b.interrupt,
+        ranges: b.ranges.map(r => ({ channel: channels.get(r.channelId)!, incarnation: r.incarnation, fromSeq: r.fromSeq, throughSeq: r.throughSeq, seqs: r.seqs })), overflow: b.overflow,
+      })), pageInfo: { hasNextPage: false, endCursor: null },
+    };
+  });
+}
+
 export const deliveryBatchQueries = {
   deliveryBatches: async (
     _: unknown,
@@ -75,6 +144,8 @@ export const deliveryBatchQueries = {
     requestCtx: Context,
   ) => {
     const ctx = (await liveCaller(requestCtx)) ?? (() => { throw taskError('APP_NOT_FOUND', 'App not found.'); })();
+    if (ctx.sessionBindingRefused && !appKeyCaller(ctx)) throw taskError('SESSION_NOT_LIVE', 'The named session is not live or cannot bind.');
+    if (ctx.sessionId && (!appKeyCaller(ctx) || !(await keyHostId(ctx.db, appKeyCaller(ctx)!)))) return selfBatches(ctx, a);
     const { app, host, authorize } = await batchKeyEntry(ctx, a.appRef);
     let only: string[] | null = null;
     if (a.workerRefs && a.workerRefs.length > 0) {
@@ -122,6 +193,29 @@ export const deliveryBatchMutations = {
     requestCtx: Context,
   ) => {
     const key = appKeyCaller(requestCtx);
+    if (requestCtx.sessionBindingRefused && !key) throw taskError('SESSION_NOT_LIVE', 'The named session is not live or cannot bind.');
+    if (requestCtx.sessionId && (!key || !(await keyHostId(requestCtx.db, key)))) {
+      const ctx = await liveCaller(requestCtx);
+      if (!ctx) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
+      const own = await ownBatchSession(ctx);
+      if (a.through?.length && a.batchIds.length !== 1) throw taskError('BAD_USER_INPUT', 'through applies to exactly one batch.');
+      return acknowledgeBatchProofs({ ctx, requester: { sessionId: own.session.id },
+        acks: a.batchIds.map(proof => ({ proof, ...(a.through?.length ? { through: a.through } : {}) })),
+        mayAckBatch: async (p, tx, txCtx) => {
+          if (p.appId !== own.session.appId || p.workerId !== own.worker.id || p.hostId !== null) return false;
+          try {
+            const live = await ownBatchSession(txCtx, p.appId, true);
+            if (live.session.id !== own.session.id || live.worker.id !== p.workerId) return false;
+            const app = await loadApp(txCtx, p.appId);
+            if (!app || app.deletedAt || app.uninstalledAt) return false;
+            const callerIds = await getAccessibleMemoryIds(txCtx);
+            const holder = live.worker.heldByUserId ? await holderAccess(txCtx, app, live.worker.heldByUserId, new Map()) : 'all';
+            const channels = await tx.channel.findMany({ where: { id: { in: p.channels.map(c => c.channelId) }, deletedAt: null }, select: { id: true, memoryId: true, memory: { select: { isEncrypted: true } } } });
+            return channels.length === p.channels.length && channels.every(c => !c.memory.isEncrypted && (callerIds === null || callerIds.includes(c.memoryId)) && mayRead(holder, c.memoryId));
+          } catch { return false; }
+        },
+      });
+    }
     if (!key) throw taskError('HOST_KEY_REQUIRED', 'Delivery batches are acknowledged by a host, with its App key.');
     if (a.through && a.through.length > 0 && a.batchIds.length !== 1) {
       throw taskError('BAD_USER_INPUT', 'through applies to exactly one batch; acknowledge a partial batch on its own.');

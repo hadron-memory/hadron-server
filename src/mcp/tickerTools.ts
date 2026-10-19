@@ -405,7 +405,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
   // #2017 (S1): thin over the same resolvers as GraphQL, so the text is byte-identical on every surface.
   server.tool(
     'hadron_delivery_batches',
-    'The ready-to-deliver batches of the workers registered on YOUR host (cor:agt:080:22, :26). A host key only: an App key ' +
+    'Ready delivery batches (cor:agt:080:22, :26): your own worker through its live session, or workers registered on YOUR host with an App key ' +
       'holding attention:deliver AND host:operate. Returns JSON: each batch has `id` (a signed proof), `worker`, `text` (one line, ' +
       'written by the server: type it UNCHANGED), `deliverAfter`, `busyDeadline`, `ranges` and `overflow`. Reading moves nothing; ' +
       'pass the ids to hadron_ack_delivery_batches after typing, within 15 minutes.',
@@ -418,7 +418,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     },
     async ({ session, ...rest }) =>
       readWakes(session, async (ctx) => {
-        const page = await Q.deliveryBatches({}, rest, ctx);
+        const page = await Q.deliveryBatches({}, rest, session ? { ...ctx, sessionId: session, sessionBindingRefused: false } : ctx);
         return JSON.stringify({
           batches: (page.batches as Row[]).map((b) => ({
             id: b.id,
@@ -439,7 +439,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     'hadron_ack_delivery_batches',
     'Record that delivery batches were typed (cor:agt:080:16, :17). Pass the ids hadron_delivery_batches gave you. The delivered mark ' +
       'rises to the end of each rendered range; with `through` (ONE batch only) only the listed channels move, each to a rendered seq of ' +
-      'its own. NEVER moves a read position. Only the host key an id names may acknowledge it, within 15 minutes; a stale, foreign or ' +
+      'its own. NEVER moves a read position. Only the receiving host key or own live session may acknowledge it, within 15 minutes; a stale, foreign or ' +
       'forged id is refused and nothing is written. A batch you do not acknowledge stays due.',
     {
       batchIds: z.array(z.string()).describe('Batch ids from hadron_delivery_batches.'),
@@ -448,7 +448,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     },
     async ({ session, batchIds, through }) => {
       const ack = async (ctx: Context) => {
-        const r = await M.acknowledgeDeliveryBatches({}, { batchIds, through }, ctx);
+        const r = await M.acknowledgeDeliveryBatches({}, { batchIds, through }, session ? { ...ctx, sessionId: session, sessionBindingRefused: false } : ctx);
         return `Acknowledged ${r.acknowledged}${r.unchanged ? ` (${r.unchanged} already delivered)` : ''}.`;
       };
       // A host key acts as itself and names no session; anyone else is a write and needs a session, like hadron_ack_wakes.
