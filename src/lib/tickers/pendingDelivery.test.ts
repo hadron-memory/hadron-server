@@ -158,4 +158,30 @@ describe('complete metadata-only pending enumeration', () => {
     await expect(enumerate({ first: 1, after: first.nextAfter, now: new Date(now.getTime()+1) })).rejects.toThrow(/cursor|after/i);
     await expect(enumerate({ first: 1, after: first.nextAfter, workerIds: [workerId] })).rejects.toThrow(/cursor|after/i);
   });
+  it('keeps rows beyond the body-character cap due without reading their sizes', async () => {
+    await messages(2);
+    await db.node.updateMany({ where: { messageChannelId: channelId, seq: 1 }, data: { content: '😀'.repeat(7000) } });
+    expect((await loadDeliveryBatches({ ctx, app, hostId: 'host-a', now })).batches[0]!.overflow).toBe(1);
+    const page = await enumerate();
+    expect(page.items.map((m: any) => [m.seq,m.state,m.withheldReason])).toEqual([[1,'due',null],[2,'due',null]]);
+  });
+  it('continues beyond the internal worker page even when its first 200 workers have no watched channels', async () => {
+    const workers = [workerId];
+    for (let i=0;i<204;i++) workers.push((await addWorker(1000+i, `Worker${i}`)).id);
+    await messages(1, { mentions: ['all'], broadcastWakes: true });
+    expect((await enumerate()).items).toHaveLength(205);
+    await db.registerEntry.updateMany({ where: { attendeeWorkerId: { in: workers.slice(0,200) } }, data: { role: 'POST' } });
+    const page = await enumerate();
+    expect(page.items.map((m: any) => m.workerId)).toEqual(workers.slice(200));
+    expect(page.complete).toBe(true);
+  });
+  it('a cursor position cannot substitute another worker into a forced self selection', async () => {
+    const other = await addWorker(23, 'Other'); await messages(3, { mentions: ['all'], broadcastWakes: true });
+    const page = await enumerate({ hostId: null, workerIds: [workerId], first: 1 });
+    const cursor = JSON.parse(Buffer.from(page.nextAfter!, 'base64url').toString('utf8'));
+    cursor.workerId = other.id;
+    const forged = Buffer.from(JSON.stringify(cursor)).toString('base64url');
+    await expect(enumerate({ hostId: null, workerIds: [workerId], first: 1, after: forged })).rejects.toThrow(/cursor|after/i);
+  });
+
 });
