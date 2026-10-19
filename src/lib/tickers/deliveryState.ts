@@ -9,12 +9,14 @@ import { generateId } from '../id.js';
 import { appendDeliveryResumedEvent, appendDeliveryStuckEvent, type DeliveryMarkPrincipal, type AlarmChain } from '../agentTasks/events.js';
 export type { DeliveryMarkPrincipal } from '../agentTasks/events.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
+import { lockAppReportsTo, reportsToChain } from '../workerReportsTo.js';
+import { appManagerUserIds } from '../auth/appManagement.js';
 import { deliveryWait, oldestStuckMessage, nextDeliveryOwnerDue, DELIVERY_EXCEPTION_CAUSES, type DeliveryMessage, type WaitException, type WaitCoverage } from './deliveryWait.js';
 
 type Tx = Prisma.TransactionClient;
 function fail(code: string): never { throw new Error(code); }
 
-/** Preserve the established authority -> App budget -> worker wake order. */
+/** Preserve authority -> reporting graph -> App budget -> worker wake order. */
 export async function deliveryStateTransaction<T>(db: PrismaClient, appId: string, workerId: string, fn: (tx: Tx) => Promise<T>): Promise<T> {
   return db.$transaction(async tx => {
     const app = await tx.app.findUnique({ where: { id: appId }, select: { organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true } });
@@ -26,6 +28,7 @@ export async function deliveryStateTransaction<T>(db: PrismaClient, appId: strin
     } });
     if (!current || current.deletedAt || current.uninstalledAt || current.organization?.deletedAt || current.ownerUser?.deletedAt) fail('DELIVERY_WORKER_NOT_FOUND');
     if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) fail('DELIVERY_AUTHORITY_CHANGED');
+    await lockAppReportsTo(tx, appId, 'shared');
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + appId}, 0))`;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + workerId}, 0))`;
     const worker = await tx.worker.findFirst({ where: { id: workerId, appId, retiredAt: null, app: { deletedAt: null, uninstalledAt: null } }, select: { id: true } });
@@ -128,11 +131,22 @@ export async function loadDeliveryWait(tx: Tx, message: DeliveryMessage, now: Da
   return deliveryWait(message, exceptions, state, now);
 }
 
-type ChainParty = { workerId: string } | { userId: string; via?: 'manager' };
+/** Capture under deliveryStateTransaction's shared reportsTo/authority fences. */
+export async function deliveryAlarmChain(tx: Tx, workerId: string): Promise<AlarmChain> {
+  const worker = await tx.worker.findUniqueOrThrow({ where: { id: workerId }, select: { appId: true } });
+  const chain = await reportsToChain(tx, workerId);
+  if (chain.length) {
+    // The graph writer enforces this; fail closed on corrupt legacy pointers.
+    const members = await tx.worker.count({ where: { id: { in: chain }, appId: worker.appId } });
+    if (new Set(chain).size !== chain.length || chain.includes(workerId) || members !== chain.length) fail('DELIVERY_CHAIN_INVALID');
+    return chain.map(id => ({ workerId: id }));
+  }
+  const app = await tx.app.findUniqueOrThrow({ where: { id: worker.appId }, select: { id: true, organizationId: true, ownerUserId: true } });
+  return (await appManagerUserIds(tx, app)).map(userId => ({ userId, via: 'manager' }));
+}
+
 export type DeliveryAlarmInput = {
   workerId: string; candidates: DeliveryMessage[]; now: Date; stuckWindowSeconds: number;
-  /** Canonical reporting chain, captured by the authorized caller under its graph lock. */
-  chain: ChainParty[];
   hold: { reason: 'draft' | 'isolated' | 'question' | 'screen-unknown' | 'not-submitted' | 'two-agents' | 'binding-mismatch'; terminalId: string | null } | null;
   /** S1/S2 supply provenance only AFTER persisting marks. Claimed ranges are verified below. */
   mark?: { channelId: string; channelIncarnation: number; throughSeq: number; principal: DeliveryMarkPrincipal };
@@ -142,7 +156,7 @@ export type DeliveryAlarmInput = {
 export async function reconcileDeliveryAlarm(tx: Tx, input: DeliveryAlarmInput): Promise<{ raised: string | null; resumed: string | null }> {
   const { workerId, now } = input;
   const safeId = (id: string) => typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : fail('DELIVERY_METADATA_INVALID');
-  const chain = input.chain.map(p => 'workerId' in p ? { workerId: safeId(p.workerId) } : { userId: safeId(p.userId), ...(p.via === 'manager' ? { via: 'manager' } : {}) });
+  const chain = await deliveryAlarmChain(tx, workerId);
   const principal = input.mark ? (p => p.kind === 'worker' ? { kind: p.kind, workerId: safeId(p.workerId) } : p.kind === 'user' ? { kind: p.kind, userId: safeId(p.userId) } : { kind: p.kind, appKeyId: safeId(p.appKeyId), hostId: safeId(p.hostId) })(input.mark.principal) : null;
   const worker = await tx.worker.findUniqueOrThrow({ where: { id: workerId }, select: { appId: true } });
   if (input.candidates.some(m => m.workerId !== workerId)) fail('DELIVERY_WORKER_MISMATCH');
