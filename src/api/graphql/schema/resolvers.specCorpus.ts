@@ -1,3 +1,5 @@
+import { liveCaller } from '../../../lib/tickers/liveCaller.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 // Draft spec corpora (#1447): the server-owned spec-corpus operations.
 //
 // #1450 — reserveSpecCitation. Contract:
@@ -82,8 +84,9 @@ export const specCorpusMutations = {
         const reserved = await ctx.db.$transaction(async (tx) => {
           let txCtx = withoutRequestCaches(ctx, tx);
           const authorizeAttempt = async () => {
-            const user = ctx.userId ? await tx.user.findUnique({ where: { id: ctx.userId }, select: { roles: true } }) : null;
-            txCtx = { ...withoutRequestCaches(ctx, tx), roles: ctx.impersonation ? [] : user?.roles ?? ctx.roles };
+            const current = await liveCaller(ctx, tx);
+            if (!current) throw authorizationDenied();
+            txCtx = current;
             await concealUnreadableDenial(txCtx, memoryId, memoryRef, () => requireMemoryWriteAccess(txCtx, memoryId));
           };
           await authorizeAttempt();

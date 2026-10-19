@@ -252,3 +252,20 @@ describe('MCP source/destination revocation does not become plan conflict',()=>{
     expect(mirrorNodeMoveToGit).not.toHaveBeenCalled();expect(await db.nodeRevision.count()).toBe(0);
   });
 });
+
+it.each(['queued','between'] as const)('a user deleted %s attempts cannot keep cached roles or create a placeholder',async stage=>{
+  const old=await node('target',true);
+  let result;
+  if(stage==='queued') result=await whileFirstAcquisitionWaits(tx=>tx.user.update({where:{id:user.id},data:{deletedAt:new Date()}}));
+  else {
+    validation.mockImplementationOnce(async()=>{
+      await db.user.update({where:{id:user.id},data:{deletedAt:new Date()}});
+      throw new ArchivePlanStaleError();
+    });
+    result=await gqlReserve();
+  }
+  expect(result.errors).toHaveLength(1);expect(result.errors![0]).toMatchObject({message:'Forbidden',extensions:{code:'FORBIDDEN'}});
+  expect(validation).toHaveBeenCalledTimes(stage==='queued'?0:1);
+  expect((await db.node.findUniqueOrThrow({where:{id:old.id}})).loc).toBe('target');
+  expect(await db.node.count({where:{isPlaceholder:true}})).toBe(0);expect(publishNodeWritten).not.toHaveBeenCalled();
+});
