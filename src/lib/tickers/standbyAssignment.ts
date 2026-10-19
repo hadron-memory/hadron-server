@@ -15,7 +15,7 @@ import { Prisma } from '../../generated/prisma/index.js';
 import { collectRegisterRows } from '../resolveRegister.js';
 import { mentionReachSql } from '../mentionReach.js';
 import { mentionTokenOf } from '../mentionToken.js';
-import { raiseDeliveryMark } from './acknowledge.js';
+import { raiseDeliveryMark } from '../workerMarks.js';
 import { standbyAdmitsSql, workerStandby } from './standby.js';
 
 export type AssignmentActor = { userId: string | null; workerId: string | null };

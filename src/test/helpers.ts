@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { generateId } from '../lib/id.js';
@@ -576,6 +577,6 @@ export async function createDbWorkerAttribution(db: PrismaClient, userId: string
   const agent = await db.agent.create({ data: { ...ownership, name: 'Attribution fixture', urn: `fixture-${suffix}.example:role` } });
   const app = await db.app.create({ data: { ...ownership, name: 'Attribution fixture', urn: `fixture-${suffix}.example:app` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-  await db.worker.create({ data: { id: workerId, appId: app.id, agentId: agent.id, name: 'Fixture', slug: 'fixture' } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: workerId, appId: app.id, agentId: agent.id, name: 'Fixture', slug: 'fixture' } });
   if (sessionId) await db.session.create({ data: { id: sessionId, workerId, userId, appId: app.id } });
 }

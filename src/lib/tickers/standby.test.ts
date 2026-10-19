@@ -54,7 +54,7 @@ let orgId: string, appId: string, agentId: string, holderId: string, caller: Con
 let app: { id: string; urn: string; organizationId: string | null; ownerUserId: string | null };
 let n = 0;
 const mkWorker = async (name: string, extra: Record<string, unknown> = {}) => {
-  const w = await db.worker.create({ data: { id: generateId(), appId, agentId, name, slug: name.toLowerCase(), heldByUserId: holderId, heldAt: posted, ...extra } });
+  const w = await db.worker.create({ data: { id: generateId(), appId, agentId, name, slug: name.toLowerCase(), signature: '', trailer: '', heldByUserId: holderId, heldAt: posted, ...extra } });
   await db.hostRegistrationWorker.create({ data: { registrationId, workerId: w.id, family: 'codex' } });
   await db.registerEntry.create({ data: { id: generateId(), appId, channelId, attendeeWorkerId: w.id, role: 'BOTH' } });
   return w;
@@ -66,7 +66,7 @@ const say = async (body: string, extra: Record<string, unknown> = {}) => {
   return seq;
 };
 let peerWorker: { id: string } | null = null;
-const peer = async () => (peerWorker ??= await db.worker.create({ data: { id: generateId(), appId, agentId, name: 'Peer', slug: 'peer' } }));
+const peer = async () => (peerWorker ??= await db.worker.create({ data: { id: generateId(), appId, agentId, name: 'Peer', slug: 'peer', signature: '', trailer: '' } }));
 const setSwitch = (on: boolean) => db.app.update({ where: { id: appId }, data: { deliveryStandbyEnabled: on } });
 const load = () => loadDeliveryBatches({ ctx: caller, app, hostId: 'host-a', now: ready });
 const enumerate = () => enumeratePendingDelivery({ ctx: caller, app, hostId: 'host-a', now: ready, first: 1000 });

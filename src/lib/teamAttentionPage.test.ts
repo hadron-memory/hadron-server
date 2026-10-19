@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /**
  * #1384/#1421 — the paged (v2) attention regression matrix (contract #2977,
  * reconciliation #2984). Ten families: bounded multi-page scanning with
@@ -113,7 +114,7 @@ beforeEach(async () => {
       sharedMemoryOfAgentId: agent.id,
     },
   });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
   const made = await ensureChannelWithRoot(db, {
     memoryId: memory.id,
     loc: 'chats:team',
@@ -192,7 +193,7 @@ describe('family 1b — #1365: a mention-only nudge beyond the scan bound', () =
       where: { appId: app.id, channelId: channel.id, attendeeWorkerId: worker.id },
       data: { mentionOnly: true },
     });
-    const mira = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Mira', slug: 'mira' } });
+    const mira = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Mira', slug: 'mira' } });
     await db.registerEntry.create({
       data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: mira.id, role: 'BOTH' },
     });
@@ -384,7 +385,7 @@ describe('family 4 — drift and key loss', () => {
     const first = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });
     expect(first.scanComplete).toBe(false);
     // A second live Worker registers mid-scan: the live target set grows.
-    const second = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Mira', slug: 'mira' } });
+    const second = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Mira', slug: 'mira' } });
     await db.registerEntry.create({
       data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: second.id, role: 'BOTH' },
     });
@@ -1111,7 +1112,7 @@ describe('family 19 — #1496 MAX_WORKERS aligned with MAX_TARGETS', () => {
         data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:extra-${i}`, name: `Extra ${i}`, visibility: 'ORGANIZATION' },
       });
       const extraWorker = await db.worker.create({
-        data: { id: generateId(), appId: app.id, agentId: extraAgent.id, name: `Extra ${i}`, slug: `extra-${i}` },
+        data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: extraAgent.id, name: `Extra ${i}`, slug: `extra-${i}` },
       });
       await db.session.create({
         data: { id: generateId(), appId: app.id, userId: user.id, workerId: extraWorker.id, agentId: extraAgent.id, type: 'DEVELOPER', startedAt: new Date() },

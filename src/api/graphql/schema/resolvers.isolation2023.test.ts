@@ -37,7 +37,7 @@ beforeEach(async () => {
   agentId = (await M.createAgent({}, { orgId: org.id, name: 'Iso Agent' }, ctx(admin.id))).id;
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Iso', urn: `${org.urn}:team` } });
   for (const x of [holder, member]) await db.appMember.create({ data: { appId: app.id, userId: x.id, role: 'member' } });
-  const w = (name: string, extra: object = {}) => db.worker.create({ data: { id: generateId(), appId: app.id, agentId, name, slug: name.toLowerCase(), ...extra }, select: { id: true } });
+  const w = (name: string, extra: object = {}) => db.worker.create({ data: { id: generateId(), appId: app.id, agentId, name, slug: name.toLowerCase(), signature: '', trailer: '', ...extra }, select: { id: true } });
   liam = await w('Liam', { heldByUserId: holder.id, heldAt: new Date() });
   anne = await w('Anne');
 });

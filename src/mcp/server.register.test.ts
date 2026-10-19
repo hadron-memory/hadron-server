@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * Spec 049 Phase 5 — the register tools on the MCP surface.
  *
@@ -54,7 +55,7 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: app2.id, agentId: agent.id } });
   const mem = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:app-shared`, name: 's', class: 'app', appId: app.id, sharedMemoryOfAgentId: agent.id } });
   const mem2 = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:other-shared`, name: 's2', class: 'app', appId: app2.id, sharedMemoryOfAgentId: agent.id } });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
   channel = (await ensureChannelWithRoot(db, { memoryId: mem.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app.id })).channel;
   channel2 = (await ensureChannelWithRoot(db, { memoryId: mem2.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app2.id })).channel;
 });
@@ -128,7 +129,7 @@ describe('team-chat monitor (#1265)', () => {
 
   it('routes mention-only attention for this operator\'s live Workers and advances only on deliberate acknowledgement', async () => {
     const mira = await db.worker.create({
-      data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Mira', slug: 'mira' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Mira', slug: 'mira' },
     });
     const asAdmin = server(admin.id);
     const irisStarted = await asAdmin.callToolText('hadron_start_session', { description: 'Iris stint', workerRef: 'Iris' });
@@ -256,7 +257,7 @@ describe('team-chat monitor (#1265)', () => {
     expect(await asAdmin.callToolText('hadron_team_chat_read', { monitorFor: worker.id })).toMatch(/^\[bad_user_input\]/);
 
     const theirs = await db.worker.create({
-      data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Theirs', slug: 'theirs' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Theirs', slug: 'theirs' },
     });
     await server(member.id).callToolText('hadron_start_session', { description: 'another operator', workerRef: 'Theirs' });
     const ownOnly = await asAdmin.callToolText('hadron_team_chat_read', { monitor: true });
@@ -264,7 +265,7 @@ describe('team-chat monitor (#1265)', () => {
     expect(ownOnly).not.toContain(`hrn:worker:${org.urn}:app:${theirs.slug}`);
 
     const idle = await db.worker.create({
-      data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Idle', slug: 'idle' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Idle', slug: 'idle' },
     });
     expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, monitorFor: idle.id })).toMatch(/^\[monitor_target_not_live\]/);
     expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, monitorFor: 'does-not-exist' })).toMatch(/^\[monitor_target_not_live\]/);

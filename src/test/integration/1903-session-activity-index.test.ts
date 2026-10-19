@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../lib/workerSignature.js';
 /**
  * #1903 — the session-activity index that production went down without, and
  * #1952 — the query shape that keeps the planner off the incident's walk.
@@ -144,13 +145,15 @@ describe('#1903 / #1952 roster liveness probe', () => {
       await seedSkew(tx);
       // The heavy session and a spread of liveness cases, all in scope. Times
       // are naive UTC, as the columns are.
-      await tx.$executeRawUnsafe(`
-        INSERT INTO workers (id, app_id, agent_id, name, slug) VALUES
-          ('w-heavy', '${APP}', 'agent-1903', 'Heavy', 'heavy'),
-          ('w-quiet', '${APP}', 'agent-1903', 'Quiet', 'quiet'),
-          ('w-mixed', '${APP}', 'agent-1903', 'Mixed', 'mixed'),
-          ('w-ended', '${APP}', 'agent-1903', 'Ended', 'ended'),
-          ('w-other', 'app-elsewhere', 'agent-1903', 'Other', 'other')`);
+      await tx.$executeRaw(Prisma.sql`
+        INSERT INTO workers (id, app_id, agent_id, name, slug, signature, trailer)
+        SELECT w.*, ${WORKER_SIGNATURE_DEFAULTS.signature}, ${WORKER_SIGNATURE_DEFAULTS.trailer}
+        FROM (VALUES
+          ('w-heavy', ${APP}, 'agent-1903', 'Heavy', 'heavy'),
+          ('w-quiet', ${APP}, 'agent-1903', 'Quiet', 'quiet'),
+          ('w-mixed', ${APP}, 'agent-1903', 'Mixed', 'mixed'),
+          ('w-ended', ${APP}, 'agent-1903', 'Ended', 'ended'),
+          ('w-other', 'app-elsewhere', 'agent-1903', 'Other', 'other')) AS w(id, app_id, agent_id, name, slug)`);
       await tx.$executeRawUnsafe(`
         INSERT INTO sessions (id, worker_id, type, started_at, updated_at, ended_at, auto_expired_at, deleted_at, family) VALUES
           ('sess-heavy',   'w-heavy', 'DEVELOPER', '2026-08-31 00:00:00', '2026-08-31 00:00:00', NULL, NULL, NULL, 'claude'),

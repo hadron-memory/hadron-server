@@ -67,6 +67,7 @@ import { locateTeamAgent } from './resolvers.worker.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { recordMentionsWorker } from '../../../lib/mentionsReadResolution.js';
 import {
   maybeAdvanceOwnChannelRead,
   lapsedResumeVerdict,
@@ -1353,7 +1354,10 @@ async function readChannelRoot(
           ? matching.slice(Math.max(0, matching.length - take))
           : matching.slice(skip, skip + take);
     recordRead(page.map((m) => m.row));
-    return { items: page.map((m) => m.msg), total: matching.length };
+    const out = { items: page.map((m) => m.msg), total: matching.length };
+    // #2018: the own-read advance moves marks only for the worker this page was filtered by.
+    if (workerId !== null) recordMentionsWorker(out, workerId);
+    return out;
   }
 
   const total = await ctx.db.node.count({ where });

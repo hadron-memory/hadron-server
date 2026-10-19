@@ -1487,7 +1487,13 @@ export const typeDefs = `#graphql
     backoff ceiling and likely needs operator attention). System-managed.
     """
     embeddingAttempts: Int!
-    content: String
+    """
+    The node's text. Include tags and data variables resolve for the reader
+    (hrn:node:hadronmemory.com:specs:cor:dmo:150:03); pass raw: true for the stored text with its tags as
+    written. Through nodeBatch, an omitted raw returns the stored text
+    permanently (R21 A) and raw: false resolves.
+    """
+    content(raw: Boolean): String
     tokens: Int
     tags: [String!]!
     properties: JSON
@@ -4522,6 +4528,10 @@ export const typeDefs = `#graphql
     memory all answer [] rather than erroring.
     """
     repos: [String!]!
+    "Per-worker signature template, masked for nonreaders (hrn:node:hadronmemory.com:specs:cor:agt:040:04)."
+    signature: String
+    "Per-worker commit trailer template, masked for nonreaders (hrn:node:hadronmemory.com:specs:cor:agt:040:04)."
+    trailer: String
     "Per-worker individuality layered over the agent's template prompt."
     promptOverride: String
     "The worker-scoped working memory in the App's container (null until provisioned)."
@@ -11174,7 +11184,11 @@ export const typeDefs = `#graphql
     role), and re-casting is barred by \`WORKER_IN_USE\` for any worker that has
     done work — precisely the ones with an identity to record.
 
-    Scope is one field on purpose: \`name\` is permanent by law (cor:agt:020:02)
+    Signature/trailer edits require an App manager; a bound worker is provisionally refused (H26).
+    Omitted preserves, null refuses, whitespace-only becomes empty text; other text is raw, max 2000 characters, no NUL.
+    A mixed update is atomic. These values reach the next compose/bind via S4.
+
+    The other casting identity fields stay immutable: \`name\` is permanent by law (hrn:node:hadronmemory.com:specs:cor:agt:020:02)
     and \`role\`/\`agent\` define the casting itself. OMITTING promptOverride
     preserves it; explicit \`null\` or a blank string CLEARS it, matching the
     nullable column and castWorker's blank-is-absent normalization.
@@ -11183,9 +11197,9 @@ export const typeDefs = `#graphql
     delivered at bind time, and a retired worker takes no new bindings, so the
     edit could never reach anyone.
 
-    Same authorization as castWorker. workerRef is the worker's id or URN (#991).
+    promptOverride alone keeps castWorker staffing authorization. workerRef is the worker's id or URN (#991).
     """
-    updateWorker(workerRef: ID!, promptOverride: String): Worker!
+    updateWorker(workerRef: ID!, promptOverride: String, signature: String, trailer: String): Worker!
 
     """
     #1162 — hard-delete a never-referenced miscast only.

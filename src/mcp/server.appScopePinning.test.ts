@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1005 — App scope must not evaporate mid-session for a multi-App user.
  *
@@ -84,7 +85,7 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'owner' } });
   await db.appMember.create({ data: { appId: otherApp.id, userId: user.id, role: 'owner' } });
   worker = await db.worker.create({
-    data: { appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' },
   });
 });
 
@@ -352,7 +353,7 @@ describe('#1005 — App scope is recoverable from the session after a reconnect'
     });
     await db.appAgent.create({ data: { appId: soloApp.id, agentId: soloAgent.id } });
     const soloWorker = await db.worker.create({
-      data: { appId: soloApp.id, agentId: soloAgent.id, name: 'Solo Worker', slug: 'solo-worker' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: soloApp.id, agentId: soloAgent.id, name: 'Solo Worker', slug: 'solo-worker' },
     });
 
     const authOf = (): AuthContext =>
