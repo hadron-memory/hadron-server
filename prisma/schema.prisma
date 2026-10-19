@@ -3154,6 +3154,12 @@ model App {
   /// `chk_apps_ticker_settings` (prisma/ticker-invariants.sql).
   /// The cadence floor, also the wake-rate ceiling: >= 60.
   tickerMinCadenceSeconds           Int  @default(120) @map("ticker_min_cadence_seconds")
+  /// #2025 / cor:agt:080:05 — Proposed bounds: 1..86400 whole seconds.
+  deliveryBusyDelaySeconds          Int @default(600) @map("delivery_busy_delay_seconds")
+  /// Proposed bounds: 1..604800; strictly greater than busy delay + cadence floor.
+  deliveryStuckWindowSeconds        Int @default(900) @map("delivery_stuck_window_seconds")
+  /// Stored OFF; enabling is refused until #2023 supplies standby behavior.
+  deliveryStandbyEnabled            Boolean @default(false) @map("delivery_standby_enabled")
   /// The fastest ticker a worker may subscribe ITSELF to: [floor, 86400].
   tickerSelfSubscribeCadenceSeconds Int  @default(600) @map("ticker_self_subscribe_cadence_seconds")
   /// How many live tickers the App may have: [1, 100].
@@ -5632,6 +5638,9 @@ model Ticker {
   channelIds        String[]  @default([]) @map("channel_ids")
   /// 'ALL' | 'MENTIONS'.
   relevance         String    @default("ALL")
+  /// #2068 (cor:agt:080:01, :10, R49): why the ticker fires, a closed set: 'read-team-channel' (relevant unread, as before) and
+  /// 'every-tick' (unconditional). Empty = never fires; any-of when several (Decided, R54).
+  reasons           String[]  @default(["read-team-channel"]) @map("reasons")
   enabled           Boolean   @default(true)
   ownerUserId       String?   @map("owner_user_id")
   ownerWorkerId     String?   @map("owner_worker_id")

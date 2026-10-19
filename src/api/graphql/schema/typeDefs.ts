@@ -6936,6 +6936,8 @@ export const typeDefs = `#graphql
 
     "#1747 — an App's ticker settings: the cadence floor, the default self-subscription cadence, the live-ticker cap and the daily wake budget (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
     appTickerSettings(appRef: String!): AppTickerSettings!
+    "App delivery settings for participants; cadence/window is the ticker floor (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
+    appDeliverySettings(appRef: String!): AppDeliverySettings!
 
     "#1747 — one worker's wake settings (defaults when it has none), readable by the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:080:03)."
     workerWakeSettings(workerRef: String!): WorkerWakeSettings!
@@ -8256,7 +8258,11 @@ export const typeDefs = `#graphql
     mentionsRef filters to messages whose stored envelope mentions the
     referenced worker (a Worker id or name of THIS App, retired included) or
     user (handle/id) — matching runs against the mention tokens extracted at
-    write time, never by re-parsing bodies. The ref must name this App's own
+    write time, never by re-parsing bodies. For a worker it returns what
+    reaches that worker (#2020): its name, replies to it, and an @all/@team
+    broadcast the server stamped at post time because its author could wake
+    everyone (hrn:node:hadronmemory.com:specs:cor:agt:080:14); never the
+    worker's own posts. A user ref matches the handle alone. The ref must name this App's own
     staff or members (a Worker of the App, an AppMember, or the caller); an
     unresolvable or foreign mentionsRef yields the empty page identically (no
     existence oracle). limit defaults to 50 (cap 200); limit: 0 returns only
@@ -8706,9 +8712,12 @@ export const typeDefs = `#graphql
 
     """
     #1747 — change an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05, :19). Whoever manages the App only.
-    Refusals: TICKER_SETTINGS_OUT_OF_RANGE, TICKER_SETTINGS_CONFLICT (a floor above a live ticker cadence).
+    Refusals: TICKER_SETTINGS_OUT_OF_RANGE, TICKER_SETTINGS_CONFLICT (a floor above a live ticker cadence),
+    DELIVERY_SETTINGS_CONFLICT (the shared cadence floor must keep stuckWindowSeconds greater than busyDelaySeconds + minCadenceSeconds).
     """
     setAppTickerSettings(appRef: String!, input: AppTickerSettingsInput!): AppTickerSettings!
+    "App managers only; omitted preserves, null refuses. Standby activation is unavailable until S7 (hrn:node:hadronmemory.com:specs:cor:agt:080:19)."
+    setAppDeliverySettings(appRef: String!, input: AppDeliverySettingsInput!): AppDeliverySettings!
 
     """
     #1747 — subscribe a worker to a ticker (hrn:node:hadronmemory.com:specs:cor:agt:080:20, :25). Its holder and whoever manages
@@ -11952,6 +11961,14 @@ export const typeDefs = `#graphql
     evidence: String
   }
 
+  "#2068 (hrn:node:hadronmemory.com:specs:cor:agt:080:01, :10) — why a ticker fires. A closed set; several fire it when any one holds."
+  enum TickerReason {
+    "Fires only when the subscriber has relevant unread in the ticker's channels (what relevance counts is the ticker's relevance)."
+    READ_TEAM_CHANNEL
+    "Fires on every tick, with or without unread. The floor, budget, pause and dormancy still apply."
+    EVERY_TICK
+  }
+
   "#1747 — how a ticker relevance narrows what can make a subscriber due (hrn:node:hadronmemory.com:specs:cor:agt:080:01)."
   enum TickerRelevance {
     ALL
@@ -12106,6 +12123,8 @@ export const typeDefs = `#graphql
     "The channels named, limited to those the reader can read. Empty means every channel the subscriber watches."
     channels: [Channel!]!
     relevance: TickerRelevance!
+    "#2068 — why the ticker fires. Never empty; existing tickers are READ_TEAM_CHANNEL."
+    reasons: [TickerReason!]!
     enabled: Boolean!
     owner: ActorRef
     "The next moment this ticker ticks, quiet hours skipped; null when disabled."
@@ -12158,6 +12177,29 @@ export const typeDefs = `#graphql
     dormant: Boolean!
   }
 
+  "Delivery timing per App. Busy/stuck bounds and relation are Proposed (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
+  type AppDeliverySettings {
+    "The existing ticker cadence floor and wake-rate ceiling, also the batching window. Changing it affects ticker cadence."
+    batchWindowSeconds: Int!
+    "Whole seconds, 1..86400; default 600."
+    busyDelaySeconds: Int!
+    "Whole seconds, 1..604800; default 900. Must exceed busy delay plus batch window."
+    stuckWindowSeconds: Int!
+    "Stored configuration; default false. Enabling is refused until standby behavior ships."
+    standbyEnabled: Boolean!
+    "False until S7 supplies standby behavior; configuration alone has no effect."
+    standbyEffective: Boolean!
+  }
+
+  "Atomic patch: omit to preserve, explicit null refuses. Empty patch returns the current authorized settings."
+  input AppDeliverySettingsInput {
+    "Shared ticker floor/window; existing floor, self-cadence and live-ticker limits apply."
+    batchWindowSeconds: Int
+    busyDelaySeconds: Int
+    stuckWindowSeconds: Int
+    standbyEnabled: Boolean
+  }
+
   "#1747 — an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
   type AppTickerSettings {
     minCadenceSeconds: Int!
@@ -12186,6 +12228,8 @@ export const typeDefs = `#graphql
     quietHours: JSON
     channelIds: [ID!]
     relevance: TickerRelevance
+    "Absent on create = [READ_TEAM_CHANNEL]; an empty list is refused. On update, absent = unchanged."
+    reasons: [TickerReason!]
     enabled: Boolean
   }
 
@@ -12199,6 +12243,8 @@ export const typeDefs = `#graphql
     channelIds: [ID!]
     clearChannels: Boolean
     relevance: TickerRelevance
+    "Absent on create = [READ_TEAM_CHANNEL]; an empty list is refused. On update, absent = unchanged."
+    reasons: [TickerReason!]
     enabled: Boolean
   }
 
