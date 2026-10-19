@@ -1742,7 +1742,7 @@ export const typeDefs = `#graphql
     expiresAt: DateTime!
   }
 
-  "#1956 — resumeSession's optional input. Everything but \`session\` is provenance for a session the redemption starts."
+  "#1956 — resumeSession's optional input. Provenance for a session the redemption starts; on an open session it resumes, only \`llmModel\` and \`family\` are refreshed (#2086)."
   input ResumeSessionInput {
     "Pick one of a CHOOSE answer's candidates by its sessionId."
     session: ID
