@@ -409,7 +409,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
   server.tool(
     'hadron_team_chat_inbox',
     'Ready delivery batches (cor:agt:080:22, :26): your own worker through its live session, or workers registered on YOUR host with an App key ' +
-      'holding attention:deliver AND host:operate. Returns JSON: each batch has `id` (a signed proof), `worker`, `text` (one line, ' +
+      'holding attention:deliver AND host:operate. Self also admits a same-App userless, non-host-launched session through an active key that never held host:operate; existing session/memory gates still apply. Returns JSON: each batch has `id` (a signed proof), `worker`, `text` (one line, ' +
       'written by the server: type it UNCHANGED), `deliverAfter`, `busyDeadline`, `ranges` and `overflow`. Reading moves nothing; ' +
       'Display the shared text, then call hadron_team_chat_inbox_ack separately within 15 minutes. A lost read response acknowledges nothing. ' +
       'The opaque proof is returned ONLY in batches[].id; never copy it into other output, errors or logs. No credentials are returned. ' +

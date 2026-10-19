@@ -163,3 +163,16 @@ it('keeps a sequence prefix at the cap when a channel timestamp runs backward', 
   expect(out.ranges[0].seqs).toEqual([1,2,3,4,5,6,7,8,9,10]);
   expect(out.text).not.toContain('body-11');
 });
+
+it('merges channel heads by time without letting a backward child leap over its lower seq', async () => {
+  const out = await render(input([
+    msg(1, { createdAt: new Date(2000) }),
+    msg(2, { createdAt: new Date(500) }),
+    msg(1, { channelId: 'channel-b', createdAt: new Date(1500), body: 'from-b' }),
+  ], { maxMessages: 2 }));
+  expect(out.ranges).toEqual([
+    { channelId: 'channel-a', fromSeq: 1, throughSeq: 1, seqs: [1] },
+    { channelId: 'channel-b', fromSeq: 1, throughSeq: 1, seqs: [1] },
+  ]);
+  expect(out.text.indexOf('from-b')).toBeLessThan(out.text.indexOf('body-1'));
+});

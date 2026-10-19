@@ -213,7 +213,7 @@ async function eligibleMessages(db: Context['db'], ch: EligibleDeliveryChannel):
   const rows = await db.$queryRaw<Row[]>(Prisma.sql`
     SELECT n.seq::int AS seq, n.content, n.data, n.created_at, COUNT(*) OVER() AS total_eligible
     FROM nodes n WHERE ${ch.predicate}
-    ORDER BY n.created_at, n.seq
+    ORDER BY n.seq
     LIMIT ${ELIGIBLE_READ_LIMIT}`);
   const eligible = rows;
   const parentSeqs = [...new Set(eligible.map((r) => replyToOf(r.data)).filter((s): s is number => s !== null))];
