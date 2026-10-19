@@ -11,6 +11,7 @@ import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { BROKEN_INCLUDE_NOTICE } from './resolveNodeContent.js';
 import { createTestableMcpServer } from '../../mcp/server.js';
+import { compileTemplate } from '../template.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -318,5 +319,14 @@ describe('genuinely sealed targets and the search index (#2041)', () => {
     const locs = JSON.stringify(hits);
     expect(locs).toContain('policy');
     expect(locs).not.toContain('"doc"');
+  });
+});
+
+describe('the empty-filter render paths (run, chat, session) stay local (#2041 §1.5)', () => {
+  it('compileTemplate with no access filter splices same-memory includes but never a foreign URN', async () => {
+    await mk('b', 'B');
+    const text = `{{> b}} {{> hrn:node:${foreignUrn}:secret}} {{> ${urn('b')}}}`;
+    // `{}` means "unrestricted" to the filter, so it must NOT turn a foreign URN into a read.
+    expect(await compileTemplate(text, null, memoryId, db, {})).toBe(`B ${BROKEN_INCLUDE_NOTICE} B`);
   });
 });
