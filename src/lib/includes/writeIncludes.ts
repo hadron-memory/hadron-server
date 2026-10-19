@@ -22,13 +22,26 @@ export interface IncludeWriteNode {
 /** Memory ids the writing principal may read: `null` = unrestricted. */
 export type ReadableMemoryIds = string[] | null;
 
+/**
+ * Prospective contents of same-memory nodes that a batch is about to write (git
+ * sync): checked as if already written, so a new file cannot slip a cycle past a
+ * check that only sees committed rows. Keyed by loc.
+ */
+export interface IncludeOverlay {
+  memoryId: string;
+  contents: Map<string, string | null>;
+}
+
+/** The id a not-yet-created node carries inside a batch check. */
+export const prospectiveNodeId = (loc: string) => `new:${loc}`;
+
 type Tx = Prisma.TransactionClient;
 
 interface Resolved { id: string; memoryId: string; loc: string; content: string | null }
 
 /** A tag's target node, or null when absent / unreadable (the two are indistinguishable by design). */
 async function resolveTarget(
-  tx: Tx, tag: IncludeTag, from: IncludeWriteNode, readable: ReadableMemoryIds,
+  tx: Tx, tag: IncludeTag, from: IncludeWriteNode, readable: ReadableMemoryIds, overlay?: IncludeOverlay,
 ): Promise<Resolved | null> {
   let memoryId = from.memoryId;
   let loc = tag.target;
@@ -44,6 +57,9 @@ async function resolveTarget(
     where: { memoryId, loc, deletedAt: null },
     select: { id: true, memoryId: true, loc: true, content: true, memory: { select: { id: true, isEncrypted: true } } },
   });
+  if (overlay && memoryId === overlay.memoryId && overlay.contents.has(loc)) {
+    return { id: node?.id ?? prospectiveNodeId(loc), memoryId, loc, content: overlay.contents.get(loc) ?? null };
+  }
   if (!node) return null;
   let content = node.content;
   if (node.memory.isEncrypted) {
@@ -69,6 +85,7 @@ export function includeRefusal(code: string, message: string, extra: Record<stri
  */
 export async function assertIncludesWritable(
   tx: Tx, node: IncludeWriteNode, plaintextContent: string | null | undefined, readable: ReadableMemoryIds,
+  overlay?: IncludeOverlay,
 ): Promise<IncludeTag[]> {
   if (!plaintextContent || !plaintextContent.includes('{{>')) return [];
   let tags: IncludeTag[];
@@ -78,27 +95,49 @@ export async function assertIncludesWritable(
     if (e instanceof IncludeSyntaxError) throw includeRefusal('INVALID_INCLUDE', e.message, { tag: e.raw });
     throw e;
   }
-  const seen = new Set<string>();
-  const walk = async (from: IncludeWriteNode, fromTags: IncludeTag[], depth: number): Promise<void> => {
+  // Longest chain below a node (0 for a leaf), memoized so a node reached first
+  // by a shallow branch cannot hide a deeper one: acceptance never depends on
+  // tag order. `onPath` stops a cycle that does not pass through the writing node.
+  const height = new Map<string, number>();
+  const onPath = new Set<string>();
+  const levelsBelow = async (from: IncludeWriteNode, fromTags: IncludeTag[], level: number): Promise<number> => {
+    let deepest = 0;
     for (const tag of fromTags) {
-      const target = await resolveTarget(tx, tag, from, readable);
+      const target = await resolveTarget(tx, tag, from, readable, overlay);
       if (!target) continue;
       if (node.id && target.id === node.id) {
         throw includeRefusal('INCLUDE_CYCLE', `Include ${tag.raw} would make this node include itself.`, { tag: tag.raw });
       }
-      if (seen.has(target.id)) continue;
-      seen.add(target.id);
-      if (depth + 1 > MAX_INCLUDE_DEPTH) {
+      if (onPath.has(target.id)) continue;
+      let h = height.get(target.id);
+      if (h === undefined) {
+        let nested: IncludeTag[] = [];
+        try {
+          nested = target.content ? parseIncludeTags(target.content) : [];
+        } catch { /* a stored malformed tag is that node's problem, not this write's */ }
+        onPath.add(target.id);
+        try {
+          h = await levelsBelow(target, nested, level + 1);
+        } catch (e) {
+          // A depth refusal found deep in the chain names the tag the writer
+          // authored, not the tag inside some other node.
+          if (level === 1 && e instanceof GraphQLError && e.extensions?.code === 'INCLUDE_TOO_DEEP') {
+            throw includeRefusal('INCLUDE_TOO_DEEP', `Includes nest deeper than ${MAX_INCLUDE_DEPTH}.`, { tag: tag.raw });
+          }
+          throw e;
+        } finally {
+          onPath.delete(target.id);
+        }
+        height.set(target.id, h);
+      }
+      if (level + h > MAX_INCLUDE_DEPTH) {
         throw includeRefusal('INCLUDE_TOO_DEEP', `Includes nest deeper than ${MAX_INCLUDE_DEPTH}.`, { tag: tag.raw });
       }
-      let nested: IncludeTag[] = [];
-      try {
-        nested = target.content ? parseIncludeTags(target.content) : [];
-      } catch { /* a stored malformed tag is that node's problem, not this write's */ }
-      await walk(target, nested, depth + 1);
+      deepest = Math.max(deepest, 1 + h);
     }
+    return deepest;
   };
-  await walk(node, tags, 0);
+  await levelsBelow(node, tags, 1);
   return tags;
 }
 
@@ -135,9 +174,9 @@ export async function syncDerivedIncludesEdges(
 export function includeRefusalText(e: unknown): string | null {
   if (!(e instanceof GraphQLError)) return null;
   const code = e.extensions?.code;
-  return code === 'INVALID_INCLUDE' || code === 'INCLUDE_CYCLE' || code === 'INCLUDE_TOO_DEEP'
-    ? `[${String(code).toLowerCase()}] ${e.message}`
-    : null;
+  if (code !== 'INVALID_INCLUDE' && code !== 'INCLUDE_CYCLE' && code !== 'INCLUDE_TOO_DEEP') return null;
+  const tag = typeof e.extensions?.tag === 'string' ? ` Tag: ${e.extensions.tag}` : '';
+  return `[${String(code).toLowerCase()}] ${e.message}${tag}`;
 }
 
 /** Tags of content already stored: a malformed one yields no edges rather than failing the caller. */

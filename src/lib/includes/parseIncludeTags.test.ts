@@ -15,6 +15,17 @@ describe('parseIncludeTags (#2040)', () => {
     const c = ['`{{> a}}`', '', '```', '{{> b}}', '```', '', '    {{> c}}', '', '{{> d}}'].join('\n');
     expect(parseIncludeTags(c).map(t => t.target)).toEqual(['d']);
   });
+  it('treats a multi-line inline code span as literal', () => {
+    expect(parseIncludeTags('`hello\n{{> a bogus}}\nworld` {{> ok}}').map(t => t.target)).toEqual(['ok']);
+    expect(parseIncludeTags('`one` para\n\n{{> a bogus')).toEqual([]);
+  });
+  it('only a bare fence of sufficient length closes a fence', () => {
+    const c = '```\ntext\n``` trailing text\n{{> a bogus}}\n```\n{{> real}}';
+    expect(parseIncludeTags(c).map(t => t.target)).toEqual(['real']);
+  });
+  it('a code span does not run across a blank line', () => {
+    expect(parseIncludeTags('a ` b\n\n{{> real}} c ` d').map(t => t.target)).toEqual(['real']);
+  });
   it('refuses an unknown setting, a repeat, rev=0 and a missing target', () => {
     for (const bad of ['{{> a nope}}', '{{> a rev=1 rev=2}}', '{{> a rev=0}}', '{{> }}']) {
       expect(() => parseIncludeTags(bad)).toThrow(IncludeSyntaxError);

@@ -77,6 +77,14 @@ describe('include tags through createNode / updateNode (#2040)', () => {
     expect(await code(create('top', '{{> n10}}'))).toBe('INCLUDE_TOO_DEEP');
   });
 
+  it('the depth cap does not depend on tag order (shallow reach first, deep second)', async () => {
+    await create('n0', 'leaf');
+    for (let i = 1; i <= 10; i++) await create(`n${i}`, `{{> n${i - 1}}}`);
+    expect(await code(create('t1', '{{> n10}}'))).toBe('INCLUDE_TOO_DEEP');
+    expect(await code(create('t2', '{{> n0}} {{> n10}}'))).toBe('INCLUDE_TOO_DEEP');
+    expect(await code(create('t3', '{{> n9}}'))).toBe('NO_ERROR');
+  });
+
   it('accepts a diamond', async () => {
     await create('d', 'D'); await create('l', '{{> d}}'); await create('r', '{{> d}}');
     expect(await code(create('top', '{{> l}} {{> r}}'))).toBe('NO_ERROR');

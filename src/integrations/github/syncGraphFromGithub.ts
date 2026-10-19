@@ -1,4 +1,4 @@
-import { assertIncludesWritable, includeRefusalText, storedIncludeTags, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
+import { assertIncludesWritable, prospectiveNodeId, includeRefusalText, storedIncludeTags, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
 import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
@@ -819,6 +819,13 @@ const syncGraphFromGithubAsSystem = async (
       // P2). An id is "settled" once it is mapped OR waiting.
       const idSettled = (id: string): boolean => fileIdToRowId.has(id) || unappliedFileIds.has(id);
 
+      // #2040 — every file of this run, as if already written: a tag is judged
+      // against the graph the sync will leave, so a new file cannot hide a cycle
+      // through another new file.
+      const includeOverlay = {
+        memoryId: graph.id,
+        contents: new Map(fsGraph.nodes.filter((n) => n.loc).map((n) => [n.loc!, n.content ?? null] as const)),
+      };
       for (const node of fsGraph.nodes) {
         const loc = node.loc!;
         if (isProtected(loc)) {
@@ -884,7 +891,7 @@ const syncGraphFromGithubAsSystem = async (
             select: { id: true },
           });
           try {
-            await assertIncludesWritable(tx, { id: selfRow?.id, memoryId: graph.id, loc }, update.content, null);
+            await assertIncludesWritable(tx, { id: selfRow?.id ?? prospectiveNodeId(loc), memoryId: graph.id, loc }, update.content, null, includeOverlay);
           } catch (e) {
             const text = includeRefusalText(e);
             if (!text) throw e;

@@ -58,6 +58,15 @@ describe('include tags through the MCP writers (#2040)', () => {
     expect(await edgesOf('a')).toEqual([]);
   });
 
+  it('a depth refusal names its tag', async () => {
+    for (let i = 1; i <= 10; i++) {
+      await mcp().callToolText('hadron_create_node', { urn: urn(`n${i}`), name: `n${i}`, content: `{{> ${i === 1 ? 'b' : `n${i - 1}`}}}` });
+    }
+    const refused = await mcp().callToolText('hadron_create_node', { urn: urn('top'), name: 'top', content: '{{> n10}}' });
+    expect(refused).toContain('[include_too_deep]');
+    expect(refused).toContain('{{> n10}}');
+  });
+
   it('hadron_create_parent_node: a tag in the description is checked', async () => {
     const refused = await mcp().callToolText('hadron_create_parent_node', { urn: urn('p'), name: 'p', description: '{{> b nope}}' });
     expect(refused).toContain('[invalid_include]');

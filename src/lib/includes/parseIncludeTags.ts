@@ -35,13 +35,15 @@ function maskCode(content: string): string {
   let fence: string | null = null;
   let prevBlank = true;
   let inIndented = false;
-  const out = lines.map(line => {
-    const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+  const blocks = lines.map(line => {
+    const fenceMatch = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
     if (fence) {
-      if (fenceMatch && fenceMatch[1][0] === fence[0] && fenceMatch[1].length >= fence.length) fence = null;
+      // A closing fence is the same character, at least as long, and nothing else on the line.
+      if (fenceMatch && fenceMatch[1][0] === fence[0] && fenceMatch[1].length >= fence.length && fenceMatch[2].trim() === '') fence = null;
       return ' '.repeat(line.length);
     }
-    if (fenceMatch) {
+    // A backtick fence's info string cannot contain a backtick (else it is an inline span).
+    if (fenceMatch && !(fenceMatch[1][0] === '`' && fenceMatch[2].includes('`'))) {
       fence = fenceMatch[1];
       return ' '.repeat(line.length);
     }
@@ -54,9 +56,22 @@ function maskCode(content: string): string {
     }
     if (!blank) inIndented = false;
     prevBlank = blank;
-    // Inline code spans: a run of N backticks closes at the next run of exactly N.
-    return line.replace(/(`+)([\s\S]*?[^`])\1(?!`)/g, m => ' '.repeat(m.length));
+    return line;
   });
+  // Inline code spans may wrap across lines inside one paragraph: a run of N
+  // backticks closes at the next run of exactly N, never across a blank line.
+  const out: string[] = [];
+  let para: string[] = [];
+  const flush = () => {
+    if (para.length === 0) return;
+    const text = para.join('\n').replace(/(`+)([\s\S]*?[^`])\1(?!`)/g, m => m.replace(/[^\n]/g, ' '));
+    out.push(...text.split('\n'));
+    para = [];
+  };
+  for (const line of blocks) {
+    if (line.trim() === '') { flush(); out.push(line); } else para.push(line);
+  }
+  flush();
   return out.join('\n');
 }
 

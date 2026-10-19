@@ -58,4 +58,17 @@ describe('git sync include tags (#2040)', () => {
     expect(result.skippedInvalidIncludes?.map((s) => s.loc)).toEqual(['a']);
     expect((await db.node.findFirstOrThrow({ where: { memoryId: graph.id, loc: 'a' } })).content).toContain('v1');
   });
+
+  it('a NEW file that includes itself, or two new files that include each other, are skipped and leave nothing stored', async () => {
+    file('fresh', '{{> fresh}}');
+    file('x', '{{> y}}');
+    file('y', '{{> x}}');
+    file('ok', 'fine');
+    const result = await syncGraphFromGithub(graph);
+    expect(result.error).toBeUndefined();
+    expect(result.skippedInvalidIncludes?.map((s) => s.loc).sort()).toEqual(['fresh', 'x', 'y']);
+    expect(await db.node.count({ where: { memoryId: graph.id, loc: { in: ['fresh', 'x', 'y'] } } })).toBe(0);
+    expect(await db.edge.count({ where: { memoryId: graph.id, governedKind: 'INCLUDE' } })).toBe(0);
+    expect(await db.node.count({ where: { memoryId: graph.id, loc: 'ok' } })).toBe(1);
+  });
 });
