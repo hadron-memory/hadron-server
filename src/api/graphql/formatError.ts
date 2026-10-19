@@ -23,6 +23,7 @@
  * so a new entry cannot be half-registered.
  */
 import type { GraphQLFormattedError } from 'graphql';
+import { publicErrorExtensions } from '../../lib/errorDiagnostics.js';
 import { isPrismaClientError, REDACTED_DB_ERROR_MESSAGE } from '../../lib/prismaErrors.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
 import { AmbiguousLegacyUrnError } from '../../lib/entityRef/errors.js';
@@ -161,6 +162,10 @@ export function formatGraphQLError(
   formattedError: GraphQLFormattedError,
   error: unknown,
 ): GraphQLFormattedError {
+  // #2087: supplied diagnostics are unsafe even when Apollo suppresses its own stacks.
+  if (formattedError.extensions && ('stacktrace' in formattedError.extensions || 'exception' in formattedError.extensions)) {
+    formattedError = { ...formattedError, extensions: publicErrorExtensions(formattedError.extensions) };
+  }
   const original = unwrap(error);
   for (const m of CLIENT_ERROR_MAPPINGS) {
     if (!m.matches(original)) continue;
