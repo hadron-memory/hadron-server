@@ -45,11 +45,13 @@ export type WakeChannel = { channelId: string; incarnation: number; fromSeq: num
  */
 export type TaskWakeReason = {
   kind: 'TASK';
-  taskId: string;
+  taskId: string | null;
+  /** Task-less alarms identify their subject without inventing a task. */
+  subjectWorkerId?: string;
   eventId: string;
   chainIndex: number;
   event: 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'ALARM' | 'END_SESSION';
-  title: string;
+  title: string | null;
 };
 
 export type WakeReason = { kind: 'MENTION' } | { kind: 'TICK'; tickerId: string; k: number } | TaskWakeReason;
@@ -160,7 +162,7 @@ export function workerWake(args: {
   }
 
   for (const t of args.tasks ?? []) {
-    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title });
+    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title, ...(t.subjectWorkerId ? {subjectWorkerId:t.subjectWorkerId} : {}) });
     if (t.atMs !== undefined) anchors.push(t.atMs);
   }
 

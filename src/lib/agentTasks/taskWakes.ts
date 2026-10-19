@@ -39,6 +39,7 @@ import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.j
 import { isWorkerDormant, toNaiveUtc } from '../sessionActivity.js';
 import { ASSIGNED_EVENT_TYPES } from './events.js';
 import { alarmEpisodeKey, currentAlarmEpisodes } from './stall.js';
+import { deliveryAlarmSnapshot } from '../tickers/deliveryState.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -47,12 +48,14 @@ export type TaskWakeEvent = 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINIS
 /** One event a worker is due a wake for. `chainIndex` is 0 except for an alarm's woken position. */
 export type PendingTaskWake = {
   workerId: string;
-  taskId: string;
+  taskId: string | null;
+  /** Present only for a task-less alarm; never a fabricated task identity. */
+  subjectWorkerId?: string;
   eventId: string;
   chainIndex: number;
   event: TaskWakeEvent;
   /** The team's own words for the task: what the nudge names (not event payload; cor:agt:050:11). */
-  title: string;
+  title: string | null;
   at: Date;
 };
 
@@ -88,7 +91,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
   const assignedTypes = Prisma.join([...ASSIGNED_EVENT_TYPES]);
 
   type Row = { workerId: string; taskId: string; eventId: string; type: string; title: string; at: Date };
-  const [assigned, finished, alarms, endSession] = await Promise.all([
+  const [assigned, finished, alarms, endSession, taskless] = await Promise.all([
     // The task's LATEST assignment event, to its current worker assignee, who has not acted on the task since
     // (an assignment the worker made itself counts as acting: `>=` includes the event).
     db.$queryRaw<Row[]>(Prisma.sql`
@@ -149,6 +152,20 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         AND q.requested_by_worker_id IS DISTINCT FROM q.worker_id
         AND ${liveApp('t')}
         AND ${undelivered('q.worker_id', 'q.event_id', '0')}`),
+    // #2021/#2014: only approved task-less alarm types; no task or payload/body join.
+    db.$queryRaw<Array<{workerId:string; subjectWorkerId:string; eventId:string; type:string; at:Date; chainIndex:number}>>(Prisma.sql`
+      SELECT (e.chain -> s.idx ->> 'workerId') AS "workerId", e.subject_worker_id AS "subjectWorkerId",
+             e.id AS "eventId", e.type, e.created_at AS at, s.idx AS "chainIndex"
+      FROM agent_team_events e
+      JOIN LATERAL (SELECT max(chain_index) AS idx FROM agent_team_alarm_schedule
+                    WHERE event_id = e.id AND woken_at IS NOT NULL) s ON s.idx IS NOT NULL
+      JOIN workers w ON w.id = (e.chain -> s.idx ->> 'workerId') AND w.app_id = e.app_id AND w.retired_at IS NULL
+      JOIN workers subject ON subject.id = e.subject_worker_id AND subject.app_id = e.app_id AND subject.retired_at IS NULL
+      WHERE e.task_id IS NULL AND e.type IN ('delivery.stuck', 'post-limit.exceeded')
+        AND e.severity = 'alarm' AND e.acknowledged_at IS NULL
+        AND (e.chain -> s.idx ->> 'workerId') IN (${ids})
+        AND ${liveApp('e')}
+        AND ${undelivered("(e.chain -> s.idx ->> 'workerId')", 'e.id', 's.idx')}`),
   ]);
 
   const current = await currentAlarmEpisodes(db, alarms, now);
@@ -161,6 +178,22 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
   for (const r of alarms) {
     if (!r.episodeStart || !current.has(alarmEpisodeKey(r.taskId, r.type, r.episodeStart))) continue;
     push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, at: r.at, chainIndex: r.chainIndex, event: 'ALARM' });
+  }
+  for (const r of taskless) {
+    if (r.type === 'delivery.stuck') {
+      // Its owner, not the task evaluator, decides currentness and exception time.
+      // Missing coverage is unavailable, never evidence of an actionable alarm.
+      let alarm;
+      try { alarm = await deliveryAlarmSnapshot(db as Prisma.TransactionClient, r.subjectWorkerId, now); }
+      catch (error) {
+        if (error instanceof Error && error.message === 'DELIVERY_WAIT_INCOMPLETE') continue;
+        throw error;
+      }
+      if (!alarm || alarm.eventId !== r.eventId || alarm.state !== 'ACTIVE') continue;
+    }
+    // post-limit.exceeded owns wall-clock scheduling; its live chain/ack gate is above.
+    push({workerId:r.workerId,subjectWorkerId:r.subjectWorkerId,taskId:null,title:null,
+      eventId:r.eventId,at:r.at,chainIndex:r.chainIndex,event:'ALARM'});
   }
   for (const list of out.values()) {
     list.sort((a, b) => a.at.getTime() - b.at.getTime() || a.eventId.localeCompare(b.eventId) || a.chainIndex - b.chainIndex);

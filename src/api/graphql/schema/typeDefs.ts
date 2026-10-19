@@ -12032,16 +12032,18 @@ export const typeDefs = `#graphql
 
   "#1708 — the task a TASK reason is for: shown only to a caller who may read the App's tasks (hrn:node:hadronmemory.com:specs:cor:agt:050:21)."
   type DueTaskReason {
-    "The task's id (for CHILD_FINISHED, the child's)."
-    id: ID!
+    "The task's id (for CHILD_FINISHED, the child's); null for a task-less ALARM."
+    id: ID
+    "The subject worker of a task-less ALARM; null for task-backed reasons."
+    subjectWorkerId: ID
     "The event delivered; acknowledging the wake records delivery on it."
     eventId: ID!
     "0, or the alarm chain position woken."
     chainIndex: Int!
     event: TaskWakeEvent!
-    "The task's title, for the nudge text."
-    title: String!
-    "A stable label for the reason, e.g. TASK:<id>:assigned."
+    "The task's title; null for a task-less ALARM. No fabricated task text."
+    title: String
+    "A stable label: TASK:<id>:<event>, or ALARM:<eventId>:<chainIndex> for a task-less alarm."
     ref: String!
   }
 

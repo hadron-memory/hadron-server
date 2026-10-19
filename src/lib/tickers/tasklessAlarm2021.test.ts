@@ -87,7 +87,9 @@ it('alarm acknowledgement stops pending delivery without pretending the subject 
  expect((await pendingTaskWakes(db,[rook.id],now())).get(rook.id)).toBeUndefined();
 });
 it('unknown null-task alarm types do not enter the closed delivery arm',async()=>{
- await db.agentTeamEvent.create({data:{appId:app.id,type:'unknown.alarm',severity:'alarm',subjectWorkerId:liam.id,chain:[{workerId:rook.id}]}});
+ const e=await db.agentTeamEvent.create({data:{appId:app.id,type:'unknown.alarm',severity:'alarm',subjectWorkerId:liam.id,chain:[{workerId:rook.id}]}});
+ const at=now();
+ await db.agentTeamAlarmSchedule.create({data:{eventId:e.id,chainIndex:0,dueAt:at,wokenAt:at}});
  expect((await pendingTaskWakes(db,[rook.id],now())).size).toBe(0);
 });
 it('a person-only fallback is visible and acknowledgeable but creates no worker push',async()=>{
@@ -124,4 +126,14 @@ it('the real MCP due-wakes handler labels a task-less alarm without task null or
  expect(answer).toContain(`alarm ${e.id}`);
  expect(answer).not.toContain('task null');
  expect(answer).not.toContain('TASK:null');
+});
+
+it.each(['missing-coverage','replaced-channel','retired-subject'])('task-less delivery refuses %s without deleting history',async mode=>{
+ const e=await deliveryAlarm();
+ const active=await db.workerDeliveryAlarmEpisode.findUniqueOrThrow({where:{workerId:liam.id}});
+ if(mode==='missing-coverage') await db.workerDeliveryWaitState.delete({where:{workerId:liam.id}});
+ if(mode==='replaced-channel') await db.channel.update({where:{id:active.channelId},data:{incarnation:2}});
+ if(mode==='retired-subject') await db.worker.update({where:{id:liam.id},data:{retiredAt:now()}});
+ expect((await pendingTaskWakes(db,[rook.id],now())).get(rook.id)).toBeUndefined();
+ expect(await db.agentTeamEvent.findUniqueOrThrow({where:{id:e.id}})).toEqual(e);
 });
