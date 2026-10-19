@@ -46,7 +46,7 @@ export type LoadedBatch = {
 
 export type LoadedBatchPage = { batches: LoadedBatch[]; nextAfter: string | null };
 
-type Row = { seq: number; content: string | null; data: unknown; created_at: Date; total_eligible: bigint };
+type Row = { seq: number; content: string | null; data: unknown; created_at: Date; oldest_posted_at: Date; total_eligible: bigint };
 
 const oneLine = (s: string): string => s.replace(/\r\n|[\r\n\u2028\u2029]/g, ' ');
 
@@ -168,6 +168,7 @@ export async function loadDeliveryBatches(args: DeliverySelectionArgs): Promise<
   for (const w of workers) {
     const messages: BatchMessage[] = [];
     let totalEligible = 0;
+    let oldestPostedAt: Date | null = null;
     const incarnationOf = new Map<string, number>();
     const markOf = new Map<string, number>();
     for (const ch of w.channels) {
@@ -176,11 +177,14 @@ export async function loadDeliveryBatches(args: DeliverySelectionArgs): Promise<
       const eligible = await eligibleMessages(args.ctx.db, ch);
       messages.push(...eligible.messages);
       totalEligible += eligible.totalEligible;
+      if (eligible.oldestPostedAt && (!oldestPostedAt || eligible.oldestPostedAt < oldestPostedAt)) {
+        oldestPostedAt = eligible.oldestPostedAt;
+      }
     }
     if (messages.length === 0) continue;
 
-    const oldest = messages.reduce((a, m) => (m.createdAt < a ? m.createdAt : a), messages[0]!.createdAt);
-    const timing = batchTiming(settings, { oldestPostedAt: oldest });
+    // Timing follows every eligible post, not only the seq-prefix body sample.
+    const timing = batchTiming(settings, { oldestPostedAt: oldestPostedAt! });
     if (timing.deliverAfter.getTime() > now.getTime()) continue;
 
     const out = renderBatch({ workerName: w.workerName, messages, totalEligible });
@@ -209,9 +213,9 @@ export async function loadDeliveryBatches(args: DeliverySelectionArgs): Promise<
 }
 
 /** The messages of a plaintext channel above `lo` that reach the worker, with their reply parent when it is in the channel. */
-async function eligibleMessages(db: Context['db'], ch: EligibleDeliveryChannel): Promise<{ messages: BatchMessage[]; totalEligible: number }> {
+async function eligibleMessages(db: Context['db'], ch: EligibleDeliveryChannel): Promise<{ messages: BatchMessage[]; totalEligible: number; oldestPostedAt: Date | null }> {
   const rows = await db.$queryRaw<Row[]>(Prisma.sql`
-    SELECT n.seq::int AS seq, n.content, n.data, n.created_at, COUNT(*) OVER() AS total_eligible
+    SELECT n.seq::int AS seq, n.content, n.data, n.created_at, MIN(n.created_at) OVER() AS oldest_posted_at, COUNT(*) OVER() AS total_eligible
     FROM nodes n WHERE ${ch.predicate}
     ORDER BY n.seq
     LIMIT ${ELIGIBLE_READ_LIMIT}`);
@@ -238,7 +242,7 @@ async function eligibleMessages(db: Context['db'], ch: EligibleDeliveryChannel):
       mentions: reachEnvelopeOf(r.data).mentions as string[],
     };
   });
-  return { messages, totalEligible: Number(rows[0]?.total_eligible ?? 0) };
+  return { messages, totalEligible: Number(rows[0]?.total_eligible ?? 0), oldestPostedAt: rows[0]?.oldest_posted_at ?? null };
 }
 
 const replyToOf = (data: unknown): number | null => {
