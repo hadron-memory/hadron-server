@@ -182,9 +182,9 @@ describe('R57 own-live-session batches', () => {
     const { createTestableMcpServer } = await import('../../../mcp/server.js');
     const server = createTestableMcpServer({ userId: manager.id, roles: ['READER'] } as never, { sessionId: `self-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
     const text = (r: any) => r.content[0].text;
-    const result = JSON.parse(text(await server.callTool('hadron_delivery_batches', { appRef: app.id, session: s.id })));
+    const result = JSON.parse(text(await server.callTool('hadron_team_chat_inbox', { appRef: app.id, session: s.id })));
     expect(result.batches.map((b: any) => b.workerId)).toEqual([kit.id]);
-    expect(text(await server.callTool('hadron_ack_delivery_batches', { batchIds: [result.batches[0].id], session: s.id }))).toBe('Acknowledged 1.');
+    expect(text(await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [result.batches[0].id], session: s.id }))).toBe('Acknowledged 1.');
   });
   it('a committed membership revocation denies even the same owned session', async () => {
     const s = await ownSession(); await postForBoth();
@@ -286,7 +286,7 @@ describe('R57 own-live-session batches', () => {
     const kitSession = await ownSession(); const rookSession = await ownSession({ workerId: rook.id }); await postForBoth();
     const { createTestableMcpServer } = await import('../../../mcp/server.js');
     const server = createTestableMcpServer({ userId: manager.id, sessionId: kitSession.id, roles: ['READER'] } as never, { sessionId: `mixed-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-    const results = await Promise.all([kitSession, rookSession].map(s => server.callTool('hadron_delivery_batches', { appRef: app.id, session: s.id })));
+    const results = await Promise.all([kitSession, rookSession].map(s => server.callTool('hadron_team_chat_inbox', { appRef: app.id, session: s.id })));
     expect(results.map((r: any) => JSON.parse(r.content[0].text).batches.map((b: any) => b.workerId))).toEqual([[kit.id], [rook.id]]);
   });
 
@@ -333,11 +333,11 @@ describe('R57 own-live-session batches', () => {
     const s = await ownSession(); await postForBoth();
     const { createTestableMcpServer } = await import('../../../mcp/server.js');
     const server = createTestableMcpServer({ userId: manager.id, roles: ['READER'], sessionBindingRefused: true } as never, { sessionId: `refused-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-    const result: any = await server.callTool('hadron_delivery_batches', { appRef: app.id, session: s.id });
+    const result: any = await server.callTool('hadron_team_chat_inbox', { appRef: app.id, session: s.id });
     expect(result.isError).not.toBe(true);
     const batches = JSON.parse(result.content[0].text).batches;
     expect(batches.map((b: any) => b.workerId)).toEqual([kit.id]);
-    const ack: any = await server.callTool('hadron_ack_delivery_batches', { batchIds: [batches[0].id], session: s.id });
+    const ack: any = await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [batches[0].id], session: s.id });
     expect(ack.isError).not.toBe(true);
     expect(ack.content[0].text).toBe('Acknowledged 1.');
   });

@@ -202,7 +202,7 @@ describe('acknowledging a batch', () => {
 });
 
 describe('the MCP twin carries the same text and the same gates', () => {
-  it('hadron_delivery_batches returns the GraphQL text byte for byte; hadron_ack_delivery_batches acknowledges it; a bare key is refused', async () => {
+  it('hadron_team_chat_inbox returns the GraphQL text byte for byte; hadron_team_chat_inbox_ack acknowledges it; a bare key is refused', async () => {
     const { createTestableMcpServer } = await import('../../../mcp/server.js');
     const mk = (k: { id: string }) =>
       createTestableMcpServer({ appId: app.id, appKeyId: k.id, organizationId: org.id, roles: [] } as never, { sessionId: `ak-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
@@ -210,12 +210,12 @@ describe('the MCP twin carries the same text and the same gates', () => {
     await postForBoth();
     const gql = (await read(hostKey)).batches[0];
     const server = mk(hostKey);
-    const mcp = JSON.parse(text(await server.callTool('hadron_delivery_batches', { appRef: app.id })));
+    const mcp = JSON.parse(text(await server.callTool('hadron_team_chat_inbox', { appRef: app.id })));
     expect(mcp.batches).toHaveLength(1);
     expect(mcp.batches[0].text).toBe(gql.text);
     expect(mcp.batches[0].worker).toBe('Kit');
-    expect(text(await server.callTool('hadron_ack_delivery_batches', { batchIds: [mcp.batches[0].id] }))).toBe('Acknowledged 1.');
-    expect(JSON.parse(text(await server.callTool('hadron_delivery_batches', { appRef: app.id }))).batches).toEqual([]);
-    expect(text(await mk(bareKey).callTool('hadron_delivery_batches', { appRef: app.id }))).toMatch(/^\[app_key_scope_required\]/);
+    expect(text(await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [mcp.batches[0].id] }))).toBe('Acknowledged 1.');
+    expect(JSON.parse(text(await server.callTool('hadron_team_chat_inbox', { appRef: app.id }))).batches).toEqual([]);
+    expect(text(await mk(bareKey).callTool('hadron_team_chat_inbox', { appRef: app.id }))).toMatch(/^\[app_key_scope_required\]/);
   });
 });

@@ -54,14 +54,14 @@ const FW = tickerFieldResolvers.WorkerWakeSettings;
 export const TICKER_WRITE_TOOLS = [
   'hadron_ticker_create', 'hadron_ticker_update', 'hadron_ticker_delete',
   'hadron_ticker_subscribe', 'hadron_ticker_unsubscribe', 'hadron_ack_wakes',
-  'hadron_delivery_settings_set', 'hadron_ack_delivery_batches',
+  'hadron_delivery_settings_set', 'hadron_team_chat_inbox_ack',
 ] as const;
 /**
  * Actor-neutral tools (listed in ACTOR_NEUTRAL_TOOLS): each takes its own
  * optional `session`. `hadron_worker_wake_settings` is a read until it is given
  * something to set, and then enforces the write rule itself.
  */
-export const TICKER_READ_TOOLS = ['hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get', 'hadron_delivery_batches'] as const;
+export const TICKER_READ_TOOLS = ['hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get', 'hadron_team_chat_inbox'] as const;
 
 function textResult(text: string, isError = false) {
   return { ...(isError ? { isError: true as const } : {}), content: [{ type: 'text' as const, text }] };
@@ -406,11 +406,11 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
 
   // #2017 (S1): thin over the same resolvers as GraphQL, so the text is byte-identical on every surface.
   server.tool(
-    'hadron_delivery_batches',
+    'hadron_team_chat_inbox',
     'Ready delivery batches (cor:agt:080:22, :26): your own worker through its live session, or workers registered on YOUR host with an App key ' +
       'holding attention:deliver AND host:operate. Returns JSON: each batch has `id` (a signed proof), `worker`, `text` (one line, ' +
       'written by the server: type it UNCHANGED), `deliverAfter`, `busyDeadline`, `ranges` and `overflow`. Reading moves nothing; ' +
-      'pass the ids to hadron_ack_delivery_batches after typing, within 15 minutes.',
+      'pass the ids to hadron_team_chat_inbox_ack after typing, within 15 minutes.',
     {
       appRef: z.string().describe('The team App (id or URN).'),
       workerRefs: z.array(z.string()).optional().describe('Only these workers. Omit for every worker on your host.'),
@@ -438,13 +438,13 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       }),
   );
   server.tool(
-    'hadron_ack_delivery_batches',
-    'Record that delivery batches were typed (cor:agt:080:16, :17). Pass the ids hadron_delivery_batches gave you. The delivered mark ' +
+    'hadron_team_chat_inbox_ack',
+    'Record that delivery batches were typed (cor:agt:080:16, :17). Pass the ids hadron_team_chat_inbox gave you. The delivered mark ' +
       'rises to the end of each rendered range; with `through` (ONE batch only) only the listed channels move, each to a rendered seq of ' +
       'its own. NEVER moves a read position. Only the receiving host key or own live session may acknowledge it, within 15 minutes; a stale, foreign or ' +
       'forged id is refused and nothing is written. A batch you do not acknowledge stays due.',
     {
-      batchIds: z.array(z.string()).describe('Batch ids from hadron_delivery_batches.'),
+      batchIds: z.array(z.string()).describe('Batch ids from hadron_team_chat_inbox.'),
       through: z.array(z.object({ channelId: z.string(), seq: z.number().int() })).optional().describe('Partial acknowledgement of a single batch.'),
       session: SESSION_WRITE,
     },
@@ -455,7 +455,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       };
       // A host key acts as itself and names no session; anyone else is a write and needs a session, like hadron_ack_wakes.
       if (appKeyCaller(ctxOf())) return readWakes(session, ack);
-      return write('hadron_ack_delivery_batches', session, ack);
+      return write('hadron_team_chat_inbox_ack', session, ack);
     },
   );
 
