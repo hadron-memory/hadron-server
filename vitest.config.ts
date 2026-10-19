@@ -9,8 +9,8 @@ export default defineConfig({
     // .claude/worktrees holds sibling agent worktrees — full repo copies whose
     // test files would otherwise be collected into THIS run (and race on the
     // shared hadron_test DB; see findings:parallel-vitest-shared-test-db).
-    // Disposable-stack regressions use node:test, not Vitest.
-    exclude: ['dist/**', '**/node_modules/**', '.claude/**', 'scripts/e2e/**'],
+    // Disposable-stack and passkey-spike regressions use node:test, not Vitest.
+    exclude: ['dist/**', '**/node_modules/**', '.claude/**', 'scripts/e2e/**', 'scripts/passkey-spike/**'],
     pool: 'forks',
     // Parallel by default: perWorkerDb.ts points each worker at its own cloned
     // DB (hadron_test_<VITEST_POOL_ID>), so files no longer race and can run

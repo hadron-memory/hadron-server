@@ -1,5 +1,6 @@
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
+import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { generateId } from '../../../lib/id.js';
 import { lockAncestorsForCreateMany, lockLocForWrite } from '../../../lib/nodeSubtreeLock.js';
 import {
@@ -26,7 +27,7 @@ import {
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
-import { applyPersonaTemplate } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables } from '../../../lib/personaDescription.js';
 import {
   evaluateEdgeCondition,
   userMessageFor,
@@ -102,6 +103,26 @@ async function chatWriteTx(
     },
     (tx) => fn(tx),
   );
+}
+
+/**
+ * The Agent's own identity bound into its template on the chat path (#2042, cor:dmo:150:08): a chat binds no worker,
+ * so `worker.name` falls back to the Agent's name, `worker.role` to its persona role, `worker.url` is the Agent's
+ * portal URL, and reports-to / signature / trailer are empty. The server calls no model in a chat (the client does),
+ * so `session.llmModel` has no value here and is empty.
+ */
+export function bindAgentPrompt(agent: { systemPrompt: string | null; name: string; urn: string; personaRole: string | null }): string {
+  const role = agent.personaRole ?? '';
+  return applyPlatformVariables(agent.systemPrompt ?? '', {
+    'worker.name': agent.name,
+    'worker.role': role,
+    'agent.name': agent.name,
+    'worker.reportsTo.name': '',
+    'worker.signature': '',
+    'worker.trailer': '',
+    'worker.url': portalUrlForUrn(agent.urn) ?? '',
+    'session.llmModel': '',
+  }, { name: agent.name, role });
 }
 
 export const chatMutations = {
@@ -701,7 +722,7 @@ export const chatMutations = {
       // Bind the Agent's own identity on the chat path. Worker briefings bind
       // the same template to the Worker's name and role instead.
       if (agent.systemPrompt) {
-        systemMessage = applyPersonaTemplate(agent.systemPrompt, agent.name, agent.personaRole ?? '') + '\n\n' + systemMessage;
+        systemMessage = bindAgentPrompt(agent) + '\n\n' + systemMessage;
       }
 
       return { chatId: chatLoc, systemMessage, tools, conversationName: convName, stageName: firstStage };
@@ -1048,7 +1069,7 @@ export const chatMutations = {
 
         // Rebind on each chat turn so edits to the Agent's prompt take effect.
         if (agent?.systemPrompt) {
-          systemMessage = applyPersonaTemplate(agent.systemPrompt, agent.name, agent.personaRole ?? '') + '\n\n' + systemMessage;
+          systemMessage = bindAgentPrompt(agent) + '\n\n' + systemMessage;
         }
 
         // Build tools from hierarchical extraction spec
@@ -1314,7 +1335,7 @@ export const chatMutations = {
           const encData = encryptNodeFields({ content: null, data: merged }, memEncInfo);
           await tx.node.update({
             where: { id: dataNode.id },
-            data: { data: (encData.data ?? null) as InputJsonValue },
+            data: { data: (encData.data ?? null) as InputJsonValue, updatedBy: ctx.userId ?? null },
           });
           // #1061 — folding extracted data into the memory's `data` node
           // rewrites a real node, so it is its own write.
@@ -1326,6 +1347,7 @@ export const chatMutations = {
             data: {
               id: dataNodeId, memoryId: chatNode.memoryId,
               loc: 'data', name: 'data', nodeType: 'info',
+              createdBy: ctx.userId ?? null, // cor:dmo:010:01 — submitting principal, independent of Worker lineage.
               data: (encNew.data ?? null) as InputJsonValue,
             },
           });
@@ -1611,6 +1633,7 @@ export const chatMutations = {
             loc: summaryLoc, name: summaryName,
             nodeType: 'abstract', content: encSummary.content ?? null, seq: messageCount + 1,
             tags: ['summary'],
+            createdBy: ctx.userId ?? null, // Supplied summary: attribute its submitter, not the chat creator.
           },
         });
         // No chat-root write: the summary is not a message.

@@ -21,6 +21,7 @@
  */
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
+import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { agentTaskFieldResolvers, taskError } from '../api/graphql/schema/resolvers.agentTask.js';
@@ -81,7 +82,7 @@ function textResult(text: string, isError = false) {
 /** A resolver refusal as `[<code>] <message>` plus its extensions; anything else is a server fault. */
 function refusal(e: unknown) {
   if (e instanceof GraphQLError) {
-    const { code, ...rest } = e.extensions ?? {};
+    const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'), true);
   }

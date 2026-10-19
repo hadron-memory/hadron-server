@@ -274,6 +274,7 @@ import { resolveSearchScope, canReadScope, resolveScopeByNameInApp, type SearchS
 // Spec 049 Phase 6 — the register block on hadron_whoami's bound rows.
 import { resolveRegister, renderDerivedBlocks } from '../lib/resolveRegister.js';
 import { attendeeMentionTokens } from '../lib/channelReadState.js';
+import { mentionReach } from '../lib/mentionReach.js';
 import {
   markOwnTeamChatRead,
   maybeAdvanceOwnChannelRead,
@@ -2128,7 +2129,7 @@ export function createMcpServerInstance(
     // #1707 — the team roster read (its own optional session).
     'hadron_team_roster',
     // #1747 — ticker reads (each takes its own optional session; wake settings enforces the write rule itself).
-    'hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes',
+    'hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get',
     // Per-connection selections and key handling: nothing authored.
     'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
     'hadron_unlock_memory', 'hadron_lock_memory',
@@ -8754,7 +8755,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
    * recover on its own.
    */
   async function bindReceipt(
-    session: { id: string; appId: string | null; workerId: string | null; agentId: string | null },
+    session: { id: string; appId: string | null; workerId: string | null; agentId: string | null; llmModel?: string | null },
     mcpCtx: Context,
   ): Promise<string> {
     // #1005: pin the session's App as this MCP session's active App.
@@ -8851,7 +8852,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // the stamps describe the text printed below (one agent read — no
         // parallel lookup that could race a template edit).
         const briefing = worker
-          ? await composeWorkerPrompt(mcpCtx, worker)
+          ? await composeWorkerPrompt(mcpCtx, worker, { llmModel: session.llmModel })
           : { text: null as string | null, renderedAt: null as Date | null, roleAgentUpdatedAt: null as Date | null };
         const prompt = briefing.text;
         // #1029: the previous stint's handoff, delivered with the briefing
@@ -8876,7 +8877,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           : null;
         const boundUrl = workerPortalUrl(boundUrn);
         workerLine =
-          `\nWorking as ${worker?.name ?? 'worker'} (${session.workerId}).` +
+          `\nWorking as ${worker?.name ?? 'worker'} (worker id: ${session.workerId}).` +
           (boundUrn ? `\n${boundUrn}` : '') +
           (boundUrl ? `\nURL: ${boundUrl}` : '') +
           // A worker whose agent carries no template and who has no override
@@ -8890,11 +8891,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           renderWorkerContinuity(continuity as RenderableContinuity | null);
       } catch {
         workerLine =
-          `\nWorking as worker ${session.workerId}.` +
+          `\nWorking as worker (worker id: ${session.workerId}).` +
           '\n\n(The boot briefing could not be rendered just now — the session IS started and bound. Retry with hadron_get_node on the role agent, or start again after ending this session; do NOT retry hadron_start_session, which would refuse WORKER_TAKEN.)';
       }
     }
-    return `${sharedConnectionNote}${workerLine}`;
+    // #1599: the session argument is never the adjacent worker identity.
+    const sessionLabel = session.workerId ? 'Worker session id' : 'Session id';
+    return `${sharedConnectionNote}\n${sessionLabel}: ${session.id} (pass as \`session\` to team tools)${workerLine}`;
   }
 
   // ── hadron_start_session ──────────────────────────────────────────────────────
@@ -9432,12 +9435,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // identifier cannot disagree.
         const url = workerPortalUrl(urn);
         return (
-          `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}\n` +
+          `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}${s.workerId ? ' (worker session id; pass as `session` to team tools)' : ' (session id)'}\n` +
           (s.endedAt ? `    ended: ${s.endedAt.toISOString()} · end reason: ${sessionEndReason(s)}\n` : '') +
           // The un-bound case is the one worth calling out: it is the shape in
           // which a team-chat post silently lands under the human's name.
           (worker
-            ? `    working as: ${worker.name}${worker.role ? ` (${worker.role})` : ''}${urn ? `\n    ${urn}` : ''}${url ? `\n    URL: ${url}` : ''}\n`
+            ? `    working as: ${worker.name}${worker.role ? ` (${worker.role})` : ''} (worker id: ${worker.id})${urn ? `\n    ${urn}` : ''}${url ? `\n    URL: ${url}` : ''}\n`
             : '    working as: nobody — this session is NOT bound to a worker, so anything it posts is attributed to you, not a teammate.\n') +
           (app ? `    app: ${app.name}\n` : '') +
           `    started: ${s.startedAt.toISOString()}${s.type ? ` · ${s.type}` : ''}` +
@@ -9921,7 +9924,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // A Worker never receives its own post, including a broadcast.
           if (message.authorWorkerId === watcher.workerId) return false;
           if (!watcher.mentionOnly) return true;
-          return message.mentions.some((mention) => watcher.mentionTokens.has(mention));
+          // #2020: its names, or a broadcast stamped at post time.
+          return mentionReach(message, [...watcher.mentionTokens]) !== null;
         });
         if (routes.length === 0) continue;
         const reply = message.replyToSeq != null ? ` (reply to #${message.replyToSeq})` : '';
@@ -10027,7 +10031,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       channel: z.string().describe('The Channel — its id, or its address (the chat root node URN hadron_list_channels prints). Copy one of those; a ref naming nothing reads as a Channel you may not see.'),
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
       beforeSeq: z.number().int().optional().describe('Page BACKWARD: only messages with seq strictly less than this, newest page of those. Ignores offset.'),
-      mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id) of the host App.'),
+      mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id) of the host App. For a worker this includes @all/@team broadcasts from an author who could wake everyone (decided at post time), and never its own posts.'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
       session: z.string().optional().describe('Your session id — passing it keeps that session alive (#1081).'),
@@ -10159,7 +10163,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     {
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
       beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),
-      mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id).'),
+      mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id). For a worker this includes @all/@team broadcasts from an author who could wake everyone (decided at post time), and never its own posts.'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
       session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. On an ordinary read, passing it keeps that session alive (#1081). Monitor mode uses it only as an App hint and does not heartbeat or wake the session.'),
@@ -10824,7 +10828,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // is otherwise stays behind the takeover refusal, which is a
             // deliberate act rather than a listing (hadron_list_workers' rule).
             (mine
-              ? `Your active session: ${mine.id} (since ${mine.startedAt.toISOString()})\n`
+              ? `Your active session: ${mine.id} (worker session id; pass as \`session\` to team tools; since ${mine.startedAt.toISOString()})\n`
               : '') +
             // Shown separately from the briefing, and labelled as the editable
             // part, so hadron_update_worker's replace semantics have something

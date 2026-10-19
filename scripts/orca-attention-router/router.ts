@@ -109,7 +109,7 @@ export function nudgeText(a: AttentionItem): string {
       ` LARGE GAP (unread span ${a.lastSeq - a.firstUnreadSeq} > ${LARGE_GAP_SPAN}): walk MENTIONS ONLY from your first unread to the head named here — every unread mention is on the path; the rest is history.` +
       ` CLI: \`hadron team chat read --mentions-me --since ${since} --before ${bound} --limit 200\`, then follow each page's prevBefore BACKWARD to your first unread — beforeSeq selects the NEWEST page under the bound, so page down to the floor and stop at an empty or floor page; MCP: \`hadron_team_chat_read\` with your session, \`sinceSeq=${since}\`, \`beforeSeq=${bound}\`, its mentions filter and limit 200, then re-call with \`beforeSeq\` = the smallest seq on your last page until the floor (MCP pages carry no prevBefore field).` +
       ` Then mark read through your OWN session at the highest seq actually delivered to you, never above #${a.lastSeq} (CLI: \`hadron team chat mark-read --through <that seq>\`; MCP: \`hadron_team_chat_mark_read\` — a mentions-filtered read never auto-marks).` +
-      ' An incomplete walk marks NOTHING; anything outside the walked bound — messages arriving now included — stays unread. If no mention needs action, mark read and finish silently — no chat post.' +
+      ' An incomplete walk marks NOTHING; anything outside the walked bound — messages arriving now included — stays unread. If no mention needs action, mark read and end with one short line (for example "read through #N, nothing in my lane"); do not post to team chat.' +
       ' (Orca attention router; counts as of send.)'
     );
   }
@@ -126,7 +126,7 @@ export function nudgeText(a: AttentionItem): string {
     head +
     `${from} ` +
     'Read team chat unfiltered with your own live session; if nothing needs action, ' +
-    "mark read and finish silently — no chat post or 'read/no-action' comment. (Orca attention router; counts as of send.)"
+    'mark read and end with one short line (for example "read through #N, nothing in my lane"); do not post to team chat. (Orca attention router; counts as of send.)'
   );
 }
 
@@ -146,7 +146,7 @@ export function livenessNudgeText(cursor: number, head: number): string {
     + `the team chat has moved past your read watermark (your cursor #${cursor} < head #${head}). `
     + `Catch up: read team chat unfiltered with your own live session — CLI: \`hadron team chat read --since ${cursor} --limit 200\` then follow nextSince; MCP: \`hadron_team_chat_read\` with your session and \`sinceSeq=${cursor}\` then the returned cursor — `
     + 'then mark read through your OWN session. '
-    + 'If nothing needs action, finish silently — no chat post. '
+    + 'If nothing needs action, end with one short line (for example "read through #N, nothing in my lane"); do not post to team chat. '
     + '(Orca attention router; liveness nudge; cursor and head as of send.)';
 }
 
@@ -915,13 +915,17 @@ export function provesIdle(
 const CODEX_PLACEHOLDERS = new Set(['Ask Codex to do anything']);
 
 /**
- * The suffix Claude Code's status line carries only while its composer is
- * EMPTY. Typing anything, a single space included, removes it; clearing the
- * composer restores it. Same in auto, manual, accept-edits and plan mode.
- * If Claude Code renames it, every Claude worker is held and the reason is
- * logged once: fail closed, loudly.
+ * Claude Code's permission-mode status line: ONE line under the composer box,
+ * `⏵⏵ <mode> (shift+tab to cycle)`, optionally followed by ` · <segment>`s.
+ * The `· ← for agents` suffix is TRANSIENT (only on the first screen after
+ * start): 9 of 12 live Claude terminals had none on 2026-10-18 (cli#907
+ * captures, bcabaf4), so keying empty on it held most Claude workers forever.
+ * The footer proves the screen shape; it cannot prove the composer is empty
+ * (Claude draws typed whitespace as nothing, and Orca blanks pending text in
+ * the tail), so the caller must ALSO see no `draft` from Orca. If Claude Code
+ * reshapes the line every Claude worker holds: fail closed.
  */
-const CLAUDE_EMPTY_HINT = '· ← for agents';
+const CLAUDE_MODE_FOOTER = /^⏵⏵ .+ \(shift\+tab to cycle\)( · .+)?$/;
 
 /** Collapse ASCII whitespace AND NBSP: Codex draws its prompt as `›` + U+00A0. */
 const squash = (s: string): string => s.replace(/[\s\u00a0]+/g, ' ').trim();
@@ -940,7 +944,7 @@ const squash = (s: string): string => s.replace(/[\s\u00a0]+/g, ' ').trim();
  *    `───` rules. Its first line must be the bare `❯` marker and every other
  *    line in it blank, so a multi-line draft is caught whatever it contains.
  *    And because typed WHITESPACE renders as nothing, the status line below
- *    the box must carry the empty-input hint (`CLAUDE_EMPTY_HINT`).
+ *    the box must sit over exactly one mode footer (`CLAUDE_MODE_FOOTER`).
  *  - Codex: the last column-0 `›` line shows the idle placeholder, and every
  *    line below it is footer (blank, `? for shortcuts`, or the `model · path`
  *    status line). Codex never draws pending text: real text shows only in
@@ -958,19 +962,17 @@ export function promptLineIsEmpty(lines: string[], agent: string): boolean {
     const close = rules[rules.length - 1];
     const box = lines.slice(rules[rules.length - 2] + 1, close);
     if (!(box.length > 0 && /^❯[\s\u00a0]*$/.test(box[0]) && box.slice(1).every((l) => squash(l) === ''))) return false;
-    // A box that LOOKS empty may hold whitespace (Chip #5756): Claude draws
-    // typed spaces as nothing. The status line's empty-input hint is the
-    // proof — `· ← for agents` shows exactly while the composer is empty, in
-    // every permission mode (live probe, 2026-10-01), since ← only switches
-    // agents when there is no text for it to move through. And the status
-    // line is the terminal's LAST content: Claude draws nothing below its
+    // A box that LOOKS empty may hold whitespace (Chip #5756) or text Orca
+    // blanked from the tail, so the caller also requires no Orca `draft`
+    // (promptIsEmptyFromTerm). Here the status line must be exactly ONE
+    // permission-mode footer. And it is the terminal's LAST content: Claude draws nothing below its
     // composer footer, so unexplained trailing content — a shell prompt after
     // `cat`ing a captured idle screen — fails here even though the box and
     // hint above it look perfect. The FIRST nonblank line below the closing
     // rule proved nothing about what sits at the terminal bottom (blind
     // review P2, #1823).
     const below = lines.slice(close + 1).map(squash).filter((l) => l !== '');
-    return below.length === 1 && below[0].endsWith(CLAUDE_EMPTY_HINT);
+    return below.length === 1 && CLAUDE_MODE_FOOTER.test(below[0]);
   }
   if (agent !== 'codex') return false;
   let at = -1;
@@ -1194,19 +1196,13 @@ export function promptIsEmpty(cfg: Config, handle: string, agent: string, run: R
 /** promptIsEmpty over an already-read screen (the untracked gate reads once). */
 export function promptIsEmptyFromTerm(terminal: Record<string, any> | undefined, agent: string): [boolean, string] {
   if (!terminal || terminal.source !== 'screen' || !Array.isArray(terminal.tail)) return [false, 'screen unreadable'];
-  // A draft pins the nudge only when the agent's own rendering cannot refute
-  // it. Claude Code draws typed-but-unsent text on its `❯` line (#1555), so a
-  // screen that proves the composer empty — bare `❯` box plus the
-  // `· ← for agents` hint (#5756) — REFUTES the draft: Orca's draft state was
-  // observed twice on 2026-10-05 carrying text no client showed, pinning
-  // workers for hours. Codex renders its composer empty while text is pending
-  // (the draft is the ONLY signal there), so its draft stays authoritative.
+  // Any draft Orca reports pins the nudge, for both agents. Orca blanks the
+  // composer text in the tail and carries it in `draft` (cli#907 captures,
+  // bcabaf4: c02, c09, x02, x04), so the screen can no longer refute a draft.
+  // This retires the earlier rule that let a Claude screen overrule a stale
+  // draft, which depended on the transient `· ← for agents` suffix.
   const draft = terminal.draft;
-  if (draft !== undefined && draft !== null && draft !== '') {
-    if (agent !== 'claude') return [false, 'text in the composer draft'];
-    if (!promptLineIsEmpty(terminal.tail as string[], agent)) return [false, 'text in the composer draft'];
-    return [true, 'stale draft (screen proves the composer empty)'];
-  }
+  if (draft !== undefined && draft !== null && draft !== '') return [false, 'text in the composer draft'];
   return promptLineIsEmpty(terminal.tail as string[], agent) ? [true, ''] : [false, 'text in the prompt'];
 }
 

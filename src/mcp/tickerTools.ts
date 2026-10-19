@@ -18,6 +18,7 @@
 import { appKeyCaller } from '../lib/appKeyScopes/scopes.js';
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
+import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { tickerFieldResolvers } from '../api/graphql/schema/resolvers.ticker.js';
@@ -29,12 +30,14 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 type Row = Record<string, any>;
 type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
 const Q = resolvers.Query as unknown as {
+  appDeliverySettings: Resolver<{ appRef: string }, Row>;
   tickers: Resolver<{ appRef: string }, Row[]>;
   ticker: Resolver<{ ref: string }, Row | null>;
   workerWakeSettings: Resolver<{ workerRef: string }, Row>;
   dueWakes: Resolver<{ appRef: string; workerRefs?: string[]; first?: number; after?: string }, Row>;
 };
 const M = resolvers.Mutation as unknown as {
+  setAppDeliverySettings: Resolver<{ appRef: string; input: unknown }, Row>;
   createTicker: Resolver<{ appRef: string; input: Row }, Row>;
   updateTicker: Resolver<{ ref: string; input: Row }, Row>;
   deleteTicker: Resolver<{ ref: string }, boolean>;
@@ -50,13 +53,14 @@ const FW = tickerFieldResolvers.WorkerWakeSettings;
 export const TICKER_WRITE_TOOLS = [
   'hadron_ticker_create', 'hadron_ticker_update', 'hadron_ticker_delete',
   'hadron_ticker_subscribe', 'hadron_ticker_unsubscribe', 'hadron_ack_wakes',
+  'hadron_delivery_settings_set',
 ] as const;
 /**
  * Actor-neutral tools (listed in ACTOR_NEUTRAL_TOOLS): each takes its own
  * optional `session`. `hadron_worker_wake_settings` is a read until it is given
  * something to set, and then enforces the write rule itself.
  */
-export const TICKER_READ_TOOLS = ['hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes'] as const;
+export const TICKER_READ_TOOLS = ['hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get'] as const;
 
 function textResult(text: string, isError = false) {
   return { ...(isError ? { isError: true as const } : {}), content: [{ type: 'text' as const, text }] };
@@ -65,7 +69,7 @@ function textResult(text: string, isError = false) {
 /** A resolver refusal as `[<code>] <message>` plus its extensions; anything else is a server fault. */
 function refusal(e: unknown) {
   if (e instanceof GraphQLError) {
-    const { code, ...rest } = e.extensions ?? {};
+    const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'), true);
   }
@@ -90,7 +94,7 @@ async function renderTicker(t: Row, ctx: Context): Promise<string> {
   }
   const quiet = t.quietHours ? `quiet hours ${t.quietHours.timezone} (${t.quietHours.windows.length} window${t.quietHours.windows.length === 1 ? '' : 's'})` : null;
   return [
-    `- ${t.name} · ${urn ?? t.id} · every ${t.cadenceSeconds}s · ${t.enabled ? 'enabled' : 'disabled'} · relevance ${t.relevance}`,
+    `- ${t.name} · ${urn ?? t.id} · every ${t.cadenceSeconds}s · ${t.enabled ? 'enabled' : 'disabled'} · relevance ${t.relevance}· reasons ${(t.reasons as string[]).map((x) => x.toLowerCase().replace(/_/g, '-')).join('+')}`,
     `  anchor ${iso(t.anchorAt)}${quiet ? ` · ${quiet}` : ''}${readable.length ? ` · ${readable.length} channel(s)` : ''}`,
     `  owner ${owner ? owner.name : 'unknown'} · subscribers: ${names.length ? names.join(', ') : 'none'}${subs.hasNextPage ? ' (more)' : ''}`,
   ].join('\n');
@@ -191,6 +195,30 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     }
   }
 
+  // #2025: thin over the shared manager transaction; cadence/window changes affect tickers too.
+  server.tool(
+    'hadron_delivery_settings_get',
+    'Read an App’s delivery settings as a participant (cor:agt:080:05). The batching window is also the ticker cadence floor. Standby is not effective until S7.',
+    { appRef: z.string().describe('The App id or URN.'), session: SESSION_READ },
+    async ({ appRef, session }) => read(session, async (ctx) => JSON.stringify(await Q.appDeliverySettings({}, { appRef }, ctx))),
+  );
+  server.tool(
+    'hadron_delivery_settings_set',
+    'Change delivery settings as the human App manager (cor:agt:080:19). Omitted preserves; null and unknown settings refuse atomically. The batching window changes ticker cadence too. Standby enabling is unavailable until S7.',
+    {
+      appRef: z.string().describe('The App id or URN.'),
+      input: z.object({
+        batchWindowSeconds: z.number().nullable().optional().describe('The shared cadence floor/window in seconds; existing ticker limits apply.'),
+        busyDelaySeconds: z.number().nullable().optional().describe('Whole seconds 1..86400, Proposed bounds.'),
+        stuckWindowSeconds: z.number().nullable().optional().describe('Whole seconds 1..604800 and greater than busy delay + window, Proposed bounds/relation.'),
+        standbyEnabled: z.boolean().nullable().optional().describe('False clears; true is refused until S7 behavior ships.'),
+      }).passthrough().describe('Atomic patch. Unknown fields are refused by the shared resolver, never silently removed.'),
+      session: SESSION_WRITE,
+    },
+    async ({ appRef, input, session }) => write('hadron_delivery_settings_set', session, async (ctx) =>
+      JSON.stringify(await M.setAppDeliverySettings({}, { appRef, input }, ctx))),
+  );
+
   server.tool(
     'hadron_ticker_list',
     'List the live tickers of a team App, with their cadence, owner and subscribers (cor:agt:080). A ticker is a named, ' +
@@ -218,6 +246,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       quietHours: quietHours.optional(),
       channelIds: z.array(z.string()).optional().describe('Channels whose unread can wake a subscriber. Not a grant. Omit for every channel the subscriber watches.'),
       relevance: z.enum(['ALL', 'MENTIONS']).optional().describe('Default ALL.'),
+      reasons: z.array(z.enum(['read-team-channel', 'every-tick'])).min(1).optional().describe('Why it fires (cor:agt:080:10). Default [read-team-channel]: only when there is relevant unread. every-tick fires on every tick; the floor, daily budget, pause and dormancy still apply. Never empty.'),
       enabled: z.boolean().optional().describe('Default true.'),
       session: SESSION_WRITE,
     },
@@ -242,6 +271,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       channelIds: z.array(z.string()).optional(),
       clearChannels: z.boolean().optional(),
       relevance: z.enum(['ALL', 'MENTIONS']).optional(),
+      reasons: z.array(z.enum(['read-team-channel', 'every-tick'])).min(1).optional(),
       enabled: z.boolean().optional(),
       session: SESSION_WRITE,
     },

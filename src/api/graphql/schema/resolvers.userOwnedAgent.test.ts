@@ -356,6 +356,8 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
   });
 
   it("the stored key cannot be moved: config set/update/test stay owner-only on a user-owned Agent (Rook P2-1)", async () => {
+    // #1882: the clear rechecks live platform authority, not only the ctx claim.
+    await db.user.update({ where: { id: otherId }, data: { roles: ['ADMIN'] } });
     const agent = await rogueAgent();
     const cfg = await db.aiServiceConfig.create({
       data: {

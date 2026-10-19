@@ -1,0 +1,27 @@
+{
+ "id": "scratch",
+ "ok": true,
+ "result": {
+  "terminal": {
+   "handle": "term_00000000-0000-0000-0000-000000000000",
+   "status": "running",
+   "tail": [
+    " ▐▛███▛█   Claude Code v2.1.303",
+    "▝▜██████▀  Sonnet 5.5 · Claude Max",
+    " ▝▝   ▝▝   ~/orca/workspaces/hadron-cli/joshua-907-scratch",
+    "                                                                                                    ◐ medium · /effort",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "❯",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
+   ],
+   "truncated": false,
+   "limited": false,
+   "oldestCursor": "0",
+   "nextCursor": "14",
+   "latestCursor": "14",
+   "returnedLineCount": 8,
+   "source": "screen"
+  }
+ }
+}
