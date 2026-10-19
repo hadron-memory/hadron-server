@@ -54,6 +54,7 @@
  */
 
 import { assertBootPromptWriteAllowed } from './bootPrompt.js';
+import { resyncDerivedIncludesForNodes } from './includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from './nodeRoleWriters.js';
 import { COMMENT_NODE_TYPE, COMMENTABLE_CLASSES, commentError, commentGovernedError } from './comments/index.js';
 import { decisionContainedError, isDecisionFamilyRole, refuseUnderDecisionLog } from './decisions/index.js';
@@ -659,6 +660,13 @@ export async function moveNodeSubtree(
     return result;
   }
 
+  // #2040 — a moved node's derived INCLUDE edges are re-derived in the memory it
+  // now lives in (a same-memory loc tag points elsewhere after a cross-memory
+  // move). They are dropped here, not re-homed: the governed-edge trigger forbids
+  // rewriting them, and their loc is id-derived.
+  await tx.edge.deleteMany({ where: { governedKind: 'INCLUDE', sourceId: { in: [...movedIds] } } });
+  await resyncDerivedIncludesForNodes(tx, [...movedIds]);
+
   // Read the destination AFTER the rows and NODE aliases have moved. A live
   // occupant has precedence over aliases, and an alias to a node newly moved
   // into this memory can now resolve. Both cases are missed by a pre-move map.
@@ -737,7 +745,8 @@ export async function moveNodeSubtree(
   // memoryId (their source stayed) — they simply become cross-memory edges,
   // gated at read time by #783.
   const outgoing = await tx.edge.findMany({
-    where: { deletedAt: null, sourceId: { in: [...movedIds] } },
+    // INCLUDE edges (#2040) were re-derived above and keep their id-derived loc.
+    where: { deletedAt: null, sourceId: { in: [...movedIds] }, OR: [{ governedKind: null }, { governedKind: { not: 'INCLUDE' } }] },
   });
   if (outgoing.length === 0) return result;
 

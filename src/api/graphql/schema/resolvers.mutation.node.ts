@@ -153,6 +153,7 @@ import {
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
+import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 
 /**
@@ -161,6 +162,9 @@ import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '..
  */
 async function refuseGovernedEdge(tx: Pick<Prisma.TransactionClient, 'edge'>, edgeId: string): Promise<void> {
   const edge = await tx.edge.findUnique({ where: { id: edgeId }, select: { governedKind: true } });
+  if (edge?.governedKind === 'INCLUDE') {
+    throw includeRefusal('INCLUDE_EDGE_DERIVED', 'This edge is derived from an include tag in the source node\'s content; edit that content instead.');
+  }
   if (edge?.governedKind) throw commentGovernedError('edge', 'edits');
 }
 
@@ -910,6 +914,24 @@ export async function writeNodeCore(
           ...inlineEdgeTargets.map((target) => target.memoryId),
         ]);
       }
+      // #2040 — include tags are checked and their derived edges synced in the
+      // writer's own transaction, on the plaintext the caller supplied. A
+      // refusal throws, so the content, revision and edges roll back together.
+      const readableForIncludes = typeof input.content === 'string' && input.content.includes('{{>')
+        ? await getAccessibleMemoryIds(ctx)
+        : null;
+      async function finalizeNodeWrite<T extends { id: string; loc: string; memoryId: string }>(
+        tx: Prisma.TransactionClient,
+        writtenNode: T,
+      ): Promise<T> {
+        if (input.content !== undefined) {
+          const tags = await assertIncludesWritable(tx, writtenNode, input.content, readableForIncludes);
+          const result = await replaceInlineEdges(tx, writtenNode);
+          await syncDerivedIncludesEdges(tx, writtenNode, tags, readableForIncludes);
+          return result;
+        }
+        return replaceInlineEdges(tx, writtenNode);
+      }
       async function replaceInlineEdges<T extends { id: string; loc: string; memoryId: string }>(
         tx: Prisma.TransactionClient,
         writtenNode: T,
@@ -933,7 +955,9 @@ export async function writeNodeCore(
           });
         }
 
-        await tx.edge.deleteMany({ where: { sourceId: writtenNode.id } });
+        // Derived INCLUDE edges (#2040) belong to the content writer, not the
+        // client's edge list: they survive an inline-edge replacement.
+        await tx.edge.deleteMany({ where: { sourceId: writtenNode.id, governedKind: null } });
         await tx.pendingEdge.deleteMany({ where: { sourceId: writtenNode.id } });
         if (resolvedEdges.length > 0) {
           const { count } = await tx.edge.createMany({
@@ -1287,7 +1311,7 @@ export async function writeNodeCore(
                   deletedAt: null,
                 };
             const updated = await tx.node.update({ where, data, include });
-            return { conflict: false, node: await replaceInlineEdges(tx, updated) };
+            return { conflict: false, node: await finalizeNodeWrite(tx, updated) };
           });
           if (result.conflict) {
             throw new GraphQLError(
@@ -1568,7 +1592,7 @@ export async function writeNodeCore(
             // #1606 — restoring a target restores the threads its soft delete
             // took (cause TARGET), never ones an admin deleted.
             if (reviving) await restoreThreadsOfTargets(tx, [upserted.id]);
-            return replaceInlineEdges(tx, upserted);
+            return finalizeNodeWrite(tx, upserted);
           });
         }
       } catch (e) {
@@ -2759,6 +2783,7 @@ export const nodeMutations = {
         // replacement was computed from a read taken BEFORE this lock, so a row
         // whose tracked state changed since then refuses the whole batch
         // (all-or-nothing, as below) instead of overwriting the newer write.
+        let readableForIncludes: string[] | null = null;
         const planMemory = new Map(plans.map((p) => [p.raw.id, p.raw.memoryId]));
         // #1753 — memory rows BEFORE node rows (promotion's order). Holding the
         // memory state through the batch still stops a pre-flip plan writing
@@ -2862,6 +2887,14 @@ export const nodeMutations = {
 
           Object.assign(data, clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
+          // #2040 — a replace that rewrites content re-checks its include tags; a
+          // refusal throws and rolls the whole batch back with it.
+          if (p.contentChanged) {
+            const text = p.plaintext.content;
+            readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+            const tags = await assertIncludesWritable(tx, raw, text, readableForIncludes);
+            await syncDerivedIncludesEdges(tx, raw, tags, readableForIncludes);
+          }
         }
       }));
 
@@ -4055,6 +4088,14 @@ export const nodeMutations = {
               ...placeholderFillPatch(lockedTarget, 'content' in changed ? changed.content : undefined),
             },
           });
+          // #2040 — the folded plaintext is re-checked for include tags (a merge
+          // can combine two nodes' tags into a cycle); a refusal rolls it back.
+          if ('content' in changed) {
+            const text = changed.content as string | null;
+            const readable = text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+            const tags = await assertIncludesWritable(tx, target, text, readable);
+            await syncDerivedIncludesEdges(tx, target, tags, readable);
+          }
         }
 
         if (fields.has('EDGES')) {
@@ -4566,6 +4607,14 @@ export const nodeMutations = {
           data: writeData,
           include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
         });
+        // #2040 — the restored text is re-checked: an old revision can hold a tag
+        // that would now make a cycle. A refusal rolls the restore back.
+        {
+          const text = plaintextFields.content as string | null;
+          const readable = text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+          const tags = await assertIncludesWritable(tx, current, text, readable);
+          await syncDerivedIncludesEdges(tx, current, tags, readable);
+        }
         return { restored, restoredPlaintext: plaintextFields, destinationEncrypted: selectedDestination.isEncrypted };
       });
       // 033 — re-embed the restored content (revision snapshots are plaintext on

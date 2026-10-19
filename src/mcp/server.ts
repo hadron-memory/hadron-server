@@ -219,6 +219,7 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
+import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
@@ -1009,6 +1010,22 @@ async function lockOutgoingEdgeMemories(
   ]);
 }
 
+/**
+ * #2040 — include tags: refuse a bad one and sync the derived INCLUDE edges, in
+ * the writer's own transaction on the plaintext it holds, so a refusal rolls
+ * back the content, revision and edges together.
+ */
+async function applyIncludesInTransaction(
+  tx: Prisma.TransactionClient,
+  node: { id: string; loc: string; memoryId: string },
+  plaintextContent: string | null,
+  auth: AuthContext,
+): Promise<void> {
+  const readable = plaintextContent?.includes('{{>') ? await getAccessibleMemoryIds(db, auth) : null;
+  const tags = await assertIncludesWritable(tx, node, plaintextContent, readable);
+  await syncDerivedIncludesEdges(tx, node, tags, readable);
+}
+
 async function replaceOutgoingEdgesInTransaction(
   tx: Prisma.TransactionClient,
   args: {
@@ -1034,7 +1051,8 @@ async function replaceOutgoingEdgesInTransaction(
   const missing = args.resolved.find((edge) => !live.has(edge.targetNodeId));
   if (missing) return `Edge target not found: "${missing.targetNodeId}"`;
 
-  await tx.edge.deleteMany({ where: { sourceId: args.sourceNodeId } });
+  // Derived INCLUDE edges (#2040) belong to the content writer.
+  await tx.edge.deleteMany({ where: { sourceId: args.sourceNodeId, governedKind: null } });
   await tx.pendingEdge.deleteMany({ where: { sourceId: args.sourceNodeId } });
   if (args.resolved.length > 0) {
     const { count } = await tx.edge.createMany({
@@ -4063,6 +4081,7 @@ export function createMcpServerInstance(
             ...upsertArgs,
             update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
+          await applyIncludesInTransaction(tx, row, content, auth);
           return row.id;
         });
       } catch (e) {
@@ -4070,6 +4089,8 @@ export function createMcpServerInstance(
         if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        const includeText = includeRefusalText(e);
+        if (includeText) return textResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return textResult(writerRefusal);
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
@@ -6315,6 +6336,7 @@ export function createMcpServerInstance(
             });
             if (edgeError) throw new InlineEdgeEndpointError(edgeError);
           }
+          await applyIncludesInTransaction(tx, written, content ?? null, auth);
           return written;
         });
       } catch (e) {
@@ -6323,6 +6345,8 @@ export function createMcpServerInstance(
           return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
         if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+        const includeText = includeRefusalText(e);
+        if (includeText) return textResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return textResult(writerRefusal);
         if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
@@ -6748,6 +6772,7 @@ export function createMcpServerInstance(
               });
               if (edgeError) throw new InlineEdgeEndpointError(edgeError);
             }
+            if (content !== undefined) await applyIncludesInTransaction(tx, updated, content, auth);
           });
         } catch (e) {
           if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
@@ -6758,7 +6783,9 @@ export function createMcpServerInstance(
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
           if (e instanceof EdgeLocConflictError) return textResult(e.message);
           if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
-          const writerRefusal = roleWriterRefusalText(e);
+          const includeText = includeRefusalText(e);
+        if (includeText) return textResult(includeText);
+        const writerRefusal = roleWriterRefusalText(e);
           if (writerRefusal) return textResult(writerRefusal);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
             return textResult(`[spec_minted_permanent] ${e.message}`);
@@ -8007,6 +8034,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (e instanceof SubtreeMoveSourceChangedError) {
           return textResult('The node was moved concurrently; re-read it and retry.');
         }
+        const includeText = includeRefusalText(e);
+        if (includeText) return textResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return textResult(writerRefusal);
         if (

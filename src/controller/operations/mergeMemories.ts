@@ -1,4 +1,5 @@
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptMergeCollisions, assertNoBootPromptRows, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
+import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
@@ -941,6 +942,11 @@ async function runMerge(
     progress.edgesDroppedCount += batch.dropped;
   }
 
+  // Derived INCLUDE edges (#2040) are not relocated (their loc is id-derived and
+  // the governed-edge trigger forbids rewriting them): drop the source memory's,
+  // then re-derive them for the target's nodes once Phase 3 has settled.
+  await db.edge.deleteMany({ where: { memoryId: sourceMemoryId, governedKind: 'INCLUDE' } });
+
   // === Phase 3: relocate the surviving source-memory edges into the target. ===
   // After Phases 2-3 the source memory holds no live nodes, so every edge
   // still denormalized to it is sourced from a relocated node (its endpoints
@@ -979,6 +985,20 @@ async function runMerge(
     progress.edgesMovedCount += move.length;
     progress.edgesDroppedCount += drop.length;
     if (edges.length < batchSize) break;
+  }
+
+  {
+    // #2040 — re-derive include edges for the target's nodes that carry tags.
+    // Encrypted content is ciphertext and never matches; those wait for their
+    // next content write.
+    const tagged = await db.node.findMany({
+      where: { memoryId: targetMemoryId, deletedAt: null, content: { contains: '{{>' } },
+      select: { id: true },
+    });
+    for (let i = 0; i < tagged.length; i += batchSize) {
+      const ids = tagged.slice(i, i + batchSize).map((n) => n.id);
+      await db.$transaction((tx) => resyncDerivedIncludesForNodes(tx, ids), BATCH_TX_OPTS);
+    }
   }
 
   // === Final: soft-delete the now-empty source memory when asked. ===
