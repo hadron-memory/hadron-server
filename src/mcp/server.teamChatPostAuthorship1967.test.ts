@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1967 — hadron_team_chat_post never silently records the HUMAN as the author (cor:agt:020:03 rev 55,
  * cor:agt:020:04 rev 22; Holger's ruling #12681: parity with hadron_channel_post, #1697).
@@ -61,15 +62,15 @@ beforeEach(async () => {
   } });
   teamChannelId = (await ensureChannelWithRoot(db, { memoryId: shared.id, loc: 'chats:team', name: 'team', createdBy: user.id, asDefaultOfAppId: app.id })).channel.id;
   opsChannelId = (await ensureChannelWithRoot(db, { memoryId: shared.id, loc: 'chats:ops', name: 'ops', createdBy: user.id })).channel.id;
-  const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
-  await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+  const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
   // Another App of the same org, with a worker: the cross-App arm. Its driver is either the org admin (who may
   // write Team's host memory) or a stranger who belongs to Other only (who may not).
   const other = await db.app.create({ data: { id: generateId(), name: 'Other', urn: 'authorship1967.example:other', organizationId: org.id } });
   await db.appAgent.create({ data: { appId: other.id, agentId: agent.id } });
   await db.appMember.create({ data: { appId: other.id, userId: user.id, role: 'owner' } });
   await db.appMember.create({ data: { appId: other.id, userId: stranger.id, role: 'member' } });
-  await db.worker.create({ data: { id: generateId(), appId: other.id, agentId: agent.id, name: 'Ola', slug: 'ola' } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: other.id, agentId: agent.id, name: 'Ola', slug: 'ola' } });
   headerSessionId = generateId();
   await db.session.create({
     data: { id: headerSessionId, appId: app.id, userId: user.id, workerId: worker.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() },

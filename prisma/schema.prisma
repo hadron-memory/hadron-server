@@ -3677,6 +3677,10 @@ model Worker {
   /// (cor:agt:020:01) — nullable; two castings of one agent share the
   /// template and nothing else.
   promptOverride String?   @map("prompt_override")
+  /// Per-worker signature template, delivered through S4 (cor:agt:040:04).
+  signature      String
+  /// Per-worker commit trailer template, delivered through S4 (cor:agt:040:04).
+  trailer        String
   /// #974 — the worker-scoped working memory in the App's container
   /// (`hrn:mem:<owner>:<app-slug>:<worker-slug>`), provisioned at cast.
   /// Identity is THIS column, never the memory's URN (the #723 rule).

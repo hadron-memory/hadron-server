@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1705 — the agent-task tools on the MCP surface.
  *
@@ -57,8 +58,8 @@ beforeEach(async () => {
   agentId = agent.id;
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.id.toLowerCase()}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
-  anne = await db.worker.create({ data: { appId: app.id, agentId, name: 'Anne', slug: 'anne' }, select: { id: true } });
-  rook = await db.worker.create({ data: { appId: app.id, agentId, name: 'Rook', slug: 'rook' }, select: { id: true } });
+  anne = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Anne', slug: 'anne' }, select: { id: true } });
+  rook = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Rook', slug: 'rook' }, select: { id: true } });
 });
 
 describe('agent-task tools: who acts', () => {

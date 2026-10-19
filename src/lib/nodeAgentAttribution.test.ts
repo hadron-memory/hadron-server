@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /** #1610: the Worker / Agent behind node writes, beside the user. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Request } from 'express';
@@ -44,7 +45,7 @@ beforeEach(async () => {
   memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'attribution' }, as());
   agent = await db.agent.create({ data: { id: generateId(), urn: 'attr.example:server-engineer', name: 'server-engineer', organizationId: org.id } });
   const app = await db.app.create({ data: { id: generateId(), name: 'Team', urn: 'attr.example:team', organizationId: org.id } });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
   session = await db.session.create({
     data: { id: generateId(), appId: app.id, userId: user.id, workerId: worker.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() },
   });
@@ -239,7 +240,7 @@ describe('#1658 review cycle', () => {
   });
 
   it('keeps concurrent requests apart: each write records its own actor', async () => {
-    const other = await db.worker.create({ data: { id: generateId(), appId: (await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).appId, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+    const other = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: (await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).appId, agentId: agent.id, name: 'Iris', slug: 'iris' } });
     const [a, b] = await Promise.all([
       runAsActor(W(), async () => { await new Promise((r) => setTimeout(r, 20)); return makeNode('c:1'); }),
       runAsActor({ workerId: other.id, agentId: agent.id }, () => makeNode('c:2')),

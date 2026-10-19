@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #980 — `Session.worker`: the nested Worker read for session-list attribution.
  *
@@ -75,7 +76,7 @@ beforeEach(async () => {
   });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   worker = await db.worker.create({
-    data: { appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', role: 'backend-engineer' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', role: 'backend-engineer' },
   });
   session = await db.session.create({
     data: { id: generateId(), appId: app.id, userId: member.id, agentId: agent.id, workerId: worker.id },

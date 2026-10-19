@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /** #1353 — loss-safe compact attention, worker-owned reads and switchover. */
 
 import { createHmac } from 'node:crypto';
@@ -121,7 +122,7 @@ async function post(body: string, options: { authorWorkerId?: string; mentions?:
 
 async function addWorker(name: string) {
   const made = await db.worker.create({
-    data: { id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase() },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase() },
   });
   await db.registerEntry.create({
     data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: made.id, role: 'BOTH' },
@@ -156,7 +157,7 @@ beforeEach(async () => {
       sharedMemoryOfAgentId: agent.id,
     },
   });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
   const made = await ensureChannelWithRoot(db, {
     memoryId: memory.id,
     loc: 'chats:team',
