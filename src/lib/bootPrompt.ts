@@ -37,6 +37,22 @@ export function withCompileWrite<T>(fn: () => Promise<T>): Promise<T> {
   return compileScope.run(true, fn);
 }
 
+/**
+ * The worker session behind a git sync. The sync itself runs as the system
+ * (#1610: its revisions name `system:github-sync`), so the requester is carried
+ * here for guard B alone.
+ */
+const syncCallerScope = new AsyncLocalStorage<{ workerId: string | null }>();
+
+/** Run a sync as the system while remembering which worker session asked for it. */
+export function withSyncCaller<T>(workerId: string | null, fn: () => Promise<T>): Promise<T> {
+  return syncCallerScope.run({ workerId }, fn);
+}
+
+function boundWorkerId(): string | null {
+  return currentActor().workerId ?? syncCallerScope.getStore()?.workerId ?? null;
+}
+
 function inCompileScope(): boolean {
   return compileScope.getStore() === true;
 }
@@ -86,7 +102,7 @@ export function assertNoWorkerSessionBootPromptWrite(
   op: BootPromptOp,
 ): void {
   if (inCompileScope()) return;
-  if (!currentActor().workerId) return;
+  if (!boundWorkerId()) return;
   if (isBootPromptRole(priorRole) || isBootPromptRole(nextRole === undefined ? priorRole : nextRole)) {
     throw bootPromptWorkerSessionError(op);
   }
@@ -120,4 +136,22 @@ export async function assertNoBootPromptRows(db: NodeReader, nodeIds: string[], 
     select: { nodeType: true, role: true },
   });
   for (const r of rows) assertBootPromptWriteAllowed(r, { nodeType: undefined, role: undefined }, op);
+}
+
+/**
+ * A worker session's whole-memory copy or merge: refused when the source holds
+ * any live boot-prompt node, source or compiled (cor:agt:040:11). A no-op for
+ * any other caller, whose copy simply excludes compiled nodes.
+ */
+export async function assertNoBootPromptRowsForWorkerSession(
+  db: NodeReader & { node: { findFirst: (args: any) => Promise<unknown> } },
+  memoryId: string,
+  op: BootPromptOp,
+): Promise<void> {
+  if (!boundWorkerId() || inCompileScope()) return;
+  const hit = await db.node.findFirst({
+    where: { memoryId, deletedAt: null, OR: [{ nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE }, BOOT_PROMPT_ROLE_WHERE] },
+    select: { id: true },
+  });
+  if (hit) throw bootPromptWorkerSessionError(op);
 }

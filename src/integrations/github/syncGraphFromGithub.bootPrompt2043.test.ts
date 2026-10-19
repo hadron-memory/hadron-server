@@ -1,0 +1,70 @@
+/** #2043: git sync never writes a compiled boot prompt, and a worker session's sync never touches a boot prompt. */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'path';
+import { mkdirSync, writeFileSync } from 'fs';
+import { db } from '../db/client.js';
+import { cleanDb, createDbOrgAndGraph, makeTmpDir } from '../../test/helpers.js';
+import { generateId } from '../../lib/id.js';
+import { runAsActor } from '../../lib/requestActor.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../lib/bootPrompt.js';
+import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
+
+vi.mock('child_process', () => ({ execFile: vi.fn((...args: unknown[]) => {
+  (args.at(-1) as Function)(null, { stdout: '', stderr: '' });
+}) }));
+vi.mock('./githubApp.js', () => ({
+  getInstallationToken: vi.fn(async () => 'fake-token'),
+  toHttpsUrl: vi.fn((source: string) => source),
+}));
+let graphsPath: string;
+let cleanup: () => void;
+let graph: MemoryWithOrg;
+vi.mock('../../config.js', async (original) => ({
+  ...await original<typeof import('../../config.js')>(),
+  get GRAPHS_PATH() { return graphsPath; },
+}));
+const repoRoot = () => join(graphsPath, 'test-org', 'boot-memory');
+const rootId = 'aaaa2043000000000000000000000001';
+function mirror(loc: string, frontmatter: string, body: string) {
+  mkdirSync(repoRoot(), { recursive: true });
+  writeFileSync(join(repoRoot(), 'README.md'), `---\nid: ${rootId}\nname: Root\n---\nRoot body\n`);
+  writeFileSync(join(repoRoot(), `${loc}.md`), `---\n${frontmatter}\n---\n${body}\n`);
+}
+beforeEach(async () => {
+  ({ dir: graphsPath, cleanup } = makeTmpDir());
+  await cleanDb(db);
+  const { org, graph: created } = await createDbOrgAndGraph(db, { orgName: 'test-org', graphName: 'boot-memory' });
+  await db.organization.update({ where: { id: org.id }, data: { githubInstallationId: 12345 } });
+  graph = await db.memory.update({ where: { id: created.id }, data: {
+    urn: 'test-org:boot-memory', source: 'git@github.com:test/repo.git', readBranch: 'main',
+  }, include: { organization: true } });
+});
+afterEach(() => { cleanup(); vi.clearAllMocks(); });
+
+describe('git sync and boot prompts (#2043)', () => {
+  it('a mirrored file at a compiled node is skipped and the node kept', async () => {
+    const c = await withCompileWrite(() => db.node.create({ data: {
+      id: generateId(), memoryId: graph.id, loc: 'compiled', name: 'Compiled', content: 'compiled text',
+      role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE,
+    } }));
+    mirror('compiled', `id: ${c.id}\nname: Hijacked`, 'forged text');
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect(await db.node.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({
+      name: 'Compiled', content: 'compiled text', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE,
+    });
+  });
+
+  it('a worker session\'s sync that would write a boot-prompt node is refused', async () => {
+    const app = await db.app.create({ data: { id: generateId(), name: 'App', urn: 'test-org:app', organizationId: graph.organizationId! } });
+    const agent = await db.agent.create({ data: { id: generateId(), name: 'Agent', urn: 'test-org:agent', organizationId: graph.organizationId! } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+    mirror('source', 'name: Source\nrole: boot-prompt', 'You are a worker.');
+    const result = await runAsActor({ workerId: worker.id, agentId: null }, () => syncGraphFromGithub(graph));
+    expect(result.error ?? '').toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await db.node.count({ where: { memoryId: graph.id, loc: 'source' } })).toBe(0);
+    // control: the server's own sync (no worker) writes the same source.
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect(await db.node.count({ where: { memoryId: graph.id, loc: 'source' } })).toBe(1);
+  });
+});

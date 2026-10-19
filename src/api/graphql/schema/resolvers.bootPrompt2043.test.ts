@@ -182,6 +182,35 @@ describe('controls (#2043)', () => {
   });
 });
 
+describe('merge and MCP twins (#2043)', () => {
+  it('an admin merge carries the source and not the compiled node (Elena rule A)', async () => {
+    await source();
+    const c = await compiled();
+    const target = await resolvers.Mutation.createMemory(null, { orgId, name: 'merge-target' }, ctx());
+    await resolvers.Mutation.mergeMemories(null, { input: { source: memory.id, target: target.id } }, ctx());
+    const locs = (await db.node.findMany({ where: { memoryId: target.id }, select: { loc: true } })).map((n) => n.loc);
+    expect(locs).toContain('boot:source');
+    expect(locs).not.toContain('boot:compiled');
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).memoryId).toBe(memory.id);
+  });
+
+  it('a worker session over MCP: create, update and delete of a boot prompt are refused', async () => {
+    const s = await source();
+    const mcp = createTestableMcpServer({ userId: admin.id, roles: [], clientId: `user:${admin.id}` });
+    const urn = `hrn:node:${memory.urn}:boot:source`;
+    const call = (tool: string, args: Record<string, unknown>) =>
+      asWorker(() => mcp.callToolText(tool, args).catch((e: Error) => e.message));
+    expect(String(await call('hadron_update_node', { urn, content: 'edit' }))).toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(String(await call('hadron_create_node', { urn: `hrn:node:${memory.urn}:boot:new`, name: 'New', role: 'boot-prompt' })))
+      .toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(String(await call('hadron_delete_node', { urn }))).toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await db.node.count({ where: { memoryId: memory.id, loc: 'boot:new' } })).toBe(0);
+    const row = await db.node.findUniqueOrThrow({ where: { id: s.id } });
+    expect(row.content).toBe('You are {{worker.name}}.');
+    expect(row.deletedAt).toBeNull();
+  });
+});
+
 describe('the invariants file is copied verbatim into its migration (#2043)', () => {
   it('migration carries prisma/boot-prompt-invariants.sql and post-push includes it', () => {
     const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');

@@ -1,4 +1,4 @@
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoWorkerSessionBootPromptWrite } from '../../lib/bootPrompt.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
 import { NOT_DECISION_FAMILY_WHERE } from '../../lib/decisions/index.js';
@@ -201,7 +201,7 @@ export async function cloneMemoryGraph(
         where: { memoryId: source.id, deletedAt: null, nodeType: { notIn: [COMMENT_NODE_TYPE, COMPILED_BOOT_PROMPT_NODE_TYPE] }, AND: [NOT_DECISION_FAMILY_WHERE] },
       });
       // #2043 (cor:agt:040:11) — a worker session's copy never writes a boot prompt.
-      for (const n of selectedNodes) assertNoWorkerSessionBootPromptWrite(null, n.role, 'clone');
+      await assertNoBootPromptRowsForWorkerSession(tx, source.id, 'clone');
       // A raw writer may have changed a stamped source without advancing its
       // revision. Reconcile and refetch stamped rows before the destination
       // insert can certify a stale claim against freshly copied content.

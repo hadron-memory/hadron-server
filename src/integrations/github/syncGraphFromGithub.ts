@@ -1,4 +1,5 @@
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoWorkerSessionBootPromptWrite } from '../../lib/bootPrompt.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoWorkerSessionBootPromptWrite, withSyncCaller } from '../../lib/bootPrompt.js';
+import { currentActor } from '../../lib/requestActor.js';
 import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
@@ -956,7 +957,7 @@ const syncGraphFromGithubAsSystem = async (
             refusedRoleLocs.add(loc);
             return true;
           }
-          assertNoWorkerSessionBootPromptWrite(prior?.role, (node as { role?: string | null }).role ?? undefined, 'import');
+          assertNoWorkerSessionBootPromptWrite(prior?.role, governedSignalsFromMirror(node).role ?? undefined, 'import');
           const signals = governedSignalsFromMirror(node);
           // #1641 §3.2 — no mirror ever writes a decision or a decision log:
           // anyone with push access could otherwise forge one. A file that
@@ -1687,4 +1688,4 @@ function extractOwnerRepo(gitUrl: string): string {
  * the system even inside a worker's request: node and revision then agree.
  */
 export const syncGraphFromGithub: typeof syncGraphFromGithubAsSystem = (...args) =>
-  runAsSystem(() => syncGraphFromGithubAsSystem(...args));
+  withSyncCaller(currentActor().workerId, () => runAsSystem(() => syncGraphFromGithubAsSystem(...args)));
