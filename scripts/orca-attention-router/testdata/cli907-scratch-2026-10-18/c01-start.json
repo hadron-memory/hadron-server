@@ -1,0 +1,28 @@
+{
+ "id": "scratch",
+ "ok": true,
+ "result": {
+  "terminal": {
+   "handle": "term_00000000-0000-0000-0000-000000000000",
+   "status": "running",
+   "tail": [
+    " ▐▛███▛█   Claude Code v2.1.303",
+    "▝▜██████▀  Sonnet 5.5 · Claude Max",
+    " ▝▝   ▝▝   ~/orca/workspaces/hadron-cli/joshua-907-scratch",
+    "  Updated to latest. Got 37 features, 227 bugfixes, and 65 other changes.",
+    "  code.claude.com/docs/en/changelog for details",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "❯",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+   ],
+   "truncated": false,
+   "limited": false,
+   "oldestCursor": "0",
+   "nextCursor": "1",
+   "latestCursor": "1",
+   "returnedLineCount": 9,
+   "source": "screen"
+  }
+ }
+}
