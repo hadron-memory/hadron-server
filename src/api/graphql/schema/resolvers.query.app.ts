@@ -1,3 +1,4 @@
+import { requireAppKeyManager } from './appKeyManagement.js';
 // appQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { decryptToken } from '../../../lib/tokenCrypto.js';
 import { DEFAULT_AI_CONFIG_NAME } from '../../../lib/aiConfig.js';
@@ -153,10 +154,8 @@ export const appQueries = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      // Unconditional shared gate — platform admin on ORG-owned, OWNER-ONLY on
-      // user-owned (spec 047 blocker 3). The old skip leaked a user-owned App's
-      // key metadata to a platform admin.
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      // #1744: inventory is manager-only, including under impersonation.
+      await requireAppKeyManager(ctx, app);
       return ctx.db.appKey.findMany({
         where: { appId: resolvedAppId, revokedAt: null },
         orderBy: { createdAt: 'desc' },

@@ -1,4 +1,5 @@
 import type { Prisma } from '../../../generated/prisma/index.js';
+import { requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import {
@@ -212,11 +213,8 @@ export const appMutations = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveAppRef(ctx.db, appRef);
       const existing = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
-      // spec 047 (blocker 3): route unconditionally through the shared gate. It
-      // grants a platform admin on an ORG-owned App (its own admin branch) but
-      // enforces OWNER-ONLY on a user-owned App — the old `if (!isPlatformAdmin)`
-      // skip bypassed that owner-only rule.
-      await requireOwnerOrOrgRole(ctx, existing, 'ADMIN');
+      // #1744 / cor:dmo:050:05: rotation is one revoke plus mint, with the same audience.
+      await requireAppKeyManager(ctx, existing);
       const rawKey = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
       const keyHash = createHash('sha256').update(rawKey).digest('hex');
       return withAuthorizedTx(
@@ -229,7 +227,7 @@ export const appMutations = {
           if (current.organizationId !== existing.organizationId || current.ownerUserId !== existing.ownerUserId) {
             throw new Error('App ownership changed; retry key regeneration');
           }
-          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
+          await requireAppKeyManager(txCtx, current);
         },
         async (tx) => {
           // Revocation and replacement are one atomic authority change.
@@ -253,7 +251,7 @@ export const appMutations = {
           return { app: fresh, rawKey };
         },
         { lockMode: 'exclusive', afterLock: async (tx) => {
-          await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedId} FOR SHARE`;
+          await lockAppKeyManagerMemberships(tx, ctx, existing);
         } },
       );
     },
@@ -1323,7 +1321,7 @@ export const appMutations = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      await requireAppKeyManager(ctx, app);
       // Raw key format: hdr_app_<64 hex chars> (256 bits of entropy)
       const rawKey = APP_KEY_PREFIX + randomBytes(32).toString('hex');
       const keyHash = hashAppKey(rawKey);
@@ -1338,7 +1336,7 @@ export const appMutations = {
           if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
             throw new Error('App ownership changed; retry key creation');
           }
-          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
+          await requireAppKeyManager(txCtx, current);
         },
         (tx) => tx.appKey.create({
           data: {
@@ -1350,7 +1348,7 @@ export const appMutations = {
           },
         }),
         { afterLock: async (tx) => {
-          await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+          await lockAppKeyManagerMemberships(tx, ctx, app);
         } },
       );
       return { key: appKey, rawKey };
@@ -1361,7 +1359,7 @@ export const appMutations = {
         where: { id },
         include: { app: true },
       });
-      await requireOwnerOrOrgRole(ctx, key.app, 'ADMIN');
+      await requireAppKeyManager(ctx, key.app);
       await withAuthorizedTx(
         ctx,
         [
@@ -1374,10 +1372,10 @@ export const appMutations = {
           if (current.organizationId !== key.app.organizationId || current.ownerUserId !== key.app.ownerUserId) {
             throw new Error('App ownership changed; retry key revocation');
           }
-          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
+          await requireAppKeyManager(txCtx, current);
         },
         (tx) => tx.appKey.update({ where: { id }, data: { revokedAt: new Date() } }),
-        { lockMode: 'exclusive' },
+        { lockMode: 'exclusive', afterLock: (tx) => lockAppKeyManagerMemberships(tx, ctx, key.app) },
       );
       return true;
     },

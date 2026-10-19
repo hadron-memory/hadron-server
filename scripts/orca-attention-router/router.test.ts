@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
-import { nudgeText,
+import { nudgeText, livenessNudgeText,
   type Config, type Runner, type RunResult, type Terminal, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce,
   promptIsEmptyFromTerm, promptLineIsEmpty, resolveTerminal, runCommand, screenAgentFamily, status,
   CALL_TIMEOUT_MS, MIN_CALL_TIMEOUT_MS,
@@ -426,7 +426,8 @@ describe('Orca attention router — the happy path', () => {
     expect(fake.sent[0][1]).toContain('unread #100–#120');
     expect(fake.sent[0][1]).toContain('latest mention #110');
     expect(fake.sent[0][1]).toContain('as of send');
-    expect(fake.sent[0][1]).toContain("no chat post or 'read/no-action' comment");
+    expect(fake.sent[0][1]).toContain('end with one short line');
+    expect(fake.sent[0][1]).toContain('do not post to team chat');
     const verbs = fake.calls.map((a) => a.slice(1, 3).join(' '));
     expect(verbs.indexOf('terminal wait')).toBeLessThan(verbs.indexOf('terminal read'));
     expect(verbs.indexOf('terminal read')).toBeLessThan(verbs.indexOf('terminal send'));
@@ -2605,5 +2606,32 @@ describe('Orca attention router — empty-composer rule pinned to the real cli#9
     ['x02-draft', 'codex', false],
   ] as const)('%s (%s) empty=%s', (name, agent, empty) => {
     expect(promptIsEmptyFromTerm(load(name), agent)[0]).toBe(empty);
+  });
+});
+
+// #1533 item 1: a Claude Code turn started by a prompt always ends with assistant
+// text shown to the human, so "finish silently" / a ban on any "read/no-action"
+// comment can never be satisfied. Every nudge ending must name an action a turn CAN
+// perform: end with one short line, and keep the team-chat prohibition (the half
+// that matters) word for word.
+describe('nudge endings are satisfiable (#1533)', () => {
+  const small = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 5, first: 100, relevant: 110, head: 120 }));
+  const large = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
+  const liveness = livenessNudgeText(100, 120);
+  const variants: Array<[string, string]> = [['small-gap', small], ['large-gap', large], ['liveness', liveness]];
+
+  for (const [name, text] of variants) {
+    it(`${name}: no unsatisfiable "finish silently" / "read/no-action comment" wording`, () => {
+      expect(text).not.toMatch(/finish silently/i);
+      expect(text).not.toContain("'read/no-action' comment");
+    });
+    it(`${name}: names a satisfiable ending and still forbids a team-chat post`, () => {
+      expect(text).toContain('end with one short line');
+      expect(text).toContain('do not post to team chat');
+    });
+  }
+
+  it('liveness keeps its invariant: "mark read" appears exactly once', () => {
+    expect((liveness.match(/mark read/gi) ?? []).length).toBe(1);
   });
 });

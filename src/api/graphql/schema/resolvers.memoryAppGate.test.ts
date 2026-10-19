@@ -86,7 +86,9 @@ describe('nested App read gates', () => {
       { organizationId: orgId, organization: eagerOrg } as { organizationId: string },
       {}, holderCtx,
     )).toBeNull();
-    expect(await resolvers.App.keys({ id: app.id, keys: [{ keyPreview: 'SYNTHETIC-KEY-PREVIEW' }] }, {}, holderCtx)).toEqual([]);
+    // #1744: credential inventory now refuses at its own manager gate.
+    await expect(resolvers.App.keys({ id: app.id, keys: [{ keyPreview: 'SYNTHETIC-KEY-PREVIEW' }] }, {}, holderCtx))
+      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(await resolvers.App.members({ id: app.id }, {}, holderCtx)).toEqual([]);
     expect(await resolvers.App.memberCount({ id: app.id }, {}, holderCtx)).toBe(0);
     expect(await resolvers.Organization.apps({ id: orgId, apps: [eagerApp] }, {}, holderCtx)).toEqual([]);

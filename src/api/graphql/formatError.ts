@@ -22,7 +22,8 @@
  * — every asset NOT_FOUND — was filed as an exception. One list, two readers,
  * so a new entry cannot be half-registered.
  */
-import type { GraphQLFormattedError } from 'graphql';
+import { Kind, type GraphQLError, type GraphQLFormattedError } from 'graphql';
+import { publicErrorExtensions } from '../../lib/errorDiagnostics.js';
 import { isPrismaClientError, REDACTED_DB_ERROR_MESSAGE } from '../../lib/prismaErrors.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
 import { AmbiguousLegacyUrnError } from '../../lib/entityRef/errors.js';
@@ -156,11 +157,31 @@ export function isExpectedClientError(original: unknown): boolean {
   return CLIENT_ERROR_MAPPINGS.some((m) => m.matches(original) && m.silenceInSentry);
 }
 
-/** Apollo `formatError`: attach the stable code for every mapped client error. */
+/** Apollo error boundary: conceal diagnostics and coercion values, retaining public domain codes/fields. */
 export function formatGraphQLError(
   formattedError: GraphQLFormattedError,
   error: unknown,
 ): GraphQLFormattedError {
+  // #2087: graphql-js attaches the variable DEFINITION to execution-time coercion
+  // failures (including nested/list/custom scalars). Resolver errors have a field
+  // path instead; schema validation retains its distinct Apollo code. Never inspect or
+  // reconstruct rejected-value prose, and never spread its supplied extensions.
+  const executionError = error as GraphQLError | null | undefined;
+  if (executionError && executionError.path == null &&
+      Array.isArray(executionError.nodes) && executionError.nodes.length === 1 &&
+      executionError.nodes[0]?.kind === Kind.VARIABLE_DEFINITION &&
+      formattedError.extensions?.code !== 'GRAPHQL_VALIDATION_FAILED') {
+    return {
+      message: 'Invalid GraphQL variable input.',
+      locations: formattedError.locations,
+      path: formattedError.path,
+      extensions: { code: 'BAD_USER_INPUT' },
+    };
+  }
+  // #2087: supplied diagnostics are unsafe even when Apollo suppresses its own stacks.
+  if (formattedError.extensions && ('stacktrace' in formattedError.extensions || 'exception' in formattedError.extensions)) {
+    formattedError = { ...formattedError, extensions: publicErrorExtensions(formattedError.extensions) };
+  }
   const original = unwrap(error);
   for (const m of CLIENT_ERROR_MAPPINGS) {
     if (!m.matches(original)) continue;
