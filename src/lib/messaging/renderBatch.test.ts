@@ -116,6 +116,27 @@ describe('renderBatch — S1 shared pure renderer', () => {
     const out = module.renderBatch(input([msg(1), msg(2)], { maxMessages: 1 }));
     expect(out.text.endsWith(module.REPLY_HINT)).toBe(true);
   });
+  it('honors tighter optional budgets while never widening the 10-message ceiling', async () => {
+    const messages = Array.from({ length: 12 }, (_, i) => msg(i + 1, { body: 'xx' }));
+    expect((await render(input(messages, { maxMessages: 50 }))).renderedCount).toBe(10);
+    const short = await render(input(messages, { maxChars: 5 }));
+    expect(short.renderedCount).toBe(2); expect(short.overflow).toBe(10);
+    const oversize = await render(input(messages, { maxChars: 1 }));
+    expect(oversize.renderedCount).toBe(1); expect(oversize.text).toContain('xx');
+  });
+  it('groups at first occurrence without reordering unrelated entries or mutating the parent', async () => {
+    const parent = { seq: 1, authorName: 'Gil', excerpt: 'parent-context' };
+    const messages = [msg(2, { parentSeq: 1, parent }), msg(3), msg(4, { parentSeq: 1, parent })];
+    const out = await render(input(messages));
+    expect(out).toEqual(await render(input([...messages].reverse())));
+    expect(out.text.indexOf('body-4')).toBeLessThan(out.text.indexOf('body-3'));
+    expect(out.renderedCount).toBe(3);
+    expect(parent.excerpt).toBe('parent-context');
+  });
+  it('does not invent parent context when supplied parent identity disagrees', async () => {
+    const out = await render(input([msg(5, { parentSeq: 1, parent: { seq: 99, authorName: 'Wrong', excerpt: 'not-the-parent' } })]));
+    expect(out.text).toContain('(re #1)'); expect(out.text).not.toContain('not-the-parent');
+  });
   it('hashes the actual UTF-8 text, stable across shuffled inputs and sensitive to body changes', async () => {
     const out = await render(input([msg(2), msg(1)]));
     expect(out.renderHash).toBe(createHash('sha256').update(out.text, 'utf8').digest('hex'));
