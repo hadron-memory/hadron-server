@@ -1,0 +1,40 @@
+{
+ "id": "scratch",
+ "ok": true,
+ "result": {
+  "terminal": {
+   "handle": "term_00000000-0000-0000-0000-000000000000",
+   "status": "running",
+   "tail": [
+    " ▐▛███▛█   Claude Code v2.1.303",
+    "▝▜██████▀  Sonnet 5.5 · Claude Max",
+    " ▝▝   ▝▝   ~/orca/workspaces/hadron-cli/joshua-907-scratch",
+    "  Updated to latest. Got 37 features, 227 bugfixes, and 65 other changes.",
+    "  code.claude.com/docs/en/changelog for details",
+    "❯ SCRATCH-907 test: reply with exactly the word ok, use no tools",
+    "● ok",
+    "✻ Crunched for 2s · done 11:14 PM",
+    "❯ SCRATCH-907 test: call the AskUserQuestion tool once, asking me to pick between options Alpha and Beta. Do nothing",
+    "  else.",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    " ☐ Pick one",
+    "Which option do you pick?",
+    "❯ 1. Alpha",
+    "     Choose option Alpha.",
+    "  2. Beta",
+    "     Choose option Beta.",
+    "  3. Type something.",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "  4. Chat about this",
+    "Enter to select · ↑/↓ to navigate · Esc to cancel"
+   ],
+   "truncated": false,
+   "limited": false,
+   "oldestCursor": "0",
+   "nextCursor": "1",
+   "latestCursor": "1",
+   "returnedLineCount": 21,
+   "source": "screen"
+  }
+ }
+}
