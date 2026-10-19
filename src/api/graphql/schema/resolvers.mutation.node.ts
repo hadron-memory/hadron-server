@@ -151,7 +151,7 @@ import {
   type MergeNodesInput,
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
-import { findInstallMemory, resolveInstallTarget, withInstallMemory, type InstallTarget } from './installMemory.js';
+import { findInstallMemory, lockInstallAuthorityFirst, resolveInstallTarget, withInstallMemory, type InstallTarget } from './installMemory.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 
@@ -338,7 +338,7 @@ export async function writeNodeCore(
           await concealUnreadableDenial(authCtx, resolvedMemoryId, conceal.ref, gate);
         }
       };
-      await authorizeWrite(ctx);
+      await authorizeWrite({ ...ctx, installWritePreflight: true });
       // Spec 049 S4 / #1180: a protected address is written by its owning
       // operation only. Since #1201 the ONLY source is the Channel table, and
       // only a Channel's own operations pass the bypass; every node-authoring
@@ -875,7 +875,11 @@ export async function writeNodeCore(
       const inWriteTransaction = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
         opts?.transaction
           ? work(opts.transaction.tx)
-          : mapDeadlockToWriteConflict(input.memoryId, () => ctx.db.$transaction(work));
+          : mapDeadlockToWriteConflict(input.memoryId, () => ctx.db.$transaction(async (tx) => {
+            // #2044: an install memory's authority comes before ANY memory/node/loc lock.
+            await lockInstallAuthorityFirst(tx, ctx, input.memoryId);
+            return work(tx);
+          }));
 
       // encryptMemory and ownership transfer both change what this writer may
       // commit. Hold a shared memory-row lock through the write, then recheck

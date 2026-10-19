@@ -201,17 +201,37 @@ type InstallMemoryRef = { id: string; class: string; appId: string | null; insta
 async function fencedInstallAudience(ctx: Context, memory: InstallMemoryRef) {
   const db = ctx.db as unknown as Prisma.TransactionClient & { $transaction?: unknown };
   if (typeof db.$transaction === 'function' || !memory.appId || !memory.installOfAgentId) {
-    return installMemoryAudience(ctx.db as never, ctx, memory);
+    const audience = await installMemoryAudience(ctx.db as never, ctx, memory);
+    // A pooled-client WRITE decision is a cheap pre-flight, honoured only for a door that
+    // rechecks inside its own fenced transaction. Any other writer fails closed (Xan on #2064).
+    return ctx.installWritePreflight ? audience : { ...audience, write: false };
   }
   const tx = db as Prisma.TransactionClient;
+  if (!(await lockInstallAuthority(tx, ctx, memory))) return NO_INSTALL_AUDIENCE;
+  const live = await liveTxContext(ctx, tx);
+  return installMemoryAudience(tx as never, live, memory);
+}
+
+/**
+ * Take the authority a write or delete of this install memory depends on: the anchors the
+ * revokers hold exclusively (App, Agent, tenant, actor), then the rows they change, FOR SHARE.
+ * False when the App is gone. Idempotent within a transaction.
+ *
+ * ORDER (Diego's delta on #2064): authority BEFORE memory/node/loc rows, the protocol's order
+ * (`withAuthorizedTx`), or a writer holding a memory row and waiting for an anchor can cycle with a
+ * revoker (account erasure) holding the anchor and waiting for the memory row. So a writer enters
+ * this at the TOP of its transaction (`lockInstallAuthorityFirst`), and the in-gate call above is
+ * then a no-op re-acquire.
+ */
+async function lockInstallAuthority(tx: Prisma.TransactionClient, ctx: Context, memory: InstallMemoryRef): Promise<boolean> {
   const app = await tx.app.findUnique({
-    where: { id: memory.appId },
+    where: { id: memory.appId! },
     select: { organizationId: true, ownerUserId: true },
   });
-  if (!app) return NO_INSTALL_AUDIENCE;
+  if (!app) return false;
   await lockAuthorityAnchors(tx, [
-    { kind: 'app', id: memory.appId },
-    { kind: 'agent', id: memory.installOfAgentId },
+    { kind: 'app', id: memory.appId! },
+    { kind: 'agent', id: memory.installOfAgentId! },
     ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
     ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
     ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
@@ -224,6 +244,18 @@ async function fencedInstallAudience(ctx: Context, memory: InstallMemoryRef) {
       await tx.$queryRaw`SELECT 1 FROM org_members WHERE organization_id = ${app.organizationId} AND user_id = ${ctx.userId} FOR SHARE`;
     }
   }
-  const live = await liveTxContext(ctx, tx);
-  return installMemoryAudience(tx as never, live, memory);
+  return true;
+}
+
+/**
+ * The first statement of any transaction that will write or delete `memoryId`: if it is an
+ * install memory, take its authority before any memory, node or loc lock. A plain read of the
+ * identity (no lock), so an ordinary memory costs one indexed select.
+ */
+export async function lockInstallAuthorityFirst(tx: Prisma.TransactionClient, ctx: Context, memoryId: string): Promise<void> {
+  const row = await tx.memory.findUnique({
+    where: { id: memoryId },
+    select: { id: true, class: true, appId: true, installOfAgentId: true, organizationId: true, ownerUserId: true },
+  });
+  if (row && row.class === 'system' && row.appId && row.installOfAgentId) await lockInstallAuthority(tx, ctx, row);
 }

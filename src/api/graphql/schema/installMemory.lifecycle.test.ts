@@ -481,3 +481,65 @@ describe('#2044 install memory — the cleanup delete carries the fence too (Xan
     await expect(M.deleteMemory({}, { id: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
   });
 });
+
+describe('#2044 install memory — lock order and the pooled-only writers (Diego/Xan deltas on #2064)', () => {
+  it('a writer takes the authority BEFORE any memory/node lock: while a revoker holds the anchor, the memory row is free', async () => {
+    const f = await fixture();
+    await f.create(f.admin);
+    const [row] = await f.installRows();
+    // What account erasure (or any revoker) holds: the tenant anchor, exclusively.
+    const revoker = await hold((tx) => lockAuthorityAnchors(tx, [{ kind: 'org', id: orgId }], 'exclusive'));
+    const writing = M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'queued' } }, ctxOf(f.admin.id))
+      .then(() => 'wrote', (e: Error) => e);
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      // The waiting writer holds NO lock on the memory or node rows, so the revoker's later
+      // delete of them cannot cycle with it.
+      await db.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
+        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${row!.id} FOR UPDATE NOWAIT`;
+        await tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${row!.id} FOR UPDATE NOWAIT`;
+      });
+    } finally {
+      revoker.release();
+      await revoker.done;
+    }
+    expect(await writing).toBe('wrote');
+  });
+
+  it('deleteMemory takes the authority first too', async () => {
+    const f = await fixture();
+    await f.create(f.admin);
+    const [row] = await f.installRows();
+    const revoker = await hold((tx) => lockAuthorityAnchors(tx, [{ kind: 'org', id: orgId }], 'exclusive'));
+    const deleting = M.deleteMemory({}, { id: row!.id }, ctxOf(f.admin.id)).then(() => 'deleted', (e: Error) => e);
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      await db.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
+        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${row!.id} FOR UPDATE NOWAIT`;
+      });
+    } finally {
+      revoker.release();
+      await revoker.done;
+    }
+    expect(await deleting).toBe('deleted');
+  });
+
+  it('writers that cannot recheck inside their own fenced transaction fail closed on an install memory (restore, move, delete node)', async () => {
+    const f = await fixture();
+    const node = await f.create(f.admin, 'prompts:lane');
+    await M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'v2' } }, ctxOf(f.admin.id));
+    const [row] = await f.installRows();
+    const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
+    const before = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    await expect(M.restoreNodeRevision({}, { revisionId: rev.id }, ctxOf(f.admin.id))).rejects.toThrow();
+    await expect(M.deleteNode({}, { nodeRef: node.id }, ctxOf(f.admin.id))).rejects.toThrow();
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect({ content: after.content, deletedAt: after.deletedAt, revSeq: after.revSeq })
+      .toEqual({ content: before.content, deletedAt: before.deletedAt, revSeq: before.revSeq });
+    expect(row).toBeTruthy();
+    // The supported doors still write.
+    await expect(M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'v3' } }, ctxOf(f.admin.id))).resolves.toBeTruthy();
+  });
+});

@@ -100,8 +100,10 @@ describe('#2044 install memory — read / write / delete audience (live App)', (
       const eff = await computeEffectiveAccess(db, { id: u, roles: [] }, { kind: 'memory', memory: { ...(await db.memory.findUniqueOrThrow({ where: { id: f.install.id }, include: { workerOf: true } })) } as never });
       expect(eff.canRead, `${who} effective read`).toBe(canRead);
       expect(eff.canWrite, `${who} effective write`).toBe(canWrite);
-      if (canWrite) await expect(requireMemoryWriteAccess(gql(u), f.install.id)).resolves.toBeUndefined();
-      else await expect(requireMemoryWriteAccess(gql(u), f.install.id)).rejects.toThrow('Forbidden');
+      // The door's pooled pre-flight (writeNodeCore sets the marker; any other pooled writer fails closed).
+      if (canWrite) await expect(requireMemoryWriteAccess(gql(u, { installWritePreflight: true }), f.install.id)).resolves.toBeUndefined();
+      else await expect(requireMemoryWriteAccess(gql(u, { installWritePreflight: true }), f.install.id)).rejects.toThrow('Forbidden');
+      await expect(requireMemoryWriteAccess(gql(u), f.install.id), `${who} unmarked pooled`).rejects.toThrow('Forbidden');
     }
   });
 
@@ -215,7 +217,7 @@ describe('#2044 install memory — user-owned App', () => {
     expect(await canWriteToMemory(db, auth(member.id), install.id)).toBe(false);
     expect(await canReadMemory(db, auth(owner.id), install.id)).toBe(true);
     expect(await canWriteToMemory(db, auth(owner.id), install.id)).toBe(false);
-    await expect(requireMemoryWriteAccess(gql(owner.id), install.id)).resolves.toBeUndefined();
+    await expect(requireMemoryWriteAccess(gql(owner.id, { installWritePreflight: true }), install.id)).resolves.toBeUndefined();
     await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
     // The owner-column blanket (READ_WRITE on everything user-owned) must not outlive the App.
     expect(await canReadMemory(db, auth(owner.id), install.id)).toBe(false);

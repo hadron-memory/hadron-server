@@ -155,7 +155,7 @@ import {
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
-import { installDeleteAllowed } from './installMemory.js';
+import { installDeleteAllowed, lockInstallAuthorityFirst } from './installMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /**
@@ -1277,6 +1277,8 @@ export const memoryMutations = {
         throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
       }
       await ctx.db.$transaction(async (tx) => {
+        // #2044: an install memory's authority before the memory row lock below.
+        await lockInstallAuthorityFirst(tx, ctx, resolvedId);
         // Spec 049 §8.5: a memory hosting a live Channel is not deleted around
         // the Channel — delete the Channel through its own operation first.
         // Checked and tombstoned under the memory-level lock Channel creation

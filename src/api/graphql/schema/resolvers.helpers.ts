@@ -101,6 +101,13 @@ export interface Context {
   login?: import('../../../auth/jwt.js').HadronJwtPayload['login'];
   db: PrismaClient;
   /**
+   * #2044: set ONLY by a door that re-runs its write gate on a transaction client holding the
+   * install memory's authority fence (writeNodeCore). On the pooled client an install memory's
+   * write gate otherwise answers NO: a writer that never rechecks in its own transaction
+   * (restoreNodeRevision, moveNode, deleteNode, ...) cannot hold the fence, so it fails closed.
+   */
+  installWritePreflight?: boolean;
+  /**
    * #1301 — set by an MCP handler that DELEGATES to a GraphQL resolver (e.g.
    * `hadron_update_node_data` → `updateNodeData`), so a refusal addresses the
    * caller on the surface they are actually on (@codex, PR #1305). Unset means
