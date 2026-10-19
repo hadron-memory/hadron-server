@@ -62,6 +62,7 @@ export async function acknowledgeWakes(args: {
 }): Promise<AcknowledgeResult> {
   const { ctx, requester } = args;
   const now = args.now ?? new Date();
+  const entered = performance.now();
   if (args.proofs.length === 0) return { acknowledged: 0, unchanged: 0 };
   if (args.proofs.length > ACK_MAX_PROOFS) {
     refuse('BAD_USER_INPUT', `Acknowledge at most ${ACK_MAX_PROOFS} wakes at a time.`);
@@ -107,6 +108,8 @@ export async function acknowledgeWakes(args: {
       if (!(await args.mayReadWorker(p, tx, txCtx))) refuse('WAKE_PROOF_REQUESTER_MISMATCH', 'This wake proof was issued to someone else.');
       const worker = await tx.worker.findUnique({ where: { id: p.workerId }, select: { appId: true, retiredAt: true } });
       if (!worker || worker.appId !== p.appId || worker.retiredAt) refuse('WAKE_PROOF_STALE', 'The worker of this wake is gone.');
+      // #2102 (Dara P2-3, cor:agt:080:17): fresh at the write, not only at entry: the locks and the gate above may wait.
+      if (!freshAfterWait(now, entered, p.issuedAt)) refuse('WAKE_PROOF_STALE', 'This wake proof is too old. Ask for the due wakes again.');
 
       // A channel recreated since issue (or deleted) invalidates the proof: its seqs restarted.
       const live = p.channels.length === 0 ? [] : await tx.channel.findMany({
@@ -179,14 +182,22 @@ export async function acknowledgeWakes(args: {
           DELETE FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND wake_key = ${proofWakeKey(p)} RETURNING absorbed_keys`);
         if (freed.length > 0) {
           spent = freed[0]!.absorbed_keys ?? [];
-          // #2069 + R53 (Xavier, #21593): a wake that absorbed earlier reasons covers its ancestors. Their keys get a receipt
-          // now (never overwriting one), so an ancestor's proof acknowledged AFTER this one finds a receipt at or after its
-          // issue and is neither a delivery nor another charge; the floor already counts from this acknowledgement.
+          // #2069 + R53 (Xavier, #21593): a wake that absorbed earlier reasons covers its ancestors. Their keys' receipts are
+          // advanced to this acknowledgement, so an ancestor's proof acknowledged AFTER this one finds a receipt at or after
+          // its issue and is neither a delivery nor another charge; the floor already counts from this acknowledgement.
+          // #2102 (Dara P2-4): ADVANCED, never left behind. Under R53 the same still-due wake is offered again after the
+          // floor, so an ancestor key may hold a receipt from a PRIOR cycle; keeping that older time would let a late
+          // current-cycle ancestor proof pass as a fresh delivery and charge again. Monotone: a newer receipt is kept.
           for (const k of spent) {
             await tx.$executeRaw`
               INSERT INTO worker_wake_acks (worker_id, wake_key, acked_at, acked_by_user_id, acked_by_worker_id, acked_by_app_key_id)
               VALUES (${p.workerId}, ${k}, ${nowNaive}::timestamp, ${ackedBy.ackedByUserId}, ${ackedBy.ackedByWorkerId}, ${ackedBy.ackedByAppKeyId})
-              ON CONFLICT (worker_id, wake_key) DO NOTHING`;
+              ON CONFLICT (worker_id, wake_key) DO UPDATE SET
+                acked_at = EXCLUDED.acked_at,
+                acked_by_user_id = EXCLUDED.acked_by_user_id,
+                acked_by_worker_id = EXCLUDED.acked_by_worker_id,
+                acked_by_app_key_id = EXCLUDED.acked_by_app_key_id
+              WHERE worker_wake_acks.acked_at < EXCLUDED.acked_at`;
           }
         }
       }
@@ -208,6 +219,15 @@ export async function acknowledgeWakes(args: {
     }
     return { acknowledged, unchanged };
   }
+}
+
+/**
+ * #2102 (Dara P2-3): is a proof still inside its 15 minutes (cor:agt:080:17) at the moment the marks are written? The
+ * entry check alone admits a call that then waits on locks or a gate past expiry. The elapsed wait is measured on the
+ * monotonic clock and added to the call's `now`, so an injected `now` keeps its meaning.
+ */
+function freshAfterWait(now: Date, entered: number, issuedAt: number): boolean {
+  return now.getTime() + (performance.now() - entered) - issuedAt <= WAKE_PROOF_MAX_AGE_MS;
 }
 
 type AckedBy = { ackedByUserId: string | null; ackedByWorkerId: string | null; ackedByAppKeyId: string | null };
@@ -292,6 +312,7 @@ export async function acknowledgeBatchProofs(args: {
 }): Promise<AcknowledgeResult> {
   const { ctx, requester } = args;
   const now = args.now ?? new Date();
+  const entered = performance.now();
   if (args.acks.length === 0) return { acknowledged: 0, unchanged: 0 };
   if (args.acks.length > ACK_MAX_PROOFS) refuse('BAD_USER_INPUT', `Acknowledge at most ${ACK_MAX_PROOFS} batches at a time.`);
 
@@ -335,6 +356,8 @@ export async function acknowledgeBatchProofs(args: {
       if (!(await args.mayAckBatch(p, tx, txCtx))) refuse('WAKE_PROOF_REQUESTER_MISMATCH', 'This delivery batch was issued to someone else.');
       const worker = await tx.worker.findUnique({ where: { id: p.workerId }, select: { appId: true, retiredAt: true } });
       if (!worker || worker.appId !== p.appId || worker.retiredAt) refuse('WAKE_PROOF_STALE', 'The worker of this delivery batch is gone.');
+      // #2102 (Dara P2-3, cor:agt:080:17): fresh at the write, not only at entry: the locks and the gate above may wait.
+      if (!freshAfterWait(now, entered, p.issuedAt)) refuse('WAKE_PROOF_STALE', 'This delivery batch id is too old. Read the batch again.');
 
       const live = await tx.channel.findMany({
         where: { id: { in: p.channels.map((c) => c.channelId) }, deletedAt: null },
