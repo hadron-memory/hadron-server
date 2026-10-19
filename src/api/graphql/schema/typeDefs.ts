@@ -1489,7 +1489,7 @@ export const typeDefs = `#graphql
     embeddingAttempts: Int!
     """
     The node's text. Include tags and data variables resolve for the reader
-    (cor:dmo:150:03); pass raw: true for the stored text with its tags as
+    (hrn:node:hadronmemory.com:specs:cor:dmo:150:03); pass raw: true for the stored text with its tags as
     written. Through nodeBatch, an omitted raw returns the stored text
     permanently (R21 A) and raw: false resolves.
     """
