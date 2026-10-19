@@ -129,3 +129,16 @@ ALTER TABLE agent_team_events ADD CONSTRAINT chk_delivery_event_payload CHECK (
     END
   ) IS TRUE
 );
+
+-- #1162: typed Worker references introduced by S5 use the same MVCC fence.
+-- Kept in this additive migration: the original #1162 migration runs before
+-- these tables exist on a fresh database. No deployed migration is rewritten.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "worker_delivery_wait_states";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "worker_delivery_wait_states"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id');
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "worker_delivery_wait_exceptions";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "worker_delivery_wait_exceptions"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id');
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "worker_delivery_alarm_episodes";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "worker_delivery_alarm_episodes"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id');
