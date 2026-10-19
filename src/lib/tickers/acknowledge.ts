@@ -189,10 +189,11 @@ export async function acknowledgeWakes(args: {
       acknowledged++;
       // #2069: ONE allowance per outstanding wake. A reservation that absorbed a later reason carries a newer key than an
       // older proof of the same worker; that older proof may still advance what it names, but the slot belongs to the
-      // reservation still outstanding, which is spent (and charged) by ITS proof. Charged only when this proof spent its
-      // own reservation, or when the worker has none outstanding at all (a lapsed reservation: today's behavior).
+      // reservation still outstanding, which is spent (and charged) by ITS proof. Charged unless this proof's key is in the
+      // absorbed lineage of the reservation still outstanding (that reservation owns the slot); an unrelated reservation, or
+      // none, leaves today's behavior untouched.
       if (spent === 0) {
-        const [{ n }] = await tx.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`SELECT count(*)::bigint AS n FROM app_wake_reservations WHERE worker_id = ${p.workerId}`);
+        const [{ n }] = await tx.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`SELECT count(*)::bigint AS n FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND ${wakeIdentity(p)} = ANY(absorbed_keys)`);
         if (Number(n) > 0) continue;
       }
       if (!p.exempt) {

@@ -262,6 +262,20 @@ describe('#2069 — an outstanding wake absorbs reasons that fall due later', ()
     expect(again.channels[0]).toMatchObject({ fromSeq: 1, throughSeq: 1 });
   });
 
+  it('control: an UNRELATED newer reservation does not share the old proof\'s allowance (old behavior kept)', async () => {
+    await say(channel, 'first', mention('liam'));
+    const first = (await due(ctx(manager.id))).wakes[0];
+    await db.$executeRaw`DELETE FROM app_wake_reservations WHERE worker_id = ${liam.id}`; // as the stale-task path does
+    await say(channel, 'second', mention('liam'));
+    const second = (await due(ctx(manager.id))).wakes[0];
+    expect(second.proof).not.toBe(first.proof);
+    await M.acknowledgeWakes({}, { proofs: [first.proof] }, ctx(manager.id));
+    const days = await db.$queryRaw<Array<{ wakes: number }>>`SELECT sum(wakes)::int AS wakes FROM app_wake_days`;
+    expect(days[0]!.wakes).toBe(1); // the old proof still pays for what it moved
+    const left = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*)::bigint n FROM app_wake_reservations WHERE worker_id = ${liam.id}`;
+    expect(Number(left[0]!.n)).toBe(1); // the newer reservation is untouched
+  });
+
   it('one allowance: the old proof then the new one charge the day once, in either order', async () => {
     for (const oldFirst of [true, false]) {
       await db.$executeRaw`DELETE FROM app_wake_days`;
