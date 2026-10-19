@@ -220,6 +220,22 @@ describe('#2089 nested App-returning surfaces', () => {
     expect(await (resolvers as any).AppAgent.app(aa, {}, as(stranger.id))).toBeNull();
   });
 
+  it('Worker.app resolves the App for the owner-role member (parity with Query.app), null otherwise, children still withheld (Atilla P2)', async () => {
+    const W = (resolvers as any).Worker;
+    const got = await W.app({ appId: app.id }, {}, as(boss.id));
+    expect(got?.id).toBe(app.id);
+    expect(await App.members(got, {}, as(boss.id))).toBeNull();
+    expect(await App.hasAiApiKey(got, {}, as(boss.id))).toBeNull();
+    expect((await W.app({ appId: app.id }, {}, as(owner.id)))?.id).toBe(app.id);
+    for (const who of [cook, stranger]) expect(await W.app({ appId: app.id }, {}, as(who.id))).toBeNull();
+    expect(await W.app({ appId: app.id }, {}, as(boss.id, { impersonation: { orgId: 'any-org' } as never }))).toBeNull();
+    await db.appMember.update({ where: { appId_userId: { appId: app.id, userId: boss.id } }, data: { role: 'cook' } });
+    expect(await W.app({ appId: app.id }, {}, as(boss.id))).toBeNull();
+    await db.appMember.update({ where: { appId_userId: { appId: app.id, userId: boss.id } }, data: { role: 'owner' } });
+    await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
+    expect(await W.app({ appId: app.id }, {}, as(boss.id))).toBeNull();
+  });
+
   it('Agent.apps / Agent.appAgents include the App for the owner-role member only', async () => {
     const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
     const ids = async (ctx: Context) =>
