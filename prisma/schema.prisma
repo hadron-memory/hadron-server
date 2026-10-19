@@ -1315,7 +1315,9 @@ model Node {
   /// holds the principal (the NodeRevision.editedByInfo convention).
   /// `approvalHash` is the full SHA-256 of approval hash v1
   /// (src/lib/approvalHash.ts) at approval time. All five are set together or
-  /// not at all (chk_node_approval_complete).
+  /// not at all (chk_node_approval_complete), except that `approvalHash` alone is
+  /// cleared when the node enters an encrypted memory (#1838): who, when and which
+  /// revision stay, and a hashless approval covers nothing.
   approvedRevNo      Int?      @map("approved_rev_no")
   approvedBy         String?   @map("approved_by")
   approvedByInfo     String?   @map("approved_by_info")
@@ -5640,6 +5642,9 @@ model Ticker {
   channelIds        String[]  @default([]) @map("channel_ids")
   /// 'ALL' | 'MENTIONS'.
   relevance         String    @default("ALL")
+  /// #2068 (cor:agt:080:01, :10, R49): why the ticker fires, a closed set: 'read-team-channel' (relevant unread, as before) and
+  /// 'every-tick' (unconditional). Empty = never fires; any-of when several (Decided, R54).
+  reasons           String[]  @default(["read-team-channel"]) @map("reasons")
   enabled           Boolean   @default(true)
   ownerUserId       String?   @map("owner_user_id")
   ownerWorkerId     String?   @map("owner_worker_id")

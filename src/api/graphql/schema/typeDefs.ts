@@ -2654,7 +2654,21 @@ export const typeDefs = `#graphql
     approvedAt: DateTime
     "#1591 — approval hash v1 recorded when this revision was approved."
     approvalHash: String
+    "#1838 — was THIS revision approved (for pinning)? Not whether the node is approved now (that is Node.approvalStatus). A revision counts as approved when some recorded approval covers exactly its hashed content, whichever revision the approval was recorded on (Holger's R7, hrn:node:hadronmemory.com:specs:cor:dmo:060:04)."
+    revisionApproval: RevisionApproval!
     createdAt: DateTime!
+  }
+
+  "#1838 — whether one revision was approved, and by which recorded approval."
+  type RevisionApproval {
+    "NOT_APPLICABLE inside an encrypted memory; APPROVED or NOT_APPROVED otherwise (never SUPERSEDED: that is about the live text)."
+    state: NodeApprovalState!
+    approved: Boolean!
+    "The revision the covering approval was recorded at; it can differ from this revision when only metadata changed, or the text recurs."
+    recordedAtRevision: Int
+    approvedBy: String
+    approvedByInfo: String
+    approvedAt: DateTime
   }
 
   type User {
@@ -2805,6 +2819,7 @@ export const typeDefs = `#graphql
     multi-Agent set per spec 023 US1.
     """
     agents: [Agent!]!
+    "Key inventory, only for whoever manages the App as themselves, never through a bound worker session (hrn:node:hadronmemory.com:specs:cor:dmo:050:05)."
     keys: [AppKey!]!
     createdAt: DateTime!
     updatedAt: DateTime
@@ -7946,7 +7961,9 @@ export const typeDefs = `#graphql
     appAIConfig(appRef: ID!): AppAIConfig
 
     """
-    List keys for an App (org ADMIN of the App's org).
+    List keys for an App, only for whoever manages the App
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request.
 
     Accepts the entity's ID or URN.
     """
@@ -9667,7 +9684,9 @@ export const typeDefs = `#graphql
 
     """
     App key management — revoke all active keys for an App and mint a
-    fresh one. (See createAppKey / revokeAppKey / deleteApp below.)
+    fresh one. Only whoever manages the App, as themselves
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request. The replacement key holds no scopes.
 
     Accepts the entity's ID or URN.
     """
@@ -11721,13 +11740,18 @@ export const typeDefs = `#graphql
     removeAgentImport(parentAgentRef: ID!, importedAgentRef: ID!): Boolean!
 
     """
-    Mint a new AppKey for an App.
+    Mint a new AppKey for an App. Only whoever manages the App, as themselves
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request; new keys hold no scopes.
+    Granting or revoking scopes uses the same manager audience.
 
     Accepts the entity's ID or URN.
     """
     createAppKey(appRef: ID!, label: String): AppKeyCreated!
     """
-    AppKey is keyed by raw ID — no urn column. Stays ID-only.
+    Revoke an AppKey. Only whoever manages the App, as themselves
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request. AppKey has no URN; the id is raw ID-only.
     """
     revokeAppKey(id: ID!): Boolean!
     """
@@ -11973,6 +11997,14 @@ export const typeDefs = `#graphql
     evidence: String
   }
 
+  "#2068 (hrn:node:hadronmemory.com:specs:cor:agt:080:01, :10) — why a ticker fires. A closed set; several fire it when any one holds."
+  enum TickerReason {
+    "Fires only when the subscriber has relevant unread in the ticker's channels (what relevance counts is the ticker's relevance)."
+    READ_TEAM_CHANNEL
+    "Fires on every tick, with or without unread. The floor, budget, pause and dormancy still apply."
+    EVERY_TICK
+  }
+
   "#1747 — how a ticker relevance narrows what can make a subscriber due (hrn:node:hadronmemory.com:specs:cor:agt:080:01)."
   enum TickerRelevance {
     ALL
@@ -12127,6 +12159,8 @@ export const typeDefs = `#graphql
     "The channels named, limited to those the reader can read. Empty means every channel the subscriber watches."
     channels: [Channel!]!
     relevance: TickerRelevance!
+    "#2068 — why the ticker fires. Never empty; existing tickers are READ_TEAM_CHANNEL."
+    reasons: [TickerReason!]!
     enabled: Boolean!
     owner: ActorRef
     "The next moment this ticker ticks, quiet hours skipped; null when disabled."
@@ -12230,6 +12264,8 @@ export const typeDefs = `#graphql
     quietHours: JSON
     channelIds: [ID!]
     relevance: TickerRelevance
+    "Absent on create = [READ_TEAM_CHANNEL]; an empty list is refused. On update, absent = unchanged."
+    reasons: [TickerReason!]
     enabled: Boolean
   }
 
@@ -12243,6 +12279,8 @@ export const typeDefs = `#graphql
     channelIds: [ID!]
     clearChannels: Boolean
     relevance: TickerRelevance
+    "Absent on create = [READ_TEAM_CHANNEL]; an empty list is refused. On update, absent = unchanged."
+    reasons: [TickerReason!]
     enabled: Boolean
   }
 
