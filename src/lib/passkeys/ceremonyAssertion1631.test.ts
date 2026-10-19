@@ -150,4 +150,19 @@ describe('decideCeremonyAssertion (deciding transaction)', () => {
     const right = await verify(answer(c.seed, { counter: 1 }), c.expected);
     expect(await db.$transaction((tx) => decideCeremonyAssertion(tx, { ceremonyId: id, browserNonceHash: NONCE, purpose: 'SIGN_IN', verified: right.snapshot }))).not.toBeNull();
   });
+
+  it('judges expiry at the moment of consuming, not at the caller transaction start (a lock wait can cross it)', async () => {
+    const id = (await db.$transaction((tx) => createCeremony(tx, { purpose: 'SIGN_IN', browserNonceHash: NONCE, ttlSeconds: 1 }))).id;
+    const c = challenge();
+    const { snapshot } = await verify(answer(c.seed, { counter: 1 }), c.expected);
+    const decided = await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT CURRENT_TIMESTAMP`; // the transaction has started, well inside the ceremony's lifetime
+      await tx.$executeRaw`SELECT pg_sleep(1.6)`;      // stands in for the anchor/row-lock wait; expiry passes inside the transaction
+      return decideCeremonyAssertion(tx, { ceremonyId: id, browserNonceHash: NONCE, purpose: 'SIGN_IN', verified: snapshot });
+    });
+    expect(decided).toBeNull();
+    const [row] = await db.$queryRaw<Array<{ consumed_at: Date | null }>>`SELECT consumed_at FROM passkey_ceremonies WHERE id = ${id}`;
+    expect(row.consumed_at).toBeNull();
+    expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: passkeyId } })).counter).toBe(0n);
+  });
 });

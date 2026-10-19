@@ -1,7 +1,8 @@
 /**
  * #1631 S2a: DB-backed ceremony state. A ceremony is opened by one browser for
  * one purpose and can be consumed once; a JWT is never proof of it. Expiry and
- * consumption use the database clock, and the consume runs inside the caller's
+ * consumption read the database clock at the statement (clock_timestamp, never the
+ * transaction-start CURRENT_TIMESTAMP: a lock wait in the caller's transaction can cross expiry), and the consume runs inside the caller's
  * transaction, so a later refusal rolls it back.
  */
 import { createHash, randomBytes } from 'node:crypto';
@@ -22,7 +23,7 @@ export async function createCeremony(
   const challengeHash = input.challengeIsId ? createHash('sha256').update(Buffer.from(id, 'base64url')).digest('hex') : input.challengeHash ?? null;
   await tx.$executeRaw`INSERT INTO passkey_ceremonies (id, purpose, browser_nonce_hash, challenge_hash, expires_at)
     VALUES (${id}, ${input.purpose}, ${input.browserNonceHash}, ${challengeHash},
-            (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') + make_interval(secs => ${input.ttlSeconds}))`;
+            (clock_timestamp() AT TIME ZONE 'UTC') + make_interval(secs => ${input.ttlSeconds}))`;
   return { id };
 }
 
@@ -36,10 +37,10 @@ export async function consumeCeremony(
   input: { id: string; browserNonceHash: string; purpose: CeremonyPurpose },
 ): Promise<boolean> {
   const rows = await tx.$queryRaw<Array<{ id: string }>>`UPDATE passkey_ceremonies
-     SET consumed_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+     SET consumed_at = (clock_timestamp() AT TIME ZONE 'UTC')
    WHERE id = ${input.id} AND consumed_at IS NULL
      AND browser_nonce_hash = ${input.browserNonceHash} AND purpose = ${input.purpose}
-     AND expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+     AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')
    RETURNING id`;
   return rows.length === 1;
 }
@@ -121,7 +122,7 @@ export async function decideCeremonyAssertion(
   if (bound[0].challenge_hash !== null && bound[0].challenge_hash !== v.challengeHash) return null;
   if (!(await consumeCeremony(tx, { id: d.ceremonyId, browserNonceHash: d.browserNonceHash, purpose: d.purpose }))) return null;
   await tx.$executeRaw`UPDATE passkey_credentials
-     SET last_used_at = GREATEST(COALESCE(last_used_at, registered_at), (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3)),
+     SET last_used_at = GREATEST(COALESCE(last_used_at, registered_at), (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3)),
          counter = GREATEST(counter, ${BigInt(v.newCounter)})
    WHERE id = ${row.id}`;
   return { ownerId: row.owner_id, passkeyId: row.id };
