@@ -219,3 +219,53 @@ describe('the MCP twin carries the same text and the same gates', () => {
     expect(text(await mk(bareKey).callTool('hadron_team_chat_inbox', { appRef: app.id }))).toMatch(/^\[app_key_scope_required\]/);
   });
 });
+
+// #2102 review regressions: commit the revocation just before the deciding
+// transaction starts. The hook changes real rows/registrations, never the answer.
+function beforeDecision(change: () => Promise<unknown>): Context {
+  let once = false;
+  const original = db.$transaction.bind(db);
+  const hooked = new Proxy(db, { get(target, prop) {
+    if (prop !== '$transaction') return Reflect.get(target, prop);
+    return async (...args: any[]) => {
+      if (!once) { once = true; await change(); }
+      return (original as any)(...args);
+    };
+  }});
+  return keyCtx(hostKey, app.id, { db: hooked });
+}
+
+describe('#2102 current host delivery policy at the deciding transaction', () => {
+  it('a supported host refresh removing the worker cannot return its earlier loaded text', async () => {
+    await postForBoth();
+    const c = beforeDecision(async () => {
+      await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 1', pollIntervalSeconds: 60, workers: [] } }, keyCtx(hostKey));
+      expect(await db.hostRegistrationWorker.count({ where: { workerId: kit.id } })).toBe(0);
+    });
+    expect((await Q.deliveryBatches({}, { appRef: app.id }, c)).batches).toEqual([]);
+  });
+
+  it.each(['register', 'encrypted', 'holder'] as const)('read omits a channel after %s authority is revoked in the gap', async (kind) => {
+    await db.worker.update({ where: { id: kit.id }, data: { heldByUserId: manager.id } });
+    await postForBoth();
+    const c = beforeDecision(() => revoke(kind));
+    expect((await Q.deliveryBatches({}, { appRef: app.id }, c)).batches).toEqual([]);
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+  });
+
+  async function revoke(kind: 'register' | 'encrypted' | 'holder') {
+    if (kind === 'register') return db.registerEntry.updateMany({ where: { attendeeWorkerId: kit.id }, data: { role: 'POST' } });
+    if (kind === 'encrypted') return db.memory.update({ where: { id: channel.memoryId }, data: { isEncrypted: true } });
+    return db.orgMember.update({ where: { organizationId_userId: { organizationId: org.id, userId: manager.id } }, data: { deletedAt: new Date() } });
+  }
+
+  it.each(['register', 'encrypted', 'holder'] as const)('old host proof refuses after %s authority loss, including at transaction entry', async (kind) => {
+    await db.worker.update({ where: { id: kit.id }, data: { heldByUserId: manager.id } });
+    await postForBoth();
+    const [b] = (await read(hostKey)).batches;
+    const c = beforeDecision(() => revoke(kind));
+    expect(await code(M.acknowledgeDeliveryBatches({}, { batchIds: [b.id] }, c))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect((await read(hostKey)).batches).toEqual([]);
+  });
+});
