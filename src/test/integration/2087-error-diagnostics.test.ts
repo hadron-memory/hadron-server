@@ -30,10 +30,11 @@ function normalized(value: unknown, ref: string) { return JSON.stringify(value).
 async function post(path: string, body: unknown, extra: Record<string,string> = {}) {
   return fetch(origin + path, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, ...extra }, body: JSON.stringify(body) });
 }
-async function gql(operation: string, ref: string) {
-  const response = await post('/graphql', { query: operation, variables: { a: ref } });
+async function gqlVariables(operation: string, variables: Record<string,unknown>) {
+  const response = await post('/graphql', { query: operation, variables });
   expect(response.status).toBe(200); return await response.json() as any;
 }
+const gql=(operation:string,ref:string)=>gqlVariables(operation,{a:ref});
 let rpcId = 1;
 async function mcpOpen() {
   const r = await post('/mcp', { jsonrpc:'2.0', id:rpcId++, method:'initialize', params:{ protocolVersion:'2025-03-26', capabilities:{}, clientInfo:{ name:'diagnostics2087', version:'1' } } }, { accept:'application/json, text/event-stream' });
@@ -115,5 +116,55 @@ describe('#2087 formatter diagnostics supplied by callers',()=>{
     const result=formatGraphQLError({message:error.message,extensions:{code:'INTERNAL_SERVER_ERROR',appRef:absent,...diagnostics}},error);
     noDiagnostics(result); expect(result.extensions?.appRef).toBe(absent);
     expect(result.extensions?.code).toBe(error instanceof UrnNotQualifiedError?'URN_NOT_QUALIFIED':'INTERNAL_SERVER_ERROR');
+  });
+});
+
+/** #2087 scoped delta: variable coercion must not serialize any rejected values. */
+describe('#2087 variable coercion',()=>{
+  const secret='SECRET_COERCION_2087';
+  const settings=`mutation($a:String!,$input:AppDeliverySettingsInput!){setAppDeliverySettings(appRef:$a,input:$input){busyDelaySeconds}}`;
+  const ticker=`mutation($a:String!,$input:TickerInput!){createTicker(appRef:$a,input:$input){id}}`;
+  function safeErrors(result:any,minimum=1) {
+    expect(result.errors.length).toBeGreaterThanOrEqual(minimum);
+    for(const error of result.errors) {
+      expect(error).toMatchObject({message:'Invalid GraphQL variable input.',extensions:{code:'BAD_USER_INPUT'}});
+      expect(error.extensions).toEqual({code:'BAD_USER_INPUT'});
+      expect(error.locations).toEqual(expect.arrayContaining([expect.objectContaining({line:expect.any(Number),column:expect.any(Number)})]));
+      expect(error.path).toBeUndefined();
+    }
+    expect(JSON.stringify(result)).not.toContain(secret); noDiagnostics(result);
+  }
+  it.each([
+    {busyDelaySeconds:500,proof:secret},
+    {busyDelaySeconds:secret},
+    null,
+  ])('typed settings variable rejects safely and changes nothing (%s)',async input=>{
+    const before=await db.app.findMany({orderBy:{id:'asc'}});
+    safeErrors(await gqlVariables(settings,{a:appId,input}));
+    expect(await db.app.findMany({orderBy:{id:'asc'}})).toEqual(before);
+  });
+  it.each([
+    {name:'safe',cadenceSeconds:120,relevance:secret},
+    {name:'safe',cadenceSeconds:120,anchorAt:secret},
+    {name:'safe',cadenceSeconds:120,channelIds:[{proof:secret}]},
+  ])('enum, custom scalar and list coercion omit values (%s)',async input=>{
+    const before=await db.ticker.count(); safeErrors(await gqlVariables(ticker,{a:appId,input})); expect(await db.ticker.count()).toBe(before);
+  });
+  it('nested input/list failures are all safe',async()=>{
+    safeErrors(await gqlVariables('query($f:NodeFilter){findNodes(filter:$f){__typename}}',{f:{where:{and:[{path:[{proof:secret}]},{as:secret}]}}}),2);
+  });
+  it('multiple failing variables all receive the fixed contract',async()=>{
+    safeErrors(await gqlVariables('query($one:Int!,$two:Int!){a:findNodes(limit:$one){__typename} b:findNodes(limit:$two){__typename}}',{one:secret,two:{proof:secret}}),2);
+  });
+  it('missing required variable is the same coercion contract',async()=>{safeErrors(await gqlVariables(settings,{a:appId}));});
+  it('schema validation stays distinct from execution coercion',async()=>{
+    const response=await post('/graphql',{query:'query($unused:String){noSuch2087Field}',variables:{unused:secret}});
+    const result=await response.json() as any;
+    expect(result.errors[0].extensions.code).toBe('GRAPHQL_VALIDATION_FAILED');
+    expect(result.errors.every((e:any)=>e.message!=='Invalid GraphQL variable input.')).toBe(true);
+  });
+  it('public domain BAD_USER_INPUT remains a domain refusal',()=>{
+    const error=new GraphQLError('Repair this public field.',{extensions:{code:'BAD_USER_INPUT',reason:'PUBLIC_REMEDY'}});
+    expect(formatGraphQLError(error.toJSON(),error)).toMatchObject({message:'Repair this public field.',extensions:{code:'BAD_USER_INPUT',reason:'PUBLIC_REMEDY'}});
   });
 });
