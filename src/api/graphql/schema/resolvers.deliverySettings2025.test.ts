@@ -88,8 +88,8 @@ describe('delivery settings #2025', () => {
     await M.createTicker({}, { appRef: appId, input: { name: 'Fast', cadenceSeconds: 120 } }, ctx(member.id));
     await code(set({ batchWindowSeconds: 180 }), 'TICKER_SETTINGS_CONFLICT');
   });
-  it('does not expose an enabled-but-ineffective standby switch', async () => {
-    await code(set({ busyDelaySeconds: 500, standbyEnabled: true }), 'DELIVERY_STANDBY_UNAVAILABLE');
+  it('S7: the standby switch is accepted and effective once on; off restores the defaults', async () => {
+    expect(await set({ standbyEnabled: true })).toEqual({ ...defaults, standbyEnabled: true, standbyEffective: true });
     expect(await set({ standbyEnabled: false })).toEqual(defaults);
   });
   it('refuses ordinary members, keys, impersonation, invalid bindings and foreign Apps', async () => {
