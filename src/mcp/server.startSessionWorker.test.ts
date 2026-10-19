@@ -79,7 +79,7 @@ describe('hadron_start_session workerRef parity (#940)', () => {
       workerRef: worker.id,
     });
     expect(out).toContain('Session started:');
-    expect(out).toContain(`Working as Iris (${worker.id})`);
+    expect(out).toContain(`Working as Iris (worker id: ${worker.id})`);
     const sessionId = out.match(/Session started: (\S+)/)?.[1];
     const row = await db.session.findUniqueOrThrow({ where: { id: sessionId! } });
     expect(row.workerId).toBe(worker.id);
@@ -174,7 +174,7 @@ describe('#990 — workerRef by name, and the briefing always comes back', () =>
       workerRef: 'Iris',
     });
     expect(out).toContain('Session started:');
-    expect(out).toContain(`Working as Iris (${worker.id})`);
+    expect(out).toContain(`Working as Iris (worker id: ${worker.id})`);
     const sessionId = out.match(/Session started: (\S+)/)?.[1];
     const row = await db.session.findUniqueOrThrow({ where: { id: sessionId! } });
     expect(row.workerId).toBe(worker.id);
@@ -186,7 +186,7 @@ describe('#990 — workerRef by name, and the briefing always comes back', () =>
       description: 'lowercase pickup',
       workerRef: 'iris',
     });
-    expect(out).toContain(`Working as Iris (${worker.id})`);
+    expect(out).toContain(`Working as Iris (worker id: ${worker.id})`);
   });
 
   it('a name from ANOTHER App does not resolve in this one', async () => {
