@@ -110,9 +110,31 @@ function saveReceipts(dir: string, r: Receipts): void {
  * message, stderr or error object: those can echo an opaque wake proof, a typed nudge, a composer draft or a credential
  * (#2070 LOCAL P2-2). A code is kept only if it looks like one.
  */
-const SAFE_CODE = /^[A-Za-z][A-Za-z0-9_.-]{1,63}$/;
-function safeCode(v: unknown): string | undefined { return typeof v === 'string' && SAFE_CODE.test(v) ? v : undefined; }
+const PUBLIC_CODES: ReadonlySet<string> = new Set([
+  // hadron server (GraphQL extensions.code): Apollo built-ins and the wake refusals this loop can meet
+  'BAD_USER_INPUT', 'UNAUTHENTICATED', 'FORBIDDEN', 'NOT_FOUND', 'APP_NOT_FOUND', 'APP_UNINSTALLED', 'GRAPHQL_VALIDATION_FAILED',
+  'GRAPHQL_PARSE_FAILED', 'INTERNAL_SERVER_ERROR', 'PERSISTED_QUERY_NOT_FOUND', 'WAKE_PROOF_INVALID',
+  'WAKE_PROOF_REQUESTER_MISMATCH', 'WAKE_PROOF_STALE',
+  // Orca (terminal list / send errors)
+  'backend_failure', 'composer_not_empty', 'invalid_argument', 'not_accepted', 'terminal_handle_stale', 'terminal_list_failed',
+  'timeout', 'transport',
+  // POSIX errno from this process's own filesystem and spawn calls
+  'ENOENT', 'EACCES', 'EPERM', 'EEXIST', 'EISDIR', 'ENOTDIR', 'ENOTEMPTY', 'ENOSPC', 'EROFS', 'EIO', 'EMFILE', 'ENFILE', 'EBUSY',
+  'EAGAIN', 'EINVAL', 'ETIMEDOUT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE',
+]);
+/**
+ * A code is VALIDATED AGAINST THAT FIXED VOCABULARY, never by its character shape: arbitrary private text can look exactly
+ * like a code (#2070 §10 delta). A known code is kept; any other string that was present collapses to the class `other`;
+ * a missing code stays absent.
+ */
+function safeCode(v: unknown): string | undefined {
+  if (typeof v !== 'string' || v === '') return undefined;
+  return PUBLIC_CODES.has(v) ? v : 'other';
+}
 const errno = (e: unknown): string => safeCode((e as NodeJS.ErrnoException)?.code) ?? 'error';
+/** Standard error classes only: a dynamic or custom name is untrusted text and collapses to `other`. */
+const KNOWN_NAMES: ReadonlySet<string> = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'RouterError']);
+const safeName = (n: unknown): string => (typeof n === 'string' && KNOWN_NAMES.has(n) ? n : 'other');
 
 /** An error THIS script raised, with a message it controls (class, code, pid, path): safe to log as written. */
 export class SafeError extends Error {}
@@ -124,9 +146,9 @@ export class SafeError extends Error {}
  */
 export function describeError(e: unknown): string {
   if (e instanceof SafeError) return scrub(e.message);
-  const name = safeCode((e as Error)?.name) ?? 'Error';
+  const name = safeName((e as Error)?.name);
   const code = safeCode((e as NodeJS.ErrnoException)?.code)
-    ?? String((e as Error)?.message ?? '').match(/"code"\s*:\s*"([A-Za-z][A-Za-z0-9_.-]{1,63})"/)?.[1];
+    ?? safeCode(String((e as Error)?.message ?? '').match(/"code"\s*:\s*"([^"]{1,64})"/)?.[1]);
   return `${name === 'RouterError' ? 'helper failed' : `unexpected ${name}`}${code ? ` (${code})` : ''}`;
 }
 
@@ -141,7 +163,7 @@ const stageClass = (s: unknown): string => (typeof s === 'string' && STAGES.has(
  * A stored `detail` (it outlives this process, and an older version wrote raw text) is logged only if it is exactly one of the
  * shapes THIS version writes; anything else is withheld. A same-id retry joins two such shapes.
  */
-const CODE_SHAPE = '[A-Za-z][A-Za-z0-9_.-]{1,63}';
+const CODE_SHAPE = `(?:other|${[...PUBLIC_CODES].join('|')})`;
 const STAGE_SHAPE = '(?:input_accepted|turn_started|no_turn_started_yet|not_accepted|other)';
 const DETAIL_SHAPES: RegExp[] = [
   /^send intent recorded before submission; outcome unknown$/,

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -918,6 +918,71 @@ describe('diagnostics never carry a proof, typed text or a server message (P2-2)
       expect(log()).not.toContain(text);
       expect(log()).toContain('unreconciled'); // still held for a human
       expect(f.sent).toEqual([]);
+    });
+
+    // Rodolfo's §10 delta at 73ed4120 and Xan's scope note: a code or a name is validated against a FIXED PUBLIC
+    // VOCABULARY, not by its character shape. Ordinary code-shaped private text must collapse to the generic class.
+    describe('code-shaped private text is not elevated to a safe code or name', () => {
+      const SHAPED = 'PRIVATE_CODE_SHAPED_SENTINEL_77';
+      it('a server error code that is not a known public code collapses to the generic class', () => {
+        f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+        f.ackReply = () => ({ errors: [{ message: 'x', extensions: { code: SHAPED } }] });
+        go();
+        expect(log()).toContain('graphql error');
+        expect(log()).not.toContain(SHAPED);
+      });
+      it('an Orca send error code that is not a known public code is not logged', () => {
+        f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+        f.sendReply = () => JSON.stringify({ ok: false, error: { code: SHAPED, message: 'm' } });
+        go();
+        expect(log()).toContain('send refused');
+        expect(log()).not.toContain(SHAPED);
+      });
+      it('a code token extracted from a helper message must be a known public code', async () => {
+        await asLoop((argv) => isTerminalList(argv)
+          ? { code: 0, stdout: JSON.stringify({ ok: false, error: { code: SHAPED, message: 'm' } }), stderr: '' } : undefined);
+        expect(log()).toContain('pass failed');
+        expect(log()).not.toContain(SHAPED);
+      });
+      it('a dynamic error name is not logged unless it is a standard class', async () => {
+        await asLoop((argv) => { if (isTerminalList(argv)) { const e = new Error('x'); e.name = SHAPED; throw e; } return undefined; });
+        expect(log()).toContain('unexpected other');
+        expect(log()).not.toContain(SHAPED);
+      });
+      it('an errno-like code property that is not a real errno is not logged', async () => {
+        await asLoop((argv) => { if (isTerminalList(argv)) throw Object.assign(new Error('x'), { code: SHAPED }); return undefined; });
+        expect(log()).not.toContain(SHAPED);
+      });
+      it('a stored detail that fits a template but carries an unknown code is withheld', () => {
+        mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+        writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1'], receiver: 'term_a#inc-1', at: 1, detail: `send refused: ${SHAPED}`, text: 'a nudge', handle: 'term_a' } }));
+        f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+        go();
+        expect(log()).not.toContain(SHAPED);
+        expect(log()).toContain('unreconciled');
+      });
+      it('real codes are still kept (backend_failure, WAKE_PROOF_STALE, EISDIR)', async () => {
+        await asLoop((argv) => isTerminalList(argv)
+          ? { code: 0, stdout: JSON.stringify({ ok: false, error: { code: 'backend_failure', message: 'm' } }), stderr: '' } : undefined);
+        expect(log()).toContain('backend_failure');
+      });
+    });
+
+    // Ada #24610 (fold in only because this finding forces a new head): the same sentinels through the REAL default sink,
+    // console.log, with no log callback at all.
+    it('end to end through console.log: stage, legacy detail and helper-code sentinels never reach the real sink', async () => {
+      const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+        writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1'], receiver: 'term_a#inc-1', at: 1, detail: 'PRIVATE_E2E_LEGACY_SENTINEL', text: 'a nudge', handle: 'term_a' } }));
+        f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+        const run = f.run;
+        f.run = (argv) => (isTerminalList(argv) ? { code: 0, stdout: JSON.stringify({ ok: false, error: { code: 'PRIVATE_E2E_CODE_SENTINEL', message: 'PRIVATE_E2E_TEXT_SENTINEL' } }), stderr: '' } : run(argv));
+        await main(['loop', '--interval', '10'], { load: cfg, run: f.run, sleep: async () => {}, maxPasses: 2 });
+        const printed = spy.mock.calls.map((c) => c.join(' ')).join('\n');
+        expect(printed).toContain('pass failed');
+        for (const s of ['PRIVATE_E2E_LEGACY_SENTINEL', 'PRIVATE_E2E_CODE_SENTINEL', 'PRIVATE_E2E_TEXT_SENTINEL']) expect(printed).not.toContain(s);
+      } finally { spy.mockRestore(); }
     });
 
     it('this script\'s own errors keep their readable message (receipts unreadable stops the pass with a code)', async () => {

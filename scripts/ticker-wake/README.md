@@ -64,9 +64,9 @@ skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
   types twice). Unreadable or malformed receipt state (not a plain object, bad
   entries) stops the pass.
 - **Diagnostics.** Log lines and stored `detail` fields carry a fixed class and,
-  when the server or Orca named one, an error code (for example
+  when the server or Orca named one, a code from a FIXED public vocabulary (a code or an error name that is not in it, however ordinary it looks, is logged as `other`; for example
   `graphql error WAKE_PROOF_STALE`, `send refused: composer_not_empty`). Never the
-  raw message, stderr, wake proof or any typed or screen text. An exception that is not this script's own (a router helper, the runner, a bug) is reduced at the outer boundary to a class plus an allowlisted code (`helper failed (backend_failure)`, `unexpected Error`).
+  raw message, stderr, wake proof or any typed or screen text. An exception that is not this script's own (a router helper, the runner, a bug) is reduced at the outer boundary to a class plus a known code (`helper failed (backend_failure)`, `unexpected Error`, `unexpected other`).
 
 ## Recovering an ambiguous entry (a human decision)
 
