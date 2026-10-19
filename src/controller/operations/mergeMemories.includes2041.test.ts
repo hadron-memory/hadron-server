@@ -127,4 +127,30 @@ describe('#2041 D5 — mergeMemories include read check', () => {
     await merge();
     expect(await db.node.count({ where: { memoryId: dst.id, loc: { in: ['intro', 'page'] }, deletedAt: null } })).toBe(2);
   });
+
+  it('membership removal committed before the batch: the batch refuses (shared-gate actual read)', async () => {
+    // The merger reads the include target only through a second org's membership.
+    const other = await db.organization.findFirstOrThrow({ where: { urn: 'd5other.example' } });
+    await db.memory.update({ where: { id: hiddenMem.id }, data: { organizationId: other.id } });
+    const member = await db.orgMember.create({ data: { organizationId: other.id, userId: admin.id, role: 'READER' } });
+    await node(src.id, '00000000000000000000000000000001', 'a', 'plain');
+    await node(src.id, 'ffffffffffffffffffffffffffffff09', 'page', `see {{> ${hiddenMem.urn}:secret }}`);
+    const before = await live(src.id);
+    const transaction = db.$transaction.bind(db);
+    let revoked = false;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...args: unknown[]) => {
+      if (!revoked && (await live(src.id)) === 1) {
+        revoked = true;
+        await db.orgMember.deleteMany({ where: { organizationId: other.id, userId: admin.id } });
+      }
+      return (transaction as (...a: unknown[]) => unknown)(...args);
+    }) as never);
+    let e: GraphQLError;
+    try { e = await errorOf(merge()); } finally { spy.mockRestore(); }
+    expect(member.userId).toBe(admin.id);
+    expect(e.extensions).toMatchObject({
+      code: 'INCLUDE_TARGET_UNAVAILABLE',
+      partialMerge: { relocated: before - 1, remainingSourceNodes: 1 },
+    });
+  });
 });
