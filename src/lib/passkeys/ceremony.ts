@@ -13,13 +13,15 @@ export type CeremonyPurpose = 'SIGN_IN' | 'STEP_UP_ONLY';
 /** Open a ceremony for the browser identified by `browserNonceHash`. */
 export async function createCeremony(
   tx: Prisma.TransactionClient,
-  input: { purpose: CeremonyPurpose; browserNonceHash: string; ttlSeconds: number; challengeHash?: string },
+  input: { purpose: CeremonyPurpose; browserNonceHash: string; ttlSeconds: number; challengeHash?: string; challengeIsId?: boolean },
 ): Promise<{ id: string }> {
   if (!/^[0-9a-f]{64}$/.test(input.browserNonceHash)) throw new Error('browser nonce hash must be 64 lowercase hex');
   if (!Number.isInteger(input.ttlSeconds) || input.ttlSeconds < 1) throw new Error('ttlSeconds must be a positive integer');
   const id = randomBytes(32).toString('base64url');
+  // challengeIsId: the challenge is the id's own random bytes, so the server stores only its hash.
+  const challengeHash = input.challengeIsId ? createHash('sha256').update(Buffer.from(id, 'base64url')).digest('hex') : input.challengeHash ?? null;
   await tx.$executeRaw`INSERT INTO passkey_ceremonies (id, purpose, browser_nonce_hash, challenge_hash, expires_at)
-    VALUES (${id}, ${input.purpose}, ${input.browserNonceHash}, ${input.challengeHash ?? null},
+    VALUES (${id}, ${input.purpose}, ${input.browserNonceHash}, ${challengeHash},
             (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') + make_interval(secs => ${input.ttlSeconds}))`;
   return { id };
 }

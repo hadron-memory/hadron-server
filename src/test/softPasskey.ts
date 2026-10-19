@@ -25,7 +25,7 @@ function coseEs256(publicKey: KeyObject): Buffer {
 export interface SoftPasskey {
   credentialId: Buffer;
   cosePublicKey: Buffer;
-  assert(opts: { payload: Buffer; origin: string; rpId: string; uv?: boolean; type?: string; counter?: number }): {
+  assert(opts: { payload: Buffer; rawChallenge?: Buffer; origin: string; rpId: string; uv?: boolean; type?: string; counter?: number }): {
     authenticatorData: Buffer; clientDataJson: Buffer; signature: Buffer;
   };
 }
@@ -35,12 +35,12 @@ export function softPasskey(): SoftPasskey {
   return {
     credentialId: randomBytes(16),
     cosePublicKey: coseEs256(publicKey),
-    assert({ payload, origin, rpId, uv = true, type = 'webauthn.get', counter = 0 }) {
+    assert({ payload, rawChallenge, origin, rpId, uv = true, type = 'webauthn.get', counter = 0 }) {
       const counterBytes = Buffer.alloc(4);
       counterBytes.writeUInt32BE(counter);
       const authenticatorData = Buffer.concat([sha256(rpId), Buffer.from([0x01 | (uv ? 0x04 : 0)]), counterBytes]);
       const clientDataJson = Buffer.from(JSON.stringify({
-        type, challenge: sha256(payload).toString('base64url'), origin, crossOrigin: false,
+        type, challenge: (rawChallenge ?? sha256(payload)).toString('base64url'), origin, crossOrigin: false,
       }));
       const signature = sign('sha256', Buffer.concat([authenticatorData, sha256(clientDataJson)]), privateKey);
       return { authenticatorData, clientDataJson, signature };
