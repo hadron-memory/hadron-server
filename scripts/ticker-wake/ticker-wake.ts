@@ -82,9 +82,9 @@ function loadReceipts(dir: string): Receipts {
   let raw: string;
   try { raw = readFileSync(receiptsPath(dir), 'utf8'); } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return {};
-    throw new Error(`receipts unreadable (${errno(e)}); stopping rather than risk a retype`);
+    throw new SafeError(`receipts unreadable (${errno(e)}); stopping rather than risk a retype`);
   }
-  const bad = (): never => { throw new Error('receipts malformed; stopping rather than risk a retype'); };
+  const bad = (): never => { throw new SafeError('receipts malformed; stopping rather than risk a retype'); };
   let parsed: any;
   try { parsed = JSON.parse(raw); } catch { return bad(); }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return bad(); // [] would be silently rewritten as []
@@ -114,6 +114,22 @@ const SAFE_CODE = /^[A-Za-z][A-Za-z0-9_.-]{1,63}$/;
 function safeCode(v: unknown): string | undefined { return typeof v === 'string' && SAFE_CODE.test(v) ? v : undefined; }
 const errno = (e: unknown): string => safeCode((e as NodeJS.ErrnoException)?.code) ?? 'error';
 
+/** An error THIS script raised, with a message it controls (class, code, pid, path): safe to log as written. */
+export class SafeError extends Error {}
+
+/**
+ * The only way an exception becomes log text. This script's own SafeErrors keep their message; anything else (a router
+ * helper's RouterError, a runner or filesystem exception, a bug) is reduced to a class plus an allowlisted code, because its
+ * message can carry Orca or hadron output, a typed nudge, a draft or a proof (#2070 LOCAL P2-2, outer catch).
+ */
+export function describeError(e: unknown): string {
+  if (e instanceof SafeError) return scrub(e.message);
+  const name = safeCode((e as Error)?.name) ?? 'Error';
+  const code = safeCode((e as NodeJS.ErrnoException)?.code)
+    ?? String((e as Error)?.message ?? '').match(/"code"\s*:\s*"([A-Za-z][A-Za-z0-9_.-]{1,63})"/)?.[1];
+  return `${name === 'RouterError' ? 'helper failed' : `unexpected ${name}`}${code ? ` (${code})` : ''}`;
+}
+
 /**
  * Last line of defence at the log sink: anything token-shaped that still reaches a log line (a `body.signature` proof, a
  * long opaque run, a bearer or key prefix) is replaced. The classes above are what keep text and messages out; this
@@ -131,10 +147,10 @@ export function scrub(s: string): string {
 function gql(run: Runner, argv: string[]): any {
   const res = run(argv);
   let data: any;
-  try { data = JSON.parse(res.stdout); } catch { throw new Error('unparsable reply'); }
+  try { data = JSON.parse(res.stdout); } catch { throw new SafeError('unparsable reply'); }
   if (data.errors?.length || data.error) {
     const code = safeCode(data.errors?.[0]?.extensions?.code) ?? safeCode(data.error?.code);
-    throw new Error(code ? `graphql error ${code}` : 'graphql error');
+    throw new SafeError(code ? `graphql error ${code}` : 'graphql error');
   }
   return data.data;
 }
@@ -226,7 +242,7 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
     const argv = [cfg.hadronCli, 'api', QUERY, '-F', `a=${cfg.app}`];
     if (page) argv.push('-F', `p=${page}`);
     const d = gql(run, argv).dueWakes;
-    if (!d) throw new Error('dueWakes returned no result');
+    if (!d) throw new SafeError('dueWakes returned no result');
     wakes.push(...d.wakes);
     more = Boolean(d.pageInfo?.hasNextPage);
     if (!more) break;
@@ -392,22 +408,22 @@ export function acquireLock(dir: string, pid = process.pid, hooks: LockHooks = {
   try {
     if (linked(tmp, lock)) return releaseFn;
     const held = ownerOf(lock);
-    if (held !== null && held !== pid && pidAlive(held)) throw new Error(`another ticker-wake (pid ${held}) holds ${lock}`);
+    if (held !== null && held !== pid && pidAlive(held)) throw new SafeError(`another ticker-wake (pid ${held}) holds ${lock}`);
     hooks.afterJudgedStale?.();
     // Take the takeover right. A takeover file that already exists is never cleaned up here, live owner or not: removing
     // it would repeat the check/unlink race one level down. A dead owner's file needs explicit operator cleanup.
     if (!linked(tmp, takeover)) {
       const t = ownerOf(takeover);
-      throw new Error(t !== null && t !== pid && pidAlive(t)
+      throw new SafeError(t !== null && t !== pid && pidAlive(t)
         ? `another starter is taking over ${lock}`
         : `${takeover} was left behind (owner ${t ?? 'unknown'}); an operator must remove it after checking that no ticker-wake is starting`);
     }
     try {
       hooks.beforeUnlink?.();
       const now = ownerOf(lock);
-      if (now !== null && now !== pid && pidAlive(now)) throw new Error(`another ticker-wake (pid ${now}) holds ${lock}`);
+      if (now !== null && now !== pid && pidAlive(now)) throw new SafeError(`another ticker-wake (pid ${now}) holds ${lock}`);
       if (now !== null) { try { unlinkSync(lock); } catch { /* gone */ } }
-      if (!linked(tmp, lock)) throw new Error(`could not take ${lock}: it was taken meanwhile`);
+      if (!linked(tmp, lock)) throw new SafeError(`could not take ${lock}: it was taken meanwhile`);
       return releaseFn;
     } finally { try { if (ownerOf(takeover) === pid) unlinkSync(takeover); } catch { /* gone */ } }
   } finally { try { unlinkSync(tmp); } catch { /* already gone */ } }
@@ -448,10 +464,10 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   const stateDir = join(cfg.stateDir, 'ticker-wake');
   if (dry) { pass(cfg, run, opts, log, stateDir); return 0; }
   let release: () => void;
-  try { release = acquireLock(stateDir); } catch (e) { log(`ticker-wake: ${scrub((e as Error).message)}`); return 1; }
+  try { release = acquireLock(stateDir); } catch (e) { log(`ticker-wake: ${describeError(e)}`); return 1; }
   try {
     for (let n = 0; ; n++) {
-      try { pass(cfg, run, opts, log, stateDir); } catch (e) { log(`${new Date().toISOString()} pass failed: ${scrub((e as Error).message)}`); }
+      try { pass(cfg, run, opts, log, stateDir); } catch (e) { log(`${new Date().toISOString()} pass failed: ${describeError(e)}`); }
       if (mode === 'once' || (deps.maxPasses !== undefined && n + 1 >= deps.maxPasses)) return 0;
       await (deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(seconds * 1000);
     }

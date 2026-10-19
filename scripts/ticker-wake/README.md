@@ -66,11 +66,11 @@ skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
 - **Diagnostics.** Log lines and stored `detail` fields carry a fixed class and,
   when the server or Orca named one, an error code (for example
   `graphql error WAKE_PROOF_STALE`, `send refused: composer_not_empty`). Never the
-  raw message, stderr, wake proof or any typed or screen text.
+  raw message, stderr, wake proof or any typed or screen text. An exception that is not this script's own (a router helper, the runner, a bug) is reduced at the outer boundary to a class plus an allowlisted code (`helper failed (backend_failure)`, `unexpected Error`).
 
 ## Recovering an ambiguous entry (a human decision)
 
-The script never deletes a receipt itself. An entry in `receipts.json` with
+The script never deletes or rewrites an UNRESOLVED ambiguous entry itself (it only removes a delivered receipt after a successful ack, and withdraws its own intent when Orca says a send was refused and nothing was typed). An entry in `receipts.json` with
 `state: "ambiguous"` and no request id (for example `detail` "send intent
 recorded before submission; outcome unknown") holds that worker's wake until a
 person classifies it. Look at the worker's terminal (`orca terminal read

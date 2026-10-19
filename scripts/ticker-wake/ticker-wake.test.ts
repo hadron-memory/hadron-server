@@ -855,6 +855,49 @@ describe('diagnostics never carry a proof, typed text or a server message (P2-2)
     expect(msg).not.toContain(PROOF_SENTINEL);
   });
 
+  // George's residual P2-2 at 8154a672: an exception thrown by a router HELPER reaches the outer catch, and scrub() only
+  // removes token shapes. Every exception that is not this script's own is logged as a class plus an allowlisted code.
+  describe('helper and outer exceptions are normalised at the boundary', () => {
+    const deps = () => ({ load: cfg, run: f.run, log: (l: string) => lines.push(l), sleep: async () => {} });
+    const asLoop = async (mutate: (argv: string[]) => { code: number; stdout: string; stderr: string } | undefined) => {
+      f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+      const run = f.run;
+      f.run = (argv) => mutate(argv) ?? run(argv);
+      expect(await main(['loop', '--interval', '10'], { ...deps(), maxPasses: 1 })).toBe(0);
+    };
+    const isTerminalList = (argv: string[]) => argv[0] === 'orca' && argv[1] === 'terminal' && argv[2] === 'list';
+
+    it('a terminal-list error carrying private text logs the class and the code, not the message', async () => {
+      await asLoop((argv) => isTerminalList(argv)
+        ? { code: 0, stdout: JSON.stringify({ ok: false, error: { code: 'backend_failure', message: TEXT_SENTINEL } }), stderr: '' }
+        : undefined);
+      expect(log()).toContain('pass failed');
+      expect(log()).toContain('backend_failure');
+      clean();
+    });
+
+    it('a helper reading unparsable output that contains private text logs a class only', async () => {
+      await asLoop((argv) => isTerminalList(argv) ? { code: 1, stdout: `garbage ${TEXT_SENTINEL} ${PROOF_SENTINEL}`, stderr: TEXT_SENTINEL } : undefined);
+      expect(log()).toContain('pass failed');
+      clean();
+    });
+
+    it('an arbitrary exception from the runner is logged by its class, never its message', async () => {
+      await asLoop((argv) => { if (isTerminalList(argv)) throw new Error(`boom ${TEXT_SENTINEL} ${PROOF_SENTINEL}`); return undefined; });
+      expect(log()).toContain('pass failed');
+      clean();
+    });
+
+    it('this script\'s own errors keep their readable message (receipts unreadable stops the pass with a code)', async () => {
+      mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+      mkdirSync(receiptsFile()); // a directory where the file should be: EISDIR on read
+      f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+      expect(await main(['loop', '--interval', '10'], { ...deps(), maxPasses: 1 })).toBe(0);
+      expect(log()).toContain('receipts unreadable (EISDIR)');
+      expect(f.sent).toEqual([]);
+    });
+  });
+
   it('screen-derived reasons are logged as a class, not as screen text', () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
     f.screen = { source: 'screen', tail: ['❯ ' + TEXT_SENTINEL, RULE, '❯ ' + TEXT_SENTINEL, RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'], draft: TEXT_SENTINEL };
