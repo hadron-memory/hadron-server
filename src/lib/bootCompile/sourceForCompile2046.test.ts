@@ -15,7 +15,7 @@ beforeEach(async () => {
   await cleanDb(db);
   const { org, graph } = await createDbOrgAndGraph(db);
   ownMemory = graph.id;
-  installMemory = (await db.memory.create({ data: { id: generateId(), name: 'Install fixture', urn: `fixture:${generateId()}`, organizationId: org.id } })).id;
+  installMemory = (await db.memory.create({ data: { id: generateId(), name: 'Install fixture', class: 'group', urn: `fixture:${generateId()}`, organizationId: org.id } })).id;
 });
 
 describe('#2046 exact-address source selection (internal, no compile entry)', () => {
@@ -62,6 +62,23 @@ describe('#2046 exact-address source selection (internal, no compile entry)', ()
     await put(installMemory, 'boot:workers:other:source');
     if (deleted) await put(installMemory, `boot:workers:${workerId}:source`, { deletedAt: new Date() });
     await expect(select({ kind: 'WORKER', workerId, installMemoryId: installMemory })).rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_NO_SOURCE' } });
+  });
+
+  it('does not fall back from a deleted Agent source or a worker without an install', async () => {
+    await put(ownMemory, 'boot:source', { deletedAt: new Date() });
+    await put(installMemory, 'boot:source');
+    await expect(select({ kind: 'AGENT', agentMemoryId: ownMemory })).rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_NO_SOURCE' } });
+    await expect(select({ kind: 'WORKER', workerId, installMemoryId: null })).rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_NO_SOURCE' } });
+  });
+
+  it.each(['AGENT', 'WORKER'] as const)('a live compiled source is invalid for %s too', async (kind) => {
+    if (kind === 'AGENT') {
+      await put(ownMemory, 'boot:source', { nodeType: 'compiled-boot-prompt' });
+      await expect(select({ kind, agentMemoryId: ownMemory })).rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_SOURCE_INVALID' } });
+    } else {
+      await put(installMemory, `boot:workers:${workerId}:source`, { nodeType: 'compiled-boot-prompt' });
+      await expect(select({ kind, workerId, installMemoryId: installMemory })).rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_SOURCE_INVALID' } });
+    }
   });
 
   it('refuses source/output memory-loc collision rather than returning an overwrite candidate', async () => {
