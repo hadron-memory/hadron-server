@@ -109,6 +109,13 @@ describe('`approved` includes (cor:dmo:150:02)', () => {
     expect(await read('inc')).toBe(N);
   });
 
+  it('an approved target with empty (null) content serves the empty text, not the notice (pinned and unpinned)', async () => {
+    const hash = computeApprovalHash({ title: 'e', abstract: null, content: null });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'e', name: 'e', content: null, revSeq: 1, approvedRevNo: 1, approvedBy: reader.id, approvedAt: new Date(), approvalHash: hash } });
+    await includer('[{{> e approved}}][{{> e rev=1 approved}}]');
+    expect(await read('inc')).toBe('[][]');
+  });
+
   it('R50: after the newest approved revision is deliberately deleted, a fresh resolution serves the next approved one; none left is the notice', async () => {
     const t = await target('t', ['v1', 'v2', 'v3 draft'], [1, 2]);
     await includer('{{> t approved}}');

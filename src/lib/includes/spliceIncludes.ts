@@ -134,7 +134,7 @@ async function approvedText(db: Db, target: Target, pinned: number | undefined):
   const verdict = await revisionApprovalOf(db, target.id, revNo);
   if (verdict.state !== 'APPROVED' || !verdict.served) return null;
   if (verdict.served.memoryId !== target.memoryId) return null;
-  return verdict.served.content;
+  return verdict.served.content ?? '';
 }
 
 async function expandTag(
