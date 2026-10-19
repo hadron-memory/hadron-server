@@ -108,6 +108,22 @@ describe('newestApprovedRevisionOf (#2041)', () => {
     expect((await newestApprovedRevisionOf(db, n.id)).found).toBeNull();
   });
 
+  it('a foreign-memory snapshot holding the live number is not read through as the live revision (Baloo P2)', async () => {
+    const n = await mk('n:11');
+    await approve(n.id); // rev 1, live: approved
+    const other = await resolvers.Mutation.createMemory(null, { orgId, name: 'elsewhere-live' }, as());
+    const live = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+    // A retained snapshot at the live number, captured in another memory, covering the same approved text.
+    await db.nodeRevision.create({ data: {
+      nodeId: n.id, memoryId: other.id, revNo: live.revSeq, loc: live.loc, name: live.name, abstract: live.abstract, content: live.content,
+      approvalHash: live.approvalHash, approvedBy: live.approvedBy, approvedAt: live.approvedAt,
+    } });
+    expect((await newestApprovedRevisionOf(db, n.id)).found).toBeNull();
+    // control: the same row captured in the target's own memory is served, as a snapshot.
+    await db.nodeRevision.updateMany({ where: { nodeId: n.id, revNo: live.revSeq }, data: { memoryId: memory.id } });
+    expect((await newestApprovedRevisionOf(db, n.id)).found).toMatchObject({ revNo: live.revSeq, source: 'snapshot' });
+  });
+
   it('the cap bounds the walk and reports truncation instead of "never approved"', async () => {
     const n = await mk('n:10');
     await approve(n.id); // rev 1

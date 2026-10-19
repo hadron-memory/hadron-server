@@ -472,6 +472,7 @@ export async function newestApprovedRevisionOf(
   const none: NewestApprovedRevision = { found: null, truncated: false };
   const live = await db.node.findUnique({ where: { id: nodeId }, select: { memoryId: true, revSeq: true } });
   if (!live) return none;
+  // Snapshots servable from the node's CURRENT memory only (a foreign-memory capture is never selected).
   const snapshots = await db.nodeRevision.findMany({
     where: { nodeId, revNo: { not: null }, OR: [{ memoryId: null }, { memoryId: live.memoryId }] },
     select: { revNo: true },
@@ -479,8 +480,11 @@ export async function newestApprovedRevisionOf(
     take: cap + 1,
   });
   const snapshotNos = new Set(snapshots.map((r) => r.revNo!));
-  // The live revision is read from the node row only while no snapshot holds its number.
-  const candidates = [...(snapshotNos.has(live.revSeq) ? [] : [live.revSeq]), ...snapshotNos].sort((a, b) => b - a);
+  // `revisionApprovalOf` resolves a number to its snapshot row first, whichever memory captured it, so the live
+  // revision is offered only while NO snapshot at all holds its number: a foreign-memory snapshot at `revSeq` would
+  // otherwise be read through, and reported as live.
+  const liveNumberHeld = (await db.nodeRevision.findFirst({ where: { nodeId, revNo: live.revSeq }, select: { id: true } })) != null;
+  const candidates = [...(liveNumberHeld ? [] : [live.revSeq]), ...snapshotNos].sort((a, b) => b - a);
   const examined = candidates.slice(0, cap);
   for (const revNo of examined) {
     const verdict = await revisionApprovalOf(db, nodeId, revNo);
