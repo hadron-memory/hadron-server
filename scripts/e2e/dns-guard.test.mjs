@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -50,4 +50,27 @@ test('DNS guard fails loud when DNS never answers', t => {
   const { r } = run(t, { upAfterProbes: 9999 });
   assert.equal(r.status, 1);
   assert.match(r.stderr, /DNS not answering/);
+});
+
+// Seeding is the recovery path: here the resolver stays dead until the seed
+// write succeeds, so removing or breaking the seed step must fail the guard.
+test('DNS guard recovers a dead resolver by seeding (seed-dependent success)', t => {
+  const root = mkdtempSync(join(tmpdir(), 'hadron-dns-guard-seed-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, 'bin'); mkdirSync(bin);
+  const seeded = join(root, 'seeded');
+  writeFileSync(join(bin, 'incus'), `#!/bin/sh
+shift 3
+case "$1" in
+  getent) [ -f "${seeded}" ] && exit 0; exit 2 ;;
+  sh) echo seeded > "${seeded}"; exit 0 ;;
+esac
+exit 99
+`, { mode: 0o700 });
+  const r = spawnSync('bash', ['-c', `set -euo pipefail; . "${guard}"; e2e_dns_guard fixture`], {
+    encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, E2E_DNS_POLL_SECONDS: '0', E2E_DNS_SEED_AFTER: '3', E2E_DNS_WAIT_PROBES: '12' },
+  });
+  assert.equal(r.status, 0, `guard exited ${r.status}: ${r.stderr}`);
+  assert.match(r.stderr, /seeding 1\.1\.1\.1/);
+  assert.ok(existsSync(seeded), 'the seed write never ran');
 });
