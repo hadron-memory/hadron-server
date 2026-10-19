@@ -156,3 +156,10 @@ describe('renderBatch — S1 shared pure renderer', () => {
     expect(out.renderHash).not.toBe((await render(input([msg(1), msg(2, { body: 'changed' })]))).renderHash);
   });
 });
+
+it('keeps a sequence prefix at the cap when a channel timestamp runs backward', async () => {
+  const messages = Array.from({ length: 11 }, (_, i) => msg(i + 1, { createdAt: new Date(2000 - i) }));
+  const out = await render(input(messages));
+  expect(out.ranges[0].seqs).toEqual([1,2,3,4,5,6,7,8,9,10]);
+  expect(out.text).not.toContain('body-11');
+});

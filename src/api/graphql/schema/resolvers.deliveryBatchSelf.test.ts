@@ -351,3 +351,58 @@ it('self proof uses the same current register policy as host proof after read', 
   expect(await code(selfAck(s, [b.id]))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
   expect(await db.workerDeliveryChannel.count()).toBe(0);
 });
+
+it('self read waits on the deciding session row and sees an end committed by its lock holder', async () => {
+  const s = await ownSession(); await postForBoth();
+  let held!: () => void; const holding = new Promise<void>(r => { held = r; });
+  let release!: () => void; const released = new Promise<void>(r => { release = r; });
+  let entering!: () => void; const locking = new Promise<'locking'>(r => { entering = () => r('locking'); });
+  const blocker = db.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM sessions WHERE id=${s.id} FOR UPDATE`;
+    held(); await released;
+    await tx.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+  });
+  await holding;
+  const original = db.$transaction.bind(db);
+  const wrapped = new Proxy(db, { get(t, prop) {
+    if (prop !== '$transaction') return Reflect.get(t, prop);
+    return (body: any, ...options: any[]) => (original as any)(async (tx: any) => body(new Proxy(tx, { get(target, key) {
+      if (key !== '$queryRaw') return Reflect.get(target, key);
+      return (...args: any[]) => {
+        const sql = Array.isArray(args[0]) ? args[0].join(' ') : '';
+        if (sql.includes('FROM sessions') && sql.includes('FOR SHARE')) entering();
+        return target.$queryRaw(...args);
+      };
+    }})), ...options);
+  }});
+  const result = code(selfRead(s, {}, { db: wrapped }));
+  try { expect(await Promise.race([locking, result.then(() => 'completed')])).toBe('locking'); }
+  finally { release(); await blocker; }
+  expect(await result).toBe('SESSION_NOT_LIVE');
+  expect(await db.appLogEntry.count()).toBe(0);
+});
+
+it('the post-load self check refuses a hard expiry crossed during message loading', async () => {
+  const deadline = Date.now() + 60_000; const s = await ownSession({ expiresAt: new Date(deadline) });
+  await postForBoth(); let crossed = false;
+  const original = db.$transaction.bind(db);
+  const wrapped = new Proxy(db, { get(t, prop) {
+    if (prop !== '$transaction') return Reflect.get(t, prop);
+    return (body: any, ...options: any[]) => (original as any)(async (tx: any) => body(new Proxy(tx, { get(target, key) {
+      if (key !== '$queryRaw') return Reflect.get(target, key);
+      return async (...args: any[]) => {
+        const rows = await target.$queryRaw(...args);
+        if (!crossed && args[0]?.strings?.join(' ').includes('total_eligible')) {
+          crossed = true; vi.setSystemTime(deadline);
+        }
+        return rows;
+      };
+    }})), ...options);
+  }});
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(deadline - 1);
+  try {
+    expect(await code(selfRead(s, {}, { db: wrapped }))).toBe('SESSION_NOT_LIVE');
+    expect(crossed).toBe(true);
+    expect(await db.appLogEntry.count()).toBe(0);
+  } finally { vi.useRealTimers(); }
+});
