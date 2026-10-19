@@ -52,6 +52,8 @@ export type TaskWakeReason = {
   chainIndex: number;
   event: 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'ALARM' | 'END_SESSION';
   title: string;
+  /** S7 (R90): messages held from a standby worker and passed at this assignment; rides the event, so returned once. */
+  standbyHeld?: number;
 };
 
 export type WakeReason = { kind: 'MENTION' } | { kind: 'TICK'; tickerId: string; k: number } | TaskWakeReason;
@@ -162,7 +164,7 @@ export function workerWake(args: {
   }
 
   for (const t of args.tasks ?? []) {
-    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title });
+    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title, ...(t.standbyHeld ? { standbyHeld: t.standbyHeld } : {}) });
     if (t.atMs !== undefined) anchors.push(t.atMs);
   }
 

@@ -249,7 +249,7 @@ async function authorityAnchorsOf(ctx: Context, appIds: string[]): Promise<Autho
  * Raise one worker's delivered-through mark on one channel. GREATEST: it only rises, unless the channel was recreated
  * (then it restarts at the new incarnation). The one writer of `worker_delivery_channels` for wakes and batches alike.
  */
-async function raiseDeliveryMark(
+export async function raiseDeliveryMark(
   tx: Prisma.TransactionClient,
   m: { workerId: string; channelId: string; incarnation: number; through: number },
   nowNaive: string,

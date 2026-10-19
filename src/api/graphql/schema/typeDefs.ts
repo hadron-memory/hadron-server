@@ -12057,6 +12057,8 @@ export const typeDefs = `#graphql
     title: String!
     "A stable label for the reason, e.g. TASK:<id>:assigned."
     ref: String!
+    "S7 (#2023, R90) — on an assignment to a worker that was on standby: how many messages were held from it and passed by the delivered mark. Returned with this one event, so once."
+    standbyHeld: Int
   }
 
   "#1748 — one page of due wakes. Counts and ranges only (hrn:node:hadronmemory.com:specs:cor:agt:080:23)."

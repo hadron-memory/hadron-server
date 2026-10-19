@@ -225,3 +225,76 @@ describe('legacy wakes (dueWakes)', () => {
     expect(await wakesFor(target.id)).toHaveLength(1);
   });
 });
+
+describe('the assignment raise (R90)', () => {
+  const assign = async (workerId: string, extra: { fail?: boolean } = {}) => {
+    const taskId = generateId();
+    await db.$transaction(async (tx) => {
+      await tx.agentTask.create({ data: { id: taskId, appId, title: 'Do the thing', ownerUserId: holderId, assigneeWorkerId: workerId, assignedAt: ready, status: 'pending' } });
+      const { appendTaskEvent } = await import('../agentTasks/events.js');
+      await appendTaskEvent(tx, { appId, taskId, actor: { userId: holderId, workerId: null, agentId: null }, event: { type: 'task.assigned', assignee: { workerId }, closeSessionWhenDone: true } as never });
+      if (extra.fail) throw new Error('rollback');
+    });
+    return taskId;
+  };
+  const markOf = async (workerId: string) => (await db.workerDeliveryChannel.findUnique({ where: { workerId_channelId: { workerId, channelId } } }))?.deliveredThroughSeq ?? 0;
+  const eventOf = (taskId: string) => db.agentTeamEvent.findFirstOrThrow({ where: { taskId, type: 'task.assigned' } });
+
+  it('raises delivered past 5 held messages, leaves read alone, and returns the count once on the task wake', async () => {
+    const head = await mkWorker('Head');
+    const target = await mkWorker('Target', { reportsToWorkerId: head.id });
+    await setSwitch(true);
+    for (let i = 0; i < 5; i++) await say(`peer-${i}`, { authorWorkerId: (await peer()).id });
+    await db.channelReadState.create({ data: { id: generateId(), workerId: target.id, appId, channelId, lastSeenSeq: 0 } });
+    const taskId = await assign(target.id);
+    expect(await markOf(target.id)).toBe(5);
+    expect((await db.channelReadState.findFirstOrThrow({ where: { workerId: target.id, channelId } })).lastSeenSeq).toBe(0);
+    expect(((await eventOf(taskId)).payload as Record<string, unknown>).standbyHeld).toBe(5);
+    const { pendingTaskWakes } = await import('../agentTasks/taskWakes.js');
+    const wakes = (await pendingTaskWakes(db, [target.id], ready)).get(target.id)!;
+    expect(wakes).toHaveLength(1); expect(wakes[0]!.standbyHeld).toBe(5);
+    // once: after the event's delivery is recorded it is no longer pending
+    await db.$executeRaw`INSERT INTO worker_delivery_task_events (worker_id, event_id, chain_index, delivered_at) VALUES (${target.id}, ${wakes[0]!.eventId}, 0, now())`;
+    expect((await pendingTaskWakes(db, [target.id], ready)).get(target.id) ?? []).toHaveLength(0);
+  });
+  it('stops one short of an admitted, undelivered message', async () => {
+    const head = await mkWorker('Head');
+    const target = await mkWorker('Target', { reportsToWorkerId: head.id });
+    await setSwitch(true);
+    await say('peer-1', { authorWorkerId: (await peer()).id });   // 1 held
+    await say('peer-2', { authorWorkerId: (await peer()).id });   // 2 held
+    await say('human', { authorUserId: holderId });               // 3 admitted
+    await say('peer-4', { authorWorkerId: (await peer()).id });   // 4 held
+    const taskId = await assign(target.id);
+    expect(await markOf(target.id)).toBe(2);
+    expect(((await eventOf(taskId)).payload as Record<string, unknown>).standbyHeld).toBe(2);
+    expect((await load()).batches.find((b) => b.workerId === target.id)!.ranges[0]!.seqs, 'the admitted message is still due; the worker is no longer on standby, so 4 is ordinary').toEqual([3, 4]);
+  });
+  it('raises nothing when the worker was not on standby: switch off, already busy, or a head', async () => {
+    const head = await mkWorker('Head');
+    const target = await mkWorker('Target', { reportsToWorkerId: head.id });
+    await say('peer', { authorWorkerId: (await peer()).id });
+    await assign(target.id);                                      // switch off
+    expect(await markOf(target.id)).toBe(0);
+    await setSwitch(true);
+    await assign(target.id);                                      // now busy with the first task
+    expect(await markOf(target.id)).toBe(0);
+    await assign(head.id);                                        // a head is never on standby
+    expect(await markOf(head.id)).toBe(0);
+  });
+  it('rolls back with a refused assignment: no mark, no event', async () => {
+    const head = await mkWorker('Head');
+    const target = await mkWorker('Target', { reportsToWorkerId: head.id });
+    await setSwitch(true);
+    await say('peer', { authorWorkerId: (await peer()).id });
+    await expect(assign(target.id, { fail: true })).rejects.toThrow('rollback');
+    expect(await markOf(target.id)).toBe(0);
+    expect(await db.agentTeamEvent.count({ where: { type: 'task.assigned' } })).toBe(0);
+  });
+  it('no acknowledgement entry point reaches the raise (it is not an ack)', async () => {
+    const { readFileSync } = await import('node:fs');
+    for (const f of ['acknowledge.ts', 'wakeProof.ts']) {
+      expect(readFileSync(new URL(`./${f}`, import.meta.url), 'utf8'), f).not.toMatch(/standbyAssignment|raiseDeliveredOnAssignment/);
+    }
+  });
+});

@@ -32,7 +32,8 @@ const OFF: WorkerStandby = { onStandby: false, headWorkerId: null };
 export const STANDBY_BUSY_TASK_STATUSES = ['pending', 'started'] as const;
 
 /** Question 1, in TS. Evaluate inside the deciding transaction. */
-export async function workerStandby(tx: Tx, workerId: string): Promise<WorkerStandby> {
+/** `excludeTaskId`: the assignment being made, so "was on standby immediately before this assignment" reads true inside it. */
+export async function workerStandby(tx: Tx, workerId: string, opts: { excludeTaskId?: string } = {}): Promise<WorkerStandby> {
   const w = await tx.worker.findUnique({
     where: { id: workerId },
     select: { appId: true, retiredAt: true, reportsToWorkerId: true },
@@ -42,7 +43,7 @@ export async function workerStandby(tx: Tx, workerId: string): Promise<WorkerSta
     tx.app.findUnique({ where: { id: w.appId }, select: { deliveryStandbyEnabled: true } }),
     tx.worker.findFirst({ where: { id: w.reportsToWorkerId, appId: w.appId, retiredAt: null }, select: { id: true } }),
     tx.worker.findFirst({ where: { reportsToWorkerId: workerId, appId: w.appId, retiredAt: null }, select: { id: true } }),
-    tx.agentTask.findFirst({ where: { assigneeWorkerId: workerId, status: { in: [...STANDBY_BUSY_TASK_STATUSES] } }, select: { id: true } }),
+    tx.agentTask.findFirst({ where: { assigneeWorkerId: workerId, status: { in: [...STANDBY_BUSY_TASK_STATUSES] }, ...(opts.excludeTaskId ? { id: { not: opts.excludeTaskId } } : {}) }, select: { id: true } }),
   ]);
   if (!app?.deliveryStandbyEnabled || !head || report || busy) return OFF;
   return { onStandby: true, headWorkerId: head.id };

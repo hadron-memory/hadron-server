@@ -534,7 +534,7 @@ export async function computeDueWakes(args: {
       subscriptions,
       tasks: tasksFor(w.id)
         .slice(0, WAKE_TASK_REASONS_MAX)
-        .map(({ taskId, eventId, chainIndex, event, title, at }) => ({ taskId, eventId, chainIndex, event, title, atMs: at.getTime() })),
+        .map(({ taskId, eventId, chainIndex, event, title, at, standbyHeld }) => ({ taskId, eventId, chainIndex, event, title, atMs: at.getTime(), ...(standbyHeld ? { standbyHeld } : {}) })),
       now,
     });
     if (!wake) continue;
