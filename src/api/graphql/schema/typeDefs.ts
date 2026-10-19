@@ -11973,6 +11973,14 @@ export const typeDefs = `#graphql
     evidence: String
   }
 
+  "#2068 (hrn:node:hadronmemory.com:specs:cor:agt:080:01, :10) — why a ticker fires. A closed set; several fire it when any one holds."
+  enum TickerReason {
+    "Fires only when the subscriber has relevant unread in the ticker's channels (what relevance counts is the ticker's relevance)."
+    READ_TEAM_CHANNEL
+    "Fires on every tick, with or without unread. The floor, budget, pause and dormancy still apply."
+    EVERY_TICK
+  }
+
   "#1747 — how a ticker relevance narrows what can make a subscriber due (hrn:node:hadronmemory.com:specs:cor:agt:080:01)."
   enum TickerRelevance {
     ALL
@@ -12174,6 +12182,8 @@ export const typeDefs = `#graphql
     "The channels named, limited to those the reader can read. Empty means every channel the subscriber watches."
     channels: [Channel!]!
     relevance: TickerRelevance!
+    "#2068 — why the ticker fires. Never empty; existing tickers are READ_TEAM_CHANNEL."
+    reasons: [TickerReason!]!
     enabled: Boolean!
     owner: ActorRef
     "The next moment this ticker ticks, quiet hours skipped; null when disabled."
@@ -12277,6 +12287,8 @@ export const typeDefs = `#graphql
     quietHours: JSON
     channelIds: [ID!]
     relevance: TickerRelevance
+    "Absent on create = [READ_TEAM_CHANNEL]; an empty list is refused. On update, absent = unchanged."
+    reasons: [TickerReason!]
     enabled: Boolean
   }
 
@@ -12290,6 +12302,8 @@ export const typeDefs = `#graphql
     channelIds: [ID!]
     clearChannels: Boolean
     relevance: TickerRelevance
+    "Absent on create = [READ_TEAM_CHANNEL]; an empty list is refused. On update, absent = unchanged."
+    reasons: [TickerReason!]
     enabled: Boolean
   }
 
