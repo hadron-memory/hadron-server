@@ -47,7 +47,7 @@ async function fixture() {
   const install = await db.memory.create({
     data: {
       id: generateId(), class: 'system', name: 'im-app-install', urn: `${orgId}:im-app-team-agent-install`,
-      organizationId: orgId, appId: app.id, installOfAgentId: agent.id,
+      organizationId: orgId, appId: app.id, installOfAgentId: agent.id, isInstallMemory: true,
     },
   });
   await db.node.create({ data: { id: generateId(), memoryId: install.id, loc: 'prompts:lane', name: 'Lane', nodeType: 'page' } });
@@ -211,7 +211,7 @@ describe('#2044 install memory — user-owned App', () => {
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     await createDbAppMember(db, app.id, member.id, 'member');
     const install = await db.memory.create({
-      data: { id: generateId(), class: 'system', name: 'uo-install', urn: 'uo:uo-install', ownerUserId: owner.id, appId: app.id, installOfAgentId: agent.id },
+      data: { id: generateId(), class: 'system', name: 'uo-install', urn: 'uo:uo-install', ownerUserId: owner.id, appId: app.id, installOfAgentId: agent.id, isInstallMemory: true },
     });
     expect(await canReadMemory(db, auth(member.id), install.id)).toBe(true);
     expect(await canWriteToMemory(db, auth(member.id), install.id)).toBe(false);
@@ -239,6 +239,17 @@ describe('#2044 install memory — database invariants', () => {
     await expect(db.memory.create({ data: { ...base, id: generateId(), class: 'system', name: 'x4', urn: `${orgId}:x4`, appId: f.app.id, installOfAgentId: f.agent.id } })).rejects.toThrow();
     // A tombstoned install does not hold the slot.
     await db.memory.update({ where: { id: f.install.id }, data: { deletedAt: new Date() } });
-    await expect(db.memory.create({ data: { ...base, id: generateId(), class: 'system', name: 'x5', urn: `${orgId}:x5`, appId: f.app.id, installOfAgentId: f.agent.id } })).resolves.toBeTruthy();
+    await expect(db.memory.create({ data: { ...base, id: generateId(), class: 'system', name: 'x5', urn: `${orgId}:x5`, appId: f.app.id, installOfAgentId: f.agent.id, isInstallMemory: true } })).resolves.toBeTruthy();
+    // R94 C: the Agent link may be NULL (a detached install) but the discriminator may not.
+    const detached = { ...base, class: 'system' as const, appId: f.app.id, isInstallMemory: true };
+    await expect(db.memory.create({ data: { ...detached, id: generateId(), name: 'd0', urn: `${orgId}:d0`, appId: null } })).rejects.toThrow();
+    await expect(db.memory.create({ data: { ...base, id: generateId(), class: 'knowledge', name: 'd1', urn: `${orgId}:d1`, isInstallMemory: true } })).rejects.toThrow();
+    await expect(db.memory.create({ data: { ...base, id: generateId(), class: 'system', name: 'd2', urn: `${orgId}:d2`, installOfAgentId: f.agent.id, appId: f.app.id } })).rejects.toThrow();
+    await expect(db.memory.create({ data: { ...detached, id: generateId(), name: 'd3', urn: `${orgId}:d3` } })).resolves.toBeTruthy();
+    // Erasing the Agent detaches the install row instead of failing on the FK or deleting it.
+    const row = await db.memory.findFirstOrThrow({ where: { appId: f.app.id, installOfAgentId: f.agent.id, deletedAt: null } });
+    await db.appAgent.deleteMany({ where: { agentId: f.agent.id } });
+    await db.agent.delete({ where: { id: f.agent.id } });
+    expect(await db.memory.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({ installOfAgentId: null, isInstallMemory: true });
   });
 });

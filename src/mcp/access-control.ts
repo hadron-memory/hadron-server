@@ -767,7 +767,7 @@ export async function getMemoryAccess(
         // #2044: an install memory is decided by its own arm below, so a
         // user-owned App's owner is no blanket READ_WRITE on one (it must not
         // survive the App's soft deletion, R45: no content reads).
-        installOfAgentId: null,
+        isInstallMemory: false,
         deletedAt: null,
       },
       select: { id: true },
@@ -913,7 +913,7 @@ export async function canWriteToMemory(
     where: { id: memoryId },
     select: {
       class: true, userId: true, userMemoryOfAgentId: true, appId: true,
-      ownerUserId: true, organizationId: true, installOfAgentId: true,
+      ownerUserId: true, organizationId: true, installOfAgentId: true, isInstallMemory: true,
       workerOf: { select: { id: true } },
     },
   });
@@ -1047,7 +1047,7 @@ export async function canWriteToMemory(
 
 type MemoryReadRow = Pick<
   Memory,
-  'id' | 'class' | 'userId' | 'userMemoryOfAgentId' | 'appId' | 'ownerUserId' | 'organizationId' | 'installOfAgentId'
+  'id' | 'class' | 'userId' | 'userMemoryOfAgentId' | 'appId' | 'ownerUserId' | 'organizationId' | 'installOfAgentId' | 'isInstallMemory'
 >;
 type SubscriptionReadRow = Pick<AgentSubscription, 'activatedAt' | 'expiresAt' | 'revokedAt'>;
 
@@ -1169,6 +1169,7 @@ export async function canReadMemory(
       ownerUserId: true,
       organizationId: true,
       installOfAgentId: true,
+      isInstallMemory: true,
     },
   });
   if (!memory) return false;
@@ -1208,6 +1209,7 @@ export async function filterReadableMemoryIds(
       ownerUserId: true,
       organizationId: true,
       installOfAgentId: true,
+      isInstallMemory: true,
     },
   });
 

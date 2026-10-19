@@ -31,10 +31,10 @@ ALTER TABLE memories
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_class_app_id
   CHECK (
-    (class = 'app' AND app_id IS NOT NULL AND install_of_agent_id IS NULL)
-    OR (class = 'system' AND app_id IS NULL AND install_of_agent_id IS NULL)
-    OR (class = 'system' AND app_id IS NOT NULL AND install_of_agent_id IS NOT NULL)
-    OR (class IN ('knowledge', 'group', 'personal', 'private') AND install_of_agent_id IS NULL)
+    (class = 'app' AND app_id IS NOT NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+    OR (class = 'system' AND app_id IS NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+    OR (class = 'system' AND app_id IS NOT NULL AND is_install_memory = true)
+    OR (class IN ('knowledge', 'group', 'personal', 'private') AND install_of_agent_id IS NULL AND is_install_memory = false)
   );
 
 -- #723: shared_memory_of_agent_id IDENTIFIES an App's runtime `shared`

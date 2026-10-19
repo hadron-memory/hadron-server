@@ -94,8 +94,8 @@ export function assertSystemMemoryOwner(
  * tombstone the App's customisation. Both promotion doors (createAgent's
  * `systemMemoryId`, updateAgent's first attach and its locked recheck) ask this.
  */
-export function assertNotInstallMemory(memory: { installOfAgentId?: string | null; appId?: string | null }): void {
-  if (memory.installOfAgentId || memory.appId) {
+export function assertNotInstallMemory(memory: { installOfAgentId?: string | null; isInstallMemory?: boolean; appId?: string | null }): void {
+  if (memory.isInstallMemory || memory.installOfAgentId || memory.appId) {
     throw new GraphQLError(
       "An App's install memory cannot be an Agent's system memory.",
       { extensions: { code: 'BAD_USER_INPUT' } },

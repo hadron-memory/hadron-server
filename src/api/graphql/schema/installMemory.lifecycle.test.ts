@@ -165,20 +165,89 @@ describe('#2044 install memory — URN reclaim (R29) and account erasure', () =>
     expect(await db.app.count({ where: { id: f.app.id } })).toBe(0);
   });
 
-  it('erasing the owner of a user-owned Agent removes its install memories instead of failing on the Agent FK', async () => {
+  it('R94 C: erasing the owner of a user-owned Agent keeps another App\'s install memory, detached, and never blocks the erasure', async () => {
     const f = await fixture();
     const owner = await f.user('uo-owner');
     const agent = await db.agent.create({ data: { id: generateId(), name: 'Mine', urn: 'uo:mine', ownerUserId: owner.id } });
-    // An install memory in someone else's (org) App: the App cascade of the erasure does not reach it,
-    // so only the explicit sweep keeps the RESTRICT Agent FK from rolling the erasure back.
+    // An install memory in someone else's (org) App: the App cascade of the erasure does not reach it.
     const { app } = await createDbAppWithKey(db, 'foreign-app', orgId);
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-    await db.memory.create({
-      data: { id: generateId(), class: 'system', name: 'uo-install', urn: `${orgId}:uo-install`, organizationId: orgId, appId: app.id, installOfAgentId: agent.id },
+    const install = await db.memory.create({
+      data: { id: generateId(), class: 'system', name: 'uo-install', urn: `${orgId}:uo-install`, organizationId: orgId, appId: app.id, installOfAgentId: agent.id, isInstallMemory: true },
     });
+    const node = await db.node.create({ data: { id: generateId(), memoryId: install.id, loc: 'prompts:lane', name: 'Lane', nodeType: 'page', content: 'secret' } });
     const { deleteUserAccount } = await import('../../../controller/operations/deleteUser.js');
     await deleteUserAccount(db, { targetUserId: owner.id, actorUserId: owner.id });
-    expect(await db.memory.count({ where: { installOfAgentId: agent.id } })).toBe(0);
+    // Kept, detached, still an install memory with its content intact.
+    const kept = await db.memory.findUniqueOrThrow({ where: { id: install.id } });
+    expect(kept).toMatchObject({ deletedAt: null, appId: app.id, installOfAgentId: null, isInstallMemory: true, class: 'system' });
+    expect(await db.agent.count({ where: { id: agent.id } })).toBe(0);
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content).toBe('secret');
+    // The App's manager finds it (record) without reading its content, and may delete it (R45).
+    expect((await Q.memory({}, { ref: install.id }, ctxOf(f.admin.id)))?.id).toBe(install.id);
+    // A stranger finds nothing, and a detached install takes no further write.
+    expect(await Q.memory({}, { ref: install.id }, ctxOf(f.stranger.id))).toBeNull();
+    await expect(M.updateNode({}, { input: { memoryId: install.id, loc: 'prompts:lane', name: 'x' } }, ctxOf(f.admin.id))).rejects.toThrow();
+    await expect(M.deleteMemory({}, { id: install.id }, ctxOf(f.stranger.id))).rejects.toThrow();
+    // Once its App is deleted the manager still finds the detached record but reads no content (R45).
+    await M.deleteApp({}, { ref: app.id }, ctxOf(f.admin.id));
+    expect((await Q.memory({}, { ref: install.id }, ctxOf(f.admin.id)))?.id).toBe(install.id);
+    expect(await Q.node({}, { ref: node.id, raw: true }, ctxOf(f.admin.id))).toBeNull();
+    await expect(M.deleteMemory({}, { id: install.id }, ctxOf(f.admin.id))).resolves.toBe(true);
+  });
+});
+
+describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', () => {
+  it('a nonparticipant platform manager must not recover unreadable content from a metadata-only update', async () => {
+    const f = await fixture();
+    const node = await f.create(f.admin);
+    const platform = await f.user('platform-outsider');
+    await db.user.update({ where: { id: platform.id }, data: { roles: ['ADMIN'] } });
+    const ctx = ctxOf(platform.id, { roles: ['ADMIN'] });
+    expect(await Q.node({}, { ref: node.id, raw: true }, ctx)).toBeNull();
+    const { ApolloServer } = await import('@apollo/server');
+    const { typeDefs } = await import('./typeDefs.js');
+    const server = new ApolloServer({ typeDefs, resolvers });
+    await server.start();
+    try {
+      const result = await server.executeOperation(
+        { query: 'mutation($i:UpdateNodeInput!){updateNode(input:$i){id name content}}', variables: { i: { install: f.install, loc: 'prompts:lane', name: 'metadata-only' } } },
+        { contextValue: ctx },
+      );
+      const wire = result.body.kind === 'single' ? result.body.singleResult : null;
+      expect((wire?.data as any)?.updateNode?.content ?? null).not.toBe('replacement');
+    } finally { await server.stop(); }
+  });
+
+  it('a participant manager still gets the content back from an update (positive control)', async () => {
+    const f = await fixture();
+    await f.create(f.admin);
+    const out = await M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', name: 'renamed' } }, ctxOf(f.admin.id));
+    expect(out.content).toBe('replacement');
+  });
+
+  it('a manager user session keeps metadata discovery of the retained record after App deletion', async () => {
+    const f = await fixture();
+    await f.create(f.admin);
+    const [memory] = await f.installRows();
+    await M.deleteApp({}, { ref: f.app.id }, ctxOf(f.admin.id));
+    expect((await Q.memory({}, { ref: memory!.id }, ctxOf(f.admin.id)))?.id).toBe(memory!.id);
+    const { app: otherApp } = await createDbAppWithKey(db, 'live-context-app', orgId);
+    await createDbAppAgent(db, otherApp.id, f.agent.id);
+    const session = await db.session.create({ data: { id: generateId(), appId: otherApp.id, userId: f.admin.id, agentId: f.agent.id } });
+    const ctx = ctxOf(f.admin.id, { appId: otherApp.id, sessionId: session.id });
+    expect((await Q.memory({}, { ref: memory!.id }, ctx))?.id).toBe(memory!.id);
+  });
+
+  it('a manager user session finds the live install memory by address, whichever App the session is bound to', async () => {
+    const f = await fixture();
+    await f.create(f.admin);
+    const [memory] = await f.installRows();
+    const { app: otherApp } = await createDbAppWithKey(db, 'live-context-app-2', orgId);
+    await createDbAppAgent(db, otherApp.id, f.agent.id);
+    const session = await db.session.create({ data: { id: generateId(), appId: otherApp.id, userId: f.admin.id, agentId: f.agent.id } });
+    const ctx = ctxOf(f.admin.id, { appId: otherApp.id, sessionId: session.id });
+    expect((await Q.installMemory({}, f.install, ctx))?.id).toBe(memory!.id);
   });
 });
 
@@ -364,13 +433,28 @@ describe('#2044 install memory — it can never become an Agent\'s brain (Andi P
     expect((await db.memory.findUniqueOrThrow({ where: { id: row!.id } })).deletedAt).toBeNull();
   });
 
+  it('R94 C: a DETACHED install memory is still never an Agent\'s system memory', async () => {
+    const f = await fixture();
+    await f.create(f.admin);
+    const [row] = await f.installRows();
+    await db.memory.update({ where: { id: row!.id }, data: { installOfAgentId: null } });
+    await expect(M.createAgent({}, { orgId, name: 'Promoted Detached', systemMemoryId: row!.id }, ctxOf(f.admin.id)))
+      .rejects.toThrow(/install memory/i);
+    const plain = await db.agent.create({ data: { id: generateId(), name: 'Plain2', urn: `${orgId}:plain2`, organizationId: orgId } });
+    await expect(M.updateAgent({}, { ref: plain.id, systemMemoryId: row!.id }, ctxOf(f.admin.id)))
+      .rejects.toThrow(/install memory/i);
+    // And it still blocks reclaiming the deleted App's URN until a manager deletes it.
+    await M.deleteApp({}, { ref: f.app.id }, ctxOf(f.admin.id));
+    await expect(M.deleteMemory({}, { id: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
+  });
+
   it('the install discriminator is forbidden on every non-system class, app-class with an App included', async () => {
     const f = await fixture();
     for (const cls of ['app', 'knowledge', 'group', 'personal', 'private'] as const) {
       await expect(db.memory.create({
         data: {
           id: generateId(), class: cls, name: `x-${cls}`, urn: `${orgId}:x-${cls}`, organizationId: orgId,
-          appId: f.app.id, installOfAgentId: f.agent.id,
+          appId: f.app.id, installOfAgentId: f.agent.id, isInstallMemory: true,
           ...(cls === 'group' ? { visibility: 'GROUP' as never } : {}),
           ...(cls === 'personal' || cls === 'private' ? { userId: f.admin.id, userMemoryOfAgentId: f.agent.id } : {}),
         },

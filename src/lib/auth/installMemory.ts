@@ -64,13 +64,17 @@ export type InstallMemoryRow = {
   class: string;
   appId: string | null;
   installOfAgentId: string | null;
+  isInstallMemory: boolean;
   organizationId: string | null;
   ownerUserId: string | null;
 };
 
 /** True for a row that IS an install memory (the discriminator every gate branches on). */
-export function isInstallMemoryRow(row: { class: string; installOfAgentId?: string | null }): boolean {
-  return row.class === 'system' && (row.installOfAgentId ?? null) !== null;
+export function isInstallMemoryRow(row: { class: string; isInstallMemory: boolean }): boolean {
+  // `isInstallMemory`, NOT `installOfAgentId`: the Agent link is NULLed when the Agent is erased with
+  // its owner's account (R94 C, a detached install), and a detached row must still be gated as one.
+  // REQUIRED, never optional: an omitted field would read as "not an install memory" and fail OPEN.
+  return row.class === 'system' && row.isInstallMemory === true;
 }
 
 type AppForInstall = {
@@ -114,8 +118,10 @@ export async function installMemoryAudience(
     return { read: false, record: manages, write: false, delete: manages };
   }
   const participates = (await participantAppIds(client, principal, app)).length > 0;
-  const installed = manages
-    ? (await client.appAgent.count({ where: { appId: app.id, agentId: memory.installOfAgentId! } })) > 0
+  // A detached install (its Agent was erased, R94 C) is no longer a customisation of anything: it
+  // is read, found and deleted, never written.
+  const installed = manages && memory.installOfAgentId
+    ? (await client.appAgent.count({ where: { appId: app.id, agentId: memory.installOfAgentId } })) > 0
     : false;
   return {
     read: participates,
@@ -151,7 +157,7 @@ export async function readableInstallMemoryIds(
   if (!where) return [];
   const rows = await db.memory.findMany({
     where: {
-      class: 'system', deletedAt: null, installOfAgentId: { not: null }, appId: { not: null },
+      class: 'system', deletedAt: null, isInstallMemory: true, appId: { not: null },
       app: { is: where },
     },
     select: { id: true, appId: true, organizationId: true, ownerUserId: true, app: { select: { organizationId: true, ownerUserId: true } } },
@@ -172,7 +178,7 @@ export async function writableInstallMemoryIds(
   for (const id of ids) {
     const row = await db.memory.findUnique({
       where: { id },
-      select: { id: true, class: true, appId: true, installOfAgentId: true, organizationId: true, ownerUserId: true },
+      select: { id: true, class: true, appId: true, installOfAgentId: true, isInstallMemory: true, organizationId: true, ownerUserId: true },
     });
     if (row && (await installMemoryAudience(db, principal, row)).write) out.push(id);
   }
@@ -200,7 +206,7 @@ export async function listableInstallMemoryIds(
     const platform = principal.roles?.includes('ADMIN') === true || principal.roles?.includes('OWNER') === true;
     const rows = await db.memory.findMany({
       where: {
-        class: 'system', deletedAt: null, installOfAgentId: { not: null }, appId: { not: null },
+        class: 'system', deletedAt: null, isInstallMemory: true, appId: { not: null },
         app: {
           is: {
             OR: [

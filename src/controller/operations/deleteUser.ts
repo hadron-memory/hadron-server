@@ -349,10 +349,9 @@ async function runDeletionTxn(
       // Copilot). Erasure wins over worker-name permanence for the erased
       // user's own castings, deliberately.
       await tx.worker.deleteMany({ where: { agent: { ownerUserId: targetUserId } } });
-      // #2044: `Memory.installOfAgentId` is ON DELETE RESTRICT, so a surviving install memory
-      // of one of these Agents would fail the agent delete below and roll the erasure back.
-      // Erasing an account erases its tenancy; this is not an App deletion (ruling A).
-      await tx.memory.deleteMany({ where: { installOfAgent: { ownerUserId: targetUserId } } });
+      // #2044 / R94 C: another App's install memory of one of these Agents is neither erased nor a
+      // blocker. `Memory.installOfAgentId` is ON DELETE SET NULL: the agent delete below detaches
+      // it and it stays with its App (`isInstallMemory`), whose managers may delete it (R45).
       // User-owned Agents (before memories: their system memories are owned
       // rows swept by the memory pass — Agent.systemMemoryId carries no FK).
       await tx.agent.deleteMany({ where: { ownerUserId: targetUserId } });

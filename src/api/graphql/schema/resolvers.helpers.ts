@@ -1156,6 +1156,14 @@ export async function canReadMemoryRecord(
   // System records follow the installed/licensed Agent or manager audience,
   // never the record-only org-member shortcut (#1807).
   if (memory.class === 'system') {
+    // #2064 §10: a user's own session is NOT a different principal for an App's INSTALL
+    // memory. Its record rights (a manager's, R45) are the user's, and binding a session
+    // of some other App must not drop them. A pure App key (no user), a run principal and
+    // an impersonation keep the hard-isolated content set below.
+    if (ctx.sessionId && ctx.userId && !ctx.impersonation && !isRunPrincipal(ctx)
+      && await ctx.db.memory.count({ where: { id: memory.id, isInstallMemory: true } }) > 0) {
+      return (await systemMemoryReadGrants(ctx.db, ctx, memory.id)).length > 0;
+    }
     if (ctx.sessionId || ctx.impersonation || isRunPrincipal(ctx) || !ctx.userId) {
       const ids = await accessible();
       return ids === null || ids.includes(memory.id);
@@ -2274,7 +2282,7 @@ export async function getAccessibleMemoryIds(
           // arrives through the strict-owner clause above.
           // #2044: not an install memory — that kind has its own audience below, so
           // a user-owned App's owner keeps no blanket read once the App is deleted.
-          { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId, installOfAgentId: null },
+          { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId, isInstallMemory: false },
         ],
       },
       select: { id: true },
@@ -2558,7 +2566,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   if (ctx.appId) {
     const memory = await ctx.db.memory.findUnique({
       where: { id: memoryId },
-      select: { id: true, ownerUserId: true, userId: true, class: true, appId: true, organizationId: true, installOfAgentId: true },
+      select: { id: true, ownerUserId: true, userId: true, class: true, appId: true, organizationId: true, installOfAgentId: true, isInstallMemory: true },
     });
     if (!memory) throw memoryWriteForbidden();
     // #2044: an install memory has its own write audience; no platform-role
@@ -2596,6 +2604,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
       userMemoryOfAgentId: true,
       createdBy: true,
       installOfAgentId: true,
+      isInstallMemory: true,
     },
   });
 

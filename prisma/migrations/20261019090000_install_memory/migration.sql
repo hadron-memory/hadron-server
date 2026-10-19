@@ -8,11 +8,12 @@
 -- second arm of the replaced CHECK. No backfill. Also lives in
 -- prisma/post-push.sql and src/test/globalSetup.ts (keep all three in sync).
 ALTER TABLE "memories" ADD COLUMN "install_of_agent_id" TEXT;
+ALTER TABLE "memories" ADD COLUMN "is_install_memory" BOOLEAN NOT NULL DEFAULT false;
 
 ALTER TABLE "memories"
   ADD CONSTRAINT "memories_install_of_agent_id_fkey"
   FOREIGN KEY ("install_of_agent_id") REFERENCES "agents"("id")
-  ON DELETE RESTRICT ON UPDATE CASCADE;
+  ON DELETE SET NULL ON UPDATE CASCADE;
 
 CREATE INDEX "memories_install_of_agent_id_idx" ON "memories"("install_of_agent_id");
 
@@ -20,10 +21,10 @@ ALTER TABLE "memories" DROP CONSTRAINT IF EXISTS "chk_memory_class_app_id";
 ALTER TABLE "memories"
   ADD CONSTRAINT "chk_memory_class_app_id"
   CHECK (
-    (class = 'app' AND app_id IS NOT NULL AND install_of_agent_id IS NULL)
-    OR (class = 'system' AND app_id IS NULL AND install_of_agent_id IS NULL)
-    OR (class = 'system' AND app_id IS NOT NULL AND install_of_agent_id IS NOT NULL)
-    OR (class IN ('knowledge', 'group', 'personal', 'private') AND install_of_agent_id IS NULL)
+    (class = 'app' AND app_id IS NOT NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+    OR (class = 'system' AND app_id IS NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+    OR (class = 'system' AND app_id IS NOT NULL AND is_install_memory = true)
+    OR (class IN ('knowledge', 'group', 'personal', 'private') AND install_of_agent_id IS NULL AND is_install_memory = false)
   );
 
 -- ONE live install memory per (App, Agent). Soft-deleted rows do not hold the

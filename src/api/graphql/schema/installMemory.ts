@@ -24,7 +24,7 @@ import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
-import { NO_INSTALL_AUDIENCE, installMemoryAudience } from '../../../lib/auth/installMemory.js';
+import { NO_INSTALL_AUDIENCE, installMemoryAudience, isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
 import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { resolveMemoryRoot, sharedMemoryName } from './chat-scope.js';
 import { isAppParticipant, memoryWriteForbidden, type Context } from './resolvers.helpers.js';
@@ -169,6 +169,7 @@ export async function ensureInstallMemory(
       visibility: null,
       appId,
       installOfAgentId: agentId,
+      isInstallMemory: true,
       userId: null,
       createdBy: txCtx.userId ?? null,
     },
@@ -196,11 +197,11 @@ export async function installDeleteAllowed(ctx: Context, memory: InstallMemoryRe
   return (await fencedInstallAudience(ctx, memory)).delete;
 }
 
-type InstallMemoryRef = { id: string; class: string; appId: string | null; installOfAgentId: string | null; organizationId: string | null; ownerUserId: string | null };
+type InstallMemoryRef = { id: string; class: string; appId: string | null; installOfAgentId: string | null; isInstallMemory: boolean; organizationId: string | null; ownerUserId: string | null };
 
 async function fencedInstallAudience(ctx: Context, memory: InstallMemoryRef) {
   const db = ctx.db as unknown as Prisma.TransactionClient & { $transaction?: unknown };
-  if (typeof db.$transaction === 'function' || !memory.appId || !memory.installOfAgentId) {
+  if (typeof db.$transaction === 'function' || !memory.appId) {
     const audience = await installMemoryAudience(ctx.db as never, ctx, memory);
     // A pooled-client WRITE decision is a cheap pre-flight, honoured only for a door that
     // rechecks inside its own fenced transaction. Any other writer fails closed (Xan on #2064).
@@ -231,13 +232,15 @@ async function lockInstallAuthority(tx: Prisma.TransactionClient, ctx: Context, 
   if (!app) return false;
   await lockAuthorityAnchors(tx, [
     { kind: 'app', id: memory.appId! },
-    { kind: 'agent', id: memory.installOfAgentId! },
+    ...(memory.installOfAgentId ? [{ kind: 'agent' as const, id: memory.installOfAgentId }] : []),
     ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
     ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
     ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
   ], 'shared');
   await tx.$queryRaw`SELECT id FROM apps WHERE id = ${memory.appId} FOR SHARE`;
-  await tx.$queryRaw`SELECT app_id FROM app_agents WHERE app_id = ${memory.appId} AND agent_id = ${memory.installOfAgentId} FOR SHARE`;
+  if (memory.installOfAgentId) {
+    await tx.$queryRaw`SELECT app_id FROM app_agents WHERE app_id = ${memory.appId} AND agent_id = ${memory.installOfAgentId} FOR SHARE`;
+  }
   if (ctx.userId && !ctx.impersonation) {
     await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${memory.appId} AND user_id = ${ctx.userId} FOR SHARE`;
     if (app.organizationId) {
@@ -255,7 +258,28 @@ async function lockInstallAuthority(tx: Prisma.TransactionClient, ctx: Context, 
 export async function lockInstallAuthorityFirst(tx: Prisma.TransactionClient, ctx: Context, memoryId: string): Promise<void> {
   const row = await tx.memory.findUnique({
     where: { id: memoryId },
-    select: { id: true, class: true, appId: true, installOfAgentId: true, organizationId: true, ownerUserId: true },
+    select: { id: true, class: true, appId: true, installOfAgentId: true, isInstallMemory: true, organizationId: true, ownerUserId: true },
   });
-  if (row && row.class === 'system' && row.appId && row.installOfAgentId) await lockInstallAuthority(tx, ctx, row);
+  if (row && isInstallMemoryRow(row) && row.appId) await lockInstallAuthority(tx, ctx, row);
+}
+
+/**
+ * #2064 §10 (Riana P2-1): the RESPONSE of an install-memory write is a READ of the node. A manager
+ * may write without being a participant (record/write/delete are not content access), so what
+ * the write hands back is held to the read audience: a caller who cannot read the memory's content
+ * gets the identity and attribution of what they wrote, with every content-bearing field and
+ * relation blanked. Participants get the node unchanged. Not a new grant: it only withholds.
+ */
+export async function concealUnreadableInstallWrite<T extends { memoryId: string }>(ctx: Context, node: T): Promise<T> {
+  const memory = await ctx.db.memory.findUnique({
+    where: { id: node.memoryId },
+    select: { id: true, class: true, appId: true, installOfAgentId: true, isInstallMemory: true, organizationId: true, ownerUserId: true },
+  });
+  if (memory && (await installMemoryAudience(ctx.db as never, ctx, memory)).read) return node;
+  return {
+    ...node,
+    content: null, description: null, abstract: null, abstractOriginHash: null, tokens: null,
+    tags: [], properties: null, data: null,
+    outgoingEdges: [], incomingEdges: [], asset: null, memory: null,
+  } as T;
 }

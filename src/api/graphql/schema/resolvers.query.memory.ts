@@ -600,8 +600,8 @@ export const memoryQueries = {
           OR: [
             // #2044: an install memory is NOT an org-wide record (its customisation is the App's):
             // the org clause skips it, and the clause below lists it to its own audience alone.
-            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any }, installOfAgentId: null },
-            { class: 'system' as any, installOfAgentId: { not: null }, id: { in: installListable } },
+            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any }, isInstallMemory: false },
+            { class: 'system' as any, isInstallMemory: true, id: { in: installListable } },
             {
               class: 'app' as any,
               ...(accessibleIds === null ? {} : { id: { in: accessibleIds } }),

@@ -108,7 +108,7 @@ async function assertNoInstallMemories(
 ): Promise<void> {
   await tx.$queryRaw`SELECT id FROM apps WHERE id = ${appId} FOR UPDATE`;
   const remaining = await tx.memory.count({
-    where: { appId, class: 'system', installOfAgentId: { not: null }, deletedAt: null },
+    where: { appId, class: 'system', isInstallMemory: true, deletedAt: null },
   });
   if (remaining > 0) {
     throw new GraphQLError(

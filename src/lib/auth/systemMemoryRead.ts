@@ -19,7 +19,7 @@ export async function systemMemoryReadGrants(
   if (!principal.userId) return [];
   const memory = await db.memory.findFirst({
     where: { id: memoryId, class: 'system', deletedAt: null },
-    select: { id: true, class: true, organizationId: true, ownerUserId: true, appId: true, installOfAgentId: true },
+    select: { id: true, class: true, organizationId: true, ownerUserId: true, appId: true, installOfAgentId: true, isInstallMemory: true },
   });
   if (!memory) return [];
   // #2044: an App's INSTALL MEMORY has no Agent pointing at it; it takes its own
@@ -93,7 +93,7 @@ export async function systemMemoryReadGrants(
 async function installMemoryGrants(
   db: PrismaClient,
   principal: { userId?: string | null; roles?: readonly string[]; impersonation?: { orgId: string } | null },
-  memory: { id: string; class: string; appId: string | null; installOfAgentId: string | null; organizationId: string | null; ownerUserId: string | null },
+  memory: { id: string; class: string; appId: string | null; installOfAgentId: string | null; isInstallMemory: boolean; organizationId: string | null; ownerUserId: string | null },
 ): Promise<GrantWithCaps[]> {
   const audience = await installMemoryAudience(db, principal, memory);
   if (!audience.record) return [];

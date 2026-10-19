@@ -34,7 +34,7 @@ async function fixture() {
     const { app } = await createDbAppWithKey(db, name, orgId);
     await createDbAppAgent(db, app.id, child.id);
     const install = await db.memory.create({
-      data: { id: generateId(), class: 'system', name: `${name}-install`, urn: `${orgId}:${name}-install`, organizationId: orgId, appId: app.id, installOfAgentId: child.id },
+      data: { id: generateId(), class: 'system', name: `${name}-install`, urn: `${orgId}:${name}-install`, organizationId: orgId, appId: app.id, installOfAgentId: child.id, isInstallMemory: true },
     });
     apps.push({ app, install });
   }

@@ -723,7 +723,7 @@ export const agentMutations = {
           }
           const lockedTarget = await tx.memory.findUniqueOrThrow({
             where: { id: promoteSystemMemoryId },
-            select: { organizationId: true, ownerUserId: true, id: true, deletedAt: true, appId: true, installOfAgentId: true },
+            select: { organizationId: true, ownerUserId: true, id: true, deletedAt: true, appId: true, installOfAgentId: true, isInstallMemory: true },
           });
           assertNotInstallMemory(lockedTarget);
           if (lockedTarget.deletedAt) {

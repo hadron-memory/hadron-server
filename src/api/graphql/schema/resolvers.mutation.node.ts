@@ -151,7 +151,7 @@ import {
   type MergeNodesInput,
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
-import { findInstallMemory, lockInstallAuthorityFirst, resolveInstallTarget, withInstallMemory, type InstallTarget } from './installMemory.js';
+import { concealUnreadableInstallWrite, findInstallMemory, lockInstallAuthorityFirst, resolveInstallTarget, withInstallMemory, type InstallTarget } from './installMemory.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 
@@ -2219,7 +2219,7 @@ async function createNodeInInstallMemory(input: CreateNodeArgs, ctx: Context) {
       transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
     }));
   for (const effect of effects) effect();
-  return written;
+  return concealUnreadableInstallWrite(ctx, written);
 }
 
 /** The caller's view of an App's install memory, creating nothing: a miss and a refusal read the same. */
@@ -2311,7 +2311,8 @@ export const nodeMutations = {
             { extensions: { code: 'BAD_USER_INPUT' } });
         }
         const memory = await findCallerInstallMemory(ctx, install);
-        return updateNodeCore({ ...rest, memoryId: memory.id } as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
+        const updated = await updateNodeCore({ ...rest, memoryId: memory.id } as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
+        return concealUnreadableInstallWrite(ctx, updated);
       }
       return updateNodeCore(input as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
     },
