@@ -361,7 +361,7 @@ it('verifier boundary caps the atomic result at ten channels and refuses an elev
   expect(await db.workerDeliveryHold.count()).toBe(10);
   expect(await db.agentTeamEvent.count({ where: { type: 'delivery.held' } })).toBe(before);
 });
-it('canonical health omits stored holds and alarms for encrypted channels as well as pending messages', async () => {
+it.each(['encrypted', 'caller', 'holder'])('canonical health omits stored holds and alarms excluded by %s visibility', async visibility => {
   const b = await batch(); await report(b.id);
   const { deliveryStateTransaction, beginDeliveryTracking, observeDeliveryPolicyThrough, reconcileDeliveryAlarm } = await import('../../../lib/tickers/deliveryState.js');
   const { loadDeliveryHealthSnapshot } = await import('../../../lib/tickers/deliveryPendingSnapshot.js');
@@ -372,9 +372,30 @@ it('canonical health omits stored holds and alarms for encrypted channels as wel
   });
   const snapshot = () => db.$transaction(tx => loadDeliveryHealthSnapshot(tx, { ctx: keyCtx(hostKey), app: { ...app, organizationId: org.id, ownerUserId: null }, hostId: 'orca1', workerId: kit.id, asOf: at }), { isolationLevel: 'RepeatableRead' });
   expect(await snapshot()).toMatchObject({ pendingMessageCount: 1, heldChannelCount: 1, activeAlarmCount: 1 });
-  await db.memory.update({ where: { id: channel.memoryId }, data: { isEncrypted: true } });
+  if (visibility === 'encrypted') await db.memory.update({ where: { id: channel.memoryId }, data: { isEncrypted: true } });
+  if (visibility === 'caller') await db.memory.update({ where: { id: channel.memoryId }, data: { class: 'private', userId: manager.id, userMemoryOfAgentId: agentId, sharedMemoryOfAgentId: null } });
+  if (visibility === 'holder') {
+    const outside = await db.user.create({ data: { id: generateId(), roles: ['READER'] } });
+    await db.worker.update({ where: { id: kit.id }, data: { heldByUserId: outside.id, heldAt: new Date() } });
+  }
   const hidden = await snapshot();
   expect(hidden).toMatchObject({ pendingMessageCount: 0, heldChannelCount: 0, activeAlarmCount: 0, suppressedAlarmCount: 0, alarm: null, channels: [], totalChannels: 0 });
   expect(JSON.stringify(hidden)).not.toContain(channel.id);
   expect(await db.workerDeliveryHold.count()).toBe(1); // history/current storage is not deleted by a read
+});
+it('memory-row visibility changes are fenced before the worker/reporting locks and rechecked after waiting', async () => {
+  const b = await batch();
+  const { waitForLockWaitersOfType } = await import('../../../test/lockWait.js');
+  let release!: () => void, held!: () => void;
+  const gate = new Promise<void>(r => { release = r; }), ready = new Promise<void>(r => { held = r; });
+  const changing = db.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${channel.memoryId} FOR UPDATE`;
+    await tx.memory.update({ where: { id: channel.memoryId }, data: { class: 'private', userId: manager.id, userMemoryOfAgentId: agentId, sharedMemoryOfAgentId: null } });
+    held(); await gate;
+  }, { timeout: 20_000 });
+  await Promise.race([ready, changing]);
+  const result = code(report(b.id));
+  try { await waitForLockWaitersOfType(db, 'transactionid', 1, 1000); } finally { release(); await changing; }
+  expect(await result).toBe('WAKE_PROOF_STALE');
+  expect(await db.workerDeliveryHold.count()).toBe(0);
 });
