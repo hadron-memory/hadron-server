@@ -8757,7 +8757,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
    * recover on its own.
    */
   async function bindReceipt(
-    session: { id: string; appId: string | null; workerId: string | null; agentId: string | null },
+    session: { id: string; appId: string | null; workerId: string | null; agentId: string | null; llmModel?: string | null },
     mcpCtx: Context,
   ): Promise<string> {
     // #1005: pin the session's App as this MCP session's active App.
@@ -8854,7 +8854,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // the stamps describe the text printed below (one agent read — no
         // parallel lookup that could race a template edit).
         const briefing = worker
-          ? await composeWorkerPrompt(mcpCtx, worker)
+          ? await composeWorkerPrompt(mcpCtx, worker, { llmModel: session.llmModel })
           : { text: null as string | null, renderedAt: null as Date | null, roleAgentUpdatedAt: null as Date | null };
         const prompt = briefing.text;
         // #1029: the previous stint's handoff, delivered with the briefing
