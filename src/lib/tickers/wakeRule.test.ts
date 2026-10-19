@@ -55,6 +55,62 @@ describe('the due rule — cor:agt:080:08–:12', () => {
     expect(w?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 6 }]);
   });
 
+  it('R63: anchorAtMs is the EARLIEST waiting reason: a mention post, the oldest unacknowledged tick, a task event', () => {
+    const post = (seq: number, ms: number) => msg(seq, { mentions: ['liam'], postedAtMs: ms });
+    const t0 = Date.parse('2026-10-05T09:00:00Z');
+    // Mention only.
+    expect(run([channel('c1', [post(5, t0 + 7000)])])?.anchorAtMs).toBe(t0 + 7000);
+    // The FIRST still-due mention, not the newest.
+    expect(run([channel('c1', [post(5, t0 + 7000), post(6, t0 + 9000)])])?.anchorAtMs).toBe(t0 + 7000);
+    // A tick: the oldest unacknowledged tick (tick 1 at anchor + 600 s), whichever tick is current.
+    const late = { now: new Date('2026-10-05T10:05:00Z') }; // tick 6
+    expect(run([channel('c1', [msg(3)])], [ticker()], late)?.anchorAtMs).toBe(t0 + 600_000);
+    expect(run([channel('c1', [msg(3)])], [{ ...ticker(), lastAckedTick: 4 }], late)?.anchorAtMs).toBe(t0 + 5 * 600_000);
+    // Mixed: the earlier of a task event and a mention.
+    const w = workerWake({ workerId: W, workerTokens: tokens, mentionsImmediate: true, channels: [channel('c1', [post(5, t0 + 9000)])], subscriptions: [], now: NOW,
+      tasks: [{ taskId: 't', eventId: 'e', chainIndex: 0, event: 'ASSIGNED', title: 'x', atMs: t0 + 2000 }] });
+    expect(w?.anchorAtMs).toBe(t0 + 2000);
+    // Nothing carries a time (pure fixtures): null, never invented.
+    expect(run([channel('c1', [msg(6, { mentions: ['liam'] })])])?.anchorAtMs).toBeNull();
+  });
+
+  it('#2068: an every-tick ticker ticks with nothing unread; one without it stays silent', () => {
+    expect(run([channel('c1', [])], [ticker({ reasons: ['every-tick'] })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([], [ticker({ reasons: ['every-tick'] })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([channel('c1', [])], [ticker({ reasons: ['read-team-channel'] })])).toBeNull();
+  });
+
+  it('#2068 (R49/R54): no reasons never fires; any one reason that holds fires; read-team-channel needs unread', () => {
+    expect(run([channel('c1', [msg(3)])], [ticker({ reasons: [] })])).toBeNull();
+    expect(run([channel('c1', [])], [ticker({ reasons: ['read-team-channel'] })])).toBeNull();
+    expect(run([channel('c1', [msg(3)])], [ticker({ reasons: ['read-team-channel'] })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([channel('c1', [])], [ticker({ reasons: ['read-team-channel', 'every-tick'] })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    // An unset reasons (a ticker built before the column) is today's behavior.
+    expect(run([channel('c1', [])], [ticker()])).toBeNull();
+  });
+
+  it('#2068: relevance narrows read-team-channel only; every-tick ignores it (ALL and MENTIONS)', () => {
+    const plain = [channel('c1', [msg(3)])];
+    expect(run(plain, [ticker({ relevance: 'MENTIONS', reasons: ['read-team-channel'] })])).toBeNull();
+    expect(run(plain, [ticker({ relevance: 'MENTIONS', reasons: ['every-tick'] })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([channel('c1', [])], [ticker({ relevance: 'MENTIONS', reasons: ['every-tick'] })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([channel('c1', [])], [ticker({ relevance: 'ALL', reasons: ['every-tick'] })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+  });
+
+  it('#2068: every-tick never bypasses the tick rules (acked, disabled, not yet a tick)', () => {
+    expect(run([channel('c1', [])], [{ ...ticker({ reasons: ['every-tick'] }), lastAckedTick: 1 }])).toBeNull();
+    expect(run([channel('c1', [])], [ticker({ reasons: ['every-tick'], enabled: false })])).toBeNull();
+    expect(run([channel('c1', [])], [ticker({ reasons: ['every-tick'] })], { now: new Date('2026-10-05T09:09:59Z') })).toBeNull();
+  });
+
+  it('#2068: a chat-less tick lists no channel, and a tick with chat still lists its range', () => {
+    const quiet = run([channel('c1', [])], [ticker({ reasons: ['every-tick'] })]);
+    expect(quiet?.channels).toEqual([]);
+    expect(quiet?.unread).toBe(0);
+    const busy = run([channel('c1', [msg(3)])], [ticker({ reasons: ['every-tick'] })]);
+    expect(busy?.channels).toEqual([expect.objectContaining({ channelId: 'c1', fromSeq: 3, throughSeq: 3 })]);
+  });
+
   it('a disabled ticker does not tick', () => {
     expect(run([channel('c1', [msg(3)])], [ticker({ enabled: false })])).toBeNull();
   });

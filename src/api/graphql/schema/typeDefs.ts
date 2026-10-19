@@ -2654,7 +2654,21 @@ export const typeDefs = `#graphql
     approvedAt: DateTime
     "#1591 — approval hash v1 recorded when this revision was approved."
     approvalHash: String
+    "#1838 — was THIS revision approved (for pinning)? Not whether the node is approved now (that is Node.approvalStatus). A revision counts as approved when some recorded approval covers exactly its hashed content, whichever revision the approval was recorded on (Holger's R7, hrn:node:hadronmemory.com:specs:cor:dmo:060:04)."
+    revisionApproval: RevisionApproval!
     createdAt: DateTime!
+  }
+
+  "#1838 — whether one revision was approved, and by which recorded approval."
+  type RevisionApproval {
+    "NOT_APPLICABLE inside an encrypted memory; APPROVED or NOT_APPROVED otherwise (never SUPERSEDED: that is about the live text)."
+    state: NodeApprovalState!
+    approved: Boolean!
+    "The revision the covering approval was recorded at; it can differ from this revision when only metadata changed, or the text recurs."
+    recordedAtRevision: Int
+    approvedBy: String
+    approvedByInfo: String
+    approvedAt: DateTime
   }
 
   type User {
@@ -2805,6 +2819,7 @@ export const typeDefs = `#graphql
     multi-Agent set per spec 023 US1.
     """
     agents: [Agent!]!
+    "Key inventory, only for whoever manages the App as themselves, never through a bound worker session (hrn:node:hadronmemory.com:specs:cor:dmo:050:05)."
     keys: [AppKey!]!
     createdAt: DateTime!
     updatedAt: DateTime
@@ -6936,11 +6951,19 @@ export const typeDefs = `#graphql
 
     "#1747 — an App's ticker settings: the cadence floor, the default self-subscription cadence, the live-ticker cap and the daily wake budget (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
     appTickerSettings(appRef: String!): AppTickerSettings!
+    "App delivery settings for participants; cadence/window is the ticker floor (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
+    appDeliverySettings(appRef: String!): AppDeliverySettings!
 
     "#1747 — one worker's wake settings (defaults when it has none), readable by the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:080:03)."
     workerWakeSettings(workerRef: String!): WorkerWakeSettings!
     "#1748 — the wakes due now (hrn:node:hadronmemory.com:specs:cor:agt:080:08). Counts and seq ranges only; reads nothing it does not return."
     dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String): DueWakePage!
+    """
+    #2017 (S1) — the ready-to-deliver batches of the workers registered on the calling host (hrn:node:hadronmemory.com:specs:cor:agt:080:22, :26).
+    An own live session reads only its bound worker. A host App key needs attention:deliver AND host:operate;
+    the host is the key's, the request names none, and a worker not on that host is absent. The text is written by the server and typed unchanged. Reading moves nothing; acknowledge the batch ids.
+    """
+    deliveryBatches(appRef: String!, workerRefs: [String!], first: Int, after: String): DeliveryBatchPage!
 
     "#1709 — the App's host registrations, liveness derived now (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Whoever reads the App's tasks and events, the App's own key included."
     hostRegistrations(appRef: String!): [HostRegistration!]!
@@ -7944,7 +7967,9 @@ export const typeDefs = `#graphql
     appAIConfig(appRef: ID!): AppAIConfig
 
     """
-    List keys for an App (org ADMIN of the App's org).
+    List keys for an App, only for whoever manages the App
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request.
 
     Accepts the entity's ID or URN.
     """
@@ -8710,9 +8735,12 @@ export const typeDefs = `#graphql
 
     """
     #1747 — change an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05, :19). Whoever manages the App only.
-    Refusals: TICKER_SETTINGS_OUT_OF_RANGE, TICKER_SETTINGS_CONFLICT (a floor above a live ticker cadence).
+    Refusals: TICKER_SETTINGS_OUT_OF_RANGE, TICKER_SETTINGS_CONFLICT (a floor above a live ticker cadence),
+    DELIVERY_SETTINGS_CONFLICT (the shared cadence floor must keep stuckWindowSeconds greater than busyDelaySeconds + minCadenceSeconds).
     """
     setAppTickerSettings(appRef: String!, input: AppTickerSettingsInput!): AppTickerSettings!
+    "App managers only; omitted preserves, null refuses. Standby activation is unavailable until S7 (hrn:node:hadronmemory.com:specs:cor:agt:080:19)."
+    setAppDeliverySettings(appRef: String!, input: AppDeliverySettingsInput!): AppDeliverySettings!
 
     """
     #1747 — subscribe a worker to a ticker (hrn:node:hadronmemory.com:specs:cor:agt:080:20, :25). Its holder and whoever manages
@@ -8733,6 +8761,12 @@ export const typeDefs = `#graphql
     setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!): WorkerWakeSettings!
     "#1748 — record that wakes were delivered (hrn:node:hadronmemory.com:specs:cor:agt:080:16). Never moves a read position."
     acknowledgeWakes(proofs: [String!]!): AcknowledgeWakesResult!
+    """
+    #2017 (S1) — record that delivery batches were typed (hrn:node:hadronmemory.com:specs:cor:agt:080:16, :17). Only the receiving host key or the worker's own receiving live session, within 15 minutes.
+    The delivered mark rises to the end of each rendered range; with through (one batch only), only the listed channels move, each to a
+    rendered seq of its own. Writes no read position, tick or budget. A repeat changes nothing.
+    """
+    acknowledgeDeliveryBatches(batchIds: [String!]!, through: [BatchThrough!]): AcknowledgeWakesResult!
 
     """
     #1709 — a host registers, or refreshes, which of its App's workers it can launch, as which model family, and in
@@ -8954,6 +8988,12 @@ export const typeDefs = `#graphql
     already exists at (memoryId, loc) — creating is create-only (spec 039
     Phase 0 D1); a soft-deleted node at the target loc is resurrected.
     'name' is required here and only here (D4).
+    Include tags (#2040): content may carry {{> target settings}} tags. Writes
+    that make a tag malformed refuse INVALID_INCLUDE, one that would make the
+    node include itself INCLUDE_CYCLE, and a chain deeper than 10
+    INCLUDE_TOO_DEEP; nothing is written. Each tag's target gets a derived edge
+    (governed kind INCLUDE) that only the content owns: editing or deleting it
+    directly refuses INCLUDE_EDGE_DERIVED.
     """
     createNode(input: CreateNodeInput!): Node!
 
@@ -9110,6 +9150,12 @@ export const typeDefs = `#graphql
     moveNode's job, D3). Every content field is optional — omitted fields are
     preserved ('name' included, D4; 'abstract' keeps its omit/null/string
     contract; omitted 'tags' are preserved, issue #235).
+    Include tags (#2040): content may carry {{> target settings}} tags. Writes
+    that make a tag malformed refuse INVALID_INCLUDE, one that would make the
+    node include itself INCLUDE_CYCLE, and a chain deeper than 10
+    INCLUDE_TOO_DEEP; nothing is written. Each tag's target gets a derived edge
+    (governed kind INCLUDE) that only the content owns: editing or deleting it
+    directly refuses INCLUDE_EDGE_DERIVED.
     """
     updateNode(input: UpdateNodeInput!): Node!
 
@@ -9650,7 +9696,9 @@ export const typeDefs = `#graphql
 
     """
     App key management — revoke all active keys for an App and mint a
-    fresh one. (See createAppKey / revokeAppKey / deleteApp below.)
+    fresh one. Only whoever manages the App, as themselves
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request. The replacement key holds no scopes.
 
     Accepts the entity's ID or URN.
     """
@@ -11704,13 +11752,18 @@ export const typeDefs = `#graphql
     removeAgentImport(parentAgentRef: ID!, importedAgentRef: ID!): Boolean!
 
     """
-    Mint a new AppKey for an App.
+    Mint a new AppKey for an App. Only whoever manages the App, as themselves
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request; new keys hold no scopes.
+    Granting or revoking scopes uses the same manager audience.
 
     Accepts the entity's ID or URN.
     """
     createAppKey(appRef: ID!, label: String): AppKeyCreated!
     """
-    AppKey is keyed by raw ID — no urn column. Stays ID-only.
+    Revoke an AppKey. Only whoever manages the App, as themselves
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
+    Never an App key, a bound worker session or an impersonated request. AppKey has no URN; the id is raw ID-only.
     """
     revokeAppKey(id: ID!): Boolean!
     """
@@ -11956,6 +12009,14 @@ export const typeDefs = `#graphql
     evidence: String
   }
 
+  "#2068 (hrn:node:hadronmemory.com:specs:cor:agt:080:01, :10) — why a ticker fires. A closed set; several fire it when any one holds."
+  enum TickerReason {
+    "Fires only when the subscriber has relevant unread in the ticker's channels (what relevance counts is the ticker's relevance)."
+    READ_TEAM_CHANNEL
+    "Fires on every tick, with or without unread. The floor, budget, pause and dormancy still apply."
+    EVERY_TICK
+  }
+
   "#1747 — how a ticker relevance narrows what can make a subscriber due (hrn:node:hadronmemory.com:specs:cor:agt:080:01)."
   enum TickerRelevance {
     ALL
@@ -12027,6 +12088,44 @@ export const typeDefs = `#graphql
     pageInfo: DueWakePageInfo!
   }
 
+  "#2017 (S1) — one page of delivery batches."
+  type DeliveryBatchPage {
+    batches: [DeliveryBatch!]!
+    pageInfo: DueWakePageInfo!
+  }
+
+  "One ready-to-type delivery for one worker. The id is a signed proof bound to the key, the host and the rendered ranges: hand it back to acknowledgeDeliveryBatches after typing."
+  type DeliveryBatch {
+    id: String!
+    worker: Worker!
+    "The whole delivery, one line, written by the server (hrn:node:hadronmemory.com:specs:cor:agt:080:26). Type it unchanged."
+    text: String!
+    "Not before this moment (the batching window / busy deadline of the oldest waiting message)."
+    deliverAfter: DateTime!
+    "The latest moment a busy worker may be made to wait for this delivery."
+    busyDeadline: DateTime!
+    "Always false until stop signals ship (S6)."
+    interrupt: Boolean!
+    ranges: [DeliveryBatchRange!]!
+    "Eligible messages left for the next batch."
+    overflow: Int!
+  }
+
+  input BatchThrough {
+    channelId: ID!
+    "A seq this batch rendered in that channel."
+    seq: Int!
+  }
+
+  type DeliveryBatchRange {
+    channel: Channel!
+    incarnation: Int!
+    fromSeq: Int!
+    throughSeq: Int!
+    "Exactly the message seqs this batch rendered."
+    seqs: [Int!]!
+  }
+
   type DueWakePageInfo {
     hasNextPage: Boolean!
     endCursor: String
@@ -12043,6 +12142,15 @@ export const typeDefs = `#graphql
     availability: DueWakeAvailability
     "Hand this back to acknowledgeWakes after delivering. Bound to the requester; good for 15 minutes."
     proof: String!
+    """
+    #2017 R63 — when the earliest waiting reason became due: a mention's first still-due post, a tick's OLDEST unacknowledged
+    tick time, a task event's time. Never restarted by a re-offer or a join (hrn:node:hadronmemory.com:specs:cor:agt:080:27).
+    """
+    anchorAt: DateTime!
+    "Not before this moment: the anchor plus the App's batching window (the shared cadence floor)."
+    deliverAfter: DateTime!
+    "The latest a busy worker may be made to wait: the anchor plus the App's busy delay."
+    busyDeadline: DateTime!
   }
 
   type DueWakeAvailability {
@@ -12110,6 +12218,8 @@ export const typeDefs = `#graphql
     "The channels named, limited to those the reader can read. Empty means every channel the subscriber watches."
     channels: [Channel!]!
     relevance: TickerRelevance!
+    "#2068 — why the ticker fires. Never empty; existing tickers are READ_TEAM_CHANNEL."
+    reasons: [TickerReason!]!
     enabled: Boolean!
     owner: ActorRef
     "The next moment this ticker ticks, quiet hours skipped; null when disabled."
@@ -12162,6 +12272,29 @@ export const typeDefs = `#graphql
     dormant: Boolean!
   }
 
+  "Delivery timing per App. Busy/stuck bounds and relation are Proposed (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
+  type AppDeliverySettings {
+    "The existing ticker cadence floor and wake-rate ceiling, also the batching window. Changing it affects ticker cadence."
+    batchWindowSeconds: Int!
+    "Whole seconds, 1..86400; default 600."
+    busyDelaySeconds: Int!
+    "Whole seconds, 1..604800; default 900. Must exceed busy delay plus batch window."
+    stuckWindowSeconds: Int!
+    "Stored configuration; default false. Enabling is refused until standby behavior ships."
+    standbyEnabled: Boolean!
+    "False until S7 supplies standby behavior; configuration alone has no effect."
+    standbyEffective: Boolean!
+  }
+
+  "Atomic patch: omit to preserve, explicit null refuses. Empty patch returns the current authorized settings."
+  input AppDeliverySettingsInput {
+    "Shared ticker floor/window; existing floor, self-cadence and live-ticker limits apply."
+    batchWindowSeconds: Int
+    busyDelaySeconds: Int
+    stuckWindowSeconds: Int
+    standbyEnabled: Boolean
+  }
+
   "#1747 — an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
   type AppTickerSettings {
     minCadenceSeconds: Int!
@@ -12190,6 +12323,8 @@ export const typeDefs = `#graphql
     quietHours: JSON
     channelIds: [ID!]
     relevance: TickerRelevance
+    "Absent on create = [READ_TEAM_CHANNEL]; an empty list is refused. On update, absent = unchanged."
+    reasons: [TickerReason!]
     enabled: Boolean
   }
 
@@ -12203,6 +12338,8 @@ export const typeDefs = `#graphql
     channelIds: [ID!]
     clearChannels: Boolean
     relevance: TickerRelevance
+    "Absent on create = [READ_TEAM_CHANNEL]; an empty list is refused. On update, absent = unchanged."
+    reasons: [TickerReason!]
     enabled: Boolean
   }
 

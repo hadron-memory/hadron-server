@@ -155,3 +155,6 @@ BEGIN
     ALTER TABLE auth_codes ALTER COLUMN oauth_scopes SET NOT NULL;
   END IF;
 END $$;
+
+-- #2025: App delivery settings/high-floor backfill before a non-wiping schema push.
+\ir delivery-settings-pre-push.sql

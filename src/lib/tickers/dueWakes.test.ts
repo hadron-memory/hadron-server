@@ -74,6 +74,14 @@ const subscribe = (tickerId: string, workerId: string) =>
   db.tickerSubscription.create({ data: { id: generateId(), tickerId, workerId, createdBy: manager.id } });
 const due = (c: Context, extra: Record<string, unknown> = {}) => Q.dueWakes({}, { appRef: app.id, ...extra }, c);
 const ids = (page: any) => page.wakes.map((w: any) => w.worker.id).sort();
+/** Moves every floor clock an hour back: channel deliveries and, since #2072 (R53), the textless wakes' receipts. */
+const pastFloor = async (ageMs = 3600_000) => {
+  const ago = new Date(Date.now() - ageMs);
+  await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: ago } });
+  await db.workerWakeAck.updateMany({ data: { ackedAt: ago } });
+};
+/** A proof as it was issued `ms` earlier: what replaying it looks like after `pastFloor(ms)` moved the clocks back. */
+const issuedEarlier = (proof: string, ms: number) => { const p = verifyWakeProof(proof); return signWakeProof({ ...p, issuedAt: p.issuedAt - ms }); };
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -229,6 +237,272 @@ describe('ticks and relevance through the whole loader', () => {
   });
 });
 
+describe('#2017 R63 — when a wake may be typed: anchorAt, deliverAfter, busyDeadline', () => {
+  const T0 = new Date('2026-10-19T02:00:00Z');
+  const timing = (w: any) => ({ anchorAt: w.anchorAt.toISOString(), deliverAfter: w.deliverAfter.toISOString(), busyDeadline: w.busyDeadline.toISOString() });
+  const at = (iso: string) => new Date(iso);
+  let window: number; let busy: number;
+  beforeEach(async () => {
+    const s = await db.app.findUniqueOrThrow({ where: { id: app.id }, select: { tickerMinCadenceSeconds: true, deliveryBusyDelaySeconds: true } });
+    window = s.tickerMinCadenceSeconds; busy = s.deliveryBusyDelaySeconds;
+  });
+  const plus = (d: Date, sec: number) => new Date(d.getTime() + sec * 1000).toISOString();
+
+  it('a mention anchors on the FIRST still-due post; later arrivals never slide it', async () => {
+    await say(channel, 'first', mention('liam'));
+    await say(channel, 'second', mention('liam'));
+    await db.node.updateMany({ where: { messageChannelId: channel.id, seq: 1 } as never, data: { createdAt: T0 } });
+    await db.node.updateMany({ where: { messageChannelId: channel.id, seq: 2 } as never, data: { createdAt: new Date(T0.getTime() + 600_000) } });
+    const w = (await due(ctx(manager.id))).wakes[0];
+    expect(timing(w)).toEqual({ anchorAt: T0.toISOString(), deliverAfter: plus(T0, window), busyDeadline: plus(T0, busy) });
+  });
+
+  it('a channel-empty tick anchors on the OLDEST unacknowledged tick, not the newest', async () => {
+    const t = await mkTicker({ cadenceSeconds: 600, anchorAt: at('2026-10-19T00:00:00Z') });
+    await subscribe(t.id, liam.id);
+    await say(channel, 'plain news'); // an ALL ticker needs relevant unread; the anchor is still the tick, not the post
+    await db.workerDeliveryTick.create({ data: { workerId: liam.id, tickerId: t.id, lastAckedTick: 2, ackedAt: new Date(Date.now() - 86_400_000) } });
+    const w = (await due(ctx(manager.id))).wakes[0];
+    // The first tick after the acknowledged tick 2 is tick 3: anchor + 3 x 600 s.
+    expect(w.reasons.map((r: any) => r.kind)).toEqual(['TICK']);
+    expect(w.anchorAt.toISOString()).toBe('2026-10-19T00:30:00.000Z');
+    expect(w.busyDeadline.toISOString()).toBe(plus(w.anchorAt, busy));
+  });
+
+  it('a mixed wake anchors on its EARLIEST reason; a re-offer never restarts it', async () => {
+    const tickAnchor = new Date(Date.now() - 3_600_000);
+    const t = await mkTicker({ cadenceSeconds: 600, anchorAt: tickAnchor });
+    await subscribe(t.id, liam.id);
+    await say(channel, 'for you', mention('liam'));
+    const posted = new Date(Date.now() - 600_000);
+    await db.node.updateMany({ where: { messageChannelId: channel.id }, data: { createdAt: posted } });
+    const first = (await due(ctx(manager.id))).wakes[0];
+    expect(first.reasons.map((r: any) => r.kind).sort()).toEqual(['MENTION', 'TICK']);
+    // The oldest unacknowledged tick (tick 1, 10 minutes after the ticker's anchor) is older than the post.
+    expect(first.anchorAt.toISOString()).toBe(new Date(tickAnchor.getTime() + 600_000).toISOString());
+    await say(channel, 'and again', mention('liam')); // arrives later: the outstanding wake is re-offered
+    const again = (await due(ctx(manager.id))).wakes[0];
+    expect(timing(again)).toEqual(timing(first));
+  });
+});
+
+describe('#2069 — an outstanding wake absorbs reasons that fall due later', () => {
+  const kinds = (w: any) => w.reasons.map((r: any) => r.kind).sort();
+
+  it('an unacknowledged MENTION wake does not hide a tick that falls due after it: one wake, both reasons, one slot', async () => {
+    await say(channel, 'for you', mention('liam'));
+    const first = (await due(ctx(manager.id))).wakes[0];
+    expect(kinds(first)).toEqual(['MENTION']);
+    const t = await mkTicker();
+    await subscribe(t.id, liam.id);
+    const again = (await due(ctx(manager.id))).wakes;
+    expect(again).toHaveLength(1);
+    expect(kinds(again[0])).toEqual(['MENTION', 'TICK']);
+    const slots = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*)::bigint n FROM app_wake_reservations WHERE worker_id = ${liam.id}`;
+    expect(Number(slots[0]!.n)).toBe(1);
+    const ack = await M.acknowledgeWakes({}, { proofs: [again[0].proof] }, ctx(manager.id));
+    expect(ack.acknowledged).toBe(1);
+    const row = await db.workerDeliveryTick.findFirstOrThrow({ where: { workerId: liam.id, tickerId: t.id } });
+    expect(row.lastAckedTick).toBeGreaterThanOrEqual(1);
+    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    await db.workerDeliveryTick.updateMany({ data: { ackedAt: new Date(Date.now() - 3600_000) } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([]);
+  });
+
+  it('control: a mention that only GROWS the outstanding wake does not rewrite it (the new one waits, as before)', async () => {
+    await say(channel, 'first', mention('liam'));
+    const first = (await due(ctx(manager.id))).wakes[0];
+    await say(channel, 'second', mention('liam'));
+    const again = (await due(ctx(manager.id))).wakes[0];
+    const body = (proof: string) => JSON.parse(Buffer.from(proof.split('.')[0]!, 'base64url').toString());
+    expect(body(again.proof).channels).toEqual(body(first.proof).channels);
+    expect(again.channels[0]).toMatchObject({ fromSeq: 1, throughSeq: 1 });
+  });
+
+  it('control: an UNRELATED newer reservation does not share the old proof\'s allowance (old behavior kept)', async () => {
+    await say(channel, 'first', mention('liam'));
+    const first = (await due(ctx(manager.id))).wakes[0];
+    await db.$executeRaw`DELETE FROM app_wake_reservations WHERE worker_id = ${liam.id}`; // as the stale-task path does
+    await say(channel, 'second', mention('liam'));
+    const second = (await due(ctx(manager.id))).wakes[0];
+    expect(second.proof).not.toBe(first.proof);
+    await M.acknowledgeWakes({}, { proofs: [first.proof] }, ctx(manager.id));
+    const days = await db.$queryRaw<Array<{ wakes: number }>>`SELECT sum(wakes)::int AS wakes FROM app_wake_days`;
+    expect(days[0]!.wakes).toBe(1); // the old proof still pays for what it moved
+    const left = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*)::bigint n FROM app_wake_reservations WHERE worker_id = ${liam.id}`;
+    expect(Number(left[0]!.n)).toBe(1); // the newer reservation is untouched
+  });
+
+  it('one allowance: the old proof then the new one charge the day once, in either order', async () => {
+    for (const oldFirst of [true, false]) {
+      await db.$executeRaw`DELETE FROM app_wake_days`;
+      await db.$executeRaw`DELETE FROM app_wake_reservations`;
+      await db.workerDeliveryChannel.deleteMany({});
+      await db.workerDeliveryTick.deleteMany({});
+      await db.workerWakeAck.deleteMany({});
+      await db.tickerSubscription.deleteMany({});
+      await db.ticker.deleteMany({});
+      await say(channel, `for you ${oldFirst}`, mention('liam'));
+      const first = (await due(ctx(manager.id))).wakes[0];
+      const t = await mkTicker();
+      await subscribe(t.id, liam.id);
+      const union = (await due(ctx(manager.id))).wakes[0];
+      expect(kinds(union)).toEqual(['MENTION', 'TICK']);
+      const order = oldFirst ? [first, union] : [union, first];
+      for (const w of order) await M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(manager.id));
+      const days = await db.$queryRaw<Array<{ wakes: number }>>`SELECT sum(wakes)::int AS wakes FROM app_wake_days`;
+      expect(days[0]!.wakes).toBe(1);
+      const left = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*)::bigint n FROM app_wake_reservations WHERE worker_id = ${liam.id}`;
+      expect(Number(left[0]!.n)).toBe(0);
+    }
+  });
+
+  it('the OLD proof, acknowledged first, delivers only what it names: the tick stays due, and the textless mention is re-offered (R53)', async () => {
+    await say(channel, 'for you', mention('liam'));
+    const first = (await due(ctx(manager.id))).wakes[0];
+    const t = await mkTicker();
+    await subscribe(t.id, liam.id);
+    await M.acknowledgeWakes({}, { proofs: [first.proof] }, ctx(manager.id));
+    await say(channel, 'plain news');
+    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    await db.workerDeliveryTick.updateMany({ data: { ackedAt: new Date(Date.now() - 3600_000) } });
+    await db.workerWakeAck.updateMany({ data: { ackedAt: new Date(Date.now() - 3600_000) } }); // R53: the receipt's clock is the floor
+    const rest = (await due(ctx(manager.id))).wakes;
+    // R53: a mention-only acknowledgement moves no message mark, so the mention is offered again with the tick.
+    expect(rest.map(kinds)).toEqual([['MENTION', 'TICK']]);
+  });
+});
+
+describe('#2068 (R49/R54) — a ticker with reason every-tick, through the whole loader', () => {
+  it('ticks with no unread at all, acknowledges, and is not due again until the next tick; read-team-channel alone stays silent', async () => {
+    const quiet = await mkTicker();
+    await subscribe(quiet.id, liam.id);
+    expect(ids(await due(ctx(manager.id)))).toEqual([]);
+    await db.ticker.update({ where: { id: quiet.id }, data: { reasons: ['every-tick'] } });
+    const page = await due(ctx(manager.id));
+    expect(ids(page)).toEqual([liam.id]);
+    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: quiet.id }), task: null }]);
+    expect(page.wakes[0].channels).toEqual([]);
+    expect(page.wakes[0]).toMatchObject({ unread: 0, unreadMentions: 0 });
+    const ack = await M.acknowledgeWakes({}, { proofs: [page.wakes[0].proof] }, ctx(manager.id));
+    expect(ack.acknowledged).toBe(1);
+    const row = await db.workerDeliveryTick.findFirstOrThrow({ where: { workerId: liam.id, tickerId: quiet.id } });
+    expect(row.lastAckedTick).toBeGreaterThanOrEqual(1);
+    await db.workerDeliveryTick.updateMany({ data: { ackedAt: new Date(Date.now() - 3600_000) } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([]); // same tick, already acknowledged
+    const later = await computeDueWakes({ ctx: ctx(manager.id), app: { id: app.id, organizationId: org.id, ownerUserId: null }, reader: { manager: true, userId: manager.id }, requester: { userId: manager.id }, now: new Date(Date.now() + 600_000) });
+    expect(later.wakes).toHaveLength(1);
+  });
+
+  const everyTick = (over: Record<string, unknown> = {}) => mkTicker({ reasons: ['every-tick'], ...over });
+  const appLike2 = () => ({ id: app.id, organizationId: org.id, ownerUserId: null });
+  const readAt = (ms: number) => computeDueWakes({ ctx: ctx(manager.id), app: appLike2(), reader: { manager: true, userId: manager.id }, requester: { userId: manager.id }, now: new Date(Date.now() + ms) });
+
+  it('every-tick ignores relevance: a MENTIONS ticker and an ALL ticker both tick with nothing unread; read-team-channel on a MENTIONS ticker needs a mention', async () => {
+    const mine = await mkTicker({ relevance: 'MENTIONS', reasons: ['read-team-channel'], name: 'M' });
+    await subscribe(mine.id, liam.id);
+    await say(channel, 'plain news');
+    expect(ids(await due(ctx(manager.id)))).toEqual([]); // MENTIONS + read-team-channel: plain chat does not count
+    await db.ticker.update({ where: { id: mine.id }, data: { reasons: ['every-tick'] } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([liam.id]);
+    // Legacy control: a normal ALL read-team-channel ticker with relevant unread still ticks.
+    await db.appWakeReservation.deleteMany();
+    await db.ticker.update({ where: { id: mine.id }, data: { relevance: 'ALL', reasons: ['read-team-channel'] } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([liam.id]);
+  });
+
+  it('a channel-empty TICK proof acknowledges exactly its tick: no chat mark, no read position, no other ticker', async () => {
+    const mine = await everyTick({ name: 'Mine' });
+    const other = await mkTicker({ name: 'Other' });
+    await subscribe(mine.id, liam.id);
+    await subscribe(other.id, liam.id);
+    const w = (await due(ctx(manager.id))).wakes[0];
+    expect(w.reasons.map((r: any) => r.ticker.id)).toEqual([mine.id]); // the read-team-channel ticker has nothing to say
+    expect(w.channels).toEqual([]);
+    expect(await M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(manager.id))).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect(await db.channelReadState.count()).toBe(0);
+    expect(await db.workerDeliveryTick.findMany({ select: { tickerId: true } })).toEqual([{ tickerId: mine.id }]);
+    await db.workerDeliveryTick.updateMany({ data: { ackedAt: new Date(Date.now() - 3600_000) } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([]); // the acknowledged tick is not due
+    expect((await readAt(600_001)).wakes).toHaveLength(1); // the next one is
+  });
+
+  it('a channel-empty proof is refused when forged, foreign, stale or for another worker; nothing is written', async () => {
+    const t = await everyTick();
+    await subscribe(t.id, liam.id);
+    const w = (await due(ctx(holderA.id))).wakes[0];
+    expect(await code(M.acknowledgeWakes({}, { proofs: [`${w.proof}x`] }, ctx(holderA.id)))).toBe('WAKE_PROOF_INVALID');
+    expect(await code(M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(holderB.id)))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    const p = verifyWakeProof(w.proof);
+    expect(await code(M.acknowledgeWakes({}, { proofs: [signWakeProof({ ...p, issuedAt: Date.now() - 16 * 60_000 })] }, ctx(holderA.id)))).toBe('WAKE_PROOF_STALE');
+    expect(await db.workerDeliveryTick.count()).toBe(0);
+  });
+
+  it('#2102 Dara P2-4: a prior-cycle ancestor receipt does not let a late ancestor proof charge again', async () => {
+    await say(channel, 'one', mention('liam'));
+    const a = (await due(ctx(manager.id))).wakes[0];
+    const aKey = verifyWakeProof(a.proof).wakeKey!;
+    // A receipt of the same still-due textless mention from a PRIOR cycle (R53: offered again after the floor).
+    await db.workerWakeAck.create({ data: { workerId: liam.id, wakeKey: aKey, ackedAt: new Date(Date.now() - 3600_000) } });
+    const t = await everyTick();
+    await subscribe(t.id, liam.id);
+    const b = (await due(ctx(manager.id))).wakes[0];
+    const r = await db.appWakeReservation.findUniqueOrThrow({ where: { workerId: liam.id } });
+    expect(r.absorbedKeys).toContain(aKey);
+    expect(await M.acknowledgeWakes({}, { proofs: [b.proof] }, ctx(manager.id))).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await M.acknowledgeWakes({}, { proofs: [a.proof] }, ctx(manager.id))).toEqual({ acknowledged: 0, unchanged: 1 });
+    expect((await db.appWakeDay.findFirstOrThrow({ where: { appId: app.id } })).wakes).toBe(1);
+  });
+
+  it('every-tick bypasses none of: pause, dormancy, the daily budget', async () => {
+    const t = await everyTick();
+    await subscribe(t.id, liam.id);
+    // pause
+    await db.workerWakeSettings.create({ data: { workerId: liam.id, pausedUntil: new Date(Date.now() + 3600_000) } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([]);
+    await db.workerWakeSettings.update({ where: { workerId: liam.id }, data: { pausedUntil: null } });
+    // dormancy
+    const old = new Date(Date.now() - 100 * DAY);
+    await db.session.create({ data: { id: generateId(), appId: app.id, userId: holderA.id, workerId: liam.id, agentId: agent.id, type: 'DEVELOPER', startedAt: old, updatedAt: old, endedAt: old } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([]);
+    await db.session.deleteMany({ where: { workerId: liam.id } });
+    // the budget
+    await db.app.update({ where: { id: app.id }, data: { wakeDailyBudget: 0 } });
+    const spent = await due(ctx(manager.id));
+    expect(spent.status).toBe('WAKE_BUDGET_EXHAUSTED');
+    expect(spent.wakes).toEqual([]);
+  });
+
+  it('every-tick respects the per-worker floor across a NEW tick: withheld inside it, offered after it (with a positive control)', async () => {
+    const floorSeconds = (await db.app.findUniqueOrThrow({ where: { id: app.id }, select: { tickerMinCadenceSeconds: true } })).tickerMinCadenceSeconds;
+    expect(floorSeconds).toBe(120);
+    const now = Date.now();
+    // Ticks fall at anchor + j x 120 s; tick 4 is current now and tick 5 falls 20 s from now.
+    const t = await everyTick({ cadenceSeconds: 120, anchorAt: new Date(now - 5 * 120_000 + 20_000) });
+    await subscribe(t.id, liam.id);
+    const first = (await due(ctx(manager.id))).wakes[0];
+    expect(first.reasons).toHaveLength(1);
+    await M.acknowledgeWakes({}, { proofs: [first.proof] }, ctx(manager.id));
+    await db.workerDeliveryTick.updateMany({ data: { ackedAt: new Date(now) } });
+    const row = await db.workerDeliveryTick.findFirstOrThrow({ where: { tickerId: t.id } });
+    expect(row.lastAckedTick).toBe(4);
+    // Tick 5 is a NEW, otherwise-due tick, 25 s after the acknowledgement: inside the 120 s floor, so it waits.
+    expect((await readAt(25_000)).wakes).toEqual([]);
+    // Positive control: the same tick is offered once the floor has passed, so nothing else was suppressing it.
+    const after = await readAt(125_000);
+    expect(after.wakes).toHaveLength(1);
+    expect(after.wakes[0].wake.reasons).toEqual([expect.objectContaining({ kind: 'TICK', k: 5 })]);
+  });
+
+  it('a ticker row created before the column existed reads as [read-team-channel] (the migration default), naming no ticker', async () => {
+    const id = generateId();
+    await db.$executeRaw`INSERT INTO tickers (id, app_id, name, slug, cadence_seconds, anchor_at, channel_ids, relevance, enabled, owner_user_id, created_at)
+      VALUES (${id}, ${app.id}, 'Old', 'old', 600, now(), '{}', 'ALL', true, ${manager.id}, now())`;
+    expect((await db.ticker.findUniqueOrThrow({ where: { id } })).reasons).toEqual(['read-team-channel']);
+  });
+});
+
 describe('read fields', () => {
   it('Ticker.nextTickAt / lastTickAt and WorkerWakeSettings.dormant', async () => {
     const F = resolvers as any;
@@ -275,7 +549,7 @@ describe('who may read due wakes, and R1/B3', () => {
     // acknowledged and the floor has passed, the manager sees only the readable channel.
     expect((await due(ctx(manager.id))).wakes).toEqual([]);
     await M.acknowledgeWakes({}, { proofs: mine.wakes.map((w: any) => w.proof) }, ctx(holderA.id));
-    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    await pastFloor();
     const both = await due(ctx(manager.id));
     expect(both.wakes[0].channels.map((c: any) => c.channel.id)).toEqual([channel.id]);
     expect(both.wakes[0].unread).toBe(1);
@@ -291,22 +565,25 @@ describe('delivery record: acknowledging, never reading', () => {
     const r = await M.acknowledgeWakes({}, { proofs: [first.wakes[0].proof] }, ctx(holderA.id));
     expect(r).toEqual({ acknowledged: 1, unchanged: 0 });
     expect(await db.channelReadState.count({ where: { workerId: liam.id } })).toBe(0);
-    const row = await db.workerDeliveryChannel.findFirstOrThrow({ where: { workerId: liam.id } });
-    expect(row).toMatchObject({ deliveredThroughSeq: 1, ackedByUserId: holderA.id });
-    // Nothing newer: not due again (outside or inside the ceiling).
+    // #2072 (R53): the acknowledgement records the wake's receipt, with who, and moves no message mark.
+    expect(await db.workerDeliveryChannel.count({ where: { workerId: liam.id } })).toBe(0);
+    expect(await db.workerWakeAck.findFirstOrThrow({ where: { workerId: liam.id } })).toMatchObject({ ackedByUserId: holderA.id });
+    // Inside the ceiling it is not due again, though its text stays undelivered.
     expect(ids(await due(ctx(holderA.id)))).toEqual([]);
 
     // A repeat acknowledgement moves nothing and is not another wake against the budget.
     expect(await M.acknowledgeWakes({}, { proofs: [first.wakes[0].proof] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
     expect((await db.appWakeDay.findFirstOrThrow({ where: { appId: app.id } })).wakes).toBe(1);
 
-    // An older proof can never lower delivered-through.
+    // An older proof replayed after a newer wake was acknowledged changes nothing.
     await say(channel, 'two', mention('liam'));
-    await db.workerDeliveryChannel.update({ where: { workerId_channelId: { workerId: liam.id, channelId: channel.id } }, data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    const ageMs = 5 * 60_000;
+    await pastFloor(ageMs);
     const second = await due(ctx(holderA.id));
-    await M.acknowledgeWakes({}, { proofs: [second.wakes[0].proof] }, ctx(holderA.id));
-    await M.acknowledgeWakes({}, { proofs: [first.wakes[0].proof] }, ctx(holderA.id));
-    expect((await db.workerDeliveryChannel.findFirstOrThrow({ where: { workerId: liam.id } })).deliveredThroughSeq).toBe(2);
+    expect(await M.acknowledgeWakes({}, { proofs: [second.wakes[0].proof] }, ctx(holderA.id))).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await M.acknowledgeWakes({}, { proofs: [issuedEarlier(first.wakes[0].proof, ageMs)] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
+    expect((await db.appWakeDay.findFirstOrThrow({ where: { appId: app.id } })).wakes).toBe(2);
+    expect(await db.workerDeliveryChannel.count({ where: { workerId: liam.id } })).toBe(0);
   });
 
   it('records the tick; the same tick is not due again until the next one', async () => {
@@ -318,7 +595,7 @@ describe('delivery record: acknowledging, never reading', () => {
     const tick = await db.workerDeliveryTick.findFirstOrThrow({ where: { workerId: liam.id, tickerId: t.id } });
     expect(tick.lastAckedTick).toBeGreaterThanOrEqual(1);
     await say(channel, 'more news');
-    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    await pastFloor();
     await db.workerDeliveryTick.updateMany({ data: { ackedAt: new Date(Date.now() - 3600_000) } });
     expect(ids(await due(ctx(manager.id)))).toEqual([]); // same tick, already acknowledged
     const later = await computeDueWakes({ ctx: ctx(manager.id), app: { id: app.id, organizationId: org.id, ownerUserId: null }, reader: { manager: true, userId: manager.id }, requester: { userId: manager.id }, now: new Date(Date.now() + 600_000) });
@@ -332,12 +609,17 @@ describe('delivery record: acknowledging, never reading', () => {
     expect(await code(M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(holderB.id)))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
     expect(await code(M.acknowledgeWakes({}, { proofs: ['garbage'] }, ctx(holderA.id)))).toBe('WAKE_PROOF_INVALID');
     const p = verifyWakeProof(w.proof);
-    expect(await code(M.acknowledgeWakes({}, { proofs: [signWakeProof({ ...p, v: 3 } as never)] }, ctx(holderA.id)))).toBe('WAKE_PROOF_INVALID');
+    expect(await code(M.acknowledgeWakes({}, { proofs: [signWakeProof({ ...p, v: 4 } as never)] }, ctx(holderA.id)))).toBe('WAKE_PROOF_INVALID');
+    // #2072: a v3 proof names no channel; one that does was not issued here.
+    expect(await code(M.acknowledgeWakes({}, { proofs: [signWakeProof({ ...p, channels: [{ channelId: channel.id, incarnation: 1, through: 1 }] })] }, ctx(holderA.id)))).toBe('WAKE_PROOF_INVALID');
     const old = signWakeProof({ ...p, issuedAt: Date.now() - 16 * 60_000 });
     expect(await code(M.acknowledgeWakes({}, { proofs: [old] }, ctx(holderA.id)))).toBe('WAKE_PROOF_STALE');
-    // A channel recreated since issue.
+    // A channel recreated since issue: still refused for an old-format (v2) proof that names it (#2072 keeps that
+    // validation; a v3 proof names no channel and writes no mark).
+    const ch = await db.channel.findUniqueOrThrow({ where: { id: channel.id } });
+    const v2 = signWakeProof({ ...p, v: 2, wakeKey: undefined, channels: [{ channelId: channel.id, incarnation: ch.incarnation, through: 1 }] });
     await db.channel.update({ where: { id: channel.id }, data: { incarnation: { increment: 1 } } });
-    expect(await code(M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(holderA.id)))).toBe('WAKE_PROOF_STALE');
+    expect(await code(M.acknowledgeWakes({}, { proofs: [v2] }, ctx(holderA.id)))).toBe('WAKE_PROOF_STALE');
     expect(await db.workerDeliveryChannel.count()).toBe(0);
   });
 
@@ -363,7 +645,8 @@ describe('R2 — amplification limits', () => {
     expect((await computeDueWakes({ ...args, now: at(30_000) })).wakes).toEqual([]);
     const later = await computeDueWakes({ ...args, now: at(121_000) });
     expect(later.wakes).toHaveLength(1);
-    expect(later.wakes[0].wake.unreadMentions).toBe(2); // the burst is ONE wake
+    // The burst is ONE wake. #2072 (R53): the first mention's text was never delivered, so it is still unread with them.
+    expect(later.wakes[0].wake.unreadMentions).toBe(3);
   });
 
   it('broadcast: an unstamped @all waits for the tick; a stamped one wakes at once', async () => {
@@ -395,10 +678,11 @@ describe('R2 — amplification limits', () => {
     await M.acknowledgeWakes({}, { proofs: page.wakes.map((w: any) => w.proof) }, ctx(manager.id));
     expect((await db.appWakeDay.findFirstOrThrow({ where: { appId: app.id } })).wakes).toBe(1);
     // Spent: the next non-exempt wake is withheld (and stays due), the stamp-exempt one passes.
-    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    await pastFloor();
     await say(channel, 'again', mention('liam'));
     const after = await due(ctx(manager.id));
-    expect(after.wakes).toEqual([]);
+    // #2072 (R53): the manager's mention to Nova moved no mark, so it is still due and, exempt, passes again.
+    expect(after.wakes.map((w: any) => w.worker.id)).toEqual([third.id]);
     expect(after.withheld).toBe(2); // Rook's unacknowledged mention is still due, and so is Liam's new one
   });
 
@@ -574,15 +858,17 @@ describe('cycle 1 — a repeat acknowledgement changes nothing (Diego P2-3)', ()
     await say(channel, 'one', mention('liam'));
     const first = (await due(ctx(holderA.id))).wakes[0];
     await M.acknowledgeWakes({}, { proofs: [first.proof] }, ctx(holderA.id));
-    const old = new Date(Date.now() - 3600_000);
-    await db.workerDeliveryChannel.updateMany({ where: { workerId: liam.id }, data: { deliveredAt: old, ackedByUserId: manager.id } });
+    // #2072 (R53): the wake's receipt is its delivery record now; no message mark is written.
+    const ageMs = 5 * 60_000;
+    const old = new Date(Date.now() - ageMs);
+    await db.workerWakeAck.updateMany({ where: { workerId: liam.id }, data: { ackedAt: old, ackedByUserId: manager.id } });
     await db.workerDeliveryTick.updateMany({ where: { workerId: liam.id }, data: { ackedAt: old, ackedByUserId: manager.id } });
-    expect(await M.acknowledgeWakes({}, { proofs: [first.proof] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
-    const ch = await db.workerDeliveryChannel.findFirstOrThrow({ where: { workerId: liam.id } });
+    expect(await M.acknowledgeWakes({}, { proofs: [issuedEarlier(first.proof, ageMs)] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
+    const ch = await db.workerWakeAck.findFirstOrThrow({ where: { workerId: liam.id } });
     const tk = await db.workerDeliveryTick.findFirstOrThrow({ where: { workerId: liam.id } });
-    expect([ch.deliveredAt.getTime(), ch.ackedByUserId]).toEqual([old.getTime(), manager.id]);
+    expect([ch.ackedAt.getTime(), ch.ackedByUserId]).toEqual([old.getTime(), manager.id]);
     expect([tk.ackedAt.getTime(), tk.ackedByUserId]).toEqual([old.getTime(), manager.id]);
-    // A newer mention is therefore not held back by the replay: the window ended an hour ago.
+    // A newer mention is therefore not held back by the replay: the window ended five minutes ago.
     await say(channel, 'two', mention('liam'));
     expect(ids(await due(ctx(holderA.id)))).toEqual([liam.id]);
   });
@@ -840,7 +1126,9 @@ describe('cycle 2 — an old, unchanged proof cannot cancel a newer reservation 
     await say(channel, 'one', mention('liam'));
     const p1 = (await due(ctx(holderA.id))).wakes[0];
     await M.acknowledgeWakes({}, { proofs: [p1.proof] }, ctx(holderA.id));
-    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    const ageMs = 5 * 60_000;
+    await pastFloor(ageMs);
+    const replay = issuedEarlier(p1.proof, ageMs); // p1 as issued before its own (now five-minute-old) receipt
     await say(channel, 'two', mention('liam'));
     const p2 = (await due(ctx(holderA.id))).wakes[0];
     expect(p2.proof).not.toBe(p1.proof);
@@ -850,7 +1138,7 @@ describe('cycle 2 — an old, unchanged proof cannot cancel a newer reservation 
     await say(channel, 'for rook', mention('rook'));
     expect((await due(ctx(holderB.id))).wakes).toHaveLength(0);
     // The old proof, replayed, is unchanged and must not free Liam's second reservation.
-    expect(await M.acknowledgeWakes({}, { proofs: [p1.proof] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
+    expect(await M.acknowledgeWakes({}, { proofs: [replay] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
     expect(await db.appWakeReservation.findMany()).toEqual(before);
     expect((await due(ctx(holderB.id))).wakes).toHaveLength(0);
     // Acknowledging the second spends it for good.
@@ -912,7 +1200,7 @@ describe('cycle 3 — one outstanding wake per worker (Diego P2-1)', () => {
     expect(await M.acknowledgeWakes({}, { proofs: [p2.proof] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
     expect((await db.appWakeDay.findFirstOrThrow({ where: { appId: app.id } })).wakes).toBe(1);
     // What arrived since is still owed, but the budget is spent and the floor holds: it waits, withheld.
-    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    await pastFloor();
     const next = await due(ctx(holderA.id));
     expect(next.wakes).toEqual([]);
     expect(next.withheld).toBe(1);
@@ -924,8 +1212,9 @@ describe('cycle 3 — one outstanding wake per worker (Diego P2-1)', () => {
     await say(channel, 'two', mention('liam'));
     expect((await due(ctx(holderA.id))).wakes[0].channels[0].throughSeq).toBe(1);
     await M.acknowledgeWakes({}, { proofs: [p1.proof] }, ctx(holderA.id));
-    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
-    expect((await due(ctx(holderA.id))).wakes[0].channels[0]).toMatchObject({ fromSeq: 2, throughSeq: 2 });
+    await pastFloor();
+    // #2072 (R53): the acknowledgement delivered no text, so the next wake still starts at the first mention.
+    expect((await due(ctx(holderA.id))).wakes[0].channels[0]).toMatchObject({ fromSeq: 1, throughSeq: 2 });
   });
 });
 
@@ -968,7 +1257,8 @@ describe('cycle 3 — a recreated channel does not wedge an outstanding wake (Ro
     await db.channel.update({ where: { id: channel.id }, data: { incarnation: { increment: 1 }, lastSeq: 0 } });
     await db.node.deleteMany({ where: { messageChannelId: channel.id } });
     await say(channel, 'fresh start', mention('liam'));
-    expect(await code(M.acknowledgeWakes({}, { proofs: [p1.proof] }, ctx(holderA.id)))).toBe('WAKE_PROOF_STALE');
+    // #2072 (R53) retired the STALE refusal of p1 here: a v3 proof names no channel, so a recreated one cannot void
+    // it (the old-format v2 refusal is pinned under 'refuses a foreign requester…'). The stored wake is still dropped.
     const p2 = (await due(ctx(holderA.id))).wakes[0];
     expect(p2.channels[0].channel.id).toBe(channel.id);
     expect(await M.acknowledgeWakes({}, { proofs: [p2.proof] }, ctx(holderA.id))).toEqual({ acknowledged: 1, unchanged: 0 });

@@ -18,6 +18,7 @@
 import { appKeyCaller } from '../lib/appKeyScopes/scopes.js';
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
+import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { tickerFieldResolvers } from '../api/graphql/schema/resolvers.ticker.js';
@@ -29,12 +30,15 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 type Row = Record<string, any>;
 type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
 const Q = resolvers.Query as unknown as {
+  appDeliverySettings: Resolver<{ appRef: string }, Row>;
   tickers: Resolver<{ appRef: string }, Row[]>;
   ticker: Resolver<{ ref: string }, Row | null>;
   workerWakeSettings: Resolver<{ workerRef: string }, Row>;
   dueWakes: Resolver<{ appRef: string; workerRefs?: string[]; first?: number; after?: string }, Row>;
+  deliveryBatches: Resolver<{ appRef: string; workerRefs?: string[]; first?: number; after?: string }, Row>;
 };
 const M = resolvers.Mutation as unknown as {
+  setAppDeliverySettings: Resolver<{ appRef: string; input: unknown }, Row>;
   createTicker: Resolver<{ appRef: string; input: Row }, Row>;
   updateTicker: Resolver<{ ref: string; input: Row }, Row>;
   deleteTicker: Resolver<{ ref: string }, boolean>;
@@ -42,6 +46,7 @@ const M = resolvers.Mutation as unknown as {
   unsubscribeWorker: Resolver<{ tickerRef: string; workerRef: string }, { subscription: Row; announcement: string | null }>;
   setWorkerWakeSettings: Resolver<{ workerRef: string; input: Row }, Row>;
   acknowledgeWakes: Resolver<{ proofs: string[] }, { acknowledged: number; unchanged: number }>;
+  acknowledgeDeliveryBatches: Resolver<{ batchIds: string[]; through?: Array<{ channelId: string; seq: number }> }, { acknowledged: number; unchanged: number }>;
 };
 const FT = tickerFieldResolvers.Ticker;
 const FW = tickerFieldResolvers.WorkerWakeSettings;
@@ -50,13 +55,14 @@ const FW = tickerFieldResolvers.WorkerWakeSettings;
 export const TICKER_WRITE_TOOLS = [
   'hadron_ticker_create', 'hadron_ticker_update', 'hadron_ticker_delete',
   'hadron_ticker_subscribe', 'hadron_ticker_unsubscribe', 'hadron_ack_wakes',
+  'hadron_delivery_settings_set', 'hadron_team_chat_inbox_ack',
 ] as const;
 /**
  * Actor-neutral tools (listed in ACTOR_NEUTRAL_TOOLS): each takes its own
  * optional `session`. `hadron_worker_wake_settings` is a read until it is given
  * something to set, and then enforces the write rule itself.
  */
-export const TICKER_READ_TOOLS = ['hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes'] as const;
+export const TICKER_READ_TOOLS = ['hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get', 'hadron_team_chat_inbox'] as const;
 
 function textResult(text: string, isError = false) {
   return { ...(isError ? { isError: true as const } : {}), content: [{ type: 'text' as const, text }] };
@@ -65,7 +71,7 @@ function textResult(text: string, isError = false) {
 /** A resolver refusal as `[<code>] <message>` plus its extensions; anything else is a server fault. */
 function refusal(e: unknown) {
   if (e instanceof GraphQLError) {
-    const { code, ...rest } = e.extensions ?? {};
+    const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'), true);
   }
@@ -90,7 +96,7 @@ async function renderTicker(t: Row, ctx: Context): Promise<string> {
   }
   const quiet = t.quietHours ? `quiet hours ${t.quietHours.timezone} (${t.quietHours.windows.length} window${t.quietHours.windows.length === 1 ? '' : 's'})` : null;
   return [
-    `- ${t.name} · ${urn ?? t.id} · every ${t.cadenceSeconds}s · ${t.enabled ? 'enabled' : 'disabled'} · relevance ${t.relevance}`,
+    `- ${t.name} · ${urn ?? t.id} · every ${t.cadenceSeconds}s · ${t.enabled ? 'enabled' : 'disabled'} · relevance ${t.relevance}· reasons ${(t.reasons as string[]).map((x) => x.toLowerCase().replace(/_/g, '-')).join('+')}`,
     `  anchor ${iso(t.anchorAt)}${quiet ? ` · ${quiet}` : ''}${readable.length ? ` · ${readable.length} channel(s)` : ''}`,
     `  owner ${owner ? owner.name : 'unknown'} · subscribers: ${names.length ? names.join(', ') : 'none'}${subs.hasNextPage ? ' (more)' : ''}`,
   ].join('\n');
@@ -191,6 +197,30 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     }
   }
 
+  // #2025: thin over the shared manager transaction; cadence/window changes affect tickers too.
+  server.tool(
+    'hadron_delivery_settings_get',
+    'Read an App’s delivery settings as a participant (cor:agt:080:05). The batching window is also the ticker cadence floor. Standby is not effective until S7.',
+    { appRef: z.string().describe('The App id or URN.'), session: SESSION_READ },
+    async ({ appRef, session }) => read(session, async (ctx) => JSON.stringify(await Q.appDeliverySettings({}, { appRef }, ctx))),
+  );
+  server.tool(
+    'hadron_delivery_settings_set',
+    'Change delivery settings as the human App manager (cor:agt:080:19). Omitted preserves; null and unknown settings refuse atomically. The batching window changes ticker cadence too. Standby enabling is unavailable until S7.',
+    {
+      appRef: z.string().describe('The App id or URN.'),
+      input: z.object({
+        batchWindowSeconds: z.number().nullable().optional().describe('The shared cadence floor/window in seconds; existing ticker limits apply.'),
+        busyDelaySeconds: z.number().nullable().optional().describe('Whole seconds 1..86400, Proposed bounds.'),
+        stuckWindowSeconds: z.number().nullable().optional().describe('Whole seconds 1..604800 and greater than busy delay + window, Proposed bounds/relation.'),
+        standbyEnabled: z.boolean().nullable().optional().describe('False clears; true is refused until S7 behavior ships.'),
+      }).passthrough().describe('Atomic patch. Unknown fields are refused by the shared resolver, never silently removed.'),
+      session: SESSION_WRITE,
+    },
+    async ({ appRef, input, session }) => write('hadron_delivery_settings_set', session, async (ctx) =>
+      JSON.stringify(await M.setAppDeliverySettings({}, { appRef, input }, ctx))),
+  );
+
   server.tool(
     'hadron_ticker_list',
     'List the live tickers of a team App, with their cadence, owner and subscribers (cor:agt:080). A ticker is a named, ' +
@@ -218,6 +248,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       quietHours: quietHours.optional(),
       channelIds: z.array(z.string()).optional().describe('Channels whose unread can wake a subscriber. Not a grant. Omit for every channel the subscriber watches.'),
       relevance: z.enum(['ALL', 'MENTIONS']).optional().describe('Default ALL.'),
+      reasons: z.array(z.enum(['read-team-channel', 'every-tick'])).min(1).optional().describe('Why it fires (cor:agt:080:10). Default [read-team-channel]: only when there is relevant unread. every-tick fires on every tick; the floor, daily budget, pause and dormancy still apply. Never empty.'),
       enabled: z.boolean().optional().describe('Default true.'),
       session: SESSION_WRITE,
     },
@@ -242,6 +273,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       channelIds: z.array(z.string()).optional(),
       clearChannels: z.boolean().optional(),
       relevance: z.enum(['ALL', 'MENTIONS']).optional(),
+      reasons: z.array(z.enum(['read-team-channel', 'every-tick'])).min(1).optional(),
       enabled: z.boolean().optional(),
       session: SESSION_WRITE,
     },
@@ -358,7 +390,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
           const ch = (w.channels as Row[]).map((c) => `${c.channel.name} ${c.fromSeq}-${c.throughSeq}`).join(', ');
           lines.push(
             `- ${w.worker.name}: ${why} · ${w.unread} unread (${w.unreadMentions} mention${w.unreadMentions === 1 ? '' : 's'}) · ${ch}` +
-              `${w.availability ? ` · ${w.availability.state}${w.availability.reason ? ` (${w.availability.reason})` : ''}` : ''}\n  proof: ${w.proof}`,
+              `${w.availability ? ` · ${w.availability.state}${w.availability.reason ? ` (${w.availability.reason})` : ''}` : ''}\n  anchor ${iso(w.anchorAt)} · deliverAfter ${iso(w.deliverAfter)} · busyDeadline ${iso(w.busyDeadline)}\n  proof: ${w.proof}`,
           );
         }
         const dormant = (page.dormant as Row[]).map((d) => `${d.worker.name} (${d.mentions})`);
@@ -371,6 +403,64 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
           page.pageInfo.hasNextPage ? `More workers: after = ${page.pageInfo.endCursor}` : null,
         ].filter(Boolean).join('\n');
       }),
+  );
+
+  // #2017 (S1): thin over the same resolvers as GraphQL, so the text is byte-identical on every surface.
+  server.tool(
+    'hadron_team_chat_inbox',
+    'Ready delivery batches (cor:agt:080:22, :26): your own worker through its live session, or workers registered on YOUR host with an App key ' +
+      'holding attention:deliver AND host:operate. Self also admits a same-App userless, non-host-launched session through an active key that never held host:operate; existing session/memory gates still apply. Returns JSON: each batch has `id` (a signed proof), `worker`, `text` (one line, ' +
+      'written by the server: type it UNCHANGED), `deliverAfter`, `busyDeadline`, `ranges` and `overflow`. Reading moves nothing; ' +
+      'Display the shared text, then call hadron_team_chat_inbox_ack separately within 15 minutes. A lost read response acknowledges nothing. ' +
+      'The opaque proof is returned ONLY in batches[].id; never copy it into other output, errors or logs. No credentials are returned. ' +
+      'Encrypted channels are omitted, even when unlocked.',
+    {
+      appRef: z.string().describe('The team App (id or URN).'),
+      workerRefs: z.array(z.string()).optional().describe('Only these workers. Self mode: only your bound worker. Host mode: omit for workers registered on your host.'),
+      first: z.number().int().optional().describe('Workers per page (default 50, max 200).'),
+      after: z.string().optional().describe('The previous page\'s endCursor.'),
+      session: z.string().optional().describe('Self: your own live bound worker session. Host key: omit session and use attention:deliver plus host:operate.'),
+    },
+    async ({ session, ...rest }) =>
+      readWakes(session, async (ctx) => {
+        const page = await Q.deliveryBatches({}, rest, session ? { ...ctx, sessionId: session, sessionBindingRefused: false } : ctx);
+        return JSON.stringify({
+          batches: (page.batches as Row[]).map((b) => ({
+            id: b.id,
+            worker: b.worker.name,
+            workerId: b.worker.id,
+            text: b.text,
+            deliverAfter: iso(b.deliverAfter),
+            busyDeadline: iso(b.busyDeadline),
+            interrupt: b.interrupt,
+            overflow: b.overflow,
+            ranges: (b.ranges as Row[]).map((r) => ({ channelId: r.channel.id, incarnation: r.incarnation, fromSeq: r.fromSeq, throughSeq: r.throughSeq, seqs: r.seqs })),
+          })),
+          pageInfo: page.pageInfo,
+        });
+      }),
+  );
+  server.tool(
+    'hadron_team_chat_inbox_ack',
+    'Record that delivery batches were typed (cor:agt:080:16, :17). Pass the ids hadron_team_chat_inbox gave you. The delivered mark ' +
+      'rises to the end of each rendered range; with `through` (ONE batch only) only the listed channels move, each to a rendered seq of ' +
+      'its own. NEVER moves a read position. Only the receiving host key or own live session may acknowledge it, within 15 minutes; a stale, foreign or ' +
+      'forged id is refused and nothing is written. A batch you do not acknowledge stays due. If the ack response is lost, retry the same ' +
+      'batchIds: repeated/concurrent acknowledgements are idempotent. Never log or echo a proof in errors or other output.',
+    {
+      batchIds: z.array(z.string()).describe('Batch ids from hadron_team_chat_inbox.'),
+      through: z.array(z.object({ channelId: z.string(), seq: z.number().int() })).optional().describe('Partial acknowledgement of a single batch.'),
+      session: z.string().optional().describe('Self: required, the same live bound worker session that received the batch. Host key: omit session and use the receiving key.'),
+    },
+    async ({ session, batchIds, through }) => {
+      const ack = async (ctx: Context) => {
+        const r = await M.acknowledgeDeliveryBatches({}, { batchIds, through }, session ? { ...ctx, sessionId: session, sessionBindingRefused: false } : ctx);
+        return `Acknowledged ${r.acknowledged}${r.unchanged ? ` (${r.unchanged} already delivered)` : ''}.`;
+      };
+      // A host key acts as itself and names no session; anyone else is a write and needs a session, like hadron_ack_wakes.
+      if (appKeyCaller(ctxOf())) return readWakes(session, ack);
+      return write('hadron_team_chat_inbox_ack', session, ack);
+    },
   );
 
   server.tool(

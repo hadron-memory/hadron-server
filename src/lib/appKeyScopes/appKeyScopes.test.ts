@@ -254,7 +254,8 @@ describe('attention:deliver — the key at dueWakes', () => {
     expect(reads).toHaveLength(1);
     expect(reads[0]).toMatchObject({ appKeyId: key.id, appId: app.id, workerCount: 1 });
     expect(await ack(keyCtx(key, app.id), page.wakes.map((w: any) => w.proof))).toEqual({ acknowledged: 1, unchanged: 0 });
-    const delivered = await db.workerDeliveryChannel.findFirstOrThrow({ where: { workerId: liam.id } });
+    // #2072 (R53): the wake's receipt names the key; no message mark is written.
+    const delivered = await db.workerWakeAck.findFirstOrThrow({ where: { workerId: liam.id } });
     expect(delivered.ackedByAppKeyId).toBe(key.id);
     expect(delivered.ackedByUserId).toBeNull();
     // A second read is a second row.
@@ -304,10 +305,12 @@ describe('attention:deliver — the key at dueWakes', () => {
     expect(await code(ack(userCtx(holder.id), [keyProof]))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
     expect(await code(ack(keyCtx(otherKey, app.id), [keyProof]))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
     expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect(await db.workerWakeAck.count()).toBe(0);
     // The reverse: a user's proof.
     const userProof = (await due(userCtx(manager.id))).wakes[0].proof;
     expect(await code(ack(keyCtx(key, app.id), [userProof]))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
     expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect(await db.workerWakeAck.count()).toBe(0);
   });
 });
 
@@ -321,6 +324,7 @@ describe('N5 / #8097 — a key bound to a session is refused, never narrowed and
     expect(await code(due(bound))).toBe('APP_KEY_SESSION_BOUND');
     expect(await code(ack(bound, [proof]))).toBe('APP_KEY_SESSION_BOUND');
     expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect(await db.workerWakeAck.count()).toBe(0);
     // Naming a session that failed to bind is the same.
     const failed = keyCtx(key, app.id, { sessionBindingRefused: true });
     expect(await code(due(failed))).toBe('APP_KEY_SESSION_BOUND');
@@ -389,6 +393,7 @@ describe('N4 — the scope is read from the database at every call', () => {
     await h.done;
     expect(await settled).toBe('APP_KEY_SCOPE_REQUIRED');
     expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect(await db.workerWakeAck.count()).toBe(0);
   });
 
   it('an acknowledgement behind a revocation in flight is waited for, then refused', async () => {
@@ -403,6 +408,7 @@ describe('N4 — the scope is read from the database at every call', () => {
     await h.done;
     expect(await settled).toBe('APP_KEY_SCOPE_REQUIRED');
     expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect(await db.workerWakeAck.count()).toBe(0);
   });
 });
 
@@ -559,6 +565,7 @@ describe('N4 on every result path — a call that issues nothing is decided unde
     expect(await db.appKeyWakeRead.count()).toBe(0);
     expect(await db.appWakeReservation.count()).toBe(0);
     expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect(await db.workerWakeAck.count()).toBe(0);
   }
   beforeEach(async () => { await grant(key); });
 
