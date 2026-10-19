@@ -357,6 +357,7 @@ it('self read waits on the deciding session row and sees an end committed by its
   let held!: () => void; const holding = new Promise<void>(r => { held = r; });
   let release!: () => void; const released = new Promise<void>(r => { release = r; });
   let entering!: () => void; const locking = new Promise<'locking'>(r => { entering = () => r('locking'); });
+  let auditing!: () => void; const auditStage = new Promise<'auditing'>(r => { auditing = () => r('auditing'); });
   const blocker = db.$transaction(async tx => {
     await tx.$queryRaw`SELECT id FROM sessions WHERE id=${s.id} FOR UPDATE`;
     held(); await released;
@@ -367,6 +368,10 @@ it('self read waits on the deciding session row and sees an end committed by its
   const wrapped = new Proxy(db, { get(t, prop) {
     if (prop !== '$transaction') return Reflect.get(t, prop);
     return (body: any, ...options: any[]) => (original as any)(async (tx: any) => body(new Proxy(tx, { get(target, key) {
+      if (key === 'appLogEntry') return new Proxy(target.appLogEntry, { get(model, method) {
+        if (method !== 'create') return Reflect.get(model, method);
+        return (...args: any[]) => { auditing(); return model.create(...args); };
+      }});
       if (key !== '$queryRaw') return Reflect.get(target, key);
       return (...args: any[]) => {
         const sql = Array.isArray(args[0]) ? args[0].join(' ') : '';
@@ -376,7 +381,7 @@ it('self read waits on the deciding session row and sees an end committed by its
     }})), ...options);
   }});
   const result = code(selfRead(s, {}, { db: wrapped }));
-  try { expect(await Promise.race([locking, result.then(() => 'completed')])).toBe('locking'); }
+  try { expect(await Promise.race([locking, auditStage, result.then(() => 'completed')])).toBe('locking'); }
   finally { release(); await blocker; }
   expect(await result).toBe('SESSION_NOT_LIVE');
   expect(await db.appLogEntry.count()).toBe(0);
