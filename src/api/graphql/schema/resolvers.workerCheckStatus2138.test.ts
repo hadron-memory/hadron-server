@@ -174,6 +174,21 @@ describe('the status on the roster and on worker get (they agree)', () => {
   });
 });
 
+describe('end to end with §3.1 stamping', () => {
+  it('a read of the team channel through the worker\'s own session turns OVERDUE into OK; another reader\'s read does not', async () => {
+    const session = await bind('Kit', 300);
+    await assign('Kit', 200);
+    await checked('Kit', teamChannel.id, 40);
+    expect((await rosterStatus('Kit')).status).toBe('OVERDUE');
+    // A person reading the channel (no worker session) is not the worker checking.
+    await Q.teamChatMessages({}, { appRef: app.id }, ctx(member.id));
+    expect((await rosterStatus('Kit')).status).toBe('OVERDUE');
+    // The worker's own read: the request carries its session (as the CLI and MCP send it).
+    await Q.teamChatMessages({}, { appRef: app.id }, { ...ctx(member.id), sessionId: session.id });
+    expect(await rosterStatus('Kit')).toMatchObject({ status: 'OK', pendingReason: null });
+  });
+});
+
 describe('who may read it', () => {
   it('worker get masks it to null for someone outside the App', async () => {
     await bind('Kit');
