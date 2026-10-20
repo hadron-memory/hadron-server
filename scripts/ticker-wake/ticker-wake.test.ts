@@ -1958,7 +1958,8 @@ describe('#2138: the roster comes from the ticker\'s subscribers and this host\'
     const six = ['Bo', 'Calvin', 'Cody', 'Mira', 'Pia', 'Udo'];
     f.tickers = [
       { id: 'T', pages: [[sub('w-ada', 'Ada'), ...six.slice(0, 3).map((n) => sub(`w-${n.toLowerCase()}`, n))]] },
-      { id: 'U', pages: [six.slice(3).map((n) => sub(`w-${n.toLowerCase()}`, n)), [sub('w-bo', 'Bo')]] }, // a second page, Bo twice
+      // a second page carries Udo alone, and Bo again (listed once)
+      { id: 'U', pages: [six.slice(3, 5).map((n) => sub(`w-${n.toLowerCase()}`, n)), [sub('w-udo', 'Udo'), sub('w-bo', 'Bo')]] },
     ];
     await go();
     const unreachable = lines.filter((l) => l.includes('unreachable on this host'));
@@ -1978,7 +1979,8 @@ describe('#2138: the roster comes from the ticker\'s subscribers and this host\'
   });
 
   it('the roster file still overrides: its row decides the worktree and pin for that worker', async () => {
-    bound('ada2', 'w-ada'); // a second worktree bound to Ada would be ambiguous, but the file row names one
+    bound('ada2', 'w-ada'); // two more worktrees bound to Ada would be ambiguous, but the file row names one
+    bound('ada3', 'w-ada');
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     await go();
     expect(f.sent).toHaveLength(1);
