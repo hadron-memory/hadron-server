@@ -287,3 +287,51 @@ describe('#2138 §3.6 — the team pause', () => {
     expect(TICKER_WRITE_TOOLS).toContain('hadron_set_team_pause');
   });
 });
+
+describe('#2138 follow-up — LIVE_CHECK is a TickerReason over the wire', () => {
+  const wire = async (query: string, variables: Record<string, unknown>) => {
+    const { ApolloServer } = await import('@apollo/server');
+    const { typeDefs } = await import('./typeDefs.js');
+    const server = new ApolloServer<Context>({ typeDefs, resolvers });
+    try {
+      const r = await server.executeOperation({ query, variables }, { contextValue: ctx(manager.id) });
+      if (r.body.kind !== 'single') throw new Error('unexpected multipart result');
+      return r.body.singleResult;
+    } finally { await server.stop(); }
+  };
+
+  it('createTicker accepts LIVE_CHECK (alone and with the others), stores live-check, and reading it back names LIVE_CHECK', async () => {
+    const created = await wire(
+      'mutation($a:String!,$i:TickerInput!){createTicker(appRef:$a,input:$i){id reasons}}',
+      { a: appId, i: { name: 'Team check', cadenceSeconds: 600, relevance: 'MENTIONS', reasons: ['READ_TEAM_CHANNEL', 'LIVE_CHECK'] } },
+    );
+    expect(created.errors).toBeUndefined();
+    expect((created.data as any).createTicker.reasons).toEqual(['READ_TEAM_CHANNEL', 'LIVE_CHECK']);
+    const id = (created.data as any).createTicker.id;
+    expect((await db.ticker.findUniqueOrThrow({ where: { id } })).reasons).toEqual(['read-team-channel', 'live-check']);
+    const read = await wire('query($a:String!){tickers(appRef:$a){id reasons}}', { a: appId });
+    expect(read.errors).toBeUndefined();
+    expect((read.data as any).tickers.find((t: any) => t.id === id).reasons).toEqual(['READ_TEAM_CHANNEL', 'LIVE_CHECK']);
+  });
+
+  it('a ticker that is only live-check reads back, and updateTicker can switch it to and from LIVE_CHECK', async () => {
+    const created = await wire('mutation($a:String!,$i:TickerInput!){createTicker(appRef:$a,input:$i){id reasons}}',
+      { a: appId, i: { name: 'Only live', cadenceSeconds: 600, reasons: ['LIVE_CHECK'] } });
+    expect(created.errors).toBeUndefined();
+    const id = (created.data as any).createTicker.id;
+    expect((created.data as any).createTicker.reasons).toEqual(['LIVE_CHECK']);
+    const patched = await wire('mutation($r:String!,$p:TickerPatch!){updateTicker(ref:$r,input:$p){reasons}}',
+      { r: id, p: { reasons: ['EVERY_TICK'] } });
+    expect(patched.errors).toBeUndefined();
+    expect((patched.data as any).updateTicker.reasons).toEqual(['EVERY_TICK']);
+    const back = await wire('mutation($r:String!,$p:TickerPatch!){updateTicker(ref:$r,input:$p){reasons}}', { r: id, p: { reasons: ['LIVE_CHECK'] } });
+    expect(back.errors).toBeUndefined();
+    expect((back.data as any).updateTicker.reasons).toEqual(['LIVE_CHECK']);
+  });
+
+  it('an unknown reason is still refused by the schema', async () => {
+    const r = await wire('mutation($a:String!,$i:TickerInput!){createTicker(appRef:$a,input:$i){id}}',
+      { a: appId, i: { name: 'Bad', cadenceSeconds: 600, reasons: ['NOPE'] } });
+    expect(r.errors?.length).toBeGreaterThan(0);
+  });
+});
