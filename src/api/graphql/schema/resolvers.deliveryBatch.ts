@@ -22,6 +22,7 @@ import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { appKeyCaller, refuseSessionBound, requireKeyScope } from '../../../lib/appKeyScopes/scopes.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { stampTeamChannelChecks } from '../../../lib/channelReadState.js';
+import { TEAM_CHAT_LOC } from '../../../lib/teamChatLoc.js';
 import { keyHostId, recordHostKeyUse, recordHostKeyUseApart, type HostKey } from '../../../lib/hostOperations/hostKey.js';
 import { liveCaller } from '../../../lib/tickers/liveCaller.js';
 import { batchProofPayload, loadDeliveryBatches, loadDeliveryChannelPolicy } from '../../../lib/tickers/deliveryBatch.js';
@@ -139,7 +140,11 @@ async function selfBatches(ctx: Context, a: { appRef: string; workerRefs?: strin
     // Re-check the clock after loading too: a long read must not return after its promised expiry.
     await ownBatchSession(txCtx, app.id);
     // #2138 §3.1: the inbox read through the worker's own session is a check of its App's team channel, empty or not.
-    await stampTeamChannelChecks(tx, worker.id);
+    if ((await stampTeamChannelChecks(tx, worker.id)) === 0) {
+      // No team channel of the worker's App to stamp (none provisioned, or deleted): log-only, no behaviour change.
+      const own = await tx.channel.findFirst({ where: { loc: TEAM_CHAT_LOC, deletedAt: null, memory: { appId: app.id } }, select: { id: true } });
+      if (!own) await tx.appLogEntry.create({ data: { appId: app.id, level: 'WARN', sessionId: session.id, message: 'channel.check.miss', detail: { reason: 'NO_TEAM_CHANNEL', via: 'inbox' } } });
+    }
     await tx.appLogEntry.create({ data: { appId: app.id, sessionId: session.id, level: 'INFO', message: 'delivery.batch.read', detail: { workerId: worker.id, count: page.batches.length } } });
     const channels = new Map((await tx.channel.findMany({ where: { id: { in: page.batches.flatMap(b => b.ranges.map(r => r.channelId)) } } })).map(c => [c.id, c]));
     return {

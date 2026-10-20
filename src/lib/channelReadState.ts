@@ -108,6 +108,63 @@ export async function stampTeamChannelChecks(db: Db, workerId: string): Promise<
   return rows.length;
 }
 
+/**
+ * #2138 follow-up — WHY a read that arrived with a session did not count as a check. Log-only diagnostics (the
+ * `channel.check.miss` AppLog entry); no behaviour hangs on it.
+ *  - BINDING_REFUSED: the request NAMED a session (X-Hadron-Session) but the server refused the binding, so it was served as a
+ *    session-less read (the caller is not told).
+ *  - SESSION_NOT_OWN_LIVE: the session is not the caller's own live Worker session.
+ *  - SESSION_REVIVE_REFUSED: the session had lapsed and could not be resumed.
+ *  - CROSS_APP: the channel is another App's team channel (the worker's own App does not host it).
+ *  - WORKER_RETIRED / CHANNEL_GONE: the worker or the channel is gone.
+ *  - NO_TEAM_CHANNEL: the inbox read found no team channel of the worker's App.
+ */
+export type CheckMissReason =
+  | 'BINDING_REFUSED' | 'SESSION_NOT_OWN_LIVE' | 'SESSION_REVIVE_REFUSED'
+  | 'CROSS_APP' | 'WORKER_RETIRED' | 'CHANNEL_GONE' | 'NO_TEAM_CHANNEL';
+
+/** Why `stampChannelCheck` stamped nothing, or null when the channel is simply not a team channel (not a miss). */
+export async function diagnoseNoStamp(db: Db, workerId: string, channelId: string): Promise<CheckMissReason | null> {
+  const [w, c] = await Promise.all([
+    db.worker.findUnique({ where: { id: workerId }, select: { appId: true, retiredAt: true } }),
+    db.channel.findUnique({ where: { id: channelId }, select: { loc: true, deletedAt: true, memory: { select: { appId: true } } } }),
+  ]);
+  if (!c || c.deletedAt) return c && c.loc === TEAM_CHAT_LOC ? 'CHANNEL_GONE' : null;
+  if (c.loc !== TEAM_CHAT_LOC) return null;
+  if (!w || w.retiredAt) return 'WORKER_RETIRED';
+  if (c.memory.appId !== w.appId) return 'CROSS_APP';
+  return null;
+}
+
+/**
+ * Log one `channel.check.miss` AppLog entry. Log-only and never throws: it records the reason code and the way the read
+ * arrived, plus the session id the AppLog row already carries, and nothing about the worker, the channel or the message
+ * content. A channel that is not a team channel logs nothing (an ordinary read of another channel is not a miss).
+ */
+export async function recordCheckMiss(
+  db: Db,
+  args: { channelId: string; sessionId?: string | null; reason: CheckMissReason; via: 'read' | 'mark' | 'inbox' },
+): Promise<void> {
+  try {
+    const ch = await db.channel.findUnique({ where: { id: args.channelId }, select: { loc: true, memory: { select: { appId: true } } } });
+    if (!ch || ch.loc !== TEAM_CHAT_LOC) return;
+    const session = args.sessionId ? await db.session.findUnique({ where: { id: args.sessionId }, select: { appId: true } }) : null;
+    const appId = session?.appId ?? ch.memory.appId;
+    if (!appId) return;
+    await db.appLogEntry.create({
+      data: {
+        appId,
+        level: 'WARN',
+        sessionId: args.sessionId ?? null,
+        message: 'channel.check.miss',
+        detail: { reason: args.reason, via: args.via },
+      },
+    });
+  } catch {
+    // diagnostics only: a failed log write must never affect the read
+  }
+}
+
 /** The attendee's cursors on a set of Channels; a Channel with no row reads 0. */
 export async function readStatesFor(db: Db, attendee: RegisterAttendee, channelIds: string[]): Promise<Map<string, number>> {
   if (channelIds.length === 0) return new Map();

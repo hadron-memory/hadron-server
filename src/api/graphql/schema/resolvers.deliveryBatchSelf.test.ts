@@ -181,6 +181,15 @@ describe('R57 own-live-session batches', () => {
     expect(page.batches).toHaveLength(1);
     expect(page.batches[0].text).toContain('standup moved');
   });
+  it('#2138: an inbox read with no team channel to check logs channel.check.miss NO_TEAM_CHANNEL (reason and route only) and still serves the read', async () => {
+    const s = await ownSession(); await postForBoth();
+    await db.channel.update({ where: { id: channel.id }, data: { deletedAt: new Date() } });
+    const page = await selfRead(s);
+    expect(Array.isArray(page.batches)).toBe(true);
+    const logs = await db.appLogEntry.findMany({ where: { appId: app.id, message: 'channel.check.miss' } });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ sessionId: s.id, detail: { reason: 'NO_TEAM_CHANNEL', via: 'inbox' } });
+  });
   it('acks self with worker provenance, session user and no key, and retry changes nothing', async () => {
     const s = await ownSession(); await postForBoth(); const [b] = (await selfRead(s)).batches;
     expect(await selfAck(s, [b.id])).toEqual({ acknowledged: 1, unchanged: 0 });

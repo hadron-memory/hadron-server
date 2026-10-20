@@ -60,6 +60,7 @@ import { mentionTokenOf, BROADCAST_MENTION_TOKENS } from '../../../lib/mentionTo
 import { reachesWorker } from '../../../lib/mentionReach.js';
 import { extractMentions } from '../../../lib/teamChatMentions.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
+import { recordCheckMiss } from '../../../lib/channelReadState.js';
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
 import { DEFAULT_CHANNEL_NAME, ensureChannelWithRoot } from '../../../lib/channels.js';
@@ -1510,14 +1511,19 @@ export const teamChatQueries = {
     // participation and register entry before advancing; the Channel host
     // is not the key.
     const pilotChannel =
-      ctx.sessionId
+      ctx.sessionId || ctx.sessionBindingRefused
         ? await ctx.db.channel.findFirst({
             where: { chatRootNodeId: root.id, deletedAt: null },
             select: { id: true, lastSeq: true },
           })
         : null;
     const page = await readChannelRoot(ctx, appId, root, args);
-    if (pilotChannel) {
+    // #2138 follow-up: a request that NAMED a session the server refused is served as a session-less read, so it can never
+    // count as a check. Say so in the App log (reason code only); behaviour is unchanged.
+    if (pilotChannel && !ctx.sessionId && ctx.sessionBindingRefused) {
+      await recordCheckMiss(ctx.db, { channelId: pilotChannel.id, reason: 'BINDING_REFUSED', via: 'read' });
+    }
+    if (pilotChannel && ctx.sessionId) {
       try {
         await maybeAdvanceOwnChannelRead(ctx, {
           channelId: pilotChannel.id,
@@ -1553,6 +1559,9 @@ export const teamChatQueries = {
   ): Promise<{ items: TeamChatMessageOut[]; total: number }> => {
     const target = await resolveChannelTarget(ctx, channelRef, 'read');
     const page = await readChannelRoot(ctx, target.app?.id ?? null, target.root, args);
+    if (!ctx.sessionId && ctx.sessionBindingRefused) {
+      await recordCheckMiss(ctx.db, { channelId: target.channelId, reason: 'BINDING_REFUSED', via: 'read' });
+    }
     if (ctx.sessionId) {
       try {
         await maybeAdvanceOwnChannelRead(ctx, {
