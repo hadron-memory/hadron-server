@@ -94,6 +94,30 @@ skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
   `graphql error WAKE_PROOF_STALE`, `send refused: composer_not_empty`). Never the
   raw message, stderr, wake proof or any typed or screen text. An exception that is not this script's own (a router helper, the runner, a bug) is reduced at the outer boundary to a class plus a known code (`helper failed (backend_failure)`, `unexpected Error`, `unexpected other`).
 
+## Resolving an ambiguous entry on evidence (#2138)
+
+Orca often reports a nudge `input_accepted` without `turn_started` (#26072),
+so most sends end ambiguous. On each later pass the script first reissues the
+entry's request by its id; a confirmation settles it. Otherwise it becomes a
+delivered receipt, and the next pass recovers it ack-only (never a retype),
+only when ALL of these hold:
+
+1. Orca **accepted** the input under a request id (detail `accepted, turn start
+   not confirmed`). An intent-only or unparsable entry is never resolved this way.
+2. The **receiver** (terminal handle and incarnation) is the same.
+3. The **composer** reads provably empty (the text is not sitting in it). It
+   types nothing, so a busy terminal does not veto it.
+4. The worker's own session **checked the team channel after the send**
+   (`checkStatus.lastCheckedAt` later than the entry's `at` by more than 5 s
+   of clock margin). For a covered task assignment, that task must also be
+   `STARTED` (or `FINISHED`) with this worker as assignee.
+
+A timeout alone never resolves an entry. After 2 cadences (20 min) without
+this evidence the entry stays held and its log line says `needs a person`;
+classify it by hand as below. Residual: a channel check the worker made on its
+own, not because of the nudge, also counts; acking the tick is still true then,
+since the check the tick asks for was done.
+
 ## Recovering an ambiguous entry (a human decision)
 
 The script never deletes or rewrites an UNRESOLVED ambiguous entry itself (it only removes a delivered receipt after a successful ack, and withdraws its own intent when Orca says a send was refused and nothing was typed). An entry in `receipts.json` with
