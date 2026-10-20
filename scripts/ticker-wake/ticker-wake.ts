@@ -156,7 +156,10 @@ export const ASSIGNMENT_EVENTS: ReadonlySet<string> = new Set(['ASSIGNED', 'REAS
  */
 export const DELIVERED_EVENTS: ReadonlySet<string> = new Set([...ASSIGNMENT_EVENTS, 'ALARM', 'CHILD_FINISHED']);
 /** An alarm's own record: its rule (the event type) and whether someone already acknowledged it (#1704). */
-export const ALARM_EVENT = `query($a:ID!,$t:ID!){agentTeamEvents(appRef:$a,taskId:$t,alarmsOnly:true,limit:200){id type acknowledgedAt}}`;
+export const ALARM_EVENT = `query($a:ID!,$t:ID!,$p:ID){agentTeamEvents(appRef:$a,taskId:$t,alarmsOnly:true,after:$p,limit:200){id type acknowledgedAt}}`;
+/** The alarm read's page size (the server's cap), and how many pages it walks before holding (George's #2160 P2). */
+const ALARM_PAGE = 200;
+const ALARM_MAX_PAGES = 50;
 /** A stall rule is typed into a terminal, so only the platform's plain rule shape is accepted (e.g. stall.not-started). */
 const STALL_RULE = /^[a-z][a-z0-9.-]{0,63}$/;
 /** A task id is typed into a terminal, so only a plain id shape is accepted; anything else holds the wake. */
@@ -421,6 +424,29 @@ function deliveryEvidence(cfg: Config, run: Runner, workerId: string, prior: Amb
   return null;
 }
 
+/**
+ * The alarm `eventId` on task `taskId`, or undefined when the task's alarm history runs out without it. The history is
+ * oldest first and keeps acknowledged alarms, so it is paged by the last event read until the exact id turns up
+ * (George's #2160 P2: a task can hold more than one page of earlier episodes). Throws a SafeError when a page fails, the
+ * cursor does not advance, or ALARM_MAX_PAGES pages pass without an end: never "absent" on a partial read.
+ */
+function findAlarm(cfg: Config, run: Runner, taskId: string, eventId: string): any {
+  let after: string | undefined;
+  for (let n = 0; n < ALARM_MAX_PAGES; n++) {
+    const argv = [cfg.hadronCli, 'api', ALARM_EVENT, '-F', `a=${cfg.app}`, '-F', `t=${taskId}`];
+    if (after) argv.push('-F', `p=${after}`);
+    const list = gql(run, argv)?.agentTeamEvents;
+    if (!Array.isArray(list)) throw new SafeError('alarm history returned no result');
+    const found = list.find((e: any) => e?.id === eventId);
+    if (found) return found;
+    if (list.length < ALARM_PAGE) return undefined;
+    const last = list[list.length - 1]?.id;
+    if (typeof last !== 'string' || last === after) throw new SafeError('alarm history cursor did not advance');
+    after = last;
+  }
+  throw new SafeError(`alarm history longer than ${ALARM_MAX_PAGES} pages`);
+}
+
 /** Ack one proof; ok only on a real acknowledgement result. */
 function ack(cfg: Config, run: Runner, proof: string): { ok: boolean; text: string } {
   try {
@@ -663,10 +689,7 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
         for (const t of newTasks) {
           if (t.event !== 'ALARM') continue;
           let alarm: any;
-          try {
-            const list = gql(run, [cfg.hadronCli, 'api', ALARM_EVENT, '-F', `a=${cfg.app}`, '-F', `t=${t.id}`])?.agentTeamEvents;
-            alarm = Array.isArray(list) ? list.find((e: any) => e?.id === t.eventId) : undefined;
-          } catch (e) { log(`${ts} ${name}: held (the alarm cannot be read: ${describeError(e)})`); return; }
+          try { alarm = findAlarm(cfg, run, t.id, t.eventId as string); } catch (e) { log(`${ts} ${name}: held (the alarm cannot be read: ${describeError(e)})`); return; }
           if (!alarm || typeof alarm.type !== 'string' || !STALL_RULE.test(alarm.type)) { log(`${ts} ${name}: held (the alarm's rule cannot be established)`); return; }
           if (alarm.acknowledgedAt) { log(`${ts} ${name}: held (the alarm was acknowledged meanwhile; left for the next pass)`); return; }
           t.rule = alarm.type;
