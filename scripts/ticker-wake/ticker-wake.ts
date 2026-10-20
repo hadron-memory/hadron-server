@@ -7,8 +7,10 @@
  * relayed: chat posts reach terminals through hadron-chat-send. Interim until
  * hadron-cli#907 (C1); shares no token, ledger or lock with the attention router.
  *
- * #2138 §5.2: the nudge asks the worker to check its unread tagged messages
- * (mentions and @all, from its read mark; never an unfiltered catch-up). A
+ * #2138 §5.2: the nudge names the commands: read its tagged messages from its
+ * read mark (`team chat read --mentions-me`, no --since), act, then
+ * `team chat mark-read` through the channel head that read printed (never an
+ * unfiltered catch-up). A
  * `live-check` ticker fires an ordinary TICK reason, so it is delivered exactly
  * like any other tick: the wake names the ticker, not why it fired.
  *
@@ -651,14 +653,20 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
 }
 
 /**
- * The one line typed into the terminal (#2138 §5.2): check the unread TAGGED messages, never an unfiltered catch-up. A
- * task assignment names the task, so the worker can start it.
+ * The one line typed into the terminal (#2138 §5.2, mark-read follow-up). It names the exact commands, because a worker's
+ * compiled prompt may not carry the messaging rules and the nudge is all it has (Yuri #26114: Codex turns obeyed the
+ * old text but read with their own --since and never marked read, so neither the cursor nor the check moved). Read
+ * tagged messages from the read mark (no --since: the read prints the mark and the channel head), act, then mark read
+ * through THAT printed head: it covers the empty case, and a message posted after the read is above it, so never
+ * skipped. A task assignment names the task, so the worker can start it.
  */
 export function nudgeText(tickers: string[], tasks: string[]): string {
-  const rule = 'Read only your own tagged messages; no unfiltered chat catch-up.';
-  if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): check your unread tagged messages, then end your turn. ${rule}`;
+  const check = 'run `hadron team chat read --mentions-me` (no --since; it prints your read mark and the channel head), '
+    + 'act on the tagged messages after your mark, run `hadron team chat mark-read --through <that channel head>`';
+  const rule = 'No unfiltered chat catch-up.';
+  if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): ${check}, then end your turn. ${rule}`;
   const which = tasks.length === 1 ? `hadron team task get ${tasks[0]}` : 'hadron team task list';
-  return `Hadron task assigned (${tasks.join(', ')}${tickers.length ? `; ticker ${tickers.join(', ')}` : ''}): check your unread tagged messages, then start the task (${which}). ${rule}`;
+  return `Hadron task assigned (${tasks.join(', ')}${tickers.length ? `; ticker ${tickers.join(', ')}` : ''}): ${check}, then start the task (\`${which}\`). ${rule}`;
 }
 
 /** A task event name from the server, logged only when it is a known shape. */
