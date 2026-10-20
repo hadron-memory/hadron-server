@@ -132,13 +132,20 @@ only when ALL of these hold:
 2. The **receiver** (terminal handle and incarnation) is the same.
 3. The **composer** reads provably empty (the text is not sitting in it). It
    types nothing, so a busy terminal does not veto it.
-4. The worker's own session **checked the team channel after the send**
-   (`checkStatus.lastCheckedAt` later than the entry's `at` by more than 5 s
-   of clock margin). For each task assignment the send newly named, that task
-   must also be `STARTED` (or `FINISHED`) with this worker as assignee. The
-   task ids are recorded on the receipt at send time (`tasks`), because
-   starting a task removes its assignment wake (#2154 P2); an older receipt
-   that covers a task without that record stays held.
+4. The worker's own session **checked the team channel after the send**:
+   its `checkStatus.lastCheckedAt` is later than the value the script read
+   and recorded on the entry just before the send (`checkedBefore`; null if
+   the worker had never checked). Both times are the SERVER's, stamped by its
+   database clock, so host/server clock skew cannot move the comparison
+   (Liam #26163: alpha's database ran about 19 s behind the host, so a check
+   right after the nudge read as before it against the host's send time). If
+   that pre-send read fails, nothing is sent and the wake waits for the next
+   pass. An older entry with no `checkedBefore` stays held. For each task
+   assignment the send newly named, that task must also be `STARTED` (or
+   `FINISHED`) with this worker as assignee. The task ids are recorded on the
+   receipt at send time (`tasks`), because starting a task removes its
+   assignment wake (#2154 P2); an older receipt that covers a task without
+   that record stays held.
 
 A timeout alone never resolves an entry. After 2 cadences (20 min) without
 this evidence the entry stays held and its log line says `needs a person`;

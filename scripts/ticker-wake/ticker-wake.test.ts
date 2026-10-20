@@ -56,6 +56,8 @@ interface Fake {
   /** agentTask(id) replies, by task id. */
   tasks: Record<string, unknown>;
   evidenceQueries: string[];
+  /** When set, the worker check-status read answers this GraphQL error. */
+  checkError: string | null;
   /** Bare `--enter` sends (no --text), by terminal handle (#2138 stranded drafts). */
   enters: string[];
   enterReply: (() => string) | null;
@@ -70,7 +72,7 @@ function fake(): Fake {
     wakes: [], acked: [], sent: [], idle: true, screen: { source: 'screen', tail: CLAUDE_IDLE },
     dueQueries: [], pages: 0, alwaysMore: false, ackReply: null, sendReply: null, dueError: null,
     incarnation: 'inc-1', retries: [], retryReply: null, run: undefined as any,
-    lastCheckedAt: null, tasks: {}, evidenceQueries: [], enters: [], enterReply: null,
+    lastCheckedAt: null, tasks: {}, evidenceQueries: [], checkError: null, enters: [], enterReply: null,
   };
   const fArg = (argv: string[], k: string): string | undefined => argv.find((a, i) => argv[i - 1] === '-F' && a.startsWith(`${k}=`))?.slice(k.length + 1);
   f.run = (argv) => {
@@ -85,6 +87,7 @@ function fake(): Fake {
       }
       if (q.includes('checkStatus')) {
         f.evidenceQueries.push(`worker ${fArg(argv, 'w')}`);
+        if (f.checkError) return out({ errors: [{ message: f.checkError, extensions: { code: 'INTERNAL_SERVER_ERROR' } }] });
         return out({ data: { worker: { id: fArg(argv, 'w'), checkStatus: { lastCheckedAt: f.lastCheckedAt } } } });
       }
       if (q.includes('agentTask(')) {
@@ -1365,6 +1368,7 @@ describe('#2138: an ambiguous receipt is resolved on evidence, never on a timeou
     f.sendReply = null;
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'ambiguous', requestId: 'r1', at: T0 });
     lines = [];
+    f.evidenceQueries = []; // the pre-send check read is not an evidence read
   };
   const receipt = () => JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada'];
 
@@ -1440,10 +1444,11 @@ describe('#2138: an ambiguous receipt is resolved on evidence, never on a timeou
     expect(log()).toContain('resolved as delivered on evidence');
   });
 
-  it('(d) no channel check, one before the send, or one inside the clock margin is not evidence', async () => {
+  it('(d) no channel check since the one recorded before the send, or an earlier one, is not evidence', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    f.lastCheckedAt = iso(T0 - 30_000);
     await ambiguous();
-    for (const checked of [null, iso(T0 - 60_000), iso(T0 + 4_000)]) {
+    for (const checked of [iso(T0 - 30_000), iso(T0 - 31_000), null]) {
       f.lastCheckedAt = checked;
       lines = [];
       await go(at(T0 + 120_000));
@@ -1477,7 +1482,7 @@ describe('#2138: an ambiguous receipt is resolved on evidence, never on a timeou
 
   it('a legacy receipt covering a task with no recorded task identity is held, never guessed', async () => {
     mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
-    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1', 'task:e-gone#0'], receiver: 'term_a#inc-1', at: T0, detail: 'accepted, turn start not confirmed (input_accepted)', text: 't', handle: 'term_a', requestId: 'r1' } }));
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1', 'task:e-gone#0'], receiver: 'term_a#inc-1', at: T0, detail: 'accepted, turn start not confirmed (input_accepted)', text: 't', handle: 'term_a', requestId: 'r1', checkedBefore: null } }));
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
     f.lastCheckedAt = iso(T0 + 60_000);
     await go(at(T0 + 120_000));
@@ -1712,6 +1717,81 @@ describe('#2138: a stranded draft is detected and listed for a person, never sub
       r['w-ada'].strandedAt = v;
       writeFileSync(receiptsFile(), JSON.stringify(r));
       await expect((async () => go(at(T0 + 60_000)))()).rejects.toThrow(/receipts malformed/);
+    }
+  });
+});
+
+describe('#2138: check evidence is compared on the server clock, never the host clock (Ada #26165)', () => {
+  // lastCheckedAt is stamped with the DATABASE's now(); on alpha it ran ~19 s behind the host (Liam #26163), so a compliant
+  // check after the nudge read as "before the send" against the host's send time. The receipt now records the worker's
+  // lastCheckedAt as read just before the send, and evidence is a LATER lastCheckedAt: both values are server times.
+  const T0 = Date.parse('2026-10-20T10:54:42.000Z'); // host time of Victor's send (Hugo #26162)
+  const at = (ms: number) => ({ now: () => ms });
+  const timing = { anchorAt: iso(T0 - 600_000), deliverAfter: iso(T0 - 300_000), busyDeadline: iso(T0 + 3_600_000) };
+  const receipt = () => JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada'];
+  const send = async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+    await go(at(T0));
+    f.sendReply = null;
+    lines = [];
+  };
+
+  it("Victor's case: a check the server stamped 19 s behind the host's send time still resolves, because it is later than the pre-send one", async () => {
+    f.lastCheckedAt = '2026-10-20T10:40:00.000Z';
+    await send();
+    expect(receipt().checkedBefore).toBe('2026-10-20T10:40:00.000Z');
+    f.lastCheckedAt = '2026-10-20T10:54:43.821Z'; // his mark-read at 10:55:03 host time, on the DB clock
+    await go(at(T0 + 120_000));
+    expect(f.acked).toHaveLength(1);
+    expect(f.sent).toHaveLength(1);
+    expect(log()).toContain('resolved as delivered on evidence');
+  });
+
+  it('a server clock running AHEAD of the host is no evidence on its own: the unchanged pre-send check does not resolve', async () => {
+    f.lastCheckedAt = iso(T0 + 30_000);
+    await send();
+    await go(at(T0 + 120_000));
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('no channel check since the send');
+  });
+
+  it('a worker that had never checked records null, and any check after that is evidence', async () => {
+    await send();
+    expect(receipt().checkedBefore).toBeNull();
+    f.lastCheckedAt = iso(T0 - 19_000);
+    await go(at(T0 + 120_000));
+    expect(f.acked).toHaveLength(1);
+  });
+
+  it('if the check status cannot be read before the send, nothing is sent and no intent is left', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    f.checkError = 'boom';
+    await go(at(T0));
+    expect(f.sent).toEqual([]);
+    expect(log()).toContain("held (the worker's check status is unreadable before the send");
+    expect(existsSync(receiptsFile()) ? JSON.parse(readFileSync(receiptsFile(), 'utf8')) : {}).toEqual({});
+    f.checkError = null;
+    await go(at(T0 + 60_000));
+    expect(f.sent).toHaveLength(1);
+  });
+
+  it('a legacy receipt with no recorded pre-send check is held, never compared against a host time', async () => {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1'], receiver: 'term_a#inc-1', at: T0, detail: 'accepted, turn start not confirmed (input_accepted)', text: 't', handle: 'term_a', requestId: 'r1', tasks: {} } }));
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    f.lastCheckedAt = iso(T0 + 600_000);
+    await go(at(T0 + 120_000));
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('the pre-send check was not recorded with the send');
+  });
+
+  it('a malformed recorded pre-send check stops the pass (fail closed)', async () => {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    for (const checkedBefore of [7, 'not a time', {}, '']) {
+      writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1'], receiver: 'term_a#inc-1', at: T0, detail: 'accepted, turn start not confirmed (input_accepted)', text: 't', handle: 'term_a', requestId: 'r1', tasks: {}, checkedBefore } }));
+      f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+      await expect((async () => go(at(T0 + 120_000)))()).rejects.toThrow(/receipts malformed/);
     }
   });
 });
