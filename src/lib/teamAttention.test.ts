@@ -28,6 +28,10 @@ vi.mock('./bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
+// #2138 §3.1: an own-session read of the team channel creates the row (lastCheckedAt) at seq 0, so "unread" is a position of 0.
+const seenSeq = async (workerId: string, channelId: string) =>
+  (await db.channelReadState.findFirst({ where: { workerId, channelId } }))?.lastSeenSeq ?? 0;
+
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
 
@@ -199,7 +203,7 @@ describe('worker-owned ordinary reads', () => {
     const ctx = userCtx({ sessionId });
     const page = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, advanceReadState: false }, ctx);
     expect(page.items.map((m: { seq: number }) => m.seq)).toEqual([1]);
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
     await vi.waitFor(async () => {
       const reads = await db.usageEvent.findMany({ where: { type: 'read', memoryId: memory.id } });
       expect(reads).toHaveLength(1);
@@ -222,7 +226,7 @@ describe('worker-owned ordinary reads', () => {
     const ctx = userCtx({ sessionId });
     const latest = await Q.channelMessages({}, { channelRef: channel.id, limit: 2 }, ctx);
     expect(latest.items.map((m: { seq: number }) => m.seq)).toEqual([4, 5]);
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
 
     await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, limit: 2 }, ctx);
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 2 });
@@ -232,7 +236,7 @@ describe('worker-owned ordinary reads', () => {
     await post('only message');
     const page = await Q.channelMessages({}, { channelRef: channel.id }, userCtx({ sessionId }));
     expect(page.items.map((m: { seq: number }) => m.seq)).toEqual([1]);
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
   });
 
   it('a partial page ending inside a legacy duplicate seq stops one short (#1362 review)', async () => {
@@ -285,7 +289,7 @@ describe('worker-owned ordinary reads', () => {
     const ctx = userCtx({ sessionId });
 
     await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 0, offset: 0 }, ctx);
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
     await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 50, offset: 0 }, ctx);
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
 
@@ -295,7 +299,7 @@ describe('worker-owned ordinary reads', () => {
     // nothing (the lost-participation shape).
     await db.session.delete({ where: { id: sessionId } });
     await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 50, offset: 0 }, ctx);
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
   });
 
   it('derives the cursor owner App from the Worker session for a registered free-standing Channel', async () => {
@@ -683,7 +687,7 @@ describe('MCP parity and discovery gate', () => {
     const bound = createTestableMcpServer({ ...auth(), sessionId });
     const monitored = await bound.callToolText('hadron_team_chat_read', { monitor: true });
     expect(monitored).toContain('second');
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
 
     // Control: an ordinary read on the same transport does advance it.
     await bound.callToolText('hadron_team_chat_read', { sinceSeq: 0 });
@@ -742,7 +746,7 @@ describe('MCP parity and discovery gate', () => {
     const server = createTestableMcpServer(auth());
 
     await server.callToolText('hadron_team_chat_read', { session: sessionId, app: app.id, mentions: worker.id });
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
 
     const marked = await server.callToolText('hadron_team_chat_mark_read', {
       session: sessionId,
@@ -808,7 +812,7 @@ describe('MCP parity and discovery gate', () => {
       session: iris.sessionId,
       sinceSeq: 0,
     });
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
     expect(await db.channelReadState.findFirst({ where: { workerId: iris.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
 
     await db.channelReadState.deleteMany();
@@ -817,7 +821,7 @@ describe('MCP parity and discovery gate', () => {
       session: iris.sessionId,
       sinceSeq: 0,
     });
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
     expect(await db.channelReadState.findFirst({ where: { workerId: iris.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
   });
 
@@ -961,7 +965,7 @@ describe('MCP parity and discovery gate', () => {
       });
       expect(teamRead).toContain('the transcript survives');
       expect(teamRead).not.toContain('cursor store unavailable');
-      expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+      expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
       expect(warn).toHaveBeenCalledTimes(2);
     } finally {
       queryRaw.mockRestore();
@@ -982,7 +986,7 @@ describe('#1540 — a mark-read through a live session keeps it live', () => {
     expect(page.items).toEqual([]);
     expect((await db.session.findUniqueOrThrow({ where: { id: sessionId } })).updatedAt!.getTime())
       .toBe(t0.getTime() + 20 * H);
-    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
     await post('later message');
     vi.setSystemTime(new Date(t0.getTime() + 30 * H));
     await expect(M.markOwnTeamChatRead({}, { appRef: app.id, channelRef: channel.id, sessionRef: sessionId, seq: 1 }, userCtx()))
@@ -1038,5 +1042,55 @@ describe('#1540 — a mark-read through a live session keeps it live', () => {
     vi.setSystemTime(new Date(t0.getTime() + 30 * H));
     await expect(M.markOwnTeamChatRead({}, { appRef: app.urn, sessionRef: sessionId, channelRef: channel.id, seq: 1 }, userCtx()))
       .rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+  });
+});
+
+describe('#2138 §3.1 — channel checks: lastCheckedAt', () => {
+  const checkedAt = async (workerId: string, channelId: string) =>
+    (await db.channelReadState.findFirst({ where: { workerId, channelId } }))?.lastCheckedAt ?? null;
+
+  it('an EMPTY read of the team channel through the worker\'s own session is a check, and moves no position', async () => {
+    expect(await checkedAt(worker.id, channel.id)).toBeNull();
+    const page = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, userCtx({ sessionId }));
+    expect(page.items).toEqual([]);
+    expect(await checkedAt(worker.id, channel.id)).toBeInstanceOf(Date);
+    expect(await seenSeq(worker.id, channel.id)).toBe(0);
+  });
+
+  it('a read that defers its acknowledgement (advanceReadState:false) and a filtered mentions read both check', async () => {
+    await post('one');
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, advanceReadState: false }, userCtx({ sessionId }));
+    const first = await checkedAt(worker.id, channel.id);
+    expect(first).toBeInstanceOf(Date);
+    await db.channelReadState.updateMany({ where: { workerId: worker.id }, data: { lastCheckedAt: new Date('2026-01-01T00:00:00Z') } });
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, mentions: 'me' }, userCtx({ sessionId }));
+    expect((await checkedAt(worker.id, channel.id))!.getTime()).toBeGreaterThan(new Date('2026-01-01T00:00:00Z').getTime());
+  });
+
+  it('a bare mark-read (nothing new) is a check; a refused mark-read (beyond the watermark) is not', async () => {
+    await expect(M.markOwnTeamChatRead({}, { appRef: app.id, channelRef: channel.id, sessionRef: sessionId, seq: 99 }, userCtx())).rejects.toThrow();
+    expect(await checkedAt(worker.id, channel.id)).toBeNull();
+    await M.markOwnTeamChatRead({}, { appRef: app.id, channelRef: channel.id, sessionRef: sessionId, seq: 0 }, userCtx());
+    expect(await checkedAt(worker.id, channel.id)).toBeInstanceOf(Date);
+  });
+
+  it('a read by a person (no worker session) checks nothing', async () => {
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, userCtx());
+    expect(await db.channelReadState.count({ where: { lastCheckedAt: { not: null } } })).toBe(0);
+  });
+
+  it("another worker's read stamps only that worker", async () => {
+    const iris = await addWorker('Iris');
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, userCtx({ sessionId: iris.sessionId }));
+    expect(await checkedAt(iris.id, channel.id)).toBeInstanceOf(Date);
+    expect(await checkedAt(worker.id, channel.id)).toBeNull();
+  });
+
+  it('a read of another channel does not count', async () => {
+    const other = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:ops', name: 'ops', createdBy: user.id });
+    await db.registerEntry.create({ data: { id: generateId(), appId: app.id, channelId: other.channel.id, attendeeWorkerId: worker.id, role: 'BOTH' } });
+    await M.markOwnTeamChatRead({}, { appRef: app.id, channelRef: other.channel.id, sessionRef: sessionId, seq: 0 }, userCtx());
+    expect(await checkedAt(worker.id, other.channel.id)).toBeNull();
+    expect(await checkedAt(worker.id, channel.id)).toBeNull();
   });
 });

@@ -162,13 +162,24 @@ describe('R57 own-live-session batches', () => {
     expect(await db.hostKeyUse.count()).toBe(before);
     expect(await db.workerDeliveryChannel.count()).toBe(0);
   });
+  it('#2138 §3.1: an own-session inbox read, empty or not, is a check of the team channel; a host read and a refused read are not', async () => {
+    const s = await ownSession();
+    const checked = async () => (await db.channelReadState.findFirst({ where: { workerId: kit.id, channelId: channel.id } }))?.lastCheckedAt ?? null;
+    expect(await checked()).toBeNull();
+    await expect(selfRead(s, {}, { sessionId: 'not-a-session' })).rejects.toThrow();
+    expect(await checked()).toBeNull();
+    await selfRead(s);
+    const first = await checked();
+    expect(first).toBeInstanceOf(Date);
+    expect((await db.channelReadState.findFirstOrThrow({ where: { workerId: kit.id, channelId: channel.id } })).lastSeenSeq).toBe(0);
+  });
   it('acks self with worker provenance, session user and no key, and retry changes nothing', async () => {
     const s = await ownSession(); await postForBoth(); const [b] = (await selfRead(s)).batches;
     expect(await selfAck(s, [b.id])).toEqual({ acknowledged: 1, unchanged: 0 });
     expect(await selfAck(s, [b.id])).toEqual({ acknowledged: 0, unchanged: 1 });
     const mark = await db.workerDeliveryChannel.findFirstOrThrow({ where: { workerId: kit.id } });
     expect([mark.ackedByWorkerId, mark.ackedByUserId, mark.ackedByAppKeyId]).toEqual([kit.id, manager.id, null]);
-    expect(await db.channelReadState.count()).toBe(0);
+    expect(await db.channelReadState.count({ where: { lastSeenSeq: { gt: 0 } } })).toBe(0); // #2138: an inbox read stamps lastCheckedAt but moves no position
   });
   it('a new session of the same worker cannot acknowledge the old session proof', async () => {
     const s = await ownSession(); await postForBoth(); const [b] = (await selfRead(s)).batches;
@@ -320,7 +331,7 @@ describe('R57 own-live-session batches', () => {
     expect((await selfRead(s)).batches[0].ranges[0].seqs).toEqual([b.ranges[0].seqs[1]]);
     expect(await selfAck(s, [b.id])).toEqual({ acknowledged: 1, unchanged: 0 });
     expect((await selfRead(s)).batches).toEqual([]);
-    expect(await db.channelReadState.count()).toBe(0);
+    expect(await db.channelReadState.count({ where: { lastSeenSeq: { gt: 0 } } })).toBe(0); // #2138: an inbox read stamps lastCheckedAt but moves no position
   });
 
   it('keeps the session refusal when middleware removed an invalid named binding', async () => {

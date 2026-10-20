@@ -281,7 +281,8 @@ describe('#2018 S2: authority, exclusions, atomicity', () => {
     await say('@kit a', { mentions: ['kit'] });
     await mentionsRead(s, { sinceSeq: 0, limit: 20 });
     expect(await db.workerDeliveryChannel.count()).toBe(0);
-    expect(await db.channelReadState.count()).toBe(0);
+    // #2138: the read is still a check (lastCheckedAt), but no read position moves for anyone.
+    expect(await db.channelReadState.count({ where: { lastSeenSeq: { gt: 0 } } })).toBe(0);
   });
 
   it('an encrypted channel is excluded: the advance moves no mark even for a page filtered by the worker', async () => {
