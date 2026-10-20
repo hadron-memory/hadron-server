@@ -30,14 +30,26 @@ logged them as not on the roster. Each pass now reads every live ticker of the
 App and its live subscribers (`tickers { subscribers }`, paged), and lists
 Orca's terminals. A worker is reachable on this host when exactly one worktree
 among those terminals carries its CLI binding
-(`<git-dir>/hadron-team-session.json`, written by `hadron team session start`).
+(`<git-dir>/hadron-team-session.json`, written by `hadron team session start`),
+and that binding names the worker's CURRENT session (George's #2161 P2, Ada
+#26314). The script reads the worker's newest session from the server
+(`sessions(workerRef, limit: 1)`, newest first). It must be open, be that
+worker's, and be the binding's `sessionId` in the binding's `appId`. A binding
+left behind after the worker's session ended, or after the worker was rebound
+elsewhere, is stale. That way, a terminal reused later in that worktree is never
+taken for the worker. Among several bindings for one worker, only the current
+one counts. A failed session read holds. The read is made once per worker per
+pass, only for workers it needs.
 `resolveTerminal` still picks the agent terminal in that worktree at delivery.
 A roster row in the config file, if there is one, overrides the binding for
 its worker (worktree and terminal pin). Any due worker is delivered this way,
 including one that subscribes to nothing (an assignee's task wake). Once per
 pass, the script logs every subscriber or due worker it can't reach, with why:
-`no binding` (no worktree on this host is bound to it, or several are) or `no
-terminal` (bound, but no connected, writable terminal in its worktree). An
+`no binding` (no worktree on this host is bound to it, or two are bound under
+its current session), `stale binding (...)` (session ended, replaced, of
+another worker or App, absent, or unreadable), or `no terminal` (bound, but no
+connected, writable terminal in its worktree). A roster-file row is the
+operator's statement and is not session-checked. An
 MCP-bound worker leaves no binding file, so it shows as `no binding`. A failed
 subscriber read stops the pass, as a failed `dueWakes` read does.
 

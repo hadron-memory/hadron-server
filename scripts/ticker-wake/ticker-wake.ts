@@ -37,7 +37,8 @@
  *    path in this script.
  *
  * Receivers (#2138, Hugo #26221): the ticker's live subscribers and every due worker, joined to this host's terminals by
- * the CLI binding in their worktree (`hostRoster`); a router-config roster row overrides it. Every one with no receiver
+ * the CLI binding in their worktree, while it names their current open session (`hostRoster`, George's #2161 P2); a
+ * router-config roster row overrides it. Every one with no receiver
  * here is logged once per pass, `no binding` or `no terminal`. Never a hand-kept list alone.
  *
  * Safety:
@@ -84,7 +85,7 @@ import { linkSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  loadConfig, DEFAULT_CONFIG, runCommand, listTerminals, resolveTerminal, boundWorker,
+  loadConfig, DEFAULT_CONFIG, runCommand, listTerminals, resolveTerminal, teamBinding,
   readScreen, promptIsEmptyFromTerm, screenAgentFamily, isIdle, idleProofAbovePrompt,
   CALL_TIMEOUT_MS, type Config, type RosterEntry, type Runner, type RunResult,
 } from '../orca-attention-router/router.js';
@@ -121,6 +122,11 @@ export const TASK_STATE = `query($t:ID!){agentTask(id:$t){id status assignee{kin
 export const SUBSCRIBERS = `query($a:String!){tickers(appRef:$a){id subscribers(first:200){items{worker{id name}} hasNextPage endCursor}}}`;
 /** The next page of one ticker's subscribers. */
 export const SUBSCRIBERS_PAGE = `query($t:String!,$p:String){ticker(ref:$t){subscribers(first:200,after:$p){items{worker{id name}} hasNextPage endCursor}}}`;
+/**
+ * A worker's newest session visible to this host's credential (newest first by startedAt; George's #2161 P2). A worker
+ * holds at most one open session, so an open newest session is its current one.
+ */
+export const CURRENT_SESSION = `query($w:String){sessions(workerRef:$w,limit:1){id workerId appId endedAt}}`;
 const MAX_PAGES = 10;
 /**
  * The tui-idle probe. It proves idle without waiting for business to clear (the router's RECHECK_IDLE_TIMEOUT_MS
@@ -513,32 +519,58 @@ const realPath = (p: string): string => { try { return realpathSync(p); } catch 
 
 /**
  * The receivers on this host (#2138, Hugo #26221: a hand-kept roster missed 17 subscribed workers). A worker is reachable
- * here when exactly one worktree among Orca's terminals carries a CLI binding (`hadron team session start`) naming it; the
- * router config's roster row for a worker, when there is one, overrides that (its worktree and terminal pin). Which
+ * here through a worktree among Orca's terminals whose CLI binding (`hadron team session start`) names it AND names its
+ * CURRENT session (George's #2161 P2, Ada #26314): the worker's newest session, read from the server, must be open, be
+ * that worker's, and be the binding's session in the binding's App. A binding left behind after the worker ended or was
+ * rebound elsewhere is stale, so a terminal later reused in that worktree is never taken for the worker. Among several
+ * bindings for one worker only the current one counts; two current ones hold. The router config's roster row for a
+ * worker, when there is one, overrides all of this (its worktree and terminal pin, as the operator states them). Which
  * terminal in the worktree gets the nudge is still `resolveTerminal`'s, at delivery. `why` says, for a worker with no
- * receiver, `no binding` (no worktree on this host is bound to it, or several are) or, for a bound one with no
- * connected, writable terminal in its worktree, `no terminal`.
+ * receiver: `no binding` (none on this host, or two current ones), `stale binding (...)` (ended, replaced, mismatched,
+ * or the session read failed), or `no terminal` (no connected, writable terminal in its worktree). The session read is
+ * made once per worker per pass, and only for a worker asked about.
  */
-export function hostRoster(cfg: Config, terminals: Array<{ worktreePath?: string; connected?: boolean; writable?: boolean }>): {
+export function hostRoster(cfg: Config, terminals: Array<{ worktreePath?: string; connected?: boolean; writable?: boolean }>, run: Runner): {
   entry: (workerId: string, name: string) => RosterEntry | null; why: (workerId: string) => string;
 } {
   const live = new Set<string>();
-  const byWorker = new Map<string, string[]>();
+  const byWorker = new Map<string, Array<{ wt: string; sessionId?: string; appId?: string }>>();
   for (const wt of new Set(terminals.map((t) => t.worktreePath).filter((p): p is string => typeof p === 'string' && p !== '').map(realPath))) {
-    const w = boundWorker(wt);
-    if (w) byWorker.set(w, [...(byWorker.get(w) ?? []), wt]);
+    const b = teamBinding(wt);
+    if (b) byWorker.set(b.workerId, [...(byWorker.get(b.workerId) ?? []), { wt, sessionId: b.sessionId, appId: b.appId }]);
   }
   for (const t of terminals) if (t.worktreePath && t.connected !== false && t.writable !== false) live.add(realPath(t.worktreePath));
-  const why = (workerId: string): string => {
+  const memo = new Map<string, { wt?: string; why: string }>();
+  const resolveWorker = (workerId: string): { wt?: string; why: string } => {
     const file = cfg.roster.find((e) => e.worker === workerId);
-    const wts = file ? [realPath(file.worktree)] : (byWorker.get(workerId) ?? []);
-    if (wts.length === 0) return 'no binding';
-    if (wts.length > 1) return `no binding (bound in ${wts.length} worktrees)`;
-    return live.has(wts[0]) ? '' : 'no terminal';
+    if (file) return { wt: realPath(file.worktree), why: live.has(realPath(file.worktree)) ? '' : 'no terminal' };
+    const bound = byWorker.get(workerId) ?? [];
+    if (bound.length === 0) return { why: 'no binding' };
+    let s: any;
+    try {
+      const list = gql(run, [cfg.hadronCli, 'api', CURRENT_SESSION, '-F', `w=${workerId}`])?.sessions;
+      if (!Array.isArray(list)) throw new SafeError('sessions returned no result');
+      s = list[0];
+    } catch (e) { return { why: `stale binding (session unreadable: ${describeError(e)})` }; }
+    if (!s || typeof s.id !== 'string') return { why: 'stale binding (no session)' };
+    if (s.endedAt !== null) return { why: 'stale binding (session ended)' };
+    if (s.workerId !== workerId) return { why: 'stale binding (session mismatched)' };
+    const current = bound.filter((b) => b.sessionId === s.id);
+    if (current.length === 0) return { why: 'stale binding (session replaced)' };
+    if (current.some((b) => b.appId !== s.appId)) return { why: 'stale binding (app mismatched)' };
+    if (current.length > 1) return { why: `no binding (bound in ${current.length} worktrees)` };
+    return { wt: current[0].wt, why: live.has(current[0].wt) ? '' : 'no terminal' };
   };
+  const resolved = (workerId: string): { wt?: string; why: string } => {
+    let r = memo.get(workerId);
+    if (!r) { r = resolveWorker(workerId); memo.set(workerId, r); }
+    return r;
+  };
+  const why = (workerId: string): string => resolved(workerId).why;
   const entry = (workerId: string, name: string): RosterEntry | null => {
-    if (why(workerId) !== '') return null;
-    return cfg.roster.find((e) => e.worker === workerId) ?? { worker: workerId, name, worktree: (byWorker.get(workerId) as string[])[0] };
+    const r = resolved(workerId);
+    if (r.why !== '' || !r.wt) return null;
+    return cfg.roster.find((e) => e.worker === workerId) ?? { worker: workerId, name, worktree: r.wt };
   };
   return { entry, why };
 }
@@ -566,7 +598,7 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
   // (#2138). Every subscriber or due worker with no receiver here is logged once per pass, with why.
   const subscribers = fetchSubscribers(cfg, run);
   const terminals = listTerminals(cfg, run);
-  const receivers = hostRoster(cfg, terminals);
+  const receivers = hostRoster(cfg, terminals, run);
   const wanted = new Map(subscribers);
   for (const w of due) if (typeof w.worker?.id === 'string' && !wanted.has(w.worker.id)) wanted.set(w.worker.id, String(w.worker.name));
   const unreachable = [...wanted].map(([id, n]) => [n, receivers.why(id)] as const).filter(([, r]) => r !== '')
