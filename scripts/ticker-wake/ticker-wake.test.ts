@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Config, Runner } from '../orca-attention-router/router.js';
 import { buildSchema, parse, validate } from 'graphql';
 import { typeDefs } from '../../src/api/graphql/schema/typeDefs.js';
-import { pass, main, acquireLock, proofTicks, QUERY, ACK } from './ticker-wake.js';
+import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK } from './ticker-wake.js';
 
 const RULE = '─'.repeat(112);
 // A finished Claude Code 2.1.303 turn over an empty composer (shapes from the cli#907 captures): the
@@ -19,14 +19,18 @@ const CLAUDE_IDLE = [
 const TICK = { kind: 'TICK', ticker: { id: 'T', name: 'coordinator-tick' } };
 const TICK2 = { kind: 'TICK', ticker: { id: 'U', name: 'eden-queue-tick' } };
 const MENTION = { kind: 'MENTION', ticker: null };
-const TASK = { kind: 'TASK', ticker: null };
+/** A TASK reason for task `id`, event `event` (#1708); its proof entry is `taskEntry(...)`. */
+const task = (id: string, event = 'ASSIGNED', eventId = `e-${id}`, chainIndex = 0) =>
+  ({ kind: 'TASK', ticker: null, task: { id, eventId, chainIndex, event } });
+const taskEntry = (id: string, eventId = `e-${id}`, chainIndex = 0) => ({ eventId, chainIndex });
+const TASK = task('t1', 'ALARM');
 const CONFIRMED = { ok: true, result: { send: { accepted: true, prompt: { requestId: 'r1', stages: ['input_accepted', 'turn_started'] } } } };
 const NO_ID_ACCEPTED = { ok: true, result: { send: { accepted: true, prompt: { stages: ['input_accepted'] } } } };
 const ACCEPTED_ONLY = { ok: true, result: { send: { accepted: true, prompt: { requestId: 'r1', stages: ['input_accepted'] } } } };
 
 /** A proof whose payload carries the given ticks ("T:k"), like the server's (opaque to everything else). */
-const proof = (ticks: string[], salt = 'x') =>
-  `${Buffer.from(JSON.stringify({ ticks: ticks.map((t) => ({ tickerId: t.split(':')[0], k: Number(t.split(':')[1]) })), issuedAt: salt })).toString('base64url')}.sig`;
+const proof = (ticks: string[], salt = 'x', tasks: Array<{ eventId: string; chainIndex: number }> = []) =>
+  `${Buffer.from(JSON.stringify({ ticks: ticks.map((t) => ({ tickerId: t.split(':')[0], k: Number(t.split(':')[1]) })), tasks, issuedAt: salt })).toString('base64url')}.sig`;
 
 interface Fake {
   run: Runner;
@@ -172,7 +176,7 @@ describe('selection and delivery', () => {
     expect(f.acked).toEqual([p1, p2]);
   });
 
-  it('TICK+TASK and TICK+unknown are left alone: no nudge, no ack, no receipt (a proof naming task events records them delivered)', () => {
+  it('TICK+TASK (not an assignment) and TICK+unknown are left alone: no nudge, no ack, no receipt (a proof naming task events records them delivered)', () => {
     for (const extra of [TASK, { kind: 'FUTURE', ticker: null }]) {
       f.wakes = [wake('w-ada', 'Ada', [TICK, extra])];
       go();
@@ -230,10 +234,122 @@ describe('selection and delivery', () => {
     expect(existsSync(receiptsFile())).toBe(false);
   });
 
-  it('proofTicks decodes the tick set, sorted, and returns null for an opaque proof', () => {
-    expect(proofTicks(proof(['B:2', 'A:1']))).toEqual(['A:1', 'B:2']);
-    expect(proofTicks('opaque')).toBeNull();
-    expect(proofTicks(`${Buffer.from(JSON.stringify({ ticks: [] })).toString('base64url')}.s`)).toBeNull();
+  it('proofCoverage decodes the ticks and task events, sorted, and returns null for an opaque or empty proof', () => {
+    expect(proofCoverage(proof(['B:2', 'A:1']))).toEqual(['A:1', 'B:2']);
+    expect(proofCoverage(proof(['A:1'], 'x', [taskEntry('t1')]))).toEqual(['A:1', 'task:e-t1#0']);
+    expect(proofCoverage(proof([], 'x', [taskEntry('t1', 'e9', 2)]))).toEqual(['task:e9#2']);
+    expect(proofCoverage('opaque')).toBeNull();
+    expect(proofCoverage(`${Buffer.from(JSON.stringify({ ticks: [], tasks: [] })).toString('base64url')}.s`)).toBeNull();
+    expect(proofCoverage(`${Buffer.from(JSON.stringify({ ticks: [], tasks: [{ eventId: 'e' }] })).toString('base64url')}.s`)).toBeNull();
+  });
+});
+
+describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
+  it('a tick nudge asks for the unread TAGGED messages and keeps the no-unfiltered-catch-up rule', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toContain('check your unread tagged messages');
+    expect(f.sent[0]).toContain('no unfiltered chat catch-up');
+    expect(f.sent[0]).not.toContain('standing routine');
+    expect(f.sent[0]).not.toContain('\n');
+  });
+
+  it('live-check fires an ordinary TICK reason, so it is nudged and acked like any tick', () => {
+    const p = proof(['L:1']);
+    f.wakes = [wake('w-ada', 'Ada', [{ kind: 'TICK', ticker: { id: 'L', name: 'team' } }], p)];
+    go();
+    expect(f.sent).toEqual([nudgeText(['team'], [])]);
+    expect(f.acked).toEqual([p]);
+  });
+
+  it.each(['ASSIGNED', 'REASSIGNED', 'MATCHED'])('a TASK-only %s wake is nudged once, naming the task, then acked', (event) => {
+    const p = proof([], 'x', [taskEntry('t42')]);
+    f.wakes = [wake('w-ada', 'Ada', [task('t42', event)], p)];
+    go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toContain('Hadron task assigned (t42)');
+    expect(f.sent[0]).toContain('hadron team task get t42');
+    expect(f.sent[0]).toContain('check your unread tagged messages');
+    expect(f.sent[0]).toContain('no unfiltered chat catch-up');
+    expect(f.acked).toEqual([p]);
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))).toEqual({});
+  });
+
+  it('TASK+MENTION is delivered (the ack moves no message mark), and two assignments point at the task list', () => {
+    const p = proof([], 'x', [taskEntry('t1'), taskEntry('t2')]);
+    f.wakes = [wake('w-ada', 'Ada', [task('t1'), task('t2', 'MATCHED'), MENTION], p)];
+    go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toContain('(t1, t2)');
+    expect(f.sent[0]).toContain('hadron team task list');
+    expect(f.acked).toEqual([p]);
+  });
+
+  it('TICK+TASK assignment: ONE nudge names the task and the ticker, and one ack covers both', () => {
+    const p = proof(['T:1'], 'x', [taskEntry('t1')]);
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1')], p)];
+    go();
+    expect(f.sent).toEqual([nudgeText(['coordinator-tick'], ['t1'])]);
+    expect(f.sent[0]).toContain('ticker coordinator-tick');
+    expect(f.acked).toEqual([p]);
+  });
+
+  it.each([
+    ['ALARM', task('t1', 'ALARM')],
+    ['CHILD_FINISHED', task('t1', 'CHILD_FINISHED')],
+    ['END_SESSION', task('t1', 'END_SESSION')],
+    ['a TASK reason without its task', { kind: 'TASK', ticker: null, task: null }],
+    ['a task id that is not a plain id', task('t1; rm -rf ~', 'ASSIGNED')],
+  ])('%s is left alone, alone or beside an assignment: no nudge, no ack, no receipt', (_label, reason) => {
+    f.wakes = [wake('w-ada', 'Ada', [reason], proof([], 'x', [taskEntry('t1')]))];
+    go();
+    f.wakes = [wake('w-ada', 'Ada', [task('t9'), reason], proof([], 'y', [taskEntry('t9'), taskEntry('t1')]))];
+    go();
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('left alone');
+    expect(log()).not.toContain('rm -rf');
+    expect(existsSync(receiptsFile())).toBe(false);
+  });
+
+  it('a delivered assignment whose ack was lost is never named again: the re-offer joined with a tick names only the ticker', () => {
+    const p1 = proof([], 'one', [taskEntry('t1')]);
+    f.wakes = [wake('w-ada', 'Ada', [task('t1')], p1)];
+    f.ackReply = () => ({ errors: [{ message: 'down' }] });
+    go();
+    expect(f.sent).toHaveLength(1);
+    f.ackReply = null;
+    const p2 = proof(['T:1'], 'two', [taskEntry('t1')]);
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1')], p2)];
+    go();
+    expect(f.sent).toHaveLength(2);
+    expect(f.sent[1]).toEqual(nudgeText(['coordinator-tick'], []));
+    expect(f.acked).toEqual([p2]);
+  });
+
+  it('a lost ack on a TASK-only wake is recovered ack-only, never retyped', () => {
+    const p = proof([], 'one', [taskEntry('t1')]);
+    f.wakes = [wake('w-ada', 'Ada', [task('t1')], p)];
+    f.ackReply = () => ({ errors: [{ message: 'down' }] });
+    go();
+    f.ackReply = null;
+    go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toEqual([p]);
+    expect(log()).toContain('ack-only recovery acked');
+  });
+
+  it('a task event in the proof that no reason names is held, not guessed', () => {
+    f.wakes = [wake('w-ada', 'Ada', [task('t1')], proof([], 'x', [taskEntry('t1'), taskEntry('zz')]))];
+    go();
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('cannot be identified');
+  });
+
+  it('asks the server for each task reason\'s id, event and coverage key', () => {
+    expect(QUERY).toContain('task{id eventId chainIndex event}');
   });
 });
 
