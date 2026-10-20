@@ -146,6 +146,33 @@ classify it by hand as below. Residual: a channel check the worker made on its
 own, not because of the nudge, also counts; acking the tick is still true then,
 since the check the tick asks for was done.
 
+### A stranded draft gets one bare Enter (#2138, GO #26144)
+
+Sometimes Orca accepts the nudge but its Enter never submits it (Hugo #26131:
+five nudges sat 2 to 7 minutes on idle terminals). The text stays in the
+composer, so condition 3 can never hold, and reissuing by id does not help:
+`--retry-request` replays the stored receipt and writes nothing (Hugo's host
+check, #26146). For such an entry the script presses Enter once, with no text
+(`orca terminal send --terminal <h> --enter`, Orca's raw input path: one CR, no
+request id, no stages), only when ALL of these hold:
+
+1. Conditions 1 and 2 above (accepted under a request id, same receiver).
+2. Orca's composer `draft` equals the entry's recorded `text` exactly
+   (trailing whitespace ignored), and the rest of the composer reads empty. Any
+   other draft, a partial or extended one, or other text holds untouched: it
+   may be a person's.
+3. The terminal is idle (tui-idle or the screen's idle proof). Busy always
+   holds, whatever the busy deadline.
+4. At least 60 s have passed since the send.
+5. The entry has no `resubmittedAt`. That field is written to `receipts.json`
+   BEFORE the keystroke; if the write fails nothing is sent, and an entry that
+   has one never gets another Enter, whatever the reply said. An entry still
+   stranded after its Enter logs `needs a person`.
+
+Nothing is ever typed, so nothing can be retyped. The entry stays ambiguous and
+resolves on evidence as above once the composer is empty and the worker checks
+the channel. A dry run does nothing.
+
 ## Recovering an ambiguous entry (a human decision)
 
 The script never deletes or rewrites an UNRESOLVED ambiguous entry itself (it only removes a delivered receipt after a successful ack, and withdraws its own intent when Orca says a send was refused and nothing was typed). An entry in `receipts.json` with

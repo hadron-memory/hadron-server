@@ -57,6 +57,11 @@
  *    input, the receiver is the same, the composer reads provably empty, and the worker's own session checked the team
  *    channel after the send (any covered task must also be STARTED by it). A timeout alone never resolves it: after 2
  *    cadences without evidence it stays held and is logged as needing a person.
+ *  - a STRANDED DRAFT (#2138, proposal #26135, GO #26144) gets one bare Enter, never text: Orca accepted our text but the
+ *    Enter never submitted it, so the composer holds exactly that text and neither the reissue (an idempotent replay of
+ *    the stored receipt, Hugo #26146) nor the evidence path can run. Only when the draft equals the recorded text, the
+ *    rest of the composer is empty, the terminal is idle and 60 s have passed since the send; `resubmittedAt` is written
+ *    first, so an entry gets at most one. The entry stays ambiguous and resolves on evidence as above.
  *  - one instance per state dir (atomic lock file).
  *
  * A pass fits inside one cadence (#2138 experiment, Hugo's tick 1, #26038): a busy terminal is PROBED, never waited
@@ -127,6 +132,8 @@ export const SUBMIT_PROBE_S = 2;
 /** Sends in flight at once. Each lane is one terminal; the reads around a send stay serial. */
 export const DELIVERY_POOL = 8;
 export const NEEDS_PERSON_AFTER_MS = 20 * 60 * 1000;
+/** A stranded draft is submitted no sooner than this after its send, so a slow submit still in progress is never raced. */
+export const RESUBMIT_AFTER_MS = 60_000;
 /** A channel check counts as after the send only past this margin, so host/server clock skew cannot pass an earlier one. */
 export const CHECK_CLOCK_MARGIN_MS = 5_000;
 /** The task states that prove the assignee saw its assignment. */
@@ -152,8 +159,9 @@ interface Delivered { state: 'sent'; coverage: string[]; receiver: string; at: n
  * An accepted-but-unconfirmed or failed-after-possible-submission send, kept until reconciled. `tasks` maps each task
  * coverage key THIS send newly named to its task id, recorded at send time because starting the task removes its wake
  * (#2154 P2); absent on a receipt written before it existed, which then cannot be resolved on task evidence.
+ * `resubmittedAt` is when the one bare Enter for a stranded draft was decided, written before the keystroke.
  */
-interface Ambiguous { state: 'ambiguous'; coverage: string[]; receiver: string; at: number; detail: string; text: string; handle: string; requestId?: string; tasks?: Record<string, string> }
+interface Ambiguous { state: 'ambiguous'; coverage: string[]; receiver: string; at: number; detail: string; text: string; handle: string; requestId?: string; tasks?: Record<string, string>; resubmittedAt?: number }
 type Receipt = Delivered | Ambiguous;
 type Receipts = Record<string, Receipt>; // by worker id
 
@@ -193,7 +201,8 @@ function loadReceipts(dir: string): Receipts {
     if (!common) return bad();
     if (r.state === 'sent') continue;
     if (r.state !== 'ambiguous' || typeof r.detail !== 'string' || typeof r.text !== 'string' || typeof r.handle !== 'string'
-      || (r.requestId !== undefined && typeof r.requestId !== 'string')) return bad();
+      || (r.requestId !== undefined && typeof r.requestId !== 'string')
+      || (r.resubmittedAt !== undefined && !(typeof r.resubmittedAt === 'number' && Number.isFinite(r.resubmittedAt)))) return bad();
     if (r.tasks !== undefined && (r.tasks === null || typeof r.tasks !== 'object' || Array.isArray(r.tasks)
       || !Object.entries(r.tasks).every(([k, v]) => k.startsWith('task:') && r.coverage.includes(k) && typeof v === 'string' && TASK_ID.test(v)))) return bad();
   }
@@ -529,6 +538,35 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
           return 'unknown input state';
         };
 
+        /**
+         * A stranded draft (#2138, GO #26144): the composer holds exactly the text this accepted send typed, because its
+         * Enter never submitted it. It gets ONE bare `--enter` (Orca's raw input path: one CR, no text, no request id), only
+         * when nothing else is on the composer, the terminal is idle (busy always holds, deadline or not) and
+         * RESUBMIT_AFTER_MS has passed since the send. `resubmittedAt` is written durably BEFORE the keystroke, and an entry
+         * that has one never gets another, whatever the reply said. Null when the composer does not hold our exact text.
+         */
+        const strandedDraft = async (p: Ambiguous): Promise<string | null> => {
+          const term = readScreen(cfg, handle, run);
+          const agent = detail === 'claude' || detail === 'codex' ? detail : (screenAgentFamily(term) ?? '');
+          if (typeof term?.draft !== 'string' || term.draft.trimEnd() !== p.text.trimEnd()) return null;
+          if (!promptIsEmptyFromTerm({ ...term, draft: undefined }, agent)[0]) return null;
+          if (p.resubmittedAt !== undefined) return 'our nudge is still in the composer after its one Enter; not retyped, not acked; needs a person';
+          if (now - p.at < RESUBMIT_AFTER_MS) return 'our nudge is in the composer; its Enter waits until 60 s after the send';
+          if (!isIdle(cfg, handle, IDLE_PROBE_MS, run) && idleProofAbovePrompt((term.tail ?? []) as string[], agent)[0] !== 'idle') {
+            return 'our nudge is in the composer but the terminal is not idle; held';
+          }
+          receipts[id] = { ...p, resubmittedAt: now };
+          try { saveReceipts(stateDir, receipts); } catch (e) {
+            receipts[id] = p;
+            return `stranded draft held (the Enter could not be recorded: ${errno(e)}); nothing sent`;
+          }
+          let accepted = false;
+          try { accepted = JSON.parse((await runAsync([cfg.orcaCli, 'terminal', 'send', '--terminal', handle, '--enter', '--json'])).stdout)?.result?.send?.accepted === true; } catch { /* unknown */ }
+          return accepted
+            ? 'stranded draft submitted with one Enter (no text); resolves on evidence'
+            : 'one Enter sent for the stranded draft, reply not an acceptance; never repeated';
+        };
+
         // An unreconciled earlier request is reconciled with ITS OWN identity. Reissuing it can still perform input, so it
         // needs the same receiver and the same composer safety as a fresh send; without a request id it stays held for a human.
         if (prior?.state === 'ambiguous') {
@@ -546,6 +584,8 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
                 : deliveryEvidence(cfg, run, id, prior);
             if (why === null) resolved = 'resolved as delivered on evidence (accepted, composer empty, channel checked after the send)';
             else {
+              const s = why === 'composer not provably empty' ? await strandedDraft(prior) : null;
+              if (s) { log(`${ts} ${name}: ${s}`); return; }
               const held = unsafe ? `unreconciled request not reissued (held: ${unsafe})` : `earlier request still unreconciled (${safeDetail(r!.detail)})`;
               const person = now - prior.at >= NEEDS_PERSON_AFTER_MS ? 'needs a person' : 'not retyped, not acked';
               log(`${ts} ${name}: ${held}; no delivery evidence yet (${why}); ${person}`);
