@@ -1918,6 +1918,9 @@ model UsageEvent {
 /// orgs).
 model Agent {
   id                   String          @id @default(cuid())
+  /// #2138 §3.5 — false: every worker cast from this Agent counts as HAVING a task (coordinators, the
+  /// lifecycle agent), so it is expected to check every period.
+  usesTasks            Boolean         @default(true) @map("uses_tasks")
   organizationId       String?         @map("organization_id")
   /// User owner of a user-owned Agent (rooted on the bare `<handle>` — #697 v2,
   /// no `@` sigil). The org/owner XOR is ENFORCED — `chk_agent_owner_xor` in
@@ -3164,6 +3167,16 @@ model App {
   deliveryStuckWindowSeconds        Int @default(900) @map("delivery_stuck_window_seconds")
   /// Stored OFF; enabling is refused until #2023 supplies standby behavior.
   deliveryStandbyEnabled            Boolean @default(false) @map("delivery_standby_enabled")
+  /// #2138 §3.2 — a worker with a task is expected to check its team channel every period (seconds);
+  /// the team ticker's cadence is set together with it.
+  deliveryCheckPeriodSeconds        Int     @default(600) @map("delivery_check_period_seconds")
+  /// #2138 §3.2 — OVERDUE after this many missed periods (+5 min slack, hard-coded); at least 1.
+  deliveryFailedChecksToOverdue     Int     @default(2) @map("delivery_failed_checks_to_overdue")
+  /// #2138 §3.6 — a TEAM pause, separate from every worker's own `pausedUntil`: a worker cannot lift
+  /// it, and ending it never clears a self-pause. NULL = not paused.
+  teamPausedAt                      DateTime? @map("team_paused_at")
+  /// #2138 §3.6 — when the last team pause ENDED; restarts every worker's check clock (the status is not OVERDUE the moment a pause lifts). NULL = never paused.
+  teamResumedAt                     DateTime? @map("team_resumed_at")
   /// The fastest ticker a worker may subscribe ITSELF to: [floor, 86400].
   tickerSelfSubscribeCadenceSeconds Int  @default(600) @map("ticker_self_subscribe_cadence_seconds")
   /// How many live tickers the App may have: [1, 100].
@@ -4957,6 +4970,10 @@ model ChannelReadState {
   channelId   String   @map("channel_id")
   lastSeenSeq Int      @default(0) @map("last_seen_seq")
   updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+  /// #2138 §3.1 — when the worker last CHECKED this channel through its own bound session (a page read, an
+  /// inbox read or a mark-read, an empty one included). Stamped only by `stampChannelCheck`; a read by a
+  /// person (asMe), by another worker or of another channel never moves it. NULL = never checked.
+  lastCheckedAt DateTime? @map("last_checked_at")
 
   worker  Worker?  @relation("ReadStateWorker", fields: [workerId], references: [id], onDelete: Cascade)
   agent   Agent?   @relation("ReadStateAgent", fields: [agentId], references: [id], onDelete: Cascade)
@@ -5664,7 +5681,8 @@ model Ticker {
   /// 'ALL' | 'MENTIONS'.
   relevance         String    @default("ALL")
   /// #2068 (cor:agt:080:01, :10, R49): why the ticker fires, a closed set: 'read-team-channel' (relevant unread, as before) and
-  /// 'every-tick' (unconditional). Empty = never fires; any-of when several (Decided, R54).
+  /// 'every-tick' (unconditional), and 'live-check' (#2138: the worker has not checked its team channel within the ticker's cadence,
+  /// whatever is unread; never for a worker not expected to check). Empty = never fires; any-of when several (Decided, R54).
   reasons           String[]  @default(["read-team-channel"]) @map("reasons")
   enabled           Boolean   @default(true)
   ownerUserId       String?   @map("owner_user_id")
@@ -5729,6 +5747,11 @@ model WorkerWakeSettings {
   workerId          String    @id @map("worker_id")
   mentions          String    @default("IMMEDIATE")
   pausedUntil       DateTime? @map("paused_until")
+  /// S7 (#2023, R85) — ISOLATION is its own state, never `pausedUntil`: written only by
+  /// isolateWorker / clearWorkerIsolation, always by a human acting as themselves.
+  isolatedUntil     DateTime? @map("isolated_until")
+  isolatedAt        DateTime? @map("isolated_at")
+  isolatedByUserId  String?   @map("isolated_by_user_id")
   updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at")
   updatedBy         String?   @map("updated_by")
   updatedByWorkerId String?   @map("updated_by_worker_id")
