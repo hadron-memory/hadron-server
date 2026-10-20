@@ -29,11 +29,14 @@ import { matchQueuedTasks } from '../lib/agentTasks/matcher.js';
 import { sweepLostHosts } from '../lib/agentTasks/hosts.js';
 import { recordLapsedAvailability } from '../lib/agentTasks/availability.js';
 import { sweepExpiredStopSignals } from '../lib/stopSignals/sweep.js';
+import { anchorNow } from '../lib/stopSignals/state.js';
 
 export type TaskMatcherTickResult = { lost: number; lapsed: number; expired: number; matched: number };
 
 /** One pass at `now`. Each step runs even when an earlier one failed. */
 export async function taskMatcherTick(db: PrismaClient, now = new Date()): Promise<TaskMatcherTickResult> {
+  // #2022: the monotonic half of `now`'s sample, so every stop decision of the pass is made at its own moment.
+  const anchor = anchorNow();
   const result: TaskMatcherTickResult = { lost: 0, lapsed: 0, expired: 0, matched: 0 };
   try {
     result.lost = await sweepLostHosts(db, now);
@@ -46,12 +49,12 @@ export async function taskMatcherTick(db: PrismaClient, now = new Date()): Promi
     console.error('[task-matcher] availability lapse sweep failed:', err);
   }
   try {
-    result.expired = (await sweepExpiredStopSignals(db, now)).length;
+    result.expired = (await sweepExpiredStopSignals(db, now, anchor)).length;
   } catch (err) {
     console.error('[task-matcher] stop signal expiry sweep failed:', err);
   }
   try {
-    result.matched = (await matchQueuedTasks(db, now)).length;
+    result.matched = (await matchQueuedTasks(db, now, { anchor })).length;
   } catch (err) {
     console.error('[task-matcher] matching failed:', err);
   }

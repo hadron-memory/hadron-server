@@ -16,7 +16,7 @@
  * that one lapsed (`host.lost`, once, stamping `lostAt`).
  */
 
-import { afterWaits, lockStopFence } from '../stopSignals/state.js';
+import { afterWaits, anchorNow, lockStopFence } from '../stopSignals/state.js';
 import { reconcileStopCoverage } from '../stopSignals/lifecycle.js';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
@@ -145,7 +145,8 @@ export async function registerHost(
     workers.set(w.workerId, { family, worktrees });
   }
 
-  const entered = performance.now();
+  // `now` is the caller's sample, taken just before this call (it defaults to one here): its monotonic half.
+  const anchor = anchorNow();
   return db.$transaction(async (tx) => {
     await lockAuthorityAnchors(tx, [{ kind: 'app', id: input.appId }], 'shared');
     if (hooks.authorize) await hooks.authorize(tx);
@@ -198,7 +199,7 @@ export async function registerHost(
     }
     if (hooks.afterWrite) await hooks.afterWrite(tx, { registrationId: cur.id, workerCount: workers.size });
     // The coverage history at the moment after this registration's waits (Xan #2166 LOCAL-1).
-    await reconcileStopCoverage(tx, input.appId, afterWaits(now, entered));
+    await reconcileStopCoverage(tx, input.appId, afterWaits(now, anchor));
     const registered = isNew || wasLapsed;
     if (registered) {
       await appendHostEvent(tx, {

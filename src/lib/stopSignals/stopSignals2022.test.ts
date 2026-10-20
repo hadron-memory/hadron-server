@@ -19,7 +19,7 @@ import { APP_KEY_PREFIX, hashAppKey } from '../../middleware/auth.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskMatcherTick } from '../../jobs/taskMatcher.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
-import { coveringSignals, lockStopFence } from './state.js';
+import { anchorNow, coveringSignals, lockStopFence } from './state.js';
 import { liftStopSignal, setStopSignal } from './lifecycle.js';
 import { countedDueAt } from '../agentTasks/stall.js';
 import { __matcherTesting } from '../agentTasks/matcher.js';
@@ -586,5 +586,22 @@ describe('fix head of #2166: the findings\' pins', () => {
     };
     expect(await run(400)).toBe('assigned'); // its until passed during the wait
     expect(await run(60_000)).toBe('worker-not-free'); // still live after the wait
+  });
+
+  it('Xan LOCAL-1 delta: the pass\'s own latency counts too: `now` and its monotonic anchor are one sample, taken at the pass', async () => {
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: dan.id, agentId, family: 'claude' } });
+    const run = async (untilMs: number) => {
+      const passNow = new Date();
+      const passAnchor = anchorNow();
+      const s = await set(ctx(max.id), { level: 'PAUSE_DISPATCH', scope: 'WORKER', worker: 'Dan', until: new Date(passNow.getTime() + untilMs) });
+      const t = await db.agentTask.create({ data: { appId: app.id, title: 'Late', ownerUserId: max.id }, select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true, createdByWorkerId: true } });
+      await new Promise((r) => setTimeout(r, 800)); // earlier work of the pass, before this decider is entered
+      const r = await __matcherTesting.tryAssign(db, t, dan.id, 'claude', passNow, {}, passAnchor);
+      await lift(ctx(max.id), s.id);
+      await db.agentTask.update({ where: { id: t.id }, data: { status: 'cancelled', cancelledAt: new Date() } });
+      return r;
+    };
+    expect(await run(400)).toBe('assigned');
+    expect(await run(60_000)).toBe('worker-not-free');
   });
 });

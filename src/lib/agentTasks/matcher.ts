@@ -48,7 +48,7 @@
  *      can never both assign one task — the loser's update matches no row.
  */
 
-import { afterWaits, coveringSignals, liveSql, lockStopFence, timeStoppedWorkers, type StopSignal } from '../stopSignals/state.js';
+import { afterWaits, anchorNow, coveringSignals, liveSql, lockStopFence, timeStoppedWorkers, type StopSignal } from '../stopSignals/state.js';
 import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
@@ -306,8 +306,9 @@ async function tryAssign(
   family: string,
   now: Date,
   hooks: MatcherHooks,
+  /** The monotonic half of `now`'s sample (`anchorNow`), from the pass; by default taken here, beside a fresh `now`. */
+  anchor: number = anchorNow(),
 ): Promise<AttemptOutcome> {
-  const entered = performance.now();
   return db.$transaction(async (tx) => {
     await lockAuthorityAnchors(tx, [{ kind: 'app', id: task.appId }], 'shared');
     const app = await tx.app.findUnique({ where: { id: task.appId }, select: { deletedAt: true, uninstalledAt: true } });
@@ -321,7 +322,7 @@ async function tryAssign(
     if (!(await stillFreeAs(tx, task.appId, workerId, family, now))) return 'worker-not-free';
     const creator = task.createdByWorkerId ?? null;
     // Decided at the moment after the waits (Xan #2166 LOCAL-1), not the pass's start.
-    const covering = await coveringSignals(tx, task.appId, creator && creator !== workerId ? [workerId, creator] : [workerId], afterWaits(now, entered));
+    const covering = await coveringSignals(tx, task.appId, creator && creator !== workerId ? [workerId, creator] : [workerId], afterWaits(now, anchor));
     if (covering.has(workerId)) return 'worker-not-free';
     // R71: a task its creator made under a pause or halt waits while that still covers the creator.
     if (creator && timeStoppedWorkers(covering).has(creator)) return 'task-gone';
@@ -354,7 +355,7 @@ export type MatchResult = { taskId: string; workerId: string; family: string };
  * hide a later task someone can. It stops early only when every candidate is
  * spent, and the spent set carries across pages.
  */
-async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: MatcherHooks): Promise<MatchResult[]> {
+async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: MatcherHooks, anchor: number): Promise<MatchResult[]> {
   const out: MatchResult[] = [];
   let candidates: WorkerWorkState[] | null = null;
   let covering: Map<string, StopSignal[]> | null = null;
@@ -389,13 +390,13 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
         if (spent.has(w.id)) continue;
         const family = eligibleFamily(req, w);
         if (!family) continue;
-        const outcome = await tryAssign(db, task, w.id, family, now, hooks);
+        const outcome = await tryAssign(db, task, w.id, family, now, hooks, anchor);
         // Assigned, or no longer free: either way this worker is spent for this run.
         if (outcome !== 'task-gone') spent.add(w.id);
         if (outcome === 'assigned') {
           out.push({ taskId: task.id, workerId: w.id, family });
           // #1709 (cor:agt:070:08): a matched worker with no live session is started through its host.
-          if (!w.live) await launchForAssignment(db, { appId, taskId: task.id, workerId: w.id }, now);
+          if (!w.live) await launchForAssignment(db, { appId, taskId: task.id, workerId: w.id }, now, anchor);
         }
         if (outcome !== 'worker-not-free') break;
       }
@@ -412,8 +413,9 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
 export async function matchQueuedTasks(
   db: PrismaClient,
   now: Date,
-  opts: { appId?: string; hooks?: MatcherHooks } = {},
+  opts: { appId?: string; hooks?: MatcherHooks; /** `now`'s monotonic half (`anchorNow`); default: here. */ anchor?: number } = {},
 ): Promise<MatchResult[]> {
+  const anchor = opts.anchor ?? anchorNow();
   const appIds = opts.appId
     ? [opts.appId]
     : (await db.agentTask.findMany({
@@ -429,7 +431,7 @@ export async function matchQueuedTasks(
   const out: MatchResult[] = [];
   for (const appId of [...new Set([...appIds, ...held])]) {
     try {
-      out.push(...(await matchApp(db, appId, now, opts.hooks ?? {})));
+      out.push(...(await matchApp(db, appId, now, opts.hooks ?? {}, anchor)));
       await recordStopHolds(db, appId, now);
     } catch (err) {
       console.error(`[task-matcher] matching App ${appId} failed:`, err);
@@ -501,7 +503,7 @@ export async function recordStopHolds(db: PrismaClient, appId: string, now: Date
 export async function matchAfterChange(db: PrismaClient, appId: string): Promise<void> {
   if (process.env.DISABLE_TASK_MATCHER === 'true') return;
   try {
-    await matchQueuedTasks(db, new Date(), { appId });
+    await matchQueuedTasks(db, new Date(), { appId, anchor: anchorNow() });
   } catch (err) {
     console.error('[task-matcher] triggered run failed:', err);
   }

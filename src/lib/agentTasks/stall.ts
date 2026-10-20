@@ -117,7 +117,7 @@ async function loadWindows(db: Db, appIds: string[]): Promise<Map<string, StallW
 
 // ── Inputs ────────────────────────────────────────────────────────────────
 
-import { afterWaits, lockStopFence } from '../stopSignals/state.js';
+import { afterWaits, anchorNow, lockStopFence } from '../stopSignals/state.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -505,8 +505,9 @@ export async function raiseStallAlarm(
   candidate: StallCandidate,
   now: Date,
   hooks: { afterChain?: () => Promise<void> } = {},
+  /** `now`'s monotonic half (`anchorNow`), from the evaluation pass; by default taken here, beside `now`. */
+  anchor: number = anchorNow(),
 ): Promise<string | null> {
-  const entered = performance.now();
   return db.$transaction(async (tx) => {
     // #2022: the App's stop fence, shared, so a raise and a stop signal change are ordered; the re-evaluation below
     // then reads the coverage ledger as the last signal change left it.
@@ -514,7 +515,7 @@ export async function raiseStallAlarm(
     await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${candidate.taskId} FOR SHARE`;
     // #2022 (Xan #2166 LOCAL-1): re-decided at the moment after the waits, so a stop that began or ended while this
     // raise waited is counted as it is now.
-    const decidedAt = afterWaits(now, entered);
+    const decidedAt = afterWaits(now, anchor);
     const [inputs] = await loadStallInputs(tx, { id: candidate.taskId }, decidedAt);
     if (!inputs) return null;
     const windows = (await loadWindows(tx, [inputs.task.appId])).get(inputs.task.appId) as StallWindows;
@@ -591,7 +592,7 @@ const EVALUATION_PAGE = 500;
  * the alarms this pass raised (a re-run, or a pass racing another instance,
  * raises none it already raised).
  */
-export async function evaluateStalls(db: PrismaClient, now = new Date()): Promise<string[]> {
+export async function evaluateStalls(db: PrismaClient, now = new Date(), anchor: number = anchorNow()): Promise<string[]> {
   const raised: string[] = [];
   let after: string | null = null;
   for (;;) {
@@ -612,7 +613,7 @@ export async function evaluateStalls(db: PrismaClient, now = new Date()): Promis
     for (const i of inputs) {
       for (const c of stallCandidates(i, windows.get(i.task.appId) as StallWindows, now)) {
         try {
-          const id = await raiseStallAlarm(db, c, now);
+          const id = await raiseStallAlarm(db, c, now, {}, anchor);
           if (id) raised.push(id);
         } catch (err) {
           // Lost a serialization race (a concurrent pass raised the same

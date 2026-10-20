@@ -12,10 +12,10 @@ import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { reconcileStopCoverage } from './lifecycle.js';
-import { afterWaits, lockStopFence } from './state.js';
+import { afterWaits, anchorNow, lockStopFence } from './state.js';
 
 /** One sweep at `now`. Returns the ids of the signals it recorded as expired. A failure in one App is logged. */
-export async function sweepExpiredStopSignals(db: PrismaClient, now: Date): Promise<string[]> {
+export async function sweepExpiredStopSignals(db: PrismaClient, now: Date, anchor: number = anchorNow()): Promise<string[]> {
   const apps = await db.$queryRaw<{ appId: string }[]>(Prisma.sql`
     SELECT DISTINCT s.app_id AS "appId" FROM team_stop_signals s
     JOIN apps a ON a.id = s.app_id AND a.deleted_at IS NULL
@@ -23,11 +23,10 @@ export async function sweepExpiredStopSignals(db: PrismaClient, now: Date): Prom
   const out: string[] = [];
   for (const { appId } of apps) {
     try {
-      const entered = performance.now();
       const r = await db.$transaction(async (tx) => {
         await lockAuthorityAnchors(tx, [{ kind: 'app', id: appId }], 'shared');
         await lockStopFence(tx, appId, 'exclusive');
-        return reconcileStopCoverage(tx, appId, afterWaits(now, entered));
+        return reconcileStopCoverage(tx, appId, afterWaits(now, anchor));
       });
       out.push(...r.expired);
     } catch (err) {

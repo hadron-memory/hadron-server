@@ -123,14 +123,19 @@ export async function coveringSignals(db: Db, appId: string, workerIds: string[]
 }
 
 /**
- * The deciding moment after a transaction's lock waits (Xan #2166 LOCAL-1): the caller's `now` advanced by the
- * monotonic time elapsed since `entered` (`performance.now()` taken before the first lock). A signal whose until passed
- * while the decider waited is then ended for it, and one set while it waited is seen. The caller's `now` stays the
- * clock seam, so an injected `now` keeps its meaning (the #2102 `freshAfterWait` pattern, acknowledge.ts).
+ * The deciding moment after a transaction's lock waits (Xan #2166 LOCAL-1): `now` advanced by the monotonic time
+ * elapsed since `anchor`, where `anchor` is the `performance.now()` sampled TOGETHER with `now` (Xan's delta: pairing an
+ * old pass `now` with a later function-entry anchor lost the pass's earlier latency). So a pass hands its decider both
+ * halves of one sample, `anchorNow()`; a caller that samples `now` itself passes no anchor and gets one taken at entry,
+ * next to that sample. A signal whose until passed in the meantime is ended for the decider, and one set is seen. `now`
+ * stays the clock seam, so an injected `now` keeps its meaning (the #2102 `freshAfterWait` pattern, acknowledge.ts).
  */
-export function afterWaits(now: Date, entered: number): Date {
-  return new Date(now.getTime() + Math.max(0, performance.now() - entered));
+export function afterWaits(now: Date, anchor: number): Date {
+  return new Date(now.getTime() + Math.max(0, performance.now() - anchor));
 }
+
+/** The monotonic half of a clock sample, taken where its `now` is taken (see `afterWaits`). */
+export const anchorNow = (): number => performance.now();
 
 /** The strongest level among `signals` (R69: every live one applies, so the worker is stopped as the highest says). */
 export function strongestLevel(signals: Pick<StopSignal, 'level'>[]): StopLevel | null {
