@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Config, Runner } from '../orca-attention-router/router.js';
 import { buildSchema, parse, validate } from 'graphql';
 import { typeDefs } from '../../src/api/graphql/schema/typeDefs.js';
-import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK } from './ticker-wake.js';
+import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE } from './ticker-wake.js';
 
 const RULE = '─'.repeat(112);
 // A finished Claude Code 2.1.303 turn over an empty composer (shapes from the cli#907 captures): the
@@ -48,6 +48,11 @@ interface Fake {
   incarnation: string;
   retries: string[];
   retryReply: (() => string) | null;
+  /** The worker's checkStatus.lastCheckedAt as the server reports it; null = never checked. */
+  lastCheckedAt: string | null;
+  /** agentTask(id) replies, by task id. */
+  tasks: Record<string, unknown>;
+  evidenceQueries: string[];
 }
 
 let dir: string;
@@ -59,7 +64,9 @@ function fake(): Fake {
     wakes: [], acked: [], sent: [], idle: true, screen: { source: 'screen', tail: CLAUDE_IDLE },
     dueQueries: [], pages: 0, alwaysMore: false, ackReply: null, sendReply: null, dueError: null,
     incarnation: 'inc-1', retries: [], retryReply: null, run: undefined as any,
+    lastCheckedAt: null, tasks: {}, evidenceQueries: [],
   };
+  const fArg = (argv: string[], k: string): string | undefined => argv.find((a, i) => argv[i - 1] === '-F' && a.startsWith(`${k}=`))?.slice(k.length + 1);
   f.run = (argv) => {
     const out = (o: unknown) => ({ code: 0, stdout: JSON.stringify(o), stderr: '' });
     if (argv[0] === 'hadron') {
@@ -69,6 +76,15 @@ function fake(): Fake {
         const proofs = JSON.parse(argv[argv.indexOf('-F') + 1].replace(/^p=/, ''));
         f.acked.push(...proofs);
         return out({ data: { acknowledgeWakes: { acknowledged: proofs.length, unchanged: 0 } } });
+      }
+      if (q.includes('checkStatus')) {
+        f.evidenceQueries.push(`worker ${fArg(argv, 'w')}`);
+        return out({ data: { worker: { id: fArg(argv, 'w'), checkStatus: { lastCheckedAt: f.lastCheckedAt } } } });
+      }
+      if (q.includes('agentTask(')) {
+        const t = fArg(argv, 't') as string;
+        f.evidenceQueries.push(`task ${t}`);
+        return out({ data: { agentTask: f.tasks[t] ?? null } });
       }
       if (q.includes('dueWakes')) {
         f.dueQueries.push(q);
@@ -875,6 +891,10 @@ describe('GraphQL contract with the server SDL (#2102 / R63)', () => {
   it('the acknowledgeWakes mutation validates', () => {
     expect(validate(schema, parse(ACK)).map((e) => e.message)).toEqual([]);
   });
+  it('the evidence reads (worker check status, task state) validate', () => {
+    expect(validate(schema, parse(WORKER_CHECK)).map((e) => e.message)).toEqual([]);
+    expect(validate(schema, parse(TASK_STATE)).map((e) => e.message)).toEqual([]);
+  });
 });
 
 // George's two P2s on #2070 (LOCAL REQUEST_CHANGES at fd5d2f33).
@@ -1231,5 +1251,161 @@ describe('#2138 experiment: a pass must fit inside one cadence', () => {
     expect(await main(['loop', '--interval', '10'], deps)).toBe(0);
     expect(sleeps).toEqual([5_000]); // pass 1 ran 0..25 s: slots at 10 s and 20 s are skipped, the next pass starts at 30 s
     expect(log()).toMatch(/overran its slot; skipped 2 slot\(s\)/);
+  });
+});
+
+describe('#2138: an ambiguous receipt is resolved on evidence, never on a timeout alone', () => {
+  const T0 = Date.parse('2026-10-20T07:30:00.000Z');
+  const at = (ms: number) => ({ now: () => ms });
+  const timing = { anchorAt: iso(T0 - 600_000), deliverAfter: iso(T0 - 300_000), busyDeadline: iso(T0 + 3_600_000) };
+  const ambiguous = () => {
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+    go(at(T0));
+    f.sendReply = null;
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'ambiguous', requestId: 'r1', at: T0 });
+    lines = [];
+  };
+  const receipt = () => JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada'];
+
+  it('accepted + same receiver + empty composer + a channel check after the send: resolved as delivered and acked, never retyped', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    ambiguous();
+    f.lastCheckedAt = iso(T0 + 60_000);
+    go(at(T0 + 120_000));
+    expect(f.retries).toEqual(['r1']); // reissued by its id first
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toHaveLength(1);
+    expect(log()).toContain('resolved as delivered on evidence');
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))).toEqual({});
+  });
+
+  it('a reissue that Orca now confirms needs no evidence read', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    ambiguous();
+    f.retryReply = () => JSON.stringify(CONFIRMED);
+    go(at(T0 + 120_000));
+    expect(f.acked).toHaveLength(1);
+    expect(f.evidenceQueries).toEqual([]);
+  });
+
+  it('(a) a request Orca never reported accepted is not resolved, whatever the evidence', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    const failed = JSON.stringify({ ok: false, error: { code: 'timeout' }, requestId: 'r9' });
+    f.sendReply = () => failed;
+    f.retryReply = () => failed;
+    go(at(T0));
+    expect(receipt()).toMatchObject({ state: 'ambiguous', requestId: 'r9' });
+    f.lastCheckedAt = iso(T0 + 60_000);
+    lines = [];
+    go(at(T0 + 120_000));
+    expect(f.acked).toEqual([]);
+    expect(f.sent).toHaveLength(1);
+    expect(log()).toContain('Orca never reported the input accepted');
+    expect(receipt().state).toBe('ambiguous');
+  });
+
+  it('(b) another receiver is not resolved, and no evidence is read', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    ambiguous();
+    f.lastCheckedAt = iso(T0 + 60_000);
+    f.incarnation = 'inc-2';
+    go(at(T0 + 120_000));
+    expect(f.acked).toEqual([]);
+    expect(f.evidenceQueries).toEqual([]);
+    expect(log()).toContain('another receiver');
+  });
+
+  it('(c) a composer that is not provably empty is not resolved', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    ambiguous();
+    f.lastCheckedAt = iso(T0 + 60_000);
+    f.screen = { source: 'screen', tail: CLAUDE_IDLE, draft: 'half typed' };
+    go(at(T0 + 120_000));
+    expect(f.acked).toEqual([]);
+    expect(f.retries).toEqual([]);
+    expect(log()).toMatch(/no delivery evidence yet \(composer not provably empty\)/);
+    expect(receipt().state).toBe('ambiguous');
+  });
+
+  it('(c) a busy terminal with an empty composer is not reissued, but may still be resolved on evidence', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    ambiguous();
+    f.lastCheckedAt = iso(T0 + 60_000);
+    f.idle = false;
+    f.screen = { source: 'screen', tail: ['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'] };
+    go(at(T0 + 120_000));
+    expect(f.retries).toEqual([]);
+    expect(f.acked).toHaveLength(1);
+    expect(log()).toContain('resolved as delivered on evidence');
+  });
+
+  it('(d) no channel check, one before the send, or one inside the clock margin is not evidence', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    ambiguous();
+    for (const checked of [null, iso(T0 - 60_000), iso(T0 + 4_000)]) {
+      f.lastCheckedAt = checked;
+      lines = [];
+      go(at(T0 + 120_000));
+      expect(f.acked).toEqual([]);
+      expect(log()).toContain('no channel check since the send');
+    }
+    expect(receipt().state).toBe('ambiguous');
+  });
+
+  it('(d) a covered task assignment also needs that task STARTED (or finished) by this worker', () => {
+    const p = proof([], 'a', [taskEntry('t7')]);
+    f.wakes = [wake('w-ada', 'Ada', [task('t7')], p, [], timing)];
+    ambiguous();
+    f.lastCheckedAt = iso(T0 + 60_000);
+    f.tasks.t7 = { id: 't7', status: 'PENDING', assignee: { kind: 'WORKER', id: 'w-ada' } };
+    go(at(T0 + 120_000));
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('a covered task is not started by this worker');
+    f.tasks.t7 = { id: 't7', status: 'STARTED', assignee: { kind: 'WORKER', id: 'w-bob' } };
+    lines = [];
+    go(at(T0 + 130_000));
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('a covered task is not started by this worker');
+    f.tasks.t7 = { id: 't7', status: 'STARTED', assignee: { kind: 'WORKER', id: 'w-ada' } };
+    lines = [];
+    go(at(T0 + 140_000));
+    expect(f.acked).toEqual([p]);
+    expect(f.evidenceQueries).toContain('task t7');
+    expect(log()).toContain('resolved as delivered on evidence');
+  });
+
+  it('a covered task the wake no longer names cannot be checked, so it is held', () => {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1', 'task:e-gone#0'], receiver: 'term_a#inc-1', at: T0, detail: 'accepted, turn start not confirmed (input_accepted)', text: 't', handle: 'term_a', requestId: 'r1' } }));
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    f.lastCheckedAt = iso(T0 + 60_000);
+    go(at(T0 + 120_000));
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('a covered task is no longer named by the wake');
+  });
+
+  it('after 2 cadences without evidence it stays held and is listed as needing a person; before that it only waits', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    ambiguous();
+    go(at(T0 + 19 * 60_000));
+    expect(log()).not.toContain('needs a person');
+    lines = [];
+    go(at(T0 + 20 * 60_000));
+    expect(f.acked).toEqual([]);
+    expect(f.sent).toHaveLength(1);
+    expect(log()).toContain('needs a person');
+    expect(receipt().state).toBe('ambiguous');
+  });
+
+  it('a resolved receipt with new ticks gets a nudge for ONLY the new work', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    ambiguous();
+    f.lastCheckedAt = iso(T0 + 60_000);
+    f.wakes = [wake('w-ada', 'Ada', [TICK, TICK2], proof(['T:1', 'U:1']), [], timing)];
+    go(at(T0 + 120_000));
+    expect(f.sent).toHaveLength(2);
+    expect(f.sent[1]).toContain('eden-queue-tick');
+    expect(f.sent[1]).not.toContain('coordinator-tick');
+    expect(f.acked).toHaveLength(1);
   });
 });
