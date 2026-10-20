@@ -26,7 +26,7 @@ import { resolveChannelRefId } from './entityRef/channelRef.js';
 import { composeWorkerUrn } from './entityRef/workerRef.js';
 import { normalizeUrnForLookup } from './urn.js';
 import { resolveRegister } from './resolveRegister.js';
-import { advanceReadState } from './channelReadState.js';
+import { advanceReadState, diagnoseNoStamp, recordCheckMiss, stampChannelCheck } from './channelReadState.js';
 import { raiseDeliveryMark, raiseReadIfMentionOnly } from './workerMarks.js';
 import { mentionsWorkerOf } from './mentionsReadResolution.js';
 import { mentionTokenOf } from './mentionToken.js';
@@ -1701,12 +1701,24 @@ export async function maybeAdvanceOwnChannelRead(
   // in `ownLiveSessionWorker` before the eligibility returns, so a driver that
   // reads only newest pages, mention filters or backward windows stays live.
   const session = await ownLiveSessionWorker(ctx, sessionRef);
-  if (!session) return null;
+  if (!session) {
+    await recordCheckMiss(ctx.db, { channelId: args.channelId, sessionId: sessionRef, reason: 'SESSION_NOT_OWN_LIVE', via: 'read' });
+    return null;
+  }
   // #1617 B — the page has been served, so the read (the act) succeeded:
   // resume now. A refusal under the lock leaves the cursor where it was.
   // Placed BEFORE the #1628 opt-out: a read that declines the cursor advance
   // is still driving the session, so it still resumes it.
-  if (session.lapsed && !(await reviveOwnLapsedSession(ctx, session.sessionId))) return null;
+  if (session.lapsed && !(await reviveOwnLapsedSession(ctx, session.sessionId))) {
+    await recordCheckMiss(ctx.db, { channelId: args.channelId, sessionId: session.sessionId, reason: 'SESSION_REVIVE_REFUSED', via: 'read' });
+    return null;
+  }
+  // #2138 §3.1: a read of the team channel through the worker's OWN session is a check, whatever it returned and
+  // whether or not it moves the cursor; another channel's read stamps nothing (stampChannelCheck).
+  if (!(await stampChannelCheck(ctx.db, session.workerId, args.channelId))) {
+    const why = await diagnoseNoStamp(ctx.db, session.workerId, args.channelId);
+    if (why) await recordCheckMiss(ctx.db, { channelId: args.channelId, sessionId: session.sessionId, reason: why, via: 'read' });
+  }
   // #1628: attribution is activity even when the caller will acknowledge only
   // after validating and delivering the page. Never skip the heartbeat above.
   if (args.advanceReadState === false) return null;
@@ -1910,5 +1922,11 @@ export async function markOwnTeamChatRead(
         return advanceReadState(tx as never, { workerId }, row.channel.id, args.seq);
       })
     : await advanceReadState(ctx.db, { workerId }, row.channel.id, args.seq);
+  // #2138 §3.1: a mark-read through the worker's own session is a check (even one that moves nothing). Stamped last, so a
+  // refused call above, or a resume refused inside its transaction, is not one.
+  if (!(await stampChannelCheck(ctx.db, workerId, row.channel.id))) {
+    const why = await diagnoseNoStamp(ctx.db, workerId, row.channel.id);
+    if (why) await recordCheckMiss(ctx.db, { channelId: row.channel.id, sessionId: session.sessionId, reason: why, via: 'mark' });
+  }
   return { workerId, channelId: row.channel.id, lastSeenSeq };
 }

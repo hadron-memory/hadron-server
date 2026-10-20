@@ -138,6 +138,7 @@ type TickerSettings = {
 const SETTINGS_SELECT = {
   tickerMinCadenceSeconds: true, tickerSelfSubscribeCadenceSeconds: true, tickerLiveCap: true, wakeDailyBudget: true,
   deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true,
+  deliveryCheckPeriodSeconds: true, deliveryFailedChecksToOverdue: true,
 } as const;
 
 function checkCadence(cadence: unknown, settings: TickerSettings): number {
@@ -161,7 +162,7 @@ function checkQuietHours(input: unknown): Prisma.InputJsonObject {
 }
 
 /** The closed set of ticker reasons (cor:agt:080:01). Stored kebab-case; the GraphQL enum spells them in capitals. */
-export const TICKER_REASONS = ['read-team-channel', 'every-tick'] as const;
+export const TICKER_REASONS = ['read-team-channel', 'every-tick', 'live-check'] as const;
 function checkReasons(list: unknown): string[] {
   if (!Array.isArray(list) || list.length === 0) throw badInput('reasons must name at least one reason: a ticker with none would never fire.');
   const out = new Set<string>();
@@ -412,7 +413,7 @@ const crudMutations = {
       // subscriber. Each must be one the editor could subscribe at the new terms
       // (cor:agt:080:20, R3); otherwise the edit is a way round the subscribe rule.
       const faster = cadence !== undefined && cadence < t.cadenceSeconds;
-      const wider = (relevance === 'ALL' && t.relevance !== 'ALL') || (reasons !== undefined && reasons.includes('every-tick') && !t.reasons.includes('every-tick'));
+      const wider = (relevance === 'ALL' && t.relevance !== 'ALL') || (reasons !== undefined && (['every-tick', 'live-check'] as const).some((r) => reasons.includes(r) && !t.reasons.includes(r)));
       if (faster || wider) {
         await requireSubscribersCovered(tx, txCtx, fresh, actor, t, cadence ?? t.cadenceSeconds, settings);
       }
@@ -596,6 +597,8 @@ export async function writeAppSettings(
       stuckWindowSeconds: patch.stuckWindowSeconds ?? cur.deliveryStuckWindowSeconds,
       standbyEnabled: patch.standbyEnabled ?? cur.deliveryStandbyEnabled,
       standbyEffective: false,
+      checkPeriodSeconds: patch.checkPeriodSeconds ?? cur.deliveryCheckPeriodSeconds,
+      failedChecksToOverdue: patch.failedChecksToOverdue ?? cur.deliveryFailedChecksToOverdue,
     };
     validateDeliverySettings(delivery, patch);
     await tx.app.update({
@@ -606,9 +609,29 @@ export async function writeAppSettings(
         deliveryBusyDelaySeconds: delivery.busyDelaySeconds,
         deliveryStuckWindowSeconds: delivery.stuckWindowSeconds,
         deliveryStandbyEnabled: delivery.standbyEnabled,
+        deliveryCheckPeriodSeconds: delivery.checkPeriodSeconds,
+        deliveryFailedChecksToOverdue: delivery.failedChecksToOverdue,
       },
     });
     return { ticker: await settingsOut(tx, fresh.id), delivery: await loadDeliverySettings(tx, fresh.id) };
+  }, { lockMode: 'exclusive' });
+}
+
+/**
+ * #2138 §3.6 — the TEAM pause: a flag on the App, separate from every worker's own `pausedUntil`. Whoever manages the App
+ * sets or clears it; a worker (whose session is the acting principal) cannot lift it, and ending it never touches a
+ * self-pause. Idempotent: pausing an already-paused team keeps the original time, clearing an unpaused team is a no-op.
+ */
+export async function writeTeamPause(ctx: Context, appRef: string, paused: boolean) {
+  const { app, actor } = await resolveParticipatedApp(ctx, appRef);
+  return writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
+    if (!(await actorManagesApp(txCtx, fresh, actor))) {
+      throw taskError('FORBIDDEN', 'Only whoever manages this App can pause or resume the team.');
+    }
+    const cur = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: { teamPausedAt: true } });
+    if (paused && !cur.teamPausedAt) await tx.app.update({ where: { id: fresh.id }, data: { teamPausedAt: new Date() } });
+    if (!paused && cur.teamPausedAt) await tx.app.update({ where: { id: fresh.id }, data: { teamPausedAt: null, teamResumedAt: new Date() } }); // the end restarts every worker's check clock
+    return { teamPausedAt: (await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: { teamPausedAt: true } })).teamPausedAt };
   }, { lockMode: 'exclusive' });
 }
 

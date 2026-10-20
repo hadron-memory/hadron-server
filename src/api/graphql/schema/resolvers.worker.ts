@@ -49,6 +49,7 @@ import {
 } from '../../../lib/workerHandoff.js';
 import { resolveMemoryRoot } from './chat-scope.js';
 import { idleCutoffs, toNaiveUtc } from '../../../lib/sessionActivity.js';
+import { loadWorkerCheckStatuses, type WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
@@ -2025,6 +2026,36 @@ export async function loadAppWorkerActivity(
 }
 
 /**
+ * #2138 §3.4 — every worker's check status in one App, loaded per APP for the
+ * same reason as `loadAppWorkerActivity` (a roster is the calling shape), and
+ * memoized only inside a query, for the same reason too. The team channel is
+ * the one the team chat reads and writes (`locateTeamChatChannel`); only a
+ * check of THAT channel counts.
+ */
+export async function loadAppWorkerCheckStatuses(
+  ctx: Context,
+  appId: string,
+  opts?: { memoize?: boolean; now?: Date },
+): Promise<Map<string, WorkerCheckStatus>> {
+  const now = opts?.now ?? new Date();
+  type Cache = Map<string, Promise<Map<string, WorkerCheckStatus>>>;
+  const holder = ctx as Context & { workerCheckStatusCache?: Cache };
+  const cache = opts?.memoize ? (holder.workerCheckStatusCache ??= new Map()) : null;
+  const cached = cache?.get(appId);
+  if (cached) return cached;
+
+  const pending = (async () => {
+    // Dynamic: resolvers.teamChat imports this module.
+    const { locateTeamChatChannel } = await import('./resolvers.teamChat.js');
+    const channel = await locateTeamChatChannel(ctx, appId);
+    return loadWorkerCheckStatuses(ctx.db, { appId, teamChannelId: channel?.channelId ?? null, now });
+  })();
+
+  cache?.set(appId, pending);
+  return pending;
+}
+
+/**
  * #983 review (Codex + Copilot P1): `Session.worker` made Worker rows
  * reachable by principals the worker queries never admitted —
  * `sessionScopeFilter` admits ANY org member (READER included), and a
@@ -2606,6 +2637,23 @@ export const workerFieldResolvers = {
         memoize: info?.operation?.operation === 'query',
       });
       return activity.get(worker.id)?.lastActiveAt ?? null;
+    },
+    /**
+     * #2138 §3.4 (experimental) — whether this worker is checking its team
+     * channel as expected (`deriveWorkerCheckStatus`). Masked on deny, on the
+     * same gate as hasLiveSession: anyone who may read the App's roster.
+     */
+    checkStatus: async (
+      worker: { id: string; appId: string },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<WorkerCheckStatus | null> => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      const statuses = await loadAppWorkerCheckStatuses(ctx, worker.appId, {
+        memoize: info?.operation?.operation === 'query',
+      });
+      return statuses.get(worker.id) ?? null;
     },
     /**
      * The role-agent behind the casting — behind Query.agent's OWN read gate
