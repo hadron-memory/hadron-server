@@ -310,13 +310,15 @@ describe('cor:agt:090:05 — when a signal ends; R69 every live signal applies',
     expect(await notices(liam)).toEqual(['pause:stop']);
   });
 
-  it('two pauses on one target are independent: each sends its own entry notice; lifting one keeps the worker paused, with no notice', async () => {
+  it('Vera pin 1: two pauses on one target are independent; the second, and lifting one, send nothing; lifting the other, one resume', async () => {
     const a = await set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Kit' });
-    await set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Kit' });
-    expect(await notices(kit)).toEqual(['pause:stop', 'pause:stop']);
+    const b = await set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Kit' });
+    expect(await notices(kit)).toEqual(['pause:stop']);
     await lift(ctx(max.id), a.id);
     expect(await covered()).toEqual(ids(kit));
-    expect(await notices(kit)).toEqual(['pause:stop', 'pause:stop']);
+    expect(await notices(kit)).toEqual(['pause:stop']);
+    await lift(ctx(max.id), b.id);
+    expect(await notices(kit)).toEqual(['pause:stop', 'pause:resume']);
   });
 
   it('a pause entering under a live halt sends no notice; the halt ending sends the pause notice', async () => {

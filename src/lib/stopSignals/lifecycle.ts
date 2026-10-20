@@ -10,11 +10,11 @@
  * the ledger, closing what no longer covers and opening what newly does, and sends each worker one notice for each
  * change of what applies to it (R95):
  *
- * - it came under a live `pause` or `halt`: that signal's notice, one per signal (R95; the selected per-signal entry,
- *   Xan #2166), interrupting only for a `halt`; a signal weaker than what already applies (a `pause` entering under
- *   a `halt`) sends none, so the notice due always says what applies;
- * - what applies dropped from `halt` to `pause` with nothing newly entered (the `halt` ended): the `pause` notice
- *   again (Vera's receipt §3, Proposed);
+ * - what applies to it changed (Vera's fit: notices follow the worker's EFFECTIVE level, CONFORMS to R95, #2166
+ *   6302988619): it came under a `pause` or `halt` (free → pause, pause → halt; it joined the team or the host listed
+ *   it), or the `halt` ended under a `pause` (the `pause` notice again, Vera's receipt §3, Proposed): that level's
+ *   notice, interrupting only for a `halt`. A second signal at the level already in force, or a weaker one under it,
+ *   sends none;
  * - nothing that stops its time covers it any more (it left the coverage, or the last such signal ended): one resume.
  *
  * `pause-dispatch` tells its coordinators once when it is set and once when it ends, and the workers it covers nothing
@@ -157,17 +157,12 @@ export async function reconcileStopCoverage(tx: Tx, appId: string, now: Date): P
       notices++;
       continue;
     }
-    // Each live signal it newly came under, at the level that now applies, sends that signal's notice (R95, the
-    // selected per-signal entry: Xan #2166). One weaker than what applies (a pause entering under a halt) sends none:
-    // the notice the worker is due must say what applies, and the pause's own notice follows when the halt ends.
-    const entering = nowList
-      .filter((x) => x.level === is && !have.has(`${x.id}|${w}`))
-      .sort((a, b) => a.setAt.getTime() - b.setAt.getTime() || a.id.localeCompare(b.id));
-    if (entering.length === 0 && was === is) continue;
-    for (const x of entering.length ? entering : [noticeSignal(nowList, is)]) {
-      await appendStopNotice(tx, { appId, recipient: { workerId: w }, signalId: x.id, level: is, notice: 'stop', at: now });
-      notices++;
-    }
+    // Only a change of what applies is told (Vera's fit, CONFORMS to R95, #2166 6302988619): a second signal at the
+    // level already in force, or a weaker one under it, changes nothing the worker does.
+    if (was === is) continue;
+    const x = noticeSignal(nowList, is);
+    await appendStopNotice(tx, { appId, recipient: { workerId: w }, signalId: x.id, level: is, notice: 'stop', at: now });
+    notices++;
   }
 
   return { entered, left, notices, expired: expiredRows.map((s) => s.id) };
