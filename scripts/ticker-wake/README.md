@@ -1,7 +1,7 @@
 # ticker-wake
 
 Interim ticker-wake deliverer for an Orca host (orca1). It reads `dueWakes`,
-types one short nudge into the idle terminal of each roster worker whose wake
+types one short nudge into the idle terminal of each worker on this host whose wake
 carries a TICK or a task event it names (an assignment, a stall alarm or a
 finished child; alone, or joined with a MENTION), and acks
 the wake by proof. It reuses the attention
@@ -22,8 +22,37 @@ tsx scripts/ticker-wake/ticker-wake.ts loop [--interval <seconds>=120] [--budget
 ```
 
 Config: the router's `~/.config/hadron-orca-attention-router/config.json`
-(app, `hadronCli`, `orcaCli`, `stateDir`, roster). A worker not on the roster is
-skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
+(app, `hadronCli`, `orcaCli`, `stateDir`, and an optional roster). State lives
+in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
+
+**Receivers (#2138, Hugo #26221).** The roster is not hand-kept. A hand-kept
+file missed 17 subscribed workers, whose wakes stayed due while every pass
+logged them as not on the roster. Each pass now reads every live ticker of the
+App and its live subscribers (`tickers { subscribers }`, paged), and lists
+Orca's terminals. A worker is reachable on this host when exactly one worktree
+among those terminals carries its CLI binding
+(`<git-dir>/hadron-team-session.json`, written by `hadron team session start`),
+and that binding names the worker's CURRENT session (George's #2161 P2, Ada
+#26314). The script reads the worker's newest session from the server
+(`sessions(workerRef, limit: 1)`, newest first). It must be open, be that
+worker's, and be the binding's `sessionId` in the binding's `appId`. A binding
+left behind after the worker's session ended, or after the worker was rebound
+elsewhere, is stale. That way, a terminal reused later in that worktree is never
+taken for the worker. Among several bindings for one worker, only the current
+one counts. A failed session read holds. The read is made once per worker per
+pass, only for workers it needs.
+`resolveTerminal` still picks the agent terminal in that worktree at delivery.
+A roster row in the config file, if there is one, overrides the binding for
+its worker (worktree and terminal pin). Any due worker is delivered this way,
+including one that subscribes to nothing (an assignee's task wake). Once per
+pass, the script logs every subscriber or due worker it can't reach, with why:
+`no binding` (no worktree on this host is bound to it, or two are bound under
+its current session), `stale binding (...)` (session ended, replaced, of
+another worker or App, absent, or unreadable), or `no terminal` (bound, but no
+connected, writable terminal in its worktree). A roster-file row is the
+operator's statement and is not session-checked. An
+MCP-bound worker leaves no binding file, so it shows as `no binding`. A failed
+subscriber read stops the pass, as a failed `dueWakes` read does.
 
 ## Contract
 

@@ -42,6 +42,11 @@
  *  - a MENTION-only wake is ignored and never acked: there is no mention-ack
  *    path in this script.
  *
+ * Receivers (#2138, Hugo #26221): the ticker's live subscribers and every due worker, joined to this host's terminals by
+ * the CLI binding in their worktree, while it names their current open session (`hostRoster`, George's #2161 P2); a
+ * router-config roster row overrides it. Every one with no receiver
+ * here is logged once per pass, `no binding` or `no terminal`. Never a hand-kept list alone.
+ *
  * Safety:
  *  - timing is the server's (R63): nothing is typed before the wake's
  *    deliverAfter; a busy terminal is held until its busyDeadline, after which
@@ -82,13 +87,13 @@
  *        tsx ticker-wake.ts loop [--interval <seconds>=120] [--budget <seconds>=interval]
  */
 import { spawn } from 'node:child_process';
-import { linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  loadConfig, DEFAULT_CONFIG, runCommand, listTerminals, resolveTerminal,
+  loadConfig, DEFAULT_CONFIG, runCommand, listTerminals, resolveTerminal, teamBinding,
   readScreen, promptIsEmptyFromTerm, screenAgentFamily, isIdle, idleProofAbovePrompt,
-  CALL_TIMEOUT_MS, type Config, type Runner, type RunResult,
+  CALL_TIMEOUT_MS, type Config, type RosterEntry, type Runner, type RunResult,
 } from '../orca-attention-router/router.js';
 
 /** A runner that does not block: the sends of different workers overlap. */
@@ -119,6 +124,15 @@ export const ACK = `mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowle
 export const WORKER_CHECK = `query($w:ID!,$a:ID){worker(ref:$w,appRef:$a){id checkStatus{lastCheckedAt}}}`;
 /** A covered task's state and assignee. */
 export const TASK_STATE = `query($t:ID!){agentTask(id:$t){id status assignee{kind id}}}`;
+/** #2138 (Hugo #26221): every live ticker of the App and its live subscribers, the first page of each. */
+export const SUBSCRIBERS = `query($a:String!){tickers(appRef:$a){id subscribers(first:200){items{worker{id name}} hasNextPage endCursor}}}`;
+/** The next page of one ticker's subscribers. */
+export const SUBSCRIBERS_PAGE = `query($t:String!,$p:String){ticker(ref:$t){subscribers(first:200,after:$p){items{worker{id name}} hasNextPage endCursor}}}`;
+/**
+ * A worker's newest session visible to this host's credential (newest first by startedAt; George's #2161 P2). A worker
+ * holds at most one open session, so an open newest session is its current one.
+ */
+export const CURRENT_SESSION = `query($w:String){sessions(workerRef:$w,limit:1){id workerId appId endedAt}}`;
 const MAX_PAGES = 10;
 /**
  * The tui-idle probe. It proves idle without waiting for business to clear (the router's RECHECK_IDLE_TIMEOUT_MS
@@ -518,6 +532,90 @@ export async function submit(cfg: Config, run: AsyncRunner, handle: string, text
   return first;
 }
 
+/**
+ * Every live subscriber of the App's tickers, by worker id (#2138, Hugo #26221). Throws a SafeError when a read fails or a
+ * ticker has more than MAX_PAGES pages: a pass that cannot say who should be reachable stops, like a failed dueWakes read.
+ */
+function fetchSubscribers(cfg: Config, run: Runner): Map<string, string> {
+  const out = new Map<string, string>();
+  const take = (page: any): void => {
+    if (!page || !Array.isArray(page.items)) throw new SafeError('subscribers returned no result');
+    for (const s of page.items) if (typeof s?.worker?.id === 'string') out.set(s.worker.id, String(s.worker.name ?? s.worker.id));
+  };
+  const tickers = gql(run, [cfg.hadronCli, 'api', SUBSCRIBERS, '-F', `a=${cfg.app}`])?.tickers;
+  if (!Array.isArray(tickers)) throw new SafeError('tickers returned no result');
+  for (const t of tickers) {
+    let page = t?.subscribers;
+    take(page);
+    for (let n = 1; page.hasNextPage; n++) {
+      if (n >= MAX_PAGES) throw new SafeError(`a ticker has more than ${MAX_PAGES} pages of subscribers`);
+      page = gql(run, [cfg.hadronCli, 'api', SUBSCRIBERS_PAGE, '-F', `t=${t.id}`, '-F', `p=${page.endCursor}`])?.ticker?.subscribers;
+      take(page);
+    }
+  }
+  return out;
+}
+
+const realPath = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); } };
+
+/**
+ * The receivers on this host (#2138, Hugo #26221: a hand-kept roster missed 17 subscribed workers). A worker is reachable
+ * here through a worktree among Orca's terminals whose CLI binding (`hadron team session start`) names it AND names its
+ * CURRENT session (George's #2161 P2, Ada #26314): the worker's newest session, read from the server, must be open, be
+ * that worker's, and be the binding's session in the binding's App. A binding left behind after the worker ended or was
+ * rebound elsewhere is stale, so a terminal later reused in that worktree is never taken for the worker. Among several
+ * bindings for one worker only the current one counts; two current ones hold. The router config's roster row for a
+ * worker, when there is one, overrides all of this (its worktree and terminal pin, as the operator states them). Which
+ * terminal in the worktree gets the nudge is still `resolveTerminal`'s, at delivery. `why` says, for a worker with no
+ * receiver: `no binding` (none on this host, or two current ones), `stale binding (...)` (ended, replaced, mismatched,
+ * or the session read failed), or `no terminal` (no connected, writable terminal in its worktree). The session read is
+ * made once per worker per pass, and only for a worker asked about.
+ */
+export function hostRoster(cfg: Config, terminals: Array<{ worktreePath?: string; connected?: boolean; writable?: boolean }>, run: Runner): {
+  entry: (workerId: string, name: string) => RosterEntry | null; why: (workerId: string) => string;
+} {
+  const live = new Set<string>();
+  const byWorker = new Map<string, Array<{ wt: string; sessionId?: string; appId?: string }>>();
+  for (const wt of new Set(terminals.map((t) => t.worktreePath).filter((p): p is string => typeof p === 'string' && p !== '').map(realPath))) {
+    const b = teamBinding(wt);
+    if (b) byWorker.set(b.workerId, [...(byWorker.get(b.workerId) ?? []), { wt, sessionId: b.sessionId, appId: b.appId }]);
+  }
+  for (const t of terminals) if (t.worktreePath && t.connected !== false && t.writable !== false) live.add(realPath(t.worktreePath));
+  const memo = new Map<string, { wt?: string; why: string }>();
+  const resolveWorker = (workerId: string): { wt?: string; why: string } => {
+    const file = cfg.roster.find((e) => e.worker === workerId);
+    if (file) return { wt: realPath(file.worktree), why: live.has(realPath(file.worktree)) ? '' : 'no terminal' };
+    const bound = byWorker.get(workerId) ?? [];
+    if (bound.length === 0) return { why: 'no binding' };
+    let s: any;
+    try {
+      const list = gql(run, [cfg.hadronCli, 'api', CURRENT_SESSION, '-F', `w=${workerId}`])?.sessions;
+      if (!Array.isArray(list)) throw new SafeError('sessions returned no result');
+      s = list[0];
+    } catch (e) { return { why: `stale binding (session unreadable: ${describeError(e)})` }; }
+    if (!s || typeof s.id !== 'string') return { why: 'stale binding (no session)' };
+    if (s.endedAt !== null) return { why: 'stale binding (session ended)' };
+    if (s.workerId !== workerId) return { why: 'stale binding (session mismatched)' };
+    const current = bound.filter((b) => b.sessionId === s.id);
+    if (current.length === 0) return { why: 'stale binding (session replaced)' };
+    if (current.some((b) => b.appId !== s.appId)) return { why: 'stale binding (app mismatched)' };
+    if (current.length > 1) return { why: `no binding (bound in ${current.length} worktrees)` };
+    return { wt: current[0].wt, why: live.has(current[0].wt) ? '' : 'no terminal' };
+  };
+  const resolved = (workerId: string): { wt?: string; why: string } => {
+    let r = memo.get(workerId);
+    if (!r) { r = resolveWorker(workerId); memo.set(workerId, r); }
+    return r;
+  };
+  const why = (workerId: string): string => resolved(workerId).why;
+  const entry = (workerId: string, name: string): RosterEntry | null => {
+    const r = resolved(workerId);
+    if (r.why !== '' || !r.wt) return null;
+    return cfg.roster.find((e) => e.worker === workerId) ?? { worker: workerId, name, worktree: r.wt };
+  };
+  return { entry, why };
+}
+
 export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = console.log, stateDir = join(cfg.stateDir, 'ticker-wake')): Promise<void> {
   const rawLog = log;
   log = (m: string): void => rawLog(scrub(m));
@@ -537,7 +635,16 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
   // Oldest anchor first, so a spent budget never starves the same workers; a wake without timing sorts last (it is held).
   const anchor = (w: any): number => { const t = typeof w.anchorAt === 'string' ? Date.parse(w.anchorAt) : NaN; return Number.isFinite(t) ? t : Infinity; };
   const due = wakes.filter((w) => kinds(w).has('TICK') || kinds(w).has('TASK')).sort((a, b) => anchor(a) - anchor(b));
-  const terminals = due.length ? listTerminals(cfg, run) : [];
+  // The receivers come from the server's subscribers and this host's bound terminals, never from a hand-kept list alone
+  // (#2138). Every subscriber or due worker with no receiver here is logged once per pass, with why.
+  const subscribers = fetchSubscribers(cfg, run);
+  const terminals = listTerminals(cfg, run);
+  const receivers = hostRoster(cfg, terminals, run);
+  const wanted = new Map(subscribers);
+  for (const w of due) if (typeof w.worker?.id === 'string' && !wanted.has(w.worker.id)) wanted.set(w.worker.id, String(w.worker.name));
+  const unreachable = [...wanted].map(([id, n]) => [n, receivers.why(id)] as const).filter(([, r]) => r !== '')
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (unreachable.length) log(`${ts} unreachable on this host (${unreachable.length}): ${unreachable.map(([n, r]) => `${n} (${r})`).join(', ')}`);
   const inFlight = new Set<string>(); // terminal handles with a send in flight
   /** Deliver one due wake. Only a submit awaits; everything else is synchronous, so a receipt update never interleaves. */
   const deliver = async (w: any): Promise<void> => {
@@ -551,8 +658,8 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
           && (r.task.event !== 'ALARM' || (typeof r.task.eventId === 'string' && TASK_ID.test(r.task.eventId)))));
       if (undeliverable.length) other.push(...new Set(undeliverable.map((r: any) => (DELIVERED_EVENTS.has(r.task?.event) ? 'TASK' : `TASK ${safeEvent(r.task?.event)}`))));
       if (other.length) { log(`${ts} ${name}: left alone (also carries ${other.join(',')}; the proof would record them delivered unseen)`); return; }
-      const entry = cfg.roster.find((e) => e.worker === id);
-      if (!entry) { log(`${ts} ${name}: not on roster`); return; }
+      const entry = receivers.entry(id, name);
+      if (!entry) { log(`${ts} ${name}: held (${receivers.why(id)} on this host)`); return; }
       const work = proofCoverage(w.proof);
       if (!work) { log(`${ts} ${name}: held (the proof's tick coverage cannot be established)`); return; }
       let prior = receipts[id];
