@@ -19,7 +19,7 @@ const get = (c = ctx(manager.id), appRef = appId) => Promise.resolve().then(() =
 const set = (input: Record<string, unknown>, c = ctx(manager.id), appRef = appId) =>
   Promise.resolve().then(() => M.setAppDeliverySettings({}, { appRef, input }, c));
 const oldSet = (input: Record<string, unknown>) => M.setAppTickerSettings({}, { appRef: appId, input }, ctx(manager.id));
-const defaults = { batchWindowSeconds: 120, busyDelaySeconds: 600, stuckWindowSeconds: 900, standbyEnabled: false, standbyEffective: false };
+const defaults = { batchWindowSeconds: 120, busyDelaySeconds: 600, stuckWindowSeconds: 900, standbyEnabled: false, standbyEffective: false, checkPeriodSeconds: 600, failedChecksToOverdue: 2 };
 async function code(p: Promise<unknown>, expected: string) {
   await expect(p).rejects.toMatchObject({ extensions: { code: expected } });
 }
@@ -184,7 +184,7 @@ describe('delivery settings #2025', () => {
     const { typeDefs } = await import('./typeDefs.js');
     const server = new ApolloServer<Context>({ typeDefs, resolvers });
     try {
-      const r = await server.executeOperation({ query: 'mutation($a:String!,$i:AppDeliverySettingsInput!){setAppDeliverySettings(appRef:$a,input:$i){batchWindowSeconds busyDelaySeconds stuckWindowSeconds standbyEnabled standbyEffective}}', variables: { a: appId, i: { busyDelaySeconds: 500 } } }, { contextValue: ctx(manager.id) });
+      const r = await server.executeOperation({ query: 'mutation($a:String!,$i:AppDeliverySettingsInput!){setAppDeliverySettings(appRef:$a,input:$i){batchWindowSeconds busyDelaySeconds stuckWindowSeconds standbyEnabled standbyEffective checkPeriodSeconds failedChecksToOverdue}}', variables: { a: appId, i: { busyDelaySeconds: 500 } } }, { contextValue: ctx(manager.id) });
       expect(r.body.kind).toBe('single');
       if (r.body.kind !== 'single') throw new Error('unexpected multipart result');
       expect(r.body.singleResult.errors).toBeUndefined();
@@ -198,5 +198,92 @@ describe('delivery settings #2025', () => {
       expect(text(await mcp.callTool('hadron_delivery_settings_set', { appRef: appId, session: plain.id, input: { busyDelaySeconds: 450 } }))).toContain('"busyDelaySeconds":450');
       expect(text(await mcp.callTool('hadron_delivery_settings_set', { appRef: appId, session: plain.id, input: { busyDelaySeconds: null } }))).toMatch(/^\[bad_user_input\]/);
     } finally { await server.stop(); }
+  });
+});
+
+describe('#2138 §3.2 — channel-check settings', () => {
+  it('defaults to 600 s and 2 missed periods', async () => {
+    expect(await get()).toMatchObject({ checkPeriodSeconds: 600, failedChecksToOverdue: 2 });
+  });
+
+  it('a manager changes both; omitted settings and the other fields are preserved', async () => {
+    const before = await get();
+    const out = await set({ checkPeriodSeconds: 300, failedChecksToOverdue: 3 });
+    expect(out).toMatchObject({ checkPeriodSeconds: 300, failedChecksToOverdue: 3, busyDelaySeconds: before.busyDelaySeconds, stuckWindowSeconds: before.stuckWindowSeconds });
+    expect(await set({ failedChecksToOverdue: 1 })).toMatchObject({ checkPeriodSeconds: 300, failedChecksToOverdue: 1 });
+    expect(await get()).toMatchObject({ checkPeriodSeconds: 300, failedChecksToOverdue: 1 });
+  });
+
+  it('refuses failedChecksToOverdue below 1 (and above 100), a period outside 60..86400, non-integers and null, changing nothing', async () => {
+    for (const input of [{ failedChecksToOverdue: 0 }, { failedChecksToOverdue: -1 }, { failedChecksToOverdue: 101 }, { failedChecksToOverdue: 1.5 },
+      { checkPeriodSeconds: 59 }, { checkPeriodSeconds: 86_401 }, { checkPeriodSeconds: 600.5 }]) {
+      await expect(set(input)).rejects.toMatchObject({ extensions: { code: 'DELIVERY_SETTINGS_OUT_OF_RANGE' } });
+    }
+    await expect(set({ checkPeriodSeconds: null })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await get()).toMatchObject({ checkPeriodSeconds: 600, failedChecksToOverdue: 2 });
+  });
+
+  it('only whoever manages the App changes them', async () => {
+    await expect(set({ checkPeriodSeconds: 300 }, ctx(member.id))).rejects.toThrow();
+    expect(await get()).toMatchObject({ checkPeriodSeconds: 600 });
+  });
+
+  it('the database bound holds under a bypassing write', async () => {
+    await expect(db.$executeRaw`UPDATE apps SET delivery_failed_checks_to_overdue = 0 WHERE id = ${appId}`).rejects.toThrow();
+    await expect(db.$executeRaw`UPDATE apps SET delivery_check_period_seconds = 30 WHERE id = ${appId}`).rejects.toThrow();
+  });
+});
+
+describe('#2138 §3.6 — the team pause', () => {
+  const pause = (paused: boolean, c = ctx(manager.id)) => Promise.resolve().then(() => M.setTeamPause({}, { appRef: appId, paused }, c));
+  const flag = async () => (await db.app.findUniqueOrThrow({ where: { id: appId } })).teamPausedAt;
+
+  it('whoever manages the App pauses and resumes; both are idempotent and a repeat keeps the original time', async () => {
+    expect(await flag()).toBeNull();
+    const first = await pause(true);
+    expect(first.teamPausedAt).toBeInstanceOf(Date);
+    await new Promise((r) => setTimeout(r, 15));
+    expect((await pause(true)).teamPausedAt).toEqual(first.teamPausedAt);
+    expect(await pause(false)).toEqual({ teamPausedAt: null });
+    expect(await pause(false)).toEqual({ teamPausedAt: null });
+    expect(await flag()).toBeNull();
+  });
+
+  it('lifting it records when it ended (teamResumedAt, which restarts every check clock); a repeat lift or a fresh pause keeps/clears nothing else', async () => {
+    const resumed = async () => (await db.app.findUniqueOrThrow({ where: { id: appId } })).teamResumedAt;
+    expect(await resumed()).toBeNull();
+    await pause(true);
+    expect(await resumed()).toBeNull();
+    await pause(false);
+    const at = await resumed();
+    expect(at).toBeInstanceOf(Date);
+    await new Promise((r) => setTimeout(r, 15));
+    await pause(false); // already resumed: a no-op, the time stays
+    expect(await resumed()).toEqual(at);
+  });
+
+  it('a worker cannot lift it, nor can a plain member, an outsider or an App key', async () => {
+    await pause(true);
+    await code(runAsActor({ workerId, agentId }, () => pause(false)), 'FORBIDDEN');
+    await expect(pause(false, ctx(member.id))).rejects.toThrow();
+    await expect(pause(false, ctx(outsider.id))).rejects.toThrow();
+    expect(await flag()).toBeInstanceOf(Date);
+  });
+
+  it('is separate from the worker\'s own pause: ending the team pause clears no self-pause, and a self-pause does not set the team flag', async () => {
+    const until = new Date(Date.now() + 3600_000);
+    await db.workerWakeSettings.create({ data: { workerId, pausedUntil: until } });
+    expect(await flag()).toBeNull();
+    await pause(true);
+    await pause(false);
+    expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId } })).pausedUntil).toEqual(until);
+  });
+
+  it('is exposed on the App and has an MCP twin', async () => {
+    await pause(true);
+    const { typeDefs } = await import('./typeDefs.js');
+    expect(typeDefs).toContain('teamPausedAt: DateTime');
+    const { TICKER_WRITE_TOOLS } = await import('../../../mcp/tickerTools.js');
+    expect(TICKER_WRITE_TOOLS).toContain('hadron_set_team_pause');
   });
 });

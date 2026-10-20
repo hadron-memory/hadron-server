@@ -26,7 +26,7 @@ import { resolveChannelRefId } from './entityRef/channelRef.js';
 import { composeWorkerUrn } from './entityRef/workerRef.js';
 import { normalizeUrnForLookup } from './urn.js';
 import { resolveRegister } from './resolveRegister.js';
-import { advanceReadState } from './channelReadState.js';
+import { advanceReadState, stampChannelCheck } from './channelReadState.js';
 import { raiseDeliveryMark, raiseReadIfMentionOnly } from './workerMarks.js';
 import { mentionsWorkerOf } from './mentionsReadResolution.js';
 import { mentionTokenOf } from './mentionToken.js';
@@ -1707,6 +1707,9 @@ export async function maybeAdvanceOwnChannelRead(
   // Placed BEFORE the #1628 opt-out: a read that declines the cursor advance
   // is still driving the session, so it still resumes it.
   if (session.lapsed && !(await reviveOwnLapsedSession(ctx, session.sessionId))) return null;
+  // #2138 §3.1: a read of the team channel through the worker's OWN session is a check, whatever it returned and
+  // whether or not it moves the cursor; another channel's read stamps nothing (stampChannelCheck).
+  await stampChannelCheck(ctx.db, session.workerId, args.channelId);
   // #1628: attribution is activity even when the caller will acknowledge only
   // after validating and delivering the page. Never skip the heartbeat above.
   if (args.advanceReadState === false) return null;
@@ -1910,5 +1913,8 @@ export async function markOwnTeamChatRead(
         return advanceReadState(tx as never, { workerId }, row.channel.id, args.seq);
       })
     : await advanceReadState(ctx.db, { workerId }, row.channel.id, args.seq);
+  // #2138 §3.1: a mark-read through the worker's own session is a check (even one that moves nothing). Stamped last, so a
+  // refused call above, or a resume refused inside its transaction, is not one.
+  await stampChannelCheck(ctx.db, workerId, row.channel.id);
   return { workerId, channelId: row.channel.id, lastSeenSeq };
 }

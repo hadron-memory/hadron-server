@@ -529,3 +529,14 @@ describe('dueness follows Tickers, not session liveness (Colin P3 on #1859)', ()
     expect(await db.workerDeliveryTaskEvent.count({ where: { undeliverableReason: 'dormant', deliveredAt: null } })).toBe(1);
   });
 });
+
+describe('#2138 §3.6 — a team pause silences task-event wakes too', () => {
+  it('a task.assigned wake is due, not due while the team is paused, due again when it resumes', async () => {
+    await assignedTo(liam);
+    expect(dueIds(await dueFor())).toEqual([liam.id]);
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: new Date() } });
+    expect(dueIds(await dueFor())).toEqual([]);
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: null } });
+    expect(dueIds(await dueFor())).toEqual([liam.id]);
+  });
+});

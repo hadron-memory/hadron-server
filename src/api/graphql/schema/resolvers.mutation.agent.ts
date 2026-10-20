@@ -120,6 +120,8 @@ export interface CreateAgentCoreInput {
   type?: 'ASSISTANT' | 'CHATBOT';
   surfaces?: string[];
   personaRole?: string | null;
+  /** #2138 §3.5: false = every worker cast from this Agent counts as having a task. Default true. */
+  usesTasks?: boolean | null;
 }
 
 /**
@@ -279,6 +281,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
         surfaces: surfaces ?? defaultSurfaces,
         // #928 persona dressing — pure metadata (see schema.prisma).
         personaRole: personaRoleNorm,
+        ...(input.usesTasks != null ? { usesTasks: input.usesTasks } : {}),
         createdBy: ctx.userId ?? ctx.clientId ?? null,
       },
       include: AGENT_INCLUDE,
@@ -398,7 +401,7 @@ async function requireKnownImportedAgent(
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string },
+      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
@@ -456,12 +459,13 @@ export const agentMutations = {
         type,
         surfaces,
         personaRole,
+        usesTasks,
       });
     },
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, registerDefaults }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; registerDefaults?: { mentionOnly?: boolean | null } | null },
+      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, registerDefaults }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; registerDefaults?: { mentionOnly?: boolean | null } | null },
       ctx: Context,
     ) => {
       // #929 review: normalize persona dressing (blank-after-trim clears).
@@ -786,6 +790,7 @@ export const agentMutations = {
           // #928 persona dressing — pure metadata. An explicit null (or a
           // blank-after-trim string) clears the field; omitted preserves.
           ...(personaRoleNorm !== undefined ? { personaRole: personaRoleNorm } : {}),
+          ...(usesTasks != null ? { usesTasks } : {}),
           // Spec 049 Phase 5: the install-row defaults — a scalar declaration,
           // stored as given; null clears to the platform defaults.
           ...(registerDefaults !== undefined
