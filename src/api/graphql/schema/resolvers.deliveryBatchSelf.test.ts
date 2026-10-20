@@ -181,6 +181,31 @@ describe('R57 own-live-session batches', () => {
     expect(page.batches).toHaveLength(1);
     expect(page.batches[0].text).toContain('standup moved');
   });
+  it('#2138: an inbox read with no team channel to check logs channel.check.miss NO_TEAM_CHANNEL (reason and route only) and still serves the read', async () => {
+    const s = await ownSession(); await postForBoth();
+    await db.channel.update({ where: { id: channel.id }, data: { deletedAt: new Date() } });
+    const page = await selfRead(s);
+    expect(Array.isArray(page.batches)).toBe(true);
+    const logs = await db.appLogEntry.findMany({ where: { appId: app.id, message: 'channel.check.miss' } });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ sessionId: s.id, detail: { reason: 'NO_TEAM_CHANNEL', via: 'inbox' } });
+  });
+  it('#2158 (George P2): a diagnostic write that FAILS never aborts a valid inbox read (the miss is logged outside the read transaction, best-effort)', async () => {
+    const s = await ownSession(); await postForBoth();
+    await db.channel.update({ where: { id: channel.id }, data: { deletedAt: new Date() } }); // no team channel -> a NO_TEAM_CHANNEL miss
+    await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION test_fail_check_miss() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'diagnostic write refused'; END $$ LANGUAGE plpgsql`);
+    await db.$executeRawUnsafe(`CREATE TRIGGER test_fail_check_miss BEFORE INSERT ON app_log FOR EACH ROW WHEN (NEW.message = 'channel.check.miss') EXECUTE FUNCTION test_fail_check_miss()`);
+    try {
+      const page = await selfRead(s);
+      expect(Array.isArray(page.batches)).toBe(true); // the read stands
+      // the read's own log entry committed: it was not rolled back with the failed diagnostic
+      expect(await db.appLogEntry.count({ where: { appId: app.id, sessionId: s.id, message: 'delivery.batch.read' } })).toBe(1);
+      expect(await db.appLogEntry.count({ where: { message: 'channel.check.miss' } })).toBe(0);
+    } finally {
+      await db.$executeRawUnsafe('DROP TRIGGER IF EXISTS test_fail_check_miss ON app_log');
+      await db.$executeRawUnsafe('DROP FUNCTION IF EXISTS test_fail_check_miss()');
+    }
+  });
   it('acks self with worker provenance, session user and no key, and retry changes nothing', async () => {
     const s = await ownSession(); await postForBoth(); const [b] = (await selfRead(s)).batches;
     expect(await selfAck(s, [b.id])).toEqual({ acknowledged: 1, unchanged: 0 });

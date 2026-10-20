@@ -1101,4 +1101,60 @@ describe('#2138 §3.1 — channel checks: lastCheckedAt', () => {
     const page = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, mentionsRef: worker.id }, userCtx({ sessionId }));
     expect(page.items.map((m: { seq: number }) => m.seq)).toEqual([1]);
   });
+
+  describe('channel.check.miss (log-only diagnostics)', () => {
+    const misses = () => db.appLogEntry.findMany({ where: { message: 'channel.check.miss' }, orderBy: { createdAt: 'asc' } });
+
+    it('a counted check logs nothing', async () => {
+      await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, userCtx({ sessionId }));
+      expect(await checkedAt(worker.id, channel.id)).toBeInstanceOf(Date);
+      expect(await misses()).toEqual([]);
+    });
+
+    it('a request that NAMED a session the server refused logs BINDING_REFUSED (reason and route only) and changes nothing else', async () => {
+      await post('one');
+      const page = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, userCtx({ sessionBindingRefused: true }));
+      expect(page.items.map((m: { seq: number }) => m.seq)).toEqual([1]);
+      expect(await checkedAt(worker.id, channel.id)).toBeNull();
+      const logs = await misses();
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatchObject({ appId: app.id, level: 'WARN', sessionId: null, detail: { reason: 'BINDING_REFUSED', via: 'read' } });
+      expect(Object.keys(logs[0].detail as object).sort()).toEqual(['reason', 'via']); // no worker, channel or content
+    });
+
+    it('a session that is not the caller\'s own live worker session logs SESSION_NOT_OWN_LIVE, carrying that session id', async () => {
+      await db.session.update({ where: { id: sessionId }, data: { endedAt: new Date() } });
+      await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, userCtx({ sessionId }));
+      expect(await checkedAt(worker.id, channel.id)).toBeNull();
+      const logs = await misses();
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatchObject({ sessionId, detail: { reason: 'SESSION_NOT_OWN_LIVE', via: 'read' } });
+    });
+
+    it("a worker of another App reading this App's team channel logs CROSS_APP and stamps nothing", async () => {
+      const foreign = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: otherApp.id, agentId: agent.id, name: 'Foreign', slug: 'foreign' } });
+      await db.registerEntry.create({ data: { id: generateId(), appId: otherApp.id, channelId: channel.id, attendeeWorkerId: foreign.id, role: 'BOTH' } });
+      const foreignSession = await db.session.create({ data: { id: generateId(), appId: otherApp.id, userId: user.id, workerId: foreign.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() } });
+      await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 20, offset: 0 }, userCtx({ sessionId: foreignSession.id }));
+      expect(await checkedAt(foreign.id, channel.id)).toBeNull();
+      const logs = await misses();
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatchObject({ sessionId: foreignSession.id, detail: { reason: 'CROSS_APP', via: 'read' } });
+    });
+
+    it('a dead session reading an ordinary (non-team) channel logs nothing either: only the team channel can miss', async () => {
+      const other = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:ops2', name: 'ops2', createdBy: user.id });
+      await db.registerEntry.create({ data: { id: generateId(), appId: app.id, channelId: other.channel.id, attendeeWorkerId: worker.id, role: 'BOTH' } });
+      await db.session.update({ where: { id: sessionId }, data: { endedAt: new Date() } });
+      await Q.channelMessages({}, { channelRef: other.channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 20, offset: 0 }, userCtx({ sessionId }));
+      expect(await misses()).toEqual([]);
+    });
+
+    it('a read of an ordinary (non-team) channel logs nothing even though it stamps nothing', async () => {
+      const other = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:ops', name: 'ops', createdBy: user.id });
+      await db.registerEntry.create({ data: { id: generateId(), appId: app.id, channelId: other.channel.id, attendeeWorkerId: worker.id, role: 'BOTH' } });
+      await Q.channelMessages({}, { channelRef: other.channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 20, offset: 0 }, userCtx({ sessionId }));
+      expect(await misses()).toEqual([]);
+    });
+  });
 });
