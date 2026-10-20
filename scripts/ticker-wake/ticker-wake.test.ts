@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Config, Runner } from '../orca-attention-router/router.js';
 import { buildSchema, parse, validate } from 'graphql';
 import { typeDefs } from '../../src/api/graphql/schema/typeDefs.js';
-import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync } from './ticker-wake.js';
+import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, ALARM_EVENT, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync } from './ticker-wake.js';
 import type { RunResult } from '../orca-attention-router/router.js';
 
 const RULE = '─'.repeat(112);
@@ -24,7 +24,8 @@ const MENTION = { kind: 'MENTION', ticker: null };
 const task = (id: string, event = 'ASSIGNED', eventId = `e-${id}`, chainIndex = 0) =>
   ({ kind: 'TASK', ticker: null, task: { id, eventId, chainIndex, event } });
 const taskEntry = (id: string, eventId = `e-${id}`, chainIndex = 0) => ({ eventId, chainIndex });
-const TASK = task('t1', 'ALARM');
+/** A task event this script never delivers (#1704: END_SESSION needs the host poller). */
+const TASK = task('t1', 'END_SESSION');
 const CONFIRMED = { ok: true, result: { send: { accepted: true, prompt: { requestId: 'r1', stages: ['input_accepted', 'turn_started'] } } } };
 const NO_ID_ACCEPTED = { ok: true, result: { send: { accepted: true, prompt: { stages: ['input_accepted'] } } } };
 /** A bare `--enter` reply (Hugo's host check, #26146): the raw input path, no request id, no stages. */
@@ -61,6 +62,11 @@ interface Fake {
   /** Bare `--enter` sends (no --text), by terminal handle (#2138 stranded drafts). */
   enters: string[];
   enterReply: (() => string) | null;
+  /** #1704: agentTeamEvents(taskId, alarmsOnly) replies, by task id. */
+  alarms: Record<string, unknown[]>;
+  /** When set, the alarm read answers this GraphQL error. */
+  alarmError: string | null;
+  alarmQueries: string[];
 }
 
 let dir: string;
@@ -73,6 +79,7 @@ function fake(): Fake {
     dueQueries: [], pages: 0, alwaysMore: false, ackReply: null, sendReply: null, dueError: null,
     incarnation: 'inc-1', retries: [], retryReply: null, run: undefined as any,
     lastCheckedAt: null, tasks: {}, evidenceQueries: [], checkError: null, enters: [], enterReply: null,
+    alarms: {}, alarmError: null, alarmQueries: [],
   };
   const fArg = (argv: string[], k: string): string | undefined => argv.find((a, i) => argv[i - 1] === '-F' && a.startsWith(`${k}=`))?.slice(k.length + 1);
   f.run = (argv) => {
@@ -89,6 +96,12 @@ function fake(): Fake {
         f.evidenceQueries.push(`worker ${fArg(argv, 'w')}`);
         if (f.checkError) return out({ errors: [{ message: f.checkError, extensions: { code: 'INTERNAL_SERVER_ERROR' } }] });
         return out({ data: { worker: { id: fArg(argv, 'w'), checkStatus: { lastCheckedAt: f.lastCheckedAt } } } });
+      }
+      if (q.includes('agentTeamEvents(')) {
+        const t = fArg(argv, 't') as string;
+        f.alarmQueries.push(`${fArg(argv, 'a')} ${t}`);
+        if (f.alarmError) return out({ errors: [{ message: f.alarmError, extensions: { code: 'INTERNAL_SERVER_ERROR' } }] });
+        return out({ data: { agentTeamEvents: f.alarms[t] ?? [] } });
       }
       if (q.includes('agentTask(')) {
         const t = fArg(argv, 't') as string;
@@ -416,9 +429,8 @@ describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
   });
 
   it.each([
-    ['ALARM', task('t1', 'ALARM')],
-    ['CHILD_FINISHED', task('t1', 'CHILD_FINISHED')],
     ['END_SESSION', task('t1', 'END_SESSION')],
+    ['an ALARM whose event id is not a plain id', task('t1', 'ALARM', 'e1; rm -rf ~')],
     ['a TASK reason without its task', { kind: 'TASK', ticker: null, task: null }],
     ['a task id that is not a plain id', task('t1; rm -rf ~', 'ASSIGNED')],
   ])('%s is left alone, alone or beside an assignment: no nudge, no ack, no receipt', async (_label, reason) => {
@@ -998,6 +1010,9 @@ describe('GraphQL contract with the server SDL (#2102 / R63)', () => {
   it('the evidence reads (worker check status, task state) validate', async () => {
     expect(validate(schema, parse(WORKER_CHECK)).map((e) => e.message)).toEqual([]);
     expect(validate(schema, parse(TASK_STATE)).map((e) => e.message)).toEqual([]);
+  });
+  it('the alarm read (#1704) validates', async () => {
+    expect(validate(schema, parse(ALARM_EVENT)).map((e) => e.message)).toEqual([]);
   });
 });
 
@@ -1902,5 +1917,143 @@ describe('#2138: a pass does not pay the turn-start wait per send (bounded concu
     expect(await main(['once'], { load: cfg, run: f.run, log: (l: string) => lines.push(l), sleep: async () => {} })).toBe(0);
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toHaveLength(1);
+  });
+});
+
+describe('#1704: stall ALARM and CHILD_FINISHED task wakes are delivered and named; END_SESSION is left alone', () => {
+  const PROBE = '`hadron team chat read --mentions-me --limit 1` (it prints `cursor #C; channel head #H`)';
+  const FULL = '`hadron team chat read --mentions-me --since C --all`';
+  const MARK = "only if that read succeeded and you saw all of its output (if your tool truncated or saved it, read the rest first; if you can't, don't mark), run `hadron team chat mark-read --through H` with the H that read printed";
+  const CHECK = `run ${PROBE}, then ${FULL} and act on the tagged messages it returns; ${MARK}`;
+  /** An alarm on task `t` as agentTeamEvents returns it. */
+  const alarm = (t: string, id = `e-${t}`, type = 'stall.not-started', acknowledgedAt: string | null = null) => ({ id, type, acknowledgedAt });
+  const receipts = () => (existsSync(receiptsFile()) ? JSON.parse(readFileSync(receiptsFile(), 'utf8')) : {});
+
+  it('an ALARM-only wake is nudged once, naming the task, the rule and the ack command, then acked (pinned text)', async () => {
+    const p = proof([], 'x', [taskEntry('t1', 'a1', 1)]);
+    f.alarms = { t1: [alarm('t1', 'a0', 'stall.no-progress'), alarm('t1', 'a1')] };
+    f.wakes = [wake('w-ada', 'Ada', [task('t1', 'ALARM', 'a1', 1)], p)];
+    await go();
+    expect(f.sent).toEqual([
+      `Hadron task wake (stall alarm stall.not-started on task t1): ${CHECK}; then act on task t1 (\`hadron team task get t1\`), `
+      + 'then acknowledge its alarm with `hadron team alarm ack a1` (this message is not an acknowledgement). No unfiltered chat catch-up.',
+    ]);
+    expect(f.alarmQueries).toEqual(['hrn:app:test:team t1']);
+    expect(f.acked).toEqual([p]);
+    expect(receipts()).toEqual({});
+  });
+
+  it('a CHILD_FINISHED-only wake is nudged once, naming the child task, then acked; no alarm read', async () => {
+    const p = proof([], 'x', [taskEntry('c1')]);
+    f.wakes = [wake('w-ada', 'Ada', [task('c1', 'CHILD_FINISHED')], p)];
+    await go();
+    expect(f.sent).toEqual([
+      `Hadron task wake (child task c1 finished): ${CHECK}; then review the finished child task (\`hadron team task get c1\`). No unfiltered chat catch-up.`,
+    ]);
+    expect(f.alarmQueries).toEqual([]);
+    expect(f.acked).toEqual([p]);
+  });
+
+  it('TICK + assignment + alarm + finished child + MENTION: ONE one-line nudge names them all, and one ack covers them', async () => {
+    const p = proof(['T:1'], 'x', [taskEntry('t1'), taskEntry('t2', 'a2'), taskEntry('c3')]);
+    f.alarms = { t2: [alarm('t2', 'a2', 'stall.owner-unreactive')] };
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1'), task('t2', 'ALARM', 'a2'), task('c3', 'CHILD_FINISHED'), MENTION], p)];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    const t = f.sent[0];
+    expect(t).toMatch(/^Hadron task wake \(assigned t1; stall alarm stall.owner-unreactive on task t2; child task c3 finished; ticker coordinator-tick\): /);
+    for (const c of ['`hadron team task get t1`', '`hadron team alarm ack a2`', '`hadron team task get c3`', 'hadron team chat mark-read --through H']) expect(t).toContain(c);
+    expect(t).not.toContain('\n');
+    expect(f.acked).toEqual([p]);
+  });
+
+  it('nudgeText keeps the assignment-only text unchanged', () => {
+    expect(nudgeText(['coordinator-tick'], [{ id: 't1', event: 'ASSIGNED' }])).toBe(nudgeText(['coordinator-tick'], ['t1']));
+    expect(nudgeText([], ['t1'])).toMatch(/^Hadron task assigned \(t1\): /);
+  });
+
+  it.each([
+    ['the alarm read fails', () => { f.alarmError = 'boom'; }, 'the alarm cannot be read'],
+    ['the alarm is not found on its task', () => { f.alarms = { t1: [alarm('t1', 'other')] }; }, "the alarm's rule cannot be established"],
+    ['the rule is not a plain rule', () => { f.alarms = { t1: [alarm('t1', 'e-t1', 'stall; rm -rf ~')] }; }, "the alarm's rule cannot be established"],
+    ['the alarm was acknowledged meanwhile', () => { f.alarms = { t1: [alarm('t1', 'e-t1', 'stall.not-started', iso(Date.now()))] }; }, 'acknowledged meanwhile'],
+  ])('%s: held, no nudge, no ack, no receipt', async (_label, arrange, why) => {
+    arrange();
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1', 'ALARM')], proof(['T:1'], 'x', [taskEntry('t1')]))];
+    await go();
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain(why);
+    expect(log()).not.toContain('rm -rf');
+    expect(log()).not.toContain('boom');
+    expect(receipts()).toEqual({});
+  });
+
+  it('a delivered alarm whose ack was lost is never named again: ack-only recovery, and a re-offer joined with a tick names only the ticker', async () => {
+    f.alarms = { t1: [alarm('t1')] };
+    const p1 = proof([], 'one', [taskEntry('t1')]);
+    f.wakes = [wake('w-ada', 'Ada', [task('t1', 'ALARM')], p1)];
+    f.ackReply = () => ({ errors: [{ message: 'down' }] });
+    await go();
+    expect(f.sent).toHaveLength(1);
+    f.ackReply = null;
+    const p2 = proof(['T:1'], 'two', [taskEntry('t1')]);
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1', 'ALARM')], p2)];
+    await go();
+    expect(f.sent).toHaveLength(2);
+    expect(f.sent[1]).toEqual(nudgeText(['coordinator-tick'], []));
+    expect(f.acked).toEqual([p2]);
+    expect(f.alarmQueries).toHaveLength(1); // a covered alarm is not read again
+  });
+
+  it('delivery is never an alarm acknowledgement: the script only ever acks the wake proof', async () => {
+    f.alarms = { t1: [alarm('t1')] };
+    const calls: string[][] = [];
+    const run = f.run;
+    f.run = (argv) => { calls.push(argv); return run(argv); };
+    f.wakes = [wake('w-ada', 'Ada', [task('t1', 'ALARM')], proof([], 'x', [taskEntry('t1')]))];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(calls.filter((a) => a[0] === 'hadron' && /mutation/.test(a[2] ?? '')).map((a) => a[2])).toEqual([ACK]);
+  });
+
+  describe('an ambiguous alarm or child send resolves on the channel check alone (its receiver need not be the assignee)', () => {
+    const T0 = Date.parse('2026-10-20T07:30:00.000Z');
+    const at = (ms: number) => ({ now: () => ms });
+    const timing = { anchorAt: iso(T0 - 600_000), deliverAfter: iso(T0 - 300_000), busyDeadline: iso(T0 + 3_600_000) };
+
+    it.each([
+      ['ALARM', task('t1', 'ALARM')],
+      ['CHILD_FINISHED', task('t1', 'CHILD_FINISHED')],
+    ])('%s: no task is recorded for task evidence, and a later check resolves it with no task read', async (_label, reason) => {
+      f.alarms = { t1: [alarm('t1')] };
+      f.lastCheckedAt = iso(T0 - 60_000);
+      f.wakes = [wake('w-ada', 'Ada', [reason], proof([], 'x', [taskEntry('t1')]), [], timing)];
+      f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+      await go(at(T0));
+      f.sendReply = null;
+      expect(receipts()['w-ada']).toMatchObject({ state: 'ambiguous', tasks: {}, checkedBefore: iso(T0 - 60_000) });
+      f.evidenceQueries = [];
+      f.lastCheckedAt = iso(T0 + 30_000);
+      await go(at(T0 + 120_000));
+      expect(f.sent).toHaveLength(1);
+      expect(f.evidenceQueries).toEqual(['worker w-ada']);
+      expect(log()).toContain('resolved as delivered on evidence');
+      expect(f.acked).toHaveLength(1);
+    });
+
+    it('an assignment joined with an alarm still needs the assigned task started', async () => {
+      f.alarms = { t2: [alarm('t2')] };
+      f.wakes = [wake('w-ada', 'Ada', [task('t1'), task('t2', 'ALARM')], proof([], 'x', [taskEntry('t1'), taskEntry('t2')]), [], timing)];
+      f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+      await go(at(T0));
+      f.sendReply = null;
+      expect(receipts()['w-ada'].tasks).toEqual({ 'task:e-t1#0': 't1' });
+      f.lastCheckedAt = iso(T0 + 30_000);
+      f.tasks = { t1: { id: 't1', status: 'PENDING', assignee: { kind: 'WORKER', id: 'w-ada' } } };
+      await go(at(T0 + 120_000));
+      expect(f.acked).toEqual([]);
+      expect(log()).toContain('a covered task is not started by this worker');
+    });
   });
 });
