@@ -27,6 +27,8 @@ const taskEntry = (id: string, eventId = `e-${id}`, chainIndex = 0) => ({ eventI
 const TASK = task('t1', 'ALARM');
 const CONFIRMED = { ok: true, result: { send: { accepted: true, prompt: { requestId: 'r1', stages: ['input_accepted', 'turn_started'] } } } };
 const NO_ID_ACCEPTED = { ok: true, result: { send: { accepted: true, prompt: { stages: ['input_accepted'] } } } };
+/** A bare `--enter` reply (Hugo's host check, #26146): the raw input path, no request id, no stages. */
+const ENTER_WRITTEN = { ok: true, result: { send: { accepted: true, bytesWritten: 1 } } };
 const ACCEPTED_ONLY = { ok: true, result: { send: { accepted: true, prompt: { requestId: 'r1', stages: ['input_accepted'] } } } };
 
 /** A proof whose payload carries the given ticks ("T:k"), like the server's (opaque to everything else). */
@@ -54,6 +56,9 @@ interface Fake {
   /** agentTask(id) replies, by task id. */
   tasks: Record<string, unknown>;
   evidenceQueries: string[];
+  /** Bare `--enter` sends (no --text), by terminal handle (#2138 stranded drafts). */
+  enters: string[];
+  enterReply: (() => string) | null;
 }
 
 let dir: string;
@@ -65,7 +70,7 @@ function fake(): Fake {
     wakes: [], acked: [], sent: [], idle: true, screen: { source: 'screen', tail: CLAUDE_IDLE },
     dueQueries: [], pages: 0, alwaysMore: false, ackReply: null, sendReply: null, dueError: null,
     incarnation: 'inc-1', retries: [], retryReply: null, run: undefined as any,
-    lastCheckedAt: null, tasks: {}, evidenceQueries: [],
+    lastCheckedAt: null, tasks: {}, evidenceQueries: [], enters: [], enterReply: null,
   };
   const fArg = (argv: string[], k: string): string | undefined => argv.find((a, i) => argv[i - 1] === '-F' && a.startsWith(`${k}=`))?.slice(k.length + 1);
   f.run = (argv) => {
@@ -100,6 +105,10 @@ function fake(): Fake {
       }
       if (argv[2] === 'wait') return out({ ok: f.idle, result: { wait: { satisfied: f.idle } }, error: f.idle ? undefined : { code: 'timeout' } });
       if (argv[2] === 'read') return out({ ok: true, result: { terminal: f.screen } });
+      if (argv[2] === 'send' && !argv.includes('--text')) {
+        f.enters.push(argv[argv.indexOf('--terminal') + 1]);
+        return { code: 0, stdout: f.enterReply ? f.enterReply() : JSON.stringify(ENTER_WRITTEN), stderr: '' };
+      }
       if (argv[2] === 'send' && argv.includes('--retry-request')) {
         f.retries.push(argv[argv.indexOf('--retry-request') + 1]);
         return { code: 0, stdout: f.retryReply ? f.retryReply() : JSON.stringify(ACCEPTED_ONLY), stderr: '' };
@@ -1532,6 +1541,160 @@ describe('#2138: an ambiguous receipt is resolved on evidence, never on a timeou
     expect(f.sent[1]).toContain('eden-queue-tick');
     expect(f.sent[1]).not.toContain('coordinator-tick');
     expect(f.acked).toHaveLength(1);
+  });
+});
+
+describe('#2138: a stranded draft gets ONE bare Enter, never retyped (proposal #26135, GO #26144)', () => {
+  // Orca accepted our text but the Enter never submitted it: the composer still holds exactly that text, so neither the
+  // reissue (an idempotent replay, Hugo #26146) nor the #2154 evidence path can run.
+  const T0 = Date.parse('2026-10-20T07:30:00.000Z');
+  const at = (ms: number) => ({ now: () => ms });
+  const timing = { anchorAt: iso(T0 - 600_000), deliverAfter: iso(T0 - 300_000), busyDeadline: iso(T0 + 3_600_000) };
+  const receipt = () => JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada'];
+  const BUSY = ['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'];
+  /** Leave an accepted-but-unconfirmed send whose text is still in the composer; returns that text. */
+  const stranded = async (): Promise<string> => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+    await go(at(T0));
+    f.sendReply = null;
+    const text = receipt().text as string;
+    f.screen = { source: 'screen', tail: CLAUDE_IDLE, draft: text };
+    lines = [];
+    return text;
+  };
+
+  it('composer holds exactly our text, idle, 60 s after the send: one bare Enter, no text, intent recorded, still ambiguous', async () => {
+    await stranded();
+    await go(at(T0 + 60_000));
+    expect(f.enters).toEqual(['term_a']);
+    expect(f.sent).toHaveLength(1); // nothing typed again
+    expect(f.retries).toEqual([]); // a reissue only replays the receipt
+    expect(f.acked).toEqual([]);
+    expect(receipt()).toMatchObject({ state: 'ambiguous', requestId: 'r1', resubmittedAt: T0 + 60_000 });
+    expect(log()).toContain('stranded draft submitted with one Enter');
+  });
+
+  it('after the Enter, the next pass resolves it on evidence as in #2154 (composer empty, channel checked)', async () => {
+    await stranded();
+    await go(at(T0 + 60_000));
+    f.screen = { source: 'screen', tail: CLAUDE_IDLE };
+    f.lastCheckedAt = iso(T0 + 70_000);
+    lines = [];
+    await go(at(T0 + 120_000));
+    expect(f.enters).toHaveLength(1);
+    expect(f.acked).toHaveLength(1);
+    expect(log()).toContain('resolved as delivered on evidence');
+  });
+
+  it('trailing whitespace on the draft is ignored', async () => {
+    const text = await stranded();
+    f.screen = { ...f.screen, draft: `${text}  \n` };
+    await go(at(T0 + 60_000));
+    expect(f.enters).toEqual(['term_a']);
+  });
+
+  it('a differing, partial or extended draft holds untouched: it may be someone else\'s input', async () => {
+    const text = await stranded();
+    for (const draft of [text.slice(0, -5), `${text} and more`, `x${text}`, 'half typed']) {
+      f.screen = { source: 'screen', tail: CLAUDE_IDLE, draft };
+      await go(at(T0 + 60_000));
+    }
+    expect(f.enters).toEqual([]);
+    expect(receipt().resubmittedAt).toBeUndefined();
+  });
+
+  it('our draft plus anything else on the composer line holds', async () => {
+    const text = await stranded();
+    f.screen = { source: 'screen', tail: [...CLAUDE_IDLE.slice(0, 3), RULE, '❯ more text', RULE, CLAUDE_IDLE[6]], draft: text };
+    await go(at(T0 + 60_000));
+    expect(f.enters).toEqual([]);
+  });
+
+  it('a busy terminal holds, even past the busy deadline', async () => {
+    const text = await stranded();
+    f.idle = false;
+    f.screen = { source: 'screen', tail: BUSY, draft: text };
+    await go(at(T0 + 3_700_000));
+    expect(f.enters).toEqual([]);
+    expect(receipt().resubmittedAt).toBeUndefined();
+  });
+
+  it('under 60 s since the send holds, so a slow submit still in progress is never raced', async () => {
+    await stranded();
+    await go(at(T0 + 59_999));
+    expect(f.enters).toEqual([]);
+    expect(receipt().resubmittedAt).toBeUndefined();
+  });
+
+  it('a second pass never sends a second Enter; still stranded after it, the entry needs a person', async () => {
+    await stranded();
+    await go(at(T0 + 60_000));
+    lines = [];
+    await go(at(T0 + 120_000));
+    await go(at(T0 + 180_000));
+    expect(f.enters).toHaveLength(1);
+    expect(f.sent).toHaveLength(1);
+    expect(log()).toContain('needs a person');
+  });
+
+  it('the intent is written before the keystroke: if it cannot be recorded, no Enter is sent', async () => {
+    await stranded();
+    mkdirSync(`${receiptsFile()}.${process.pid}.tmp`);
+    try { await go(at(T0 + 60_000)); } catch { /* may throw or log */ }
+    expect(f.enters).toEqual([]);
+    rmSync(`${receiptsFile()}.${process.pid}.tmp`, { recursive: true, force: true });
+    expect(receipt().resubmittedAt).toBeUndefined();
+  });
+
+  it('a failed or unparsable Enter reply is never retried: one keystroke per entry', async () => {
+    await stranded();
+    f.enterReply = () => 'not json';
+    await go(at(T0 + 60_000));
+    await go(at(T0 + 120_000));
+    expect(f.enters).toHaveLength(1);
+    expect(receipt().resubmittedAt).toBe(T0 + 60_000);
+  });
+
+  it('dry run is a no-op', async () => {
+    await stranded();
+    await go({ ...at(T0 + 60_000), dry: true });
+    expect(f.enters).toEqual([]);
+    expect(receipt().resubmittedAt).toBeUndefined();
+  });
+
+  it('a request Orca never reported accepted gets no Enter', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    const failed = JSON.stringify({ ok: false, error: { code: 'timeout' }, requestId: 'r9' });
+    f.sendReply = () => failed;
+    f.retryReply = () => failed;
+    await go(at(T0));
+    f.screen = { source: 'screen', tail: CLAUDE_IDLE, draft: receipt().text };
+    await go(at(T0 + 60_000));
+    expect(f.enters).toEqual([]);
+  });
+
+  it('another receiver gets no Enter', async () => {
+    await stranded();
+    f.incarnation = 'inc-2';
+    await go(at(T0 + 60_000));
+    expect(f.enters).toEqual([]);
+  });
+
+  it('the draft text never reaches the log', async () => {
+    const text = await stranded();
+    await go(at(T0 + 60_000));
+    expect(log()).not.toContain(text.slice(0, 40));
+  });
+
+  it('a malformed resubmittedAt stops the pass (fail closed)', async () => {
+    await stranded();
+    for (const v of ['x', null, {}]) {
+      const r = JSON.parse(readFileSync(receiptsFile(), 'utf8'));
+      r['w-ada'].resubmittedAt = v;
+      writeFileSync(receiptsFile(), JSON.stringify(r));
+      await expect((async () => go(at(T0 + 60_000)))()).rejects.toThrow(/receipts malformed/);
+    }
   });
 });
 
