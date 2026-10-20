@@ -1482,7 +1482,7 @@ describe('#2138: an ambiguous receipt is resolved on evidence, never on a timeou
 
   it('a legacy receipt covering a task with no recorded task identity is held, never guessed', async () => {
     mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
-    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1', 'task:e-gone#0'], receiver: 'term_a#inc-1', at: T0, detail: 'accepted, turn start not confirmed (input_accepted)', text: 't', handle: 'term_a', requestId: 'r1' } }));
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1', 'task:e-gone#0'], receiver: 'term_a#inc-1', at: T0, detail: 'accepted, turn start not confirmed (input_accepted)', text: 't', handle: 'term_a', requestId: 'r1', checkedBefore: null } }));
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
     f.lastCheckedAt = iso(T0 + 60_000);
     await go(at(T0 + 120_000));

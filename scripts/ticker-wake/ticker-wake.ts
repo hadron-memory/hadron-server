@@ -55,7 +55,8 @@
  *  - an ambiguous send is resolved WITHOUT a person only on evidence (#2138, proposal #26055, approved #26060): after
  *    its request is reissued by id and still not confirmed, it becomes a delivered receipt only when Orca accepted the
  *    input, the receiver is the same, the composer reads provably empty, and the worker's own session checked the team
- *    channel after the send (any covered task must also be STARTED by it). A timeout alone never resolves it: after 2
+ *    channel after the send: a later lastCheckedAt than the one read just before the send, both on the server's clock
+ *    (Ada #26165; any covered task must also be STARTED by it). A timeout alone never resolves it: after 2
  *    cadences without evidence it stays held and is logged as needing a person.
  *  - a STRANDED DRAFT (#2138, Ada #26150) is DETECTED, never submitted: Orca accepted our text but the Enter never
  *    submitted it, so the composer holds exactly that text and neither the reissue (an idempotent replay of the stored
@@ -136,8 +137,6 @@ export const DELIVERY_POOL = 8;
 export const NEEDS_PERSON_AFTER_MS = 20 * 60 * 1000;
 /** A draft still in the composer this long after its send counts as stranded, not as a slow submit still in progress. */
 export const STRANDED_AFTER_MS = 60_000;
-/** A channel check counts as after the send only past this margin, so host/server clock skew cannot pass an earlier one. */
-export const CHECK_CLOCK_MARGIN_MS = 5_000;
 /** The task states that prove the assignee saw its assignment. */
 const TASK_SEEN: ReadonlySet<string> = new Set(['STARTED', 'FINISHED']);
 /** Orca took the input (send.accepted) but no turn start was seen: the only ambiguity evidence may resolve. */
@@ -162,8 +161,10 @@ interface Delivered { state: 'sent'; coverage: string[]; receiver: string; at: n
  * coverage key THIS send newly named to its task id, recorded at send time because starting the task removes its wake
  * (#2154 P2); absent on a receipt written before it existed, which then cannot be resolved on task evidence.
  * `strandedAt` is when the send was first seen stranded in the composer, recorded once and never rewritten.
+ * `checkedBefore` is the worker's `lastCheckedAt` as the SERVER reported it just before the send (null: never checked),
+ * so delivery evidence compares two server times (#2138, Ada #26165); absent on an older receipt, which then holds.
  */
-interface Ambiguous { state: 'ambiguous'; coverage: string[]; receiver: string; at: number; detail: string; text: string; handle: string; requestId?: string; tasks?: Record<string, string>; strandedAt?: number }
+interface Ambiguous { state: 'ambiguous'; coverage: string[]; receiver: string; at: number; detail: string; text: string; handle: string; requestId?: string; tasks?: Record<string, string>; strandedAt?: number; checkedBefore?: string | null }
 type Receipt = Delivered | Ambiguous;
 type Receipts = Record<string, Receipt>; // by worker id
 
@@ -204,7 +205,8 @@ function loadReceipts(dir: string): Receipts {
     if (r.state === 'sent') continue;
     if (r.state !== 'ambiguous' || typeof r.detail !== 'string' || typeof r.text !== 'string' || typeof r.handle !== 'string'
       || (r.requestId !== undefined && typeof r.requestId !== 'string')
-      || (r.strandedAt !== undefined && !(typeof r.strandedAt === 'number' && Number.isFinite(r.strandedAt)))) return bad();
+      || (r.strandedAt !== undefined && !(typeof r.strandedAt === 'number' && Number.isFinite(r.strandedAt)))
+      || (r.checkedBefore !== undefined && r.checkedBefore !== null && !(typeof r.checkedBefore === 'string' && Number.isFinite(Date.parse(r.checkedBefore))))) return bad();
     if (r.tasks !== undefined && (r.tasks === null || typeof r.tasks !== 'object' || Array.isArray(r.tasks)
       || !Object.entries(r.tasks).every(([k, v]) => k.startsWith('task:') && r.coverage.includes(k) && typeof v === 'string' && TASK_ID.test(v)))) return bad();
   }
@@ -372,17 +374,28 @@ function ackCovered(cfg: Config, run: Runner, workerId: string, proof: string, c
 }
 
 /**
- * Server evidence that an accepted nudge was delivered: the worker's own channel check after the send, and every
- * covered task STARTED (or finished) by this worker. Null when the evidence holds, else why it does not; a failed read
- * is "no evidence", never an error.
+ * The worker's own last team-channel check, as the server stamped it (its database clock): an ISO time, or null when it
+ * has never checked. Throws a SafeError when the read fails or the value is not a time.
+ */
+function lastChecked(cfg: Config, run: Runner, workerId: string): string | null {
+  const v = gql(run, [cfg.hadronCli, 'api', WORKER_CHECK, '-F', `w=${workerId}`, '-F', `a=${cfg.app}`])?.worker?.checkStatus?.lastCheckedAt;
+  if (v === null) return null;
+  if (typeof v !== 'string' || !Number.isFinite(Date.parse(v))) throw new SafeError('check status carries no time');
+  return v;
+}
+
+/**
+ * Server evidence that an accepted nudge was delivered: a channel check by the worker's own session LATER than the one
+ * recorded just before the send, and every covered task STARTED (or finished) by this worker. Both check times are the
+ * server's, so host/server clock skew cannot move the comparison either way (Liam #26163: alpha's DB ran ~19 s behind
+ * the host). Null when the evidence holds, else why it does not; a failed read is "no evidence", never an error.
  */
 function deliveryEvidence(cfg: Config, run: Runner, workerId: string, prior: Ambiguous): string | null {
-  let checked: number;
-  try {
-    const v = gql(run, [cfg.hadronCli, 'api', WORKER_CHECK, '-F', `w=${workerId}`, '-F', `a=${cfg.app}`])?.worker?.checkStatus?.lastCheckedAt;
-    checked = typeof v === 'string' ? Date.parse(v) : NaN;
-  } catch (e) { return `the worker's check status is unreadable (${describeError(e)})`; }
-  if (!Number.isFinite(checked) || checked <= prior.at + CHECK_CLOCK_MARGIN_MS) return 'no channel check since the send';
+  if (prior.checkedBefore === undefined) return 'the pre-send check was not recorded with the send';
+  let checked: string | null;
+  try { checked = lastChecked(cfg, run, workerId); } catch (e) { return `the worker's check status is unreadable (${describeError(e)})`; }
+  const before = prior.checkedBefore === null ? -Infinity : Date.parse(prior.checkedBefore);
+  if (checked === null || !(Date.parse(checked) > before)) return 'no channel check since the send';
   // Only the tasks this send newly named need proof; a covered task with no recorded identity (a legacy receipt) holds.
   if (!prior.tasks && prior.coverage.some((c) => c.startsWith('task:'))) return 'a covered task was not recorded with the send';
   for (const taskId of Object.values(prior.tasks ?? {})) {
@@ -636,9 +649,15 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
         // receipt write fails, after Orca took the input, this entry is what stops the next pass from typing the same wake again:
         // it is an ambiguous record without a request identity, which is held for a human and never retyped or acked. If the
         // intent itself cannot be written, nothing is sent.
+        // The worker's last check on the SERVER clock, so a later pass can tell a check after this send from the one before.
+        let checkedBefore: string | null;
+        try { checkedBefore = lastChecked(cfg, run, id); } catch (e) {
+          log(`${ts} ${name}: held (the worker's check status is unreadable before the send: ${describeError(e)}); nothing sent`);
+          return;
+        }
         const before = receipts[id];
         const restore = (): void => { if (before) receipts[id] = before; else delete receipts[id]; };
-        receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: 'send intent recorded before submission; outcome unknown', text, handle, tasks };
+        receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: 'send intent recorded before submission; outcome unknown', text, handle, tasks, checkedBefore };
         try { saveReceipts(stateDir, receipts); } catch (e) {
           restore();
           log(`${ts} ${name}: held (the send intent could not be recorded: ${errno(e)}); nothing sent`);
@@ -655,7 +674,7 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
         }
         if (r.kind === 'uncertain') {
           // Never an ack, never a fresh type: recorded with its request identity so it can be reconciled.
-          receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: r.detail, text, handle, tasks, ...(r.requestId ? { requestId: r.requestId } : {}) };
+          receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: r.detail, text, handle, tasks, checkedBefore, ...(r.requestId ? { requestId: r.requestId } : {}) };
           try { saveReceipts(stateDir, receipts); } catch (e) { log(`${ts} ${name}: could not update the send record (${errno(e)}); the earlier intent stays and holds the wake`); }
           log(`${ts} ${name}: send not confirmed (${safeDetail(r.detail)}); left for reconciliation`);
           return;
