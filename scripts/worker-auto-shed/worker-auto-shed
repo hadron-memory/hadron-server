@@ -97,10 +97,24 @@ name=$(basename "$cwd")
 
 # Cooldown: never shed the same worktree twice within 10 minutes.
 stamp="$STATE_DIR/${name}.last-auto-shed"
+# #2163 part 1 (Hugo 2026-10-20): a second PreCompact while the stopped process
+# is still dying must BLOCK, or the compaction completes in the dying process
+# and the relaunch opens on a compaction summary. Block only when the earlier
+# fire really stopped a process and that same process is still alive; if the
+# earlier fire stopped nothing, blocking would wedge a live, unshed agent, so
+# compaction is allowed as before.
+killmark="$STATE_DIR/${name}.last-auto-shed-pid"
 if [ -f "$stamp" ] && [ $(( $(date +%s) - $(stat -c %Y "$stamp") )) -lt 600 ]; then
+  kp=$(cat "$killmark" 2>/dev/null)
+  if [ -n "$kp" ] && kill -0 "$kp" 2>/dev/null && [ "${CLAUDE_PID:-$kp}" = "$kp" ]; then
+    log "skip: $name shed within the last 10 minutes (loop guard); stopped pid $kp still exiting, BLOCKING compaction"
+    echo "worker-auto-shed: this session is being replaced after an auto-shed; compaction blocked" >&2
+    exit 2
+  fi
   log "skip: $name shed within the last 10 minutes (loop guard)"
   exit 0
 fi
+rm -f "$killmark"
 touch "$stamp"
 
 # Safety net: the full transcript survives, timestamped, for mining/audit.
@@ -121,6 +135,14 @@ if [ $? -eq 0 ]; then
   log "$name: resume claim written (60s window; lapses unused)"
 else
   log "$name: resume claim write FAILED (continuing — binding recovery stands): $claim_out"
+fi
+
+# Mechanical handoff (hadron-server#2131): a PreCompact hook cannot ask the
+# agent for a handoff, so write one FROM the transcript before the kill.
+# Skipped in DRY mode; any failure is logged and never blocks the shed.
+if [ "${WORKER_AUTO_SHED_DRY:-0}" != "1" ] && [ -x "$HOME/.local/bin/worker-auto-shed-handoff" ]; then
+  ho_out=$("$HOME/.local/bin/worker-auto-shed-handoff" "$cwd" "$transcript" 2>&1 | tail -3)
+  log "$name: auto handoff attempted: $ho_out"
 fi
 
 
@@ -159,6 +181,7 @@ stop_pid() {
     [ -z "$q" ] || [ "$q" = "0" ] && break
     if tr '\0' ' ' < /proc/$q/cmdline 2>/dev/null | grep -q 'worker-supervise'; then
       log "$name: stopping claude pid $1 (cmdline-verified, supervised)"
+      echo "$1" > "$killmark"
       kill "$1" 2>>"$LOG"
       return 0
     fi
@@ -171,7 +194,8 @@ if [ -n "${CLAUDE_PID:-}" ] && [ "$CLAUDE_PID" -gt 0 ] 2>/dev/null \
    && [ "$CLAUDE_PID" != "$$" ] && kill -0 "$CLAUDE_PID" 2>/dev/null \
    && is_claude_pid "$CLAUDE_PID"; then
   stop_pid "$CLAUDE_PID"
-  exit 0
+  echo "worker-auto-shed: session stopped for an auto-shed; compaction blocked" >&2
+  exit 2
 fi
 p=$$
 for _ in $(seq 1 6); do
@@ -179,7 +203,8 @@ for _ in $(seq 1 6); do
   [ -z "$p" ] || [ "$p" = "0" ] && break
   if [ "$p" -gt 1 ] 2>/dev/null && kill -0 "$p" 2>/dev/null && is_claude_pid "$p"; then
     stop_pid "$p"
-    exit 0
+    echo "worker-auto-shed: session stopped for an auto-shed; compaction blocked" >&2
+    exit 2
   fi
 done
 # Booby-trap fix (Hugo finding, 2026-10-13): the prompt above was written
