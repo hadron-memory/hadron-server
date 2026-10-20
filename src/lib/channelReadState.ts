@@ -165,6 +165,23 @@ export async function recordCheckMiss(
   }
 }
 
+/**
+ * The inbox read stamped no team channel: log NO_TEAM_CHANNEL when the App truly has none (none provisioned, or deleted).
+ * Called AFTER the read's transaction, best-effort and log-only: it never throws and cannot abort or alter the read.
+ */
+export async function recordNoTeamChannelMiss(db: Db, args: { appId: string; sessionId: string }): Promise<void> {
+  try {
+    // loc-scope-ok: scoped to this App's own memories (memory.appId), not a bare loc
+    const own = await db.channel.findFirst({ where: { loc: TEAM_CHAT_LOC, deletedAt: null, memory: { appId: args.appId } }, select: { id: true } });
+    if (own) return;
+    await db.appLogEntry.create({
+      data: { appId: args.appId, level: 'WARN', sessionId: args.sessionId, message: 'channel.check.miss', detail: { reason: 'NO_TEAM_CHANNEL', via: 'inbox' } },
+    });
+  } catch {
+    // diagnostics only
+  }
+}
+
 /** The attendee's cursors on a set of Channels; a Channel with no row reads 0. */
 export async function readStatesFor(db: Db, attendee: RegisterAttendee, channelIds: string[]): Promise<Map<string, number>> {
   if (channelIds.length === 0) return new Map();
