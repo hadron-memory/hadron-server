@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Config, Runner } from '../orca-attention-router/router.js';
 import { buildSchema, parse, validate } from 'graphql';
 import { typeDefs } from '../../src/api/graphql/schema/typeDefs.js';
-import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, DELIVERY_POOL, SUBMIT_PROBE_S } from './ticker-wake.js';
+import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync } from './ticker-wake.js';
 import type { RunResult } from '../orca-attention-router/router.js';
 
 const RULE = '─'.repeat(112);
@@ -1536,6 +1536,13 @@ describe('#2138: a pass does not pay the turn-start wait per send (bounded concu
     st.pending.shift()!();
     await expect(p).rejects.toThrow('boom');
     expect(f.acked).toHaveLength(1); // W0 completed: receipt then ack
+  });
+
+  it('runCommandAsync: a real process answers with its exit code and output; a spawn failure is code 1 with EMPTY stdout', async () => {
+    expect(await runCommandAsync(['node', '-e', 'process.stdout.write("ok"); process.exit(3)'])).toMatchObject({ code: 3, stdout: 'ok' });
+    expect(await runCommandAsync(['/nonexistent/ticker-wake-binary'])).toMatchObject({ code: 1, stdout: '' });
+    const [a, b] = await Promise.all([1, 2].map(() => (async () => { const t = Date.now(); await runCommandAsync(['node', '-e', 'setTimeout(() => {}, 400)']); return Date.now() - t; })()));
+    expect(Math.max(a, b)).toBeLessThan(1500); // the two overlap; they do not queue behind each other
   });
 
   it('production entry wires the real async runner; a test runner without one is wrapped', async () => {

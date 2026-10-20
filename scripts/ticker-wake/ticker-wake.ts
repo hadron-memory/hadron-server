@@ -65,14 +65,37 @@
  * usage: tsx ticker-wake.ts once [--dry] [--budget <seconds>=300]
  *        tsx ticker-wake.ts loop [--interval <seconds>=120] [--budget <seconds>=interval]
  */
+import { spawn } from 'node:child_process';
 import { linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   loadConfig, DEFAULT_CONFIG, runCommand, listTerminals, resolveTerminal,
   readScreen, promptIsEmptyFromTerm, screenAgentFamily, isIdle, idleProofAbovePrompt,
-  type Config, type Runner,
+  CALL_TIMEOUT_MS, type Config, type Runner, type RunResult,
 } from '../orca-attention-router/router.js';
+
+/** A runner that does not block: the sends of different workers overlap. */
+export type AsyncRunner = (argv: string[]) => Promise<RunResult>;
+
+/**
+ * The asynchronous twin of the router's `runCommand`, with the same fail-closed contract: a spawn error or a call past
+ * the hard timeout (SIGKILL) is code 1 with EMPTY stdout, so a result the failure invalidated never reaches a caller.
+ */
+export const runCommandAsync: AsyncRunner = (argv) => new Promise((resolveRun) => {
+  let stdout = '';
+  let stderr = '';
+  let done = false;
+  const finish = (r: RunResult): void => { if (!done) { done = true; clearTimeout(timer); resolveRun(r); } };
+  const child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
+  const timer = setTimeout(() => { child.kill('SIGKILL'); finish({ code: 1, stdout: '', stderr: `call exceeded ${CALL_TIMEOUT_MS}ms and was killed` }); }, CALL_TIMEOUT_MS);
+  child.stdout.setEncoding('utf8').on('data', (d: string) => { stdout += d; });
+  child.stderr.setEncoding('utf8').on('data', (d: string) => { stderr += d; });
+  child.on('error', (e: NodeJS.ErrnoException) => finish({ code: 1, stdout: '', stderr: `call failed: ${e.code ?? 'error'}` }));
+  child.on('close', (code, signal) => finish(code === null
+    ? { code: 1, stdout: '', stderr: `call ended by ${signal ?? 'a signal'}` }
+    : { code, stdout, stderr }));
+});
 
 export const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{worker{id name} reasons{kind ticker{id name} task{id eventId chainIndex event}} proof anchorAt deliverAfter busyDeadline} pageInfo{hasNextPage endCursor}}}`;
 export const ACK = `mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowledged unchanged}}`;
@@ -92,6 +115,15 @@ export const DEFAULT_ONCE_BUDGET_S = 300;
 /** A proof older than this is re-fetched before its ack: the server refuses one past 15 minutes (WAKE_PROOF_MAX_AGE_MS). */
 export const PROOF_REFRESH_AFTER_MS = 10 * 60 * 1000;
 /** An ambiguous send with no delivery evidence after this long (2 cadences of the 600 s team-tick) is listed for a person. */
+/**
+ * How long a send observes the accepted prompt for a turn start (`--wait-submit`). Orca only observes for this long;
+ * a timeout returns the input-accepted receipt and never resends. It almost never confirms in time (#26099: two 15 s
+ * observations were ~30 s of every resolve+send), and since #2154 an accepted send is resolved on evidence later, so a
+ * short look is enough. Its own constant: `submitWaitS` belongs to the shared router config.
+ */
+export const SUBMIT_PROBE_S = 2;
+/** Sends in flight at once. Each lane is one terminal; the reads around a send stay serial. */
+export const DELIVERY_POOL = 8;
 export const NEEDS_PERSON_AFTER_MS = 20 * 60 * 1000;
 /** A channel check counts as after the send only past this margin, so host/server clock skew cannot pass an earlier one. */
 export const CHECK_CLOCK_MARGIN_MS = 5_000;
@@ -106,8 +138,11 @@ export const ASSIGNMENT_EVENTS: ReadonlySet<string> = new Set(['ASSIGNED', 'REAS
 const TASK_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 type Log = (line: string) => void;
-/** `budgetMs`: no new delivery starts once this long has passed since the pass began (default DEFAULT_ONCE_BUDGET_S). */
-export interface Opts { dry?: boolean; now?: () => number; budgetMs?: number }
+/**
+ * `budgetMs`: no new delivery starts once this long has passed since the pass began (default DEFAULT_ONCE_BUDGET_S).
+ * `runAsync`: runs the sends, so they can overlap; without it the synchronous runner is wrapped (tests).
+ */
+export interface Opts { dry?: boolean; now?: () => number; budgetMs?: number; runAsync?: AsyncRunner }
 
 /** What a confirmed send covered, and who received it. */
 interface Delivered { state: 'sent'; coverage: string[]; receiver: string; at: number }
@@ -400,13 +435,13 @@ function classify(stdout: string): Submission {
  * prior request is reissued, which Orca binds to the same prompt payload and
  * terminal incarnation: it reports that request's state and never types twice.
  */
-export function submit(cfg: Config, run: Runner, handle: string, text: string, retryRequestId?: string): Submission {
-  const argv = [cfg.orcaCli, 'terminal', 'send', '--terminal', handle, '--text', text, '--enter', '--wait-submit', String(cfg.submitWaitS), '--json'];
+export async function submit(cfg: Config, run: AsyncRunner, handle: string, text: string, retryRequestId?: string): Promise<Submission> {
+  const argv = [cfg.orcaCli, 'terminal', 'send', '--terminal', handle, '--text', text, '--enter', '--wait-submit', String(SUBMIT_PROBE_S), '--json'];
   if (retryRequestId) argv.push('--retry-request', retryRequestId);
-  const first = classify(run(argv).stdout);
+  const first = classify((await run(argv)).stdout);
   // An ambiguous transport failure that names its request is reissued ONCE with that same request identity.
   if (!retryRequestId && first.kind === 'uncertain' && first.requestId && !first.stages.length) {
-    const again = classify(run([...argv, '--retry-request', first.requestId]).stdout);
+    const again = classify((await run([...argv, '--retry-request', first.requestId])).stdout);
     const requestId = again.requestId ?? first.requestId;
     // Once a request may have been submitted, only a confirmation resolves it. A failed same-id retry (even a structured
     // refusal that carries no id) does not prove the original never submitted: it stays uncertain.
@@ -416,10 +451,11 @@ export function submit(cfg: Config, run: Runner, handle: string, text: string, r
   return first;
 }
 
-export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = console.log, stateDir = join(cfg.stateDir, 'ticker-wake')): void {
+export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = console.log, stateDir = join(cfg.stateDir, 'ticker-wake')): Promise<void> {
   const rawLog = log;
   log = (m: string): void => rawLog(scrub(m));
   const dry = Boolean(opts.dry);
+  const runAsync: AsyncRunner = opts.runAsync ?? ((argv) => Promise.resolve(run(argv)));
   const clock = opts.now ?? Date.now;
   const now = clock();
   const deadline = now + (opts.budgetMs ?? DEFAULT_ONCE_BUDGET_S * 1000);
@@ -435,159 +471,182 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
   const anchor = (w: any): number => { const t = typeof w.anchorAt === 'string' ? Date.parse(w.anchorAt) : NaN; return Number.isFinite(t) ? t : Infinity; };
   const due = wakes.filter((w) => kinds(w).has('TICK') || kinds(w).has('TASK')).sort((a, b) => anchor(a) - anchor(b));
   const terminals = due.length ? listTerminals(cfg, run) : [];
-  for (const [i, w] of due.entries()) {
-    if (clock() >= deadline) { log(`${ts} pass budget spent; ${due.length - i} due wake(s) left for the next pass`); break; }
-    const name = w.worker.name;
-    const id: string = w.worker.id;
-    const other = [...kinds(w)].filter((x) => x !== 'TICK' && x !== 'MENTION' && x !== 'TASK');
-    // A task reason is delivered only for an assignment the caller can see; its id is typed, so it must be a plain id.
-    const unassignable = w.reasons.filter((r: any) => r.kind === 'TASK'
-      && !(r.task && ASSIGNMENT_EVENTS.has(r.task.event) && typeof r.task.id === 'string' && TASK_ID.test(r.task.id)));
-    if (unassignable.length) other.push(...new Set(unassignable.map((r: any) => (ASSIGNMENT_EVENTS.has(r.task?.event) ? 'TASK' : `TASK ${safeEvent(r.task?.event)}`))));
-    if (other.length) { log(`${ts} ${name}: left alone (also carries ${other.join(',')}; the proof would record them delivered unseen)`); continue; }
-    const entry = cfg.roster.find((e) => e.worker === id);
-    if (!entry) { log(`${ts} ${name}: not on roster`); continue; }
-    const work = proofCoverage(w.proof);
-    if (!work) { log(`${ts} ${name}: held (the proof's tick coverage cannot be established)`); continue; }
-    let prior = receipts[id];
+  const inFlight = new Set<string>(); // terminal handles with a send in flight
+  /** Deliver one due wake. Only a submit awaits; everything else is synchronous, so a receipt update never interleaves. */
+  const deliver = async (w: any): Promise<void> => {
+      const name = w.worker.name;
+      const id: string = w.worker.id;
+      const other = [...kinds(w)].filter((x) => x !== 'TICK' && x !== 'MENTION' && x !== 'TASK');
+      // A task reason is delivered only for an assignment the caller can see; its id is typed, so it must be a plain id.
+      const unassignable = w.reasons.filter((r: any) => r.kind === 'TASK'
+        && !(r.task && ASSIGNMENT_EVENTS.has(r.task.event) && typeof r.task.id === 'string' && TASK_ID.test(r.task.id)));
+      if (unassignable.length) other.push(...new Set(unassignable.map((r: any) => (ASSIGNMENT_EVENTS.has(r.task?.event) ? 'TASK' : `TASK ${safeEvent(r.task?.event)}`))));
+      if (other.length) { log(`${ts} ${name}: left alone (also carries ${other.join(',')}; the proof would record them delivered unseen)`); return; }
+      const entry = cfg.roster.find((e) => e.worker === id);
+      if (!entry) { log(`${ts} ${name}: not on roster`); return; }
+      const work = proofCoverage(w.proof);
+      if (!work) { log(`${ts} ${name}: held (the proof's tick coverage cannot be established)`); return; }
+      let prior = receipts[id];
 
-    // The server owns the timing (R63): anchor, floor and busy deadline come with the wake and are never recomputed or
-    // remembered here, so a re-offer, a join or a restart cannot restart them. Missing/unparsable timing holds.
-    const at = (v: unknown): number => (typeof v === 'string' ? Date.parse(v) : NaN);
-    const deliverAfter = at(w.deliverAfter);
-    const busyDeadline = at(w.busyDeadline);
-    if (!Number.isFinite(deliverAfter) || !Number.isFinite(busyDeadline) || !Number.isFinite(at(w.anchorAt))) { log(`${ts} ${name}: held (the wake carries no server timing)`); continue; }
+      // The server owns the timing (R63): anchor, floor and busy deadline come with the wake and are never recomputed or
+      // remembered here, so a re-offer, a join or a restart cannot restart them. Missing/unparsable timing holds.
+      const at = (v: unknown): number => (typeof v === 'string' ? Date.parse(v) : NaN);
+      const deliverAfter = at(w.deliverAfter);
+      const busyDeadline = at(w.busyDeadline);
+      if (!Number.isFinite(deliverAfter) || !Number.isFinite(busyDeadline) || !Number.isFinite(at(w.anchorAt))) { log(`${ts} ${name}: held (the wake carries no server timing)`); return; }
 
-    const [handle, detail] = resolveTerminal(entry, terminals, cfg, run);
-    if (!handle) { log(`${ts} ${name}: held (${detail})`); continue; }
-    const term0 = terminals.find((t) => t.handle === handle) as any;
-    const receiver = `${handle}#${term0?.incarnationId ?? ''}`;
+      const [handle, detail] = resolveTerminal(entry, terminals, cfg, run);
+      if (!handle) { log(`${ts} ${name}: held (${detail})`); return; }
+      const term0 = terminals.find((t) => t.handle === handle) as any;
+      const receiver = `${handle}#${term0?.incarnationId ?? ''}`;
+      // Never two sends in flight to one terminal: a second worker resolving to it is held to a later pass.
+      if (inFlight.has(handle)) { log(`${ts} ${name}: held (another send to this terminal is in flight)`); return; }
+      inFlight.add(handle);
+      try {
 
-    /**
-     * The R63 delivery gate for anything that can type into this terminal. The composer rules are unconditional: a
-     * draft, a question/menu, unknown input or identity, or a foreign composer always holds. Before the server's
-     * deliverAfter nothing is typed; "busy" alone vetoes only until the server's busyDeadline, then stops vetoing.
-     */
-    /** One screen read: whether the composer is provably empty (no draft, question/menu or unknown input). */
-    const readComposer = (): { term: Record<string, any> | undefined; agent: string; empty: boolean } => {
-      const term = readScreen(cfg, handle, run);
-      const agent = detail === 'claude' || detail === 'codex' ? detail : (screenAgentFamily(term) ?? '');
-      return { term, agent, empty: promptIsEmptyFromTerm(term, agent)[0] };
-    };
-    const safeToType = (): string | null => {
-      if (now < deliverAfter) return `before deliverAfter ${new Date(deliverAfter).toISOString()}`;
-      const idleNow = isIdle(cfg, handle, IDLE_PROBE_MS, run);
-      const { term, agent, empty } = readComposer();
-      if (!empty) return 'composer not provably empty';
-      if (idleNow) return null;
-      const [proof, why] = idleProofAbovePrompt((term?.tail ?? []) as string[], agent);
-      if (proof === 'idle') return null;
-      if (proof === 'busy') return now >= busyDeadline ? null : `busy until the server's busyDeadline ${new Date(busyDeadline).toISOString()}`;
-      return 'unknown input state';
-    };
+        /**
+         * The R63 delivery gate for anything that can type into this terminal. The composer rules are unconditional: a
+         * draft, a question/menu, unknown input or identity, or a foreign composer always holds. Before the server's
+         * deliverAfter nothing is typed; "busy" alone vetoes only until the server's busyDeadline, then stops vetoing.
+         */
+        /** One screen read: whether the composer is provably empty (no draft, question/menu or unknown input). */
+        const readComposer = (): { term: Record<string, any> | undefined; agent: string; empty: boolean } => {
+          const term = readScreen(cfg, handle, run);
+          const agent = detail === 'claude' || detail === 'codex' ? detail : (screenAgentFamily(term) ?? '');
+          return { term, agent, empty: promptIsEmptyFromTerm(term, agent)[0] };
+        };
+        const safeToType = (): string | null => {
+          if (now < deliverAfter) return `before deliverAfter ${new Date(deliverAfter).toISOString()}`;
+          const idleNow = isIdle(cfg, handle, IDLE_PROBE_MS, run);
+          const { term, agent, empty } = readComposer();
+          if (!empty) return 'composer not provably empty';
+          if (idleNow) return null;
+          const [proof, why] = idleProofAbovePrompt((term?.tail ?? []) as string[], agent);
+          if (proof === 'idle') return null;
+          if (proof === 'busy') return now >= busyDeadline ? null : `busy until the server's busyDeadline ${new Date(busyDeadline).toISOString()}`;
+          return 'unknown input state';
+        };
 
-    // An unreconciled earlier request is reconciled with ITS OWN identity. Reissuing it can still perform input, so it
-    // needs the same receiver and the same composer safety as a fresh send; without a request id it stays held for a human.
-    if (prior?.state === 'ambiguous') {
-      if (!prior.requestId || dry) { log(`${ts} ${name}: an earlier send is unreconciled (${safeDetail(prior.detail)}); not retyped, not acked`); continue; }
-      if (prior.receiver !== receiver) { log(`${ts} ${name}: an earlier send is unreconciled for another receiver (${prior.receiver}); held for a human`); continue; }
-      // Reissue by its own id first: a confirmation from Orca settles it.
-      const unsafe = safeToType();
-      const r = unsafe ? null : submit(cfg, run, prior.handle, prior.text, prior.requestId);
-      let resolved = r?.kind === 'confirmed' ? 'reconciled as delivered' : '';
-      if (!resolved) {
-        // Otherwise only evidence resolves it (#26055): accepted, same receiver (checked above), composer provably empty,
-        // and the worker's own session checked the channel after the send. It types nothing, so busy does not veto it.
-        const why = !(wasAccepted(prior.detail) || (r !== null && wasAccepted(r.detail))) ? 'Orca never reported the input accepted'
-          : !readComposer().empty ? 'composer not provably empty'
-            : deliveryEvidence(cfg, run, id, prior);
-        if (why === null) resolved = 'resolved as delivered on evidence (accepted, composer empty, channel checked after the send)';
-        else {
-          const held = unsafe ? `unreconciled request not reissued (held: ${unsafe})` : `earlier request still unreconciled (${safeDetail(r!.detail)})`;
-          const person = now - prior.at >= NEEDS_PERSON_AFTER_MS ? 'needs a person' : 'not retyped, not acked';
-          log(`${ts} ${name}: ${held}; no delivery evidence yet (${why}); ${person}`);
-          continue;
+        // An unreconciled earlier request is reconciled with ITS OWN identity. Reissuing it can still perform input, so it
+        // needs the same receiver and the same composer safety as a fresh send; without a request id it stays held for a human.
+        if (prior?.state === 'ambiguous') {
+          if (!prior.requestId || dry) { log(`${ts} ${name}: an earlier send is unreconciled (${safeDetail(prior.detail)}); not retyped, not acked`); return; }
+          if (prior.receiver !== receiver) { log(`${ts} ${name}: an earlier send is unreconciled for another receiver (${prior.receiver}); held for a human`); return; }
+          // Reissue by its own id first: a confirmation from Orca settles it.
+          const unsafe = safeToType();
+          const r = unsafe ? null : await submit(cfg, runAsync, prior.handle, prior.text, prior.requestId);
+          let resolved = r?.kind === 'confirmed' ? 'reconciled as delivered' : '';
+          if (!resolved) {
+            // Otherwise only evidence resolves it (#26055): accepted, same receiver (checked above), composer provably empty,
+            // and the worker's own session checked the channel after the send. It types nothing, so busy does not veto it.
+            const why = !(wasAccepted(prior.detail) || (r !== null && wasAccepted(r.detail))) ? 'Orca never reported the input accepted'
+              : !readComposer().empty ? 'composer not provably empty'
+                : deliveryEvidence(cfg, run, id, prior);
+            if (why === null) resolved = 'resolved as delivered on evidence (accepted, composer empty, channel checked after the send)';
+            else {
+              const held = unsafe ? `unreconciled request not reissued (held: ${unsafe})` : `earlier request still unreconciled (${safeDetail(r!.detail)})`;
+              const person = now - prior.at >= NEEDS_PERSON_AFTER_MS ? 'needs a person' : 'not retyped, not acked';
+              log(`${ts} ${name}: ${held}; no delivery evidence yet (${why}); ${person}`);
+              return;
+            }
+          }
+          prior = receipts[id] = { state: 'sent', coverage: prior.coverage, receiver: prior.receiver, at: now };
+          saveReceipts(stateDir, receipts);
+          log(`${ts} ${name}: earlier request ${resolved}`);
         }
-      }
-      prior = receipts[id] = { state: 'sent', coverage: prior.coverage, receiver: prior.receiver, at: now };
-      saveReceipts(stateDir, receipts);
-      log(`${ts} ${name}: earlier request ${resolved}`);
-    }
 
-    const covered = prior?.state === 'sent' && prior.receiver === receiver ? prior.coverage : [];
-    const newWork = work.filter((t) => !covered.includes(t));
-    // Everything in this proof was already delivered to this receiver: only the ack is missing.
-    if (!newWork.length) {
-      if (dry) { log(`${ts} ${name}: WOULD ack-only (covered by a confirmed receipt)`); continue; }
-      const a = ackCovered(cfg, run, id, w.proof, covered, clock);
-      log(`${ts} ${name}: ack-only recovery ${a.ok ? 'acked' : 'FAILED'} ${a.text}`);
-      if (a.ok) { delete receipts[id]; saveReceipts(stateDir, receipts); }
-      continue;
-    }
+        const covered = prior?.state === 'sent' && prior.receiver === receiver ? prior.coverage : [];
+        const newWork = work.filter((t) => !covered.includes(t));
+        // Everything in this proof was already delivered to this receiver: only the ack is missing.
+        if (!newWork.length) {
+          if (dry) { log(`${ts} ${name}: WOULD ack-only (covered by a confirmed receipt)`); return; }
+          const a = ackCovered(cfg, run, id, w.proof, covered, clock);
+          log(`${ts} ${name}: ack-only recovery ${a.ok ? 'acked' : 'FAILED'} ${a.text}`);
+          if (a.ok) { delete receipts[id]; saveReceipts(stateDir, receipts); }
+          return;
+        }
 
-    // Otherwise a fresh nudge for ONLY the uncovered work; if any of it cannot be identified, hold rather than repeat covered work.
-    const nameOf = new Map<string, string>();
-    for (const r of w.reasons) if (r.kind === 'TICK' && r.ticker?.id) nameOf.set(r.ticker.id, r.ticker.name);
-    const taskOf = new Map<string, string>();
-    for (const r of w.reasons) if (r.kind === 'TASK') taskOf.set(taskKey(r.task.eventId, r.task.chainIndex), r.task.id);
-    const newTickers = new Set<string>();
-    const newTasks = new Set<string>();
-    let unknown = false;
-    for (const t of newWork) {
-      const found = t.startsWith('task:') ? taskOf.get(t) : nameOf.get(t.slice(0, t.lastIndexOf(':')));
-      if (!found) { unknown = true; break; }
-      (t.startsWith('task:') ? newTasks : newTickers).add(found);
-    }
-    if (unknown) { log(`${ts} ${name}: held (the uncovered tick work cannot be identified; reconcile rather than repeat covered work)`); continue; }
+        // Otherwise a fresh nudge for ONLY the uncovered work; if any of it cannot be identified, hold rather than repeat covered work.
+        const nameOf = new Map<string, string>();
+        for (const r of w.reasons) if (r.kind === 'TICK' && r.ticker?.id) nameOf.set(r.ticker.id, r.ticker.name);
+        const taskOf = new Map<string, string>();
+        for (const r of w.reasons) if (r.kind === 'TASK') taskOf.set(taskKey(r.task.eventId, r.task.chainIndex), r.task.id);
+        const newTickers = new Set<string>();
+        const newTasks = new Set<string>();
+        let unknown = false;
+        for (const t of newWork) {
+          const found = t.startsWith('task:') ? taskOf.get(t) : nameOf.get(t.slice(0, t.lastIndexOf(':')));
+          if (!found) { unknown = true; break; }
+          (t.startsWith('task:') ? newTasks : newTickers).add(found);
+        }
+        if (unknown) { log(`${ts} ${name}: held (the uncovered tick work cannot be identified; reconcile rather than repeat covered work)`); return; }
 
-    const unsafe = safeToType();
-    if (unsafe) { log(`${ts} ${name}: held (${unsafe})`); continue; }
-    const text = nudgeText([...newTickers], [...newTasks]);
-    if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); continue; }
-    const coverage = [...new Set([...covered, ...work])].sort();
-    // The task identities this send names, kept on the receipt: the assignment wake is gone once the task starts.
-    const tasks: Record<string, string> = {};
-    for (const t of newWork) if (t.startsWith('task:')) tasks[t] = taskOf.get(t) as string;
+        const unsafe = safeToType();
+        if (unsafe) { log(`${ts} ${name}: held (${unsafe})`); return; }
+        const text = nudgeText([...newTickers], [...newTasks]);
+        if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); return; }
+        const coverage = [...new Set([...covered, ...work])].sort();
+        // The task identities this send names, kept on the receipt: the assignment wake is gone once the task starts.
+        const tasks: Record<string, string> = {};
+        for (const t of newWork) if (t.startsWith('task:')) tasks[t] = taskOf.get(t) as string;
 
-    // Persist the UNRESOLVED INTENT before anything can be submitted (#2070 LOCAL P2-1). If the process dies, or any later
-    // receipt write fails, after Orca took the input, this entry is what stops the next pass from typing the same wake again:
-    // it is an ambiguous record without a request identity, which is held for a human and never retyped or acked. If the
-    // intent itself cannot be written, nothing is sent.
-    const before = receipts[id];
-    const restore = (): void => { if (before) receipts[id] = before; else delete receipts[id]; };
-    receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: 'send intent recorded before submission; outcome unknown', text, handle, tasks };
-    try { saveReceipts(stateDir, receipts); } catch (e) {
-      restore();
-      log(`${ts} ${name}: held (the send intent could not be recorded: ${errno(e)}); nothing sent`);
-      continue;
+        // Persist the UNRESOLVED INTENT before anything can be submitted (#2070 LOCAL P2-1). If the process dies, or any later
+        // receipt write fails, after Orca took the input, this entry is what stops the next pass from typing the same wake again:
+        // it is an ambiguous record without a request identity, which is held for a human and never retyped or acked. If the
+        // intent itself cannot be written, nothing is sent.
+        const before = receipts[id];
+        const restore = (): void => { if (before) receipts[id] = before; else delete receipts[id]; };
+        receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: 'send intent recorded before submission; outcome unknown', text, handle, tasks };
+        try { saveReceipts(stateDir, receipts); } catch (e) {
+          restore();
+          log(`${ts} ${name}: held (the send intent could not be recorded: ${errno(e)}); nothing sent`);
+          return;
+        }
+        const r = await submit(cfg, runAsync, handle, text);
+        if (r.kind === 'refused') {
+          // Orca says nothing was typed: the intent is withdrawn so the next pass retries. If that write fails, the intent stays
+          // on disk and the wake is held for a human (fail closed).
+          restore();
+          try { saveReceipts(stateDir, receipts); } catch (e) { log(`${ts} ${name}: could not withdraw the send intent (${errno(e)}); held for a human`); }
+          log(`${ts} ${name}: ${safeDetail(r.detail)}; will retry`);
+          return;
+        }
+        if (r.kind === 'uncertain') {
+          // Never an ack, never a fresh type: recorded with its request identity so it can be reconciled.
+          receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: r.detail, text, handle, tasks, ...(r.requestId ? { requestId: r.requestId } : {}) };
+          try { saveReceipts(stateDir, receipts); } catch (e) { log(`${ts} ${name}: could not update the send record (${errno(e)}); the earlier intent stays and holds the wake`); }
+          log(`${ts} ${name}: send not confirmed (${safeDetail(r.detail)}); left for reconciliation`);
+          return;
+        }
+        receipts[id] = { state: 'sent', coverage, receiver, at: now };
+        try { saveReceipts(stateDir, receipts); } catch (e) {
+          // Orca confirmed the turn started but the receipt could not be written: the intent on disk still marks the wake as
+          // unreconciled, so it is never retyped; it is not acked either, and waits for a human.
+          log(`${ts} ${name}: nudged ${handle} but the receipt could not be written (${errno(e)}); intent retained, not acked`);
+          return;
+        }
+        const a = ackCovered(cfg, run, id, w.proof, coverage, clock);
+        log(`${ts} ${name}: nudged ${handle}; ${a.ok ? 'acked' : 'ack FAILED (retried ack-only next pass)'} ${a.text}`);
+        if (a.ok) { delete receipts[id]; saveReceipts(stateDir, receipts); }
+      } finally { inFlight.delete(handle); }
+  };
+
+  // A bounded pool of lanes (#2138): the sends overlap, so a pass costs about the slowest lane, not the sum of the
+  // turn-start observations. No new delivery starts once the budget is spent or a delivery failed; a failure is
+  // rethrown only after every send in flight has finished and written its receipt (fail closed, never mid-send).
+  let next = 0;
+  let left = 0;
+  let failed: { e: unknown } | null = null;
+  const lane = async (): Promise<void> => {
+    while (next < due.length && !failed) {
+      const w = due[next++];
+      if (clock() >= deadline) { left++; continue; }
+      try { await deliver(w); } catch (e) { failed ??= { e }; }
     }
-    const r = submit(cfg, run, handle, text);
-    if (r.kind === 'refused') {
-      // Orca says nothing was typed: the intent is withdrawn so the next pass retries. If that write fails, the intent stays
-      // on disk and the wake is held for a human (fail closed).
-      restore();
-      try { saveReceipts(stateDir, receipts); } catch (e) { log(`${ts} ${name}: could not withdraw the send intent (${errno(e)}); held for a human`); }
-      log(`${ts} ${name}: ${safeDetail(r.detail)}; will retry`);
-      continue;
-    }
-    if (r.kind === 'uncertain') {
-      // Never an ack, never a fresh type: recorded with its request identity so it can be reconciled.
-      receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: r.detail, text, handle, tasks, ...(r.requestId ? { requestId: r.requestId } : {}) };
-      try { saveReceipts(stateDir, receipts); } catch (e) { log(`${ts} ${name}: could not update the send record (${errno(e)}); the earlier intent stays and holds the wake`); }
-      log(`${ts} ${name}: send not confirmed (${safeDetail(r.detail)}); left for reconciliation`);
-      continue;
-    }
-    receipts[id] = { state: 'sent', coverage, receiver, at: now };
-    try { saveReceipts(stateDir, receipts); } catch (e) {
-      // Orca confirmed the turn started but the receipt could not be written: the intent on disk still marks the wake as
-      // unreconciled, so it is never retyped; it is not acked either, and waits for a human.
-      log(`${ts} ${name}: nudged ${handle} but the receipt could not be written (${errno(e)}); intent retained, not acked`);
-      continue;
-    }
-    const a = ackCovered(cfg, run, id, w.proof, coverage, clock);
-    log(`${ts} ${name}: nudged ${handle}; ${a.ok ? 'acked' : 'ack FAILED (retried ack-only next pass)'} ${a.text}`);
-    if (a.ok) { delete receipts[id]; saveReceipts(stateDir, receipts); }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(DELIVERY_POOL, due.length) }, lane));
+  if (failed) throw (failed as { e: unknown }).e;
+  if (left) log(`${ts} pass budget spent; ${left} due wake(s) left for the next pass`);
   if (!due.length) log(`${ts} no ticker wakes due (${wakes.length} other wakes ignored)`);
 }
 
@@ -660,6 +719,8 @@ export interface MainDeps {
   run?: Runner;
   log?: Log;
   sleep?: (ms: number) => Promise<void>;
+  /** Runs the sends; defaults to runCommandAsync, or to a wrapped `run` when one is given (tests). */
+  runAsync?: AsyncRunner;
   /** loop only: stop after this many passes (tests). */
   maxPasses?: number;
   now?: () => number;
@@ -693,9 +754,10 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   const cfg = (deps.load ?? (() => loadConfig(DEFAULT_CONFIG)))();
   const run = deps.run ?? runCommand;
   const clock = deps.now ?? Date.now;
-  const opts: Opts = { dry, now: deps.now, budgetMs: (budget ?? (mode === 'loop' ? seconds : DEFAULT_ONCE_BUDGET_S)) * 1000 };
+  const runAsync = deps.runAsync ?? (deps.run ? undefined : runCommandAsync);
+  const opts: Opts = { dry, now: deps.now, runAsync, budgetMs: (budget ?? (mode === 'loop' ? seconds : DEFAULT_ONCE_BUDGET_S)) * 1000 };
   const stateDir = join(cfg.stateDir, 'ticker-wake');
-  if (dry) { pass(cfg, run, opts, log, stateDir); return 0; }
+  if (dry) { await pass(cfg, run, opts, log, stateDir); return 0; }
   let release: () => void;
   try { release = acquireLock(stateDir); } catch (e) { log(`ticker-wake: ${describeError(e)}`); return 1; }
   try {
@@ -705,7 +767,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     let next = clock();
     for (let n = 0; ; n++) {
       const started = clock();
-      try { pass(cfg, run, opts, log, stateDir); } catch (e) { log(`${new Date(clock()).toISOString()} pass failed: ${describeError(e)}`); }
+      try { await pass(cfg, run, opts, log, stateDir); } catch (e) { log(`${new Date(clock()).toISOString()} pass failed: ${describeError(e)}`); }
       if (mode === 'once' || (deps.maxPasses !== undefined && n + 1 >= deps.maxPasses)) return 0;
       next = Math.max(next, started) + slotMs;
       const ended = clock();
