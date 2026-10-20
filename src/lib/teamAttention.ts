@@ -1903,8 +1903,6 @@ export async function markOwnTeamChatRead(
   if (args.seq > row.channel.lastSeq) {
     fail(`seq ${args.seq} is beyond the Channel watermark (${row.channel.lastSeq}).`, 'SEQ_BEYOND_WATERMARK', { lastSeq: row.channel.lastSeq });
   }
-  // #2138 §3.1: a bare mark-read through the worker's own session is a check (even one that moves nothing); a refused call above is not one.
-  await stampChannelCheck(ctx.db, workerId, row.channel.id);
   // #1617 B — a lapsed session resumes in the SAME transaction as the cursor
   // write (#1625 review, Baloo P2-1): both commit, or neither does.
   const lastSeenSeq = session.lapsed
@@ -1915,5 +1913,8 @@ export async function markOwnTeamChatRead(
         return advanceReadState(tx as never, { workerId }, row.channel.id, args.seq);
       })
     : await advanceReadState(ctx.db, { workerId }, row.channel.id, args.seq);
+  // #2138 §3.1: a mark-read through the worker's own session is a check (even one that moves nothing). Stamped last, so a
+  // refused call above, or a resume refused inside its transaction, is not one.
+  await stampChannelCheck(ctx.db, workerId, row.channel.id);
   return { workerId, channelId: row.channel.id, lastSeenSeq };
 }

@@ -3175,6 +3175,8 @@ model App {
   /// #2138 §3.6 — a TEAM pause, separate from every worker's own `pausedUntil`: a worker cannot lift
   /// it, and ending it never clears a self-pause. NULL = not paused.
   teamPausedAt                      DateTime? @map("team_paused_at")
+  /// #2138 §3.6 — when the last team pause ENDED; restarts every worker's check clock (the status is not OVERDUE the moment a pause lifts). NULL = never paused.
+  teamResumedAt                     DateTime? @map("team_resumed_at")
   /// The fastest ticker a worker may subscribe ITSELF to: [floor, 86400].
   tickerSelfSubscribeCadenceSeconds Int  @default(600) @map("ticker_self_subscribe_cadence_seconds")
   /// How many live tickers the App may have: [1, 100].

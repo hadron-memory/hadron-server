@@ -114,6 +114,14 @@ describe('the OVERDUE clock: the latest of the last check, the assignment, the s
     expect(derive({ ...stale, pausedUntil: ago(26 * MIN) }).status).toBe('OVERDUE');
   });
 
+  it('a TEAM pause ending restarts the clock: a stale worker is not OVERDUE the moment it lifts', () => {
+    const stale = { lastCheckedAt: ago(3 * 60 * MIN), lastAssignedAt: ago(3 * 60 * MIN), liveSessionStartedAt: ago(4 * 60 * MIN) };
+    expect(derive({ ...stale }).status).toBe('OVERDUE'); // without a recorded resume
+    expect(derive({ ...stale, teamResumedAt: ago(5 * MIN) }).status).toBe('OK');
+    expect(derive({ ...stale, teamResumedAt: ago(26 * MIN) }).status).toBe('OVERDUE');
+    expect(derive({ ...stale, pendingReason: 'TEAM_PAUSED', teamResumedAt: ago(5 * MIN) }).status).toBe('PENDING'); // still paused wins
+  });
+
   it('a check in the future (clock skew) is not OVERDUE', () => {
     expect(derive({ lastCheckedAt: new Date(now.getTime() + MIN) }).status).toBe('OK');
   });

@@ -1396,6 +1396,20 @@ describe('#2138 §3.3 — the live-check reason through the whole loader', () =>
     expect(ids(await due(ctx(manager.id)))).not.toContain(liam.id);
   });
 
+  it('#2138 §3.6: a TEAM pause silences EVERY reason, not only live-check: read-team-channel, every-tick and an immediate mention', async () => {
+    const rtc = await mkTicker({ relevance: 'MENTIONS', reasons: ['read-team-channel'], name: 'R' });
+    const every = await mkTicker({ reasons: ['every-tick'], name: 'E' });
+    await subscribe(rtc.id, liam.id);
+    await subscribe(every.id, liam.id);
+    await say(channel, 'hey @liam', { mentions: ['liam'] }); // immediate mention (mentions IMMEDIATE by default)
+    const reasons = async () => (await due(ctx(manager.id))).wakes.flatMap((w: any) => w.reasons.map((r: any) => r.kind)).sort();
+    expect(await reasons()).toEqual(['MENTION', 'TICK', 'TICK']);
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: new Date() } });
+    expect(await reasons()).toEqual([]);
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: null } });
+    expect(await reasons()).toEqual(['MENTION', 'TICK', 'TICK']);
+  });
+
   it('read-team-channel with an unread mention: due with a stale check, not with a fresh one', async () => {
     const t = await mkTicker({ relevance: 'MENTIONS', reasons: ['read-team-channel'] });
     await subscribe(t.id, liam.id);

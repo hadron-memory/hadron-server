@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
-import { stampChannelCheck } from './channelReadState.js';
+import { stampChannelCheck, stampTeamChannelChecks } from './channelReadState.js';
 import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 
 vi.mock('./bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -63,5 +63,25 @@ describe('stampChannelCheck', () => {
     expect(await stampChannelCheck(db, workerA2, teamA)).toBe(false);
     await db.channel.update({ where: { id: teamA }, data: { deletedAt: new Date() } });
     expect(await stampChannelCheck(db, workerA, teamA)).toBe(false);
+  });
+});
+
+describe('stampTeamChannelChecks (the inbox read) is scoped to the worker\'s own App team channel', () => {
+  it('stamps the own App team channel only: not another channel of the App, not another App\'s team channel', async () => {
+    expect(await stampTeamChannelChecks(db, workerA)).toBe(1);
+    expect(await checked(workerA, teamA)).toBeInstanceOf(Date);
+    expect(await checked(workerA, otherA)).toBeNull(); // a non-team channel of the same App
+    expect(await checked(workerA, teamB)).toBeNull(); // another App's team channel
+    expect(await db.channelReadState.count({ where: { workerId: workerA } })).toBe(1);
+  });
+
+  it('stamps nothing for another worker of the App, for a retired worker, or when the App has no team channel', async () => {
+    await stampTeamChannelChecks(db, workerA);
+    expect(await checked(workerA2, teamA)).toBeNull();
+    await db.worker.update({ where: { id: workerA2 }, data: { retiredAt: new Date() } });
+    expect(await stampTeamChannelChecks(db, workerA2)).toBe(0);
+    await db.channel.update({ where: { id: teamB }, data: { deletedAt: new Date() } });
+    expect(await stampTeamChannelChecks(db, workerB)).toBe(0);
+    expect(await checked(workerB, teamB)).toBeNull();
   });
 });

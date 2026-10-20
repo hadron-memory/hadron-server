@@ -3,6 +3,7 @@ ALTER TABLE "channel_read_states" ADD COLUMN IF NOT EXISTS "last_checked_at" TIM
 ALTER TABLE "apps" ADD COLUMN IF NOT EXISTS "delivery_check_period_seconds" INTEGER NOT NULL DEFAULT 600;
 ALTER TABLE "apps" ADD COLUMN IF NOT EXISTS "delivery_failed_checks_to_overdue" INTEGER NOT NULL DEFAULT 2;
 ALTER TABLE "apps" ADD COLUMN IF NOT EXISTS "team_paused_at" TIMESTAMP(3);
+ALTER TABLE "apps" ADD COLUMN IF NOT EXISTS "team_resumed_at" TIMESTAMP(3);
 ALTER TABLE "agents" ADD COLUMN IF NOT EXISTS "uses_tasks" BOOLEAN NOT NULL DEFAULT true;
 
 -- #2138 §3.2 — the channel-check settings: a period of at least a minute, and OVERDUE after at least one missed period.

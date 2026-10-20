@@ -174,6 +174,19 @@ describe('the status on the roster and on worker get (they agree)', () => {
     expect(await workerStatus('Kit')).toMatchObject({ status: 'PENDING', pendingReason: 'TEAM_PAUSED' });
   });
 
+  it('lifting a team pause (setTeamPause false) restarts the clock: a stale worker is OK the moment it lifts, then OVERDUE again once the clock runs out', async () => {
+    await bind('Kit', 300);
+    await assign('Kit', 200);
+    await checked('Kit', teamChannel.id, 90);
+    expect((await rosterStatus('Kit')).status).toBe('OVERDUE');
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: ago(60 * MIN) } });
+    expect(await rosterStatus('Kit')).toMatchObject({ status: 'PENDING', pendingReason: 'TEAM_PAUSED' });
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: null, teamResumedAt: new Date() } }); // what setTeamPause(false) writes
+    expect((await rosterStatus('Kit')).status).toBe('OK');
+    await db.app.update({ where: { id: app.id }, data: { teamResumedAt: ago(30 * MIN) } });
+    expect((await rosterStatus('Kit')).status).toBe('OVERDUE');
+  });
+
   it('the reason is the ticker\'s own (loadPendingReasons): isolation, and team pause over own pause over isolation', async () => {
     await bind('Kit', 300);
     await assign('Kit', 200);

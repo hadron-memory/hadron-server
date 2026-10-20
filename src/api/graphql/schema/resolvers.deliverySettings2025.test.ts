@@ -249,6 +249,19 @@ describe('#2138 §3.6 — the team pause', () => {
     expect(await flag()).toBeNull();
   });
 
+  it('lifting it records when it ended (teamResumedAt, which restarts every check clock); a repeat lift or a fresh pause keeps/clears nothing else', async () => {
+    const resumed = async () => (await db.app.findUniqueOrThrow({ where: { id: appId } })).teamResumedAt;
+    expect(await resumed()).toBeNull();
+    await pause(true);
+    expect(await resumed()).toBeNull();
+    await pause(false);
+    const at = await resumed();
+    expect(at).toBeInstanceOf(Date);
+    await new Promise((r) => setTimeout(r, 15));
+    await pause(false); // already resumed: a no-op, the time stays
+    expect(await resumed()).toEqual(at);
+  });
+
   it('a worker cannot lift it, nor can a plain member, an outsider or an App key', async () => {
     await pause(true);
     await code(runAsActor({ workerId, agentId }, () => pause(false)), 'FORBIDDEN');

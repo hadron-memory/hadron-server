@@ -14,9 +14,8 @@
  * A worker HAS A TASK when a task assigned to it is open (`pending` or
  * `started`), or when its Agent has `usesTasks: false`. The OVERDUE clock runs
  * from the latest of its last check, its newest open assignment, its live
- * session's start and the end of its own pause. A team pause clears
- * `App.teamPausedAt` without recording when it ended, so ending one does not
- * restart the clock (noted on the PR).
+ * session's start, the end of its own pause and the end of a team pause
+ * (`App.teamResumedAt`), so no worker turns OVERDUE the moment a pause lifts.
  *
  * Experimental draft spec, not law:
  * hrn:node:hadronmemory.com:hadron-dev-team-vera:work:2138-experiment-spec
@@ -48,6 +47,8 @@ export type WorkerCheckInputs = {
   lastCheckedAt: Date | null;
   /** Its own pause (`WorkerWakeSettings.pausedUntil`); a past one restarts the clock. */
   pausedUntil: Date | null;
+  /** When the App's last TEAM pause ended (`App.teamResumedAt`); restarts the clock like a worker's own pause. */
+  teamResumedAt?: Date | null;
 };
 
 export type CheckSettings = { checkPeriodSeconds: number; failedChecksToOverdue: number };
@@ -80,6 +81,8 @@ export function deriveWorkerCheckStatus(i: WorkerCheckInputs, s: CheckSettings, 
     i.liveSessionStartedAt.getTime(),
     // A pause that has ended (an active one is PAUSED above).
     i.pausedUntil && i.pausedUntil.getTime() <= now.getTime() ? i.pausedUntil.getTime() : -Infinity,
+    // #2138 §3.6: a team pause that has ended restarts every worker's clock (an active one is TEAM_PAUSED above).
+    i.teamResumedAt?.getTime() ?? -Infinity,
   );
   return out(now.getTime() - clockStart > overdueAfterMs(s) ? 'OVERDUE' : 'OK');
 }
@@ -100,7 +103,7 @@ export async function loadWorkerCheckStatuses(
   const { appId, teamChannelId, now } = opts;
   const app = await db.app.findUnique({
     where: { id: appId },
-    select: { deliveryCheckPeriodSeconds: true, deliveryFailedChecksToOverdue: true },
+    select: { deliveryCheckPeriodSeconds: true, deliveryFailedChecksToOverdue: true, teamResumedAt: true },
   });
   if (!app) return new Map();
   const workers = await db.worker.findMany({
@@ -150,6 +153,7 @@ export async function loadWorkerCheckStatuses(
           lastAssignedAt: openTask.get(w.id) ?? null,
           lastCheckedAt: checkedAt.get(w.id) ?? null,
           pausedUntil: wake.get(w.id)?.pausedUntil ?? null,
+          teamResumedAt: app.teamResumedAt,
         },
         settings,
         now,
