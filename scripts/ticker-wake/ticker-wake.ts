@@ -52,8 +52,13 @@
  *    malformed receipt state stops the pass: fail closed.
  *  - one instance per state dir (atomic lock file).
  *
- * usage: tsx ticker-wake.ts once [--dry]
- *        tsx ticker-wake.ts loop [--interval <seconds>=120]
+ * A pass fits inside one cadence (#2138 experiment, Hugo's tick 1, #26038): a busy terminal is PROBED, never waited
+ * on, so it is held to a later pass instead of costing a busy-wait; the oldest wakes go first, and once the pass
+ * budget is spent the rest wait for the next pass; a proof near the end of its 15-minute life, or one the server calls
+ * stale, is re-fetched before the ack; the loop runs on fixed slots and skips (and logs) a slot a pass overran.
+ *
+ * usage: tsx ticker-wake.ts once [--dry] [--budget <seconds>=300]
+ *        tsx ticker-wake.ts loop [--interval <seconds>=120] [--budget <seconds>=interval]
  */
 import { linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -67,13 +72,24 @@ import {
 export const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{worker{id name} reasons{kind ticker{id name} task{id eventId chainIndex event}} proof anchorAt deliverAfter busyDeadline} pageInfo{hasNextPage endCursor}}}`;
 export const ACK = `mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowledged unchanged}}`;
 const MAX_PAGES = 10;
+/**
+ * The tui-idle probe. It proves idle without waiting for business to clear (the router's RECHECK_IDLE_TIMEOUT_MS
+ * rule); a busy terminal falls through to the screen read and the server's busyDeadline, and is otherwise held to a
+ * later pass. Waiting `busyWaitMs` per busy worker is what made tick 1's serial pass run ~30 min.
+ */
+export const IDLE_PROBE_MS = 500;
+/** A `once` pass's default budget: half the 600 s team-tick cadence, so a pass ends well inside one cadence. */
+export const DEFAULT_ONCE_BUDGET_S = 300;
+/** A proof older than this is re-fetched before its ack: the server refuses one past 15 minutes (WAKE_PROOF_MAX_AGE_MS). */
+export const PROOF_REFRESH_AFTER_MS = 10 * 60 * 1000;
 /** The task events that mean "a task was assigned to you" (#2138 §5.2); every other task event is left alone. */
 export const ASSIGNMENT_EVENTS: ReadonlySet<string> = new Set(['ASSIGNED', 'REASSIGNED', 'MATCHED']);
 /** A task id is typed into a terminal, so only a plain id shape is accepted; anything else holds the wake. */
 const TASK_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 type Log = (line: string) => void;
-export interface Opts { dry?: boolean; now?: () => number }
+/** `budgetMs`: no new delivery starts once this long has passed since the pass began (default DEFAULT_ONCE_BUDGET_S). */
+export interface Opts { dry?: boolean; now?: () => number; budgetMs?: number }
 
 /** What a confirmed send covered, and who received it. */
 interface Delivered { state: 'sent'; coverage: string[]; receiver: string; at: number }
@@ -227,6 +243,62 @@ function gql(run: Runner, argv: string[]): any {
   return data.data;
 }
 
+/** When the proof was issued (ms), from its payload; null when it does not say. */
+export function proofIssuedAt(proof: string): number | null {
+  try {
+    const v = JSON.parse(Buffer.from(proof.split('.')[0], 'base64url').toString('utf8')).issuedAt;
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
+  } catch { return null; }
+}
+
+/** Read every page of dueWakes (at most MAX_PAGES); `more` says pages were left unread. */
+function fetchDue(cfg: Config, run: Runner): { wakes: any[]; more: boolean } {
+  const wakes: any[] = [];
+  let page: string | null = null;
+  let more = false;
+  for (let n = 0; n < MAX_PAGES; n++) {
+    const argv = [cfg.hadronCli, 'api', QUERY, '-F', `a=${cfg.app}`];
+    if (page) argv.push('-F', `p=${page}`);
+    const d = gql(run, argv).dueWakes;
+    if (!d) throw new SafeError('dueWakes returned no result');
+    wakes.push(...d.wakes);
+    more = Boolean(d.pageInfo?.hasNextPage);
+    if (!more) break;
+    page = d.pageInfo.endCursor;
+  }
+  return { wakes, more };
+}
+
+/**
+ * Ack a worker's wake whose work is all in `covered` (a confirmed receipt for the same receiver). A proof near the end
+ * of its life is re-fetched first, and a proof the server calls stale is re-fetched once and retried: the fresh proof
+ * is acked only when the receipt still covers ALL of it. A fresh proof with new work is left for the next pass, which
+ * names only that work; nothing is ever typed here.
+ */
+function ackCovered(cfg: Config, run: Runner, workerId: string, proof: string, covered: string[], clock: () => number): { ok: boolean; text: string } {
+  const refetch = (): { proof?: string; text: string } => {
+    let fresh: any;
+    try { fresh = fetchDue(cfg, run).wakes.find((w) => w.worker?.id === workerId); } catch (e) { return { text: `proof refresh failed (${describeError(e)})` }; }
+    if (!fresh) return { text: 'no wake is due any more after a proof refresh' };
+    const work = proofCoverage(fresh.proof);
+    if (!work) return { text: 'the fresh proof\'s coverage cannot be established' };
+    if (!work.every((t) => covered.includes(t))) return { text: 'the fresh proof carries new work; left for the next pass' };
+    return { proof: fresh.proof, text: 'proof refreshed' };
+  };
+  const issued = proofIssuedAt(proof);
+  let current = proof;
+  if (issued !== null && clock() - issued > PROOF_REFRESH_AFTER_MS) {
+    const r = refetch();
+    if (!r.proof) return { ok: false, text: r.text };
+    current = r.proof;
+  }
+  const a = ack(cfg, run, current);
+  if (a.ok || a.text !== 'graphql error WAKE_PROOF_STALE') return a;
+  const r = refetch();
+  if (!r.proof) return { ok: false, text: `${a.text}; ${r.text}` };
+  return ack(cfg, run, r.proof);
+}
+
 /** Ack one proof; ok only on a real acknowledgement result. */
 function ack(cfg: Config, run: Runner, proof: string): { ok: boolean; text: string } {
   try {
@@ -302,30 +374,23 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
   const rawLog = log;
   log = (m: string): void => rawLog(scrub(m));
   const dry = Boolean(opts.dry);
-  const now = (opts.now ?? Date.now)();
+  const clock = opts.now ?? Date.now;
+  const now = clock();
+  const deadline = now + (opts.budgetMs ?? DEFAULT_ONCE_BUDGET_S * 1000);
   const ts = new Date(now).toISOString();
   if (!dry) mkdirSync(stateDir, { recursive: true });
   const receipts = loadReceipts(stateDir); // throws on unreadable/malformed state
 
-  const wakes: any[] = [];
-  let page: string | null = null;
-  let more = false;
-  for (let n = 0; n < MAX_PAGES; n++) {
-    const argv = [cfg.hadronCli, 'api', QUERY, '-F', `a=${cfg.app}`];
-    if (page) argv.push('-F', `p=${page}`);
-    const d = gql(run, argv).dueWakes;
-    if (!d) throw new SafeError('dueWakes returned no result');
-    wakes.push(...d.wakes);
-    more = Boolean(d.pageInfo?.hasNextPage);
-    if (!more) break;
-    page = d.pageInfo.endCursor;
-  }
+  const { wakes, more } = fetchDue(cfg, run);
   if (more) log(`${ts} dueWakes has more than ${MAX_PAGES} pages; the rest wait for a later pass`);
 
   const kinds = (w: any): Set<string> => new Set(w.reasons.map((r: any) => r.kind));
-  const due = wakes.filter((w) => kinds(w).has('TICK') || kinds(w).has('TASK'));
+  // Oldest anchor first, so a spent budget never starves the same workers; a wake without timing sorts last (it is held).
+  const anchor = (w: any): number => { const t = typeof w.anchorAt === 'string' ? Date.parse(w.anchorAt) : NaN; return Number.isFinite(t) ? t : Infinity; };
+  const due = wakes.filter((w) => kinds(w).has('TICK') || kinds(w).has('TASK')).sort((a, b) => anchor(a) - anchor(b));
   const terminals = due.length ? listTerminals(cfg, run) : [];
-  for (const w of due) {
+  for (const [i, w] of due.entries()) {
+    if (clock() >= deadline) { log(`${ts} pass budget spent; ${due.length - i} due wake(s) left for the next pass`); break; }
     const name = w.worker.name;
     const id: string = w.worker.id;
     const other = [...kinds(w)].filter((x) => x !== 'TICK' && x !== 'MENTION' && x !== 'TASK');
@@ -359,7 +424,7 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
      */
     const safeToType = (): string | null => {
       if (now < deliverAfter) return `before deliverAfter ${new Date(deliverAfter).toISOString()}`;
-      const idleNow = isIdle(cfg, handle, cfg.busyWaitMs, run);
+      const idleNow = isIdle(cfg, handle, IDLE_PROBE_MS, run);
       const term = readScreen(cfg, handle, run);
       const agent = detail === 'claude' || detail === 'codex' ? detail : (screenAgentFamily(term) ?? '');
       const [empty, emptyWhy] = promptIsEmptyFromTerm(term, agent);
@@ -390,7 +455,7 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
     // Everything in this proof was already delivered to this receiver: only the ack is missing.
     if (!newWork.length) {
       if (dry) { log(`${ts} ${name}: WOULD ack-only (covered by a confirmed receipt)`); continue; }
-      const a = ack(cfg, run, w.proof);
+      const a = ackCovered(cfg, run, id, w.proof, covered, clock);
       log(`${ts} ${name}: ack-only recovery ${a.ok ? 'acked' : 'FAILED'} ${a.text}`);
       if (a.ok) { delete receipts[id]; saveReceipts(stateDir, receipts); }
       continue;
@@ -452,7 +517,7 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
       log(`${ts} ${name}: nudged ${handle} but the receipt could not be written (${errno(e)}); intent retained, not acked`);
       continue;
     }
-    const a = ack(cfg, run, w.proof);
+    const a = ackCovered(cfg, run, id, w.proof, coverage, clock);
     log(`${ts} ${name}: nudged ${handle}; ${a.ok ? 'acked' : 'ack FAILED (retried ack-only next pass)'} ${a.text}`);
     if (a.ok) { delete receipts[id]; saveReceipts(stateDir, receipts); }
   }
@@ -537,33 +602,52 @@ export interface MainDeps {
 export async function main(argv: string[], deps: MainDeps = {}): Promise<number> {
   const log = deps.log ?? console.log;
   const [mode, ...rest] = argv;
-  const usage = (m: string): number => { log(`ticker-wake: ${m}\nusage: once [--dry] | loop [--interval <seconds>]`); return 2; };
+  const usage = (m: string): number => { log(`ticker-wake: ${m}\nusage: once [--dry] [--budget <seconds>] | loop [--interval <seconds>] [--budget <seconds>]`); return 2; };
   if (mode !== 'once' && mode !== 'loop') return usage(`unknown mode ${JSON.stringify(mode)}`);
-  const allowed = mode === 'once' ? ['--dry'] : ['--interval'];
+  const allowed = mode === 'once' ? ['--dry', '--budget'] : ['--interval', '--budget'];
   let seconds = 120;
+  let budget: number | undefined;
   let dry = false;
+  const secondsArg = (v: string | undefined): number => (v !== undefined && /^\d+(\.\d+)?$/.test(v) ? Number(v) : NaN);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (!allowed.includes(a)) return usage(`${a} is not valid for ${mode}`);
     if (a === '--dry') dry = true;
-    else {
-      const v = rest[++i];
-      seconds = v !== undefined && /^\d+(\.\d+)?$/.test(v) ? Number(v) : NaN;
+    else if (a === '--budget') {
+      budget = secondsArg(rest[++i]);
+      if (!Number.isFinite(budget) || budget < 10) return usage('--budget needs a number of seconds, at least 10');
+    } else {
+      seconds = secondsArg(rest[++i]);
       if (!Number.isFinite(seconds) || seconds < 10) return usage('--interval needs a number of seconds, at least 10');
     }
   }
+  // A loop pass must end inside its own slot, so its budget defaults to, and may not exceed, the interval.
+  if (mode === 'loop' && budget !== undefined && budget > seconds) return usage('--budget may not exceed --interval');
   const cfg = (deps.load ?? (() => loadConfig(DEFAULT_CONFIG)))();
   const run = deps.run ?? runCommand;
-  const opts: Opts = { dry, now: deps.now };
+  const clock = deps.now ?? Date.now;
+  const opts: Opts = { dry, now: deps.now, budgetMs: (budget ?? (mode === 'loop' ? seconds : DEFAULT_ONCE_BUDGET_S)) * 1000 };
   const stateDir = join(cfg.stateDir, 'ticker-wake');
   if (dry) { pass(cfg, run, opts, log, stateDir); return 0; }
   let release: () => void;
   try { release = acquireLock(stateDir); } catch (e) { log(`ticker-wake: ${describeError(e)}`); return 1; }
   try {
+    // Fixed slots: a pass starts on a slot boundary. One that overran its slot skips the slots it covered (logged) and
+    // the next pass starts on the following boundary, so passes never run back to back or pile up behind a slow one.
+    const slotMs = seconds * 1000;
+    let next = clock();
     for (let n = 0; ; n++) {
-      try { pass(cfg, run, opts, log, stateDir); } catch (e) { log(`${new Date().toISOString()} pass failed: ${describeError(e)}`); }
+      const started = clock();
+      try { pass(cfg, run, opts, log, stateDir); } catch (e) { log(`${new Date(clock()).toISOString()} pass failed: ${describeError(e)}`); }
       if (mode === 'once' || (deps.maxPasses !== undefined && n + 1 >= deps.maxPasses)) return 0;
-      await (deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(seconds * 1000);
+      next = Math.max(next, started) + slotMs;
+      const ended = clock();
+      if (ended > next) {
+        const skipped = Math.ceil((ended - next) / slotMs);
+        next += skipped * slotMs;
+        log(`${new Date(ended).toISOString()} pass overran its slot; skipped ${skipped} slot(s)`);
+      }
+      await (deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(next - ended);
     }
   } finally { release(); }
 }

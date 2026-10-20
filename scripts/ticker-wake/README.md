@@ -16,8 +16,8 @@ by this README, the PR, its approvals or its merge. Use `once --dry` to see what
 pass would do without typing or acking anything.
 
 ```
-tsx scripts/ticker-wake/ticker-wake.ts once [--dry]
-tsx scripts/ticker-wake/ticker-wake.ts loop [--interval <seconds>=120]   # at least 10
+tsx scripts/ticker-wake/ticker-wake.ts once [--dry] [--budget <seconds>=300]
+tsx scripts/ticker-wake/ticker-wake.ts loop [--interval <seconds>=120] [--budget <seconds>=interval]   # each at least 10
 ```
 
 Config: the router's `~/.config/hadron-orca-attention-router/config.json`
@@ -53,6 +53,20 @@ skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
   `busyDeadline`, after which busy alone stops vetoing. Nothing is recomputed or
   remembered locally, so a re-offer, join or restart cannot restart it, and a
   wake without timing (old server) is held.
+- **A pass fits inside one cadence (#2138 experiment).** Tick 1 on orca1
+  (#26038) ran a serial pass of ~34 wakes for ~30 min: a 60 s busy-wait per
+  busy worker plus the turn-start wait. So: a busy terminal is *probed*
+  (`tui-idle` with a 500 ms timeout, not `busyWaitMs`) and, short of the
+  server's `busyDeadline`, held to a later pass. Wakes are served oldest
+  anchor first, and once the pass budget (`--budget`; 300 s for `once`, the
+  interval for `loop`, which it may not exceed) is spent no new delivery
+  starts and the rest wait for the next pass. A proof older than 10 minutes
+  (the server refuses one past 15) is re-fetched before its ack, and a proof
+  the server calls `WAKE_PROOF_STALE` is re-fetched once and retried; the fresh
+  proof is acked only when the confirmed receipt covers all of it, otherwise
+  the next pass names only the new work. The loop runs on fixed slots: a pass
+  that overruns its slot skips the slots it covered (logged) instead of
+  running back to back. A second instance is refused by the lock.
 - **Composer.** Unconditional, deadline or not: a nudge is typed only when a
   read shows the composer empty with no Orca draft (even when `tui-idle` holds);
   a draft, question/menu, unknown input or identity holds. Nothing is cleared or
