@@ -1374,14 +1374,47 @@ describe('#2138: an ambiguous receipt is resolved on evidence, never on a timeou
     expect(log()).toContain('resolved as delivered on evidence');
   });
 
-  it('a covered task the wake no longer names cannot be checked, so it is held', () => {
+  it('a legacy receipt covering a task with no recorded task identity is held, never guessed', () => {
     mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
     writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1', 'task:e-gone#0'], receiver: 'term_a#inc-1', at: T0, detail: 'accepted, turn start not confirmed (input_accepted)', text: 't', handle: 'term_a', requestId: 'r1' } }));
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
     f.lastCheckedAt = iso(T0 + 60_000);
     go(at(T0 + 120_000));
     expect(f.acked).toEqual([]);
-    expect(log()).toContain('a covered task is no longer named by the wake');
+    expect(f.evidenceQueries).not.toContain('task t7');
+    expect(log()).toContain('a covered task was not recorded with the send');
+  });
+
+  it("George's lifecycle probe (#2154 P2): STARTING the task removes its wake, and a later tick still resolves the receipt by the task recorded at send time", () => {
+    const p = proof([], 'a', [taskEntry('t7')]);
+    f.wakes = [wake('w-ada', 'Ada', [task('t7')], p, [], timing)];
+    ambiguous();
+    expect(receipt().tasks).toEqual({ 'task:e-t7#0': 't7' });
+    // The worker started the task: the server drops the assignment wake; only a later tick is due.
+    f.tasks.t7 = { id: 't7', status: 'STARTED', assignee: { kind: 'WORKER', id: 'w-ada' } };
+    f.lastCheckedAt = iso(T0 + 60_000);
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    go(at(T0 + 120_000));
+    expect(f.evidenceQueries).toContain('task t7');
+    expect(log()).toContain('resolved as delivered on evidence');
+    expect(f.sent).toHaveLength(2); // the tick is new work: one nudge for it, never the task again
+    expect(f.sent[1]).toContain('coordinator-tick');
+    expect(f.sent[1]).not.toContain('t7');
+  });
+
+  it('only the tasks a send newly named are recorded; a send naming no task records none', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+    ambiguous();
+    expect(receipt().tasks).toEqual({});
+  });
+
+  it('a malformed recorded task map stops the pass (fail closed)', () => {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    for (const tasks of [[], { 'task:e-x#0': 7 }, { 'T:1': 't1' }, { 'task:e-other#0': 't1' }, { 'task:e-x#0': 'bad id!' }]) {
+      writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1', 'task:e-x#0'], receiver: 'term_a#inc-1', at: T0, detail: 'accepted, turn start not confirmed (input_accepted)', text: 't', handle: 'term_a', requestId: 'r1', tasks } }));
+      f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
+      expect(() => go(at(T0 + 120_000))).toThrow(/receipts malformed/);
+    }
   });
 
   it('after 2 cadences without evidence it stays held and is listed as needing a person; before that it only waits', () => {
