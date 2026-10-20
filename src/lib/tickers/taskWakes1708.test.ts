@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1708 — Task Management T5: task events as the second relevance source of the
  * due-wake computation, with per-event acknowledgement (design:agent-tasks §6;
@@ -47,7 +48,7 @@ async function mkUser(n: number) {
 }
 const mkWorker = (name: string, extra: Record<string, unknown> = {}) =>
   db.worker.create({
-    data: { id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: holder.id, heldAt: new Date(), ...extra },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: holder.id, heldAt: new Date(), ...extra },
     select: { id: true, name: true },
   });
 
@@ -526,5 +527,16 @@ describe('dueness follows Tickers, not session liveness (Colin P3 on #1859)', ()
     expect((await taskStallTick(db, new Date())).undeliverable).toBe(1);
     expect((await taskStallTick(db, new Date(Date.now() + MIN))).undeliverable).toBe(0);
     expect(await db.workerDeliveryTaskEvent.count({ where: { undeliverableReason: 'dormant', deliveredAt: null } })).toBe(1);
+  });
+});
+
+describe('#2138 §3.6 — a team pause silences task-event wakes too', () => {
+  it('a task.assigned wake is due, not due while the team is paused, due again when it resumes', async () => {
+    await assignedTo(liam);
+    expect(dueIds(await dueFor())).toEqual([liam.id]);
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: new Date() } });
+    expect(dueIds(await dueFor())).toEqual([]);
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: null } });
+    expect(dueIds(await dueFor())).toEqual([liam.id]);
   });
 });

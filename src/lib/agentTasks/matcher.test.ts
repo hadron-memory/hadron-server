@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1707 (Task Management T3) — the matcher (cor:agt:060:05, :06): who is free
  * for work, who a queued task goes to, when matching runs, and that
@@ -59,7 +60,7 @@ beforeEach(async () => {
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `match-${n}.example:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
   const worker = (name: string, role: string) =>
-    db.worker.create({ data: { appId: app.id, agentId, name, slug: name.toLowerCase(), role, heldByUserId: mia.id }, select: { id: true } });
+    db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name, slug: name.toLowerCase(), role, heldByUserId: mia.id }, select: { id: true } });
   baloo = await worker('Baloo', 'reviewer');
   liam = await worker('Liam', 'reviewer');
   rook = await worker('Rook', 'reviewer');

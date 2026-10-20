@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #2017 S1 slice (b): batch proofs (`signBatchProof` / `verifyBatchProof`) and the range-bounded
  * `acknowledgeBatchProofs`, against a real test database. One block per row of the retry matrix in
@@ -82,7 +83,7 @@ beforeEach(async () => {
   const memory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agent.id } });
   chA = await mkChannel(memory.id, 'chats:a');
   chB = await mkChannel(memory.id, 'chats:b');
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Liam', slug: 'liam' }, select: { id: true } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Liam', slug: 'liam' }, select: { id: true } });
 });
 
 describe('batch proof: signing, domain separation, shape', () => {

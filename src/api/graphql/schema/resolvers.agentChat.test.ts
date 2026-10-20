@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { BROKEN_INCLUDE_NOTICE as N } from '../../../lib/includes/spliceIncludes.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLoc, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -967,18 +968,18 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     );
     // #1835: readable knowledge is a retrieval context, not a bare-loc
     // namespace. No foreign partial is borrowed before a local target exists.
-    expect(start.systemMessage).toBe(' |  |  |  |  | ');
+    expect(start.systemMessage).toBe(`${N} | ${N} | ${N} | ${N} | ${N} | ${N}`);
     const chatRoot = await chatNodeByLocOrThrow(db, start.chatId);
     await db.node.create({ data: { memoryId: chatRoot.memoryId, loc: 'y-secret', name: 'Local Y', content: 'LOCAL Y' } });
     await db.node.create({ data: { memoryId: chatRoot.memoryId, loc: 'global-note', name: 'Local global', content: 'LOCAL GLOBAL' } });
     const startedAgain = await resolvers.Mutation.startChat(
       {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
     );
-    expect(startedAgain.systemMessage).toBe(' | LOCAL Y | LOCAL GLOBAL |  |  | ');
+    expect(startedAgain.systemMessage).toBe(`${N} | LOCAL Y | LOCAL GLOBAL | ${N} | ${N} | ${N}`);
     const sent = await resolvers.Mutation.sendChatMessage(
       {}, { chatId: start.chatId, userMessage: 'hello' }, userCtx(otherUser.id),
     );
-    expect(sent.systemMessage).toBe(' | LOCAL Y | LOCAL GLOBAL |  |  | ');
+    expect(sent.systemMessage).toBe(`${N} | LOCAL Y | LOCAL GLOBAL | ${N} | ${N} | ${N}`);
   });
 
   it('does not restore an uninstalled Agent when sending to its retained shared chat', async () => {

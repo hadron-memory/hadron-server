@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1037 — an explicitly-qualified reference beats connection state.
  *
@@ -57,7 +58,7 @@ beforeEach(async () => {
   appA = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team A', urn: `${org.urn}:team-a` } });
   appB = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team B', urn: `${org.urn}:team-b` } });
   for (const a of [appA, appB]) await db.appAgent.create({ data: { appId: a.id, agentId: agent.id } });
-  await db.worker.create({ data: { appId: appA.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: appA.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
 });
 
 /** A user whose connection is pinned to App B — a later bind in another App. */

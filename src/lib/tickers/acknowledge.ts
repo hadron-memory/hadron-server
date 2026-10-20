@@ -32,6 +32,7 @@ import { currentActor } from '../requestActor.js';
 import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
 import type { AuthorityAnchor } from '../auth/authorityAnchors.js';
 import { toNaiveUtc } from '../sessionActivity.js';
+import { raiseDeliveryMark, raiseReadIfMentionOnly, type AckedBy } from '../workerMarks.js';
 import {
   proofWakeKey, sameBatchRequester, sameRequester, verifyBatchProof, verifyWakeProof, WAKE_PROOF_MAX_AGE_MS,
   type BatchProof, type BatchRequester, type WakeProof, type WakeRequester,
@@ -230,8 +231,6 @@ function freshAfterWait(now: Date, entered: number, issuedAt: number): boolean {
   return now.getTime() + (performance.now() - entered) - issuedAt <= WAKE_PROOF_MAX_AGE_MS;
 }
 
-type AckedBy = { ackedByUserId: string | null; ackedByWorkerId: string | null; ackedByAppKeyId: string | null };
-
 /**
  * The authority an acknowledgement rests on, anchored BEFORE any row or advisory lock (Diego cycle 2, P2-1): every App
  * in the call, its org and its owner. Revokers of that authority take the same anchors exclusively.
@@ -245,49 +244,13 @@ async function authorityAnchorsOf(ctx: Context, appIds: string[]): Promise<Autho
   ]);
 }
 
-/**
- * Raise one worker's delivered-through mark on one channel. GREATEST: it only rises, unless the channel was recreated
- * (then it restarts at the new incarnation). The one writer of `worker_delivery_channels` for wakes and batches alike.
- */
-async function raiseDeliveryMark(
-  tx: Prisma.TransactionClient,
-  m: { workerId: string; channelId: string; incarnation: number; through: number },
-  nowNaive: string,
-  ackedBy: AckedBy,
-): Promise<void> {
-  await tx.$executeRaw`
-    INSERT INTO worker_delivery_channels
-      (worker_id, channel_id, channel_incarnation, delivered_through_seq, delivered_at,
-       acked_by_user_id, acked_by_worker_id, acked_by_app_key_id)
-    VALUES (${m.workerId}, ${m.channelId}, ${m.incarnation}, ${m.through}, ${nowNaive}::timestamp,
-            ${ackedBy.ackedByUserId}, ${ackedBy.ackedByWorkerId}, ${ackedBy.ackedByAppKeyId})
-    ON CONFLICT (worker_id, channel_id) DO UPDATE SET
-      delivered_through_seq = CASE WHEN worker_delivery_channels.channel_incarnation = EXCLUDED.channel_incarnation
-                                   THEN GREATEST(worker_delivery_channels.delivered_through_seq, EXCLUDED.delivered_through_seq)
-                                   ELSE EXCLUDED.delivered_through_seq END,
-      -- A repeat of what is already delivered changes NOTHING, neither the ceiling's clock nor who delivered it (Diego P2-3).
-      delivered_at = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
-                            OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
-                          THEN EXCLUDED.delivered_at ELSE worker_delivery_channels.delivered_at END,
-      acked_by_user_id = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
-                                OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
-                              THEN EXCLUDED.acked_by_user_id ELSE worker_delivery_channels.acked_by_user_id END,
-      acked_by_worker_id = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
-                                  OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
-                                THEN EXCLUDED.acked_by_worker_id ELSE worker_delivery_channels.acked_by_worker_id END,
-      acked_by_app_key_id = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
-                                   OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
-                                 THEN EXCLUDED.acked_by_app_key_id ELSE worker_delivery_channels.acked_by_app_key_id END,
-      channel_incarnation = EXCLUDED.channel_incarnation`;
-}
-
 // acknowledgeBatchProofs — #2017 (S1), cor:agt:080:12/:16/:17.
 //
 // The host types a rendered delivery batch, then hands back its signed id. In ONE transaction each channel's
 // delivered-through mark rises to the end of the range the batch rendered, or, with a partial `through`, to the listed
-// rendered seq of each LISTED channel (an omitted channel moves nothing and stays due). It writes only
-// WorkerDeliveryChannel: no ChannelReadState, no tick, no wake budget or reservation (a batch is not a wake). A repeat
-// changes nothing. The host/scope authority is re-derived by the caller's `mayAckBatch` inside the transaction.
+// rendered seq of each LISTED channel (an omitted channel moves nothing and stays due). It writes
+// WorkerDeliveryChannel and, on a mention-only attendance only, ChannelReadState to the same seq (#2018, ruling A);
+// no tick, no wake budget or reservation (a batch is not a wake). A repeat changes nothing. The host/scope authority is re-derived by the caller's `mayAckBatch` inside the transaction.
 //
 // Refusals: a forged, malformed or wrong-kind id, or a range past the channel's head → WAKE_PROOF_INVALID; an id issued
 // to somebody else, or authority gone → WAKE_PROOF_REQUESTER_MISMATCH; older than 15 minutes, issued in the future, a
@@ -381,6 +344,8 @@ export async function acknowledgeBatchProofs(args: {
         }
         if (!row || !sameIncarnation || m.through > row.deliveredThroughSeq) advanced = true;
         await raiseDeliveryMark(tx, { workerId: p.workerId, channelId: m.channelId, incarnation: m.incarnation, through: m.through }, nowNaive, ackedByOf(p, sessionUserId));
+        // #2018 (S2, ruling A): on a mention-only attendance the read position moves with it, in this transaction.
+        await raiseReadIfMentionOnly(tx, { workerId: p.workerId, channelId: m.channelId, through: m.through });
       }
       if (advanced) acknowledged++; else unchanged++;
     }

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1749 — Tickers S3 (epic #1659): App key scopes, `attention:deliver` for team routers, and the
  * session-bound refusal. Acceptance list of the issue, one block per heading.
@@ -103,7 +104,7 @@ beforeEach(async () => {
   for (const u of [holder, member]) await db.appMember.create({ data: { appId: app.id, userId: u.id, role: 'member' } });
   memory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agent.id } });
   channel = await mkChannel(memory.id, 'chats:team', manager.id);
-  liam = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Liam', slug: 'liam', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
+  liam = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Liam', slug: 'liam', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
   await db.registerEntry.create({ data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: liam.id, role: 'BOTH' } });
   key = await mkKey(app.id);
   post = vi.spyOn(teamChatMutations, 'createTeamChatMessage').mockResolvedValue({} as never);
@@ -158,7 +159,7 @@ describe('the scope primitive', () => {
   });
 
   it('a worker\'s session, even its manager-holder\'s, does not manage', async () => {
-    const mgrWorker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Boss', slug: 'boss', heldByUserId: manager.id, heldAt: new Date() }, select: { id: true } });
+    const mgrWorker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Boss', slug: 'boss', heldByUserId: manager.id, heldAt: new Date() }, select: { id: true } });
     const { runAsActor } = await import('../requestActor.js');
     const c = await runAsActor({ workerId: mgrWorker.id, agentId: agent.id }, () => code(M.grantAppKeyScope({}, { id: key.id, scope: 'attention:deliver' }, userCtx(manager.id))));
     expect(c).toBeDefined();
@@ -275,7 +276,7 @@ describe('attention:deliver — the key at dueWakes', () => {
 
   it('only the key\'s own App\'s workers, even when another App\'s worker is named', async () => {
     const other = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
-    const stranger = await db.worker.create({ data: { id: generateId(), appId: other.id, agentId: agent.id, name: 'Stray', slug: 'stray' }, select: { id: true } });
+    const stranger = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: other.id, agentId: agent.id, name: 'Stray', slug: 'stray' }, select: { id: true } });
     await grant(key);
     const page = await due(keyCtx(key, app.id), { workerRefs: [stranger.id, liam.id] });
     expect(page.wakes.map((w: any) => w.worker.id)).toEqual([liam.id]);
@@ -416,7 +417,7 @@ describe('the wake-budget notice is posted by the platform, key-only reads inclu
   const notices = () => db.node.findMany({ where: { messageChannelId: channel.id, nodeType: 'chat-message' }, orderBy: { seq: 'asc' } });
   beforeEach(async () => {
     await grant(key);
-    const rook = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Rook', slug: 'rook', heldByUserId: member.id, heldAt: new Date() }, select: { id: true } });
+    const rook = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Rook', slug: 'rook', heldByUserId: member.id, heldAt: new Date() }, select: { id: true } });
     await db.registerEntry.create({ data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: rook.id, role: 'BOTH' } });
     await db.app.update({ where: { id: app.id }, data: { wakeDailyBudget: 1 } });
     // The team chat the notice goes to: the channel of the team space, as the App's default.

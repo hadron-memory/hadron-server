@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #964 — castWorkerPreview: the dry-run for the one IRREVERSIBLE act in the
  * team feature (a cast name is permanent, cor:agt:020:02).
@@ -138,7 +139,7 @@ describe('#964 — castWorkerPreview', () => {
   it('a previewed name is NOT reserved — someone else can take it first, by design', async () => {
     const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Fred' });
     expect(p.name).toBe('Fred');
-    await db.worker.create({ data: { appId: app.id, agentId: roleAgent.id, name: 'Fred', slug: 'fred' } });
+    await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: roleAgent.id, name: 'Fred', slug: 'fred' } });
     // The preview held no lease, so the same call now refuses.
     await expectCode(
       preview(ctx(admin.id), { role: 'backend-engineer', name: 'Fred' }),
@@ -155,7 +156,7 @@ describe('#964 — castWorkerPreview', () => {
     expect(p.name).toBe('Zoe');
     expect(p.prompt).toBe('You are Zoe, a backend-engineer.\n\nBe terse.');
     await db.worker.create({
-      data: { appId: app.id, agentId: roleAgent.id, name: 'zoe', slug: 'zoe', retiredAt: new Date() },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: roleAgent.id, name: 'zoe', slug: 'zoe', retiredAt: new Date() },
     });
     await expectCode(
       preview(ctx(admin.id), { agentRef: roleAgent.id, name: 'Zoe' }),
@@ -172,7 +173,7 @@ describe('#964 — castWorkerPreview', () => {
     // A taken name — the refusal that replaced WORKER_REGISTER_EXHAUSTED as the
     // "you cannot have this one" answer, now that names are chosen not drawn.
     await db.worker.create({
-      data: { appId: app.id, agentId: roleAgent.id, name: 'Fred', slug: workerSlugBase('Fred') },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: roleAgent.id, name: 'Fred', slug: workerSlugBase('Fred') },
     });
     await expectCode(
       preview(ctx(admin.id), { role: 'backend-engineer', name: 'Fred' }),

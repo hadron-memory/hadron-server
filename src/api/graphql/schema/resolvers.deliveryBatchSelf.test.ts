@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #2017 R57 — real DB own-session batch read/ack contract; host controls remain in deliveryBatch.test.ts.
  * cor:agt:080:22 (host arm, R4), :23, :26; cor:agt:070:04, :07.
@@ -73,8 +74,8 @@ beforeEach(async () => {
   agentId = (await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(manager.id))).id;
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true, urn: true } });
   otherApp = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other` }, select: { id: true } });
-  kit = await db.worker.create({ data: { appId: app.id, agentId, name: 'Kit', slug: 'kit' }, select: { id: true, name: true } });
-  rook = await db.worker.create({ data: { appId: app.id, agentId, name: 'Rook', slug: 'rook' }, select: { id: true, name: true } });
+  kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Kit', slug: 'kit' }, select: { id: true, name: true } });
+  rook = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Rook', slug: 'rook' }, select: { id: true, name: true } });
   const memory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agentId } });
   const made = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:team', name: 'team', createdBy: manager.id });
   channel = { id: made.channel.id, memoryId: memory.id, loc: 'chats:team', chatRootNodeId: made.rootId };
@@ -161,13 +162,57 @@ describe('R57 own-live-session batches', () => {
     expect(await db.hostKeyUse.count()).toBe(before);
     expect(await db.workerDeliveryChannel.count()).toBe(0);
   });
+  it('#2138 §3.1: an own-session inbox read, empty or not, is a check of the team channel; a host read and a refused read are not', async () => {
+    const s = await ownSession();
+    const checked = async () => (await db.channelReadState.findFirst({ where: { workerId: kit.id, channelId: channel.id } }))?.lastCheckedAt ?? null;
+    expect(await checked()).toBeNull();
+    await expect(selfRead(s, {}, { sessionId: 'not-a-session' })).rejects.toThrow();
+    expect(await checked()).toBeNull();
+    await selfRead(s);
+    const first = await checked();
+    expect(first).toBeInstanceOf(Date);
+    expect((await db.channelReadState.findFirstOrThrow({ where: { workerId: kit.id, channelId: channel.id } })).lastSeenSeq).toBe(0);
+  });
+  it('#2013 (#2138 §3.7): a stamped @all post reaches the worker\'s inbox', async () => {
+    const s = await ownSession();
+    await say('@all standup moved', { mentions: ['all'], broadcastWakes: true });
+    await db.node.updateMany({ where: { messageChannelId: channel.id }, data: { createdAt: new Date(Date.now() - 3600_000) } }); // past the batching window
+    const page = await selfRead(s);
+    expect(page.batches).toHaveLength(1);
+    expect(page.batches[0].text).toContain('standup moved');
+  });
+  it('#2138: an inbox read with no team channel to check logs channel.check.miss NO_TEAM_CHANNEL (reason and route only) and still serves the read', async () => {
+    const s = await ownSession(); await postForBoth();
+    await db.channel.update({ where: { id: channel.id }, data: { deletedAt: new Date() } });
+    const page = await selfRead(s);
+    expect(Array.isArray(page.batches)).toBe(true);
+    const logs = await db.appLogEntry.findMany({ where: { appId: app.id, message: 'channel.check.miss' } });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ sessionId: s.id, detail: { reason: 'NO_TEAM_CHANNEL', via: 'inbox' } });
+  });
+  it('#2158 (George P2): a diagnostic write that FAILS never aborts a valid inbox read (the miss is logged outside the read transaction, best-effort)', async () => {
+    const s = await ownSession(); await postForBoth();
+    await db.channel.update({ where: { id: channel.id }, data: { deletedAt: new Date() } }); // no team channel -> a NO_TEAM_CHANNEL miss
+    await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION test_fail_check_miss() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'diagnostic write refused'; END $$ LANGUAGE plpgsql`);
+    await db.$executeRawUnsafe(`CREATE TRIGGER test_fail_check_miss BEFORE INSERT ON app_log FOR EACH ROW WHEN (NEW.message = 'channel.check.miss') EXECUTE FUNCTION test_fail_check_miss()`);
+    try {
+      const page = await selfRead(s);
+      expect(Array.isArray(page.batches)).toBe(true); // the read stands
+      // the read's own log entry committed: it was not rolled back with the failed diagnostic
+      expect(await db.appLogEntry.count({ where: { appId: app.id, sessionId: s.id, message: 'delivery.batch.read' } })).toBe(1);
+      expect(await db.appLogEntry.count({ where: { message: 'channel.check.miss' } })).toBe(0);
+    } finally {
+      await db.$executeRawUnsafe('DROP TRIGGER IF EXISTS test_fail_check_miss ON app_log');
+      await db.$executeRawUnsafe('DROP FUNCTION IF EXISTS test_fail_check_miss()');
+    }
+  });
   it('acks self with worker provenance, session user and no key, and retry changes nothing', async () => {
     const s = await ownSession(); await postForBoth(); const [b] = (await selfRead(s)).batches;
     expect(await selfAck(s, [b.id])).toEqual({ acknowledged: 1, unchanged: 0 });
     expect(await selfAck(s, [b.id])).toEqual({ acknowledged: 0, unchanged: 1 });
     const mark = await db.workerDeliveryChannel.findFirstOrThrow({ where: { workerId: kit.id } });
     expect([mark.ackedByWorkerId, mark.ackedByUserId, mark.ackedByAppKeyId]).toEqual([kit.id, manager.id, null]);
-    expect(await db.channelReadState.count()).toBe(0);
+    expect(await db.channelReadState.count({ where: { lastSeenSeq: { gt: 0 } } })).toBe(0); // #2138: an inbox read stamps lastCheckedAt but moves no position
   });
   it('a new session of the same worker cannot acknowledge the old session proof', async () => {
     const s = await ownSession(); await postForBoth(); const [b] = (await selfRead(s)).batches;
@@ -319,7 +364,7 @@ describe('R57 own-live-session batches', () => {
     expect((await selfRead(s)).batches[0].ranges[0].seqs).toEqual([b.ranges[0].seqs[1]]);
     expect(await selfAck(s, [b.id])).toEqual({ acknowledged: 1, unchanged: 0 });
     expect((await selfRead(s)).batches).toEqual([]);
-    expect(await db.channelReadState.count()).toBe(0);
+    expect(await db.channelReadState.count({ where: { lastSeenSeq: { gt: 0 } } })).toBe(0); // #2138: an inbox read stamps lastCheckedAt but moves no position
   });
 
   it('keeps the session refusal when middleware removed an invalid named binding', async () => {

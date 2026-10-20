@@ -1,5 +1,6 @@
 import Mustache from 'mustache';
 import { parseIncludeTags } from './includes/parseIncludeTags.js';
+import { spliceIncludes, type SpliceOptions } from './includes/spliceIncludes.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { decryptNodeFields } from './nodeCrypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
@@ -31,7 +32,7 @@ export function templatePartialLocs(content: string): string[] {
  *   1. Node's own data ({{field}})
  *   2. Memory's default data node ({{field}} if not in own data)
  *   3. Cross-node references ({{node-name.field}})
- *   4. Partials ({{> node-loc}}) — includes another node's compiled content
+ *   4. Includes ({{> node-loc}}) — spliced in as text before the above render (#2041)
  *
  * For encrypted memories, this function only produces useful output if the
  * caller already has an active session key in the session key cache. Nodes
@@ -44,14 +45,17 @@ export function templatePartialLocs(content: string): string[] {
  * values only. Single-human memories ignore it.
  */
 export async function compileTemplate(
-  content: string,
+  rawContent: string,
   nodeData: Record<string, unknown> | null,
   memoryId: string,
   db: PrismaClient,
   accessFilter: Record<string, unknown>,
   personId?: string | null,
+  /** `includer` names the node being compiled so a cycle back through it is caught at once (#2041). */
+  includes: SpliceOptions & { includer?: { id?: string } } = {},
 ): Promise<string> {
-  if (!content.includes('{{')) return content;
+  if (!rawContent.includes('{{')) return rawContent;
+  let content = rawContent;
 
   // Check if the memory is encrypted. If so, we need to decrypt any nodes we
   // load during compilation. No key in the cache → we can't compile, so we
@@ -71,6 +75,11 @@ export async function compileTemplate(
   if (memEncInfo?.isEncrypted && !hasKey) {
     return content;
   }
+
+  // Includes first, as plain text: each tag becomes the target's stored text
+  // (nested, the reader's own access, a notice where it can't resolve), so the
+  // variables below render across the whole of it, as a Mustache partial did.
+  content = await spliceIncludes(db, accessFilter, content, { id: includes.includer?.id, memoryId }, includes);
 
   // 1. Build the view: node's own data
   const view: Record<string, unknown> = {};
@@ -131,25 +140,8 @@ export async function compileTemplate(
     }
   }
 
-  // 4. Resolve partials ({{> node-loc}})
-  const partials: Record<string, string> = {};
-  const partialRefs = templatePartialLocs(content);
-
-  for (const partialLoc of partialRefs) {
-    const partialNode = await db.node.findFirst({
-      where: { loc: partialLoc, memoryId, deletedAt: null, AND: [accessFilter] },
-      select: { content: true, data: true, memoryId: true },
-    });
-    if (partialNode) {
-      if (memEncInfo?.isEncrypted) decryptNodeFields(partialNode, memEncInfo);
-      if (partialNode.content) {
-        partials[partialLoc] = partialNode.content;
-      }
-    }
-  }
-
   try {
-    return Mustache.render(content, view, partials);
+    return Mustache.render(content, view);
   } catch {
     // If compilation fails, return the raw content
     return content;

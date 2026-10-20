@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1705 — agent tasks (Task Management T1): authorization matrix, lifecycle,
  * events and the read gate.
@@ -82,7 +83,7 @@ async function user(suffix: string, n: number, handle?: string) {
 
 async function worker(appId: string, name: string, extra: Record<string, unknown> = {}) {
   return db.worker.create({
-    data: { id: generateId(), appId, agentId: teamAgent.id, name, slug: name.toLowerCase(), ...extra },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: teamAgent.id, name, slug: name.toLowerCase(), ...extra },
     select: { id: true },
   });
 }
