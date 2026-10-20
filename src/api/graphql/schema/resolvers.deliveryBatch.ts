@@ -142,6 +142,7 @@ async function selfBatches(ctx: Context, a: { appRef: string; workerRefs?: strin
     // #2138 §3.1: the inbox read through the worker's own session is a check of its App's team channel, empty or not.
     if ((await stampTeamChannelChecks(tx, worker.id)) === 0) {
       // No team channel of the worker's App to stamp (none provisioned, or deleted): log-only, no behaviour change.
+      // loc-scope-ok: the lookup is scoped to this App's own memories (memory.appId), not a bare loc
       const own = await tx.channel.findFirst({ where: { loc: TEAM_CHAT_LOC, deletedAt: null, memory: { appId: app.id } }, select: { id: true } });
       if (!own) await tx.appLogEntry.create({ data: { appId: app.id, level: 'WARN', sessionId: session.id, message: 'channel.check.miss', detail: { reason: 'NO_TEAM_CHANNEL', via: 'inbox' } } });
     }
