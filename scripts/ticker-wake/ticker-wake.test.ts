@@ -262,14 +262,35 @@ describe('selection and delivery', () => {
 });
 
 describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
-  it('a tick nudge asks for the unread TAGGED messages and keeps the no-unfiltered-catch-up rule', async () => {
+  /** The read and the mark-read a nudge must name (Yuri #26114: Codex turns read with their own --since and never marked read). */
+  const READ = '`hadron team chat read --mentions-me` (no --since; it prints your read mark and the channel head)';
+  const MARK = '`hadron team chat mark-read --through <that channel head>`';
+  const ordered = (text: string, parts: string[]) => {
+    const at = parts.map((p) => text.indexOf(p));
+    expect(at.every((i) => i >= 0)).toBe(true);
+    expect([...at].sort((a, b) => a - b)).toEqual(at);
+  };
+
+  it('a tick nudge names the exact commands, in order: read tagged from your read mark, act, mark-read, end your turn (pinned text)', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     await go();
-    expect(f.sent).toHaveLength(1);
-    expect(f.sent[0]).toContain('check your unread tagged messages');
-    expect(f.sent[0]).toContain('no unfiltered chat catch-up');
-    expect(f.sent[0]).not.toContain('standing routine');
+    expect(f.sent).toEqual([
+      `Hadron ticker wake (coordinator-tick): run ${READ}, act on the tagged messages after your mark, run ${MARK}, then end your turn. No unfiltered chat catch-up.`,
+    ]);
+    ordered(f.sent[0], [READ, 'act on the tagged messages', MARK, 'end your turn']);
+    expect(f.sent[0]).not.toMatch(/--since </);
     expect(f.sent[0]).not.toContain('\n');
+  });
+
+  it('a task nudge names the same read and mark-read, then the task, on one line (pinned text)', () => {
+    expect(nudgeText(['coordinator-tick'], ['t1'])).toBe(
+      `Hadron task assigned (t1; ticker coordinator-tick): run ${READ}, act on the tagged messages after your mark, run ${MARK}, then start the task (\`hadron team task get t1\`). No unfiltered chat catch-up.`,
+    );
+    expect(nudgeText([], ['t1', 't2'])).toContain('(`hadron team task list`)');
+    for (const t of [nudgeText(['a'], []), nudgeText([], ['t1']), nudgeText(['a'], ['t1', 't2'])]) {
+      expect(t).not.toContain('\n');
+      ordered(t, [READ, MARK]);
+    }
   });
 
   it('live-check fires an ordinary TICK reason, so it is nudged and acked like any tick', async () => {
@@ -287,8 +308,8 @@ describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
     expect(f.sent).toHaveLength(1);
     expect(f.sent[0]).toContain('Hadron task assigned (t42)');
     expect(f.sent[0]).toContain('hadron team task get t42');
-    expect(f.sent[0]).toContain('check your unread tagged messages');
-    expect(f.sent[0]).toContain('no unfiltered chat catch-up');
+    expect(f.sent[0]).toContain('hadron team chat mark-read --through');
+    expect(f.sent[0]).toContain('No unfiltered chat catch-up');
     expect(f.acked).toEqual([p]);
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))).toEqual({});
   });
