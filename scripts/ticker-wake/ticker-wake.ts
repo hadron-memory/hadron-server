@@ -2,12 +2,17 @@
  * Ticker-only wake delivery for an Orca host (Hugo, 2026-10-18; corrected after
  * the #2070 gate, 2026-10-19).
  *
- * Delivers ONLY wakes that carry a TICK, from hadron dueWakes to the worker's
- * terminal, then acks the wake by proof. Mentions are not relayed: chat posts
- * reach terminals through hadron-chat-send. Interim until hadron-cli#907 (C1);
- * shares no token, ledger or lock with the attention router.
+ * Delivers wakes that carry a TICK or a task ASSIGNMENT, from hadron dueWakes
+ * to the worker's terminal, then acks the wake by proof. Mentions are not
+ * relayed: chat posts reach terminals through hadron-chat-send. Interim until
+ * hadron-cli#907 (C1); shares no token, ledger or lock with the attention router.
  *
- * Per-reason contract (TICK-only; #2070 gate, Vera's receipt; updated for #2102):
+ * #2138 §5.2: the nudge asks the worker to check its unread tagged messages
+ * (mentions and @all, from its read mark; never an unfiltered catch-up). A
+ * `live-check` ticker fires an ordinary TICK reason, so it is delivered exactly
+ * like any other tick: the wake names the ticker, not why it fired.
+ *
+ * Per-reason contract (#2070 gate, Vera's receipt; updated for #2102 and #2138):
  *  - a wake whose reasons are TICK, or TICK joined with MENTION: nudge once, then
  *    ack it. Since #2069 (landed in #2102) a MENTION-only reservation absorbs a
  *    later tick, so a worker holding an outstanding mention is offered a
@@ -17,9 +22,15 @@
  *    and due (it is delivered by an S1 batch / hadron-chat-send, never by this
  *    script). The nudge tells the worker to run its standing routine and read only its own
  *    mentions; it forbids an unfiltered chat catch-up.
- *  - any wake carrying another reason (TASK, unknown): left alone, neither
- *    nudged nor acked. A proof naming task events records them delivered
- *    unseen (T5 receipts), and this script does not deliver tasks.
+ *  - a TASK reason for an assignment (ASSIGNED, REASSIGNED, MATCHED; #2138
+ *    §5.2), alone or joined with ticks or a mention: nudged once, naming the
+ *    task, then acked. The ack records the task event delivered (T5 receipts),
+ *    which is now true: the nudge named it. Task events are covered by the
+ *    receipt like ticks, so one is never named twice to the same receiver.
+ *  - any wake carrying another reason (another task event such as ALARM,
+ *    CHILD_FINISHED or END_SESSION, a TASK reason without its task, or an
+ *    unknown kind): left alone, neither nudged nor acked, because its proof
+ *    would record those events delivered unseen.
  *  - a MENTION-only wake is ignored and never acked: there is no mention-ack
  *    path in this script.
  *
@@ -53,9 +64,13 @@ import {
   type Config, type Runner,
 } from '../orca-attention-router/router.js';
 
-export const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{worker{id name} reasons{kind ticker{id name}} proof anchorAt deliverAfter busyDeadline} pageInfo{hasNextPage endCursor}}}`;
+export const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{worker{id name} reasons{kind ticker{id name} task{id eventId chainIndex event}} proof anchorAt deliverAfter busyDeadline} pageInfo{hasNextPage endCursor}}}`;
 export const ACK = `mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowledged unchanged}}`;
 const MAX_PAGES = 10;
+/** The task events that mean "a task was assigned to you" (#2138 §5.2); every other task event is left alone. */
+export const ASSIGNMENT_EVENTS: ReadonlySet<string> = new Set(['ASSIGNED', 'REASSIGNED', 'MATCHED']);
+/** A task id is typed into a terminal, so only a plain id shape is accepted; anything else holds the wake. */
+const TASK_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 type Log = (line: string) => void;
 export interface Opts { dry?: boolean; now?: () => number }
@@ -67,12 +82,20 @@ interface Ambiguous { state: 'ambiguous'; coverage: string[]; receiver: string; 
 type Receipt = Delivered | Ambiguous;
 type Receipts = Record<string, Receipt>; // by worker id
 
-/** The ticks a proof carries ("tickerId:k"), decoded from its payload; null when it cannot be established. */
-export function proofTicks(proof: string): string[] | null {
+/** A task event's coverage key ("task:<eventId>#<chainIndex>"), shared by the proof and the wake's reasons. */
+const taskKey = (eventId: unknown, chainIndex: unknown): string => `task:${eventId}#${chainIndex}`;
+
+/**
+ * Everything a proof carries that a nudge must name: its ticks ("tickerId:k") and its task events (`taskKey`), sorted.
+ * Null when the payload cannot be decoded, names nothing, or carries an entry with a missing part.
+ */
+export function proofCoverage(proof: string): string[] | null {
   try {
     const body = JSON.parse(Buffer.from(proof.split('.')[0], 'base64url').toString('utf8'));
     const ticks = (body.ticks ?? []).map((t: any) => `${t.tickerId}:${t.k}`);
-    return ticks.length && ticks.every((t: string) => !t.includes('undefined')) ? ticks.sort() : null;
+    const tasks = (body.tasks ?? []).map((t: any) => taskKey(t.eventId, t.chainIndex));
+    const all = [...ticks, ...tasks];
+    return all.length && all.every((t: string) => !t.includes('undefined')) ? all.sort() : null;
   } catch { return null; }
 }
 
@@ -300,17 +323,21 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
   if (more) log(`${ts} dueWakes has more than ${MAX_PAGES} pages; the rest wait for a later pass`);
 
   const kinds = (w: any): Set<string> => new Set(w.reasons.map((r: any) => r.kind));
-  const due = wakes.filter((w) => kinds(w).has('TICK'));
+  const due = wakes.filter((w) => kinds(w).has('TICK') || kinds(w).has('TASK'));
   const terminals = due.length ? listTerminals(cfg, run) : [];
   for (const w of due) {
     const name = w.worker.name;
     const id: string = w.worker.id;
-    const other = [...kinds(w)].filter((x) => x !== 'TICK' && x !== 'MENTION');
+    const other = [...kinds(w)].filter((x) => x !== 'TICK' && x !== 'MENTION' && x !== 'TASK');
+    // A task reason is delivered only for an assignment the caller can see; its id is typed, so it must be a plain id.
+    const unassignable = w.reasons.filter((r: any) => r.kind === 'TASK'
+      && !(r.task && ASSIGNMENT_EVENTS.has(r.task.event) && typeof r.task.id === 'string' && TASK_ID.test(r.task.id)));
+    if (unassignable.length) other.push(...new Set(unassignable.map((r: any) => (ASSIGNMENT_EVENTS.has(r.task?.event) ? 'TASK' : `TASK ${safeEvent(r.task?.event)}`))));
     if (other.length) { log(`${ts} ${name}: left alone (also carries ${other.join(',')}; the proof would record them delivered unseen)`); continue; }
     const entry = cfg.roster.find((e) => e.worker === id);
     if (!entry) { log(`${ts} ${name}: not on roster`); continue; }
-    const ticks = proofTicks(w.proof);
-    if (!ticks) { log(`${ts} ${name}: held (the proof's tick coverage cannot be established)`); continue; }
+    const work = proofCoverage(w.proof);
+    if (!work) { log(`${ts} ${name}: held (the proof's tick coverage cannot be established)`); continue; }
     let prior = receipts[id];
 
     // The server owns the timing (R63): anchor, floor and busy deadline come with the wake and are never recomputed or
@@ -359,9 +386,9 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
     }
 
     const covered = prior?.state === 'sent' && prior.receiver === receiver ? prior.coverage : [];
-    const newTicks = ticks.filter((t) => !covered.includes(t));
+    const newWork = work.filter((t) => !covered.includes(t));
     // Everything in this proof was already delivered to this receiver: only the ack is missing.
-    if (!newTicks.length) {
+    if (!newWork.length) {
       if (dry) { log(`${ts} ${name}: WOULD ack-only (covered by a confirmed receipt)`); continue; }
       const a = ack(cfg, run, w.proof);
       log(`${ts} ${name}: ack-only recovery ${a.ok ? 'acked' : 'FAILED'} ${a.text}`);
@@ -369,22 +396,26 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
       continue;
     }
 
-    // Otherwise a fresh nudge for ONLY the uncovered tick work; if it cannot be identified, hold rather than repeat covered work.
+    // Otherwise a fresh nudge for ONLY the uncovered work; if any of it cannot be identified, hold rather than repeat covered work.
     const nameOf = new Map<string, string>();
     for (const r of w.reasons) if (r.kind === 'TICK' && r.ticker?.id) nameOf.set(r.ticker.id, r.ticker.name);
+    const taskOf = new Map<string, string>();
+    for (const r of w.reasons) if (r.kind === 'TASK') taskOf.set(taskKey(r.task.eventId, r.task.chainIndex), r.task.id);
     const newTickers = new Set<string>();
-    for (const t of newTicks) {
-      const tickerName = nameOf.get(t.slice(0, t.lastIndexOf(':')));
-      if (!tickerName) { newTickers.clear(); break; }
-      newTickers.add(tickerName);
+    const newTasks = new Set<string>();
+    let unknown = false;
+    for (const t of newWork) {
+      const found = t.startsWith('task:') ? taskOf.get(t) : nameOf.get(t.slice(0, t.lastIndexOf(':')));
+      if (!found) { unknown = true; break; }
+      (t.startsWith('task:') ? newTasks : newTickers).add(found);
     }
-    if (!newTickers.size) { log(`${ts} ${name}: held (the uncovered tick work cannot be identified; reconcile rather than repeat covered work)`); continue; }
+    if (unknown) { log(`${ts} ${name}: held (the uncovered tick work cannot be identified; reconcile rather than repeat covered work)`); continue; }
 
     const unsafe = safeToType();
     if (unsafe) { log(`${ts} ${name}: held (${unsafe})`); continue; }
-    const text = `Hadron ticker wake (${[...newTickers].join(', ')}): run your standing routine for this tick, then end your turn. Read only your own mentions; no unfiltered chat catch-up.`;
+    const text = nudgeText([...newTickers], [...newTasks]);
     if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); continue; }
-    const coverage = [...new Set([...covered, ...ticks])].sort();
+    const coverage = [...new Set([...covered, ...work])].sort();
 
     // Persist the UNRESOLVED INTENT before anything can be submitted (#2070 LOCAL P2-1). If the process dies, or any later
     // receipt write fails, after Orca took the input, this entry is what stops the next pass from typing the same wake again:
@@ -427,6 +458,20 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
   }
   if (!due.length) log(`${ts} no ticker wakes due (${wakes.length} other wakes ignored)`);
 }
+
+/**
+ * The one line typed into the terminal (#2138 §5.2): check the unread TAGGED messages, never an unfiltered catch-up. A
+ * task assignment names the task, so the worker can start it.
+ */
+export function nudgeText(tickers: string[], tasks: string[]): string {
+  const rule = 'Read only your own tagged messages; no unfiltered chat catch-up.';
+  if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): check your unread tagged messages, then end your turn. ${rule}`;
+  const which = tasks.length === 1 ? `hadron team task get ${tasks[0]}` : 'hadron team task list';
+  return `Hadron task assigned (${tasks.join(', ')}${tickers.length ? `; ticker ${tickers.join(', ')}` : ''}): check your unread tagged messages, then start the task (${which}). ${rule}`;
+}
+
+/** A task event name from the server, logged only when it is a known shape. */
+const safeEvent = (e: unknown): string => (typeof e === 'string' && /^[A-Z_]{1,32}$/.test(e) ? e : 'other');
 
 function pidAlive(pid: number): boolean {
   try { return pid > 0 && readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('ticker-wake'); } catch { return false; }
