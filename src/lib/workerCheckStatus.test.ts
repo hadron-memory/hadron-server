@@ -2,8 +2,9 @@
  * #2138 §3.4 — the worker check status, as a pure derivation: every boundary
  * the plan's acceptance list names (no session, each PENDING reason, a fresh
  * assignment after an old check, exactly `failedChecksToOverdue` × period + 5
- * minutes at the default and at a changed value, `usesTasks: false`), plus the
- * precedence between reasons and what starts the OVERDUE clock.
+ * minutes at the default and at a changed value), plus what starts the OVERDUE
+ * clock. Which reason applies, and in what order, is `loadPendingReasons`
+ * (the ticker's), exercised end to end in resolvers.workerCheckStatus2138.test.ts.
  *
  * The draft spec is hrn:node:hadronmemory.com:hadron-dev-team-vera:work:2138-experiment-spec.
  */
@@ -24,13 +25,10 @@ const DEFAULTS = { checkPeriodSeconds: 600, failedChecksToOverdue: 2 };
 /** A live worker with a task that checked a minute ago. Each test changes one thing. */
 const base = (over: Partial<WorkerCheckInputs> = {}): WorkerCheckInputs => ({
   liveSessionStartedAt: ago(60 * MIN),
-  hasTask: true,
+  pendingReason: null,
   lastAssignedAt: ago(50 * MIN),
   lastCheckedAt: ago(1 * MIN),
   pausedUntil: null,
-  teamPaused: false,
-  isolated: false,
-  standby: false,
   ...over,
 });
 
@@ -58,45 +56,17 @@ describe('NO_SESSION', () => {
   });
 
   it('wins over every PENDING reason (NO_SESSION is never PENDING or OVERDUE)', () => {
-    expect(derive({ liveSessionStartedAt: null, hasTask: false, teamPaused: true, isolated: true }).status).toBe('NO_SESSION');
+    expect(derive({ liveSessionStartedAt: null, pendingReason: 'TEAM_PAUSED' }).status).toBe('NO_SESSION');
   });
 });
 
 describe('PENDING, with its reason', () => {
-  it('NO_TASK: no open task and the Agent uses tasks', () => {
-    expect(derive({ hasTask: false, lastAssignedAt: null, lastCheckedAt: null })).toEqual({
+  it.each(['TEAM_PAUSED', 'PAUSED', 'ISOLATED', 'STANDBY', 'NO_TASK'] as const)('%s, even with a stale check', (reason) => {
+    expect(derive({ pendingReason: reason, lastCheckedAt: ago(5 * 60 * MIN) })).toEqual({
       status: 'PENDING',
-      pendingReason: 'NO_TASK',
-      lastCheckedAt: null,
+      pendingReason: reason,
+      lastCheckedAt: ago(5 * 60 * MIN),
     });
-  });
-
-  it('STANDBY: no task, and on standby', () => {
-    expect(derive({ hasTask: false, lastAssignedAt: null, standby: true })).toMatchObject({ status: 'PENDING', pendingReason: 'STANDBY' });
-  });
-
-  it('PAUSED by its own pause, even with a task and a stale check', () => {
-    expect(derive({ pausedUntil: new Date(now.getTime() + MIN), lastCheckedAt: ago(5 * 60 * MIN) })).toMatchObject({
-      status: 'PENDING',
-      pendingReason: 'PAUSED',
-    });
-  });
-
-  it('TEAM_PAUSED by a team pause, separate from the worker\'s own pause', () => {
-    expect(derive({ teamPaused: true, lastCheckedAt: ago(5 * 60 * MIN) })).toMatchObject({ status: 'PENDING', pendingReason: 'TEAM_PAUSED' });
-  });
-
-  it('ISOLATED, even with a task', () => {
-    expect(derive({ isolated: true, lastCheckedAt: ago(5 * 60 * MIN) })).toMatchObject({ status: 'PENDING', pendingReason: 'ISOLATED' });
-  });
-
-  it('precedence: TEAM_PAUSED over PAUSED over ISOLATED over STANDBY over NO_TASK', () => {
-    const idle = { hasTask: false, lastAssignedAt: null };
-    const selfPause = { pausedUntil: new Date(now.getTime() + MIN) };
-    expect(derive({ ...idle, ...selfPause, teamPaused: true, isolated: true, standby: true }).pendingReason).toBe('TEAM_PAUSED');
-    expect(derive({ ...idle, ...selfPause, isolated: true, standby: true }).pendingReason).toBe('PAUSED');
-    expect(derive({ ...idle, isolated: true, standby: true }).pendingReason).toBe('ISOLATED');
-    expect(derive({ ...idle, standby: true }).pendingReason).toBe('STANDBY');
   });
 
   it('a self-pause that has already ended does not pause', () => {
@@ -116,9 +86,9 @@ describe('OK and OVERDUE at the boundary', () => {
     expect(derive({ lastCheckedAt: ago(11 * MIN + 1), lastAssignedAt: ago(90 * MIN) }, settings).status).toBe('OVERDUE');
   });
 
-  it('usesTasks: false counts as having a task (the loader sets hasTask), with no assignment at all', () => {
-    expect(derive({ hasTask: true, lastAssignedAt: null, lastCheckedAt: ago(30 * MIN) }).status).toBe('OVERDUE');
-    expect(derive({ hasTask: true, lastAssignedAt: null, lastCheckedAt: ago(2 * MIN) }).status).toBe('OK');
+  it('with no assignment at all (usesTasks: false), the last check alone runs the clock', () => {
+    expect(derive({ lastAssignedAt: null, lastCheckedAt: ago(30 * MIN) }).status).toBe('OVERDUE');
+    expect(derive({ lastAssignedAt: null, lastCheckedAt: ago(2 * MIN) }).status).toBe('OK');
   });
 });
 

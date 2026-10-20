@@ -5,7 +5,9 @@
  *
  * - `NO_SESSION`: no live session (cor:agt:020:11, the shared `isSessionLive`).
  * - `PENDING`: not expected to check, with its reason: a team pause, its own
- *   pause, isolated, on standby, or no task.
+ *   pause, isolated, on standby, or no task. The reasons come from the ticker's
+ *   own `loadPendingReasons`, so the roster and the `live-check` rule can't
+ *   disagree about who is expected to check.
  * - `OK`: has a task and checked within `failedChecksToOverdue` × period + 5 minutes.
  * - `OVERDUE`: has a task and hasn't checked for longer than that.
  *
@@ -22,13 +24,12 @@
 
 import type { Prisma, PrismaClient, SessionType } from '../generated/prisma/index.js';
 import { isSessionLive, loadLastEventBySession, recentlyTouchedFilter } from './sessionActivity.js';
-import { s7Available } from './tickers/s7Availability.js';
-import { workerStandby } from './tickers/standby.js';
+import { loadPendingReasons, type PendingReason } from './tickers/checkPending.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
 export type WorkerCheckState = 'NO_SESSION' | 'PENDING' | 'OK' | 'OVERDUE';
-export type WorkerPendingReason = 'TEAM_PAUSED' | 'PAUSED' | 'ISOLATED' | 'STANDBY' | 'NO_TASK';
+export type WorkerPendingReason = PendingReason;
 
 export type WorkerCheckStatus = {
   status: WorkerCheckState;
@@ -40,16 +41,13 @@ export type WorkerCheckStatus = {
 export type WorkerCheckInputs = {
   /** Start of its newest live session; null = no live session. */
   liveSessionStartedAt: Date | null;
-  /** An open task is assigned to it, or its Agent has `usesTasks: false`. */
-  hasTask: boolean;
+  /** Why it isn't expected to check (`loadPendingReasons`); null = it has a task and is expected to. */
+  pendingReason: WorkerPendingReason | null;
   /** Its newest open assignment, if any. */
   lastAssignedAt: Date | null;
   lastCheckedAt: Date | null;
-  /** Its own pause (`WorkerWakeSettings.pausedUntil`), active while in the future. */
+  /** Its own pause (`WorkerWakeSettings.pausedUntil`); a past one restarts the clock. */
   pausedUntil: Date | null;
-  teamPaused: boolean;
-  isolated: boolean;
-  standby: boolean;
 };
 
 export type CheckSettings = { checkPeriodSeconds: number; failedChecksToOverdue: number };
@@ -63,10 +61,9 @@ export function overdueAfterMs(s: CheckSettings): number {
 }
 
 /**
- * The status from its inputs. Precedence: NO_SESSION, then PENDING reasons in
- * the order team paused (a worker can't lift it), its own pause, isolated,
- * standby, no task, then OK or OVERDUE. OK holds at
- * exactly the limit; OVERDUE starts one millisecond after it.
+ * The status from its inputs: NO_SESSION, then PENDING with its reason, then
+ * OK or OVERDUE. OK holds at exactly the limit; OVERDUE starts one millisecond
+ * after it.
  */
 export function deriveWorkerCheckStatus(i: WorkerCheckInputs, s: CheckSettings, now: Date): WorkerCheckStatus {
   const out = (status: WorkerCheckState, pendingReason: WorkerPendingReason | null = null): WorkerCheckStatus => ({
@@ -75,18 +72,14 @@ export function deriveWorkerCheckStatus(i: WorkerCheckInputs, s: CheckSettings, 
     lastCheckedAt: i.lastCheckedAt,
   });
   if (!i.liveSessionStartedAt) return out('NO_SESSION');
-  const selfPaused = i.pausedUntil !== null && i.pausedUntil.getTime() > now.getTime();
-  if (i.teamPaused) return out('PENDING', 'TEAM_PAUSED');
-  if (selfPaused) return out('PENDING', 'PAUSED');
-  if (i.isolated) return out('PENDING', 'ISOLATED');
-  if (!i.hasTask) return out('PENDING', i.standby ? 'STANDBY' : 'NO_TASK');
+  if (i.pendingReason) return out('PENDING', i.pendingReason);
 
   const clockStart = Math.max(
     i.lastCheckedAt?.getTime() ?? -Infinity,
     i.lastAssignedAt?.getTime() ?? -Infinity,
     i.liveSessionStartedAt.getTime(),
-    // Its own pause has ended here (an active one returned PAUSED above).
-    i.pausedUntil?.getTime() ?? -Infinity,
+    // A pause that has ended (an active one is PAUSED above).
+    i.pausedUntil && i.pausedUntil.getTime() <= now.getTime() ? i.pausedUntil.getTime() : -Infinity,
   );
   return out(now.getTime() - clockStart > overdueAfterMs(s) ? 'OVERDUE' : 'OK');
 }
@@ -107,17 +100,17 @@ export async function loadWorkerCheckStatuses(
   const { appId, teamChannelId, now } = opts;
   const app = await db.app.findUnique({
     where: { id: appId },
-    select: { deliveryCheckPeriodSeconds: true, deliveryFailedChecksToOverdue: true, teamPausedAt: true, deliveryStandbyEnabled: true },
+    select: { deliveryCheckPeriodSeconds: true, deliveryFailedChecksToOverdue: true },
   });
   if (!app) return new Map();
   const workers = await db.worker.findMany({
     where: { appId, ...(opts.workerIds ? { id: { in: opts.workerIds } } : {}) },
-    select: { id: true, agent: { select: { usesTasks: true } } },
+    select: { id: true },
   });
   if (workers.length === 0) return new Map();
   const ids = workers.map((w) => w.id);
 
-  const [sessions, tasks, readStates, wakeSettings] = await Promise.all([
+  const [sessions, tasks, readStates, wakeSettings, pending] = await Promise.all([
     db.session.findMany({
       where: { workerId: { in: ids }, endedAt: null, deletedAt: null, ...recentlyTouchedFilter(now) },
       select: { id: true, workerId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
@@ -130,7 +123,8 @@ export async function loadWorkerCheckStatuses(
     teamChannelId
       ? db.channelReadState.findMany({ where: { workerId: { in: ids }, channelId: teamChannelId }, select: { workerId: true, lastCheckedAt: true } })
       : Promise.resolve([]),
-    db.workerWakeSettings.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, pausedUntil: true, isolatedUntil: true } }),
+    db.workerWakeSettings.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, pausedUntil: true } }),
+    loadPendingReasons(db, appId, ids, now),
   ]);
 
   // The same liveness predicate as the roster's liveSession and startSession's gate (cor:agt:020:11).
@@ -145,27 +139,17 @@ export async function loadWorkerCheckStatuses(
   const checkedAt = new Map(readStates.map((r) => [r.workerId as string, r.lastCheckedAt]));
   const wake = new Map(wakeSettings.map((ws) => [ws.workerId, ws]));
   const settings = { checkPeriodSeconds: app.deliveryCheckPeriodSeconds, failedChecksToOverdue: app.deliveryFailedChecksToOverdue };
-  // Standby and isolation are inert until S7b (s7Available() is false in production).
-  const standbyLive = s7Available() && app.deliveryStandbyEnabled;
-
   const out = new Map<string, WorkerCheckStatus>();
   for (const w of workers) {
-    const ws = wake.get(w.id);
-    const hasOpenTask = openTask.has(w.id);
-    const hasTask = hasOpenTask || !w.agent.usesTasks;
-    const standby = standbyLive && !hasTask && liveStart.has(w.id) ? (await workerStandby(db, w.id)).onStandby : false;
     out.set(
       w.id,
       deriveWorkerCheckStatus(
         {
           liveSessionStartedAt: liveStart.get(w.id) ?? null,
-          hasTask,
+          pendingReason: pending.get(w.id) ?? null,
           lastAssignedAt: openTask.get(w.id) ?? null,
           lastCheckedAt: checkedAt.get(w.id) ?? null,
-          pausedUntil: ws?.pausedUntil ?? null,
-          teamPaused: app.teamPausedAt !== null,
-          isolated: s7Available() && !!ws?.isolatedUntil && ws.isolatedUntil > now,
-          standby,
+          pausedUntil: wake.get(w.id)?.pausedUntil ?? null,
         },
         settings,
         now,
