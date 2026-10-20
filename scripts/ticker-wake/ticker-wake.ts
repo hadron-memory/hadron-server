@@ -2,7 +2,7 @@
  * Ticker-only wake delivery for an Orca host (Hugo, 2026-10-18; corrected after
  * the #2070 gate, 2026-10-19).
  *
- * Delivers wakes that carry a TICK or a task ASSIGNMENT, from hadron dueWakes
+ * Delivers wakes that carry a TICK or a task event (an assignment, a stall alarm, a finished child), from hadron dueWakes
  * to the worker's terminal, then acks the wake by proof. Mentions are not
  * relayed: chat posts reach terminals through hadron-chat-send. Interim until
  * hadron-cli#907 (C1); shares no token, ledger or lock with the attention router.
@@ -29,10 +29,16 @@
  *    task, then acked. The ack records the task event delivered (T5 receipts),
  *    which is now true: the nudge named it. Task events are covered by the
  *    receipt like ticks, so one is never named twice to the same receiver.
- *  - any wake carrying another reason (another task event such as ALARM,
- *    CHILD_FINISHED or END_SESSION, a TASK reason without its task, or an
- *    unknown kind): left alone, neither nudged nor acked, because its proof
- *    would record those events delivered unseen.
+ *  - a TASK reason for a stall ALARM or a CHILD_FINISHED (#1704), alone or
+ *    joined as above: nudged once, then acked, recorded in the receipt like an
+ *    assignment. An alarm names its task, its stall rule (read from the alarm,
+ *    which must still be unacknowledged) and the `hadron team alarm ack <id>`
+ *    to run after acting, because delivery is never an acknowledgement
+ *    (cor:agt:050:20); a finished child names the child task.
+ *  - any wake carrying another reason (END_SESSION, which needs the host
+ *    poller, a TASK reason without its task, or an unknown kind): left alone,
+ *    neither nudged nor acked, because its proof would record those events
+ *    delivered unseen.
  *  - a MENTION-only wake is ignored and never acked: there is no mention-ack
  *    path in this script.
  *
@@ -156,8 +162,20 @@ const TASK_SEEN: ReadonlySet<string> = new Set(['STARTED', 'FINISHED']);
 /** Orca took the input (send.accepted) but no turn start was seen: the only ambiguity evidence may resolve. */
 const ACCEPTED_DETAIL = 'accepted, turn start not confirmed';
 const wasAccepted = (detail: string): boolean => detail.split('; same-id retry: ').some((p) => p.startsWith(ACCEPTED_DETAIL));
-/** The task events that mean "a task was assigned to you" (#2138 §5.2); every other task event is left alone. */
+/** The task events that mean "a task was assigned to you" (#2138 §5.2). */
 export const ASSIGNMENT_EVENTS: ReadonlySet<string> = new Set(['ASSIGNED', 'REASSIGNED', 'MATCHED']);
+/**
+ * Every task event this script delivers (#1704): the assignments, a stall ALARM and a CHILD_FINISHED. END_SESSION is
+ * left alone: it needs the host poller, which is not running.
+ */
+export const DELIVERED_EVENTS: ReadonlySet<string> = new Set([...ASSIGNMENT_EVENTS, 'ALARM', 'CHILD_FINISHED']);
+/** An alarm's own record: its rule (the event type) and whether someone already acknowledged it (#1704). */
+export const ALARM_EVENT = `query($a:ID!,$t:ID!,$p:ID){agentTeamEvents(appRef:$a,taskId:$t,alarmsOnly:true,after:$p,limit:200){id type acknowledgedAt}}`;
+/** The alarm read's page size (the server's cap), and how many pages it walks before holding (George's #2160 P2). */
+const ALARM_PAGE = 200;
+const ALARM_MAX_PAGES = 50;
+/** A stall rule is typed into a terminal, so only the platform's plain rule shape is accepted (e.g. stall.not-started). */
+const STALL_RULE = /^[a-z][a-z0-9.-]{0,63}$/;
 /** A task id is typed into a terminal, so only a plain id shape is accepted; anything else holds the wake. */
 const TASK_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -420,6 +438,29 @@ function deliveryEvidence(cfg: Config, run: Runner, workerId: string, prior: Amb
   return null;
 }
 
+/**
+ * The alarm `eventId` on task `taskId`, or undefined when the task's alarm history runs out without it. The history is
+ * oldest first and keeps acknowledged alarms, so it is paged by the last event read until the exact id turns up
+ * (George's #2160 P2: a task can hold more than one page of earlier episodes). Throws a SafeError when a page fails, the
+ * cursor does not advance, or ALARM_MAX_PAGES pages pass without an end: never "absent" on a partial read.
+ */
+function findAlarm(cfg: Config, run: Runner, taskId: string, eventId: string): any {
+  let after: string | undefined;
+  for (let n = 0; n < ALARM_MAX_PAGES; n++) {
+    const argv = [cfg.hadronCli, 'api', ALARM_EVENT, '-F', `a=${cfg.app}`, '-F', `t=${taskId}`];
+    if (after) argv.push('-F', `p=${after}`);
+    const list = gql(run, argv)?.agentTeamEvents;
+    if (!Array.isArray(list)) throw new SafeError('alarm history returned no result');
+    const found = list.find((e: any) => e?.id === eventId);
+    if (found) return found;
+    if (list.length < ALARM_PAGE) return undefined;
+    const last = list[list.length - 1]?.id;
+    if (typeof last !== 'string' || last === after) throw new SafeError('alarm history cursor did not advance');
+    after = last;
+  }
+  throw new SafeError(`alarm history longer than ${ALARM_MAX_PAGES} pages`);
+}
+
 /** Ack one proof; ok only on a real acknowledgement result. */
 function ack(cfg: Config, run: Runner, proof: string): { ok: boolean; text: string } {
   try {
@@ -610,10 +651,12 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
       const name = w.worker.name;
       const id: string = w.worker.id;
       const other = [...kinds(w)].filter((x) => x !== 'TICK' && x !== 'MENTION' && x !== 'TASK');
-      // A task reason is delivered only for an assignment the caller can see; its id is typed, so it must be a plain id.
-      const unassignable = w.reasons.filter((r: any) => r.kind === 'TASK'
-        && !(r.task && ASSIGNMENT_EVENTS.has(r.task.event) && typeof r.task.id === 'string' && TASK_ID.test(r.task.id)));
-      if (unassignable.length) other.push(...new Set(unassignable.map((r: any) => (ASSIGNMENT_EVENTS.has(r.task?.event) ? 'TASK' : `TASK ${safeEvent(r.task?.event)}`))));
+      // A task reason is delivered only for an event this script names (DELIVERED_EVENTS) and the caller can see; its id
+      // is typed, and so is an alarm's event id (the ack command), so both must be plain ids.
+      const undeliverable = w.reasons.filter((r: any) => r.kind === 'TASK'
+        && !(r.task && DELIVERED_EVENTS.has(r.task.event) && typeof r.task.id === 'string' && TASK_ID.test(r.task.id)
+          && (r.task.event !== 'ALARM' || (typeof r.task.eventId === 'string' && TASK_ID.test(r.task.eventId)))));
+      if (undeliverable.length) other.push(...new Set(undeliverable.map((r: any) => (DELIVERED_EVENTS.has(r.task?.event) ? 'TASK' : `TASK ${safeEvent(r.task?.event)}`))));
       if (other.length) { log(`${ts} ${name}: left alone (also carries ${other.join(',')}; the proof would record them delivered unseen)`); return; }
       const entry = receivers.entry(id, name);
       if (!entry) { log(`${ts} ${name}: held (${receivers.why(id)} on this host)`); return; }
@@ -731,26 +774,47 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
         // Otherwise a fresh nudge for ONLY the uncovered work; if any of it cannot be identified, hold rather than repeat covered work.
         const nameOf = new Map<string, string>();
         for (const r of w.reasons) if (r.kind === 'TICK' && r.ticker?.id) nameOf.set(r.ticker.id, r.ticker.name);
-        const taskOf = new Map<string, string>();
-        for (const r of w.reasons) if (r.kind === 'TASK') taskOf.set(taskKey(r.task.eventId, r.task.chainIndex), r.task.id);
+        const taskOf = new Map<string, { id: string; event: string; eventId: string }>();
+        for (const r of w.reasons) if (r.kind === 'TASK') taskOf.set(taskKey(r.task.eventId, r.task.chainIndex), r.task);
         const newTickers = new Set<string>();
-        const newTasks = new Set<string>();
+        const newTasks: NudgeTask[] = [];
         let unknown = false;
         for (const t of newWork) {
-          const found = t.startsWith('task:') ? taskOf.get(t) : nameOf.get(t.slice(0, t.lastIndexOf(':')));
-          if (!found) { unknown = true; break; }
-          (t.startsWith('task:') ? newTasks : newTickers).add(found);
+          if (t.startsWith('task:')) {
+            const r = taskOf.get(t);
+            if (!r) { unknown = true; break; }
+            newTasks.push({ id: r.id, event: ASSIGNMENT_EVENTS.has(r.event) ? 'ASSIGNED' : r.event as NudgeTask['event'], eventId: r.eventId });
+          } else {
+            const found = nameOf.get(t.slice(0, t.lastIndexOf(':')));
+            if (!found) { unknown = true; break; }
+            newTickers.add(found);
+          }
         }
         if (unknown) { log(`${ts} ${name}: held (the uncovered tick work cannot be identified; reconcile rather than repeat covered work)`); return; }
+        // An alarm is named with its rule, read from the alarm itself (the wake does not carry it). Unreadable, unknown,
+        // not a plain rule, or already acknowledged: held, and the next pass's wake decides again.
+        for (const t of newTasks) {
+          if (t.event !== 'ALARM') continue;
+          let alarm: any;
+          try { alarm = findAlarm(cfg, run, t.id, t.eventId as string); } catch (e) { log(`${ts} ${name}: held (the alarm cannot be read: ${describeError(e)})`); return; }
+          if (!alarm || typeof alarm.type !== 'string' || !STALL_RULE.test(alarm.type)) { log(`${ts} ${name}: held (the alarm's rule cannot be established)`); return; }
+          if (alarm.acknowledgedAt) { log(`${ts} ${name}: held (the alarm was acknowledged meanwhile; left for the next pass)`); return; }
+          t.rule = alarm.type;
+        }
 
         const unsafe = safeToType();
         if (unsafe) { log(`${ts} ${name}: held (${unsafe})`); return; }
-        const text = nudgeText([...newTickers], [...newTasks]);
+        const text = nudgeText([...newTickers], newTasks);
         if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); return; }
         const coverage = [...new Set([...covered, ...work])].sort();
-        // The task identities this send names, kept on the receipt: the assignment wake is gone once the task starts.
+        // The ASSIGNED task identities this send names, kept on the receipt: the assignment wake is gone once the task
+        // starts, and a started task is their delivery evidence. An alarm or a finished child has no such proof (its
+        // receiver need not be the assignee), so its evidence is the channel check alone, as for a tick.
         const tasks: Record<string, string> = {};
-        for (const t of newWork) if (t.startsWith('task:')) tasks[t] = taskOf.get(t) as string;
+        for (const t of newWork) {
+          const r = t.startsWith('task:') ? taskOf.get(t) : undefined;
+          if (r && ASSIGNMENT_EVENTS.has(r.event)) tasks[t] = r.id;
+        }
 
         // Persist the UNRESOLVED INTENT before anything can be submitted (#2070 LOCAL P2-1). If the process dies, or any later
         // receipt write fails, after Orca took the input, this entry is what stops the next pass from typing the same wake again:
@@ -829,16 +893,37 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
  * posted after it, and still stamps the check on an empty read. On a failed read nothing is marked, and a read whose
  * output the worker's tool truncated or saved counts only once the worker has read the rest (George's #2156 residual).
  */
-export function nudgeText(tickers: string[], tasks: string[]): string {
+export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>): string {
   const check = 'run `hadron team chat read --mentions-me --limit 1` (it prints `cursor #C; channel head #H`), '
     + 'then `hadron team chat read --mentions-me --since C --all` and act on the tagged messages it returns; '
     + 'only if that read succeeded and you saw all of its output (if your tool truncated or saved it, read the rest first; '
     + 'if you can\'t, don\'t mark), run `hadron team chat mark-read --through H` with the H that read printed';
   const rule = 'No unfiltered chat catch-up.';
   if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): ${check}; then end your turn. ${rule}`;
-  const which = tasks.length === 1 ? `hadron team task get ${tasks[0]}` : 'hadron team task list';
-  return `Hadron task assigned (${tasks.join(', ')}${tickers.length ? `; ticker ${tickers.join(', ')}` : ''}): ${check}; then start the task (\`${which}\`). ${rule}`;
+  const all = tasks.map((t): NudgeTask => (typeof t === 'string' ? { id: t, event: 'ASSIGNED' } : t));
+  const assigned = [...new Set(all.filter((t) => t.event === 'ASSIGNED').map((t) => t.id))];
+  const alarms = all.filter((t) => t.event === 'ALARM');
+  const children = all.filter((t) => t.event === 'CHILD_FINISHED');
+  const ticker = tickers.length ? `; ticker ${tickers.join(', ')}` : '';
+  const which = assigned.length === 1 ? `hadron team task get ${assigned[0]}` : 'hadron team task list';
+  if (!alarms.length && !children.length) return `Hadron task assigned (${assigned.join(', ')}${ticker}): ${check}; then start the task (\`${which}\`). ${rule}`;
+  // #1704: an alarm names its task and rule and how to acknowledge it, since delivery is never an acknowledgement
+  // (cor:agt:050:20); a finished child names the child.
+  const items = [
+    ...(assigned.length ? [`assigned ${assigned.join(', ')}`] : []),
+    ...alarms.map((a) => `stall alarm ${a.rule} on task ${a.id}`),
+    ...children.map((c) => `child task ${c.id} finished`),
+  ];
+  const actions = [
+    ...(assigned.length ? [`start the assigned task (\`${which}\`)`] : []),
+    ...alarms.map((a) => `act on task ${a.id} (\`hadron team task get ${a.id}\`), then acknowledge its alarm with \`hadron team alarm ack ${a.eventId}\` (this message is not an acknowledgement)`),
+    ...children.map((c) => `review the finished child task (\`hadron team task get ${c.id}\`)`),
+  ];
+  return `Hadron task wake (${items.join('; ')}${ticker}): ${check}; then ${actions.join('; ')}. ${rule}`;
 }
+
+/** A task event a nudge names (#1704). An alarm carries its event id (what `team alarm ack` takes) and its stall rule. */
+export interface NudgeTask { id: string; event: 'ASSIGNED' | 'ALARM' | 'CHILD_FINISHED'; eventId?: string; rule?: string }
 
 /** A task event name from the server, logged only when it is a known shape. */
 const safeEvent = (e: unknown): string => (typeof e === 'string' && /^[A-Z_]{1,32}$/.test(e) ? e : 'other');
