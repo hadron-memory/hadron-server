@@ -12305,12 +12305,16 @@ export const typeDefs = `#graphql
 
   "Delivery timing per App. Busy/stuck bounds and relation are Proposed (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
   type AppDeliverySettings {
-    "The existing ticker cadence floor and wake-rate ceiling, also the batching window. Changing it affects ticker cadence."
+    "The existing ticker cadence floor and wake-rate ceiling, also the batching window. Changing it affects ticker cadence. DEPRECATED (#2138): push batching is superseded by channel checks; kept readable, no new consumer."
     batchWindowSeconds: Int!
-    "Whole seconds, 1..86400; default 600."
+    "Whole seconds, 1..86400; default 600. DEPRECATED (#2138): superseded by channel checks."
     busyDelaySeconds: Int!
-    "Whole seconds, 1..604800; default 900. Must exceed busy delay plus batch window."
+    "Whole seconds, 1..604800; default 900. Must exceed busy delay plus batch window. DEPRECATED (#2138): superseded by channel checks."
     stuckWindowSeconds: Int!
+    "#2138: a worker with a task is expected to check its team channel every period. Whole seconds, 60..86400; default 600. Set together with the team ticker's cadence."
+    checkPeriodSeconds: Int!
+    "#2138: a worker with a task is OVERDUE after this many missed periods plus 5 minutes. Whole number, 1..100; default 2."
+    failedChecksToOverdue: Int!
     "Stored configuration; default false. Enabling is refused until standby behavior ships."
     standbyEnabled: Boolean!
     "False until S7 supplies standby behavior; configuration alone has no effect."
@@ -12324,6 +12328,10 @@ export const typeDefs = `#graphql
     busyDelaySeconds: Int
     stuckWindowSeconds: Int
     standbyEnabled: Boolean
+    "#2138: whole seconds, 60..86400."
+    checkPeriodSeconds: Int
+    "#2138: whole number, 1..100."
+    failedChecksToOverdue: Int
   }
 
   "#1747 — an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."

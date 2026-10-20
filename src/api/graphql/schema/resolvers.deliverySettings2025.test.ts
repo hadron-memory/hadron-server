@@ -19,7 +19,7 @@ const get = (c = ctx(manager.id), appRef = appId) => Promise.resolve().then(() =
 const set = (input: Record<string, unknown>, c = ctx(manager.id), appRef = appId) =>
   Promise.resolve().then(() => M.setAppDeliverySettings({}, { appRef, input }, c));
 const oldSet = (input: Record<string, unknown>) => M.setAppTickerSettings({}, { appRef: appId, input }, ctx(manager.id));
-const defaults = { batchWindowSeconds: 120, busyDelaySeconds: 600, stuckWindowSeconds: 900, standbyEnabled: false, standbyEffective: false };
+const defaults = { batchWindowSeconds: 120, busyDelaySeconds: 600, stuckWindowSeconds: 900, standbyEnabled: false, standbyEffective: false, checkPeriodSeconds: 600, failedChecksToOverdue: 2 };
 async function code(p: Promise<unknown>, expected: string) {
   await expect(p).rejects.toMatchObject({ extensions: { code: expected } });
 }
@@ -184,7 +184,7 @@ describe('delivery settings #2025', () => {
     const { typeDefs } = await import('./typeDefs.js');
     const server = new ApolloServer<Context>({ typeDefs, resolvers });
     try {
-      const r = await server.executeOperation({ query: 'mutation($a:String!,$i:AppDeliverySettingsInput!){setAppDeliverySettings(appRef:$a,input:$i){batchWindowSeconds busyDelaySeconds stuckWindowSeconds standbyEnabled standbyEffective}}', variables: { a: appId, i: { busyDelaySeconds: 500 } } }, { contextValue: ctx(manager.id) });
+      const r = await server.executeOperation({ query: 'mutation($a:String!,$i:AppDeliverySettingsInput!){setAppDeliverySettings(appRef:$a,input:$i){batchWindowSeconds busyDelaySeconds stuckWindowSeconds standbyEnabled standbyEffective checkPeriodSeconds failedChecksToOverdue}}', variables: { a: appId, i: { busyDelaySeconds: 500 } } }, { contextValue: ctx(manager.id) });
       expect(r.body.kind).toBe('single');
       if (r.body.kind !== 'single') throw new Error('unexpected multipart result');
       expect(r.body.singleResult.errors).toBeUndefined();
@@ -198,5 +198,38 @@ describe('delivery settings #2025', () => {
       expect(text(await mcp.callTool('hadron_delivery_settings_set', { appRef: appId, session: plain.id, input: { busyDelaySeconds: 450 } }))).toContain('"busyDelaySeconds":450');
       expect(text(await mcp.callTool('hadron_delivery_settings_set', { appRef: appId, session: plain.id, input: { busyDelaySeconds: null } }))).toMatch(/^\[bad_user_input\]/);
     } finally { await server.stop(); }
+  });
+});
+
+describe('#2138 §3.2 — channel-check settings', () => {
+  it('defaults to 600 s and 2 missed periods', async () => {
+    expect(await get()).toMatchObject({ checkPeriodSeconds: 600, failedChecksToOverdue: 2 });
+  });
+
+  it('a manager changes both; omitted settings and the other fields are preserved', async () => {
+    const before = await get();
+    const out = await set({ checkPeriodSeconds: 300, failedChecksToOverdue: 3 });
+    expect(out).toMatchObject({ checkPeriodSeconds: 300, failedChecksToOverdue: 3, busyDelaySeconds: before.busyDelaySeconds, stuckWindowSeconds: before.stuckWindowSeconds });
+    expect(await set({ failedChecksToOverdue: 1 })).toMatchObject({ checkPeriodSeconds: 300, failedChecksToOverdue: 1 });
+    expect(await get()).toMatchObject({ checkPeriodSeconds: 300, failedChecksToOverdue: 1 });
+  });
+
+  it('refuses failedChecksToOverdue below 1 (and above 100), a period outside 60..86400, non-integers and null, changing nothing', async () => {
+    for (const input of [{ failedChecksToOverdue: 0 }, { failedChecksToOverdue: -1 }, { failedChecksToOverdue: 101 }, { failedChecksToOverdue: 1.5 },
+      { checkPeriodSeconds: 59 }, { checkPeriodSeconds: 86_401 }, { checkPeriodSeconds: 600.5 }]) {
+      await expect(set(input)).rejects.toMatchObject({ extensions: { code: 'DELIVERY_SETTINGS_OUT_OF_RANGE' } });
+    }
+    await expect(set({ checkPeriodSeconds: null })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await get()).toMatchObject({ checkPeriodSeconds: 600, failedChecksToOverdue: 2 });
+  });
+
+  it('only whoever manages the App changes them', async () => {
+    await expect(set({ checkPeriodSeconds: 300 }, ctx(member.id))).rejects.toThrow();
+    expect(await get()).toMatchObject({ checkPeriodSeconds: 600 });
+  });
+
+  it('the database bound holds under a bypassing write', async () => {
+    await expect(db.$executeRaw`UPDATE apps SET delivery_failed_checks_to_overdue = 0 WHERE id = ${appId}`).rejects.toThrow();
+    await expect(db.$executeRaw`UPDATE apps SET delivery_check_period_seconds = 30 WHERE id = ${appId}`).rejects.toThrow();
   });
 });

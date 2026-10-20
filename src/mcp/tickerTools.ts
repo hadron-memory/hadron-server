@@ -218,6 +218,8 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
         busyDelaySeconds: z.number().nullable().optional().describe('Whole seconds 1..86400, Proposed bounds.'),
         stuckWindowSeconds: z.number().nullable().optional().describe('Whole seconds 1..604800 and greater than busy delay + window, Proposed bounds/relation.'),
         standbyEnabled: z.boolean().nullable().optional().describe('False clears; true is refused until S7 behavior ships.'),
+        checkPeriodSeconds: z.number().nullable().optional().describe('#2138: whole seconds 60..86400; a worker with a task is expected to check its team channel this often. Set together with the team ticker cadence.'),
+        failedChecksToOverdue: z.number().nullable().optional().describe('#2138: whole number 1..100; OVERDUE after this many missed periods + 5 minutes.'),
       }).passthrough().describe('Atomic patch. Unknown fields are refused by the shared resolver, never silently removed.'),
       session: SESSION_WRITE,
     },

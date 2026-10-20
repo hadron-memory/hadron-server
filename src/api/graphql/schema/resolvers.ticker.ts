@@ -138,6 +138,7 @@ type TickerSettings = {
 const SETTINGS_SELECT = {
   tickerMinCadenceSeconds: true, tickerSelfSubscribeCadenceSeconds: true, tickerLiveCap: true, wakeDailyBudget: true,
   deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true,
+  deliveryCheckPeriodSeconds: true, deliveryFailedChecksToOverdue: true,
 } as const;
 
 function checkCadence(cadence: unknown, settings: TickerSettings): number {
@@ -596,6 +597,8 @@ export async function writeAppSettings(
       stuckWindowSeconds: patch.stuckWindowSeconds ?? cur.deliveryStuckWindowSeconds,
       standbyEnabled: patch.standbyEnabled ?? cur.deliveryStandbyEnabled,
       standbyEffective: false,
+      checkPeriodSeconds: patch.checkPeriodSeconds ?? cur.deliveryCheckPeriodSeconds,
+      failedChecksToOverdue: patch.failedChecksToOverdue ?? cur.deliveryFailedChecksToOverdue,
     };
     validateDeliverySettings(delivery, patch);
     await tx.app.update({
@@ -606,6 +609,8 @@ export async function writeAppSettings(
         deliveryBusyDelaySeconds: delivery.busyDelaySeconds,
         deliveryStuckWindowSeconds: delivery.stuckWindowSeconds,
         deliveryStandbyEnabled: delivery.standbyEnabled,
+        deliveryCheckPeriodSeconds: delivery.checkPeriodSeconds,
+        deliveryFailedChecksToOverdue: delivery.failedChecksToOverdue,
       },
     });
     return { ticker: await settingsOut(tx, fresh.id), delivery: await loadDeliverySettings(tx, fresh.id) };
