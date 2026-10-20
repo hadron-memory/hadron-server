@@ -184,10 +184,13 @@ const DIE_MS = 4000;
 
 interface Agent { pid: number; supervisor: ReturnType<typeof spawn>; gone: () => boolean }
 
-/** Start a supervised stand-in agent and wait until its pid is known. */
-async function startAgent(root: string, tag = 'agent'): Promise<Agent> {
+/**
+ * Start a supervised stand-in agent and wait until its pid is known. `onTerm` is shell run first
+ * when it is stopped, as its own child (a PreCompact fire from the dying agent itself).
+ */
+async function startAgent(root: string, tag = 'agent', onTerm = ''): Promise<Agent> {
   const pidFile = join(root, `${tag}.pid`);
-  const inner = `trap 'sleep ${DIE_MS / 1000}; exit 0' TERM; while :; do sleep 0.1; done`;
+  const inner = `trap '${onTerm}sleep ${DIE_MS / 1000}; exit 0' TERM; while :; do sleep 0.1; done`;
   const supervisor = spawn('bash', ['-c', `(exec -a claude bash -c "${inner}") & echo $! > "${pidFile}"; wait`, 'worker-supervise'], { stdio: 'ignore' });
   for (let i = 0; i < 100 && !existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 50));
   const pid = Number(readFileSync(pidFile, 'utf8').trim());
@@ -201,12 +204,16 @@ async function startAgent(root: string, tag = 'agent'): Promise<Agent> {
 }
 
 /** One PreCompact(auto) fire of `hook` for the worktree, as the agent `claudePid`. */
-function fire(hook: string, s: ReturnType<typeof sandbox>, wt: string, claudePid?: number): { status: number | null; log: string } {
+function fire(hook: string, s: ReturnType<typeof sandbox>, wt: string, claudePid?: number | ''): { status: number | null; log: string } {
   const env: Record<string, string> = { PATH: `${s.bin}:${process.env.PATH}`, HOME: s.home };
   if (claudePid !== undefined) env.CLAUDE_PID = String(claudePid);
-  const r = spawnSync('bash', [hook], { encoding: 'utf8', input: JSON.stringify({ trigger: 'auto', cwd: wt, transcript_path: '' }), env });
+  const r = spawnSync('bash', [hook], { encoding: 'utf8', input: fireInput(wt), env });
+  return { status: r.status, log: shedLog(s) };
+}
+const fireInput = (wt: string): string => JSON.stringify({ trigger: 'auto', cwd: wt, transcript_path: '' });
+function shedLog(s: ReturnType<typeof sandbox>): string {
   const logPath = join(s.home, '.local', 'state', 'hadron-worker-shed', 'auto-shed.log');
-  return { status: r.status, log: existsSync(logPath) ? readFileSync(logPath, 'utf8') : '' };
+  return existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
 }
 
 describe('#2163 part 1: a stopped agent cannot compact on the way out', () => {
@@ -266,6 +273,35 @@ describe('#2163 part 1: a stopped agent cannot compact on the way out', () => {
     const r = fire(NEW_HOOK, s, wt, other.pid);
     expect(r.status, r.log).toBe(0);
     expect(other.gone(), 'a cooldown fire signalled the other agent').toBe(false);
+  });
+
+  // George's #2164 P2: the cooldown must verify the caller, never default it to the stopped pid.
+  for (const [label, pid] of [['missing', undefined], ['empty', '']] as const) {
+    it(`a fire with a ${label} CLAUDE_PID, not descended from the stopped agent, is allowed while it exits (exit 0)`, async () => {
+      const { s, wt, agent } = await stage();
+      expect(fire(NEW_HOOK, s, wt, agent.pid).status).toBe(2);
+      await new Promise((r) => setTimeout(r, 500));
+      expect(agent.gone(), 'the stand-in exited before the second fire').toBe(false);
+      const r = fire(NEW_HOOK, s, wt, pid);
+      expect(r.status, r.log).toBe(0);
+      expect(r.log).not.toMatch(/BLOCKING compaction/);
+    });
+  }
+
+  it('a fire from the dying agent itself with no CLAUDE_PID is blocked: its ancestry proves the owner (exit 2)', async () => {
+    const s = sandbox();
+    const wt = join(s.root, NAME); mkdirSync(wt);
+    const input = join(s.root, 'fire.json'); writeFileSync(input, fireInput(wt));
+    const rc = join(s.root, 'self-fire.rc');
+    // On TERM the stand-in runs the hook as its own child, with CLAUDE_PID removed from the environment.
+    // (`\$?` survives the supervisor's double-quoted `bash -c`, so it is the hook's exit status.)
+    const onTerm = `env -u CLAUDE_PID HOME=${s.home} PATH=${s.bin}:${process.env.PATH} bash ${NEW_HOOK} < ${input} > /dev/null 2>&1; echo \\$? > ${rc}; `;
+    const agent = await startAgent(s.root, 'agent', onTerm);
+    agents.push(agent);
+    expect(fire(NEW_HOOK, s, wt, agent.pid).status).toBe(2);
+    for (let i = 0; i < 50 && !existsSync(rc); i++) await new Promise((r) => setTimeout(r, 100));
+    expect(readFileSync(rc, 'utf8').trim(), shedLog(s)).toBe('2');
+    expect(shedLog(s)).toMatch(/BLOCKING compaction/);
   });
 
   describe('red pins: the hook installed before the fix lets compaction through', () => {
