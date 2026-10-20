@@ -35,6 +35,7 @@ import { mentionTokenOf } from './mentionToken.js';
 import { mentionReachSql } from './mentionReach.js';
 import { parseRunRegisterSnapshot, type RegisterAttendee } from './resolveRegister.js';
 import { escapePrismaLikePattern } from './literalLocPrefix.js';
+import { TEAM_CHAT_LOC } from './teamChatLoc.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -63,6 +64,48 @@ export async function advanceReadState(db: Db, attendee: RegisterAttendee, chann
             DO UPDATE SET last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq), updated_at = now()
           RETURNING last_seen_seq`;
   return rows[0]?.last_seen_seq ?? target;
+}
+
+/**
+ * #2138 §3.1 — record that a worker CHECKED its App's team channel: `last_checked_at = now()` on its own read-state row,
+ * created at seq 0 when it has none. A check is any read of that channel through the worker's OWN bound session (a page
+ * read, an inbox read, a mark-read, an empty one included); it moves no read position and no delivery mark.
+ *
+ * Only the App's TEAM channel counts: a channel whose root is `chats:team` in a memory of the worker's own App. Anything
+ * else, or a worker of another App, stamps nothing. Callers must have established that the actor IS the worker's own
+ * live session; this function cannot tell a person's `asMe` read from the worker's, so it is never called for those.
+ * Returns whether a row was stamped.
+ */
+export async function stampChannelCheck(db: Db, workerId: string, channelId: string): Promise<boolean> {
+  const rows = await db.$queryRaw<Array<{ ok: number }>>`
+    INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, last_checked_at, updated_at)
+    SELECT ${generateId()}, w.id, c.id, 0, now(), now()
+    FROM workers w
+    JOIN channels c ON c.id = ${channelId} AND c.deleted_at IS NULL AND c.loc = ${TEAM_CHAT_LOC}
+    JOIN memories m ON m.id = c.memory_id AND m.app_id = w.app_id
+    WHERE w.id = ${workerId} AND w.retired_at IS NULL
+    ON CONFLICT (worker_id, channel_id) WHERE worker_id IS NOT NULL
+      DO UPDATE SET last_checked_at = now()
+    RETURNING 1 AS ok`;
+  return rows.length > 0;
+}
+
+/**
+ * #2138 §3.1 — the inbox read: a worker's own session read of its pending batches checks the team channel(s) of its App
+ * (the inbox is not addressed to one channel). Same rules as {@link stampChannelCheck}; returns the channels stamped.
+ */
+export async function stampTeamChannelChecks(db: Db, workerId: string): Promise<number> {
+  const rows = await db.$queryRaw<Array<{ ok: number }>>`
+    INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, last_checked_at, updated_at)
+    SELECT gen_random_uuid()::text, w.id, c.id, 0, now(), now()
+    FROM workers w
+    JOIN memories m ON m.app_id = w.app_id
+    JOIN channels c ON c.memory_id = m.id AND c.deleted_at IS NULL AND c.loc = ${TEAM_CHAT_LOC}
+    WHERE w.id = ${workerId} AND w.retired_at IS NULL
+    ON CONFLICT (worker_id, channel_id) WHERE worker_id IS NOT NULL
+      DO UPDATE SET last_checked_at = now()
+    RETURNING 1 AS ok`;
+  return rows.length;
 }
 
 /** The attendee's cursors on a set of Channels; a Channel with no row reads 0. */
