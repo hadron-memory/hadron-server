@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Config, Runner } from '../orca-attention-router/router.js';
 import { buildSchema, parse, validate } from 'graphql';
 import { typeDefs } from '../../src/api/graphql/schema/typeDefs.js';
-import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, SUBSCRIBERS, SUBSCRIBERS_PAGE, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync } from './ticker-wake.js';
+import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, SUBSCRIBERS, SUBSCRIBERS_PAGE, CURRENT_SESSION, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync } from './ticker-wake.js';
 import type { RunResult } from '../orca-attention-router/router.js';
 
 const RULE = '─'.repeat(112);
@@ -66,6 +66,10 @@ interface Fake {
   subscribersError: string | null;
   /** Terminals listed besides term_a. */
   extraTerminals: any[];
+  /** #2161: each worker's sessions as the server lists them, newest first. */
+  sessions: Record<string, Array<{ id: string; workerId: string; appId: string; endedAt: string | null }>>;
+  sessionsError: string | null;
+  sessionQueries: string[];
 }
 
 let dir: string;
@@ -78,7 +82,7 @@ function fake(): Fake {
     dueQueries: [], pages: 0, alwaysMore: false, ackReply: null, sendReply: null, dueError: null,
     incarnation: 'inc-1', retries: [], retryReply: null, run: undefined as any,
     lastCheckedAt: null, tasks: {}, evidenceQueries: [], checkError: null, enters: [], enterReply: null,
-    tickers: [], subscribersError: null, extraTerminals: [],
+    tickers: [], subscribersError: null, extraTerminals: [], sessions: {}, sessionsError: null, sessionQueries: [],
   };
   const subPage = (t: { pages: Array<Array<{ id: string; name: string }>> }, i: number) => ({
     items: (t.pages[i] ?? []).map((w) => ({ worker: w })), hasNextPage: i + 1 < t.pages.length, endCursor: i + 1 < t.pages.length ? `p${i + 1}` : null,
@@ -101,6 +105,12 @@ function fake(): Fake {
       if (q.includes('ticker(ref')) {
         const t = f.tickers.find((x) => x.id === fArg(argv, 't'));
         return out({ data: { ticker: t ? { subscribers: subPage(t, Number((fArg(argv, 'p') ?? 'p0').slice(1))) } : null } });
+      }
+      if (q.includes('sessions(workerRef')) {
+        const w = fArg(argv, 'w') as string;
+        f.sessionQueries.push(w);
+        if (f.sessionsError) return out({ errors: [{ message: f.sessionsError, extensions: { code: 'INTERNAL_SERVER_ERROR' } }] });
+        return out({ data: { sessions: (f.sessions[w] ?? []).slice(0, 1) } });
       }
       if (q.includes('checkStatus')) {
         f.evidenceQueries.push(`worker ${fArg(argv, 'w')}`);
@@ -1924,11 +1934,18 @@ describe('#2138: a pass does not pay the turn-start wait per send (bounded concu
 });
 
 describe('#2138: the roster comes from the ticker\'s subscribers and this host\'s bound terminals (Hugo #26221)', () => {
-  /** A worktree under `dir` bound (CLI binding file) to `workerId`, with a live agent terminal `handle` listed by Orca. */
-  const bound = (slug: string, workerId: string | null, handle = `term_${slug}`, live = true) => {
+  /**
+   * A worktree under `dir` bound (CLI binding file) to `workerId` under `sessionId` (default: that worker's current open
+   * session, registered on the server), with a live agent terminal `handle` listed by Orca.
+   */
+  const bound = (slug: string, workerId: string | null, handle = `term_${slug}`, live = true, sessionId?: string) => {
     const wt = join(dir, slug);
     mkdirSync(join(wt, '.git'), { recursive: true });
-    if (workerId) writeFileSync(join(wt, '.git', 'hadron-team-session.json'), JSON.stringify({ workerName: slug, workerId }));
+    if (workerId) {
+      const sid = sessionId ?? `s-${workerId}`;
+      if (sessionId === undefined) f.sessions[workerId] ??= [{ id: sid, workerId, appId: 'app-1', endedAt: null }];
+      writeFileSync(join(wt, '.git', 'hadron-team-session.json'), JSON.stringify({ workerName: slug, workerId, sessionId: sid, appId: 'app-1' }));
+    }
     f.extraTerminals.push({ handle, incarnationId: 'inc-1', worktreePath: wt, connected: live, writable: true, agentIdentity: 'claude' });
     return wt;
   };
@@ -1968,7 +1985,7 @@ describe('#2138: the roster comes from the ticker\'s subscribers and this host\'
     expect(unreachable[0]).not.toContain('Ada');
   });
 
-  it('a worker bound in two worktrees on this host is not guessed at: held, and logged', async () => {
+  it('a worker bound in two worktrees under its current session is not guessed at: held, and logged', async () => {
     bound('d1', 'w-dup');
     bound('d2', 'w-dup');
     f.wakes = [wake('w-dup', 'Dup', [TICK])];
@@ -1996,9 +2013,84 @@ describe('#2138: the roster comes from the ticker\'s subscribers and this host\'
     expect(f.acked).toEqual([]);
   });
 
+  describe("a binding counts only while it names the worker's current open session (George's #2161 P2, Ada #26314)", () => {
+    const old = (w: string, endedAt: string | null = '2026-10-20T10:00:00.000Z') => ({ id: `old-${w}`, workerId: w, appId: 'app-1', endedAt });
+
+    it("George's case: Bo's binding from an ended session, in a worktree whose idle agent terminal was reused: held, never nudged", async () => {
+      f.sessions = { 'w-bo': [old('w-bo')] };
+      bound('reused', 'w-bo', 'term_reused', true, 'old-w-bo');
+      f.tickers = [{ id: 'T', pages: [[sub('w-bo', 'Bo')]] }];
+      f.wakes = [wake('w-bo', 'Bo', [TICK])];
+      await go();
+      expect(f.sent).toEqual([]);
+      expect(f.acked).toEqual([]);
+      expect(log()).toContain('Bo: held (stale binding (session ended) on this host)');
+      expect(log()).toContain('Bo (stale binding (session ended))');
+      expect(f.sessionQueries).toEqual(['w-bo']); // once per pass, though asked twice
+    });
+
+    it('a binding whose session was replaced by a newer open one elsewhere is held', async () => {
+      f.sessions = { 'w-bo': [{ id: 'new-w-bo', workerId: 'w-bo', appId: 'app-1', endedAt: null }, old('w-bo')] };
+      bound('reused', 'w-bo', 'term_reused', true, 'old-w-bo');
+      f.wakes = [wake('w-bo', 'Bo', [TICK])];
+      await go();
+      expect(f.sent).toEqual([]);
+      expect(log()).toContain('stale binding (session replaced)');
+    });
+
+    it('the stale worktree is passed over and the current one is nudged, when both are on this host', async () => {
+      f.sessions = { 'w-bo': [{ id: 'new-w-bo', workerId: 'w-bo', appId: 'app-1', endedAt: null }, old('w-bo')] };
+      bound('reused', 'w-bo', 'term_reused', true, 'old-w-bo');
+      bound('bo-now', 'w-bo', 'term_bo_now', true, 'new-w-bo');
+      const sends: string[] = [];
+      const run = f.run;
+      f.run = (argv) => { if (argv[0] === 'orca' && argv[2] === 'send') sends.push(argv[argv.indexOf('--terminal') + 1]); return run(argv); };
+      f.wakes = [wake('w-bo', 'Bo', [TICK])];
+      await go();
+      expect(sends).toEqual(['term_bo_now']);
+      expect(f.acked).toHaveLength(1);
+    });
+
+    it.each([
+      ['an unreadable session read', () => { f.sessionsError = 'down'; }, 'stale binding (session unreadable: graphql error INTERNAL_SERVER_ERROR)'],
+      ['no visible session at all', () => { f.sessions['w-bo'] = []; }, 'stale binding (no session)'],
+      ['a session of another worker', () => { f.sessions['w-bo'] = [{ id: 's-w-bo', workerId: 'w-x', appId: 'app-1', endedAt: null }]; }, 'stale binding (session mismatched)'],
+      ['a session in another App', () => { f.sessions['w-bo'] = [{ id: 's-w-bo', workerId: 'w-bo', appId: 'app-2', endedAt: null }]; }, 'stale binding (app mismatched)'],
+    ])('%s holds, never nudges', async (_label, arrange, why) => {
+      bound('bo', 'w-bo');
+      arrange();
+      f.wakes = [wake('w-bo', 'Bo', [TICK])];
+      await go();
+      expect(f.sent).toEqual([]);
+      expect(f.acked).toEqual([]);
+      expect(log()).toContain(why);
+      expect(log()).not.toContain('down');
+    });
+
+    it('a binding file that records no session holds (a workerId alone proves nothing)', async () => {
+      const wt = join(dir, 'bare');
+      mkdirSync(join(wt, '.git'), { recursive: true });
+      writeFileSync(join(wt, '.git', 'hadron-team-session.json'), JSON.stringify({ workerId: 'w-bo' }));
+      f.extraTerminals.push({ handle: 'term_bare', incarnationId: 'inc-1', worktreePath: wt, connected: true, writable: true, agentIdentity: 'claude' });
+      f.sessions = { 'w-bo': [{ id: 's-w-bo', workerId: 'w-bo', appId: 'app-1', endedAt: null }] };
+      f.wakes = [wake('w-bo', 'Bo', [TICK])];
+      await go();
+      expect(f.sent).toEqual([]);
+      expect(log()).toContain('stale binding (session replaced)');
+    });
+
+    it('a roster-file row is the operator\'s statement and is not session-checked', async () => {
+      f.wakes = [wake('w-ada', 'Ada', [TICK])];
+      await go();
+      expect(f.sent).toHaveLength(1);
+      expect(f.sessionQueries).toEqual([]);
+    });
+  });
+
   it('the subscriber reads validate against the server SDL', () => {
     const schema = buildSchema(typeDefs);
     expect(validate(schema, parse(SUBSCRIBERS)).map((e) => e.message)).toEqual([]);
     expect(validate(schema, parse(SUBSCRIBERS_PAGE)).map((e) => e.message)).toEqual([]);
+    expect(validate(schema, parse(CURRENT_SESSION)).map((e) => e.message)).toEqual([]);
   });
 });
