@@ -4626,6 +4626,12 @@ export const typeDefs = `#graphql
     one). Masked to null on deny, like heldByUserId.
     """
     lastActiveAt: DateTime
+    """
+    #2138 §3.4 (experimental) — whether this worker is checking its team
+    channel as expected, derived at read time. Masked to null on the same read
+    gate as hasLiveSession.
+    """
+    checkStatus: WorkerCheckStatus
     "The role-agent behind the casting."
     agent: Agent
     "The App whose staff this casting fills."
@@ -12747,6 +12753,44 @@ export const typeDefs = `#graphql
     NOT_LAUNCHABLE
   }
 
+  "#2138 §3.4 (experimental) — a worker's check status. Draft spec: hrn:node:hadronmemory.com:hadron-dev-team-vera:work:2138-experiment-spec."
+  enum WorkerCheckState {
+    "No live session."
+    NO_SESSION
+    "Not expected to check now; pendingReason says why."
+    PENDING
+    "Has a task and checked within failedChecksToOverdue × checkPeriodSeconds + 5 minutes."
+    OK
+    "Has a task and hasn't checked for longer than that. Long turns show here on purpose."
+    OVERDUE
+  }
+
+  "#2138 §3.4 — why a worker is PENDING. Precedence: PAUSED, ISOLATED, STANDBY, NO_TASK."
+  enum WorkerCheckPendingReason {
+    "Its own pause (pausedUntil) or a team pause is in force."
+    PAUSED
+    "In isolation (unreachable until isolation is built)."
+    ISOLATED
+    "On standby (unreachable until standby is built)."
+    STANDBY
+    "No open task assigned, and its Agent uses tasks."
+    NO_TASK
+  }
+
+  """
+  #2138 §3.4 — a worker's check status. A worker HAS A TASK when an open task is
+  assigned to it or its Agent has usesTasks: false. The OVERDUE clock runs from
+  the latest of lastCheckedAt, its newest open assignment, its live session's
+  start and the end of its own pause.
+  """
+  type WorkerCheckStatus {
+    status: WorkerCheckState!
+    "Set only when status is PENDING."
+    pendingReason: WorkerCheckPendingReason
+    "When it last checked the App's team channel through its own session; null if never."
+    lastCheckedAt: DateTime
+  }
+
   "#1707 — one worker on the team roster."
   type TeamRosterEntry {
     worker: AgentTaskParty!
@@ -12788,6 +12832,8 @@ export const typeDefs = `#graphql
     reportsTo: AgentTaskParty
     "#1726 — it reports to a worker that has since retired (retirement leaves the claim; the roster flags it)."
     reportsToRetired: Boolean!
+    "#2138 §3.4 (experimental) — whether it is checking its team channel as expected."
+    checkStatus: WorkerCheckStatus
   }
 
   "#1707 — the team roster of one App."
