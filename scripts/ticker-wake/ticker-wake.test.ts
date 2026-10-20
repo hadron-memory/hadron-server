@@ -101,7 +101,11 @@ function fake(): Fake {
         const t = fArg(argv, 't') as string;
         f.alarmQueries.push(`${fArg(argv, 'a')} ${t}`);
         if (f.alarmError) return out({ errors: [{ message: f.alarmError, extensions: { code: 'INTERNAL_SERVER_ERROR' } }] });
-        return out({ data: { agentTeamEvents: f.alarms[t] ?? [] } });
+        // Like the server: oldest first, strictly after the given event, at most 200.
+        const all = (f.alarms[t] ?? []) as Array<{ id: string }>;
+        const after = fArg(argv, 'p');
+        const from = after === undefined ? 0 : all.findIndex((e) => e.id === after) + 1;
+        return out({ data: { agentTeamEvents: all.slice(from, from + 200) } });
       }
       if (q.includes('agentTask(')) {
         const t = fArg(argv, 't') as string;
@@ -1987,6 +1991,40 @@ describe('#1704: stall ALARM and CHILD_FINISHED task wakes are delivered and nam
     expect(log()).not.toContain('rm -rf');
     expect(log()).not.toContain('boom');
     expect(receipts()).toEqual({});
+  });
+
+  it("George's #2160 P2: the due alarm is the 201st, after a full page of acknowledged history; the lookup pages to it", async () => {
+    const old = Array.from({ length: 200 }, (_, i) => alarm('t1', `old${i}`, 'stall.no-progress', iso(Date.now() - 86_400_000)));
+    f.alarms = { t1: [...old, alarm('t1', 'new201')] };
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1', 'ALARM', 'new201')], proof(['T:1'], 'x', [taskEntry('t1', 'new201')]))];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toContain('`hadron team alarm ack new201`');
+    expect(f.alarmQueries).toHaveLength(2);
+    expect(f.acked).toHaveLength(1);
+  });
+
+  it('an alarm absent from a history that ends exactly on a full page is held after the empty next page, never guessed', async () => {
+    f.alarms = { t1: Array.from({ length: 200 }, (_, i) => alarm('t1', `old${i}`)) };
+    f.wakes = [wake('w-ada', 'Ada', [task('t1', 'ALARM', 'gone')], proof([], 'x', [taskEntry('t1', 'gone')]))];
+    await go();
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+    expect(f.alarmQueries).toHaveLength(2);
+    expect(log()).toContain("the alarm's rule cannot be established");
+  });
+
+  it('a failed later page holds the wake rather than reading the alarm as absent', async () => {
+    f.alarms = { t1: [...Array.from({ length: 200 }, (_, i) => alarm('t1', `old${i}`)), alarm('t1', 'new201')] };
+    const run = f.run;
+    let n = 0;
+    f.run = (argv) => (argv[0] === 'hadron' && argv[2]?.includes('agentTeamEvents(') && ++n === 2
+      ? { code: 0, stdout: JSON.stringify({ errors: [{ message: 'x', extensions: { code: 'INTERNAL_SERVER_ERROR' } }] }), stderr: '' } : run(argv));
+    f.wakes = [wake('w-ada', 'Ada', [task('t1', 'ALARM', 'new201')], proof([], 'x', [taskEntry('t1', 'new201')]))];
+    await go();
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('the alarm cannot be read: graphql error INTERNAL_SERVER_ERROR');
   });
 
   it('a delivered alarm whose ack was lost is never named again: ack-only recovery, and a re-offer joined with a tick names only the ticker', async () => {
