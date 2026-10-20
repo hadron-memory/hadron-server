@@ -13,6 +13,8 @@
 // (`roles:<role>` nodes, `data.names`), read at CASTING time — and only when
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
+import { lockStopFence } from '../../../lib/stopSignals/state.js';
+import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { GraphQLError } from 'graphql';
 import { WORKER_SIGNATURE_DEFAULTS, normalizeWorkerSignature, withWorkerSignatures } from '../../../lib/workerSignature.js';
 import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
@@ -1023,6 +1025,9 @@ export const workerMutations = {
     const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
     await requireWorkerStaffAccess(ctx, app);
     await ctx.db.$transaction(async (tx) => {
+      // #2022: the stop fence, exclusive, before the graph lock (src/lib/stopSignals/state.ts): a retired worker
+      // leaves every stop signal's coverage, recorded below.
+      await lockStopFence(tx, worker.appId, 'exclusive');
       // #1726: the reportsTo graph lock BEFORE the worker row (the lock
       // protocol in src/lib/workerReportsTo.ts; #1737 review, Diego P2-2).
       await lockAppReportsTo(tx, worker.appId);
@@ -1045,6 +1050,7 @@ export const workerMutations = {
             endedBy: ctx.userId ?? null, endedByWorkerId: actor.workerId, endedByAgentId: actor.agentId,
           },
         });
+        await reconcileStopCoverage(tx, worker.appId, new Date());
       }
     });
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
@@ -1133,9 +1139,12 @@ export const workerMutations = {
               throw forbidden();
             },
           });
+          // #2022 (R95): a stop signal's team coverage follows the reporting lines, from this moment.
+          await reconcileStopCoverage(tx, worker.appId, new Date());
         },
         {
           afterLock: async (tx) => {
+            await lockStopFence(tx, app.id, 'exclusive');
             await lockAppReportsTo(tx, app.id);
             if (ctx.userId) {
               await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId} FOR SHARE`;

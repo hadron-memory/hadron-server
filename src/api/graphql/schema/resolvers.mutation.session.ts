@@ -1,3 +1,5 @@
+import { lockStopFence } from '../../../lib/stopSignals/state.js';
+import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { storedIncludeTags, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // sessionMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
@@ -1144,6 +1146,8 @@ export const sessionMutations = {
         // P2-2, Rook P2-1). A demotion or role removal then commits first and is
         // seen, or waits for this bind.
         if (reportsToId && appId) {
+          // #2022: the stop fence, exclusive, before the graph lock (src/lib/stopSignals/state.ts).
+          await lockStopFence(tx, appId, 'exclusive');
           await lockAppReportsTo(tx, appId);
           if (ctx.userId) {
             await tx.$queryRaw`SELECT 1 FROM users WHERE id = ${ctx.userId} FOR SHARE`;
@@ -1433,6 +1437,8 @@ export const sessionMutations = {
               );
             },
           });
+          // #2022 (R95): a team signal covers the worker from the moment it joins the team.
+          await reconcileStopCoverage(tx, bindAppId, new Date());
         }
         if (supersedes.length > 0) {
           const ids = supersedes.map((r) => r.id).filter((id) => id !== created.id);

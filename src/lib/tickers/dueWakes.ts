@@ -19,6 +19,8 @@
 // the channels pass. They wake at once like a mention, under the same floor
 // and budget, and are acknowledged per event through the v2 proof.
 
+import { coveringSignals, timeStoppedWorkers } from '../stopSignals/state.js';
+import { pendingStopNotices, s6NoticesAvailable, type PendingStopNotice } from '../stopSignals/delivery.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { batchTiming, loadDeliverySettings } from './batchTiming.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
@@ -85,7 +87,7 @@ export type DueWakesResult = {
 
 /** #2069: the reasons a wake carries that a delivery must name: a mention, one tick of one ticker, one task event. */
 const reasonKeys = (wake: WorkerWake): Set<string> =>
-  new Set(wake.reasons.map((r) => (r.kind === 'MENTION' ? 'M' : r.kind === 'TICK' ? `T:${r.tickerId}:${r.k}` : `K:${r.eventId}:${r.chainIndex}`)));
+  new Set(wake.reasons.map((r) => (r.kind === 'MENTION' ? 'M' : r.kind === 'TICK' ? `T:${r.tickerId}:${r.k}` : r.kind === 'STOP' ? `S:${r.eventId}` : `K:${r.eventId}:${r.chainIndex}`)));
 /** True when `fresh` carries a TICK or TASK reason the outstanding wake lacks. A grown mention range alone is not one. */
 const absorbsNewReason = (outstanding: WorkerWake, fresh: WorkerWake): boolean => {
   const had = reasonKeys(outstanding);
@@ -95,10 +97,15 @@ const absorbsNewReason = (outstanding: WorkerWake, fresh: WorkerWake): boolean =
 const tasksOf = (wake: WorkerWake) =>
   wake.reasons.flatMap((r) => (r.kind === 'TASK' ? [{ eventId: r.eventId, chainIndex: r.chainIndex }] : []));
 
+/** #2022 — the wake's stop-signal notice, as the receipt it is acknowledged by (event id, chain position 0). */
+const stopsOf = (wake: WorkerWake) =>
+  wake.reasons.flatMap((r) => (r.kind === 'STOP' ? [{ eventId: r.eventId, chainIndex: 0 }] : []));
+const hasStop = (wake: WorkerWake): boolean => wake.reasons.some((r) => r.kind === 'STOP');
+
 const identityOf = (wake: WorkerWake) => ({
   channels: wake.channels.map((c) => ({ channelId: c.channelId, incarnation: c.incarnation, through: c.throughSeq })),
   ticks: wake.reasons.flatMap((r) => (r.kind === 'TICK' ? [{ tickerId: r.tickerId, k: r.k }] : [])),
-  tasks: tasksOf(wake),
+  tasks: [...tasksOf(wake), ...stopsOf(wake)],
 });
 
 const taskKey = (t: { eventId: string; chainIndex: number }) => `${t.eventId}#${t.chainIndex}`;
@@ -394,6 +401,10 @@ export async function computeDueWakes(args: {
   // #2138 §3.1/§3.3: when each worker last CHECKED each channel, and which workers are PENDING (not expected to check).
   const checkedOf = new Map(readStates.map((r) => [`${r.workerId}:${r.channelId}`, r.lastCheckedAt?.getTime() ?? null]));
   const pendingOf = await loadPendingReasons(db, app.id, workers.map((w) => w.id), now);
+  // #2022 (R68): a worker a `pause` or `halt` covers is due no tick. Live coverage, worked out in this read.
+  const tickStopped = timeStoppedWorkers(await coveringSignals(db, app.id, ids, now));
+  // #2022 (cor:agt:090:04): the one stop notice each worker is due, offered only while the notice lane is on (DARK).
+  const stopOf = s6NoticesAvailable() ? await pendingStopNotices(db, app.id, ids) : new Map<string, PendingStopNotice>();
 
   // Registers: the channels each worker watches (not POST-only).
   const registers = await Promise.all(ids.map(async (id) => [id, await collectRegisterRows(db, { workerId: id })] as const));
@@ -483,7 +494,7 @@ export async function computeDueWakes(args: {
       // #2072 (R53): no channel range. The display channels stay on the wake; the proof carries the wake's identity.
       channels: [],
       ticks: wake.reasons.flatMap((r) => (r.kind === 'TICK' ? [{ tickerId: r.tickerId, k: r.k }] : [])),
-      tasks: tasksOf(wake),
+      tasks: [...tasksOf(wake), ...stopsOf(wake)],
       exempt: wake.exempt,
       issuedAt: now.getTime(),
       wakeKey: wakeIdentity(identityOf(wake)),
@@ -514,13 +525,24 @@ export async function computeDueWakes(args: {
       if (n > 0) dormant.push({ workerId: w.id, mentions: n });
       continue; // never due
     }
+    // A worker's own pause holds a stop notice too (cor:agt:080:11, Decided; Vera's receipt §4): it waits.
     if (ws?.pausedUntil && ws.pausedUntil.getTime() > now.getTime()) continue; // a pause silences ticks AND mentions (Q2)
+    const stop = stopOf.get(w.id);
     // #2138 §3.6: a TEAM pause silences EVERY reason (ticks of every kind, mentions, task events), exactly as a worker's own pause does.
-    if (pendingOf.get(w.id) === 'TEAM_PAUSED') continue;
-    if (s7Available() && ws?.isolatedUntil && ws.isolatedUntil.getTime() > now.getTime()) continue; // S7 R85: a live isolation, its own state
+    // #2022: except one stop-signal notice (Holger R105), which then travels alone.
+    const teamPaused = pendingOf.get(w.id) === 'TEAM_PAUSED';
+    // S7 R85: a live isolation, its own state. #2022: a stop notice reaches an isolated worker (R86), alone.
+    const isolated = s7Available() && !!ws?.isolatedUntil && ws.isolatedUntil.getTime() > now.getTime();
+    if ((teamPaused || isolated) && !stop) continue;
+    const stopReason = (n: PendingStopNotice) => ({ kind: 'STOP' as const, eventId: n.eventId, signalId: n.signalId, level: n.level, notice: n.notice, interrupt: n.interrupt });
+    if (teamPaused || isolated) {
+      const only: WorkerWake = { reasons: [stopReason(stop!)], channels: [], unread: 0, unreadMentions: 0, exempt: false, anchorAtMs: stop!.at.getTime() };
+      issued.push({ workerId: w.id, wake: only, availability: null, proof: signFor(w.id, only), exempt: false });
+      continue;
+    }
 
     // S7: a TICK is not one of the four kinds a standby worker is sent.
-    const subscriptions: SubscriptionInput[] = (standbyHead ? [] : subsOf.get(w.id) ?? []).map((s) => ({
+    const subscriptions: SubscriptionInput[] = (standbyHead || tickStopped.has(w.id) ? [] : subsOf.get(w.id) ?? []).map((s) => ({
       ticker: {
         id: s.ticker.id,
         anchorAt: s.ticker.anchorAt,
@@ -534,7 +556,7 @@ export async function computeDueWakes(args: {
       },
       lastAckedTick: tickAckOf.get(`${w.id}:${s.ticker.id}`)?.lastAckedTick ?? 0,
     }));
-    const wake = workerWake({
+    let wake = workerWake({
       workerId: w.id,
       workerTokens,
       mentionsImmediate: (ws?.mentions ?? 'IMMEDIATE') === 'IMMEDIATE',
@@ -546,9 +568,15 @@ export async function computeDueWakes(args: {
         .map(({ taskId, eventId, chainIndex, event, title, at, standbyHeld }) => ({ taskId, eventId, chainIndex, event, title, atMs: at.getTime(), ...(standbyHeld ? { standbyHeld } : {}) })),
       now,
     });
+    // #2022: the stop notice rides ahead of everything else in the wake (cor:agt:090:04), or is the wake.
+    if (stop) {
+      if (wake) wake.reasons.unshift(stopReason(stop));
+      else wake = { reasons: [stopReason(stop)], channels: [], unread: 0, unreadMentions: 0, exempt: false, anchorAtMs: stop.at.getTime() };
+    }
     if (!wake) continue;
 
     // cor:agt:080:13 — at most one wake per worker per floor, for every caller; a wake inside the window waits.
+    // #2022: a stop notice skips the floor (cor:agt:090:04, D-2026-10-16-002).
     const last = Math.max(
       0,
       ...deliveryChannels.filter((d) => d.workerId === w.id).map((d) => d.deliveredAt.getTime()),
@@ -556,7 +584,7 @@ export async function computeDueWakes(args: {
       taskDeliveredOf.get(w.id) ?? 0,
       wakeAckedOf.get(w.id) ?? 0,
     );
-    if (last > 0 && now.getTime() - last < floorMs) continue;
+    if (last > 0 && now.getTime() - last < floorMs && !hasStop(wake)) continue;
 
     const a = availabilityOf.get(w.id);
     let proof = signFor(w.id, wake);
@@ -591,7 +619,11 @@ export async function computeDueWakes(args: {
   const passes = (i: (typeof issued)[number]) => {
     const { exempt: _e, ...out } = i;
     const anchorMs = i.wake.anchorAtMs ?? now.getTime();
-    wakes.push({ ...out, timing: { anchorAt: new Date(anchorMs), ...batchTiming(deliverySettings, { oldestPostedAt: new Date(anchorMs) }) } });
+    // #2022: a stop notice waits for no batching window and no busy delay (cor:agt:090:04; cor:agt:080:27, Proposed).
+    const timing = hasStop(i.wake)
+      ? { anchorAt: new Date(anchorMs), deliverAfter: now, busyDeadline: now }
+      : { anchorAt: new Date(anchorMs), ...batchTiming(deliverySettings, { oldestPostedAt: new Date(anchorMs) }) };
+    wakes.push({ ...out, timing });
   };
   if (issued.length > 0) {
     await db.$transaction(async (tx) => {
@@ -660,8 +692,9 @@ export async function computeDueWakes(args: {
         // #1708: so is one carrying a task event that no longer asks anything of the worker (the task ended, the alarm's
         // episode passed, the worker acted): re-handing it would deliver exactly what the pre-delivery re-checks refuse.
         // Judged only by a reader of the App's tasks; for anyone else the stored wake is not theirs to see (below).
-        const stillPending = new Set(tasksFor(i.workerId).map(taskKey));
-        const staleTask = taskOk(i.workerId) && !!stored && tasksOf(stored.wake).some((t) => !stillPending.has(taskKey(t)));
+        const stillPending = new Set([...tasksFor(i.workerId).map(taskKey), ...(stopOf.has(i.workerId) ? [taskKey({ eventId: stopOf.get(i.workerId)!.eventId, chainIndex: 0 })] : [])]);
+        const staleTask = !!stored && ((taskOk(i.workerId) && tasksOf(stored.wake).some((t) => !stillPending.has(taskKey(t))))
+          || stopsOf(stored.wake).some((t) => !stillPending.has(taskKey(t))));
         if (stored && (staleTask || !stored.wake.channels.every((c) => channelOf.get(c.channelId)?.incarnation === c.incarnation))) {
           await tx.$executeRaw`DELETE FROM app_wake_reservations WHERE worker_id = ${i.workerId}`;
           live.delete(i.workerId);
@@ -677,7 +710,8 @@ export async function computeDueWakes(args: {
           // non-exempt wake here would be a delivery no slot paid for (and, with room, a second inside one floor),
           // so it waits for the first to be acknowledged or to lapse; it is not "withheld" by the budget, so no
           // notice is raised. An exempt wake never takes a slot and still passes (Diego, #1751 cycle 4).
-          if (i.exempt) passes(i);
+          // #2022: a stop notice is never left behind another wake (cor:agt:090:04).
+          if (i.exempt || hasStop(i.wake)) passes(i);
           continue;
         }
         if (have) {
@@ -709,7 +743,8 @@ export async function computeDueWakes(args: {
           continue;
         }
         if (!i.exempt) {
-          if (consumed >= budget) { withheld++; continue; }
+          // #2022 (R89): a stop notice counts against the budget but is never withheld by it.
+          if (consumed >= budget && !hasStop(i.wake)) { withheld++; continue; }
           consumed++;
           reserve.push({ workerId: i.workerId, key: wakeIdentity(identityOf(i.wake)), wake: i.wake });
         }

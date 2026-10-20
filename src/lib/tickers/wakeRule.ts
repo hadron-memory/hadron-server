@@ -58,7 +58,20 @@ export type TaskWakeReason = {
   standbyHeld?: number;
 };
 
-export type WakeReason = { kind: 'MENTION' } | { kind: 'TICK'; tickerId: string; k: number } | TaskWakeReason;
+/**
+ * #2022 (S6, cor:agt:090:04) — a stop-signal notice: the newest one the worker hasn't been delivered. Only a `halt`'s
+ * stop notice interrupts. Acknowledged like a task event (its event id at chain position 0), so never a chat mark.
+ */
+export type StopWakeReason = {
+  kind: 'STOP';
+  eventId: string;
+  signalId: string;
+  level: 'pause-dispatch' | 'pause' | 'halt';
+  notice: 'stop' | 'resume';
+  interrupt: boolean;
+};
+
+export type WakeReason = { kind: 'MENTION' } | { kind: 'TICK'; tickerId: string; k: number } | TaskWakeReason | StopWakeReason;
 
 /** A task wake handed to the rule: already gated for the requester, oldest first. */
 export type TaskWakeInput = Omit<TaskWakeReason, 'kind'> & { /** R63: the task event's time (ms), the anchor of a task reason. */ atMs?: number };

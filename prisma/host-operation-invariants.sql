@@ -136,7 +136,7 @@ CREATE TRIGGER trg_host_operations_forward_only
 -- never changed, removed only with its key (the cascade).
 ALTER TABLE host_key_uses DROP CONSTRAINT IF EXISTS chk_host_key_uses_shape;
 ALTER TABLE host_key_uses ADD CONSTRAINT chk_host_key_uses_shape CHECK (
-  action IN ('register', 'collect', 'report', 'availability', 'read', 'session', 'issue', 'deliver') AND
+  action IN ('register', 'collect', 'report', 'availability', 'read', 'session', 'issue', 'deliver', 'stop') AND
   host_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' AND
   (count IS NULL OR count >= 0) AND
   -- A refused report may name no operation it could see; an accepted one always names its own.
