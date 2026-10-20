@@ -215,7 +215,10 @@ export async function appendChatMessage<T>(
     msgNum: string;
     chatData: Record<string, unknown>;
   }) => Promise<T>,
-  opts?: ChatRootOpts,
+  opts?: ChatRootOpts & {
+    /** #2014: commit a refusal side effect without advancing any message allocation state. */
+    skipAllocation?: (inserted: T) => boolean;
+  },
 ): Promise<{ seq: number; chatData: Record<string, unknown>; inserted: T }> {
   return withChatRootLock(db, chat, memEncInfo, async ({ tx, chatData }) => {
     const seq = (await highWaterSeq(tx, chat, chatData)) + 1;
@@ -225,6 +228,9 @@ export async function appendChatMessage<T>(
       msgNum: String(seq).padStart(3, '0'),
       chatData,
     });
+    if (opts?.skipAllocation?.(inserted)) {
+      return { value: { seq, chatData, inserted } };
+    }
     const now = new Date();
     // Spec 049 Phase 4 (D-2026-09-13-009): the Channel's watermark is the
     // allocator's output, written in the SAME transaction as the seq. The

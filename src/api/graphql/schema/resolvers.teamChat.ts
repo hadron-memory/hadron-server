@@ -35,6 +35,7 @@ import type { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { generateId } from '../../../lib/id.js';
 import { appendChatMessage } from '../../../lib/chatRoot.js';
+import { admitWorkerPost, chatPostAdmissionTime, lockChatPostWorker } from '../../../lib/chatPostAdmission.js';
 import { lockStampAuthority, wakeStampsFor } from '../../../lib/tickers/postStamp.js';
 import { deriveEdgeLoc, sanitizeLocAtom } from '../../../lib/edgeLoc.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -983,7 +984,7 @@ async function postToChannelRoot(
   const messageId = generateId();
   const createdBy = opts.system ? null : (ctx.userId ?? null);
   let messageLoc: string | null = null;
-  const { seq, inserted: createdAt } = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
+  const { seq, inserted: createdAt } = await appendChatMessage<Date | GraphQLError>(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
     // The Channel is re-checked LIVE under the lock (Copilot on PR #1169):
     // deleteChannel takes this same key, so a delete that committed between
     // resolving the target and acquiring it is seen here — a message is
@@ -1030,6 +1031,18 @@ async function postToChannelRoot(
           { extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND', replyToSeq } },
         );
       }
+    }
+    // #2014/#2015: serialize the derived worker across Channels, then use ONE DB admission instant.
+    // Return (do not throw) a refusal: the rate episode/alarm must commit, while allocation remains untouched.
+    let admittedAt: Date | undefined;
+    if (typeof envelope.authorWorkerId === 'string') {
+      await lockChatPostWorker(tx, envelope.authorWorkerId);
+      admittedAt = await chatPostAdmissionTime(tx);
+      const refusal = await admitWorkerPost(tx, {
+        workerId: envelope.authorWorkerId, channelId: incarnation.id, body,
+        replyTargetId: replyTarget?.id ?? null, at: admittedAt,
+      });
+      if (refusal) return refusal;
     }
     // #1842 — the reply-target fold (Holger, #10394): when the target was
     // authored by a WORKER, that worker counts as mentioned, recorded at
@@ -1132,6 +1145,7 @@ async function postToChannelRoot(
         createdByAgentId: authorAgentId,
         // #914: the SENDER's user id — for worker posts, the human driver.
         createdBy,
+        ...(admittedAt ? { createdAt: admittedAt } : {}),
       },
     });
     if (replyTarget) {
@@ -1148,7 +1162,8 @@ async function postToChannelRoot(
       });
     }
     return row.createdAt;
-  }, { asChannel: true });
+  }, { asChannel: true, skipAllocation: (value) => value instanceof GraphQLError });
+  if (createdAt instanceof GraphQLError) throw createdAt;
 
   // #1061 — a chat message IS a node, so posting one is a write on the team's
   // shared chat memory. This was one of the largest blind spots in the old

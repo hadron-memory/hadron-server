@@ -530,6 +530,9 @@ async function applyTemplateConstraints(client: Client) {
       WHERE "node_type" = 'chat-message' AND "deleted_at" IS NULL AND "seq" IS NOT NULL;
   `);
 
+  // #2014: final event-shape composition, after every other invariant source.
+  await client.query(readFileSync(new URL('../../prisma/chat-post-invariants.sql', import.meta.url), 'utf8'));
+
 }
 
 async function provisionParallel(admin: Client, base: string, runId: string) {

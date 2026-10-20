@@ -11344,7 +11344,8 @@ export const typeDefs = `#graphql
     successor code.
 
     Error codes (extensions.code): TEAM_CHAT_BODY_TOO_LARGE,
-    TEAM_CHAT_REPLY_NOT_FOUND, SESSION_NOT_FOUND, SESSION_ENDED,
+    TEAM_CHAT_REPLY_NOT_FOUND, TEAM_CHAT_DUPLICATE, TEAM_CHAT_RATE_LIMITED,
+    SESSION_NOT_FOUND, SESSION_ENDED,
     SESSION_NOT_WORKER_BOUND, CHANNEL_HOST_NOT_WRITABLE, WORKER_RETIRED,
     SESSION_EXPIRED (encrypted team memory without an active session key),
     TEAM_AGENT_NOT_FOUND / TEAM_AGENT_AMBIGUOUS (first-post bootstrap could

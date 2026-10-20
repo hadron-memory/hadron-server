@@ -1387,6 +1387,8 @@ model Node {
   processesIndexOf   Agent[]   @relation("AgentProcessesIndex")
 
   @@unique([loc, memoryId])
+  // #2014: rolling worker post admission (includes deleted accepted posts).
+  @@index([createdByWorkerId, createdAt(sort: Desc)], map: "nodes_worker_post_admission_idx")
   @@index([loc])
   @@index([memoryId])
   // Graph-view scale path (#466): memoryNodes runs
@@ -3773,6 +3775,8 @@ model Worker {
   launchableVia      HostRegistrationWorker[]
   hostOperations     HostOperation[]
 
+  postLimitEpisodes WorkerPostLimitEpisode[]
+
   /// The URN atom's uniqueness. Unfiltered on retirement, like
   /// `workers_app_name_uniq`: a retired worker's URN must keep resolving.
   @@unique([appId, slug], map: "workers_app_slug_uniq")
@@ -6001,4 +6005,18 @@ model WorkerReferenceFence {
   version   BigInt @default(0)
 
   @@map("worker_reference_fences")
+}
+
+/// #2014: one durable rate-refusal episode per worker/hour. The event and schedule commit with it.
+model WorkerPostLimitEpisode {
+  id           String   @id @default(cuid())
+  workerId     String   @map("worker_id")
+  episodeStart DateTime @map("episode_start")
+  eventId      String   @unique @map("event_id")
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@unique([workerId, episodeStart])
+  @@index([workerId, episodeStart(sort: Desc)])
+  @@map("worker_post_limit_episodes")
 }

@@ -10206,6 +10206,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           `Posted team-chat message #${msg.seq}${where} as ${msg.authorName ?? 'unknown'}${extras.length ? ` (${extras.join('; ')})` : ''}.`,
         );
       } catch (e) {
+        // #2014/#2015: parity with the explicit-Channel post; keep the actionable code and text.
+        if (e instanceof ScopeGraphQLError && ['TEAM_CHAT_DUPLICATE', 'TEAM_CHAT_RATE_LIMITED'].includes(String(e.extensions?.code))) {
+          return textResult(`[${String(e.extensions.code).toLowerCase()}] ${e.message}`);
+        }
         return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat post failed'}`);
       }
     },
