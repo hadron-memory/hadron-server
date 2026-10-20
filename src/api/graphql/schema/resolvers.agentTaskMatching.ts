@@ -13,6 +13,8 @@ import { type Context } from './resolvers.helpers.js';
 import { resolveParticipatedApp } from './resolvers.agentTask.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import { loadTeamRoster, type RosterEntry } from '../../../lib/agentTasks/roster.js';
+import type { WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
+import { loadAppWorkerCheckStatuses } from './resolvers.worker.js';
 
 const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
 
@@ -21,12 +23,20 @@ export const agentTaskMatchingQueries = {
   teamRoster: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
     const { app } = await resolveParticipatedApp(ctx, appRef);
     const asOf = new Date();
-    const entries = await loadTeamRoster(ctx.db, app.id, asOf);
-    return { appId: app.id, asOf, workers: entries.map((e) => ({ ...e, appUrn: app.urn })) };
+    const [entries, checks] = await Promise.all([
+      loadTeamRoster(ctx.db, app.id, asOf),
+      // #2138 §3.4 — the same derivation as Worker.checkStatus, at the roster's instant.
+      loadAppWorkerCheckStatuses(ctx, app.id, { now: asOf }),
+    ]);
+    return {
+      appId: app.id,
+      asOf,
+      workers: entries.map((e) => ({ ...e, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null })),
+    };
   },
 };
 
-type RosterRow = RosterEntry & { appUrn: string };
+type RosterRow = RosterEntry & { appUrn: string; checkStatus: WorkerCheckStatus | null };
 
 export const agentTaskMatchingFieldResolvers = {
   TeamRosterEntry: {
@@ -43,5 +53,6 @@ export const agentTaskMatchingFieldResolvers = {
       ? { kind: 'WORKER', id: r.reportsTo.workerId, name: r.reportsTo.name, urn: composeWorkerUrn(r.appUrn, r.reportsTo.slug) }
       : null),
     reportsToRetired: (r: RosterRow) => r.reportsTo?.retired ?? false,
+    checkStatus: (r: RosterRow) => r.checkStatus,
   },
 };
