@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import type { Config, Runner } from '../orca-attention-router/router.js';
 import { buildSchema, parse, validate } from 'graphql';
 import { typeDefs } from '../../src/api/graphql/schema/typeDefs.js';
-import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE } from './ticker-wake.js';
+import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync } from './ticker-wake.js';
+import type { RunResult } from '../orca-attention-router/router.js';
 
 const RULE = '─'.repeat(112);
 // A finished Claude Code 2.1.303 turn over an empty composer (shapes from the cli#907 captures): the
@@ -133,26 +134,26 @@ beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'ticker-wake-')); f = fake()
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 describe('selection and delivery', () => {
-  it('delivers a TICK-only wake and acks it by its own proof', () => {
+  it('delivers a TICK-only wake and acks it by its own proof', async () => {
     const p = proof(['T:1'], 'a');
     f.wakes = [wake('w-ada', 'Ada', [TICK], p, [{ fromSeq: 1, throughSeq: 2 }])];
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.sent[0]).toContain('coordinator-tick');
     expect(f.acked).toEqual([p]);
   });
 
-  it('a MENTION-only wake is neither nudged nor acked', () => {
+  it('a MENTION-only wake is neither nudged nor acked', async () => {
     f.wakes = [wake('w-ada', 'Ada', [MENTION])];
-    go();
+    await go();
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
     expect(log()).toContain('1 other wakes ignored');
   });
 
-  it('delivers a TICK wake with empty channels (#2068) and never asks for channels', () => {
+  it('delivers a TICK wake with empty channels (#2068) and never asks for channels', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [])];
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toHaveLength(1);
     expect(f.dueQueries[0]).not.toContain('channels');
@@ -163,10 +164,10 @@ describe('selection and delivery', () => {
   // joined proof records the tick and spends the reservation and never marks the mention delivered or read (S1 text
   // batches and the worker's own read do that). Without delivering the joined wake, every worker holding an outstanding
   // mention would never get its ticks: the dark team #2069 describes.
-  it('TICK+MENTION is delivered: nudged once and acked (the ack moves no message mark, R53)', () => {
+  it('TICK+MENTION is delivered: nudged once and acked (the ack moves no message mark, R53)', async () => {
     const p = proof(['T:1']);
     f.wakes = [wake('w-ada', 'Ada', [TICK, MENTION], p)];
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.sent[0]).toContain('coordinator-tick');
     expect(f.acked).toEqual([p]);
@@ -175,27 +176,27 @@ describe('selection and delivery', () => {
   // Vera's pin (spec fit at fd5d2f33, cor:agt:080:04/:13): the ack moved no mark, so the mention stays due and the server
   // offers it again past the floor. The server half is proven live (Coco's stack); this is the loop's half of the sequence:
   // it must not swallow or ack the re-offered mention, and it must still deliver the next tick that joins it.
-  it('after a joined TICK+MENTION ack, the re-offered MENTION-only wake is left alone and the next joined tick is delivered', () => {
+  it('after a joined TICK+MENTION ack, the re-offered MENTION-only wake is left alone and the next joined tick is delivered', async () => {
     const p1 = proof(['T:1'], 'one');
     f.wakes = [wake('w-ada', 'Ada', [TICK, MENTION], p1)];
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toEqual([p1]);
     f.wakes = [wake('w-ada', 'Ada', [MENTION], proof([], 'again'))]; // the mention, offered again past the floor
-    go();
+    await go();
     expect(f.sent, 'a MENTION-only wake must not be typed').toHaveLength(1);
     expect(f.acked, 'a MENTION-only wake must not be acked').toEqual([p1]);
     const p2 = proof(['T:2'], 'two');
     f.wakes = [wake('w-ada', 'Ada', [TICK, MENTION], p2)]; // the next tick joins the still-due mention
-    go();
+    await go();
     expect(f.sent).toHaveLength(2);
     expect(f.acked).toEqual([p1, p2]);
   });
 
-  it('TICK+TASK (not an assignment) and TICK+unknown are left alone: no nudge, no ack, no receipt (a proof naming task events records them delivered)', () => {
+  it('TICK+TASK (not an assignment) and TICK+unknown are left alone: no nudge, no ack, no receipt (a proof naming task events records them delivered)', async () => {
     for (const extra of [TASK, { kind: 'FUTURE', ticker: null }]) {
       f.wakes = [wake('w-ada', 'Ada', [TICK, extra])];
-      go();
+      await go();
     }
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
@@ -203,54 +204,54 @@ describe('selection and delivery', () => {
     expect(existsSync(receiptsFile())).toBe(false);
   });
 
-  it('a joined TICK+MENTION proof after an earlier delivery is never retyped; the lost ack is recovered ack-only', () => {
+  it('a joined TICK+MENTION proof after an earlier delivery is never retyped; the lost ack is recovered ack-only', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
     f.ackReply = () => ({ errors: [{ message: 'down' }] });
-    go(); // typed, ack lost: a sent receipt exists
+    await go(); // typed, ack lost: a sent receipt exists
     f.ackReply = null;
     const joined = proof(['T:1'], 'joined');
     f.wakes = [wake('w-ada', 'Ada', [TICK, MENTION], joined)];
-    go();
+    await go();
     expect(f.sent).toHaveLength(1); // still the one original nudge: the joined re-offer is not typed again
     expect(f.acked).toEqual([joined]); // its tick coverage is fully covered by the confirmed receipt
   });
 
-  it('a worker not on the roster is skipped without an ack', () => {
+  it('a worker not on the roster is skipped without an ack', async () => {
     f.wakes = [wake('w-other', 'Zed', [TICK])];
-    go();
+    await go();
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
     expect(log()).toContain('Zed: not on roster');
   });
 
-  it('a proof whose tick coverage cannot be decoded is held', () => {
+  it('a proof whose tick coverage cannot be decoded is held', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], 'opaque')];
-    go();
+    await go();
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
     expect(log()).toContain('tick coverage cannot be established');
   });
 
-  it('a roster/identity mismatch holds: the worktree is bound to another worker', () => {
+  it('a roster/identity mismatch holds: the worktree is bound to another worker', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     mkdirSync(join(dir, '.git'), { recursive: true });
     writeFileSync(join(dir, '.git', 'hadron-team-session.json'), JSON.stringify({ workerId: 'w-someone-else' }));
-    go();
+    await go();
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
     expect(log()).toContain('bound to another worker');
   });
 
-  it('--dry sends and acks nothing and writes no receipt', () => {
+  it('--dry sends and acks nothing and writes no receipt', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
-    go({ dry: true });
+    await go({ dry: true });
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
     expect(log()).toContain('WOULD nudge');
     expect(existsSync(receiptsFile())).toBe(false);
   });
 
-  it('proofCoverage decodes the ticks and task events, sorted, and returns null for an opaque or empty proof', () => {
+  it('proofCoverage decodes the ticks and task events, sorted, and returns null for an opaque or empty proof', async () => {
     expect(proofCoverage(proof(['B:2', 'A:1']))).toEqual(['A:1', 'B:2']);
     expect(proofCoverage(proof(['A:1'], 'x', [taskEntry('t1')]))).toEqual(['A:1', 'task:e-t1#0']);
     expect(proofCoverage(proof([], 'x', [taskEntry('t1', 'e9', 2)]))).toEqual(['task:e9#2']);
@@ -261,9 +262,9 @@ describe('selection and delivery', () => {
 });
 
 describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
-  it('a tick nudge asks for the unread TAGGED messages and keeps the no-unfiltered-catch-up rule', () => {
+  it('a tick nudge asks for the unread TAGGED messages and keeps the no-unfiltered-catch-up rule', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.sent[0]).toContain('check your unread tagged messages');
     expect(f.sent[0]).toContain('no unfiltered chat catch-up');
@@ -271,18 +272,18 @@ describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
     expect(f.sent[0]).not.toContain('\n');
   });
 
-  it('live-check fires an ordinary TICK reason, so it is nudged and acked like any tick', () => {
+  it('live-check fires an ordinary TICK reason, so it is nudged and acked like any tick', async () => {
     const p = proof(['L:1']);
     f.wakes = [wake('w-ada', 'Ada', [{ kind: 'TICK', ticker: { id: 'L', name: 'team' } }], p)];
-    go();
+    await go();
     expect(f.sent).toEqual([nudgeText(['team'], [])]);
     expect(f.acked).toEqual([p]);
   });
 
-  it.each(['ASSIGNED', 'REASSIGNED', 'MATCHED'])('a TASK-only %s wake is nudged once, naming the task, then acked', (event) => {
+  it.each(['ASSIGNED', 'REASSIGNED', 'MATCHED'])('a TASK-only %s wake is nudged once, naming the task, then acked', async (event) => {
     const p = proof([], 'x', [taskEntry('t42')]);
     f.wakes = [wake('w-ada', 'Ada', [task('t42', event)], p)];
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.sent[0]).toContain('Hadron task assigned (t42)');
     expect(f.sent[0]).toContain('hadron team task get t42');
@@ -292,20 +293,20 @@ describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))).toEqual({});
   });
 
-  it('TASK+MENTION is delivered (the ack moves no message mark), and two assignments point at the task list', () => {
+  it('TASK+MENTION is delivered (the ack moves no message mark), and two assignments point at the task list', async () => {
     const p = proof([], 'x', [taskEntry('t1'), taskEntry('t2')]);
     f.wakes = [wake('w-ada', 'Ada', [task('t1'), task('t2', 'MATCHED'), MENTION], p)];
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.sent[0]).toContain('(t1, t2)');
     expect(f.sent[0]).toContain('hadron team task list');
     expect(f.acked).toEqual([p]);
   });
 
-  it('TICK+TASK assignment: ONE nudge names the task and the ticker, and one ack covers both', () => {
+  it('TICK+TASK assignment: ONE nudge names the task and the ticker, and one ack covers both', async () => {
     const p = proof(['T:1'], 'x', [taskEntry('t1')]);
     f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1')], p)];
-    go();
+    await go();
     expect(f.sent).toEqual([nudgeText(['coordinator-tick'], ['t1'])]);
     expect(f.sent[0]).toContain('ticker coordinator-tick');
     expect(f.acked).toEqual([p]);
@@ -317,11 +318,11 @@ describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
     ['END_SESSION', task('t1', 'END_SESSION')],
     ['a TASK reason without its task', { kind: 'TASK', ticker: null, task: null }],
     ['a task id that is not a plain id', task('t1; rm -rf ~', 'ASSIGNED')],
-  ])('%s is left alone, alone or beside an assignment: no nudge, no ack, no receipt', (_label, reason) => {
+  ])('%s is left alone, alone or beside an assignment: no nudge, no ack, no receipt', async (_label, reason) => {
     f.wakes = [wake('w-ada', 'Ada', [reason], proof([], 'x', [taskEntry('t1')]))];
-    go();
+    await go();
     f.wakes = [wake('w-ada', 'Ada', [task('t9'), reason], proof([], 'y', [taskEntry('t9'), taskEntry('t1')]))];
-    go();
+    await go();
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
     expect(log()).toContain('left alone');
@@ -329,42 +330,42 @@ describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
     expect(existsSync(receiptsFile())).toBe(false);
   });
 
-  it('a delivered assignment whose ack was lost is never named again: the re-offer joined with a tick names only the ticker', () => {
+  it('a delivered assignment whose ack was lost is never named again: the re-offer joined with a tick names only the ticker', async () => {
     const p1 = proof([], 'one', [taskEntry('t1')]);
     f.wakes = [wake('w-ada', 'Ada', [task('t1')], p1)];
     f.ackReply = () => ({ errors: [{ message: 'down' }] });
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     f.ackReply = null;
     const p2 = proof(['T:1'], 'two', [taskEntry('t1')]);
     f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1')], p2)];
-    go();
+    await go();
     expect(f.sent).toHaveLength(2);
     expect(f.sent[1]).toEqual(nudgeText(['coordinator-tick'], []));
     expect(f.acked).toEqual([p2]);
   });
 
-  it('a lost ack on a TASK-only wake is recovered ack-only, never retyped', () => {
+  it('a lost ack on a TASK-only wake is recovered ack-only, never retyped', async () => {
     const p = proof([], 'one', [taskEntry('t1')]);
     f.wakes = [wake('w-ada', 'Ada', [task('t1')], p)];
     f.ackReply = () => ({ errors: [{ message: 'down' }] });
-    go();
+    await go();
     f.ackReply = null;
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toEqual([p]);
     expect(log()).toContain('ack-only recovery acked');
   });
 
-  it('a task event in the proof that no reason names is held, not guessed', () => {
+  it('a task event in the proof that no reason names is held, not guessed', async () => {
     f.wakes = [wake('w-ada', 'Ada', [task('t1')], proof([], 'x', [taskEntry('t1'), taskEntry('zz')]))];
-    go();
+    await go();
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
     expect(log()).toContain('cannot be identified');
   });
 
-  it('asks the server for each task reason\'s id, event and coverage key', () => {
+  it('asks the server for each task reason\'s id, event and coverage key', async () => {
     expect(QUERY).toContain('task{id eventId chainIndex event}');
   });
 });
@@ -372,56 +373,56 @@ describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
 describe('idle gate (C1 rule)', () => {
   beforeEach(() => { f.wakes = [wake('w-ada', 'Ada', [TICK])]; });
 
-  it('tui-idle satisfied and an empty composer: delivered', () => {
-    go();
+  it('tui-idle satisfied and an empty composer: delivered', async () => {
+    await go();
     expect(f.sent).toHaveLength(1);
   });
 
-  it('tui-idle satisfied is NOT enough: any Orca draft holds, whitespace and multiline included', () => {
+  it('tui-idle satisfied is NOT enough: any Orca draft holds, whitespace and multiline included', async () => {
     for (const draft of ['half typed', '   ', 'line one\nline two']) {
       f.sent = []; f.acked = []; lines = [];
       f.screen = { source: 'screen', tail: CLAUDE_IDLE, draft };
-      go();
+      await go();
       expect(f.sent).toEqual([]);
       expect(f.acked).toEqual([]);
       expect(log()).toContain('composer not provably empty');
     }
   });
 
-  it('tui-idle satisfied over a menu or an unknown screen: held', () => {
+  it('tui-idle satisfied over a menu or an unknown screen: held', async () => {
     f.screen = { source: 'screen', tail: ['Which option do you pick?', '❯ 1. Alpha', '  2. Beta', 'Enter to select · ↑/↓ to navigate'] };
-    go();
+    await go();
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
   });
 
-  it('Claude composer with the mode footer and NO agents suffix, no draft, tui-idle unavailable: delivered via the screen', () => {
+  it('Claude composer with the mode footer and NO agents suffix, no draft, tui-idle unavailable: delivered via the screen', async () => {
     f.idle = false;
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toHaveLength(1);
   });
 
-  it('screen fallback with an Orca draft holds and the wake stays due', () => {
+  it('screen fallback with an Orca draft holds and the wake stays due', async () => {
     f.idle = false;
     f.screen = { source: 'screen', tail: CLAUDE_IDLE, draft: 'half typed' };
-    go();
+    await go();
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
   });
 
-  it('a second footer row is not the mode line: held', () => {
+  it('a second footer row is not the mode line: held', async () => {
     f.idle = false;
     f.screen = { source: 'screen', tail: [...CLAUDE_IDLE, '  esc to interrupt'] };
-    go();
+    await go();
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
   });
 
-  it('a running turn is held, and nothing is cleared or interrupted', () => {
+  it('a running turn is held, and nothing is cleared or interrupted', async () => {
     f.idle = false;
     f.screen = { source: 'screen', tail: ['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'] };
-    go();
+    await go();
     expect(f.sent).toEqual([]);
   });
 });
@@ -432,28 +433,28 @@ describe('R63 timing (server-owned anchor, floor and busy deadline)', () => {
   const timing = (deliverAfter: number, busyDeadline: number) => ({ anchorAt: iso(T0 - 900_000), deliverAfter: iso(deliverAfter), busyDeadline: iso(busyDeadline) });
   const at = (ms: number) => ({ now: () => ms });
 
-  it('nothing is typed before deliverAfter, even to an idle terminal; at deliverAfter it is delivered', () => {
+  it('nothing is typed before deliverAfter, even to an idle terminal; at deliverAfter it is delivered', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing(T0 + 60_000, T0 + 600_000))];
-    go(at(T0 + 59_999));
+    await go(at(T0 + 59_999));
     expect(f.sent).toEqual([]);
     expect(log()).toContain('before deliverAfter');
-    go(at(T0 + 60_000));
+    await go(at(T0 + 60_000));
     expect(f.sent).toHaveLength(1);
   });
 
-  it('busy vetoes before busyDeadline, and stops vetoing at and after it', () => {
+  it('busy vetoes before busyDeadline, and stops vetoing at and after it', async () => {
     f.idle = false;
     f.screen = { source: 'screen', tail: BUSY };
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing(T0 - 1, T0 + 600_000))];
-    go(at(T0 + 599_999));
+    await go(at(T0 + 599_999));
     expect(f.sent).toEqual([]);
     expect(log()).toContain('busy until the server');
-    go(at(T0 + 600_000));
+    await go(at(T0 + 600_000));
     expect(f.sent).toHaveLength(1); // at the deadline busy alone no longer vetoes
     expect(f.acked).toHaveLength(1);
   });
 
-  it('after the deadline a busy terminal is delivered to; after it nothing else relaxes', () => {
+  it('after the deadline a busy terminal is delivered to; after it nothing else relaxes', async () => {
     f.idle = false;
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing(T0 - 1, T0 + 1))];
     for (const [label, screen] of [
@@ -464,46 +465,46 @@ describe('R63 timing (server-owned anchor, floor and busy deadline)', () => {
     ] as const) {
       f.sent = []; f.acked = []; lines = [];
       f.screen = screen as any;
-      go(at(T0 + 3_600_000)); // an hour past the deadline
+      await go(at(T0 + 3_600_000)); // an hour past the deadline
       expect(f.sent, label).toEqual([]);
       expect(f.acked, label).toEqual([]);
     }
   });
 
-  it('timing comes only from the wake: a restart, re-offer or join decides identically and keeps no local clock', () => {
+  it('timing comes only from the wake: a restart, re-offer or join decides identically and keeps no local clock', async () => {
     f.idle = false;
     f.screen = { source: 'screen', tail: BUSY };
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'first-offer'), [], timing(T0 - 1, T0 + 600_000))];
-    go(at(T0 + 10_000)); // held
+    await go(at(T0 + 10_000)); // held
     // a re-offer carries the SAME stored anchor/floor/deadline (new proof bytes): decided by the wake's fields alone
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 're-offer'), [], timing(T0 - 1, T0 + 600_000))];
-    go(at(T0 + 10_000));
+    await go(at(T0 + 10_000));
     expect(f.sent).toEqual([]);
     // a fresh process (no memory of the earlier passes) at the deadline delivers
-    go(at(T0 + 600_000));
+    await go(at(T0 + 600_000));
     expect(f.sent).toHaveLength(1);
     // a joined TASK reason leaves the wake untouched whatever the clock says
     f.sent = []; f.acked = [];
     f.wakes = [wake('w-ada', 'Ada', [TICK, TASK], proof(['T:1']), [], timing(T0 - 1, T0 + 1))];
-    go(at(T0 + 3_600_000));
+    await go(at(T0 + 3_600_000));
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
   });
 
-  it('a wake without server timing (old server) is held, never given a local default', () => {
+  it('a wake without server timing (old server) is held, never given a local default', async () => {
     f.wakes = [{ worker: { id: 'w-ada', name: 'Ada' }, reasons: [TICK], channels: [], proof: proof(['T:1']) }];
-    go();
+    await go();
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
     expect(log()).toContain('no server timing');
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], { anchorAt: 'x', deliverAfter: iso(Date.now()), busyDeadline: iso(Date.now()) })];
-    go();
+    await go();
     expect(f.sent).toEqual([]);
   });
 
-  it('asks the server for anchorAt, deliverAfter and busyDeadline', () => {
+  it('asks the server for anchorAt, deliverAfter and busyDeadline', async () => {
     f.wakes = [];
-    go();
+    await go();
     expect(f.dueQueries[0]).toMatch(/anchorAt deliverAfter busyDeadline/);
   });
 });
@@ -512,32 +513,32 @@ describe('typed-once, coverage and ambiguity', () => {
   const lostAck = () => { f.ackReply = () => ({ errors: [{ message: 'upstream 502' }] }); };
   const T = (k: number) => `T:${k}`;
 
-  it('a confirmed send whose ack fails is retried ack-only for a fully covered proof, never retyped', () => {
+  it('a confirmed send whose ack fails is retried ack-only for a fully covered proof, never retyped', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1)]))];
     lostAck();
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(log()).toContain('ack FAILED');
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'sent', coverage: [T(1)], receiver: 'term_a#inc-1' });
     f.ackReply = null;
     lines = [];
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1)], 'reissued'))]; // a re-read proof: same ticks, new bytes
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toHaveLength(1);
     expect(log()).toContain('ack-only recovery acked');
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))).toEqual({});
   });
 
-  it('overlapping ticks: the second nudge names ONLY the uncovered ticker, coverage is the union, the combined proof is acked', () => {
+  it('overlapping ticks: the second nudge names ONLY the uncovered ticker, coverage is the union, the combined proof is acked', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1)]))];
     lostAck();
-    go();
+    await go();
     expect(f.sent[0]).toContain('coordinator-tick');
     f.ackReply = null;
     const both = proof([T(1), 'U:1'], 'both');
     f.wakes = [wake('w-ada', 'Ada', [TICK, TICK2], both)];
-    go();
+    await go();
     expect(f.sent).toHaveLength(2);
     expect(f.sent[1]).toContain('eden-queue-tick');
     expect(f.sent[1]).not.toContain('coordinator-tick'); // the covered work is not asked for again
@@ -545,168 +546,168 @@ describe('typed-once, coverage and ambiguity', () => {
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))).toEqual({});
   });
 
-  it('a later tick of the SAME ticker is new work and is named', () => {
+  it('a later tick of the SAME ticker is new work and is named', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1)]))];
     lostAck();
-    go();
+    await go();
     f.ackReply = null;
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1), T(2)]))];
-    go();
+    await go();
     expect(f.sent).toHaveLength(2);
     expect(f.sent[1]).toContain('coordinator-tick');
     expect(f.acked).toHaveLength(1);
   });
 
-  it('uncovered tick work that cannot be mapped to a ticker is held, not repeated', () => {
+  it('uncovered tick work that cannot be mapped to a ticker is held, not repeated', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1)]))];
     lostAck();
-    go();
+    await go();
     f.ackReply = null;
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1), 'Z:9']))]; // Z is not among the wake's reasons
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toEqual([]);
     expect(log()).toContain('cannot be identified');
   });
 
-  it('a changed receiver (replacement terminal) does not inherit the old receipt', () => {
+  it('a changed receiver (replacement terminal) does not inherit the old receipt', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1)]))];
     lostAck();
-    go();
+    await go();
     f.ackReply = null;
     f.incarnation = 'inc-2';
-    go();
+    await go();
     expect(f.sent).toHaveLength(2); // the new terminal never received the first nudge
   });
 
-  it('an ack reply without an acknowledgement result is not reported as acked', () => {
+  it('an ack reply without an acknowledgement result is not reported as acked', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.ackReply = () => ({ data: {} });
-    go();
+    await go();
     expect(log()).toContain('ack FAILED');
     expect(log()).not.toMatch(/; acked /);
   });
 
-  it('accepted without a confirmed turn start is ambiguous and kept with its request id; it is reconciled by that id, never retyped', () => {
+  it('accepted without a confirmed turn start is ambiguous and kept with its request id; it is reconciled by that id, never retyped', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toEqual([]);
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'ambiguous', requestId: 'r1', handle: 'term_a' });
     f.sendReply = null;
-    go(); // still unconfirmed on retry
+    await go(); // still unconfirmed on retry
     expect(f.retries).toEqual(['r1']);
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toEqual([]);
     expect(log()).toContain('still unreconciled');
     f.retryReply = () => JSON.stringify(CONFIRMED); // the retry now reports the turn started
     lines = [];
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toHaveLength(1);
     expect(log()).toContain('reconciled as delivered');
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))).toEqual({});
   });
 
-  it('only the exact stage turn_started confirms', () => {
+  it('only the exact stage turn_started confirms', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.sendReply = () => JSON.stringify({ ok: true, result: { send: { accepted: true, prompt: { requestId: 'r2', stages: ['input_accepted', 'no_turn_started_yet'] } } } });
-    go();
+    await go();
     expect(f.acked).toEqual([]);
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada'].state).toBe('ambiguous');
   });
 
-  it('an unparsable or id-less receipt is ambiguous with no request id: held for a human, no retry calls', () => {
+  it('an unparsable or id-less receipt is ambiguous with no request id: held for a human, no retry calls', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.sendReply = () => 'not json';
-    go();
+    await go();
     f.sendReply = null;
-    go();
-    go();
+    await go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.retries).toEqual([]);
     expect(f.acked).toEqual([]);
     expect(log()).toContain('unreconciled');
   });
 
-  it('a failure that names a request id is reissued once with that same id: confirmed on retry means one send, acked', () => {
+  it('a failure that names a request id is reissued once with that same id: confirmed on retry means one send, acked', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.sendReply = () => JSON.stringify({ ok: false, error: { code: 'transport', details: { requestId: 'rq9' } } });
     f.retryReply = () => JSON.stringify(CONFIRMED);
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(f.retries).toEqual(['rq9']);
     expect(f.acked).toHaveLength(1);
   });
 
-  it('a failure after possible submission whose retry also fails stays ambiguous with its request id', () => {
+  it('a failure after possible submission whose retry also fails stays ambiguous with its request id', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.sendReply = () => JSON.stringify({ ok: false, error: { code: 'transport', details: { requestId: 'rq9' } } });
     f.retryReply = () => JSON.stringify({ ok: false, error: { code: 'transport', details: { requestId: 'rq9' } } });
-    go();
+    await go();
     expect(f.acked).toEqual([]);
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'ambiguous', requestId: 'rq9' });
-    go();
+    await go();
     expect(f.sent).toHaveLength(1); // not retyped
   });
 
-  it('uncertain with an id, then a same-id retry that fails WITHOUT an id, stays uncertain across restarts: no fresh type, no ack', () => {
+  it('uncertain with an id, then a same-id retry that fails WITHOUT an id, stays uncertain across restarts: no fresh type, no ack', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
     f.retryReply = () => JSON.stringify({ ok: false, error: { code: 'invalid_argument' } });
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'ambiguous', requestId: 'r1' });
-    for (let i = 0; i < 3; i++) go(); // "restarts": every pass rereads the receipts
+    for (let i = 0; i < 3; i++) await go(); // "restarts": every pass rereads the receipts
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toEqual([]);
     expect(log()).toContain('still unreconciled');
     expect(log()).not.toContain('will retry'); // never downgraded to a fresh-send refusal
     f.retryReply = () => JSON.stringify(CONFIRMED); // a same-id confirmation may still promote it
-    go();
+    await go();
     expect(f.acked).toHaveLength(1);
   });
 
-  it('reissuing an unresolved request keeps the receiver and composer guard: no retry while a draft is pending or the receiver changed', () => {
+  it('reissuing an unresolved request keeps the receiver and composer guard: no retry while a draft is pending or the receiver changed', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
-    go();
+    await go();
     f.screen = { source: 'screen', tail: CLAUDE_IDLE, draft: 'half typed' };
-    go();
+    await go();
     expect(f.retries).toEqual([]);
     expect(log()).toContain('not reissued');
     f.screen = { source: 'screen', tail: CLAUDE_IDLE };
     f.incarnation = 'inc-2';
-    go();
+    await go();
     expect(f.retries).toEqual([]);
     expect(log()).toContain('another receiver');
   });
 
-  it('an ambiguous receipt older than a day is still kept (no silent expiry)', () => {
+  it('an ambiguous receipt older than a day is still kept (no silent expiry)', async () => {
     mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
     writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1'], receiver: 'term_a#inc-1', at: 1, detail: 'old', text: 't', handle: 'term_a' } }));
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
-    go();
+    await go();
     expect(f.sent).toEqual([]);
     expect(log()).toContain('unreconciled');
   });
 
-  it('a structured refusal (no request id, nothing typed) leaves the wake due and retypes later', () => {
+  it('a structured refusal (no request id, nothing typed) leaves the wake due and retypes later', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.sendReply = () => JSON.stringify({ ok: false, error: { code: 'invalid_argument' } });
-    go();
+    await go();
     expect(f.acked).toEqual([]);
     expect(log()).toContain('send refused');
     // The intent written before the send is withdrawn: no entry for the worker remains (the file may exist, empty).
     const left = existsSync(receiptsFile()) ? JSON.parse(readFileSync(receiptsFile(), 'utf8')) : {};
     expect(left['w-ada']).toBeUndefined();
     f.sendReply = null;
-    go();
+    await go();
     expect(f.acked).toHaveLength(1);
   });
 
-  it('unreadable or malformed receipt state stops the pass: nothing is sent or acked', () => {
+  it('unreadable or malformed receipt state stops the pass: nothing is sent or acked', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
     const bad = [
@@ -720,41 +721,41 @@ describe('typed-once, coverage and ambiguity', () => {
     ];
     for (const raw of bad) {
       writeFileSync(receiptsFile(), raw);
-      expect(() => go(), raw).toThrow('malformed');
+      await expect((async () => go())(), raw).rejects.toThrow('malformed');
     }
     writeFileSync(receiptsFile(), '{}');
     chmodSync(receiptsFile(), 0o000);
-    if (process.getuid?.() !== 0) expect(() => go()).toThrow('unreadable');
+    if (process.getuid?.() !== 0) await expect((async () => go())()).rejects.toThrow('unreadable');
     chmodSync(receiptsFile(), 0o600);
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
   });
 
-  it('a receipt file replaced by [] after a lost ack stops the restart instead of retyping', () => {
+  it('a receipt file replaced by [] after a lost ack stops the restart instead of retyping', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof([T(1)]))];
     lostAck();
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     writeFileSync(receiptsFile(), '[]');
     f.ackReply = null;
-    expect(() => go()).toThrow('malformed');
+    await expect((async () => go())()).rejects.toThrow('malformed');
     expect(f.sent).toHaveLength(1);
   });
 });
 
 describe('failure and paging', () => {
-  it('a GraphQL failure on dueWakes throws and sends and acks nothing', () => {
+  it('a GraphQL failure on dueWakes throws and sends and acks nothing', async () => {
     f.dueError = 'permission denied';
     // The server's message is not echoed (P2-2): the class is. Its text can carry a proof or private text.
-    expect(() => go()).toThrow('graphql error');
-    expect(() => go()).not.toThrow('permission denied');
+    await expect((async () => go())()).rejects.toThrow('graphql error');
+    await expect((async () => go())()).rejects.not.toThrow('permission denied');
     expect(f.sent).toEqual([]);
   });
 
-  it('stops after 10 pages and says so', () => {
+  it('stops after 10 pages and says so', async () => {
     f.alwaysMore = true;
     f.wakes = [];
-    go();
+    await go();
     expect(f.pages).toBe(10);
     expect(log()).toContain('more than 10 pages');
   });
@@ -801,7 +802,7 @@ describe('CLI entry and single instance', () => {
     } finally { holder.kill(); }
   });
 
-  it('a stale lock (dead pid) is taken over and released', () => {
+  it('a stale lock (dead pid) is taken over and released', async () => {
     const stateDir = join(dir, 'ticker-wake');
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, 'lock'), '999999999');
@@ -811,7 +812,7 @@ describe('CLI entry and single instance', () => {
     expect(existsSync(join(stateDir, 'lock'))).toBe(false);
   });
 
-  it('stale-lock takeover race: a second contender during the takeover is refused, exactly one proceeds', () => {
+  it('stale-lock takeover race: a second contender during the takeover is refused, exactly one proceeds', async () => {
     const stateDir = join(dir, 'ticker-wake');
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, 'lock'), '999999999');
@@ -831,7 +832,7 @@ describe('CLI entry and single instance', () => {
     } finally { first.kill(); }
   });
 
-  it('stale-lock takeover never unlinks a live replacement owner that arrived after the stale judgment', () => {
+  it('stale-lock takeover never unlinks a live replacement owner that arrived after the stale judgment', async () => {
     const stateDir = join(dir, 'ticker-wake');
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, 'lock'), '999999999');
@@ -845,7 +846,7 @@ describe('CLI entry and single instance', () => {
     } finally { holder.kill(); }
   });
 
-  it('a takeover file left behind by a dead process fails closed for operator cleanup, and is not removed', () => {
+  it('a takeover file left behind by a dead process fails closed for operator cleanup, and is not removed', async () => {
     const stateDir = join(dir, 'ticker-wake');
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, 'lock'), '999999999');
@@ -884,14 +885,14 @@ describe('CLI entry and single instance', () => {
 // removal on the server side fails here instead of at the first live poll.
 describe('GraphQL contract with the server SDL (#2102 / R63)', () => {
   const schema = buildSchema(typeDefs);
-  it('the dueWakes query validates and asks for the timing fields the loop consumes', () => {
+  it('the dueWakes query validates and asks for the timing fields the loop consumes', async () => {
     expect(validate(schema, parse(QUERY)).map((e) => e.message)).toEqual([]);
     for (const f of ['anchorAt', 'deliverAfter', 'busyDeadline']) expect(QUERY).toContain(f);
   });
-  it('the acknowledgeWakes mutation validates', () => {
+  it('the acknowledgeWakes mutation validates', async () => {
     expect(validate(schema, parse(ACK)).map((e) => e.message)).toEqual([]);
   });
-  it('the evidence reads (worker check status, task state) validate', () => {
+  it('the evidence reads (worker check status, task state) validate', async () => {
     expect(validate(schema, parse(WORKER_CHECK)).map((e) => e.message)).toEqual([]);
     expect(validate(schema, parse(TASK_STATE)).map((e) => e.message)).toEqual([]);
   });
@@ -903,35 +904,35 @@ describe('send intent is persisted BEFORE a possible submission (P2-1)', () => {
   // it fails for root and non-root alike, and it only appears once the send has happened.
   const tmpPath = () => `${receiptsFile()}.${process.pid}.tmp`;
 
-  it('a confirmed send whose receipt write then fails is never retyped by the next pass', () => {
+  it('a confirmed send whose receipt write then fails is never retyped by the next pass', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
     f.sendReply = () => { mkdirSync(tmpPath()); return JSON.stringify(CONFIRMED); };
-    try { go(); } catch { /* the old code lets the write failure end the pass */ }
+    try { await go(); } catch { /* the old code lets the write failure end the pass */ }
     expect(f.sent).toHaveLength(1);
     rmSync(tmpPath(), { recursive: true, force: true }); // the operator clears the fault
     f.sendReply = null;
-    go();
+    await go();
     expect(f.sent, 'the same wake was typed a second time').toHaveLength(1);
     expect(f.acked, 'an unreconciled send must not be acked').toEqual([]);
     expect(log()).toContain('unreconciled');
   });
 
-  it('if the intent cannot be recorded, nothing is sent (fail closed)', () => {
+  it('if the intent cannot be recorded, nothing is sent (fail closed)', async () => {
     mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
     mkdirSync(tmpPath()); // the very first write fails
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
-    try { go(); } catch { /* may throw or log */ }
+    try { await go(); } catch { /* may throw or log */ }
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
   });
 
-  it('a send that was refused (nothing typed) leaves no intent behind, so it is retried', () => {
+  it('a send that was refused (nothing typed) leaves no intent behind, so it is retried', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
     f.sendReply = () => JSON.stringify({ ok: false, error: { code: 'not_accepted' } });
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     f.sendReply = null;
-    go();
+    await go();
     expect(f.sent, 'a refused send must be retried').toHaveLength(2);
     expect(f.acked).toHaveLength(1);
   });
@@ -946,46 +947,46 @@ describe('diagnostics never carry a proof, typed text or a server message (P2-2)
     expect(everything).not.toContain(TEXT_SENTINEL);
   };
 
-  it('a failed ack logs its server error CODE but not the server message', () => {
+  it('a failed ack logs its server error CODE but not the server message', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
     f.ackReply = () => ({ errors: [{ message: `stale ${PROOF_SENTINEL} ${TEXT_SENTINEL}`, extensions: { code: 'WAKE_PROOF_STALE' } }] });
-    go();
+    await go();
     expect(log()).toContain('WAKE_PROOF_STALE');
     clean();
   });
 
-  it('an unparsable hadron reply does not log its stderr', () => {
+  it('an unparsable hadron reply does not log its stderr', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
     const run = f.run;
     f.run = (argv) => (argv[0] === 'hadron' && String(argv[2]).includes('acknowledgeWakes')
       ? { code: 1, stdout: 'not json', stderr: `boom ${PROOF_SENTINEL} ${TEXT_SENTINEL}` }
       : run(argv));
-    go();
+    await go();
     clean();
   });
 
-  it('a refused send does not log the raw send error', () => {
+  it('a refused send does not log the raw send error', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
     f.sendReply = () => JSON.stringify({ ok: false, error: { code: 'composer_not_empty', message: `draft: ${TEXT_SENTINEL}` } });
-    go();
+    await go();
     expect(log()).toContain('composer_not_empty');
     clean();
   });
 
-  it('an uncertain send with a request identity keeps the identity but logs and stores no raw error', () => {
+  it('an uncertain send with a request identity keeps the identity but logs and stores no raw error', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
     const uncertain = () => JSON.stringify({ ok: false, requestId: 'r-9', error: { message: `echo ${TEXT_SENTINEL} ${PROOF_SENTINEL}` } });
     f.sendReply = uncertain;
     f.retryReply = uncertain; // the same-identity retry fails the same way
-    go();
+    await go();
     clean();
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'ambiguous', requestId: 'r-9' });
   });
 
-  it('a failed dueWakes read throws a message without the server text', () => {
+  it('a failed dueWakes read throws a message without the server text', async () => {
     f.dueError = `bad ${TEXT_SENTINEL} ${PROOF_SENTINEL}`;
     let msg = '';
-    try { go(); } catch (e) { msg = (e as Error).message; }
+    try { await go(); } catch (e) { msg = (e as Error).message; }
     expect(msg).not.toBe('');
     expect(msg).not.toContain(TEXT_SENTINEL);
     expect(msg).not.toContain(PROOF_SENTINEL);
@@ -1033,24 +1034,24 @@ describe('diagnostics never carry a proof, typed text or a server message (P2-2)
       expect(f.sent).toEqual([]);
     });
 
-    it('Rodolfo 2: an arbitrary Orca stage string cannot become log or stored diagnostic text', () => {
+    it('Rodolfo 2: an arbitrary Orca stage string cannot become log or stored diagnostic text', async () => {
       const text = 'PRIVATE_STAGE_TEXT_SENTINEL';
       f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
       f.sendReply = () => JSON.stringify({ ok: true, result: { send: { accepted: true, prompt: { requestId: 'r1', stages: ['input_accepted', text] } } } });
       f.retryReply = f.sendReply;
-      go();
+      await go();
       expect(log()).not.toContain(text);
       const entry = JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada'];
       expect(entry.detail).not.toContain(text);
       expect(entry.state).toBe('ambiguous'); // still never retyped or acked
     });
 
-    it('Rodolfo 3: a legacy receipt\'s raw detail is not logged while the worker is held', () => {
+    it('Rodolfo 3: a legacy receipt\'s raw detail is not logged while the worker is held', async () => {
       const text = 'PRIVATE_LEGACY_TEXT_SENTINEL';
       mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
       writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1'], receiver: 'term_a#inc-1', at: 1, detail: text, text: 'a nudge', handle: 'term_a' } }));
       f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
-      go();
+      await go();
       expect(log()).not.toContain(text);
       expect(log()).toContain('unreconciled'); // still held for a human
       expect(f.sent).toEqual([]);
@@ -1060,17 +1061,17 @@ describe('diagnostics never carry a proof, typed text or a server message (P2-2)
     // VOCABULARY, not by its character shape. Ordinary code-shaped private text must collapse to the generic class.
     describe('code-shaped private text is not elevated to a safe code or name', () => {
       const SHAPED = 'PRIVATE_CODE_SHAPED_SENTINEL_77';
-      it('a server error code that is not a known public code collapses to the generic class', () => {
+      it('a server error code that is not a known public code collapses to the generic class', async () => {
         f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
         f.ackReply = () => ({ errors: [{ message: 'x', extensions: { code: SHAPED } }] });
-        go();
+        await go();
         expect(log()).toContain('graphql error');
         expect(log()).not.toContain(SHAPED);
       });
-      it('an Orca send error code that is not a known public code is not logged', () => {
+      it('an Orca send error code that is not a known public code is not logged', async () => {
         f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
         f.sendReply = () => JSON.stringify({ ok: false, error: { code: SHAPED, message: 'm' } });
-        go();
+        await go();
         expect(log()).toContain('send refused');
         expect(log()).not.toContain(SHAPED);
       });
@@ -1089,11 +1090,11 @@ describe('diagnostics never carry a proof, typed text or a server message (P2-2)
         await asLoop((argv) => { if (isTerminalList(argv)) throw Object.assign(new Error('x'), { code: SHAPED }); return undefined; });
         expect(log()).not.toContain(SHAPED);
       });
-      it('a stored detail that fits a template but carries an unknown code is withheld', () => {
+      it('a stored detail that fits a template but carries an unknown code is withheld', async () => {
         mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
         writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1'], receiver: 'term_a#inc-1', at: 1, detail: `send refused: ${SHAPED}`, text: 'a nudge', handle: 'term_a' } }));
         f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
-        go();
+        await go();
         expect(log()).not.toContain(SHAPED);
         expect(log()).toContain('unreconciled');
       });
@@ -1131,10 +1132,10 @@ describe('diagnostics never carry a proof, typed text or a server message (P2-2)
     });
   });
 
-  it('screen-derived reasons are logged as a class, not as screen text', () => {
+  it('screen-derived reasons are logged as a class, not as screen text', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
     f.screen = { source: 'screen', tail: ['❯ ' + TEXT_SENTINEL, RULE, '❯ ' + TEXT_SENTINEL, RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'], draft: TEXT_SENTINEL };
-    go();
+    await go();
     expect(f.sent).toEqual([]);
     expect(log()).toContain('held');
     clean();
@@ -1147,44 +1148,44 @@ describe('#2138 experiment: a pass must fit inside one cadence', () => {
   /** A clock that returns `t` and lets a fake call move it. */
   const clock = () => { const c = { t: T0, now: () => c.t }; return c; };
 
-  it('a busy terminal is probed, never waited on: tui-idle is asked with a short timeout, not busyWaitMs', () => {
+  it('a busy terminal is probed, never waited on: tui-idle is asked with a short timeout, not busyWaitMs', async () => {
     const waits: string[] = [];
     const run: Runner = (argv) => { if (argv[1] === 'terminal' && argv[2] === 'wait') waits.push(argv[argv.indexOf('--timeout-ms') + 1]); return f.run(argv); };
     f.idle = false;
     f.screen = { source: 'screen', tail: ['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'] };
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
-    pass({ ...cfg(), busyWaitMs: 60_000 }, run, {}, (l) => lines.push(l));
+    await pass({ ...cfg(), busyWaitMs: 60_000 }, run, {}, (l) => lines.push(l));
     expect(waits.length).toBeGreaterThan(0);
     for (const w of waits) expect(Number(w)).toBeLessThanOrEqual(1000);
     expect(f.sent).toEqual([]);
     expect(log()).toContain('busy until the server');
   });
 
-  it('a pass stops starting deliveries once its budget is spent, and leaves the rest for the next pass', () => {
+  it('a pass stops starting deliveries once its budget is spent, and leaves the rest for the next pass', async () => {
     const c = clock();
     const run: Runner = (argv) => { if (argv[2]?.includes?.('dueWakes')) c.t += 2_000; return f.run(argv); };
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timed(T0 - 600_000))];
-    pass(cfg(), run, { now: c.now, budgetMs: 1_000 }, (l) => lines.push(l));
+    await pass(cfg(), run, { now: c.now, budgetMs: 1_000 }, (l) => lines.push(l));
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
     expect(log()).toMatch(/budget spent; 1 due wake\(s\) left for the next pass/);
   });
 
-  it('the oldest wake is served first, so a spent budget never starves the same workers', () => {
+  it('the oldest wake is served first, so a spent budget never starves the same workers', async () => {
     const c = clock();
     const run: Runner = (argv) => { if (argv[2] === 'send') c.t += 5_000; return f.run(argv); };
     f.wakes = [
       wake('w-bob', 'Bob', [TICK], proof(['T:2']), [], timed(T0 - 60_000)), // newer, listed first by the server
       wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timed(T0 - 600_000)),
     ];
-    pass(cfg(), run, { now: c.now, budgetMs: 4_000 }, (l) => lines.push(l));
+    await pass(cfg(), run, { now: c.now, budgetMs: 4_000 }, (l) => lines.push(l));
     expect(f.sent).toHaveLength(1); // Ada, the older one
     expect(f.acked).toHaveLength(1);
     expect(log()).not.toContain('Bob: not on roster');
     expect(log()).toMatch(/1 due wake\(s\) left for the next pass/);
   });
 
-  it('a stale proof at ack time is re-fetched and the fresh proof acked when the receipt covers it', () => {
+  it('a stale proof at ack time is re-fetched and the fresh proof acked when the receipt covers it', async () => {
     const fresh = proof(['T:1'], 'fresh');
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'old'))];
     let calls = 0;
@@ -1195,7 +1196,7 @@ describe('#2138 experiment: a pass must fit inside one cadence', () => {
     };
     const acks: string[] = [];
     const run: Runner = (argv) => { if (argv[0] === 'hadron' && argv[2].includes('acknowledgeWakes')) acks.push(JSON.parse(argv[argv.indexOf('-F') + 1].slice(2))[0]); return f.run(argv); };
-    pass(cfg(), run, {}, (l) => lines.push(l));
+    await pass(cfg(), run, {}, (l) => lines.push(l));
     expect(f.sent).toHaveLength(1);
     expect(acks).toHaveLength(2);
     expect(acks[0]).not.toBe(fresh);
@@ -1204,31 +1205,31 @@ describe('#2138 experiment: a pass must fit inside one cadence', () => {
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))).toEqual({});
   });
 
-  it('a re-fetched proof that carries NEW work is not acked: the receipt stays and the next pass names only the new work', () => {
+  it('a re-fetched proof that carries NEW work is not acked: the receipt stays and the next pass names only the new work', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'old'))];
     f.ackReply = () => {
       f.wakes = [wake('w-ada', 'Ada', [TICK, TICK2], proof(['T:1', 'U:1'], 'fresh'))];
       return { errors: [{ message: 'too old', extensions: { code: 'WAKE_PROOF_STALE' } }] };
     };
-    go();
+    await go();
     expect(f.sent).toHaveLength(1);
     expect(log()).toMatch(/fresh proof carries new work/);
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'sent', coverage: ['T:1'] });
     f.ackReply = null;
     lines = [];
-    go();
+    await go();
     expect(f.sent).toHaveLength(2);
     expect(f.sent[1]).toContain('eden-queue-tick');
     expect(f.sent[1]).not.toContain('coordinator-tick');
   });
 
-  it('a proof near the end of its life is refreshed BEFORE the ack, so the old proof is never sent to the server', () => {
+  it('a proof near the end of its life is refreshed BEFORE the ack, so the old proof is never sent to the server', async () => {
     const c = clock();
     const old = proof(['T:1'], T0 - 11 * 60_000);
     const fresh = proof(['T:1'], T0);
     f.wakes = [wake('w-ada', 'Ada', [TICK], old, [], timed(T0 - 600_000))];
     const run: Runner = (argv) => { if (argv[2] === 'send') f.wakes = [wake('w-ada', 'Ada', [TICK], fresh, [], timed(T0 - 600_000))]; return f.run(argv); };
-    pass(cfg(), run, { now: c.now }, (l) => lines.push(l));
+    await pass(cfg(), run, { now: c.now }, (l) => lines.push(l));
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toEqual([fresh]);
   });
@@ -1258,20 +1259,20 @@ describe('#2138: an ambiguous receipt is resolved on evidence, never on a timeou
   const T0 = Date.parse('2026-10-20T07:30:00.000Z');
   const at = (ms: number) => ({ now: () => ms });
   const timing = { anchorAt: iso(T0 - 600_000), deliverAfter: iso(T0 - 300_000), busyDeadline: iso(T0 + 3_600_000) };
-  const ambiguous = () => {
+  const ambiguous = async () => {
     f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
-    go(at(T0));
+    await go(at(T0));
     f.sendReply = null;
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'ambiguous', requestId: 'r1', at: T0 });
     lines = [];
   };
   const receipt = () => JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada'];
 
-  it('accepted + same receiver + empty composer + a channel check after the send: resolved as delivered and acked, never retyped', () => {
+  it('accepted + same receiver + empty composer + a channel check after the send: resolved as delivered and acked, never retyped', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
-    ambiguous();
+    await ambiguous();
     f.lastCheckedAt = iso(T0 + 60_000);
-    go(at(T0 + 120_000));
+    await go(at(T0 + 120_000));
     expect(f.retries).toEqual(['r1']); // reissued by its id first
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toHaveLength(1);
@@ -1279,122 +1280,122 @@ describe('#2138: an ambiguous receipt is resolved on evidence, never on a timeou
     expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))).toEqual({});
   });
 
-  it('a reissue that Orca now confirms needs no evidence read', () => {
+  it('a reissue that Orca now confirms needs no evidence read', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
-    ambiguous();
+    await ambiguous();
     f.retryReply = () => JSON.stringify(CONFIRMED);
-    go(at(T0 + 120_000));
+    await go(at(T0 + 120_000));
     expect(f.acked).toHaveLength(1);
     expect(f.evidenceQueries).toEqual([]);
   });
 
-  it('(a) a request Orca never reported accepted is not resolved, whatever the evidence', () => {
+  it('(a) a request Orca never reported accepted is not resolved, whatever the evidence', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
     const failed = JSON.stringify({ ok: false, error: { code: 'timeout' }, requestId: 'r9' });
     f.sendReply = () => failed;
     f.retryReply = () => failed;
-    go(at(T0));
+    await go(at(T0));
     expect(receipt()).toMatchObject({ state: 'ambiguous', requestId: 'r9' });
     f.lastCheckedAt = iso(T0 + 60_000);
     lines = [];
-    go(at(T0 + 120_000));
+    await go(at(T0 + 120_000));
     expect(f.acked).toEqual([]);
     expect(f.sent).toHaveLength(1);
     expect(log()).toContain('Orca never reported the input accepted');
     expect(receipt().state).toBe('ambiguous');
   });
 
-  it('(b) another receiver is not resolved, and no evidence is read', () => {
+  it('(b) another receiver is not resolved, and no evidence is read', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
-    ambiguous();
+    await ambiguous();
     f.lastCheckedAt = iso(T0 + 60_000);
     f.incarnation = 'inc-2';
-    go(at(T0 + 120_000));
+    await go(at(T0 + 120_000));
     expect(f.acked).toEqual([]);
     expect(f.evidenceQueries).toEqual([]);
     expect(log()).toContain('another receiver');
   });
 
-  it('(c) a composer that is not provably empty is not resolved', () => {
+  it('(c) a composer that is not provably empty is not resolved', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
-    ambiguous();
+    await ambiguous();
     f.lastCheckedAt = iso(T0 + 60_000);
     f.screen = { source: 'screen', tail: CLAUDE_IDLE, draft: 'half typed' };
-    go(at(T0 + 120_000));
+    await go(at(T0 + 120_000));
     expect(f.acked).toEqual([]);
     expect(f.retries).toEqual([]);
     expect(log()).toMatch(/no delivery evidence yet \(composer not provably empty\)/);
     expect(receipt().state).toBe('ambiguous');
   });
 
-  it('(c) a busy terminal with an empty composer is not reissued, but may still be resolved on evidence', () => {
+  it('(c) a busy terminal with an empty composer is not reissued, but may still be resolved on evidence', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
-    ambiguous();
+    await ambiguous();
     f.lastCheckedAt = iso(T0 + 60_000);
     f.idle = false;
     f.screen = { source: 'screen', tail: ['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'] };
-    go(at(T0 + 120_000));
+    await go(at(T0 + 120_000));
     expect(f.retries).toEqual([]);
     expect(f.acked).toHaveLength(1);
     expect(log()).toContain('resolved as delivered on evidence');
   });
 
-  it('(d) no channel check, one before the send, or one inside the clock margin is not evidence', () => {
+  it('(d) no channel check, one before the send, or one inside the clock margin is not evidence', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
-    ambiguous();
+    await ambiguous();
     for (const checked of [null, iso(T0 - 60_000), iso(T0 + 4_000)]) {
       f.lastCheckedAt = checked;
       lines = [];
-      go(at(T0 + 120_000));
+      await go(at(T0 + 120_000));
       expect(f.acked).toEqual([]);
       expect(log()).toContain('no channel check since the send');
     }
     expect(receipt().state).toBe('ambiguous');
   });
 
-  it('(d) a covered task assignment also needs that task STARTED (or finished) by this worker', () => {
+  it('(d) a covered task assignment also needs that task STARTED (or finished) by this worker', async () => {
     const p = proof([], 'a', [taskEntry('t7')]);
     f.wakes = [wake('w-ada', 'Ada', [task('t7')], p, [], timing)];
-    ambiguous();
+    await ambiguous();
     f.lastCheckedAt = iso(T0 + 60_000);
     f.tasks.t7 = { id: 't7', status: 'PENDING', assignee: { kind: 'WORKER', id: 'w-ada' } };
-    go(at(T0 + 120_000));
+    await go(at(T0 + 120_000));
     expect(f.acked).toEqual([]);
     expect(log()).toContain('a covered task is not started by this worker');
     f.tasks.t7 = { id: 't7', status: 'STARTED', assignee: { kind: 'WORKER', id: 'w-bob' } };
     lines = [];
-    go(at(T0 + 130_000));
+    await go(at(T0 + 130_000));
     expect(f.acked).toEqual([]);
     expect(log()).toContain('a covered task is not started by this worker');
     f.tasks.t7 = { id: 't7', status: 'STARTED', assignee: { kind: 'WORKER', id: 'w-ada' } };
     lines = [];
-    go(at(T0 + 140_000));
+    await go(at(T0 + 140_000));
     expect(f.acked).toEqual([p]);
     expect(f.evidenceQueries).toContain('task t7');
     expect(log()).toContain('resolved as delivered on evidence');
   });
 
-  it('a legacy receipt covering a task with no recorded task identity is held, never guessed', () => {
+  it('a legacy receipt covering a task with no recorded task identity is held, never guessed', async () => {
     mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
     writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1', 'task:e-gone#0'], receiver: 'term_a#inc-1', at: T0, detail: 'accepted, turn start not confirmed (input_accepted)', text: 't', handle: 'term_a', requestId: 'r1' } }));
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
     f.lastCheckedAt = iso(T0 + 60_000);
-    go(at(T0 + 120_000));
+    await go(at(T0 + 120_000));
     expect(f.acked).toEqual([]);
     expect(f.evidenceQueries).not.toContain('task t7');
     expect(log()).toContain('a covered task was not recorded with the send');
   });
 
-  it("George's lifecycle probe (#2154 P2): STARTING the task removes its wake, and a later tick still resolves the receipt by the task recorded at send time", () => {
+  it("George's lifecycle probe (#2154 P2): STARTING the task removes its wake, and a later tick still resolves the receipt by the task recorded at send time", async () => {
     const p = proof([], 'a', [taskEntry('t7')]);
     f.wakes = [wake('w-ada', 'Ada', [task('t7')], p, [], timing)];
-    ambiguous();
+    await ambiguous();
     expect(receipt().tasks).toEqual({ 'task:e-t7#0': 't7' });
     // The worker started the task: the server drops the assignment wake; only a later tick is due.
     f.tasks.t7 = { id: 't7', status: 'STARTED', assignee: { kind: 'WORKER', id: 'w-ada' } };
     f.lastCheckedAt = iso(T0 + 60_000);
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
-    go(at(T0 + 120_000));
+    await go(at(T0 + 120_000));
     expect(f.evidenceQueries).toContain('task t7');
     expect(log()).toContain('resolved as delivered on evidence');
     expect(f.sent).toHaveLength(2); // the tick is new work: one nudge for it, never the task again
@@ -1402,43 +1403,152 @@ describe('#2138: an ambiguous receipt is resolved on evidence, never on a timeou
     expect(f.sent[1]).not.toContain('t7');
   });
 
-  it('only the tasks a send newly named are recorded; a send naming no task records none', () => {
+  it('only the tasks a send newly named are recorded; a send naming no task records none', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
-    ambiguous();
+    await ambiguous();
     expect(receipt().tasks).toEqual({});
   });
 
-  it('a malformed recorded task map stops the pass (fail closed)', () => {
+  it('a malformed recorded task map stops the pass (fail closed)', async () => {
     mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
     for (const tasks of [[], { 'task:e-x#0': 7 }, { 'T:1': 't1' }, { 'task:e-other#0': 't1' }, { 'task:e-x#0': 'bad id!' }]) {
       writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'ambiguous', coverage: ['T:1', 'task:e-x#0'], receiver: 'term_a#inc-1', at: T0, detail: 'accepted, turn start not confirmed (input_accepted)', text: 't', handle: 'term_a', requestId: 'r1', tasks } }));
       f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
-      expect(() => go(at(T0 + 120_000))).toThrow(/receipts malformed/);
+      await expect((async () => go(at(T0 + 120_000)))()).rejects.toThrow(/receipts malformed/);
     }
   });
 
-  it('after 2 cadences without evidence it stays held and is listed as needing a person; before that it only waits', () => {
+  it('after 2 cadences without evidence it stays held and is listed as needing a person; before that it only waits', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
-    ambiguous();
-    go(at(T0 + 19 * 60_000));
+    await ambiguous();
+    await go(at(T0 + 19 * 60_000));
     expect(log()).not.toContain('needs a person');
     lines = [];
-    go(at(T0 + 20 * 60_000));
+    await go(at(T0 + 20 * 60_000));
     expect(f.acked).toEqual([]);
     expect(f.sent).toHaveLength(1);
     expect(log()).toContain('needs a person');
     expect(receipt().state).toBe('ambiguous');
   });
 
-  it('a resolved receipt with new ticks gets a nudge for ONLY the new work', () => {
+  it('a resolved receipt with new ticks gets a nudge for ONLY the new work', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
-    ambiguous();
+    await ambiguous();
     f.lastCheckedAt = iso(T0 + 60_000);
     f.wakes = [wake('w-ada', 'Ada', [TICK, TICK2], proof(['T:1', 'U:1']), [], timing)];
-    go(at(T0 + 120_000));
+    await go(at(T0 + 120_000));
     expect(f.sent).toHaveLength(2);
     expect(f.sent[1]).toContain('eden-queue-tick');
     expect(f.sent[1]).not.toContain('coordinator-tick');
+    expect(f.acked).toHaveLength(1);
+  });
+});
+
+describe('#2138: a pass does not pay the turn-start wait per send (bounded concurrent delivery)', () => {
+  /** N roster workers, each with its own worktree and pinned terminal, all idle with an empty composer. */
+  const crew = (n: number, shareTerminal = false) => {
+    const roster = Array.from({ length: n }, (_, i) => {
+      const wt = join(dir, shareTerminal ? 'shared' : `w${i}`);
+      mkdirSync(wt, { recursive: true });
+      return { worker: `w-${i}`, name: `W${i}`, worktree: wt, terminal: shareTerminal ? 'term_s' : `term_${i}` };
+    });
+    const terminals = roster.map((r) => ({ handle: r.terminal, incarnationId: 'inc-1', worktreePath: r.worktree, connected: true, writable: true, agentIdentity: 'claude' }));
+    const uniq = [...new Map(terminals.map((t) => [t.handle, t])).values()];
+    f.wakes = roster.map((r, i) => wake(r.worker, r.name, [TICK], proof([`T:${i + 1}`])));
+    const run: Runner = (argv) => (argv[0] === 'orca' && argv[2] === 'list'
+      ? { code: 0, stdout: JSON.stringify({ ok: true, result: { terminals: uniq } }), stderr: '' } : f.run(argv));
+    return { cfg: { ...cfg(), roster } as Config, run };
+  };
+  /** An async runner whose sends stay in flight until released; everything else answers from `run`. */
+  const held = (run: Runner) => {
+    const pending: Array<() => void> = [];
+    const st = { inFlight: 0, max: 0, waits: [] as string[], pending };
+    const runAsync = (argv: string[]): Promise<RunResult> => {
+      if (argv[0] === 'orca' && argv[2] === 'send') {
+        st.waits.push(argv[argv.indexOf('--wait-submit') + 1]);
+        st.inFlight++; st.max = Math.max(st.max, st.inFlight);
+        return new Promise((resolveSend) => pending.push(() => { st.inFlight--; resolveSend(run(argv)); }));
+      }
+      return Promise.resolve(run(argv));
+    };
+    return { st, runAsync };
+  };
+  const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
+  const drain = async (st: { pending: Array<() => void> }, done: { v: boolean }) => {
+    while (!done.v) { await settle(); while (st.pending.length) st.pending.shift()!(); }
+  };
+
+  it("a send observes the turn start for SUBMIT_PROBE_S (2 s), not the router's submitWaitS, on a fresh send and on a reissue", async () => {
+    expect(SUBMIT_PROBE_S).toBe(2);
+    const waits: string[] = [];
+    const run: Runner = (argv) => { if (argv[0] === 'orca' && argv[2] === 'send') waits.push(argv[argv.indexOf('--wait-submit') + 1]); return f.run(argv); };
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+    await pass({ ...cfg(), submitWaitS: 15 }, run, {}, (l) => lines.push(l));
+    f.sendReply = null;
+    await pass({ ...cfg(), submitWaitS: 15 }, run, {}, (l) => lines.push(l)); // reissue by id
+    expect(f.retries).toEqual(['r1']);
+    expect(waits).toEqual(['2', '2']);
+  });
+
+  it('due workers are delivered to concurrently, up to DELIVERY_POOL sends in flight at once, and every one is acked', async () => {
+    const n = DELIVERY_POOL + 4;
+    const { cfg: c, run } = crew(n);
+    const { st, runAsync } = held(run);
+    const done = { v: false };
+    const p = pass(c, run, { runAsync }, (l) => lines.push(l)).finally(() => { done.v = true; });
+    await settle();
+    expect(st.inFlight).toBe(DELIVERY_POOL); // the pool is full before any send completes
+    await drain(st, done);
+    await p;
+    expect(st.max).toBe(DELIVERY_POOL);
+    expect(f.sent).toHaveLength(n);
+    expect(f.acked).toHaveLength(n);
+  });
+
+  it('two workers that resolve to the SAME terminal never have sends in flight at once: the second is held', async () => {
+    const { cfg: c, run } = crew(2, true);
+    const { st, runAsync } = held(run);
+    const done = { v: false };
+    const p = pass(c, run, { runAsync }, (l) => lines.push(l)).finally(() => { done.v = true; });
+    await settle();
+    expect(st.inFlight).toBe(1);
+    await drain(st, done);
+    await p;
+    expect(f.sent).toHaveLength(1);
+    expect(log()).toContain('another send to this terminal is in flight');
+  });
+
+  it('a worker that fails stops new deliveries, but the pass waits for sends in flight (and their receipts) before it fails', async () => {
+    const { cfg: c, run: base } = crew(2);
+    let failNext = false;
+    const run: Runner = (argv) => {
+      if (failNext && argv[0] === 'orca' && argv[2] === 'wait' && argv.includes('term_1')) throw new Error('boom');
+      return base(argv);
+    };
+    failNext = true;
+    const { st, runAsync } = held(run);
+    let settled = false;
+    const p = pass(c, run, { runAsync }, (l) => lines.push(l)).then(() => { settled = true; }, (e) => { settled = true; throw e; });
+    await settle();
+    expect(st.inFlight).toBe(1); // W0's send is in flight; W1 threw
+    expect(settled).toBe(false); // the pass has not given up on W0's send
+    st.pending.shift()!();
+    await expect(p).rejects.toThrow('boom');
+    expect(f.acked).toHaveLength(1); // W0 completed: receipt then ack
+  });
+
+  it('runCommandAsync: a real process answers with its exit code and output; a spawn failure is code 1 with EMPTY stdout', async () => {
+    expect(await runCommandAsync(['node', '-e', 'process.stdout.write("ok"); process.exit(3)'])).toMatchObject({ code: 3, stdout: 'ok' });
+    expect(await runCommandAsync(['/nonexistent/ticker-wake-binary'])).toMatchObject({ code: 1, stdout: '' });
+    const [a, b] = await Promise.all([1, 2].map(() => (async () => { const t = Date.now(); await runCommandAsync(['node', '-e', 'setTimeout(() => {}, 400)']); return Date.now() - t; })()));
+    expect(Math.max(a, b)).toBeLessThan(1500); // the two overlap; they do not queue behind each other
+  });
+
+  it('production entry wires the real async runner; a test runner without one is wrapped', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    expect(await main(['once'], { load: cfg, run: f.run, log: (l: string) => lines.push(l), sleep: async () => {} })).toBe(0);
+    expect(f.sent).toHaveLength(1);
     expect(f.acked).toHaveLength(1);
   });
 });

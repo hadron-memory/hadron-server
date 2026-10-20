@@ -67,6 +67,17 @@ skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
   the next pass names only the new work. The loop runs on fixed slots: a pass
   that overruns its slot skips the slots it covered (logged) instead of
   running back to back. A second instance is refused by the lock.
+- **No turn-start wait per send (#2138, Hugo #26099).** Each resolve plus
+  send used to cost ~30 s, almost all of it two 15 s `--wait-submit`
+  observations that Orca almost never confirms. A send now observes for 2 s
+  (`SUBMIT_PROBE_S`; Orca never resends on that timeout, it returns the
+  input-accepted receipt), and an accepted send is resolved on evidence later
+  (below). Sends to different workers run concurrently, up to 8 in flight
+  (`DELIVERY_POOL`); the reads and receipt writes around them stay serial on
+  one thread. Two workers that resolve to the same terminal never have sends
+  in flight at once: the second is held to a later pass. If a delivery fails,
+  no new one starts, and the pass fails only after every send in flight has
+  finished and written its receipt.
 - **Composer.** Unconditional, deadline or not: a nudge is typed only when a
   read shows the composer empty with no Orca draft (even when `tui-idle` holds);
   a draft, question/menu, unknown input or identity holds. Nothing is cleared or
