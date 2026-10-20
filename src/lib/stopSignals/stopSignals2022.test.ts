@@ -24,6 +24,7 @@ import { liftStopSignal, setStopSignal } from './lifecycle.js';
 import { countedDueAt } from '../agentTasks/stall.js';
 import { __matcherTesting } from '../agentTasks/matcher.js';
 import { loadPendingReasons } from '../tickers/checkPending.js';
+import { launchForAssignment } from '../hostOperations/launch.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -603,5 +604,43 @@ describe('fix head of #2166: the findings\' pins', () => {
     };
     expect(await run(400)).toBe('assigned');
     expect(await run(60_000)).toBe('worker-not-free');
+  });
+});
+
+describe('fix head of #2166 cycle 2 (Ralion §10)', () => {
+  const uses = (key: { id: string }) => db.hostKeyUse.findMany({ where: { appKeyId: key.id }, orderBy: { id: 'asc' }, select: { action: true, count: true, refusedCode: true } });
+
+  it('P2-1: a host key\'s list is a recorded use (read, with its count), and its refusal is recorded', async () => {
+    await set(keyCtx(orca1), { level: 'HALT', scope: 'HOST' });
+    const before = (await uses(orca1)).length;
+    await Q.teamStopSignals({}, { appRef: app.id }, keyCtx(orca1));
+    expect((await uses(orca1)).slice(before)).toEqual([{ action: 'read', count: 1, refusedCode: null }]);
+    expect(await code(Q.teamStopSignals({}, { appRef: app.id, after: 'garbage!' }, keyCtx(orca1)))).toBe('BAD_USER_INPUT');
+    expect((await uses(orca1)).slice(before + 1)).toEqual([{ action: 'read', count: null, refusedCode: 'BAD_USER_INPUT' }]);
+  });
+
+  it('P2-1: a host key\'s malformed set and lift are recorded refusals', async () => {
+    expect(await code(set(keyCtx(orca1), { level: 'STOP', scope: 'HOST' }))).toBe('BAD_USER_INPUT');
+    expect(await code(set(keyCtx(orca1), { level: 'HALT', scope: 'HOST', worker: 'Dan' }))).toBe('BAD_USER_INPUT');
+    expect(await code(lift(keyCtx(orca1), ''))).toBe('BAD_USER_INPUT');
+    expect(await uses(orca1)).toEqual(expect.arrayContaining([{ action: 'stop', count: null, refusedCode: 'BAD_USER_INPUT' }]));
+    expect((await uses(orca1)).filter((u) => u.action === 'stop' && u.refusedCode === 'BAD_USER_INPUT')).toHaveLength(3);
+  });
+
+  it('P3: a host key cannot lift a manager\'s host-scope PAUSE on its own host', async () => {
+    const p = await set(ctx(max.id), { level: 'PAUSE', scope: 'HOST', host: 'orca1' });
+    expect(await code(lift(keyCtx(orca1), p.id))).toBe('STOP_SIGNAL_SCOPE_FORBIDDEN');
+    expect((await Q.teamStopSignals({}, { appRef: app.id }, ctx(max.id))).signals.map((x: any) => x.id)).toEqual([p.id]);
+  });
+
+  it('P3: a stop set between an assignment\'s commit and its launch starts nothing; without it the worker is started', async () => {
+    await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 1', pollIntervalSeconds: 600, workers: [{ worker: ada.id, family: 'claude' }, { worker: dan.id, family: 'claude', worktrees: ['hadron-server/dan'] }] } }, keyCtx(orca1));
+    const assigned = () => db.agentTask.create({ data: { appId: app.id, title: 'Launch', ownerUserId: max.id, assigneeWorkerId: dan.id, assignedAt: new Date() }, select: { id: true } });
+    const t1 = await assigned();
+    const s = await set(ctx(max.id), { level: 'PAUSE_DISPATCH', scope: 'WORKER', worker: 'Dan' });
+    expect(await launchForAssignment(db, { appId: app.id, taskId: t1.id, workerId: dan.id })).toBeNull();
+    expect(await db.hostOperation.count({ where: { workerId: dan.id, type: 'worker.start' } })).toBe(0);
+    await lift(ctx(max.id), s.id);
+    expect(await launchForAssignment(db, { appId: app.id, taskId: t1.id, workerId: dan.id })).toEqual(expect.any(String));
   });
 });

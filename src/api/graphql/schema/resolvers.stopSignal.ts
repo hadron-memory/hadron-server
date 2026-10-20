@@ -158,94 +158,108 @@ async function afterCommit(ctx: Context, appId: string): Promise<void> {
 
 export const stopSignalMutations = {
   /** cor:agt:090:01, :06 — set a stop signal. Refusals: see the file header. */
-  setTeamStopSignal: async (_: unknown, { input }: { input: SetTeamStopSignalInput }, ctx: Context): Promise<StopSignalView> => {
-    const level = parseLevel(input?.level);
-    const scope = parseScope(input?.scope);
-    const workerRef = trimmed(input?.worker);
-    const hostRef = trimmed(input?.host);
-    if (scope === 'host' && workerRef) throw badInput('A host signal names a host, not a worker.');
-    if (scope !== 'host' && hostRef) throw badInput('A worker or team signal names a worker, not a host.');
-
-    if (appKeyCaller(ctx)) {
-      return recordingRefusal(ctx, 'stop', null, async () => {
-        const { app, host, authorize } = await hostKeyEntry(ctx, input.appRef);
-        if (level !== 'halt' || scope !== 'host') throw scopeForbidden();
-        if (hostRef && hostRef !== host.hostId) throw hostScopeRequired();
-        const view = await ctx.db.$transaction(async (tx) => {
-          await authorize(tx);
-          await lockStopFence(tx, app.id, 'exclusive');
-          const now = new Date();
-          const until = parseUntil(input.until, now);
-          const regId = await targetHost(tx, app.id, host.hostId);
-          await recordHostKeyUse(tx, host, 'stop', { count: 1 });
-          const s = await setStopSignal(tx, {
-            appId: app.id, level, scope, targetWorkerId: null, targetHostRegistrationId: regId, until,
-            by: { appKeyId: host.appKeyId },
-          }, now);
-          return viewOf(tx, s, now);
-        });
-        await afterCommit(ctx, app.id);
-        return view;
-      });
-    }
-
-    if (scope === 'host' ? !hostRef : !workerRef) {
-      throw badInput(scope === 'host' ? 'A host signal names its host.' : 'A worker or team signal names its worker.');
-    }
-    const { app, actor } = await personEntry(ctx, input.appRef);
-    const view = await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
-      if (!(await actorManagesApp(txCtx, fresh, actor))) throw managerRequired();
-      const now = new Date();
-      const until = parseUntil(input.until, now);
-      const targetWorkerId = scope === 'host' ? null : await targetWorker(txCtx, fresh.id, workerRef as string);
-      const targetHostRegistrationId = scope === 'host' ? await targetHost(tx, fresh.id, hostRef as string) : null;
-      const by: StopActor = { userId: actor.userId, actor: eventActor(actor.userId) };
-      const s = await setStopSignal(tx, { appId: fresh.id, level, scope, targetWorkerId, targetHostRegistrationId, until, by }, now);
-      return viewOf(tx, s, now);
-    }, { stopFence: 'exclusive' });
-    await afterCommit(ctx, app.id);
-    return view;
-  },
-
-  /**
-   * cor:agt:090:05, :06 — lift a signal. `changed` is false when it had already ended: nothing is written and nobody
-   * gets a second notice. Lifting one signal never ends another (R69).
-   */
-  liftTeamStopSignal: async (_: unknown, { appRef, id }: { appRef: string; id: string }, ctx: Context): Promise<{ signal: StopSignalView; changed: boolean }> => {
-    if (typeof id !== 'string' || !id.trim()) throw badInput('id is required.');
-    if (appKeyCaller(ctx)) {
-      return recordingRefusal(ctx, 'stop', null, async () => {
-        const { app, host, authorize } = await hostKeyEntry(ctx, appRef);
-        const out = await ctx.db.$transaction(async (tx) => {
-          await authorize(tx);
-          await lockStopFence(tx, app.id, 'exclusive');
-          const s = await signalInApp(tx, app.id, id);
-          // Its own host's halt only; any other signal is not the key's to see, so it is "not found".
-          const own = s && s.scope === 'host' && s.targetHostRegistrationId === (await targetHostOrNull(tx, app.id, host.hostId));
-          if (!s || !own) throw notFound();
-          if (s.level !== 'halt') throw scopeForbidden();
-          await recordHostKeyUse(tx, host, 'stop', { count: 1 });
-          const now = new Date();
-          const r = await liftStopSignal(tx, s.id, { appKeyId: host.appKeyId }, now);
-          return { signal: await viewOf(tx, r.signal, now), changed: r.changed };
-        });
-        if (out.changed) await afterCommit(ctx, app.id);
-        return out;
-      });
-    }
-    const { app, actor } = await personEntry(ctx, appRef);
-    const out = await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
-      const s = await signalInApp(tx, fresh.id, id);
-      if (!s) throw notFound();
-      if (!(await actorManagesApp(txCtx, fresh, actor))) throw managerRequired();
-      const now = new Date();
-      const r = await liftStopSignal(tx, s.id, { userId: actor.userId, actor: eventActor(actor.userId) }, now);
-      return { signal: await viewOf(tx, r.signal, now), changed: r.changed };
-    }, { stopFence: 'exclusive' });
-    if (out.changed) await afterCommit(ctx, app.id);
-    return out;
-  },
+  setTeamStopSignal: (_: unknown, a: { input: SetTeamStopSignalInput }, ctx: Context): Promise<StopSignalView> =>
+    keyRecorded(ctx, 'stop', () => setSignal(a.input, ctx)),
+  liftTeamStopSignal: (_: unknown, a: { appRef: string; id: string }, ctx: Context): Promise<{ signal: StopSignalView; changed: boolean }> =>
+    keyRecorded(ctx, 'stop', () => liftSignal(a.appRef, a.id, ctx)),
 };
+
+/**
+ * #2022 (Ralion #2166 §10 P2-1, cor:agt:070:07): every call by a host key is recorded, its refusals included. The
+ * WHOLE call runs inside the recording, input validation too, so a malformed host-key call is a recorded refusal.
+ */
+function keyRecorded<T>(ctx: Context, action: 'stop' | 'read', fn: () => Promise<T>): Promise<T> {
+  return appKeyCaller(ctx) ? recordingRefusal(ctx, action, null, fn) : fn();
+}
+
+/** cor:agt:090:01, :06 — set a stop signal. Refusals: see the file header. */
+async function setSignal(input: SetTeamStopSignalInput, ctx: Context): Promise<StopSignalView> {
+  const level = parseLevel(input?.level);
+  const scope = parseScope(input?.scope);
+  const workerRef = trimmed(input?.worker);
+  const hostRef = trimmed(input?.host);
+  if (scope === 'host' && workerRef) throw badInput('A host signal names a host, not a worker.');
+  if (scope !== 'host' && hostRef) throw badInput('A worker or team signal names a worker, not a host.');
+
+  if (appKeyCaller(ctx)) {
+    return (async () => {
+      const { app, host, authorize } = await hostKeyEntry(ctx, input.appRef);
+      if (level !== 'halt' || scope !== 'host') throw scopeForbidden();
+      if (hostRef && hostRef !== host.hostId) throw hostScopeRequired();
+      const view = await ctx.db.$transaction(async (tx) => {
+        await authorize(tx);
+        await lockStopFence(tx, app.id, 'exclusive');
+        const now = new Date();
+        const until = parseUntil(input.until, now);
+        const regId = await targetHost(tx, app.id, host.hostId);
+        await recordHostKeyUse(tx, host, 'stop', { count: 1 });
+        const s = await setStopSignal(tx, {
+          appId: app.id, level, scope, targetWorkerId: null, targetHostRegistrationId: regId, until,
+          by: { appKeyId: host.appKeyId },
+        }, now);
+        return viewOf(tx, s, now);
+      });
+      await afterCommit(ctx, app.id);
+      return view;
+    })();
+  }
+
+  if (scope === 'host' ? !hostRef : !workerRef) {
+    throw badInput(scope === 'host' ? 'A host signal names its host.' : 'A worker or team signal names its worker.');
+  }
+  const { app, actor } = await personEntry(ctx, input.appRef);
+  const view = await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
+    if (!(await actorManagesApp(txCtx, fresh, actor))) throw managerRequired();
+    const now = new Date();
+    const until = parseUntil(input.until, now);
+    const targetWorkerId = scope === 'host' ? null : await targetWorker(txCtx, fresh.id, workerRef as string);
+    const targetHostRegistrationId = scope === 'host' ? await targetHost(tx, fresh.id, hostRef as string) : null;
+    const by: StopActor = { userId: actor.userId, actor: eventActor(actor.userId) };
+    const s = await setStopSignal(tx, { appId: fresh.id, level, scope, targetWorkerId, targetHostRegistrationId, until, by }, now);
+    return viewOf(tx, s, now);
+  }, { stopFence: 'exclusive' });
+  await afterCommit(ctx, app.id);
+  return view;
+}
+
+/**
+ * cor:agt:090:05, :06 — lift a signal. `changed` is false when it had already ended: nothing is written and nobody
+ * gets a second notice. Lifting one signal never ends another (R69).
+ */
+async function liftSignal(appRef: string, id: string, ctx: Context): Promise<{ signal: StopSignalView; changed: boolean }> {
+  if (typeof id !== 'string' || !id.trim()) throw badInput('id is required.');
+  if (appKeyCaller(ctx)) {
+    return (async () => {
+      const { app, host, authorize } = await hostKeyEntry(ctx, appRef);
+      const out = await ctx.db.$transaction(async (tx) => {
+        await authorize(tx);
+        await lockStopFence(tx, app.id, 'exclusive');
+        const s = await signalInApp(tx, app.id, id);
+        // Its own host's halt only; any other signal is not the key's to see, so it is "not found".
+        const own = s && s.scope === 'host' && s.targetHostRegistrationId === (await targetHostOrNull(tx, app.id, host.hostId));
+        if (!s || !own) throw notFound();
+        if (s.level !== 'halt') throw scopeForbidden();
+        await recordHostKeyUse(tx, host, 'stop', { count: 1 });
+        const now = new Date();
+        const r = await liftStopSignal(tx, s.id, { appKeyId: host.appKeyId }, now);
+        return { signal: await viewOf(tx, r.signal, now), changed: r.changed };
+      });
+      if (out.changed) await afterCommit(ctx, app.id);
+      return out;
+    })();
+  }
+  const { app, actor } = await personEntry(ctx, appRef);
+  const out = await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
+    const s = await signalInApp(tx, fresh.id, id);
+    if (!s) throw notFound();
+    if (!(await actorManagesApp(txCtx, fresh, actor))) throw managerRequired();
+    const now = new Date();
+    const r = await liftStopSignal(tx, s.id, { userId: actor.userId, actor: eventActor(actor.userId) }, now);
+    return { signal: await viewOf(tx, r.signal, now), changed: r.changed };
+  }, { stopFence: 'exclusive' });
+  if (out.changed) await afterCommit(ctx, app.id);
+  return out;
+}
 
 async function signalInApp(tx: Prisma.TransactionClient, appId: string, id: string): Promise<StopSignal | null> {
   const [s] = await tx.$queryRaw<StopSignal[]>(P.sql`SELECT ${SIGNAL_COLUMNS} FROM team_stop_signals s WHERE s.id = ${id} AND s.app_id = ${appId}`);
@@ -278,48 +292,53 @@ export const stopSignalQueries = {
    * (`worker` narrows to the signals covering that worker now); a worker's session sees the live ones covering it; a
    * host key sees its own host's. `includeEnded` adds ended signals for people and host keys.
    */
-  teamStopSignals: async (_: unknown, args: ListArgs, ctx: Context) => {
-    const take = Math.min(Math.max(args.first ?? PAGE_DEFAULT, 1), PAGE_MAX);
-    const cursor = decodeCursor(args.after);
-    const now = new Date();
-
-    let appId: string;
-    let filter: P.Sql;
-    const key = appKeyCaller(ctx);
-    let db: Prisma.TransactionClient | Context['db'] = ctx.db;
-    if (key) {
-      const { app, authorize } = await hostKeyEntry(ctx, args.appRef);
-      appId = app.id;
-      return ctx.db.$transaction(async (tx) => {
-        await authorize(tx);
-        const hostId = await keyHostId(tx, key);
-        const reg = hostId ? await targetHostOrNull(tx, app.id, hostId) : null;
-        const f = reg ? P.sql`s.scope = 'host' AND s.target_host_registration_id = ${reg}` : P.sql`false`;
-        return page(tx, appId, f, args.includeEnded === true, take, cursor, now);
-      });
-    }
-    const { app } = await resolveParticipatedApp(ctx, args.appRef);
-    appId = app.id;
-    const actor = await resolveTaskActor(ctx, app);
-    const selfWorker = currentActor().workerId;
-    if (actor?.kind === 'worker' || selfWorker) {
-      // A worker sees what covers it, live, never another worker's signals (090:07).
-      const me = (actor?.kind === 'worker' ? actor.workerId : selfWorker) as string;
-      const covering = (await coveringSignals(db, app.id, [me], now)).get(me) ?? [];
-      const ids = covering.map((s) => s.id);
-      filter = ids.length ? P.sql`s.id IN (${P.join(ids)})` : P.sql`false`;
-      return page(db, appId, filter, false, take, cursor, now);
-    }
-    filter = P.sql`true`;
-    if (trimmed(args.worker)) {
-      const wid = await resolveTaskWorkerId(ctx, app.id, trimmed(args.worker) as string);
-      const covering = wid ? (await coveringSignals(db, app.id, [wid], now)).get(wid) ?? [] : [];
-      const ids = covering.map((s) => s.id);
-      filter = ids.length ? P.sql`s.id IN (${P.join(ids)})` : P.sql`false`;
-    }
-    return page(db, appId, filter, args.includeEnded === true, take, cursor, now);
-  },
+  teamStopSignals: (_: unknown, args: ListArgs, ctx: Context) => keyRecorded(ctx, 'read', () => listSignals(args, ctx)),
 };
+
+async function listSignals(args: ListArgs, ctx: Context) {
+  const take = Math.min(Math.max(args.first ?? PAGE_DEFAULT, 1), PAGE_MAX);
+  const cursor = decodeCursor(args.after);
+  const now = new Date();
+
+  let appId: string;
+  let filter: P.Sql;
+  const key = appKeyCaller(ctx);
+  let db: Prisma.TransactionClient | Context['db'] = ctx.db;
+  if (key) {
+    const { app, host, authorize } = await hostKeyEntry(ctx, args.appRef);
+    appId = app.id;
+    return ctx.db.$transaction(async (tx) => {
+      await authorize(tx);
+      const hostId = await keyHostId(tx, key);
+      const reg = hostId ? await targetHostOrNull(tx, app.id, hostId) : null;
+      const f = reg ? P.sql`s.scope = 'host' AND s.target_host_registration_id = ${reg}` : P.sql`false`;
+      const out = await page(tx, appId, f, args.includeEnded === true, take, cursor, now);
+      // cor:agt:070:07: a host key's read is a use too, recorded in the read's own transaction.
+      await recordHostKeyUse(tx, host, 'read', { count: out.signals.length });
+      return out;
+    });
+  }
+  const { app } = await resolveParticipatedApp(ctx, args.appRef);
+  appId = app.id;
+  const actor = await resolveTaskActor(ctx, app);
+  const selfWorker = currentActor().workerId;
+  if (actor?.kind === 'worker' || selfWorker) {
+    // A worker sees what covers it, live, never another worker's signals (090:07).
+    const me = (actor?.kind === 'worker' ? actor.workerId : selfWorker) as string;
+    const covering = (await coveringSignals(db, app.id, [me], now)).get(me) ?? [];
+    const ids = covering.map((s) => s.id);
+    filter = ids.length ? P.sql`s.id IN (${P.join(ids)})` : P.sql`false`;
+    return page(db, appId, filter, false, take, cursor, now);
+  }
+  filter = P.sql`true`;
+  if (trimmed(args.worker)) {
+    const wid = await resolveTaskWorkerId(ctx, app.id, trimmed(args.worker) as string);
+    const covering = wid ? (await coveringSignals(db, app.id, [wid], now)).get(wid) ?? [] : [];
+    const ids = covering.map((s) => s.id);
+    filter = ids.length ? P.sql`s.id IN (${P.join(ids)})` : P.sql`false`;
+  }
+  return page(db, appId, filter, args.includeEnded === true, take, cursor, now);
+}
 
 async function page(
   db: Prisma.TransactionClient | Context['db'],
