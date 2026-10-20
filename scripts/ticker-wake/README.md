@@ -109,8 +109,11 @@ only when ALL of these hold:
    types nothing, so a busy terminal does not veto it.
 4. The worker's own session **checked the team channel after the send**
    (`checkStatus.lastCheckedAt` later than the entry's `at` by more than 5 s
-   of clock margin). For a covered task assignment, that task must also be
-   `STARTED` (or `FINISHED`) with this worker as assignee.
+   of clock margin). For each task assignment the send newly named, that task
+   must also be `STARTED` (or `FINISHED`) with this worker as assignee. The
+   task ids are recorded on the receipt at send time (`tasks`), because
+   starting a task removes its assignment wake (#2154 P2); an older receipt
+   that covers a task without that record stays held.
 
 A timeout alone never resolves an entry. After 2 cadences (20 min) without
 this evidence the entry stays held and its log line says `needs a person`;
