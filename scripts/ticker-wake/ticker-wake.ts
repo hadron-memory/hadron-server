@@ -7,8 +7,10 @@
  * relayed: chat posts reach terminals through hadron-chat-send. Interim until
  * hadron-cli#907 (C1); shares no token, ledger or lock with the attention router.
  *
- * #2138 §5.2: the nudge asks the worker to check its unread tagged messages
- * (mentions and @all, from its read mark; never an unfiltered catch-up). A
+ * #2138 §5.2: the nudge names the commands: learn its read mark C from one
+ * `team chat read --mentions-me --limit 1`, read everything tagged from C with
+ * `--since C --all`, act, then, only if that read succeeded, `team chat
+ * mark-read` through the head it printed (never an unfiltered catch-up). A
  * `live-check` ticker fires an ordinary TICK reason, so it is delivered exactly
  * like any other tick: the wake names the ticker, not why it fired.
  *
@@ -651,14 +653,25 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
 }
 
 /**
- * The one line typed into the terminal (#2138 §5.2): check the unread TAGGED messages, never an unfiltered catch-up. A
- * task assignment names the task, so the worker can start it.
+ * The one line typed into the terminal (#2138 §5.2, mark-read follow-up). It names the exact commands, because a worker's
+ * compiled prompt may not carry the messaging rules and the nudge is all it has (Yuri #26114: Codex turns obeyed the
+ * old text but read with their own --since and never marked read). Verified against the released CLI v0.26.0
+ * (8c428a7, internal/cmd/team/chat.go): a read with no --since is a TAIL read of the newest page only (George #2156
+ * P2), so the first read only learns the cursor C; `--since C --all` then walks every page forward from C until a
+ * short page, and fails as a whole, before any output, if a page fails. Each read samples the head it prints BEFORE
+ * fetching, so marking through the H the complete read printed never buries an unseen tagged message, never skips one
+ * posted after it, and still stamps the check on an empty read. On a failed read nothing is marked, and a read whose
+ * output the worker's tool truncated or saved counts only once the worker has read the rest (George's #2156 residual).
  */
 export function nudgeText(tickers: string[], tasks: string[]): string {
-  const rule = 'Read only your own tagged messages; no unfiltered chat catch-up.';
-  if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): check your unread tagged messages, then end your turn. ${rule}`;
+  const check = 'run `hadron team chat read --mentions-me --limit 1` (it prints `cursor #C; channel head #H`), '
+    + 'then `hadron team chat read --mentions-me --since C --all` and act on the tagged messages it returns; '
+    + 'only if that read succeeded and you saw all of its output (if your tool truncated or saved it, read the rest first; '
+    + 'if you can\'t, don\'t mark), run `hadron team chat mark-read --through H` with the H that read printed';
+  const rule = 'No unfiltered chat catch-up.';
+  if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): ${check}; then end your turn. ${rule}`;
   const which = tasks.length === 1 ? `hadron team task get ${tasks[0]}` : 'hadron team task list';
-  return `Hadron task assigned (${tasks.join(', ')}${tickers.length ? `; ticker ${tickers.join(', ')}` : ''}): check your unread tagged messages, then start the task (${which}). ${rule}`;
+  return `Hadron task assigned (${tasks.join(', ')}${tickers.length ? `; ticker ${tickers.join(', ')}` : ''}): ${check}; then start the task (\`${which}\`). ${rule}`;
 }
 
 /** A task event name from the server, logged only when it is a known shape. */

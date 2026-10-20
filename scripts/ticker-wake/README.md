@@ -26,8 +26,22 @@ skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
 
 ## Contract
 
-- **Nudge (#2138 §5.2).** One line: check your unread tagged messages (mentions
-  and `@all`, from your read mark), never an unfiltered chat catch-up. A task
+- **Nudge (#2138 §5.2).** One line that names the exact commands, checked
+  against the released CLI v0.26.0: run `hadron team chat read --mentions-me
+  --limit 1` (it prints `cursor #C; channel head #H`), then `hadron team chat
+  read --mentions-me --since C --all` and act on the tagged messages it
+  returns; only if that read succeeded and you saw all of its output (if your
+  tool truncated or saved it, read the rest first; if you can't, don't mark),
+  `hadron team chat mark-read --through H` with the H that read printed; then
+  end your turn. Never an unfiltered
+  catch-up. Why two reads: a read without `--since` returns only the newest
+  page (George, #2156 P2), so marking through its head could bury older
+  tagged messages; `--since C --all` walks every page forward from the read
+  mark and fails as a whole if a page fails. Each read samples its head before
+  fetching, so a message posted after the read stays unread. The mark-read
+  moves the read cursor and stamps the channel check that #2154's evidence
+  resolver reads (Codex turns that obeyed the older text read with their own
+  `--since` and never marked read, Yuri #26114). A task
   assignment also names the task (`hadron team task get <id>`, or `task list`
   for several). A `live-check` ticker fires an ordinary TICK reason, so it is
   delivered exactly like any tick.
