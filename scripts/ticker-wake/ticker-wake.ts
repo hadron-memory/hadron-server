@@ -660,12 +660,14 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
  * P2), so the first read only learns the cursor C; `--since C --all` then walks every page forward from C until a
  * short page, and fails as a whole, before any output, if a page fails. Each read samples the head it prints BEFORE
  * fetching, so marking through the H the complete read printed never buries an unseen tagged message, never skips one
- * posted after it, and still stamps the check on an empty read. On a failed read nothing is marked.
+ * posted after it, and still stamps the check on an empty read. On a failed read nothing is marked, and a read whose
+ * output the worker's tool truncated or saved counts only once the worker has read the rest (George's #2156 residual).
  */
 export function nudgeText(tickers: string[], tasks: string[]): string {
   const check = 'run `hadron team chat read --mentions-me --limit 1` (it prints `cursor #C; channel head #H`), '
     + 'then `hadron team chat read --mentions-me --since C --all` and act on the tagged messages it returns; '
-    + 'only if that read succeeded, run `hadron team chat mark-read --through H` with the H that read printed';
+    + 'only if that read succeeded and you saw all of its output (if your tool truncated or saved it, read the rest first; '
+    + 'if you can\'t, don\'t mark), run `hadron team chat mark-read --through H` with the H that read printed';
   const rule = 'No unfiltered chat catch-up.';
   if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): ${check}; then end your turn. ${rule}`;
   const which = tasks.length === 1 ? `hadron team task get ${tasks[0]}` : 'hadron team task list';

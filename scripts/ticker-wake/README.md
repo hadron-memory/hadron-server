@@ -30,8 +30,10 @@ skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
   against the released CLI v0.26.0: run `hadron team chat read --mentions-me
   --limit 1` (it prints `cursor #C; channel head #H`), then `hadron team chat
   read --mentions-me --since C --all` and act on the tagged messages it
-  returns; only if that read succeeded, `hadron team chat mark-read --through
-  H` with the H that read printed; then end your turn. Never an unfiltered
+  returns; only if that read succeeded and you saw all of its output (if your
+  tool truncated or saved it, read the rest first; if you can't, don't mark),
+  `hadron team chat mark-read --through H` with the H that read printed; then
+  end your turn. Never an unfiltered
   catch-up. Why two reads: a read without `--since` returns only the newest
   page (George, #2156 P2), so marking through its head could bury older
   tagged messages; `--since C --all` walks every page forward from the read
