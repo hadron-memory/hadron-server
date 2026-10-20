@@ -12259,11 +12259,11 @@ export const typeDefs = `#graphql
 
   "#2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:01) — a stop signal's level. Each stops everything the one before it does."
   enum StopSignalLevel {
-    "Stops assignment only: matching skips the covered workers and a manual assignment to one is refused (TASK_STOPPED). Its coordinators are told."
+    "Stops assignment only: matching skips the covered workers and a manual assignment to one is refused (TASK_STOPPED). Its coordinators are told (the notice is recorded but not yet delivered)."
     PAUSE_DISPATCH
-    "Also stops ticks and stall time. Each covered worker is told to finish or stop at its next sub-task."
+    "Also stops ticks and stall time. Each covered worker is told to finish or stop at its next sub-task (the notice is recorded but not yet delivered)."
     PAUSE
-    "Also interrupts each covered worker, to save its work and write a hand-off."
+    "Also interrupts each covered worker, to save its work and write a hand-off (the notice is recorded but not yet delivered: no interrupt happens yet)."
     HALT
   }
 

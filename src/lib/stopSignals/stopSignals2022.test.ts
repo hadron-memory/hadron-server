@@ -142,6 +142,7 @@ describe('cor:agt:090:06 — who may set and lift a stop signal', () => {
     await db.appMember.update({ where: { appId_userId: { appId: app.id, userId: mia.id } }, data: { role: 'owner' } });
     const e = await refusal(asWorker(ada, () => set(ctx(mia.id), { level: 'PAUSE_DISPATCH', scope: 'TEAM', worker: 'Ada' })));
     expect(e.extensions).toMatchObject({ code: 'APP_MANAGER_REQUIRED', right: 'manage-app' });
+    expect(e.message).toMatch(/Retry with a plain session \(hadron_start_session with no worker\)/);
     // The same person, as themselves, may.
     expect((await set(ctx(mia.id), { level: 'PAUSE_DISPATCH', scope: 'TEAM', worker: 'Ada' })).setByUserId).toBe(mia.id);
   });
@@ -240,10 +241,12 @@ describe('cor:agt:090:03 — every level stops assignment', () => {
     expect(await assigneeOf(t.id)).toBeNull();
     const assigned = await M.createAgentTask({}, { input: { appRef: app.id, title: 'X', assignee: { worker: 'Kit' } } }, ctx(max.id));
     const e = await refusal(M.reassignAgentTask({}, { taskId: assigned.id, assignee: { worker: 'Liam' } }, ctx(max.id)));
-    expect(e.message).toBe('Assignment is stopped by an active stop signal.');
+    const handle = (await db.user.findUniqueOrThrow({ where: { id: max.id }, select: { handle: true } })).handle;
+    const setter = handle ? `@${handle}` : `user ${max.id}`;
+    expect(e.message).toBe(`Can't assign to Liam: a PAUSE_DISPATCH stop signal (TEAM, set by ${setter}, until ${until.toISOString()}) covers them. Assign someone else, or whoever manages the App lifts it (hadron_stop_signal_lift id=${s.id}).`);
     expect(e.extensions).toMatchObject({
-      code: 'TASK_STOPPED', workerId: liam.id, moreBlockers: false,
-      blockers: [{ id: s.id, level: 'pause-dispatch', scope: 'team', setByUserId: max.id, setByHostKey: false, until: until.toISOString() }],
+      code: 'TASK_STOPPED', workerId: liam.id, workerUrn: expect.stringMatching(/^hrn:worker:.*:liam$/), moreBlockers: false,
+      blockers: [{ id: s.id, level: 'PAUSE_DISPATCH', scope: 'TEAM', setByUserId: max.id, setByHandle: handle, setByHostKey: false, until: until.toISOString() }],
     });
     expect(await assigneeOf(assigned.id)).toBe(kit.id);
   });
@@ -307,12 +310,21 @@ describe('cor:agt:090:05 — when a signal ends; R69 every live signal applies',
     expect(await notices(liam)).toEqual(['pause:stop']);
   });
 
-  it('two pauses on one target are independent: lifting one keeps the worker paused, with no notice', async () => {
+  it('two pauses on one target are independent: each sends its own entry notice; lifting one keeps the worker paused, with no notice', async () => {
     const a = await set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Kit' });
     await set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Kit' });
+    expect(await notices(kit)).toEqual(['pause:stop', 'pause:stop']);
     await lift(ctx(max.id), a.id);
     expect(await covered()).toEqual(ids(kit));
-    expect(await notices(kit)).toEqual(['pause:stop']);
+    expect(await notices(kit)).toEqual(['pause:stop', 'pause:stop']);
+  });
+
+  it('a pause entering under a live halt sends no notice; the halt ending sends the pause notice', async () => {
+    const h = await set(keyCtx(orca2), { level: 'HALT', scope: 'HOST' });
+    await set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Kit' });
+    expect(await notices(kit)).toEqual(['halt:stop:interrupt']);
+    await lift(keyCtx(orca2), h.id);
+    expect(await notices(kit)).toEqual(['halt:stop:interrupt', 'pause:stop']);
   });
 
   it('S1/S3: an expiry ends the signal at its until, recorded by the sweep; a lift after it changes nothing and tells nobody again', async () => {
@@ -517,5 +529,60 @@ describe('#2138 check status under a stop signal', () => {
     await lift(ctx(max.id), d.id);
     await set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Kit' });
     expect(await reason(kit)).toBe('STOPPED');
+  });
+});
+
+describe('fix head of #2166: the findings\' pins', () => {
+  it('Diego P2-2: a reportsTo bind and setTeamPause holding the fence shared do not deadlock (the real resolvers)', async () => {
+    let writerReady!: () => void, releaseWriter!: () => void;
+    const writerHasFence = new Promise<void>((r) => { writerReady = r; });
+    const goWriter = new Promise<void>((r) => { releaseWriter = r; });
+    // setTeamPause, held right after it takes the App's stop fence shared (before it updates the App row).
+    const hookedDb = new Proxy(db, { get(target, prop) {
+      if (prop === '$transaction') return (fn: any, opts: any) => (target as any).$transaction((tx: any) => fn(new Proxy(tx, { get(t, key) {
+        if (key === '$executeRaw') return async (...args: any[]) => {
+          const out = await t.$executeRaw(...args);
+          if (String(args[0]).includes('pg_advisory_xact_lock_shared') && args[1] === 'stop-signals:' + app.id) { writerReady(); await goWriter; }
+          return out;
+        };
+        const v = t[key]; return typeof v === 'function' ? v.bind(t) : v;
+      } })), opts);
+      const v = (target as any)[prop]; return typeof v === 'function' ? v.bind(target) : v;
+    } });
+    const writing = M.setTeamPause({}, { appRef: app.id, paused: true }, { ...ctx(max.id), db: hookedDb }).then(() => null, (e: any) => e);
+    await writerHasFence;
+    // The bind sets reportsTo: it waits on the fence before it locks the App row, so the writer can finish.
+    const binding = M.startSession({}, { input: { id: generateId(), workerRef: kit.id, reportsTo: ada.id } }, ctx(mia.id)).then(() => null, (e: any) => e);
+    await new Promise((r) => setTimeout(r, 300));
+    releaseWriter();
+    expect(await Promise.all([writing, binding])).toEqual([null, null]);
+    expect((await db.worker.findUniqueOrThrow({ where: { id: kit.id } })).reportsToWorkerId).toBe(ada.id);
+    expect((await db.app.findUniqueOrThrow({ where: { id: app.id } })).teamPausedAt).not.toBeNull();
+  });
+
+  it('Xan LOCAL-1: an until that passes while the assignment waits on the fence is ended for it; a later one still holds', async () => {
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: dan.id, agentId, family: 'claude' } });
+    const run = async (untilMs: number) => {
+      const start = new Date();
+      const s = await set(ctx(max.id), { level: 'PAUSE_DISPATCH', scope: 'WORKER', worker: 'Dan', until: new Date(start.getTime() + untilMs) });
+      const t = await db.agentTask.create({ data: { appId: app.id, title: 'Cross', ownerUserId: max.id }, select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true, createdByWorkerId: true } });
+      let release!: () => void;
+      const held = new Promise<void>((r) => { release = r; });
+      let locked!: () => void;
+      const hasLock = new Promise<void>((r) => { locked = r; });
+      // Another connection holds the fence exclusive across the until.
+      const holder = db.$transaction(async (tx) => { await lockStopFence(tx, app.id, 'exclusive'); locked(); await held; }, { timeout: 10_000 });
+      await hasLock;
+      const outcome = __matcherTesting.tryAssign(db, t, dan.id, 'claude', new Date(), {});
+      await new Promise((r) => setTimeout(r, 800));
+      release();
+      await holder;
+      const r = await outcome;
+      await lift(ctx(max.id), s.id);
+      await db.agentTask.update({ where: { id: t.id }, data: { status: 'cancelled', cancelledAt: new Date() } });
+      return r;
+    };
+    expect(await run(400)).toBe('assigned'); // its until passed during the wait
+    expect(await run(60_000)).toBe('worker-not-free'); // still live after the wait
   });
 });

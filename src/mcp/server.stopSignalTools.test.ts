@@ -58,7 +58,7 @@ describe('stop-signal tools', () => {
     const s = mcp(authOf(admin.id));
     const plain = await session({ userId: admin.id });
     const set = text(await s.callTool('hadron_stop_signal_set', { appRef: app.id, level: 'PAUSE', scope: 'WORKER', worker: 'Anne', session: plain.id }));
-    expect(set).toMatch(/· PAUSE · worker .* by user .* · LIVE · until lifted$/);
+    expect(set).toMatch(/· PAUSE · worker Anne \(hrn:worker:[^)]*:anne\) · set .* by (@\S+|user \S+) · LIVE · until lifted$/);
     const id = /^- (\S+)/.exec(set)![1];
     expect(text(await s.callTool('hadron_stop_signal_list', { appRef: app.id }))).toContain(id);
     expect(text(await s.callTool('hadron_stop_signal_lift', { appRef: app.id, id, session: plain.id }))).toMatch(/^lifted\n/);

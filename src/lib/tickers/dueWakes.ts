@@ -693,8 +693,11 @@ export async function computeDueWakes(args: {
         // episode passed, the worker acted): re-handing it would deliver exactly what the pre-delivery re-checks refuse.
         // Judged only by a reader of the App's tasks; for anyone else the stored wake is not theirs to see (below).
         const stillPending = new Set([...tasksFor(i.workerId).map(taskKey), ...(stopOf.has(i.workerId) ? [taskKey({ eventId: stopOf.get(i.workerId)!.eventId, chainIndex: 0 })] : [])]);
+        // #2022 (Diego #2166 P2-1): so is one carrying a TICK for a worker a `pause` or `halt` now covers (R68), or a
+        // stop notice that is no longer the one due: re-handing it would deliver what the stop forbids.
         const staleTask = !!stored && ((taskOk(i.workerId) && tasksOf(stored.wake).some((t) => !stillPending.has(taskKey(t))))
-          || stopsOf(stored.wake).some((t) => !stillPending.has(taskKey(t))));
+          || stopsOf(stored.wake).some((t) => !stillPending.has(taskKey(t)))
+          || (tickStopped.has(i.workerId) && stored.wake.reasons.some((r) => r.kind === 'TICK')));
         if (stored && (staleTask || !stored.wake.channels.every((c) => channelOf.get(c.channelId)?.incarnation === c.incarnation))) {
           await tx.$executeRaw`DELETE FROM app_wake_reservations WHERE worker_id = ${i.workerId}`;
           live.delete(i.workerId);

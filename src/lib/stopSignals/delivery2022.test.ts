@@ -15,6 +15,9 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { teamChatMutations } from '../../api/graphql/schema/resolvers.teamChat.js';
 import { setS6NoticesAvailableForTest } from './delivery.js';
 import { verifyWakeProof } from '../tickers/wakeProof.js';
+import { ensureChannelWithRoot } from '../channels.js';
+import { appendChatMessage } from '../chatRoot.js';
+import { getMemoryEncryptionInfo } from '../nodeCrypto.js';
 
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -140,5 +143,46 @@ describe('cor:agt:090:04 — the notice lane', () => {
     const page = await Q.dueWakes({}, { appRef: app.id }, ctx(manager.id));
     expect(page.withheld).toBe(0);
     expect(kinds(page.wakes[0])).toEqual(['STOP']);
+  });
+});
+
+describe('fix head of #2166 (Diego P2-1): an outstanding wake\'s TICK is not re-offered under a pause or halt', () => {
+  let channel: { id: string; memoryId: string; loc: string; chatRootNodeId: string };
+  beforeEach(async () => {
+    const appRow = await db.app.findUniqueOrThrow({ where: { id: app.id }, select: { organizationId: true, urn: true } });
+    const agentRow = await db.agent.findFirstOrThrow({ where: { organizationId: appRow.organizationId! } });
+    const memory = await db.memory.create({ data: { id: generateId(), organizationId: appRow.organizationId!, urn: `${appRow.urn}-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agentRow.id } });
+    const made = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:team', name: 'chats:team', createdBy: manager.id });
+    channel = { id: made.channel.id, memoryId: memory.id, loc: 'chats:team', chatRootNodeId: made.rootId };
+    await db.registerEntry.create({ data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: liam.id, role: 'BOTH' } });
+  });
+  const mentionLiam = async () => {
+    const enc = await getMemoryEncryptionInfo(db, channel.memoryId);
+    await appendChatMessage(db, { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc }, enc, async ({ tx, seq, msgNum }) =>
+      tx.node.create({ data: { id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, messageChannelId: channel.id, content: 'for you', data: { mentions: ['liam'] } } }),
+    { asChannel: true });
+  };
+
+  for (const level of ['PAUSE', 'HALT'] as const) {
+    it(`${level}: the reserved MENTION+TICK wake is re-offered without its TICK; the mention stays due`, async () => {
+      await mentionLiam();
+      expect(kinds((await due())[0]).sort()).toEqual(['MENTION', 'TICK']);
+      await set(level);
+      const [next] = await due();
+      expect(kinds(next)).toEqual(['MENTION']);
+      expect(verifyWakeProof(next.proof).ticks).toEqual([]);
+    });
+  }
+
+  it('PAUSE_DISPATCH control: the reserved wake keeps its TICK; after a pause is lifted, ticks are offered again', async () => {
+    await mentionLiam();
+    await due();
+    const d = await set('PAUSE_DISPATCH');
+    expect(kinds((await due())[0]).sort()).toEqual(['MENTION', 'TICK']);
+    await lift(d.id);
+    const p = await set('PAUSE');
+    expect(kinds((await due())[0])).toEqual(['MENTION']);
+    await lift(p.id);
+    expect(kinds((await due())[0]).sort()).toEqual(['MENTION', 'TICK']);
   });
 });

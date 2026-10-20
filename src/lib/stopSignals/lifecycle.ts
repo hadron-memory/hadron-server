@@ -10,8 +10,11 @@
  * the ledger, closing what no longer covers and opening what newly does, and sends each worker one notice for each
  * change of what applies to it (R95):
  *
- * - it came under a `pause` or `halt`, or what applies changed between them (a `halt` ending under a `pause` sends the
- *   `pause` notice again, Vera's receipt §3, Proposed): that level's notice, interrupting only for a `halt`;
+ * - it came under a live `pause` or `halt`: that signal's notice, one per signal (R95; the selected per-signal entry,
+ *   Xan #2166), interrupting only for a `halt`; a signal weaker than what already applies (a `pause` entering under
+ *   a `halt`) sends none, so the notice due always says what applies;
+ * - what applies dropped from `halt` to `pause` with nothing newly entered (the `halt` ended): the `pause` notice
+ *   again (Vera's receipt §3, Proposed);
  * - nothing that stops its time covers it any more (it left the coverage, or the last such signal ended): one resume.
  *
  * `pause-dispatch` tells its coordinators once when it is set and once when it ends, and the workers it covers nothing
@@ -136,7 +139,7 @@ export async function reconcileStopCoverage(tx: Tx, appId: string, now: Date): P
     }
   }
 
-  // 5. One notice per worker whose time-stopping level changed (pause-dispatch tells workers nothing).
+  // 5. The workers' notices (pause-dispatch tells workers nothing), per the file header.
   const workers = new Set([...before.keys(), ...covering.keys()]);
   const retired = new Set((await tx.worker.findMany({
     where: { id: { in: [...workers] }, retiredAt: { not: null } }, select: { id: true },
@@ -146,16 +149,25 @@ export async function reconcileStopCoverage(tx: Tx, appId: string, now: Date): P
     const was = timeLevel(before.get(w) ?? []);
     const nowList = covering.get(w) ?? [];
     const is = timeLevel(nowList);
-    if (was === is) continue;
-    if (is !== null) {
-      const s = noticeSignal(nowList, is);
-      await appendStopNotice(tx, { appId, recipient: { workerId: w }, signalId: s.id, level: is, notice: 'stop', at: now });
-    } else {
+    if (is === null) {
+      if (was === null) continue;
       // The resume names the strongest signal that stopped it as last recorded.
       const prior = (before.get(w) ?? []).filter((x) => x.level === was).sort((a, b) => a.signalId.localeCompare(b.signalId))[0]!;
       await appendStopNotice(tx, { appId, recipient: { workerId: w }, signalId: prior.signalId, level: was as StopLevel, notice: 'resume', at: now });
+      notices++;
+      continue;
     }
-    notices++;
+    // Each live signal it newly came under, at the level that now applies, sends that signal's notice (R95, the
+    // selected per-signal entry: Xan #2166). One weaker than what applies (a pause entering under a halt) sends none:
+    // the notice the worker is due must say what applies, and the pause's own notice follows when the halt ends.
+    const entering = nowList
+      .filter((x) => x.level === is && !have.has(`${x.id}|${w}`))
+      .sort((a, b) => a.setAt.getTime() - b.setAt.getTime() || a.id.localeCompare(b.id));
+    if (entering.length === 0 && was === is) continue;
+    for (const x of entering.length ? entering : [noticeSignal(nowList, is)]) {
+      await appendStopNotice(tx, { appId, recipient: { workerId: w }, signalId: x.id, level: is, notice: 'stop', at: now });
+      notices++;
+    }
   }
 
   return { entered, left, notices, expired: expiredRows.map((s) => s.id) };

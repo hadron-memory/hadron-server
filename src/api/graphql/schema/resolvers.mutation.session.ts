@@ -1136,6 +1136,11 @@ export const sessionMutations = {
         // checked lifecycle. Recheck the settled App in the transaction before
         // claiming a name or inserting a session. An explicit Worker ref may
         // have replaced a stale selection above; only the final App matters.
+        // #2022 (Diego #2166 P2-2): a bind that sets reportsTo is a stop-coverage writer, so it takes the App's stop
+        // fence EXCLUSIVE before any row lock, the App row included: an App-row writer (setTeamPause, under the
+        // App's anchors) holds the fence shared before it updates that row, so taking the fence after the App row
+        // here was a real deadlock (40P01). This path takes no authority anchors, so the fence is its first lock.
+        if (reportsToId && appId) await lockStopFence(tx, appId, 'exclusive');
         if (appId) {
           await lockSessionAppActive(tx, appId);
         }
@@ -1146,8 +1151,6 @@ export const sessionMutations = {
         // P2-2, Rook P2-1). A demotion or role removal then commits first and is
         // seen, or waits for this bind.
         if (reportsToId && appId) {
-          // #2022: the stop fence, exclusive, before the graph lock (src/lib/stopSignals/state.ts).
-          await lockStopFence(tx, appId, 'exclusive');
           await lockAppReportsTo(tx, appId);
           if (ctx.userId) {
             await tx.$queryRaw`SELECT 1 FROM users WHERE id = ${ctx.userId} FOR SHARE`;

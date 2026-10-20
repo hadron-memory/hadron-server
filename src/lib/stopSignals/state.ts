@@ -10,8 +10,11 @@
  * A signal is live while it has not ended and its until (when given) has not passed (090:05, Proposed): an expiry is in
  * effect at `until` even before the sweep records it, so no reader depends on the sweep.
  *
- * Lock order (the stop fence, `lockStopFence`): authority anchors → STOP FENCE → the reportsTo graph lock → the
- * host-lapse lock → rows. Writers that change a signal or the topology coverage is computed from take it EXCLUSIVE
+ * Lock order (the stop fence, `lockStopFence`): authority anchors (and, under `withAuthorizedTx`, the anchors' own
+ * org / user / App rows FOR SHARE) → STOP FENCE → the reportsTo graph lock → the host-lapse lock → every other row.
+ * A path that takes no authority anchors takes the fence before ANY row, the App row included (`retireWorker`, a
+ * bind that sets reportsTo): an App-row writer holds the fence shared before it updates its App row, so a fence
+ * taken after an App row lock deadlocks against it (Diego #2166 P2-2, a real 40P01). Writers that change a signal or the topology coverage is computed from take it EXCLUSIVE
  * (set, lift, expiry, `setWorkerReportsTo`, `retireWorker`, a bind that sets reportsTo, `registerHost`); deciders take it
  * SHARED (task writes, the matcher's assignment, a launch, a stall raise), so a decision and a signal change are
  * ordered. Never upgraded from shared to exclusive in one transaction.
@@ -117,6 +120,16 @@ export async function coveringSignals(db: Db, appId: string, workerIds: string[]
     out.set(workerId, list);
   }
   return out;
+}
+
+/**
+ * The deciding moment after a transaction's lock waits (Xan #2166 LOCAL-1): the caller's `now` advanced by the
+ * monotonic time elapsed since `entered` (`performance.now()` taken before the first lock). A signal whose until passed
+ * while the decider waited is then ended for it, and one set while it waited is seen. The caller's `now` stays the
+ * clock seam, so an injected `now` keeps its meaning (the #2102 `freshAfterWait` pattern, acknowledge.ts).
+ */
+export function afterWaits(now: Date, entered: number): Date {
+  return new Date(now.getTime() + Math.max(0, performance.now() - entered));
 }
 
 /** The strongest level among `signals` (R69: every live one applies, so the worker is stopped as the highest says). */

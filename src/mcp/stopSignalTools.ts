@@ -18,6 +18,8 @@ import { runAsActor } from '../lib/requestActor.js';
 import { UrnNotQualifiedError } from '../lib/urn.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { StopSignalView } from '../api/graphql/schema/resolvers.stopSignal.js';
+import { resolveAppRef } from '../lib/entityRef/appRef.js';
+import { stopNames } from '../lib/stopSignals/names.js';
 
 type Row = Record<string, any>;
 type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
@@ -51,10 +53,19 @@ function refusal(e: unknown) {
 
 const iso = (d: Date | null | undefined) => (d ? new Date(d).toISOString() : null);
 
-/** One signal as one line: ids, level, scope, target, setter, times. */
-export function renderSignal(s: StopSignalView): string {
-  const target = s.scope === 'HOST' ? `host ${s.targetHostId ?? '?'}` : `${s.scope.toLowerCase()} ${s.targetWorkerId ?? '?'}`;
-  const setter = s.setByHostKey ? 'a host key' : `user ${s.setByUserId ?? '?'}`;
+/** The public names a line shows beside the ids (Uma #2166 P2-2): worker name and URN, setter handle, host label. */
+type Names = { worker: (id: string | null) => { name: string; urn: string | null } | null; user: (id: string | null) => string | null; hostLabel: (hostId: string | null) => string | null };
+const NO_NAMES: Names = { worker: () => null, user: () => null, hostLabel: () => null };
+
+/** One signal as one line: ids with their names, level, scope, target, setter, times. */
+export function renderSignal(s: StopSignalView, n: Names = NO_NAMES): string {
+  const w = n.worker(s.targetWorkerId);
+  const label = n.hostLabel(s.targetHostId);
+  const target = s.scope === 'HOST'
+    ? `host ${s.targetHostId ?? '?'}${label ? ` (${label})` : ''}`
+    : `${s.scope.toLowerCase()} ${w ? `${w.name} (${w.urn ?? s.targetWorkerId})` : s.targetWorkerId ?? '?'}`;
+  const handle = n.user(s.setByUserId);
+  const setter = s.setByHostKey ? 'a host key' : handle ? `@${handle}` : `user ${s.setByUserId ?? '?'}`;
   const end = s.live
     ? (s.until ? `until ${iso(s.until)}` : 'until lifted')
     : `${(s.endKind ?? 'ENDED').toLowerCase()} ${iso(s.endedAt)}`;
@@ -67,6 +78,22 @@ const SESSION_WRITE = z.string().optional().describe(
 );
 const SESSION_READ = z.string().optional().describe('Optional session id: read as that session\'s worker (the signals covering it).');
 const appRef = z.string().describe('The App id or URN.');
+
+/** Look the names up for `signals`, inside their App only. Any failure renders the ids alone. */
+async function namesFor(db: PrismaClient, appRef: string, signals: StopSignalView[]): Promise<Names> {
+  try {
+    const { id: appId } = await resolveAppRef(db, appRef);
+    const hostIds = [...new Set(signals.map((s) => s.targetHostId).filter((h): h is string => !!h))];
+    const [n, hosts] = await Promise.all([
+      stopNames(db, appId, { workerIds: signals.map((s) => s.targetWorkerId), userIds: signals.map((s) => s.setByUserId) }),
+      hostIds.length ? db.hostRegistration.findMany({ where: { appId, hostId: { in: hostIds } }, select: { hostId: true, label: true } }) : [],
+    ]);
+    const labels = new Map(hosts.map((h) => [h.hostId, h.label]));
+    return { worker: n.worker, user: n.user, hostLabel: (h) => (h ? labels.get(h) ?? null : null) };
+  } catch {
+    return NO_NAMES;
+  }
+}
 
 /** Register the stop-signal tools on one MCP server instance. `auth` is the connection's principal. */
 export function registerStopSignalTools(server: McpServer, deps: { db: PrismaClient; auth: AuthContext }): void {
@@ -126,7 +153,7 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
   server.tool(
     'hadron_stop_signal_set',
     'Set a STOP SIGNAL on an App (cor:agt:090): PAUSE_DISPATCH stops assignment; PAUSE also stops ticks and stall time; ' +
-      'HALT also interrupts. Scope WORKER (one worker), TEAM (a head and its whole reporting tree) or HOST (the workers a ' +
+      'HALT also interrupts (its notices are recorded but not yet delivered, so no interrupt happens yet). Scope WORKER (one worker), TEAM (a head and its whole reporting tree) or HOST (the workers a ' +
       'host registration lists). Whoever manages the App, any level and scope; a host key, a HALT on its own host only. ' +
       'Never replaces another signal.',
     {
@@ -138,8 +165,10 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
       until: z.string().optional().describe('ISO time it ends on its own; later than now. Omitted: until lifted.'),
       session: SESSION_WRITE,
     },
-    async ({ session, ...input }) => write('hadron_stop_signal_set', session, async (ctx) =>
-      renderSignal(await M.setTeamStopSignal({}, { input }, ctx))),
+    async ({ session, ...input }) => write('hadron_stop_signal_set', session, async (ctx) => {
+      const s = await M.setTeamStopSignal({}, { input }, ctx);
+      return renderSignal(s, await namesFor(db, input.appRef, [s]));
+    }),
   );
 
   server.tool(
@@ -149,7 +178,7 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
     { appRef, id: z.string().describe('The stop signal id.'), session: SESSION_WRITE },
     async ({ appRef: a, id, session }) => write('hadron_stop_signal_lift', session, async (ctx) => {
       const r = await M.liftTeamStopSignal({}, { appRef: a, id }, ctx);
-      return `${r.changed ? 'lifted' : 'unchanged (already ended)'}\n${renderSignal(r.signal)}`;
+      return `${r.changed ? 'lifted' : 'unchanged (already ended)'}\n${renderSignal(r.signal, await namesFor(db, a, [r.signal]))}`;
     }),
   );
 
@@ -167,7 +196,8 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
     },
     async ({ session, ...args }) => read(session, async (ctx) => {
       const page = await Q.teamStopSignals({}, args, ctx);
-      const lines = page.signals.map(renderSignal);
+      const names = await namesFor(db, args.appRef, page.signals);
+      const lines = page.signals.map((s) => renderSignal(s, names));
       if (lines.length === 0) lines.push('No stop signals.');
       if (page.pageInfo.hasNextPage) lines.push(`more: after=${page.pageInfo.endCursor}`);
       return lines.join('\n');

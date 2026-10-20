@@ -117,7 +117,7 @@ async function loadWindows(db: Db, appIds: string[]): Promise<Map<string, StallW
 
 // ── Inputs ────────────────────────────────────────────────────────────────
 
-import { lockStopFence } from '../stopSignals/state.js';
+import { afterWaits, lockStopFence } from '../stopSignals/state.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -506,15 +506,19 @@ export async function raiseStallAlarm(
   now: Date,
   hooks: { afterChain?: () => Promise<void> } = {},
 ): Promise<string | null> {
+  const entered = performance.now();
   return db.$transaction(async (tx) => {
     // #2022: the App's stop fence, shared, so a raise and a stop signal change are ordered; the re-evaluation below
     // then reads the coverage ledger as the last signal change left it.
     await lockStopFence(tx, candidate.appId, 'shared');
     await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${candidate.taskId} FOR SHARE`;
-    const [inputs] = await loadStallInputs(tx, { id: candidate.taskId }, now);
+    // #2022 (Xan #2166 LOCAL-1): re-decided at the moment after the waits, so a stop that began or ended while this
+    // raise waited is counted as it is now.
+    const decidedAt = afterWaits(now, entered);
+    const [inputs] = await loadStallInputs(tx, { id: candidate.taskId }, decidedAt);
     if (!inputs) return null;
     const windows = (await loadWindows(tx, [inputs.task.appId])).get(inputs.task.appId) as StallWindows;
-    const again = stallCandidates(inputs, windows, now).find(
+    const again = stallCandidates(inputs, windows, decidedAt).find(
       (c) => c.rule === candidate.rule && c.episodeStart.getTime() === candidate.episodeStart.getTime(),
     );
     if (!again) return null;

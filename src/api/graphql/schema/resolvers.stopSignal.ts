@@ -46,15 +46,16 @@ const PAGE_DEFAULT = 50;
 const PAGE_MAX = 200;
 
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
-const notFound = (): GraphQLError => taskError('STOP_SIGNAL_NOT_FOUND', 'Stop signal or its target not found.');
+const notFound = (): GraphQLError => taskError('STOP_SIGNAL_NOT_FOUND', 'No stop signal with that id in this App.');
+const targetNotFound = (): GraphQLError => taskError('STOP_SIGNAL_NOT_FOUND', 'No such worker or host in this App.');
 const managerRequired = (): GraphQLError =>
   taskError('APP_MANAGER_REQUIRED', 'Only whoever manages this App sets or lifts a stop signal.', { right: 'manage-app' });
 const hostScopeRequired = (): GraphQLError =>
-  taskError('HOST_SCOPE_REQUIRED', "A host key sets or lifts a stop signal only on its own host, taken from the key's binding.", { right: 'own-host' });
+  taskError('HOST_SCOPE_REQUIRED', "A host key sets or lifts a stop signal only on its own host, taken from the key's binding. Omit host: this key's host is used.", { right: 'own-host' });
 const scopeForbidden = (): GraphQLError =>
-  taskError('STOP_SIGNAL_SCOPE_FORBIDDEN', "A host key sets only a halt, on its own host: no other level, and no worker or team scope.", { right: 'host-halt-only' });
+  taskError('STOP_SIGNAL_SCOPE_FORBIDDEN', 'A host key sets or lifts only a HALT, on its own host: no other level, and no WORKER or TEAM scope.', { right: 'host-halt-only' });
 const workerSession = (): GraphQLError =>
-  taskError('APP_MANAGER_REQUIRED', "A worker's session acts with the worker's own rights, which don't include stop signals.", { right: 'manage-app' });
+  taskError('APP_MANAGER_REQUIRED', "A worker's session acts with the worker's own rights, which don't include stop signals. Retry with a plain session (hadron_start_session with no worker) as a person who manages the App.", { right: 'manage-app' });
 
 export type SetTeamStopSignalInput = {
   appRef: string;
@@ -121,7 +122,7 @@ function parseScope(raw: unknown): StopScope {
 function parseUntil(raw: unknown, now: Date): Date | null {
   if (raw === undefined || raw === null) return null;
   const d = raw instanceof Date ? raw : typeof raw === 'string' ? new Date(raw) : null;
-  if (!d || Number.isNaN(d.getTime())) throw badInput('until is a date-time.');
+  if (!d || Number.isNaN(d.getTime())) throw badInput('until must be an ISO 8601 date-time.');
   if (d.getTime() <= now.getTime()) throw badInput('until must be later than now.');
   return d;
 }
@@ -131,16 +132,16 @@ const trimmed = (v: unknown): string | null => (typeof v === 'string' && v.trim(
 /** A worker of THIS App that isn't retired, by ref, read on the transaction client; else not found. */
 async function targetWorker(txCtx: Context, appId: string, ref: string): Promise<string> {
   const id = await resolveTaskWorkerId(txCtx, appId, ref);
-  if (!id) throw notFound();
+  if (!id) throw targetNotFound();
   const row = await txCtx.db.worker.findUnique({ where: { id }, select: { appId: true, retiredAt: true } });
-  if (!row || row.appId !== appId || row.retiredAt) throw notFound();
+  if (!row || row.appId !== appId || row.retiredAt) throw targetNotFound();
   return id;
 }
 
 /** The App's registration of `hostId`, or not found. */
 async function targetHost(tx: Prisma.TransactionClient, appId: string, hostId: string): Promise<string> {
   const reg = await tx.hostRegistration.findUnique({ where: { appId_hostId: { appId, hostId } }, select: { id: true } });
-  if (!reg) throw notFound();
+  if (!reg) throw targetNotFound();
   return reg.id;
 }
 

@@ -48,7 +48,7 @@
  *      can never both assign one task — the loser's update matches no row.
  */
 
-import { coveringSignals, liveSql, lockStopFence, timeStoppedWorkers, type StopSignal } from '../stopSignals/state.js';
+import { afterWaits, coveringSignals, liveSql, lockStopFence, timeStoppedWorkers, type StopSignal } from '../stopSignals/state.js';
 import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
@@ -307,6 +307,7 @@ async function tryAssign(
   now: Date,
   hooks: MatcherHooks,
 ): Promise<AttemptOutcome> {
+  const entered = performance.now();
   return db.$transaction(async (tx) => {
     await lockAuthorityAnchors(tx, [{ kind: 'app', id: task.appId }], 'shared');
     const app = await tx.app.findUnique({ where: { id: task.appId }, select: { deletedAt: true, uninstalledAt: true } });
@@ -319,7 +320,8 @@ async function tryAssign(
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('agent-task-matcher:worker'), hashtext(${workerId}))`;
     if (!(await stillFreeAs(tx, task.appId, workerId, family, now))) return 'worker-not-free';
     const creator = task.createdByWorkerId ?? null;
-    const covering = await coveringSignals(tx, task.appId, creator && creator !== workerId ? [workerId, creator] : [workerId], now);
+    // Decided at the moment after the waits (Xan #2166 LOCAL-1), not the pass's start.
+    const covering = await coveringSignals(tx, task.appId, creator && creator !== workerId ? [workerId, creator] : [workerId], afterWaits(now, entered));
     if (covering.has(workerId)) return 'worker-not-free';
     // R71: a task its creator made under a pause or halt waits while that still covers the creator.
     if (creator && timeStoppedWorkers(covering).has(creator)) return 'task-gone';
