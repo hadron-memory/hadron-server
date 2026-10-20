@@ -50,6 +50,11 @@
  *    send is AMBIGUOUS: never retyped, never acked, kept until a human
  *    reconciles it (delete its entry in receipts.json). Unreadable or
  *    malformed receipt state stops the pass: fail closed.
+ *  - an ambiguous send is resolved WITHOUT a person only on evidence (#2138, proposal #26055, approved #26060): after
+ *    its request is reissued by id and still not confirmed, it becomes a delivered receipt only when Orca accepted the
+ *    input, the receiver is the same, the composer reads provably empty, and the worker's own session checked the team
+ *    channel after the send (any covered task must also be STARTED by it). A timeout alone never resolves it: after 2
+ *    cadences without evidence it stays held and is logged as needing a person.
  *  - one instance per state dir (atomic lock file).
  *
  * A pass fits inside one cadence (#2138 experiment, Hugo's tick 1, #26038): a busy terminal is PROBED, never waited
@@ -71,6 +76,10 @@ import {
 
 export const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{worker{id name} reasons{kind ticker{id name} task{id eventId chainIndex event}} proof anchorAt deliverAfter busyDeadline} pageInfo{hasNextPage endCursor}}}`;
 export const ACK = `mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowledged unchanged}}`;
+/** The worker's own last team-channel check (#2138 §3.4; stamped only through its own session). */
+export const WORKER_CHECK = `query($w:ID!,$a:ID){worker(ref:$w,appRef:$a){id checkStatus{lastCheckedAt}}}`;
+/** A covered task's state and assignee. */
+export const TASK_STATE = `query($t:ID!){agentTask(id:$t){id status assignee{kind id}}}`;
 const MAX_PAGES = 10;
 /**
  * The tui-idle probe. It proves idle without waiting for business to clear (the router's RECHECK_IDLE_TIMEOUT_MS
@@ -82,6 +91,15 @@ export const IDLE_PROBE_MS = 500;
 export const DEFAULT_ONCE_BUDGET_S = 300;
 /** A proof older than this is re-fetched before its ack: the server refuses one past 15 minutes (WAKE_PROOF_MAX_AGE_MS). */
 export const PROOF_REFRESH_AFTER_MS = 10 * 60 * 1000;
+/** An ambiguous send with no delivery evidence after this long (2 cadences of the 600 s team-tick) is listed for a person. */
+export const NEEDS_PERSON_AFTER_MS = 20 * 60 * 1000;
+/** A channel check counts as after the send only past this margin, so host/server clock skew cannot pass an earlier one. */
+export const CHECK_CLOCK_MARGIN_MS = 5_000;
+/** The task states that prove the assignee saw its assignment. */
+const TASK_SEEN: ReadonlySet<string> = new Set(['STARTED', 'FINISHED']);
+/** Orca took the input (send.accepted) but no turn start was seen: the only ambiguity evidence may resolve. */
+const ACCEPTED_DETAIL = 'accepted, turn start not confirmed';
+const wasAccepted = (detail: string): boolean => detail.split('; same-id retry: ').some((p) => p.startsWith(ACCEPTED_DETAIL));
 /** The task events that mean "a task was assigned to you" (#2138 §5.2); every other task event is left alone. */
 export const ASSIGNMENT_EVENTS: ReadonlySet<string> = new Set(['ASSIGNED', 'REASSIGNED', 'MATCHED']);
 /** A task id is typed into a terminal, so only a plain id shape is accepted; anything else holds the wake. */
@@ -93,8 +111,12 @@ export interface Opts { dry?: boolean; now?: () => number; budgetMs?: number }
 
 /** What a confirmed send covered, and who received it. */
 interface Delivered { state: 'sent'; coverage: string[]; receiver: string; at: number }
-/** An accepted-but-unconfirmed or failed-after-possible-submission send, kept until reconciled. */
-interface Ambiguous { state: 'ambiguous'; coverage: string[]; receiver: string; at: number; detail: string; text: string; handle: string; requestId?: string }
+/**
+ * An accepted-but-unconfirmed or failed-after-possible-submission send, kept until reconciled. `tasks` maps each task
+ * coverage key THIS send newly named to its task id, recorded at send time because starting the task removes its wake
+ * (#2154 P2); absent on a receipt written before it existed, which then cannot be resolved on task evidence.
+ */
+interface Ambiguous { state: 'ambiguous'; coverage: string[]; receiver: string; at: number; detail: string; text: string; handle: string; requestId?: string; tasks?: Record<string, string> }
 type Receipt = Delivered | Ambiguous;
 type Receipts = Record<string, Receipt>; // by worker id
 
@@ -135,6 +157,8 @@ function loadReceipts(dir: string): Receipts {
     if (r.state === 'sent') continue;
     if (r.state !== 'ambiguous' || typeof r.detail !== 'string' || typeof r.text !== 'string' || typeof r.handle !== 'string'
       || (r.requestId !== undefined && typeof r.requestId !== 'string')) return bad();
+    if (r.tasks !== undefined && (r.tasks === null || typeof r.tasks !== 'object' || Array.isArray(r.tasks)
+      || !Object.entries(r.tasks).every(([k, v]) => k.startsWith('task:') && r.coverage.includes(k) && typeof v === 'string' && TASK_ID.test(v)))) return bad();
   }
   return parsed as Receipts;
 }
@@ -299,6 +323,28 @@ function ackCovered(cfg: Config, run: Runner, workerId: string, proof: string, c
   return ack(cfg, run, r.proof);
 }
 
+/**
+ * Server evidence that an accepted nudge was delivered: the worker's own channel check after the send, and every
+ * covered task STARTED (or finished) by this worker. Null when the evidence holds, else why it does not; a failed read
+ * is "no evidence", never an error.
+ */
+function deliveryEvidence(cfg: Config, run: Runner, workerId: string, prior: Ambiguous): string | null {
+  let checked: number;
+  try {
+    const v = gql(run, [cfg.hadronCli, 'api', WORKER_CHECK, '-F', `w=${workerId}`, '-F', `a=${cfg.app}`])?.worker?.checkStatus?.lastCheckedAt;
+    checked = typeof v === 'string' ? Date.parse(v) : NaN;
+  } catch (e) { return `the worker's check status is unreadable (${describeError(e)})`; }
+  if (!Number.isFinite(checked) || checked <= prior.at + CHECK_CLOCK_MARGIN_MS) return 'no channel check since the send';
+  // Only the tasks this send newly named need proof; a covered task with no recorded identity (a legacy receipt) holds.
+  if (!prior.tasks && prior.coverage.some((c) => c.startsWith('task:'))) return 'a covered task was not recorded with the send';
+  for (const taskId of Object.values(prior.tasks ?? {})) {
+    let t: any;
+    try { t = gql(run, [cfg.hadronCli, 'api', TASK_STATE, '-F', `t=${taskId}`])?.agentTask; } catch (e) { return `a covered task is unreadable (${describeError(e)})`; }
+    if (!t || !TASK_SEEN.has(t.status) || t.assignee?.kind !== 'WORKER' || t.assignee?.id !== workerId) return 'a covered task is not started by this worker';
+  }
+  return null;
+}
+
 /** Ack one proof; ok only on a real acknowledgement result. */
 function ack(cfg: Config, run: Runner, proof: string): { ok: boolean; text: string } {
   try {
@@ -422,12 +468,16 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
      * draft, a question/menu, unknown input or identity, or a foreign composer always holds. Before the server's
      * deliverAfter nothing is typed; "busy" alone vetoes only until the server's busyDeadline, then stops vetoing.
      */
+    /** One screen read: whether the composer is provably empty (no draft, question/menu or unknown input). */
+    const readComposer = (): { term: Record<string, any> | undefined; agent: string; empty: boolean } => {
+      const term = readScreen(cfg, handle, run);
+      const agent = detail === 'claude' || detail === 'codex' ? detail : (screenAgentFamily(term) ?? '');
+      return { term, agent, empty: promptIsEmptyFromTerm(term, agent)[0] };
+    };
     const safeToType = (): string | null => {
       if (now < deliverAfter) return `before deliverAfter ${new Date(deliverAfter).toISOString()}`;
       const idleNow = isIdle(cfg, handle, IDLE_PROBE_MS, run);
-      const term = readScreen(cfg, handle, run);
-      const agent = detail === 'claude' || detail === 'codex' ? detail : (screenAgentFamily(term) ?? '');
-      const [empty, emptyWhy] = promptIsEmptyFromTerm(term, agent);
+      const { term, agent, empty } = readComposer();
       if (!empty) return 'composer not provably empty';
       if (idleNow) return null;
       const [proof, why] = idleProofAbovePrompt((term?.tail ?? []) as string[], agent);
@@ -441,13 +491,27 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
     if (prior?.state === 'ambiguous') {
       if (!prior.requestId || dry) { log(`${ts} ${name}: an earlier send is unreconciled (${safeDetail(prior.detail)}); not retyped, not acked`); continue; }
       if (prior.receiver !== receiver) { log(`${ts} ${name}: an earlier send is unreconciled for another receiver (${prior.receiver}); held for a human`); continue; }
+      // Reissue by its own id first: a confirmation from Orca settles it.
       const unsafe = safeToType();
-      if (unsafe) { log(`${ts} ${name}: unreconciled request not reissued (held: ${unsafe})`); continue; }
-      const r = submit(cfg, run, prior.handle, prior.text, prior.requestId);
-      if (r.kind !== 'confirmed') { log(`${ts} ${name}: earlier request still unreconciled (${safeDetail(r.detail)}); not retyped, not acked`); continue; }
+      const r = unsafe ? null : submit(cfg, run, prior.handle, prior.text, prior.requestId);
+      let resolved = r?.kind === 'confirmed' ? 'reconciled as delivered' : '';
+      if (!resolved) {
+        // Otherwise only evidence resolves it (#26055): accepted, same receiver (checked above), composer provably empty,
+        // and the worker's own session checked the channel after the send. It types nothing, so busy does not veto it.
+        const why = !(wasAccepted(prior.detail) || (r !== null && wasAccepted(r.detail))) ? 'Orca never reported the input accepted'
+          : !readComposer().empty ? 'composer not provably empty'
+            : deliveryEvidence(cfg, run, id, prior);
+        if (why === null) resolved = 'resolved as delivered on evidence (accepted, composer empty, channel checked after the send)';
+        else {
+          const held = unsafe ? `unreconciled request not reissued (held: ${unsafe})` : `earlier request still unreconciled (${safeDetail(r!.detail)})`;
+          const person = now - prior.at >= NEEDS_PERSON_AFTER_MS ? 'needs a person' : 'not retyped, not acked';
+          log(`${ts} ${name}: ${held}; no delivery evidence yet (${why}); ${person}`);
+          continue;
+        }
+      }
       prior = receipts[id] = { state: 'sent', coverage: prior.coverage, receiver: prior.receiver, at: now };
       saveReceipts(stateDir, receipts);
-      log(`${ts} ${name}: earlier request reconciled as delivered`);
+      log(`${ts} ${name}: earlier request ${resolved}`);
     }
 
     const covered = prior?.state === 'sent' && prior.receiver === receiver ? prior.coverage : [];
@@ -481,6 +545,9 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
     const text = nudgeText([...newTickers], [...newTasks]);
     if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); continue; }
     const coverage = [...new Set([...covered, ...work])].sort();
+    // The task identities this send names, kept on the receipt: the assignment wake is gone once the task starts.
+    const tasks: Record<string, string> = {};
+    for (const t of newWork) if (t.startsWith('task:')) tasks[t] = taskOf.get(t) as string;
 
     // Persist the UNRESOLVED INTENT before anything can be submitted (#2070 LOCAL P2-1). If the process dies, or any later
     // receipt write fails, after Orca took the input, this entry is what stops the next pass from typing the same wake again:
@@ -488,7 +555,7 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
     // intent itself cannot be written, nothing is sent.
     const before = receipts[id];
     const restore = (): void => { if (before) receipts[id] = before; else delete receipts[id]; };
-    receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: 'send intent recorded before submission; outcome unknown', text, handle };
+    receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: 'send intent recorded before submission; outcome unknown', text, handle, tasks };
     try { saveReceipts(stateDir, receipts); } catch (e) {
       restore();
       log(`${ts} ${name}: held (the send intent could not be recorded: ${errno(e)}); nothing sent`);
@@ -505,7 +572,7 @@ export function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log = conso
     }
     if (r.kind === 'uncertain') {
       // Never an ack, never a fresh type: recorded with its request identity so it can be reconciled.
-      receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: r.detail, text, handle, ...(r.requestId ? { requestId: r.requestId } : {}) };
+      receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: r.detail, text, handle, tasks, ...(r.requestId ? { requestId: r.requestId } : {}) };
       try { saveReceipts(stateDir, receipts); } catch (e) { log(`${ts} ${name}: could not update the send record (${errno(e)}); the earlier intent stays and holds the wake`); }
       log(`${ts} ${name}: send not confirmed (${safeDetail(r.detail)}); left for reconciliation`);
       continue;
