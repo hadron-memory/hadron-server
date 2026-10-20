@@ -233,3 +233,44 @@ describe('#2138 §3.2 — channel-check settings', () => {
     await expect(db.$executeRaw`UPDATE apps SET delivery_check_period_seconds = 30 WHERE id = ${appId}`).rejects.toThrow();
   });
 });
+
+describe('#2138 §3.6 — the team pause', () => {
+  const pause = (paused: boolean, c = ctx(manager.id)) => Promise.resolve().then(() => M.setTeamPause({}, { appRef: appId, paused }, c));
+  const flag = async () => (await db.app.findUniqueOrThrow({ where: { id: appId } })).teamPausedAt;
+
+  it('whoever manages the App pauses and resumes; both are idempotent and a repeat keeps the original time', async () => {
+    expect(await flag()).toBeNull();
+    const first = await pause(true);
+    expect(first.teamPausedAt).toBeInstanceOf(Date);
+    await new Promise((r) => setTimeout(r, 15));
+    expect((await pause(true)).teamPausedAt).toEqual(first.teamPausedAt);
+    expect(await pause(false)).toEqual({ teamPausedAt: null });
+    expect(await pause(false)).toEqual({ teamPausedAt: null });
+    expect(await flag()).toBeNull();
+  });
+
+  it('a worker cannot lift it, nor can a plain member, an outsider or an App key', async () => {
+    await pause(true);
+    await code(runAsActor({ workerId, agentId }, () => pause(false)), 'FORBIDDEN');
+    await expect(pause(false, ctx(member.id))).rejects.toThrow();
+    await expect(pause(false, ctx(outsider.id))).rejects.toThrow();
+    expect(await flag()).toBeInstanceOf(Date);
+  });
+
+  it('is separate from the worker\'s own pause: ending the team pause clears no self-pause, and a self-pause does not set the team flag', async () => {
+    const until = new Date(Date.now() + 3600_000);
+    await db.workerWakeSettings.create({ data: { workerId, pausedUntil: until } });
+    expect(await flag()).toBeNull();
+    await pause(true);
+    await pause(false);
+    expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId } })).pausedUntil).toEqual(until);
+  });
+
+  it('is exposed on the App and has an MCP twin', async () => {
+    await pause(true);
+    const { typeDefs } = await import('./typeDefs.js');
+    expect(typeDefs).toContain('teamPausedAt: DateTime');
+    const { TICKER_WRITE_TOOLS } = await import('../../../mcp/tickerTools.js');
+    expect(TICKER_WRITE_TOOLS).toContain('hadron_set_team_pause');
+  });
+});

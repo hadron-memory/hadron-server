@@ -40,6 +40,7 @@ const Q = resolvers.Query as unknown as {
 };
 const M = resolvers.Mutation as unknown as {
   setAppDeliverySettings: Resolver<{ appRef: string; input: unknown }, Row>;
+  setTeamPause: Resolver<{ appRef: string; paused: boolean }, Row>;
   createTicker: Resolver<{ appRef: string; input: Row }, Row>;
   updateTicker: Resolver<{ ref: string; input: Row }, Row>;
   deleteTicker: Resolver<{ ref: string }, boolean>;
@@ -58,7 +59,7 @@ const FW = tickerFieldResolvers.WorkerWakeSettings;
 export const TICKER_WRITE_TOOLS = [
   'hadron_ticker_create', 'hadron_ticker_update', 'hadron_ticker_delete',
   'hadron_ticker_subscribe', 'hadron_ticker_unsubscribe', 'hadron_ack_wakes',
-  'hadron_delivery_settings_set', 'hadron_team_chat_inbox_ack',
+  'hadron_delivery_settings_set', 'hadron_set_team_pause', 'hadron_team_chat_inbox_ack',
   'hadron_isolate_worker', 'hadron_clear_worker_isolation',
 ] as const;
 /**
@@ -202,6 +203,13 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
   }
 
   // #2025: thin over the shared manager transaction; cadence/window changes affect tickers too.
+  server.tool(
+    'hadron_set_team_pause',
+    'Pause or resume the WHOLE TEAM of an App, as whoever manages it (#2138). Separate from each worker\'s own pause: a worker cannot lift it and ending it clears no self-pause. While paused no worker is nudged and every worker\'s check status is PENDING (TEAM_PAUSED). Idempotent.',
+    { appRef: z.string().describe('The App id or URN.'), paused: z.boolean().describe('true pauses the team, false resumes it.'), session: SESSION_WRITE },
+    async ({ appRef, paused, session }) => write('hadron_set_team_pause', session, async (ctx) =>
+      JSON.stringify(await M.setTeamPause({}, { appRef, paused }, ctx))),
+  );
   server.tool(
     'hadron_delivery_settings_get',
     'Read an App’s delivery settings as a participant (cor:agt:080:05). The batching window is also the ticker cadence floor. Standby is not effective until S7.',

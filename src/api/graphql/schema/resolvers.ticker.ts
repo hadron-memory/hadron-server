@@ -617,6 +617,24 @@ export async function writeAppSettings(
   }, { lockMode: 'exclusive' });
 }
 
+/**
+ * #2138 §3.6 — the TEAM pause: a flag on the App, separate from every worker's own `pausedUntil`. Whoever manages the App
+ * sets or clears it; a worker (whose session is the acting principal) cannot lift it, and ending it never touches a
+ * self-pause. Idempotent: pausing an already-paused team keeps the original time, clearing an unpaused team is a no-op.
+ */
+export async function writeTeamPause(ctx: Context, appRef: string, paused: boolean) {
+  const { app, actor } = await resolveParticipatedApp(ctx, appRef);
+  return writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
+    if (!(await actorManagesApp(txCtx, fresh, actor))) {
+      throw taskError('FORBIDDEN', 'Only whoever manages this App can pause or resume the team.');
+    }
+    const cur = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: { teamPausedAt: true } });
+    if (paused && !cur.teamPausedAt) await tx.app.update({ where: { id: fresh.id }, data: { teamPausedAt: new Date() } });
+    if (!paused && cur.teamPausedAt) await tx.app.update({ where: { id: fresh.id }, data: { teamPausedAt: null } });
+    return { teamPausedAt: (await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: { teamPausedAt: true } })).teamPausedAt };
+  }, { lockMode: 'exclusive' });
+}
+
 // ── Settings projections ──────────────────────────────────────────────────
 
 async function settingsOut(db: Pick<Context['db'], 'app' | 'worker'>, appId: string) {
