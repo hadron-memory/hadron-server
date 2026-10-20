@@ -1,6 +1,7 @@
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
+import { servedPromptOwnerFields, servedPromptTypeResolvers } from './resolvers.servedPrompt.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // typeResolvers — GraphQL type-level field resolvers extracted from resolvers.ts
@@ -823,6 +824,10 @@ function lastEventAtBatched(ctx: Context, sessionId: string): Promise<Date | nul
 }
 
 export const typeResolvers = {
+  ...servedPromptTypeResolvers,
+  Chat: {
+    servedPrompts: servedPromptOwnerFields.chatServedPrompts,
+  },
   McpServer: {
     // headersEncrypted is not in the GraphQL type at all; readers get only
     // this boolean (write-only secret posture, same as tool-held tokens).
@@ -1112,6 +1117,8 @@ export const typeResolvers = {
       resolveRevisionEditor(ctx, [nv.approvedBy]),
   },
   AppRun: {
+    /** #2047: the run's record, self-authorized (the run read gate). */
+    servedPrompt: servedPromptOwnerFields.runServedPrompt,
     /**
      * Spec 049 Phase 3b — the run's scope as the CALLER may read it: the mint
      * snapshot ∩ the caller's current access (a lens never grants), or null
@@ -1886,6 +1893,8 @@ export const typeResolvers = {
     },
   },
   Session: {
+    /** #2047: a bind's record, self-authorized (worker internals). */
+    servedPrompts: servedPromptOwnerFields.sessionServedPrompts,
     /** #1156 / cor:dmo:070:05: no new read gate; the parent Session is authorized. */
     endReason: sessionEndReason,
     /** #1645: nested events inherit current session and memory read boundaries. */

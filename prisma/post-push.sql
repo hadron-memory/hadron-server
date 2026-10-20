@@ -718,3 +718,7 @@ CREATE TRIGGER user_deletion_audits_immutable
 
 -- #1162: newly introduced typed Worker/session references fence hard deletion.
 \ir worker-reference-invariants.sql
+
+-- #2047: the served-prompt record — one owner, owner-consistent identity, immutable, deleted only with its owner. After
+-- the #1162 fence file: it puts the record's worker/session columns under that fence function.
+\ir served-prompt-invariants.sql
