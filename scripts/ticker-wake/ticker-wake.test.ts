@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Config, Runner } from '../orca-attention-router/router.js';
 import { buildSchema, parse, validate } from 'graphql';
 import { typeDefs } from '../../src/api/graphql/schema/typeDefs.js';
-import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync } from './ticker-wake.js';
+import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, SUBSCRIBERS, SUBSCRIBERS_PAGE, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync } from './ticker-wake.js';
 import type { RunResult } from '../orca-attention-router/router.js';
 
 const RULE = '─'.repeat(112);
@@ -61,6 +61,11 @@ interface Fake {
   /** Bare `--enter` sends (no --text), by terminal handle (#2138 stranded drafts). */
   enters: string[];
   enterReply: (() => string) | null;
+  /** #2138: the App's live tickers, each with its subscriber pages ([[{id,name}...], ...]). */
+  tickers: Array<{ id: string; pages: Array<Array<{ id: string; name: string }>> }>;
+  subscribersError: string | null;
+  /** Terminals listed besides term_a. */
+  extraTerminals: any[];
 }
 
 let dir: string;
@@ -73,7 +78,11 @@ function fake(): Fake {
     dueQueries: [], pages: 0, alwaysMore: false, ackReply: null, sendReply: null, dueError: null,
     incarnation: 'inc-1', retries: [], retryReply: null, run: undefined as any,
     lastCheckedAt: null, tasks: {}, evidenceQueries: [], checkError: null, enters: [], enterReply: null,
+    tickers: [], subscribersError: null, extraTerminals: [],
   };
+  const subPage = (t: { pages: Array<Array<{ id: string; name: string }>> }, i: number) => ({
+    items: (t.pages[i] ?? []).map((w) => ({ worker: w })), hasNextPage: i + 1 < t.pages.length, endCursor: i + 1 < t.pages.length ? `p${i + 1}` : null,
+  });
   const fArg = (argv: string[], k: string): string | undefined => argv.find((a, i) => argv[i - 1] === '-F' && a.startsWith(`${k}=`))?.slice(k.length + 1);
   f.run = (argv) => {
     const out = (o: unknown) => ({ code: 0, stdout: JSON.stringify(o), stderr: '' });
@@ -84,6 +93,14 @@ function fake(): Fake {
         const proofs = JSON.parse(argv[argv.indexOf('-F') + 1].replace(/^p=/, ''));
         f.acked.push(...proofs);
         return out({ data: { acknowledgeWakes: { acknowledged: proofs.length, unchanged: 0 } } });
+      }
+      if (q.includes('tickers(appRef')) {
+        if (f.subscribersError) return out({ errors: [{ message: f.subscribersError, extensions: { code: 'INTERNAL_SERVER_ERROR' } }] });
+        return out({ data: { tickers: f.tickers.map((t) => ({ id: t.id, subscribers: subPage(t, 0) })) } });
+      }
+      if (q.includes('ticker(ref')) {
+        const t = f.tickers.find((x) => x.id === fArg(argv, 't'));
+        return out({ data: { ticker: t ? { subscribers: subPage(t, Number((fArg(argv, 'p') ?? 'p0').slice(1))) } : null } });
       }
       if (q.includes('checkStatus')) {
         f.evidenceQueries.push(`worker ${fArg(argv, 'w')}`);
@@ -104,7 +121,7 @@ function fake(): Fake {
     }
     if (argv[0] === 'orca' && argv[1] === 'terminal') {
       if (argv[2] === 'list') {
-        return out({ ok: true, result: { terminals: [{ handle: 'term_a', incarnationId: f.incarnation, worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }] } });
+        return out({ ok: true, result: { terminals: [{ handle: 'term_a', incarnationId: f.incarnation, worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }, ...f.extraTerminals] } });
       }
       if (argv[2] === 'wait') return out({ ok: f.idle, result: { wait: { satisfied: f.idle } }, error: f.idle ? undefined : { code: 'timeout' } });
       if (argv[2] === 'read') return out({ ok: true, result: { terminal: f.screen } });
@@ -228,12 +245,13 @@ describe('selection and delivery', () => {
     expect(f.acked).toEqual([joined]); // its tick coverage is fully covered by the confirmed receipt
   });
 
-  it('a worker not on the roster is skipped without an ack', async () => {
+  it('a worker with no roster row and no binding on this host is held without an ack, and logged unreachable', async () => {
     f.wakes = [wake('w-other', 'Zed', [TICK])];
     await go();
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
-    expect(log()).toContain('Zed: not on roster');
+    expect(log()).toContain('Zed: held (no binding on this host)');
+    expect(log()).toContain('unreachable on this host (1): Zed (no binding)');
   });
 
   it('a proof whose tick coverage cannot be decoded is held', async () => {
@@ -1284,7 +1302,7 @@ describe('#2138 experiment: a pass must fit inside one cadence', () => {
     await pass(cfg(), run, { now: c.now, budgetMs: 4_000 }, (l) => lines.push(l));
     expect(f.sent).toHaveLength(1); // Ada, the older one
     expect(f.acked).toHaveLength(1);
-    expect(log()).not.toContain('Bob: not on roster');
+    expect(log()).not.toContain('Bob: held');
     expect(log()).toMatch(/1 due wake\(s\) left for the next pass/);
   });
 
@@ -1902,5 +1920,83 @@ describe('#2138: a pass does not pay the turn-start wait per send (bounded concu
     expect(await main(['once'], { load: cfg, run: f.run, log: (l: string) => lines.push(l), sleep: async () => {} })).toBe(0);
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toHaveLength(1);
+  });
+});
+
+describe('#2138: the roster comes from the ticker\'s subscribers and this host\'s bound terminals (Hugo #26221)', () => {
+  /** A worktree under `dir` bound (CLI binding file) to `workerId`, with a live agent terminal `handle` listed by Orca. */
+  const bound = (slug: string, workerId: string | null, handle = `term_${slug}`, live = true) => {
+    const wt = join(dir, slug);
+    mkdirSync(join(wt, '.git'), { recursive: true });
+    if (workerId) writeFileSync(join(wt, '.git', 'hadron-team-session.json'), JSON.stringify({ workerName: slug, workerId }));
+    f.extraTerminals.push({ handle, incarnationId: 'inc-1', worktreePath: wt, connected: live, writable: true, agentIdentity: 'claude' });
+    return wt;
+  };
+  const sub = (id: string, name: string) => ({ id, name });
+
+  it('a subscriber missing from the hand-kept roster file is delivered through its bound terminal', async () => {
+    bound('bo', 'w-bo');
+    f.tickers = [{ id: 'T', pages: [[sub('w-ada', 'Ada'), sub('w-bo', 'Bo')]] }];
+    f.wakes = [wake('w-bo', 'Bo', [TICK])];
+    await go();
+    expect(f.sent).toEqual([nudgeText(['coordinator-tick'], [])]);
+    expect(f.acked).toHaveLength(1);
+    expect(log()).not.toContain('unreachable');
+  });
+
+  it('a task wake for a bound worker that subscribes to nothing is still delivered', async () => {
+    bound('cy', 'w-cy');
+    f.wakes = [wake('w-cy', 'Cy', [task('t1')], proof([], 'x', [taskEntry('t1')]))];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toHaveLength(1);
+  });
+
+  it("logs every subscriber it cannot reach, once per pass, with the reason, even with nothing due (today's six)", async () => {
+    bound('pia', 'w-pia', 'term_pia', false); // bound, but its only terminal is disconnected
+    bound('loose', null); // a terminal in an unbound worktree reaches nobody
+    const six = ['Bo', 'Calvin', 'Cody', 'Mira', 'Pia', 'Udo'];
+    f.tickers = [
+      { id: 'T', pages: [[sub('w-ada', 'Ada'), ...six.slice(0, 3).map((n) => sub(`w-${n.toLowerCase()}`, n))]] },
+      { id: 'U', pages: [six.slice(3).map((n) => sub(`w-${n.toLowerCase()}`, n)), [sub('w-bo', 'Bo')]] }, // a second page, Bo twice
+    ];
+    await go();
+    const unreachable = lines.filter((l) => l.includes('unreachable on this host'));
+    expect(unreachable).toHaveLength(1);
+    expect(unreachable[0]).toContain('unreachable on this host (6): Bo (no binding), Calvin (no binding), Cody (no binding), Mira (no binding), Pia (no terminal), Udo (no binding)');
+    expect(unreachable[0]).not.toContain('Ada');
+  });
+
+  it('a worker bound in two worktrees on this host is not guessed at: held, and logged', async () => {
+    bound('d1', 'w-dup');
+    bound('d2', 'w-dup');
+    f.wakes = [wake('w-dup', 'Dup', [TICK])];
+    await go();
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('Dup (no binding (bound in 2 worktrees))');
+  });
+
+  it('the roster file still overrides: its row decides the worktree and pin for that worker', async () => {
+    bound('ada2', 'w-ada'); // a second worktree bound to Ada would be ambiguous, but the file row names one
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toHaveLength(1);
+  });
+
+  it('an unreadable subscriber list stops the pass: nothing typed, nothing acked', async () => {
+    f.subscribersError = 'down';
+    bound('bo', 'w-bo');
+    f.wakes = [wake('w-bo', 'Bo', [TICK])];
+    await expect(go()).rejects.toThrow('graphql error INTERNAL_SERVER_ERROR');
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+  });
+
+  it('the subscriber reads validate against the server SDL', () => {
+    const schema = buildSchema(typeDefs);
+    expect(validate(schema, parse(SUBSCRIBERS)).map((e) => e.message)).toEqual([]);
+    expect(validate(schema, parse(SUBSCRIBERS_PAGE)).map((e) => e.message)).toEqual([]);
   });
 });
