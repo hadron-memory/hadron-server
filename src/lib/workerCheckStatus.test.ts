@@ -82,17 +82,19 @@ describe('PENDING, with its reason', () => {
     });
   });
 
-  it('PAUSED by a team pause, separate from the worker\'s own pause', () => {
-    expect(derive({ teamPaused: true, lastCheckedAt: ago(5 * 60 * MIN) })).toMatchObject({ status: 'PENDING', pendingReason: 'PAUSED' });
+  it('TEAM_PAUSED by a team pause, separate from the worker\'s own pause', () => {
+    expect(derive({ teamPaused: true, lastCheckedAt: ago(5 * 60 * MIN) })).toMatchObject({ status: 'PENDING', pendingReason: 'TEAM_PAUSED' });
   });
 
   it('ISOLATED, even with a task', () => {
     expect(derive({ isolated: true, lastCheckedAt: ago(5 * 60 * MIN) })).toMatchObject({ status: 'PENDING', pendingReason: 'ISOLATED' });
   });
 
-  it('precedence: PAUSED over ISOLATED over STANDBY over NO_TASK', () => {
+  it('precedence: TEAM_PAUSED over PAUSED over ISOLATED over STANDBY over NO_TASK', () => {
     const idle = { hasTask: false, lastAssignedAt: null };
-    expect(derive({ ...idle, teamPaused: true, isolated: true, standby: true }).pendingReason).toBe('PAUSED');
+    const selfPause = { pausedUntil: new Date(now.getTime() + MIN) };
+    expect(derive({ ...idle, ...selfPause, teamPaused: true, isolated: true, standby: true }).pendingReason).toBe('TEAM_PAUSED');
+    expect(derive({ ...idle, ...selfPause, isolated: true, standby: true }).pendingReason).toBe('PAUSED');
     expect(derive({ ...idle, isolated: true, standby: true }).pendingReason).toBe('ISOLATED');
     expect(derive({ ...idle, standby: true }).pendingReason).toBe('STANDBY');
   });

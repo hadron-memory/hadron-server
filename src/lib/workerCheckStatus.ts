@@ -4,8 +4,8 @@
  * status only (the alarm on it is deferred).
  *
  * - `NO_SESSION`: no live session (cor:agt:020:11, the shared `isSessionLive`).
- * - `PENDING`: not expected to check, with its reason: paused (its own pause or
- *   a team pause), isolated, on standby, or no task.
+ * - `PENDING`: not expected to check, with its reason: a team pause, its own
+ *   pause, isolated, on standby, or no task.
  * - `OK`: has a task and checked within `failedChecksToOverdue` × period + 5 minutes.
  * - `OVERDUE`: has a task and hasn't checked for longer than that.
  *
@@ -28,11 +28,11 @@ import { workerStandby } from './tickers/standby.js';
 type Db = PrismaClient | Prisma.TransactionClient;
 
 export type WorkerCheckState = 'NO_SESSION' | 'PENDING' | 'OK' | 'OVERDUE';
-export type WorkerCheckPendingReason = 'PAUSED' | 'ISOLATED' | 'STANDBY' | 'NO_TASK';
+export type WorkerPendingReason = 'TEAM_PAUSED' | 'PAUSED' | 'ISOLATED' | 'STANDBY' | 'NO_TASK';
 
 export type WorkerCheckStatus = {
   status: WorkerCheckState;
-  pendingReason: WorkerCheckPendingReason | null;
+  pendingReason: WorkerPendingReason | null;
   /** When it last checked the App's team channel through its own session; null if never. */
   lastCheckedAt: Date | null;
 };
@@ -64,18 +64,20 @@ export function overdueAfterMs(s: CheckSettings): number {
 
 /**
  * The status from its inputs. Precedence: NO_SESSION, then PENDING reasons in
- * the order paused, isolated, standby, no task, then OK or OVERDUE. OK holds at
+ * the order team paused (a worker can't lift it), its own pause, isolated,
+ * standby, no task, then OK or OVERDUE. OK holds at
  * exactly the limit; OVERDUE starts one millisecond after it.
  */
 export function deriveWorkerCheckStatus(i: WorkerCheckInputs, s: CheckSettings, now: Date): WorkerCheckStatus {
-  const out = (status: WorkerCheckState, pendingReason: WorkerCheckPendingReason | null = null): WorkerCheckStatus => ({
+  const out = (status: WorkerCheckState, pendingReason: WorkerPendingReason | null = null): WorkerCheckStatus => ({
     status,
     pendingReason,
     lastCheckedAt: i.lastCheckedAt,
   });
   if (!i.liveSessionStartedAt) return out('NO_SESSION');
   const selfPaused = i.pausedUntil !== null && i.pausedUntil.getTime() > now.getTime();
-  if (selfPaused || i.teamPaused) return out('PENDING', 'PAUSED');
+  if (i.teamPaused) return out('PENDING', 'TEAM_PAUSED');
+  if (selfPaused) return out('PENDING', 'PAUSED');
   if (i.isolated) return out('PENDING', 'ISOLATED');
   if (!i.hasTask) return out('PENDING', i.standby ? 'STANDBY' : 'NO_TASK');
 
@@ -173,7 +175,7 @@ export async function loadWorkerCheckStatuses(
   return out;
 }
 
-const reasonWords = (r: WorkerCheckPendingReason): string => r.toLowerCase().replace(/_/g, ' ');
+const reasonWords = (r: WorkerPendingReason): string => r.toLowerCase().replace(/_/g, ' ');
 
 /** The short form for a roster line: `check OK`, `check PENDING (no task)`. */
 export function renderCheckStatusShort(s: WorkerCheckStatus): string {

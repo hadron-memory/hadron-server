@@ -12765,9 +12765,11 @@ export const typeDefs = `#graphql
     OVERDUE
   }
 
-  "#2138 §3.4 — why a worker is PENDING. Precedence: PAUSED, ISOLATED, STANDBY, NO_TASK."
-  enum WorkerCheckPendingReason {
-    "Its own pause (pausedUntil) or a team pause is in force."
+  "#2138 §3.4 — why a worker is PENDING. Precedence: TEAM_PAUSED, PAUSED, ISOLATED, STANDBY, NO_TASK."
+  enum WorkerPendingReason {
+    "A team pause is in force (App.teamPausedAt); the worker can't lift it."
+    TEAM_PAUSED
+    "Its own pause (pausedUntil) is in force."
     PAUSED
     "In isolation (unreachable until isolation is built)."
     ISOLATED
@@ -12786,7 +12788,7 @@ export const typeDefs = `#graphql
   type WorkerCheckStatus {
     status: WorkerCheckState!
     "Set only when status is PENDING."
-    pendingReason: WorkerCheckPendingReason
+    pendingReason: WorkerPendingReason
     "When it last checked the App's team channel through its own session; null if never."
     lastCheckedAt: DateTime
   }

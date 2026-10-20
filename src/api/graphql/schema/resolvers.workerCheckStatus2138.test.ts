@@ -160,7 +160,7 @@ describe('the status on the roster and on worker get (they agree)', () => {
     expect((await rosterStatus('Kit')).status).toBe('OVERDUE'); // 15 min > 11 min
   });
 
-  it('PENDING PAUSED by the worker\'s own pause, and by a team pause', async () => {
+  it('PENDING PAUSED by the worker\'s own pause, TEAM_PAUSED by a team pause', async () => {
     await bind('Kit', 300);
     await assign('Kit', 200);
     await checked('Kit', teamChannel.id, 90);
@@ -169,8 +169,8 @@ describe('the status on the roster and on worker get (they agree)', () => {
     await db.workerWakeSettings.update({ where: { workerId: w.Kit.id }, data: { pausedUntil: null } });
     expect((await rosterStatus('Kit')).status).toBe('OVERDUE');
     await db.app.update({ where: { id: app.id }, data: { teamPausedAt: ago(10) } });
-    expect(await rosterStatus('Kit')).toMatchObject({ status: 'PENDING', pendingReason: 'PAUSED' });
-    expect(await workerStatus('Kit')).toMatchObject({ status: 'PENDING', pendingReason: 'PAUSED' });
+    expect(await rosterStatus('Kit')).toMatchObject({ status: 'PENDING', pendingReason: 'TEAM_PAUSED' });
+    expect(await workerStatus('Kit')).toMatchObject({ status: 'PENDING', pendingReason: 'TEAM_PAUSED' });
   });
 });
 
