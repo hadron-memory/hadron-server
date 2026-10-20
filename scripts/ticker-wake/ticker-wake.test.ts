@@ -29,7 +29,7 @@ const NO_ID_ACCEPTED = { ok: true, result: { send: { accepted: true, prompt: { s
 const ACCEPTED_ONLY = { ok: true, result: { send: { accepted: true, prompt: { requestId: 'r1', stages: ['input_accepted'] } } } };
 
 /** A proof whose payload carries the given ticks ("T:k"), like the server's (opaque to everything else). */
-const proof = (ticks: string[], salt = 'x', tasks: Array<{ eventId: string; chainIndex: number }> = []) =>
+const proof = (ticks: string[], salt: string | number = 'x', tasks: Array<{ eventId: string; chainIndex: number }> = []) =>
   `${Buffer.from(JSON.stringify({ ticks: ticks.map((t) => ({ tickerId: t.split(':')[0], k: Number(t.split(':')[1]) })), tasks, issuedAt: salt })).toString('base64url')}.sig`;
 
 interface Fake {
@@ -1118,5 +1118,118 @@ describe('diagnostics never carry a proof, typed text or a server message (P2-2)
     expect(f.sent).toEqual([]);
     expect(log()).toContain('held');
     clean();
+  });
+});
+
+describe('#2138 experiment: a pass must fit inside one cadence', () => {
+  const T0 = Date.parse('2026-10-20T06:00:00.000Z');
+  const timed = (anchorMs: number) => ({ anchorAt: iso(anchorMs), deliverAfter: iso(anchorMs), busyDeadline: iso(anchorMs + 3_600_000) });
+  /** A clock that returns `t` and lets a fake call move it. */
+  const clock = () => { const c = { t: T0, now: () => c.t }; return c; };
+
+  it('a busy terminal is probed, never waited on: tui-idle is asked with a short timeout, not busyWaitMs', () => {
+    const waits: string[] = [];
+    const run: Runner = (argv) => { if (argv[1] === 'terminal' && argv[2] === 'wait') waits.push(argv[argv.indexOf('--timeout-ms') + 1]); return f.run(argv); };
+    f.idle = false;
+    f.screen = { source: 'screen', tail: ['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'] };
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    pass({ ...cfg(), busyWaitMs: 60_000 }, run, {}, (l) => lines.push(l));
+    expect(waits.length).toBeGreaterThan(0);
+    for (const w of waits) expect(Number(w)).toBeLessThanOrEqual(1000);
+    expect(f.sent).toEqual([]);
+    expect(log()).toContain('busy until the server');
+  });
+
+  it('a pass stops starting deliveries once its budget is spent, and leaves the rest for the next pass', () => {
+    const c = clock();
+    const run: Runner = (argv) => { if (argv[2]?.includes?.('dueWakes')) c.t += 2_000; return f.run(argv); };
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timed(T0 - 600_000))];
+    pass(cfg(), run, { now: c.now, budgetMs: 1_000 }, (l) => lines.push(l));
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+    expect(log()).toMatch(/budget spent; 1 due wake\(s\) left for the next pass/);
+  });
+
+  it('the oldest wake is served first, so a spent budget never starves the same workers', () => {
+    const c = clock();
+    const run: Runner = (argv) => { if (argv[2] === 'send') c.t += 5_000; return f.run(argv); };
+    f.wakes = [
+      wake('w-bob', 'Bob', [TICK], proof(['T:2']), [], timed(T0 - 60_000)), // newer, listed first by the server
+      wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timed(T0 - 600_000)),
+    ];
+    pass(cfg(), run, { now: c.now, budgetMs: 4_000 }, (l) => lines.push(l));
+    expect(f.sent).toHaveLength(1); // Ada, the older one
+    expect(f.acked).toHaveLength(1);
+    expect(log()).not.toContain('Bob: not on roster');
+    expect(log()).toMatch(/1 due wake\(s\) left for the next pass/);
+  });
+
+  it('a stale proof at ack time is re-fetched and the fresh proof acked when the receipt covers it', () => {
+    const fresh = proof(['T:1'], 'fresh');
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'old'))];
+    let calls = 0;
+    f.ackReply = () => {
+      calls++;
+      if (calls === 1) { f.wakes = [wake('w-ada', 'Ada', [TICK], fresh)]; return { errors: [{ message: 'too old', extensions: { code: 'WAKE_PROOF_STALE' } }] }; }
+      return { data: { acknowledgeWakes: { acknowledged: 1, unchanged: 0 } } };
+    };
+    const acks: string[] = [];
+    const run: Runner = (argv) => { if (argv[0] === 'hadron' && argv[2].includes('acknowledgeWakes')) acks.push(JSON.parse(argv[argv.indexOf('-F') + 1].slice(2))[0]); return f.run(argv); };
+    pass(cfg(), run, {}, (l) => lines.push(l));
+    expect(f.sent).toHaveLength(1);
+    expect(acks).toHaveLength(2);
+    expect(acks[0]).not.toBe(fresh);
+    expect(acks[1]).toBe(fresh);
+    expect(log()).toContain('acked');
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))).toEqual({});
+  });
+
+  it('a re-fetched proof that carries NEW work is not acked: the receipt stays and the next pass names only the new work', () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'old'))];
+    f.ackReply = () => {
+      f.wakes = [wake('w-ada', 'Ada', [TICK, TICK2], proof(['T:1', 'U:1'], 'fresh'))];
+      return { errors: [{ message: 'too old', extensions: { code: 'WAKE_PROOF_STALE' } }] };
+    };
+    go();
+    expect(f.sent).toHaveLength(1);
+    expect(log()).toMatch(/fresh proof carries new work/);
+    expect(JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada']).toMatchObject({ state: 'sent', coverage: ['T:1'] });
+    f.ackReply = null;
+    lines = [];
+    go();
+    expect(f.sent).toHaveLength(2);
+    expect(f.sent[1]).toContain('eden-queue-tick');
+    expect(f.sent[1]).not.toContain('coordinator-tick');
+  });
+
+  it('a proof near the end of its life is refreshed BEFORE the ack, so the old proof is never sent to the server', () => {
+    const c = clock();
+    const old = proof(['T:1'], T0 - 11 * 60_000);
+    const fresh = proof(['T:1'], T0);
+    f.wakes = [wake('w-ada', 'Ada', [TICK], old, [], timed(T0 - 600_000))];
+    const run: Runner = (argv) => { if (argv[2] === 'send') f.wakes = [wake('w-ada', 'Ada', [TICK], fresh, [], timed(T0 - 600_000))]; return f.run(argv); };
+    pass(cfg(), run, { now: c.now }, (l) => lines.push(l));
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toEqual([fresh]);
+  });
+
+  it('--budget is accepted by once and loop; a bad value, or a loop budget longer than the interval, is a usage error', async () => {
+    const deps = { load: cfg, run: f.run, log: (l: string) => lines.push(l), sleep: async () => {} };
+    expect(await main(['once', '--budget', '30'], deps)).toBe(0);
+    expect(await main(['loop', '--interval', '60', '--budget', '30'], { ...deps, maxPasses: 1 })).toBe(0);
+    for (const argv of [['once', '--budget', 'x'], ['once', '--budget', '5'], ['once', '--budget'], ['loop', '--interval', '20', '--budget', '30']]) {
+      expect(await main(argv, deps)).toBe(2);
+    }
+  });
+
+  it('the loop keeps fixed slots: a pass that overruns its slot skips the missed slots (logged) instead of running back to back', async () => {
+    const c = clock();
+    const sleeps: number[] = [];
+    const run: Runner = (argv) => { if (argv[2]?.includes?.('dueWakes')) c.t += 25_000; return f.run(argv); };
+    const deps = { load: cfg, run, log: (l: string) => lines.push(l), now: c.now, maxPasses: 2,
+      sleep: async (ms: number) => { sleeps.push(ms); c.t += ms; } };
+    expect(await main(['loop', '--interval', '10'], deps)).toBe(0);
+    expect(sleeps).toEqual([5_000]); // pass 1 ran 0..25 s: slots at 10 s and 20 s are skipped, the next pass starts at 30 s
+    expect(log()).toMatch(/overran its slot; skipped 2 slot\(s\)/);
   });
 });
