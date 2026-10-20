@@ -262,35 +262,86 @@ describe('selection and delivery', () => {
 });
 
 describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
-  /** The read and the mark-read a nudge must name (Yuri #26114: Codex turns read with their own --since and never marked read). */
-  const READ = '`hadron team chat read --mentions-me` (no --since; it prints your read mark and the channel head)';
-  const MARK = '`hadron team chat mark-read --through <that channel head>`';
-  const ordered = (text: string, parts: string[]) => {
-    const at = parts.map((p) => text.indexOf(p));
-    expect(at.every((i) => i >= 0)).toBe(true);
-    expect([...at].sort((a, b) => a - b)).toEqual(at);
-  };
+  /** The reads and the mark-read a nudge must name (Yuri #26114; George's #2156 P2: a cursorless read is the newest page only). */
+  const PROBE = '`hadron team chat read --mentions-me --limit 1` (it prints `cursor #C; channel head #H`)';
+  const FULL = '`hadron team chat read --mentions-me --since C --all`';
+  const MARK = 'only if that read succeeded, run `hadron team chat mark-read --through H` with the H that read printed';
+  const CHECK = `run ${PROBE}, then ${FULL} and act on the tagged messages it returns; ${MARK}`;
 
-  it('a tick nudge names the exact commands, in order: read tagged from your read mark, act, mark-read, end your turn (pinned text)', async () => {
+  /**
+   * A worker that follows the nudge's commands literally, against the read semantics of the released CLI v0.26.0
+   * (8c428a7, internal/cmd/team/chat.go): the read-state line (cursor, head) is sampled BEFORE the fetch; with no
+   * --since/--all it is a tail read of the newest `--limit` (default 200) matching messages; `--since N --all` walks
+   * 200-message pages forward from N until a short page, and any failed page fails the whole command before output.
+   * `C` resolves to the printed cursor, `H` to the head printed by the latest read; a conditional mark is skipped when
+   * that read failed. Returns the seqs it saw and the seq it marked read through (null: no mark).
+   */
+  const follow = (nudge: string, chat: { cursor: number; head: number; tagged: number[] }, failFullRead = false) => {
+    const cmds = [...nudge.matchAll(/`(hadron team chat [^`]+)`/g)].map((m) => m[1].split(/\s+/).slice(3));
+    const seen = new Set<number>();
+    let printed: { cursor: number; head: number } | null = null;
+    let lastOk = false;
+    let marked: number | null = null;
+    const tagged = chat.tagged.filter((t) => t <= chat.head).sort((a, b) => a - b);
+    for (const a of cmds) {
+      const flag = (k: string): string | undefined => (a.includes(k) ? a[a.indexOf(k) + 1] : undefined);
+      if (a[0] === 'read') {
+        printed = { cursor: chat.cursor, head: chat.head };
+        const sinceArg = flag('--since');
+        const since = sinceArg === undefined ? undefined : sinceArg === 'C' ? printed.cursor : Number(sinceArg);
+        const limit = Number(flag('--limit') ?? 200);
+        if (a.includes('--all') && failFullRead) { lastOk = false; continue; }
+        const page = since === undefined ? tagged.slice(-limit)
+          : a.includes('--all') ? tagged.filter((t) => t > since) : tagged.filter((t) => t > since).slice(0, limit);
+        page.forEach((t) => seen.add(t));
+        lastOk = true;
+      } else if (a[0] === 'mark-read') {
+        if (nudge.includes('only if that read succeeded') && !lastOk) continue;
+        const through = flag('--through');
+        marked = through === 'H' || through?.startsWith('<') ? (printed?.head ?? null) : Number(through); // any placeholder names the printed head
+      }
+    }
+    return { seen, marked };
+  };
+  /** Nothing tagged at or below the mark was left unseen. */
+  const noGap = (chat: { cursor: number; tagged: number[] }, r: { seen: Set<number>; marked: number | null }) =>
+    r.marked === null || chat.tagged.filter((t) => t > chat.cursor && t <= (r.marked as number)).every((t) => r.seen.has(t));
+
+  it("George's #2156 fixture: cursor 0, head 201, 201 tagged messages; following the nudge marks nothing read unseen", () => {
+    const chat = { cursor: 0, head: 201, tagged: Array.from({ length: 201 }, (_, i) => i + 1) };
+    for (const text of [nudgeText(['coordinator-tick'], []), nudgeText([], ['t1'])]) {
+      const r = follow(text, chat);
+      expect(r.marked).toBe(201);
+      expect(r.seen.has(1)).toBe(true);
+      expect(noGap(chat, r)).toBe(true);
+    }
+  });
+
+  it('a backlog over several pages from a mid-channel cursor is read in full before the mark; an empty one still marks', () => {
+    const big = { cursor: 1_000, head: 1_650, tagged: Array.from({ length: 600 }, (_, i) => 1_001 + i) };
+    expect(noGap(big, follow(nudgeText(['t'], []), big))).toBe(true);
+    const empty = { cursor: 1_000, head: 1_010, tagged: [] };
+    expect(follow(nudgeText(['t'], []), empty).marked).toBe(1_010); // the check is still stamped on an empty read
+  });
+
+  it('a failed full read marks nothing', () => {
+    const chat = { cursor: 0, head: 201, tagged: Array.from({ length: 201 }, (_, i) => i + 1) };
+    expect(follow(nudgeText(['coordinator-tick'], []), chat, true).marked).toBeNull();
+  });
+
+  it('a tick nudge names the exact commands, in order, on one line (pinned text)', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     await go();
-    expect(f.sent).toEqual([
-      `Hadron ticker wake (coordinator-tick): run ${READ}, act on the tagged messages after your mark, run ${MARK}, then end your turn. No unfiltered chat catch-up.`,
-    ]);
-    ordered(f.sent[0], [READ, 'act on the tagged messages', MARK, 'end your turn']);
-    expect(f.sent[0]).not.toMatch(/--since </);
+    expect(f.sent).toEqual([`Hadron ticker wake (coordinator-tick): ${CHECK}; then end your turn. No unfiltered chat catch-up.`]);
     expect(f.sent[0]).not.toContain('\n');
   });
 
-  it('a task nudge names the same read and mark-read, then the task, on one line (pinned text)', () => {
+  it('a task nudge names the same reads and mark, then the task, on one line (pinned text)', () => {
     expect(nudgeText(['coordinator-tick'], ['t1'])).toBe(
-      `Hadron task assigned (t1; ticker coordinator-tick): run ${READ}, act on the tagged messages after your mark, run ${MARK}, then start the task (\`hadron team task get t1\`). No unfiltered chat catch-up.`,
+      `Hadron task assigned (t1; ticker coordinator-tick): ${CHECK}; then start the task (\`hadron team task get t1\`). No unfiltered chat catch-up.`,
     );
     expect(nudgeText([], ['t1', 't2'])).toContain('(`hadron team task list`)');
-    for (const t of [nudgeText(['a'], []), nudgeText([], ['t1']), nudgeText(['a'], ['t1', 't2'])]) {
-      expect(t).not.toContain('\n');
-      ordered(t, [READ, MARK]);
-    }
+    for (const t of [nudgeText(['a'], []), nudgeText([], ['t1']), nudgeText(['a'], ['t1', 't2'])]) expect(t).not.toContain('\n');
   });
 
   it('live-check fires an ordinary TICK reason, so it is nudged and acked like any tick', async () => {
