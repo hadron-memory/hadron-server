@@ -117,6 +117,14 @@ describe('include tags through createNode / updateNode (#2040)', () => {
     expect(await includeEdges('c12')).toEqual([]);
   });
 
+  it('terminates on a stored cycle that does not pass through the writer, and saves', async () => {
+    // x <-> y made directly (a write would refuse it): the walk must not loop.
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'x', name: 'x', content: 'X{{> y}}' } });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'y', name: 'y', content: 'Y{{> x}}' } });
+    expect(await code(create('w', '{{> x}} {{> y}}'))).toBe('NO_ERROR');
+    expect((await includeEdges('w')).map(e => e.target.loc).sort()).toEqual(['x', 'y']);
+  });
+
   it('cycle detection does not depend on tag order (a node already walked on a shallow branch)', async () => {
     await create('s', 'S');
     await create('a', 'A');
