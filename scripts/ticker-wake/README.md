@@ -146,6 +146,34 @@ classify it by hand as below. Residual: a channel check the worker made on its
 own, not because of the nudge, also counts; acking the tick is still true then,
 since the check the tick asks for was done.
 
+### A stranded draft is detected and listed for a person (#2138, Ada #26150)
+
+Sometimes Orca accepts the nudge but its Enter never submits it (Hugo #26131:
+five nudges sat 2 to 7 minutes on idle terminals, then submitted on their own).
+The text stays in the composer, so condition 3 can never hold, and reissuing by
+id does not help: `--retry-request` replays the stored receipt and writes
+nothing (Hugo's host check, #26146).
+
+The script recognises such an entry and **never sends a keystroke** for it. It
+counts as stranded only when ALL of these hold:
+
+1. Conditions 1 and 2 above (accepted under a request id, same receiver).
+2. Orca's composer `draft` equals the entry's recorded `text` exactly
+   (trailing whitespace ignored), and the rest of the composer reads empty.
+3. The terminal is idle (tui-idle or the screen's idle proof).
+4. At least 60 s have passed since the send.
+
+Then `strandedAt` is recorded in `receipts.json` once (never rewritten), and
+the pass logs `stranded draft, <N>s ...; needs a person`. The entry stays
+ambiguous: if the draft submits on its own and the worker checks the channel,
+it resolves on evidence as above. Otherwise a person decides, as below.
+
+Why not press Enter: Orca's bare `--enter` is a raw write bound to neither the
+terminal incarnation nor the expected draft, so a terminal replaced (or typed
+into) between the script's read and the keystroke would get it (George's
+#2157 P2). Automatic submission waits for an Orca conditional submit bound to
+both: `hrn:node:hadronmemory.com:hadron-server:findings:orca-conditional-submit-for-stranded-drafts`.
+
 ## Recovering an ambiguous entry (a human decision)
 
 The script never deletes or rewrites an UNRESOLVED ambiguous entry itself (it only removes a delivered receipt after a successful ack, and withdraws its own intent when Orca says a send was refused and nothing was typed). An entry in `receipts.json` with
