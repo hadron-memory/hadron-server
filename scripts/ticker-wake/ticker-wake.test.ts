@@ -265,7 +265,7 @@ describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
   /** The reads and the mark-read a nudge must name (Yuri #26114; George's #2156 P2: a cursorless read is the newest page only). */
   const PROBE = '`hadron team chat read --mentions-me --limit 1` (it prints `cursor #C; channel head #H`)';
   const FULL = '`hadron team chat read --mentions-me --since C --all`';
-  const MARK = 'only if that read succeeded, run `hadron team chat mark-read --through H` with the H that read printed';
+  const MARK = "only if that read succeeded and you saw all of its output (if your tool truncated or saved it, read the rest first; if you can't, don't mark), run `hadron team chat mark-read --through H` with the H that read printed";
   const CHECK = `run ${PROBE}, then ${FULL} and act on the tagged messages it returns; ${MARK}`;
 
   /**
@@ -274,9 +274,14 @@ describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
    * --since/--all it is a tail read of the newest `--limit` (default 200) matching messages; `--since N --all` walks
    * 200-message pages forward from N until a short page, and any failed page fails the whole command before output.
    * `C` resolves to the printed cursor, `H` to the head printed by the latest read; a conditional mark is skipped when
-   * that read failed. Returns the seqs it saw and the seq it marked read through (null: no mark).
+   * that read failed. `tool` models the worker's host: it may show only the first `shows` messages of the full read's
+   * output (truncated, or saved to a file), and the worker may or may not be able to read the rest; a worker reads the
+   * rest, or holds the mark, only when the nudge tells it to. Returns the seqs it saw and the mark (null: none).
    */
-  const follow = (nudge: string, chat: { cursor: number; head: number; tagged: number[] }, failFullRead = false) => {
+  const follow = (nudge: string, chat: { cursor: number; head: number; tagged: number[] }, failFullRead = false,
+    tool: { shows?: number; canReadRest?: boolean } = {}) => {
+    const toldSeeAll = nudge.includes('you saw all of its output');
+    let sawAll = true;
     const cmds = [...nudge.matchAll(/`(hadron team chat [^`]+)`/g)].map((m) => m[1].split(/\s+/).slice(3));
     const seen = new Set<number>();
     let printed: { cursor: number; head: number } | null = null;
@@ -293,10 +298,14 @@ describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
         if (a.includes('--all') && failFullRead) { lastOk = false; continue; }
         const page = since === undefined ? tagged.slice(-limit)
           : a.includes('--all') ? tagged.filter((t) => t > since) : tagged.filter((t) => t > since).slice(0, limit);
-        page.forEach((t) => seen.add(t));
+        const truncated = a.includes('--all') && tool.shows !== undefined && page.length > tool.shows;
+        const readRest = truncated && toldSeeAll && Boolean(tool.canReadRest);
+        (truncated && !readRest ? page.slice(0, tool.shows) : page).forEach((t) => seen.add(t));
+        sawAll = !truncated || readRest;
         lastOk = true;
       } else if (a[0] === 'mark-read') {
         if (nudge.includes('only if that read succeeded') && !lastOk) continue;
+        if (toldSeeAll && !sawAll) continue;
         const through = flag('--through');
         marked = through === 'H' || through?.startsWith('<') ? (printed?.head ?? null) : Number(through); // any placeholder names the printed head
       }
@@ -322,6 +331,16 @@ describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
     expect(noGap(big, follow(nudgeText(['t'], []), big))).toBe(true);
     const empty = { cursor: 1_000, head: 1_010, tagged: [] };
     expect(follow(nudgeText(['t'], []), empty).marked).toBe(1_010); // the check is still stamped on an empty read
+  });
+
+  it('truncated output: a worker that cannot read the rest marks nothing; one that reads the saved rest marks with no gap', () => {
+    const chat = { cursor: 0, head: 201, tagged: Array.from({ length: 201 }, (_, i) => i + 1) };
+    const cannot = follow(nudgeText(['coordinator-tick'], []), chat, false, { shows: 50, canReadRest: false });
+    expect(cannot.marked).toBeNull();
+    expect(noGap(chat, cannot)).toBe(true);
+    const can = follow(nudgeText(['coordinator-tick'], []), chat, false, { shows: 50, canReadRest: true });
+    expect(can.marked).toBe(201);
+    expect(noGap(chat, can)).toBe(true);
   });
 
   it('a failed full read marks nothing', () => {
