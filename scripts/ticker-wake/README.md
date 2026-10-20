@@ -2,7 +2,8 @@
 
 Interim ticker-wake deliverer for an Orca host (orca1). It reads `dueWakes`,
 types one short nudge into the idle terminal of each roster worker whose wake
-carries a TICK (alone, or joined with a MENTION), and acks the wake by proof. It reuses the attention
+carries a TICK or a task assignment (alone, or joined with a MENTION), and acks
+the wake by proof. It reuses the attention
 router's terminal and idle helpers (`../orca-attention-router/router.ts`,
 including the C1 empty-composer rule) and shares no token, ledger or lock with
 the router. Retire it when hadron-cli#907 (C1, delivery inside the host poller)
@@ -25,16 +26,27 @@ skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
 
 ## Contract
 
+- **Nudge (#2138 §5.2).** One line: check your unread tagged messages (mentions
+  and `@all`, from your read mark), never an unfiltered chat catch-up. A task
+  assignment also names the task (`hadron team task get <id>`, or `task list`
+  for several). A `live-check` ticker fires an ordinary TICK reason, so it is
+  delivered exactly like any tick.
 - **Reasons.** TICK, or TICK joined with MENTION: nudge once, then ack. Since
   #2069 (landed in #2102) a MENTION-only reservation absorbs a later tick, so a
   worker holding an outstanding mention is offered a TICK+MENTION wake; skipping
   it would starve that worker of ticks. Since R53 (#2072) acknowledging a wake
   moves no message mark: it records the tick and spends the reservation, and the
   mention stays unread and due (an S1 batch or `hadron-chat-send` delivers it,
-  never this script). A wake carrying TASK or an unknown reason is left alone,
-  neither nudged nor acked (a proof naming task events records them delivered
-  unseen). A MENTION-only wake is ignored and never acked: there is no
-  mention-ack path.
+  never this script). A TASK reason for an assignment (`ASSIGNED`,
+  `REASSIGNED`, `MATCHED`), alone or joined with ticks or a mention, is nudged
+  once naming the task, then acked; the ack records the task event delivered,
+  which the nudge made true. Task events are covered by the receipt like ticks,
+  so a re-offer never names the same task twice to the same receiver. Any other
+  task event (`ALARM`, `CHILD_FINISHED`, `END_SESSION`), a TASK reason without its
+  task or with an id that is not a plain id, or an unknown reason leaves the
+  whole wake alone, neither nudged nor acked (its proof would record those
+  events delivered unseen). A MENTION-only wake is ignored and never acked:
+  there is no mention-ack path.
 - **Timing (R63).** The server owns it: each wake carries `anchorAt`,
   `deliverAfter` and `busyDeadline` (Liam's seam, hadron-server#2017 (S1)
   branch). Nothing is typed before `deliverAfter`; a busy terminal is held until
