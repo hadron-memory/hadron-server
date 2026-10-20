@@ -173,6 +173,14 @@ describe('R57 own-live-session batches', () => {
     expect(first).toBeInstanceOf(Date);
     expect((await db.channelReadState.findFirstOrThrow({ where: { workerId: kit.id, channelId: channel.id } })).lastSeenSeq).toBe(0);
   });
+  it('#2013 (#2138 §3.7): a stamped @all post reaches the worker\'s inbox', async () => {
+    const s = await ownSession();
+    await say('@all standup moved', { mentions: ['all'], broadcastWakes: true });
+    await db.node.updateMany({ where: { messageChannelId: channel.id }, data: { createdAt: new Date(Date.now() - 3600_000) } }); // past the batching window
+    const page = await selfRead(s);
+    expect(page.batches).toHaveLength(1);
+    expect(page.batches[0].text).toContain('standup moved');
+  });
   it('acks self with worker provenance, session user and no key, and retry changes nothing', async () => {
     const s = await ownSession(); await postForBoth(); const [b] = (await selfRead(s)).batches;
     expect(await selfAck(s, [b.id])).toEqual({ acknowledged: 1, unchanged: 0 });

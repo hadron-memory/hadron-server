@@ -29,6 +29,8 @@ export type ChannelInput = {
   incarnation: number;
   /** The register marks this channel mention-only for the worker. */
   mentionOnly: boolean;
+  /** #2138 §3.1: when the worker last CHECKED this channel (ms), or null/absent when it never has. */
+  lastCheckedAtMs?: number | null;
   /** Messages above both the read position and the delivered-through seq, up to the head. */
   messages: RoutedMessage[];
 };
@@ -118,6 +120,8 @@ export function workerWake(args: {
   subscriptions: SubscriptionInput[];
   /** #1708 — task events the worker is due for. They wake at once, like a mention, whatever the mentions setting. */
   tasks?: TaskWakeInput[];
+  /** #2138 §3.3: the worker is PENDING (not expected to check: no task, standby, isolated, paused): `live-check` is never due. */
+  checkPending?: boolean;
   now: Date;
 }): WorkerWake | null {
   const { workerId, workerTokens, channels, subscriptions, now } = args;
@@ -157,7 +161,17 @@ export function workerWake(args: {
     // #2068 (Holger R49): the ticker's reasons decide whether it fires; any one that holds fires it. Every other tick rule
     // above (schedule, acknowledged tick) still holds. No reasons = never.
     const why = sub.ticker.reasons ?? ['read-team-channel'];
-    if (why.includes('every-tick') || (why.includes('read-team-channel') && any)) {
+    // #2138 §3.3: a worker that CHECKED within the ticker's cadence is not nudged again for it. `read-team-channel` waits for
+    // the next tick (a worst case near twice the period is accepted); `live-check` is the stale-check nudge, whatever is unread,
+    // and never for a PENDING worker. The check is judged on the channels this ticker covers (all the worker's when it names none).
+    const cadenceMs = sub.ticker.cadenceSeconds * 1000;
+    const covered = [...perChannel.values()].filter(({ ch }) => !scope || scope.has(ch.channelId));
+    const fresh = covered.some(({ ch }) => ch.lastCheckedAtMs != null && now.getTime() - ch.lastCheckedAtMs < cadenceMs);
+    if (
+      why.includes('every-tick') ||
+      (why.includes('read-team-channel') && any && !fresh) ||
+      (why.includes('live-check') && !args.checkPending && !fresh)
+    ) {
       reasons.push({ kind: 'TICK', tickerId: sub.ticker.id, k });
       anchors.push(oldestUnackedTickAt(sub.ticker, sub.lastAckedTick, k).getTime());
     }

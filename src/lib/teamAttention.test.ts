@@ -1063,7 +1063,7 @@ describe('#2138 §3.1 — channel checks: lastCheckedAt', () => {
     const first = await checkedAt(worker.id, channel.id);
     expect(first).toBeInstanceOf(Date);
     await db.channelReadState.updateMany({ where: { workerId: worker.id }, data: { lastCheckedAt: new Date('2026-01-01T00:00:00Z') } });
-    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, mentions: 'me' }, userCtx({ sessionId }));
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, mentionsRef: worker.id }, userCtx({ sessionId }));
     expect((await checkedAt(worker.id, channel.id))!.getTime()).toBeGreaterThan(new Date('2026-01-01T00:00:00Z').getTime());
   });
 
@@ -1092,5 +1092,13 @@ describe('#2138 §3.1 — channel checks: lastCheckedAt', () => {
     await M.markOwnTeamChatRead({}, { appRef: app.id, channelRef: other.channel.id, sessionRef: sessionId, seq: 0 }, userCtx());
     expect(await checkedAt(worker.id, other.channel.id)).toBeNull();
     expect(await checkedAt(worker.id, channel.id)).toBeNull();
+  });
+
+  it('#2013: a stamped @all post appears in the worker\'s own mentions read (the mentions-from-mark read)', async () => {
+    const iris = await addWorker('Iris');
+    await post('everyone: standup moved', { authorWorkerId: iris.id, mentions: ['all'], broadcastWakes: true });
+    await post('plain chatter, no tag');
+    const page = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, mentionsRef: worker.id }, userCtx({ sessionId }));
+    expect(page.items.map((m: { seq: number }) => m.seq)).toEqual([1]);
   });
 });

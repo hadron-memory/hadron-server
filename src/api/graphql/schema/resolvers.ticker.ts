@@ -161,7 +161,7 @@ function checkQuietHours(input: unknown): Prisma.InputJsonObject {
 }
 
 /** The closed set of ticker reasons (cor:agt:080:01). Stored kebab-case; the GraphQL enum spells them in capitals. */
-export const TICKER_REASONS = ['read-team-channel', 'every-tick'] as const;
+export const TICKER_REASONS = ['read-team-channel', 'every-tick', 'live-check'] as const;
 function checkReasons(list: unknown): string[] {
   if (!Array.isArray(list) || list.length === 0) throw badInput('reasons must name at least one reason: a ticker with none would never fire.');
   const out = new Set<string>();
@@ -412,7 +412,7 @@ const crudMutations = {
       // subscriber. Each must be one the editor could subscribe at the new terms
       // (cor:agt:080:20, R3); otherwise the edit is a way round the subscribe rule.
       const faster = cadence !== undefined && cadence < t.cadenceSeconds;
-      const wider = (relevance === 'ALL' && t.relevance !== 'ALL') || (reasons !== undefined && reasons.includes('every-tick') && !t.reasons.includes('every-tick'));
+      const wider = (relevance === 'ALL' && t.relevance !== 'ALL') || (reasons !== undefined && (['every-tick', 'live-check'] as const).some((r) => reasons.includes(r) && !t.reasons.includes(r)));
       if (faster || wider) {
         await requireSubscribersCovered(tx, txCtx, fresh, actor, t, cadence ?? t.cadenceSeconds, settings);
       }
