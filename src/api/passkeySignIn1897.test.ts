@@ -8,6 +8,18 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../test/softPasskey.js';
 import { generateId } from '../lib/id.js';
+import * as pendingModule from '../auth/pendingEmailSignIn.js';
+import * as evidenceModule from '../auth/loginEvidence.js';
+
+// Pass-through spies: every call runs the real function unless a test overrides ONE call.
+vi.mock('../auth/pendingEmailSignIn.js', async (orig) => {
+  const real = await orig<typeof import('../auth/pendingEmailSignIn.js')>();
+  return { ...real, completePending: vi.fn(real.completePending) };
+});
+vi.mock('../auth/loginEvidence.js', async (orig) => {
+  const real = await orig<typeof import('../auth/loginEvidence.js')>();
+  return { ...real, verifiedLoginEvidence: vi.fn(real.verifiedLoginEvidence) };
+});
 
 const ORIGIN = 'https://sign.example.test';
 const RP = 'example.test';
@@ -184,7 +196,7 @@ describe('portal continuation, switch on', () => {
     expect(await db.signIn.count()).toBe(0);
   });
 
-  it('a revoked passkey, and a passkey enrolled for another RP, cannot complete', async () => {
+  it('a revoked passkey cannot complete', async () => {
     const { cookie } = await begin();
     const o = await options(cookie!);
     await db.$executeRaw`UPDATE passkey_credentials SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) WHERE id = ${passkeyId}`;
@@ -215,6 +227,55 @@ describe('portal continuation, switch on', () => {
     expect(rs.map((r) => r.status).sort()).toEqual([200, 403]);
     expect(await db.signIn.count()).toBe(1);
     expect(await db.authHandoffCode.count()).toBe(1);
+  });
+
+  it('a refusal after the sign-in was written rolls EVERYTHING back (Andi, Gene: late completePending=false)', async () => {
+    const { cookie } = await begin();
+    const o = await options(cookie!);
+    vi.mocked(pendingModule.completePending).mockResolvedValueOnce(false);
+    const r = await post('/complete', cookie, answer(o));
+    expect(r.status).toBe(403);
+    expect(await r.text()).toBe('{"error":"forbidden"}');
+    // The deciding writes did not commit: no sign-in, no handoff code, the ceremony and counter are untouched,
+    // and the pending flow is still live, so the genuine retry with the same proof succeeds.
+    expect(await db.signIn.count()).toBe(0);
+    expect(await db.authHandoffCode.count()).toBe(0);
+    expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: passkeyId } })).counter).toBe(0n);
+    expect((await db.pendingEmailSignIn.findFirstOrThrow()).completedAt).toBeNull();
+    expect((await post('/complete', cookie, answer(o))).status).toBe(200);
+    expect(await db.signIn.count()).toBe(1);
+  });
+
+  it('reads the login evidence on the transaction, never on the shared pool (Charles: pool starvation)', async () => {
+    const { cookie } = await begin();
+    const o = await options(cookie!);
+    vi.mocked(evidenceModule.verifiedLoginEvidence).mockClear();
+    expect((await post('/complete', cookie, answer(o))).status).toBe(200);
+    const calls = vi.mocked(evidenceModule.verifiedLoginEvidence).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const [client] of calls) expect(client === (db as unknown)).toBe(false);
+  });
+
+  it('options is refused for an unlisted Origin and for an expired flow, like complete', async () => {
+    const { cookie } = await begin();
+    expect((await post('/options', cookie, {}, 'https://evil.example')).status).toBe(403);
+    expect((await post('/options', cookie, {}, null)).status).toBe(403);
+    const pending = await db.pendingEmailSignIn.findFirstOrThrow();
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`);
+      await tx.$executeRaw`UPDATE pending_email_sign_ins SET created_at = created_at - interval '11 minutes', expires_at = expires_at - interval '11 minutes' WHERE id = ${pending.id}`;
+    });
+    expect((await post('/options', cookie)).status).toBe(403);
+  });
+
+  it('a passkey enrolled for another RP ID does not count: the fixed refusal, no pending row', async () => {
+    const elsewhere = await db.user.create({ data: { email: 'rp@example.test', handle: 'rp-user', roles: ['READER'] } });
+    await insertSoftPasskey(db, elsewhere.id, softPasskey(), { rpId: 'elsewhere.example' });
+    const r = await verify(await magicLink({ email: 'rp@example.test' }));
+    expect(r.status).toBe(400);
+    expect(await r.json()).toEqual({ error: 'Invalid or expired token' });
+    expect(await pendingCount()).toBe(0);
+    expect(await db.authHandoffCode.count()).toBe(0);
   });
 
   it('a user with no passkey gets the fixed refusal and no pending row: the factor is never skipped', async () => {

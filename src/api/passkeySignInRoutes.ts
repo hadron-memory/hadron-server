@@ -38,8 +38,8 @@ const COOKIE_PATH = '/auth/passkey';
 const CEREMONY_TTL_SECONDS = 300;
 /** Requests a minute per client IP, across the sign-in routes. */
 export const PASSKEY_SIGN_IN_RATE_LIMIT_PER_MINUTE = 30;
-/** complete attempts per credential per 15 minutes, whatever client address they come from. */
-export const PASSKEY_SIGN_IN_PER_CREDENTIAL_LIMIT = 10;
+/** options/complete attempts per pending flow per 15 minutes, whatever client address they come from. */
+export const PASSKEY_SIGN_IN_PER_PENDING_LIMIT = 10;
 
 const sha256Hex = (b: Uint8Array | string) => createHash('sha256').update(b).digest('hex');
 const refuse = (res: Response) => res.status(403).type('application/json').set('Cache-Control', 'no-store').send('{"error":"forbidden"}');
@@ -61,6 +61,9 @@ function originAllowed(req: Request): string | null {
   const origin = req.headers.origin;
   return typeof origin === 'string' && signingCeremonyOrigins().includes(origin) ? origin : null;
 }
+
+/** Any refusal inside the deciding transaction: rolls it back, and the route answers the one uniform 403. */
+class SignInRefused extends Error {}
 
 const secureCookie = (req: Request) => process.env.NODE_ENV === 'production' || req.secure;
 
@@ -126,14 +129,8 @@ export function mountPasskeySignInRoutes(app: Express, env: NodeJS.ProcessEnv = 
     handler: (_req, res) => { res.status(429).end(); },
   });
   const json = express.json({ limit: '16kb' });
-  const perCredential = rateLimit({
-    windowMs: 15 * 60_000, limit: PASSKEY_SIGN_IN_PER_CREDENTIAL_LIMIT, standardHeaders: false, legacyHeaders: false,
-    skip: (req) => !b64((req.body as Record<string, unknown> | undefined)?.credentialId, 512),
-    keyGenerator: (req) => `credential:${sha256Hex(b64((req.body as Record<string, unknown>).credentialId, 512)!)}`,
-    handler: (_req, res) => { res.status(429).end(); },
-  });
   const perPending = rateLimit({
-    windowMs: 15 * 60_000, limit: PASSKEY_SIGN_IN_PER_CREDENTIAL_LIMIT, standardHeaders: false, legacyHeaders: false,
+    windowMs: 15 * 60_000, limit: PASSKEY_SIGN_IN_PER_PENDING_LIMIT, standardHeaders: false, legacyHeaders: false,
     skip: (req) => !pendingCookie(req),
     keyGenerator: (req) => `pending:${sha256Hex(pendingCookie(req)!)}`,
     handler: (_req, res) => { res.status(429).end(); },
@@ -179,7 +176,7 @@ export function mountPasskeySignInRoutes(app: Express, env: NodeJS.ProcessEnv = 
     } catch { refuse(res); }
   });
 
-  app.post(`${PASSKEY_SIGN_IN_PATH}/complete`, limiter, json, perCredential, perPending, async (req: Request, res: Response) => {
+  app.post(`${PASSKEY_SIGN_IN_PATH}/complete`, limiter, json, perPending, async (req: Request, res: Response) => {
     try {
       if (!originAllowed(req)) return void refuse(res);
       const cookie = pendingCookie(req);
@@ -208,19 +205,22 @@ export function mountPasskeySignInRoutes(app: Express, env: NodeJS.ProcessEnv = 
         origins: signingCeremonyOrigins(),
       });
 
+      // Inside the transaction every refusal THROWS, so nothing already written (the consumed ceremony, the
+      // sign-in) can commit on a refused request (Andi, Gene: #2225 P2). Every read here uses `tx`: a read on the
+      // shared pool from inside an open transaction can starve the pool under concurrent sign-ins (Charles).
       const done = await db.$transaction(async (tx) => {
         await lockAuthorityAnchors(tx, [{ kind: 'user', id: row.owner_id }], 'exclusive');
         const user = await tx.user.findFirst({ where: { id: row.owner_id, deletedAt: null } });
-        if (!user) return null;
+        if (!user) throw new SignInRefused();
         const pending = await loadLivePending(tx, cookie, { forUpdate: true });
-        if (!pending || pending.id !== pendingSnap.id || pending.userId !== user.id || pending.ceremonyId !== ceremonyId) return null;
+        if (!pending || pending.id !== pendingSnap.id || pending.userId !== user.id || pending.ceremonyId !== ceremonyId) throw new SignInRefused();
         const decided = await decideCeremonyAssertion(tx, {
           ceremonyId, browserNonceHash: pending.browserHash, purpose: 'SIGN_IN', verified: verified.snapshot,
         });
-        if (!decided || decided.ownerId !== user.id) return null;
+        if (!decided || decided.ownerId !== user.id) throw new SignInRefused();
         const signIn = await createSignIn(tx, { userId: user.id, method: 'email', passkeyId: decided.passkeyId });
-        if (!(await completePending(tx, pending.id, signIn.id))) return null;
-        const login = await verifiedLoginEvidence(db, 'email');
+        if (!(await completePending(tx, pending.id, signIn.id))) throw new SignInRefused();
+        const login = await verifiedLoginEvidence(tx, 'email');
         if (pending.continuation === 'PORTAL') {
           const code = await issueLoginCode({
             login, userId: user.id, redirect: pending.redirect ?? '/', isNew: pending.isNew ?? false,
