@@ -153,6 +153,7 @@ import {
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
+import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 
@@ -4778,7 +4779,10 @@ export const nodeMutations = {
         );
       }
       decryptNodeFields(node, memEncInfo);
-      const markdown = node.content && node.content.trim().length > 0 ? node.content : `# ${node.name}`;
+      // A Google Doc is a read for a human: includes resolve with the exporter's
+      // access (cor:dmo:150:03); variables stay as stored, as before.
+      const exported = await resolveNodeContent(ctx, node, { mode: 'includes' });
+      const markdown = exported && exported.trim().length > 0 ? exported : `# ${node.name}`;
 
       const { file } = await runOwnedEmailOperation<{ file: ToolDriveFile }>(ctx, connectionRef, 'create-doc', {
         title: title?.trim() || node.name,

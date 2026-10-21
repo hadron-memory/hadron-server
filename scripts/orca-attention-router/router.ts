@@ -1320,12 +1320,13 @@ const real = (p: string): string => {
 };
 
 /**
- * The worker id a CLI team-session binding in this worktree names, if any.
+ * The CLI team-session binding in this worktree, if any: its worker and, when
+ * the file records them, the session and App it was bound under.
  *
  * The binding lives in the worktree's git dir (`hadron team session start`).
  * An MCP-bound worker leaves none; absence is not a mismatch.
  */
-export function boundWorker(worktree: string): string | null {
+export function teamBinding(worktree: string): { workerId: string; sessionId?: string; appId?: string } | null {
   try {
     const dotGit = join(worktree, '.git');
     let gitDir = dotGit;
@@ -1334,10 +1335,17 @@ export function boundWorker(worktree: string): string | null {
       gitDir = isAbsolute(pointer) ? pointer : join(worktree, pointer);
     }
     const binding = JSON.parse(readFileSync(join(gitDir, 'hadron-team-session.json'), 'utf8'));
-    return typeof binding.workerId === 'string' && binding.workerId ? binding.workerId : null;
+    if (typeof binding.workerId !== 'string' || !binding.workerId) return null;
+    const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
+    return { workerId: binding.workerId, sessionId: str(binding.sessionId), appId: str(binding.appId) };
   } catch {
     return null;
   }
+}
+
+/** The worker id a CLI team-session binding in this worktree names, if any. */
+export function boundWorker(worktree: string): string | null {
+  return teamBinding(worktree)?.workerId ?? null;
 }
 
 /**

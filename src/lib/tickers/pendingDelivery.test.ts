@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /** #2017 shared metadata source for S5/S13. Red first; no body/renderer cap may truncate pending metadata. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -22,7 +23,7 @@ async function messages(count: number, extra: Record<string, unknown> = {}, ch =
   await db.channel.update({ where: { id: ch }, data: { lastSeq: count+offset, lastMessageAt: posted } });
 }
 async function addWorker(n: number, name: string, reg = registrationId) {
-  const w = await db.worker.create({ data: { id: id(n), appId: app.id, agentId: id(4), name, slug: name.toLowerCase(), heldByUserId: id(3), heldAt: posted } });
+  const w = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: id(n), appId: app.id, agentId: id(4), name, slug: name.toLowerCase(), heldByUserId: id(3), heldAt: posted } });
   await db.hostRegistrationWorker.create({ data: { registrationId: reg, workerId: w.id, family: 'codex' } });
   await db.registerEntry.create({ data: { appId: app.id, channelId, attendeeWorkerId: w.id, role: 'BOTH' } });
   return w;

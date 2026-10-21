@@ -136,8 +136,12 @@ export async function dueWakesFor(
         ticker: r.kind === 'TICK' ? tickers.get(r.tickerId) ?? null : null,
         // #1708: the task is gated in computeDueWakes (a reader of the App's tasks only), so it is shown as is.
         task: r.kind === 'TASK'
-          ? { id: r.taskId, eventId: r.eventId, chainIndex: r.chainIndex, event: r.event, title: r.title, ref: taskReasonRef(r.taskId, r.event) }
+          ? { id: r.taskId, eventId: r.eventId, chainIndex: r.chainIndex, event: r.event, title: r.title, ref: taskReasonRef(r.taskId, r.event), ...(r.standbyHeld ? { standbyHeld: r.standbyHeld } : {}) }
           : null,
+        // #2022: a stop notice concerns the worker itself; whoever may read its wakes sees it.
+        ...(r.kind === 'STOP'
+          ? { stop: { eventId: r.eventId, signalId: r.signalId, level: STOP_LEVEL_ENUM[r.level], notice: r.notice.toUpperCase(), interrupt: r.interrupt } }
+          : {}),
       })),
       channels: w.wake.channels.map((c) => ({
         channel: channels.get(c.channelId)!,
@@ -237,6 +241,9 @@ async function acknowledgeAsKey(requestCtx: Context, key: { appKeyId: string; ap
     },
   });
 }
+
+/** #2022 — a stop level as its SDL enum value. */
+const STOP_LEVEL_ENUM = { 'pause-dispatch': 'PAUSE_DISPATCH', pause: 'PAUSE', halt: 'HALT' } as const;
 
 export const wakeQueries = {
   dueWakes: (_: unknown, a: { appRef: string; workerRefs?: string[] | null; first?: number | null; after?: string | null }, ctx: Context) =>

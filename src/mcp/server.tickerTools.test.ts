@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1747 — the ticker tools on the MCP surface.
  *
@@ -8,6 +9,7 @@
  * GraphQL codes, wake settings read without a session and set with one.
  */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { setS7AvailableForTest } from '../lib/tickers/s7Availability.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -58,12 +60,12 @@ beforeEach(async () => {
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.id.toLowerCase()}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
   await db.appMember.create({ data: { appId: app.id, userId: holder.id, role: 'member' } });
-  anne = await db.worker.create({ data: { appId: app.id, agentId, name: 'Anne', slug: 'anne', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
-  liam = await db.worker.create({ data: { appId: app.id, agentId, name: 'Liam', slug: 'liam', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
+  anne = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Anne', slug: 'anne', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
+  liam = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Liam', slug: 'liam', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
   post = vi.spyOn(teamChatMutations, 'createTeamChatMessage').mockResolvedValue({} as never);
 });
 
-afterEach(() => post.mockRestore());
+afterEach(() => { post.mockRestore(); setS7AvailableForTest(false); });
 
 describe('ticker tools: who acts', () => {
   it('every write tool refuses without a session, and writes nothing', async () => {
@@ -200,5 +202,19 @@ describe('ticker tools: who acts', () => {
     expect(code(text(await sh.callTool('hadron_ack_wakes', { proofs: ['x'] })))).toBe('SESSION_REQUIRED');
     const plain = await session({ userId: holder.id });
     expect(code(text(await sh.callTool('hadron_ack_wakes', { proofs: ['x'], session: plain.id })))).toBe('WAKE_PROOF_INVALID');
+  });
+  it('S7: isolate / clear are for a person acting as themselves; a worker session is refused; the wake-settings read shows it', async () => {
+    setS7AvailableForTest(true);
+    const sa = mcp(authOf(admin.id));
+    const plain = await session({ userId: admin.id });
+    const isolated = text(await sa.callTool('hadron_isolate_worker', { workerRef: liam.id, session: plain.id }));
+    expect(isolated).toMatch(/^Isolated\. Isolated until /);
+    expect(text(await sa.callTool('hadron_worker_wake_settings', { workerRef: liam.id }))).toMatch(/isolated by .* until /);
+    const sh = mcp(authOf(holder.id));
+    const asLiam = await session({ userId: holder.id, appId: app.id, workerId: liam.id });
+    expect(code(text(await sh.callTool('hadron_clear_worker_isolation', { workerRef: liam.id, session: asLiam.id })))).toBe('WORKER_ISOLATION_FORBIDDEN');
+    expect(code(text(await sh.callTool('hadron_isolate_worker', { workerRef: liam.id })))).toBe('SESSION_REQUIRED');
+    expect(text(await sh.callTool('hadron_clear_worker_isolation', { workerRef: liam.id, session: (await session({ userId: holder.id })).id }))).toMatch(/^Cleared\. Not isolated\./);
+    expect(text(await sa.callTool('hadron_worker_wake_settings', { workerRef: liam.id }))).not.toMatch(/isolated by/);
   });
 });

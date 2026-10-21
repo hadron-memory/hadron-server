@@ -1918,6 +1918,9 @@ model UsageEvent {
 /// orgs).
 model Agent {
   id                   String          @id @default(cuid())
+  /// #2138 §3.5 — false: every worker cast from this Agent counts as HAVING a task (coordinators, the
+  /// lifecycle agent), so it is expected to check every period.
+  usesTasks            Boolean         @default(true) @map("uses_tasks")
   organizationId       String?         @map("organization_id")
   /// User owner of a user-owned Agent (rooted on the bare `<handle>` — #697 v2,
   /// no `@` sigil). The org/owner XOR is ENFORCED — `chk_agent_owner_xor` in
@@ -3164,6 +3167,16 @@ model App {
   deliveryStuckWindowSeconds        Int @default(900) @map("delivery_stuck_window_seconds")
   /// Stored OFF; enabling is refused until #2023 supplies standby behavior.
   deliveryStandbyEnabled            Boolean @default(false) @map("delivery_standby_enabled")
+  /// #2138 §3.2 — a worker with a task is expected to check its team channel every period (seconds);
+  /// the team ticker's cadence is set together with it.
+  deliveryCheckPeriodSeconds        Int     @default(600) @map("delivery_check_period_seconds")
+  /// #2138 §3.2 — OVERDUE after this many missed periods (+5 min slack, hard-coded); at least 1.
+  deliveryFailedChecksToOverdue     Int     @default(2) @map("delivery_failed_checks_to_overdue")
+  /// #2138 §3.6 — a TEAM pause, separate from every worker's own `pausedUntil`: a worker cannot lift
+  /// it, and ending it never clears a self-pause. NULL = not paused.
+  teamPausedAt                      DateTime? @map("team_paused_at")
+  /// #2138 §3.6 — when the last team pause ENDED; restarts every worker's check clock (the status is not OVERDUE the moment a pause lifts). NULL = never paused.
+  teamResumedAt                     DateTime? @map("team_resumed_at")
   /// The fastest ticker a worker may subscribe ITSELF to: [floor, 86400].
   tickerSelfSubscribeCadenceSeconds Int  @default(600) @map("ticker_self_subscribe_cadence_seconds")
   /// How many live tickers the App may have: [1, 100].
@@ -3260,6 +3273,8 @@ model App {
   /// #1707 — hosts that registered which workers they can launch (cor:agt:070:01).
   hostRegistrations       HostRegistration[]
   hostOperations          HostOperation[]
+  /// #2022 (S6, cor:agt:090) — the App's stop signals, live and ended.
+  stopSignals             TeamStopSignal[]
   launchGrants            LaunchGrant[]
   /// #1956 — resume claims written before a deliberate context reset (cor:agt:020:03).
   resumeClaims            ResumeClaim[]
@@ -3677,6 +3692,10 @@ model Worker {
   /// (cor:agt:020:01) — nullable; two castings of one agent share the
   /// template and nothing else.
   promptOverride String?   @map("prompt_override")
+  /// Per-worker signature template, delivered through S4 (cor:agt:040:04).
+  signature      String
+  /// Per-worker commit trailer template, delivered through S4 (cor:agt:040:04).
+  trailer        String
   /// #974 — the worker-scoped working memory in the App's container
   /// (`hrn:mem:<owner>:<app-slug>:<worker-slug>`), provisioned at cast.
   /// Identity is THIS column, never the memory's URN (the #723 rule).
@@ -3755,6 +3774,8 @@ model Worker {
   appGrants           AppGrant[]
   launchableVia      HostRegistrationWorker[]
   hostOperations     HostOperation[]
+  /// #2022 — worker- and team-scope stop signals naming this worker as target.
+  stopSignalsTargeting TeamStopSignal[]
 
   /// The URN atom's uniqueness. Unfiltered on retirement, like
   /// `workers_app_name_uniq`: a retired worker's URN must keep resolving.
@@ -4044,6 +4065,22 @@ model AuthCode {
   @@index([userId])
   @@index([clientId])
   @@map("auth_codes")
+}
+
+/// #1631 S2a: one browser-bound, purpose-bound, single-use ceremony step.
+/// Expiry and consumption are decided on the database clock.
+model PasskeyCeremony {
+  id               String    @id
+  purpose          String
+  browserNonceHash String    @map("browser_nonce_hash")
+  /// SHA-256 hex of the challenge issued for this ceremony: every ceremony is bound to one.
+  challengeHash    String    @map("challenge_hash")
+  createdAt        DateTime  @default(dbgenerated("(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  expiresAt        DateTime  @map("expires_at")
+  consumedAt       DateTime? @map("consumed_at")
+
+  @@index([expiresAt])
+  @@map("passkey_ceremonies")
 }
 
 /// #1631 schema-first: shared credential registry (cor:aut:040:05), no enrollment route yet.
@@ -4937,6 +4974,10 @@ model ChannelReadState {
   channelId   String   @map("channel_id")
   lastSeenSeq Int      @default(0) @map("last_seen_seq")
   updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+  /// #2138 §3.1 — when the worker last CHECKED this channel through its own bound session (a page read, an
+  /// inbox read or a mark-read, an empty one included). Stamped only by `stampChannelCheck`; a read by a
+  /// person (asMe), by another worker or of another channel never moves it. NULL = never checked.
+  lastCheckedAt DateTime? @map("last_checked_at")
 
   worker  Worker?  @relation("ReadStateWorker", fields: [workerId], references: [id], onDelete: Cascade)
   agent   Agent?   @relation("ReadStateAgent", fields: [agentId], references: [id], onDelete: Cascade)
@@ -5213,6 +5254,8 @@ model AgentTask {
   assigneeWorker Worker?          @relation("AgentTaskAssigneeWorker", fields: [assigneeWorkerId], references: [id], onDelete: NoAction)
   assigneeUser   User?            @relation("AgentTaskAssigneeUser", fields: [assigneeUserId], references: [id], onDelete: NoAction)
   events         AgentTeamEvent[]
+  /// #2022 — times stop signals kept this task from being assigned.
+  stopHolds      AgentTaskStopHold[]
 
   @@index([appId, status])
   @@index([parentTaskId])
@@ -5410,8 +5453,10 @@ model HostRegistration {
   refreshedAt         DateTime  @map("refreshed_at")
   lostAt              DateTime? @map("lost_at")
 
-  app     App                      @relation(fields: [appId], references: [id], onDelete: Cascade)
-  workers HostRegistrationWorker[]
+  app         App                      @relation(fields: [appId], references: [id], onDelete: Cascade)
+  workers     HostRegistrationWorker[]
+  /// #2022 — host-scope stop signals naming this registration.
+  stopSignals TeamStopSignal[]
 
   @@unique([appId, hostId], map: "host_registrations_app_host_uniq")
   @@map("host_registrations")
@@ -5644,7 +5689,8 @@ model Ticker {
   /// 'ALL' | 'MENTIONS'.
   relevance         String    @default("ALL")
   /// #2068 (cor:agt:080:01, :10, R49): why the ticker fires, a closed set: 'read-team-channel' (relevant unread, as before) and
-  /// 'every-tick' (unconditional). Empty = never fires; any-of when several (Decided, R54).
+  /// 'every-tick' (unconditional), and 'live-check' (#2138: the worker has not checked its team channel within the ticker's cadence,
+  /// whatever is unread; never for a worker not expected to check). Empty = never fires; any-of when several (Decided, R54).
   reasons           String[]  @default(["read-team-channel"]) @map("reasons")
   enabled           Boolean   @default(true)
   ownerUserId       String?   @map("owner_user_id")
@@ -5709,6 +5755,11 @@ model WorkerWakeSettings {
   workerId          String    @id @map("worker_id")
   mentions          String    @default("IMMEDIATE")
   pausedUntil       DateTime? @map("paused_until")
+  /// S7 (#2023, R85) — ISOLATION is its own state, never `pausedUntil`: written only by
+  /// isolateWorker / clearWorkerIsolation, always by a human acting as themselves.
+  isolatedUntil     DateTime? @map("isolated_until")
+  isolatedAt        DateTime? @map("isolated_at")
+  isolatedByUserId  String?   @map("isolated_by_user_id")
   updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at")
   updatedBy         String?   @map("updated_by")
   updatedByWorkerId String?   @map("updated_by_worker_id")
@@ -5847,6 +5898,77 @@ model AppWakeReservation {
 
   @@index([appId, reservedAt])
   @@map("app_wake_reservations")
+}
+
+/// #2022 (S6, cor:agt:090:01) — a stop signal: team state that stops work for the workers it covers until it ends.
+/// Level `pause-dispatch` | `pause` | `halt`; scope `worker` | `team` | `host`. A worker or team signal names its
+/// target worker (a team by its head); a host signal names its host registration. Who set it is a person
+/// (`setByUserId`) or a host key (`setByAppKeyId`), never both. It is live while `endedAt` is null and `until` (when
+/// given) has not passed: an expiry is in effect at `until` even before the sweep records it. The level, scope,
+/// target, setter and set time never change; the end is recorded once (prisma/stop-signal-invariants.sql). No text.
+model TeamStopSignal {
+  id                       String    @id
+  appId                    String    @map("app_id")
+  level                    String
+  scope                    String
+  targetWorkerId           String?   @map("target_worker_id")
+  targetHostRegistrationId String?   @map("target_host_registration_id")
+  setAt                    DateTime  @map("set_at")
+  until                    DateTime?
+  setByUserId              String?   @map("set_by_user_id")
+  setByAppKeyId            String?   @map("set_by_app_key_id")
+  endedAt                  DateTime? @map("ended_at")
+  /// `lifted` | `expired`.
+  endKind                  String?   @map("end_kind")
+  endedByUserId            String?   @map("ended_by_user_id")
+  endedByAppKeyId          String?   @map("ended_by_app_key_id")
+
+  app          App                @relation(fields: [appId], references: [id], onDelete: Cascade)
+  targetWorker Worker?            @relation(fields: [targetWorkerId], references: [id], onDelete: Cascade)
+  targetHost   HostRegistration?  @relation(fields: [targetHostRegistrationId], references: [id], onDelete: Cascade)
+  coverage     TeamStopCoverage[]
+
+  @@index([appId, setAt, id])
+  @@index([targetWorkerId])
+  @@index([targetHostRegistrationId])
+  @@map("team_stop_signals")
+}
+
+/// #2022 (R95) — when a stop signal covered a worker: the HISTORY that stall clocks and notices read. Enforcement never
+/// reads it; it works coverage out live (cor:agt:090:02). Kept by `reconcileStopCoverage` under the App's stop fence:
+/// one open interval per (signal, worker) (partial unique index, prisma/stop-signal-invariants.sql). An interval ends
+/// at the earliest of `leftAt`, its signal's end and its signal's `until`.
+model TeamStopCoverage {
+  id        String    @id
+  appId     String    @map("app_id")
+  signalId  String    @map("signal_id")
+  workerId  String    @map("worker_id")
+  enteredAt DateTime  @map("entered_at")
+  leftAt    DateTime? @map("left_at")
+
+  signal TeamStopSignal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@index([workerId, enteredAt])
+  @@index([signalId])
+  @@index([appId])
+  @@map("team_stop_coverage")
+}
+
+/// #2022 (R68, Vera's receipt §5) — a time when stop signals were what kept a queued task from being assigned: every
+/// worker that would otherwise match it was covered, or its creator was under a `pause` or `halt` (R71). The
+/// couldn't-be-assigned clock (cor:agt:050:17) doesn't count it. Opened and closed by the matcher's pass; one open
+/// hold per task (partial unique index).
+model AgentTaskStopHold {
+  id        String    @id
+  appId     String    @map("app_id")
+  taskId    String    @map("task_id")
+  startedAt DateTime  @map("started_at")
+  endedAt   DateTime? @map("ended_at")
+
+  task AgentTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, startedAt])
+  @@map("agent_task_stop_holds")
 }
 
 /// #1747 — a narrow, named App grant held by a WORKER (cor:agt:080:24). One

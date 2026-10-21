@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /** S1 slice (c), #2017: whole-loader DB fixtures. Authority entry gates are Liam's resolver tests. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -28,7 +29,7 @@ const newChannel = async (memoryId: string, loc: string): Promise<Ch> => {
   return { id: made.channel.id, memoryId, loc, chatRootNodeId: made.rootId };
 };
 const newWorker = async (name: string, host = registration.id) => {
-  const w = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: holder.id, heldAt: posted }, select: { id: true, name: true } });
+  const w = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: holder.id, heldAt: posted }, select: { id: true, name: true } });
   await db.hostRegistrationWorker.create({ data: { registrationId: host, workerId: w.id, family: 'codex' } });
   await watch(w.id, channel); return w;
 };

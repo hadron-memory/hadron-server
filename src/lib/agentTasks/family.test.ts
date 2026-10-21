@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1707 — a worker's model family (cor:agt:060:04): the derivation from a
  * session's reported model and tool, the explicit `family` argument on
@@ -80,7 +81,7 @@ describe('startSession family, and Worker.family following the binding', () => {
     const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
     app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `fam-${n}.example:team` }, select: { id: true } });
     await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
-    worker = await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' }, select: { id: true, appId: true } });
+    worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' }, select: { id: true, appId: true } });
   });
 
   const start = (input: Record<string, unknown>) =>
@@ -167,7 +168,7 @@ describe('startSession family, and Worker.family following the binding', () => {
     const template = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
     const snapshots = new Map<string, any>();
     for (const row of mapping) {
-      await db.worker.create({ data: { id: row.workerId, appId: app.id, agentId: template.agentId, name: row.worktreeSlug, slug: row.worktreeSlug } });
+      await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: row.workerId, appId: app.id, agentId: template.agentId, name: row.worktreeSlug, slug: row.worktreeSlug } });
       const session = await db.session.create({ data: { id: generateId(), workerId: row.workerId, appId: app.id, userId: mia.id, tool: 'claude-code', family: null } });
       snapshots.set(session.id, session);
     }

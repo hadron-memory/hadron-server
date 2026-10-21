@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../lib/workerSignature.js';
 /**
  * 008-agent-installation — User Story 3 (T062–T065).
  *
@@ -394,7 +395,7 @@ describe('App-tombstone URN reclaim respects Worker castings (#974, cor:agt:020:
       },
     });
     await db.worker.create({
-      data: { appId: retired.id, agentId: suite.id, name: 'Iris', slug: 'iris' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: retired.id, agentId: suite.id, name: 'Iris', slug: 'iris' },
     });
 
     await expect(

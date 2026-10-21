@@ -7,8 +7,10 @@
  *   2. write down every worker availability whose `until` passed (#1766,
  *      cor:agt:060:02), before matching, so the worker is matched in this
  *      same pass;
- *   3. match every App's queued tasks to workers free for work
- *      (cor:agt:060:06).
+ *   3. write down every stop signal whose until passed (#2022, cor:agt:090:05),
+ *      with its notices, so a worker it no longer covers is matched in this pass;
+ *   4. match every App's queued tasks to workers free for work
+ *      (cor:agt:060:06), and record the stop holds of what stays queued.
  *
  * The sweep backs up the event-driven runs (`matchAfterChange`: a task created
  * with no assignee, a task finished or cancelled, an availability change) and
@@ -26,12 +28,16 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 import { matchQueuedTasks } from '../lib/agentTasks/matcher.js';
 import { sweepLostHosts } from '../lib/agentTasks/hosts.js';
 import { recordLapsedAvailability } from '../lib/agentTasks/availability.js';
+import { sweepExpiredStopSignals } from '../lib/stopSignals/sweep.js';
+import { anchorNow } from '../lib/stopSignals/state.js';
 
-export type TaskMatcherTickResult = { lost: number; lapsed: number; matched: number };
+export type TaskMatcherTickResult = { lost: number; lapsed: number; expired: number; matched: number };
 
 /** One pass at `now`. Each step runs even when an earlier one failed. */
 export async function taskMatcherTick(db: PrismaClient, now = new Date()): Promise<TaskMatcherTickResult> {
-  const result: TaskMatcherTickResult = { lost: 0, lapsed: 0, matched: 0 };
+  // #2022: the monotonic half of `now`'s sample, so every stop decision of the pass is made at its own moment.
+  const anchor = anchorNow();
+  const result: TaskMatcherTickResult = { lost: 0, lapsed: 0, expired: 0, matched: 0 };
   try {
     result.lost = await sweepLostHosts(db, now);
   } catch (err) {
@@ -43,7 +49,12 @@ export async function taskMatcherTick(db: PrismaClient, now = new Date()): Promi
     console.error('[task-matcher] availability lapse sweep failed:', err);
   }
   try {
-    result.matched = (await matchQueuedTasks(db, now)).length;
+    result.expired = (await sweepExpiredStopSignals(db, now, anchor)).length;
+  } catch (err) {
+    console.error('[task-matcher] stop signal expiry sweep failed:', err);
+  }
+  try {
+    result.matched = (await matchQueuedTasks(db, now, { anchor })).length;
   } catch (err) {
     console.error('[task-matcher] matching failed:', err);
   }

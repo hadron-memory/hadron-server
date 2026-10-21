@@ -80,6 +80,8 @@ import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../
 import { resolveWorkerIdByName } from './resolvers.worker.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
+import { lockStopFence } from '../../../lib/stopSignals/state.js';
+import { refuseStoppedAssignee } from '../../../lib/stopSignals/enforce.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
 import { withAuthorizedTx } from './authorizedTx.js';
@@ -624,8 +626,13 @@ export async function inTaskWriteTx<T>(
   actor: TaskActor | RunCreator,
   refused: () => GraphQLError,
   write: (tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp) => Promise<T>,
-  /** `exclusive` for a writer that UPDATEs the anchored App row itself: it cannot upgrade a shared hold without deadlocking its peers. */
-  options: { lockMode?: 'shared' | 'exclusive' } = {},
+  /**
+   * `lockMode: 'exclusive'` for a writer that UPDATEs the anchored App row itself: it cannot upgrade a shared hold
+   * without deadlocking its peers. `stopFence` (#2022): the App's stop fence, taken after the anchors and BEFORE the
+   * reportsTo graph lock (src/lib/stopSignals/state.ts, the lock order). Every task write holds it shared, so an
+   * assignment decision and a stop signal change are ordered; a stop signal writer asks for it exclusive.
+   */
+  options: { lockMode?: 'shared' | 'exclusive'; stopFence?: 'shared' | 'exclusive' } = {},
 ): Promise<T> {
   const anchors: AuthorityAnchor[] = [
     { kind: 'app', id: app.id },
@@ -653,6 +660,7 @@ export async function inTaskWriteTx<T>(
       {
         lockMode: options.lockMode,
         afterLock: async (tx) => {
+          await lockStopFence(tx, app.id, options.stopFence ?? 'shared');
           // #1726: the reportsTo graph, SHARED, before any membership or worker
           // row (src/lib/workerReportsTo.ts, the lock protocol). The chain arm
           // of cor:agt:050:09 then reads a graph no writer can change before
@@ -740,6 +748,8 @@ async function insertTask(
     status?: 'backlog' | 'pending';
   },
 ): Promise<{ id: string; queued: boolean }> {
+  // #2022 (cor:agt:090:03): a stop signal refuses making a covered worker the assignee, at creation too.
+  if (a.assignee?.workerId) await refuseStoppedAssignee(tx, a.app.id, a.assignee.workerId, new Date());
   const created = await tx.agentTask.create({
     data: {
       appId: a.app.id,
@@ -959,6 +969,8 @@ export const agentTaskMutations = {
         throw taskError('TASK_INVALID_TRANSITION', 'This task already has an assignee; reassign it instead.', { taskId });
       }
       party ??= await resolveParty(txCtx, app, assignee, 'TASK_ASSIGNEE_INVALID');
+      // #2022 (cor:agt:090:03): never to a worker a live stop signal covers.
+      if (party.workerId) await refuseStoppedAssignee(tx, app.id, party.workerId, new Date(), task.id);
       const close = closeSessionWhenDone ?? task.closeSessionWhenDone;
       // #1754 (cor:agt:050:02): assigning a backlog task makes it ready work.
       // The write is a guarded updateMany on the consumed state (no assignee,
@@ -1090,6 +1102,8 @@ export const agentTaskMutations = {
       if (sameParty(from, party)) {
         throw taskError('TASK_INVALID_TRANSITION', 'The task is already assigned there.', { taskId });
       }
+      // #2022 (cor:agt:090:03): never to a worker a live stop signal covers; moving it away is not refused.
+      if (party.workerId) await refuseStoppedAssignee(tx, app.id, party.workerId, new Date(), task.id);
       const close = closeSessionWhenDone ?? task.closeSessionWhenDone;
       await tx.agentTask.update({
         where: { id: task.id },

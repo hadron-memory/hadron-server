@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { generateId } from '../lib/id.js';
@@ -80,7 +81,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // refuses a row DELETE while its App exists (append-only), and TRUNCATE
   // fires no row triggers. #1706: agent_team_alarm_schedule references the events, so it is
   // truncated with them. #1708: so is worker_delivery_task_events, for the same reason.
-  await db.$executeRawUnsafe('TRUNCATE worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, agent_tasks');
+  // #2022: a task's stop holds go with it.
+  await db.$executeRawUnsafe('TRUNCATE worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, agent_task_stop_holds, agent_tasks');
   // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
   await db.worker.deleteMany();
   await db.node.deleteMany();
@@ -576,6 +578,6 @@ export async function createDbWorkerAttribution(db: PrismaClient, userId: string
   const agent = await db.agent.create({ data: { ...ownership, name: 'Attribution fixture', urn: `fixture-${suffix}.example:role` } });
   const app = await db.app.create({ data: { ...ownership, name: 'Attribution fixture', urn: `fixture-${suffix}.example:app` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-  await db.worker.create({ data: { id: workerId, appId: app.id, agentId: agent.id, name: 'Fixture', slug: 'fixture' } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: workerId, appId: app.id, agentId: agent.id, name: 'Fixture', slug: 'fixture' } });
   if (sessionId) await db.session.create({ data: { id: sessionId, workerId, userId, appId: app.id } });
 }

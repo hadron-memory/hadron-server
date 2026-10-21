@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { compileTemplate } from './template.js';
+import { BROKEN_INCLUDE_NOTICE } from './includes/spliceIncludes.js';
 
 // Mock PrismaClient
 function mockDb(
@@ -158,7 +159,8 @@ describe('compileTemplate', () => {
       mockDb([]),
       {},
     );
-    expect(result).toBe(' rest');
+    // cor:dmo:150:05: an include that can't resolve shows the notice, never a silent gap.
+    expect(result).toBe(`${BROKEN_INCLUDE_NOTICE} rest`);
   });
 
   // Regression: issue #543 — soft-deleted nodes must not resolve during
@@ -185,7 +187,7 @@ describe('compileTemplate', () => {
       { loc: 'greeting', content: 'Welcome!', deletedAt: new Date('2026-07-07') },
     ]);
     const result = await compileTemplate('{{> greeting}} rest', null, 'mem1', db, {});
-    expect(result).toBe(' rest');
+    expect(result).toBe(`${BROKEN_INCLUDE_NOTICE} rest`);
   });
 
   it('combines all resolution sources', async () => {
