@@ -1967,6 +1967,17 @@ model Agent {
   /// Agent prompt template. {{name}}/{{role}} bind to the Worker's identity
   /// for a worker briefing, or to this Agent's name/role for a chat.
   systemPrompt         String?         @map("system_prompt")
+  /// #2045 (S8, cor:agt:040:07) — this Agent's boot-prompt POINTER: the id of a
+  /// compiled boot-prompt node (`nodeType = 'compiled-boot-prompt'`), never its
+  /// source. NO foreign key: nodes are hard-deleted on some paths (deleteNode
+  /// hard/subtree, memory merge, git-sync cleanup), and SET NULL would turn a
+  /// deleted target (R27) into "no pointer" (R26) while RESTRICT would block
+  /// those deletes. `bootPromptUrn` is the target's canonical URN at write time,
+  /// read only when the row is gone; both are set or both NULL
+  /// (chk_*_boot_prompt_pointer_pair, prisma/boot-prompt-pointer-invariants.sql).
+  /// Written only through `setBootPromptPointer` (src/lib/bootPromptPointer.ts).
+  bootPromptNodeId     String?         @map("boot_prompt_node_id")
+  bootPromptUrn        String?         @map("boot_prompt_urn")
   /// Memory containing conversation designs (stages, prompts,
   /// partials). Universally read-only from any App context post-008
   /// (DEVELOP-from-App is dropped per R-10); edits happen in the
@@ -2104,6 +2115,7 @@ model Agent {
   @@index([ownerUserId])
   @@index([extendsAgentId])
   @@index([legacyUrn])
+  @@index([bootPromptNodeId])
   @@map("agents")
 }
 
@@ -3656,21 +3668,35 @@ model AppLogEntry {
 /// (FR-005; orphan retention preserved). Duplicate inserts for the
 /// same (app_id, agent_id) are rejected by the composite PK.
 model AppAgent {
-  appId     String    @map("app_id")
-  agentId   String    @map("agent_id")
+  appId            String    @map("app_id")
+  agentId          String    @map("agent_id")
   // Audit fields mirror AppMember (no soft-delete). Uninstall is a
   // hard row delete; predicate lookups use `findUnique` on the
   // composite PK with no filter.
-  createdAt DateTime  @default(now()) @map("created_at")
-  createdBy String?   @map("created_by")
-  updatedAt DateTime? @updatedAt @map("updated_at")
-  updatedBy String?   @map("updated_by")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  createdBy        String?   @map("created_by")
+  updatedAt        DateTime? @updatedAt @map("updated_at")
+  updatedBy        String?   @map("updated_by")
+  /// #2045 (S8, cor:agt:040:07) — the install's boot-prompt POINTER: the id of a
+  /// compiled boot-prompt node (`nodeType = 'compiled-boot-prompt'`), never its
+  /// source. NO foreign key: nodes are hard-deleted on some paths (deleteNode
+  /// hard/subtree, memory merge, git-sync cleanup), and SET NULL would turn a
+  /// deleted target (R27) into "no pointer" (R26) while RESTRICT would block
+  /// those deletes. `bootPromptUrn` is the target's canonical URN at write time,
+  /// read only when the row is gone; both are set or both NULL
+  /// (chk_*_boot_prompt_pointer_pair, prisma/boot-prompt-pointer-invariants.sql).
+  /// Written only through `setBootPromptPointer` (src/lib/bootPromptPointer.ts).
+  /// The row is hard-deleted on uninstall, so a reinstall starts empty until
+  /// the App's manager next compiles (cor:agt:040:06, cor:dmo:050:03).
+  bootPromptNodeId String?   @map("boot_prompt_node_id")
+  bootPromptUrn    String?   @map("boot_prompt_urn")
 
   app   App   @relation(fields: [appId], references: [id], onDelete: Cascade)
   agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@id([appId, agentId])
   @@index([agentId])
+  @@index([bootPromptNodeId])
   @@map("app_agents")
 }
 
@@ -3727,6 +3753,18 @@ model Worker {
   signature         String
   /// Per-worker commit trailer template, delivered through S4 (cor:agt:040:04).
   trailer           String
+  /// #2045 (S8, cor:agt:040:07) — this worker's boot-prompt POINTER: the id of a
+  /// compiled boot-prompt node (`nodeType = 'compiled-boot-prompt'`), never its
+  /// source. NO foreign key: nodes are hard-deleted on some paths (deleteNode
+  /// hard/subtree, memory merge, git-sync cleanup), and SET NULL would turn a
+  /// deleted target (R27) into "no pointer" (R26) while RESTRICT would block
+  /// those deletes. `bootPromptUrn` is the target's canonical URN at write time,
+  /// read only when the row is gone; both are set or both NULL
+  /// (chk_*_boot_prompt_pointer_pair, prisma/boot-prompt-pointer-invariants.sql).
+  /// Written only through `setBootPromptPointer` (src/lib/bootPromptPointer.ts).
+  /// Set for customised workers only, empty otherwise (cor:dmo:050:11).
+  bootPromptNodeId  String?   @map("boot_prompt_node_id")
+  bootPromptUrn     String?   @map("boot_prompt_urn")
   /// #974 — the worker-scoped working memory in the App's container
   /// (`hrn:mem:<owner>:<app-slug>:<worker-slug>`), provisioned at cast.
   /// Identity is THIS column, never the memory's URN (the #723 rule).
@@ -3816,6 +3854,7 @@ model Worker {
   /// #1050 — "what does this person hold", across Apps.
   @@index([heldByUserId])
   @@index([reportsToWorkerId])
+  @@index([bootPromptNodeId])
   @@map("workers")
 }
 

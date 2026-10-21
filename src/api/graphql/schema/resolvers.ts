@@ -55,6 +55,8 @@ import { appMemoryMutations } from './resolvers.mutation.appMemory.js';
 import { orgMutations } from './resolvers.mutation.org.js';
 import { agentMutations } from './resolvers.mutation.agent.js';
 import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
+import { bootPromptPointerFieldResolvers } from './resolvers.bootPromptPointer.js';
+import { bootPromptPointerMutations } from './resolvers.mutation.bootPromptPointer.js';
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamSpecQueries } from './resolvers.teamSpec.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
@@ -126,7 +128,10 @@ export const resolvers = {
   // `Agent` already has a block in typeResolvers; the register's field joins
   // it rather than replacing it (a bare spread would clobber the AI-config
   // and relation fields).
-  Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent, ...agentExtendedByFieldResolvers.Agent },
+  Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent, ...agentExtendedByFieldResolvers.Agent, ...bootPromptPointerFieldResolvers.Agent },
+  // #2045: the boot-prompt pointer read fields join the existing blocks.
+  AppAgent: { ...typeResolvers.AppAgent, ...bootPromptPointerFieldResolvers.AppAgent },
+  Worker: { ...workerFieldResolvers.Worker, ...bootPromptPointerFieldResolvers.Worker },
   // Same for Memory: the config field joins the existing type block (#1325).
   Memory: { ...typeResolvers.Memory, ...memoryConfigFieldResolvers.Memory },
   // #1591: approval status joins the existing Node block; #1610 the
@@ -218,6 +223,7 @@ export const resolvers = {
     ...orgMutations,
     ...agentMutations,
     ...workerMutations,
+    ...bootPromptPointerMutations,
     ...teamRoleMutations,
     ...teamChatMutations,
     ...teamAttentionMutations,

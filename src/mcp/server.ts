@@ -10953,6 +10953,13 @@ function ageOf(at: Date, now: Date = new Date()): string {
           // #2138 §3.4 — gated like hasLiveSession; null on deny.
           resolvers.Worker.checkStatus(worker, {}, ctx) as Promise<WorkerCheckStatus | null>,
         ]);
+        // #2045: the boot-prompt pointer, through the SAME gated field resolvers
+        // GraphQL serves (null on deny, and null when unset). A read only: R24
+        // keeps every pointer WRITE off MCP.
+        const [bootPromptRef, bootPromptTargetDeleted] = await Promise.all([
+          resolvers.Worker.bootPromptRef(worker, {}, ctx),
+          resolvers.Worker.bootPromptTargetDeleted(worker, {}, ctx),
+        ]);
         const prompt = briefing.text;
         const agentName = (agent as { name?: string } | null)?.name ?? null;
         const readUrl = workerPortalUrl(workerUrn as string | null);
@@ -11049,6 +11056,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // Only the caller's OWN driving session is named. Whose session it
             // is otherwise stays behind the takeover refusal, which is a
             // deliberate act rather than a listing (hadron_list_workers' rule).
+            (bootPromptRef
+              ? `Boot prompt pointer: ${bootPromptRef}${bootPromptTargetDeleted ? ' (TARGET DELETED: nothing can be served from it; clear or repoint it)' : ''}\n`
+              : '') +
             (mine
               ? `Your active session: ${mine.id} (worker session id; pass as \`session\` to team tools; since ${mine.startedAt.toISOString()})\n`
               : '') +

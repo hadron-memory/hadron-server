@@ -389,7 +389,7 @@ export function workerNotFound(workerRef: string): GraphQLError {
  * participation lookup propagates, because reporting an outage as a missing
  * worker misleads exactly the caller who needs the truth.
  */
-async function resolveReadableWorkerRef(
+export async function resolveReadableWorkerRef(
   ctx: Context,
   workerRef: string,
 ): Promise<{ worker: WorkerRow; app: AppRow }> {

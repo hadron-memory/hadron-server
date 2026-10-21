@@ -2914,6 +2914,17 @@ export const typeDefs = `#graphql
     app: App
     "The installed Agent when this caller may read its definition; an installation license alone does not grant that read."
     agent: Agent
+    """
+    #2045 — the canonical URN of the compiled boot prompt the install's pointer names now
+    (a moved node shows its new URN; a hard-deleted one its URN at write time). Null when no pointer is set
+    OR when the caller may not see it (the App's participants only): null is not proof that no pointer exists.
+    """
+    bootPromptRef: String
+    """
+    #2045 — whether the pointer's target is deleted (soft or hard): true / false, and null when no pointer is set
+    or the caller may not see it. Same gate as bootPromptRef. Nothing is served from a deleted target (R27).
+    """
+    bootPromptTargetDeleted: Boolean
     createdAt: DateTime!
     createdBy: String
     updatedAt: DateTime
@@ -4136,6 +4147,17 @@ export const typeDefs = `#graphql
     description: String
     "Templated Agent prompt. {{name}}/{{role}} bind to the Agent in chats or the named Worker in briefings."
     systemPrompt: String
+    """
+    #2045 — the canonical URN of the compiled boot prompt this Agent's pointer names now
+    (a moved node shows its new URN; a hard-deleted one its URN at write time). Null when no pointer is set
+    OR when the caller may not see it (only a caller who may read the Agent's system memory): null is not proof that no pointer exists.
+    """
+    bootPromptRef: String
+    """
+    #2045 — whether the pointer's target is deleted (soft or hard): true / false, and null when no pointer is set
+    or the caller may not see it. Same gate as bootPromptRef. Nothing is served from a deleted target (R27).
+    """
+    bootPromptTargetDeleted: Boolean
     systemMemoryId: String
     visibility: AgentVisibility!
     "cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement, not access)."
@@ -4629,6 +4651,17 @@ export const typeDefs = `#graphql
     trailer: String
     "Per-worker individuality layered over the agent's template prompt."
     promptOverride: String
+    """
+    #2045 — the canonical URN of the compiled boot prompt this worker's pointer names now
+    (set for customised workers only). Null when no pointer is set OR when the caller may not see it (WORKING-STATE
+    field, behind the worker read gate): null is not proof that no pointer exists.
+    """
+    bootPromptRef: String
+    """
+    #2045 — whether the pointer's target is deleted (soft or hard): true / false, and null when no pointer is set
+    or the caller may not see it. Same gate as bootPromptRef. Nothing is served from a deleted target (R27).
+    """
+    bootPromptTargetDeleted: Boolean
     "The worker-scoped working memory in the App's container (null until provisioned)."
     memoryId: ID
     """
@@ -11393,6 +11426,32 @@ export const typeDefs = `#graphql
     promptOverride alone keeps castWorker staffing authorization. workerRef is the worker's id or URN (#991).
     """
     updateWorker(workerRef: ID!, promptOverride: String, signature: String, trailer: String): Worker!
+
+    """
+    #2045 (S8) — set or clear an Agent's boot-prompt pointer. nodeRef (a node id or a
+    fully-qualified node URN) must name a COMPILED boot prompt in this Agent's own system memory; approval is not
+    required here (it is checked when the prompt is served). nodeRef is REQUIRED: an explicit null clears, and an
+    omitted one is refused with BAD_USER_INPUT.
+
+    Only the Agent's manager, acting as themselves (R23): a request bound to a worker session, the manager's own
+    included, is refused BOOT_PROMPT_POINTER_SESSION_REFUSED; a non-manager, an App key, an impersonation or a
+    run is FORBIDDEN. The gate runs before the target is looked at, so a refused caller learns nothing about it.
+    Then: BOOT_PROMPT_POINTER_NOT_FOUND (missing, deleted or unreadable, alike), _NOT_COMPILED, _WRONG_ROLE,
+    _WRONG_MEMORY. No MCP twin (R24).
+    """
+    setAgentBootPrompt(agentRef: String!, nodeRef: String): Agent!
+    """
+    #2045 — set or clear an installed Agent's boot-prompt pointer for one App (AppAgent.bootPromptRef). The node
+    must be compiled and sit in that App's install memory for that Agent. Only the App's manager, as themselves;
+    otherwise as setAgentBootPrompt.
+    """
+    setAppAgentBootPrompt(appRef: String!, agentRef: String!, nodeRef: String): AppAgent!
+    """
+    #2045 — set or clear a worker's boot-prompt pointer (for customised workers). The node must be compiled and
+    sit in the worker's App's install memory for the worker's Agent. Only the App's manager, as themselves;
+    otherwise as setAgentBootPrompt. workerRef is the worker's id or URN.
+    """
+    setWorkerBootPrompt(workerRef: ID!, nodeRef: String): Worker!
 
     """
     #1162 — hard-delete a never-referenced miscast only.
