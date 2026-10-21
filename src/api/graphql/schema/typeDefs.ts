@@ -1407,6 +1407,8 @@ export const typeDefs = `#graphql
     updatedByWorker: ActorRef
     "#1610 — the Agent behind the last authored edit; cleared like updatedByWorker."
     updatedByAgent: ActorRef
+    "#2176 - the User behind the last authored edit, as handle and URN only (the same projection as a revision's editedByUser, and always the user that revision records). Cleared like updatedByWorker: an authored edit with no user behind it (a system job, a git sync, an API key with no account) clears it. Null also for a deleted user and for nodes last edited before #2176, which are not backfilled."
+    updatedByUser: NodeRevisionEditor
     "#1606 — open and resolved discussion on this node (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Batched per request."
     commentSummary: CommentSummary!
     "#1608 — this node AS a comment (author, target, anchor revision, thread) when its nodeType is 'comment'; null for content. Lets a search hit render as feedback, never as content of its target (hrn:node:hadronmemory.com:specs:cor:dmo:110:08)."
@@ -4092,6 +4094,14 @@ export const typeDefs = `#graphql
     enabled: Boolean
   }
 
+  "#2177 - one page of Agent.extendedBy."
+  type AgentExtensionPage {
+    items: [Agent!]!
+    "Opaque. Null when hasMore is false."
+    endCursor: String
+    hasMore: Boolean!
+  }
+
   """
   The reusable definition a Builder creates and the marketplace can list.
   Agents are installed into runtime Apps through the AppAgent N:M join: an App
@@ -4125,6 +4135,15 @@ export const typeDefs = `#graphql
     or null. Set, change or clear it with setAgentBase.
     """
     extendsAgentId: ID
+    """
+    #2177 - the Agents that DIRECTLY extend this one (not their extenders), in name order, that you may
+    read exactly as you read agent(ref:). Visibility is applied before the page is cut. first: 1-50,
+    default 20. "after" is an opaque token from a previous page's endCursor: it expires after 15 minutes,
+    is bound to this Agent and to you, and a refused token is always the same "invalid cursor" error.
+    An EMPTY page with hasMore true means the scan is incomplete, NOT that nothing readable remains:
+    keep paging. There is deliberately no total.
+    """
+    extendedBy(first: Int = 20, after: String): AgentExtensionPage!
     """
     #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - the id of the index node whose incoming,
     trigger-labelled edges list this Agent's own tasks, or null. Set or clear
