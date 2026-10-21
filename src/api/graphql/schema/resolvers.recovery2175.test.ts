@@ -30,7 +30,10 @@ describe('explicit recovery reads', () => {
     const n = await node('a');
     expect(await Q.node({}, { ref: n.id }, ctx())).toBeNull();
     const recovered = await Q.recoveryNode({}, { nodeRef: n.id }, ctx());
-    expect(recovered).toMatchObject({ id: n.id, content: 'raw {{missing}}', deletedAt: n.deletedAt });
+    expect(recovered).toMatchObject({ id: n.id, deletedAt: n.deletedAt });
+    // Content is a selection-time resolver so encrypted metadata inspection needs no plaintext key.
+    const R = resolvers.RecoveryNode as unknown as Record<string, (...a: any[]) => Promise<unknown>>;
+    expect(await R.content(recovered, {}, ctx())).toBe('raw {{missing}}');
     expect(recovered.urn).toBe('hrn:node:recovery2175.example:corpus:a');
   });
   it('conceals deleted content from a reader and treats live nodes as absent on the recovery point read', async () => {

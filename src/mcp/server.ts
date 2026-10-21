@@ -3491,6 +3491,31 @@ export function createMcpServerInstance(
     organizationId: auth.organizationId ?? undefined,
   });
 
+  // #2175: explicit recovery twins delegate to the same writer-plus-reader resolver gate.
+  const recoveryPageArgs = {
+    memoryRef: z.string().describe('One live memory ID or qualified URN.'),
+    limit: z.number().int().nullable().optional().describe('Default20 (also null), cap200; drain pages using total.'),
+    offset: z.number().int().nullable().optional().describe('Page offset, default0.'),
+  };
+  server.tool('hadron_list_recovery_nodes', 'Writer-only retained tombstones in one live memory. Explicit recovery; ordinary reads remain live-only.',
+    recoveryPageArgs, async (args) => textResult(JSON.stringify(await resolvers.Query.recoveryNodes({}, args, scopeCtx()))));
+  server.tool('hadron_list_recovery_edges', 'Explicit writer-only source-memory graph inspection; each endpoint is independently authorized before paging/count.',
+    recoveryPageArgs, async (args) => textResult(JSON.stringify(await resolvers.Query.recoveryEdges({}, args, scopeCtx()))));
+  server.tool('hadron_get_recovery_node', 'Writer-only raw tombstone content in a live memory; no templates, inheritance or automatic retention expiry.',
+    { nodeRef: z.string().describe('Stable node ID or qualified node URN.') }, async (args) => {
+      const ctx = scopeCtx();
+      const retained = await resolvers.Query.recoveryNode({}, args, ctx);
+      if (!retained) return textResult('Node not found.');
+      const { _retainedNode: _internal, ...dto } = retained;
+      const content = await resolvers.RecoveryNode.content(retained as never, {}, ctx);
+      return textResult(JSON.stringify({ ...dto, content }));
+    });
+  server.tool('hadron_restore_node', 'Restore one ordinary retained node, writer-only. Restore deleted parents first; governed/protected nodes refuse. No recursive restore.',
+    { nodeRef: z.string().describe('Stable node ID or qualified node URN.') }, async (args) => {
+      const restored = await resolvers.Mutation.restoreNode({}, args, scopeCtx());
+      return textResult(JSON.stringify({ id: restored.id, loc: restored.loc, memoryId: restored.memoryId, deletedAt: restored.deletedAt }));
+    });
+
   /** A resolver refusal as `[<code>] <message>` text, the app-selection envelope convention. */
   const scopeErrorText = (e: unknown) => {
     if (e instanceof ScopeGraphQLError) {

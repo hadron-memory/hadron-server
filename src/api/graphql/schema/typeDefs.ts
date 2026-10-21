@@ -1381,7 +1381,35 @@ export const typeDefs = `#graphql
     trigger: String
   }
 
+  "Explicit writer-only tombstone content; no generic entity relations. hrn:node:hadronmemory.com:specs:cor:dmo:010:04"
+  type RecoveryNode {
+    id: ID!
+    urn: String!
+    memoryId: ID!
+    loc: String!
+    name: String!
+    nodeType: String!
+    description: String
+    deletedAt: DateTime!
+    content: String
+  }
+  type RecoveryNodeSummary {
+    id: ID!
+    urn: String!
+    memoryId: ID!
+    loc: String!
+    name: String!
+    nodeType: String!
+    deletedAt: DateTime!
+  }
+  type RecoveryNodesPage { items: [RecoveryNodeSummary!]!, total: Int! }
+  type RecoveryEndpoint { id: ID!, urn: String!, loc: String!, name: String!, deletedAt: DateTime }
+  type RecoveryGraphEdge { id: ID!, name: String!, source: RecoveryEndpoint!, target: RecoveryEndpoint! }
+  type RecoveryEdgesPage { items: [RecoveryGraphEdge!]!, total: Int! }
+
   type Node {
+    "Deletion marker. Ordinary reads still omit tombstones; explicit recovery is writer-only."
+    deletedAt: DateTime
     id: ID!
     "#1392 — warnings from a cross-memory move. Null on other Node reads; [] when a move changes no local content links. Raw content is preserved."
     moveLinkWarnings: [NodeMoveLinkWarning!]
@@ -7058,6 +7086,12 @@ export const typeDefs = `#graphql
   enum AutomationTriggerKind { SCHEDULE WEBHOOK MANUAL }
 
   type Query {
+    "Raw retained tombstone in a live memory, writer-plus-reader only; no inheritance or template compilation. hrn:node:hadronmemory.com:specs:cor:dmo:010:04"
+    recoveryNode(nodeRef: ID!): RecoveryNode
+    "Explicit tombstone page, default20 cap200, SQL-authorized total; no timed purge. hrn:node:hadronmemory.com:specs:cor:api:120:04"
+    recoveryNodes(memoryRef: ID!, limit: Int = 20, offset: Int = 0): RecoveryNodesPage!
+    "Explicit source-memory recovery graph, live edges with independently authorized endpoints. Default20 cap200. hrn:node:hadronmemory.com:specs:cor:api:110:02"
+    recoveryEdges(memoryRef: ID!, limit: Int = 20, offset: Int = 0): RecoveryEdgesPage!
     "#1719: review exact automation graph bytes and digest. triggerRef is the trigger row ID; MANUAL uses the origin AppRun ID. Only its run-as user or the manager of an App-only trigger may preview."
     previewAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): JSON!
 
@@ -8850,6 +8884,8 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
+    "Restore one retained ordinary node inside a live memory. Deleted ancestors and governed kinds refuse; no recursion or revision restore. hrn:node:hadronmemory.com:specs:cor:acl:130:02"
+    restoreNode(nodeRef: ID!): Node!
     "#1719: rebind a trigger to its reviewed graph. expectedHash must match previewAutomation; edits since preview refuse adoption."
     reAdoptAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!, expectedHash: String!): Boolean!
 
