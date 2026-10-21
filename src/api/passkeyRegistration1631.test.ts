@@ -326,7 +326,13 @@ describe('the server-hosted pages', () => {
     const js = await realFetch(`${base}/passkeys/assets/ceremony.js`);
     expect(js.headers.get('content-type')).toMatch(/^application\/javascript/);
     expect(js.headers.get('x-content-type-options')).toBe('nosniff');
-    expect(await js.text()).toContain('navigator.credentials.create');
+    const script = await js.text();
+    // The served script must at least parse: no test executes it, and a stray quote would break every page.
+    expect(() => new Function(script)).not.toThrow();
+    expect(script).toContain('navigator.credentials.create');
+    // Uma P2-4: the end-window preview offers the "I didn't add this" path.
+    expect(script).toContain("not-mine-window");
+    expect(await (await realFetch(`${base}/passkeys/window/end`)).text()).toContain("I didn't add this passkey");
   });
 
   it('the confirm page links back to the page the leg started from', async () => {

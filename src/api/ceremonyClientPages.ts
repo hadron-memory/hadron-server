@@ -88,7 +88,7 @@ ${live ? '' : '<p id="add-first-why" class="hint">Available once step 1 is done.
 ${signInForms('window')}
 <p><button id="end-window">End the window now</button></p>
 <p id="window-passkey" role="alert" tabindex="-1" hidden></p>
-<p><button id="confirm-window" hidden>Yes, I added this passkey: end the window</button></p>
+<p><button id="confirm-window" hidden>Yes, I added this passkey: end the window</button> <button id="not-mine-window" hidden>I didn't add this passkey</button></p>
 <p id="status-window" role="status" aria-live="polite"></p>
 </main>`);
   });
@@ -196,14 +196,20 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
   if ($('end-window')) $('end-window').addEventListener('click', function () {
     say('status-window', '');
     post('/passkeys/window/preview').then(function (r) {
-      if (!r.ok) throw new Error('Nothing to end. Confirm who you are first, with a different method than you used to add the passkey, within 10 minutes.');
+      if (!r.ok) throw new Error('Confirm who you are first, with a different method than you used to add the passkey, within the last 10 minutes. If you have, no passkey of yours is in its cooling-off window.');
       return r.json();
     }).then(function (p) {
       var w = $('window-passkey'); var b = $('confirm-window');
-      w.textContent = 'This ends the cooling-off window of the passkey "' + p.label + '", added ' + new Date(p.registeredAt).toLocaleString() + ' after confirming with ' + p.method + '. Anything it signed then counts. Continue only if you added it.';
-      w.hidden = false; b.hidden = false; w.focus();
+      w.textContent = 'This ends the cooling-off window of the passkey "' + p.label + '", added ' + new Date(p.registeredAt).toLocaleString() + ' after confirming with ' + p.method + '. Anything it has signed stops being pending and counts as signed by you. Continue only if you added it.';
+      var n = $('not-mine-window');
+      w.hidden = false; b.hidden = false; n.hidden = false; w.focus();
+      // Uma P2-4: the case this preview exists to catch.
+      n.onclick = function () {
+        b.hidden = true; n.hidden = true;
+        say('status-window', 'Nothing was changed. Remove that passkey now: use the "Remove this passkey" link in the email we sent when it was added (no sign-in needed), or sign in and remove it from the passkeys in your account. Contact Hadron support if you need help.');
+      };
       b.onclick = function () {
-        b.hidden = true;
+        b.hidden = true; $('not-mine-window').hidden = true;
         post('/passkeys/window/end').then(function (r) {
           say('status-window', r.ok ? 'The cooling-off window has ended. Anything the passkey signed is no longer pending.' : 'Not ended. Start again.');
         }).catch(function (e) { say('status-window', e.message); });
