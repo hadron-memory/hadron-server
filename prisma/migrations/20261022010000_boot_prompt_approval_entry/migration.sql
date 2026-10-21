@@ -20,7 +20,7 @@
 -- migration that carries the new text. Idempotent.
 
 CREATE OR REPLACE FUNCTION hadron_is_boot_prompt_role(r text) RETURNS boolean
-LANGUAGE sql IMMUTABLE AS $$ SELECT r = 'boot-prompt' OR r LIKE 'boot-prompt.%' $$;
+LANGUAGE sql IMMUTABLE AS $$ SELECT coalesce(r = 'boot-prompt' OR r LIKE 'boot-prompt.%', false) $$;
 
 -- Placed: an Agent's system memory, or an install memory (isInstallMemoryRow).
 CREATE OR REPLACE FUNCTION hadron_boot_prompt_placed(memory text) RETURNS boolean

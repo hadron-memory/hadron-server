@@ -23,7 +23,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { NO_INSTALL_AUDIENCE, installMemoryAudience, isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
 import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { resolveMemoryRoot, sharedMemoryName } from './chat-scope.js';
@@ -255,6 +255,35 @@ async function lockInstallAuthority(tx: Prisma.TransactionClient, ctx: Context, 
  * install memory, take its authority before any memory, node or loc lock. A plain read of the
  * identity (no lock), so an ordinary memory costs one indexed select.
  */
+/**
+ * #2043 (Dara's P2-1 on #2235) — the authority anchors {@link lockInstallAuthority} takes for this
+ * memory, for a door whose transaction opens with `withAuthorizedMemoryTx`: passed as its
+ * `otherAnchors`, they are acquired in the SAME ordered call as the memory/org anchors, so App and
+ * Agent come first (anchor kind order) exactly as the revokers take them, and the in-gate
+ * `lockInstallAuthority` is then a no-op re-acquire. Empty for any other memory. A plain read of
+ * the identity, no lock.
+ */
+export async function installAuthorityAnchors(
+  db: Pick<PrismaClient, 'memory' | 'app'>,
+  ctx: Pick<Context, 'userId'>,
+  memoryId: string,
+): Promise<AuthorityAnchor[]> {
+  const memory = await db.memory.findUnique({
+    where: { id: memoryId },
+    select: { class: true, appId: true, installOfAgentId: true, isInstallMemory: true },
+  });
+  if (!memory || !isInstallMemoryRow(memory) || !memory.appId) return [];
+  const app = await db.app.findUnique({ where: { id: memory.appId }, select: { organizationId: true, ownerUserId: true } });
+  if (!app) return [];
+  return [
+    { kind: 'app', id: memory.appId },
+    ...(memory.installOfAgentId ? [{ kind: 'agent' as const, id: memory.installOfAgentId }] : []),
+    ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+    ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+  ];
+}
+
 export async function lockInstallAuthorityFirst(tx: Prisma.TransactionClient, ctx: Context, memoryId: string): Promise<void> {
   const row = await tx.memory.findUnique({
     where: { id: memoryId },

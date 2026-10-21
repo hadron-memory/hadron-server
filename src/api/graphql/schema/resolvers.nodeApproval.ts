@@ -10,6 +10,7 @@ import {
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveNodeUrnField, resolveRevisionEditor, typeResolvers } from './resolvers.types.js';
 import { withAuthorizedMemoryTx } from './authorizedTx.js';
+import { installAuthorityAnchors } from './installMemory.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -32,7 +33,7 @@ import {
   type NodeApprovalRow,
   type NodeIntegrityResult,
 } from '../../../lib/nodeApproval.js';
-import { bootPromptApprovalGate, type BootPromptApprovalGate } from '../../../lib/bootPromptApproval.js';
+import { bootPromptApprovalGate } from '../../../lib/bootPromptApproval.js';
 
 /**
  * #1591 — the approval policy: may this caller approve nodes of this memory?
@@ -214,17 +215,15 @@ export const nodeApprovalMutations = {
     await requirePlainApprovalMemory(ctx, memoryId);
     // E1 intentionally never supplies a decryption key to the approval writer.
     const key = null;
-    let bootPromptGate: BootPromptApprovalGate | undefined;
+    // #2043 (Dara P2-1): an install memory's App/Agent authority in the opening ordered anchor set.
+    const installAnchors = await installAuthorityAnchors(ctx.db, ctx, memoryId);
     try {
       const { node } = await withAuthorizedMemoryTx(
-        ctx, memoryId, [],
-        async (txCtx) => {
-          await mayApproveNodes(txCtx, memoryId);
-          await requirePlainApprovalMemory(txCtx, memoryId);
-          bootPromptGate = await bootPromptApprovalGate(txCtx, memoryId);
-        },
-        (tx) => approveNodeInTransaction(tx, id, {
-          memoryId, approver: editorFromAuth(ctx), key, expectedRevision: revision, bootPromptGate,
+        ctx, memoryId, installAnchors,
+        async (txCtx) => { await mayApproveNodes(txCtx, memoryId); await requirePlainApprovalMemory(txCtx, memoryId); },
+        async (tx, txCtx) => approveNodeInTransaction(tx, id, {
+          memoryId, approver: editorFromAuth(ctx), key, expectedRevision: revision,
+          bootPromptGate: await bootPromptApprovalGate(txCtx, memoryId),
         }),
       );
       return receiptOf(ctx, node);
@@ -248,15 +247,14 @@ export const nodeApprovalMutations = {
     await requirePlainApprovalMemory(ctx, memoryId);
     // E1 intentionally never supplies a decryption key to the approval writer.
     const key = null;
-    let bootPromptGate: BootPromptApprovalGate | undefined;
+    // #2043 (Dara P2-1): an install memory's App/Agent authority in the opening ordered anchor set.
+    const installAnchors = await installAuthorityAnchors(ctx.db, ctx, memoryId);
     const outcome = await withAuthorizedMemoryTx(
-      ctx, memoryId, [],
-      async (txCtx) => {
-        await mayApproveNodes(txCtx, memoryId);
-        await requirePlainApprovalMemory(txCtx, memoryId);
-        bootPromptGate = await bootPromptApprovalGate(txCtx, memoryId);
-      },
-      async (tx) => {
+      ctx, memoryId, installAnchors,
+      async (txCtx) => { await mayApproveNodes(txCtx, memoryId); await requirePlainApprovalMemory(txCtx, memoryId); },
+      async (tx, txCtx) => {
+        // #2043 — decided once for the memory, inside this transaction, and applied to each locked row.
+        const bootPromptGate = await bootPromptApprovalGate(txCtx, memoryId);
         // Lock in id order, so two bulk approvals cannot deadlock each other.
         // #1591: only unminted nodes are approved in bulk; a minted node's
         // later edits are approved one at a time.

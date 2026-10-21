@@ -18,6 +18,8 @@ import { cleanDb, createDbAppAgent, createDbAppMember, createDbAppWithKey } from
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { bootPromptApprovalGate } from '../../../lib/bootPromptApproval.js';
 import { resolvers } from './resolvers.js';
@@ -293,6 +295,82 @@ describe('#2043 S6 — an outside approval ends when its node enters the placed 
     const group = await bootSource(f.group.id, 'boot:stays');
     await approve(group.id, ctxOf(f.writer.id));
     expect((await db.node.findUniqueOrThrow({ where: { id: group.id } })).approvalHash).not.toBeNull();
+  });
+});
+
+// §10 / BLIND Dara P2-1: an install-memory approval takes the install's App/Agent
+// authority in its OPENING ordered anchor set, before the memory/org anchors, as
+// the revokers (uninstall) do; otherwise the two orders can cycle.
+describe('#2043 S6 — install approval takes the install authority first', () => {
+  it('parks on the Agent anchor an uninstall holds, before taking the memory anchor, then completes', async () => {
+    const f = await fixture();
+    const node = await bootSource(f.install.id);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    const holder = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'agent', id: f.agent.id }], 'exclusive');
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await isHeld;
+    const approval = codeOf(approve(node.id, ctxOf(f.admin.id)));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      const free = await db.$transaction(async (tx) => (await tx.$queryRaw<Array<{ ok: boolean }>>`
+        SELECT pg_try_advisory_xact_lock(hashtext('authorization:memory'), hashtext(${f.install.id})) AS ok`)[0]!.ok);
+      expect(free).toBe(true);
+    } finally {
+      release();
+      await holder;
+    }
+    expect(await approval).toBe('NO_ERROR');
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvalHash).not.toBeNull();
+  });
+});
+
+describe('#2043 S6 — a refusal changes nothing, and the fenced recheck decides', () => {
+  // §10 Rook P3-1: the gate runs on the locked row BEFORE the revision reconcile,
+  // which would otherwise write a revision for a node whose text drifted.
+  it('a skipped boot prompt with drifted revision state gets no reconcile revision', async () => {
+    const f = await fixture();
+    const node = await bootSource(f.agentMem.id);
+    await db.$executeRaw`UPDATE nodes SET content = 'drifted outside the writer' WHERE id = ${node.id}`;
+    const before = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    const revisions = await db.nodeRevision.count({ where: { nodeId: node.id } });
+    const result = await runAsActor({ workerId: f.worker.id, agentId: null }, () => bulk(f.agentMem.id, ctxOf(f.admin.id)));
+    expect(result.skippedBootPrompts).toEqual(['boot:source']);
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect({ revSeq: after.revSeq, contentRevSeq: after.contentRevSeq }).toEqual({ revSeq: before.revSeq, contentRevSeq: before.contentRevSeq });
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(revisions);
+  });
+
+  // §10 Rook P3-2: the pooled pre-flight is only a pre-flight; the write gate is
+  // re-decided inside the fenced transaction, after the anchors are held.
+  it('a manager demoted while the approval waits on the org anchor is refused inside the transaction', async () => {
+    const f = await fixture();
+    const node = await plain(f.agentMem.id);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    const demote = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'org', id: orgId }], 'exclusive');
+      await tx.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: f.admin.id } }, data: { role: 'READER' } });
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await isHeld;
+    const approval = codeOf(approve(node.id, ctxOf(f.admin.id)));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      release();
+      await demote;
+    }
+    expect(await approval).toBe('FORBIDDEN');
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvalHash).toBeNull();
   });
 });
 

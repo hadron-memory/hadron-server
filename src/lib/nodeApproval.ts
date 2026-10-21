@@ -164,14 +164,14 @@ export async function approveNodeInTransaction(
     key: EncryptionKey | null;
     expectedRevision?: number | null;
     now?: Date;
-    /** #2043 — the caller's boot-prompt approval decision for this memory (bootPromptApprovalGate). */
-    bootPromptGate?: BootPromptApprovalGate;
+    /** #2043 — the caller's boot-prompt approval decision for this memory (bootPromptApprovalGate). Required: no caller skips it. */
+    bootPromptGate: BootPromptApprovalGate;
   },
 ): Promise<{ node: NodeApprovalRow; approvedNow: boolean }> {
   // #2043 (R30, cor:agt:040:18) — judged on the LOCKED row, before the revision
   // reconcile below can write anything: a refusal changes nothing.
   const gate = opts.bootPromptGate;
-  if (gate?.placed && gate.refusal) {
+  if (gate.placed && gate.refusal) {
     const [row] = await tx.$queryRaw<Array<{ role: string | null }>>`
       SELECT role FROM nodes WHERE id = ${nodeId} AND memory_id = ${opts.memoryId} AND deleted_at IS NULL FOR UPDATE`;
     if (row && isBootPromptRole(row.role)) {
