@@ -10,7 +10,10 @@
  * The script is served from this origin (`/passkeys/assets/ceremony.js`), so the CSP allows no inline script. Forms
  * may post to the identity providers' authorize pages, because the sign-in start answers with a redirect there.
  */
-import type { Express, Response } from 'express';
+import type { Express, Request, Response } from 'express';
+import { db } from '../integrations/db/client.js';
+import { peekFreshSignIn } from '../lib/passkeys/freshSignIn.js';
+import { createHash } from 'node:crypto';
 import { page } from './ceremonyPages.js';
 import { passkeyRpId } from '../lib/signing/config.js';
 
@@ -36,24 +39,45 @@ ${(['github', 'google', 'apple'] as const).map((p) => `<form method="post" actio
 
 function send(res: Response, title: string, body: string): void {
   res.status(200).set(CLIENT_PAGE_HEADERS).type('html')
-    .send(page(title, `${body}\n<p id="status" role="status" aria-live="polite"></p>\n<script src="${CEREMONY_SCRIPT_PATH}" defer></script>`));
+    .send(page(title, `${body}\n<script src="${CEREMONY_SCRIPT_PATH}" defer></script>`));
+}
+
+const METHOD_NAMES: Record<string, string> = { github: 'GitHub', google: 'Google', apple: 'Apple', email: 'an email link' };
+
+/** This browser's live fresh sign-in, if exactly one (spends nothing). */
+async function liveSignIn(req: Request) {
+  const raw = /(?:^|;\s*)hadron_ceremony_browser=([^;]+)/.exec(req.headers.cookie ?? '')?.[1];
+  return raw ? peekFreshSignIn(db, { browserNonceHash: createHash('sha256').update(raw).digest('hex') }) : null;
 }
 
 /** Mount the pages; called from the dark ceremony mount only. */
-export function mountCeremonyClientPages(app: Express): void {
-  app.get('/passkeys/register', (_req, res) => {
+export function mountCeremonyClientPages(app: Express, opts: { windowHours: number }): void {
+  app.get('/passkeys/register', async (req, res) => {
+    // Uma P2-1: show step 1 as done when this browser holds a live confirmation, and gate step 2 on it.
+    const live = await liveSignIn(req).catch(() => null);
+    const step1 = live
+      ? `<p class="done" role="status"><strong>Confirmed with ${METHOD_NAMES[live.method] ?? live.method}</strong>, ${Math.max(1, Math.ceil(live.secondsLeft / 60))} minute(s) left to add your passkey.</p>`
+      : `<p>Confirm who you are in this browser. The confirmation lasts 10 minutes.</p>\n${signInForms('register')}`;
     send(res, 'Add a passkey', `<main data-page="register" data-rp-id="${passkeyRpId()}">
 <h1>Add a passkey</h1>
+<p>A passkey lets you sign Hadron changes with your fingerprint, face or device PIN. Your first passkey goes through a
+<strong>cooling-off window of ${opts.windowHours} hours</strong>: anything it signs stays pending until the window ends, and we email you a link to remove it if you didn't add it.</p>
 <h2>Your first passkey</h2>
-<p>First confirm who you are, within the last 10 minutes, in this browser.</p>
-${signInForms('register')}
-<p><label>Name for this passkey <input id="label" maxlength="64" value="Passkey"></label></p>
-<p><button id="add-first">Add my first passkey</button></p>
+<h3>1. Confirm who you are</h3>
+${step1}
+<h3>2. Name and add it</h3>
+<p><label>Name for this passkey <input id="label" maxlength="64" placeholder="for example, Work laptop"></label></p>
+<p><button id="add-first"${live ? '' : ' disabled aria-describedby="add-first-why"'}>Add my first passkey</button></p>
+${live ? '' : '<p id="add-first-why" class="hint">Available once step 1 is done.</p>'}
+<p id="status-first" role="status" aria-live="polite"></p>
 <h2>Already have a passkey?</h2>
 <p>Use it to vouch for the new one. A passkey still in its cooling-off window can't vouch.</p>
 <p><button id="add-later">Use my passkey, then add another</button></p>
-<p id="account" hidden></p>
-<p><button id="confirm-account" hidden>Continue</button></p>
+<p id="status-later" role="status" aria-live="polite"></p>
+<div id="account-check" hidden>
+<p id="account" role="alert" tabindex="-1"></p>
+<p><button id="confirm-account">Continue</button> <button id="stop-account">Not my account: stop</button></p>
+</div>
 </main>`);
   });
 
@@ -63,8 +87,9 @@ ${signInForms('register')}
 <p>Confirm who you are with a method you did <strong>not</strong> use to add the passkey. Then anything it signed stops being pending.</p>
 ${signInForms('window')}
 <p><button id="end-window">End the window now</button></p>
-<p id="window-passkey" hidden></p>
+<p id="window-passkey" role="alert" tabindex="-1" hidden></p>
 <p><button id="confirm-window" hidden>Yes, I added this passkey: end the window</button></p>
+<p id="status-window" role="status" aria-live="polite"></p>
 </main>`);
   });
 
@@ -78,7 +103,7 @@ ${signInForms('window')}
 const CEREMONY_SCRIPT = String.raw`'use strict';
 (function () {
   var $ = function (id) { return document.getElementById(id); };
-  var status = function (msg) { var s = $('status'); if (s) s.textContent = msg; };
+  var say = function (id, msg) { var s = $(id); if (s) s.textContent = msg; };
   var enc = function (buf) {
     var s = ''; var b = new Uint8Array(buf);
     for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
@@ -90,8 +115,10 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
     for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
   };
+  var TOO_MANY = 'Too many attempts. Wait a minute and try again.';
   var post = function (path, body) {
-    return fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+    return fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) })
+      .then(function (r) { if (r.status === 429) throw new Error(TOO_MANY); return r; });
   };
   var main = document.querySelector('main');
   var emailForm = $('email-form');
@@ -99,19 +126,24 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
     e.preventDefault();
     var f = new FormData(emailForm);
     post('/passkeys/sign-in/email', { email: f.get('email'), next: f.get('next') }).then(function () {
-      status('If that address belongs to an account, a link is on its way. Open it in this browser.');
-    });
+      say(main.dataset.page === 'window' ? 'status-window' : 'status-first', 'If that address belongs to an account, a link is on its way. Open it in this browser.');
+    }).catch(function (e) { say('status-first', e.message); });
   });
 
   var challenge = function () {
     return post('/passkeys/register/challenge').then(function (r) { if (!r.ok) throw new Error('refused'); return r.json(); });
   };
+  // Uma P2-2: the account check takes focus, and offers a way out that clears the ceremony.
   var confirmAccount = function (handle) {
-    return new Promise(function (resolve) {
-      var a = $('account'); var b = $('confirm-account');
+    return new Promise(function (resolve, reject) {
+      var box = $('account-check'); var a = $('account');
       a.textContent = 'You are adding a passkey to the Hadron account @' + handle + '. Continue only if that is your account.';
-      a.hidden = false; b.hidden = false;
-      b.onclick = function () { b.hidden = true; resolve(); };
+      box.hidden = false; a.focus();
+      $('confirm-account').onclick = function () { box.hidden = true; resolve(); };
+      $('stop-account').onclick = function () {
+        box.hidden = true;
+        post('/passkeys/register/stop').then(function () { reject(new Error('Stopped. Nothing was added, and this page forgot the confirmation.')); });
+      };
     });
   };
   var create = function (ceremonyId, options) {
@@ -128,11 +160,13 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
         },
         clientExtensionResults: cred.getClientExtensionResults()
       };
-      return post('/passkeys/register/finish', { ceremonyId: ceremonyId, response: response, label: ($('label') || {}).value || 'Passkey' });
+      var label = (($('label') || {}).value || '').trim() || 'Passkey';
+      return post('/passkeys/register/finish', { ceremonyId: ceremonyId, response: response, label: label });
     });
   };
   var register = function (vouch) {
-    status('');
+    var out = vouch ? 'status-later' : 'status-first';
+    say('status-first', ''); say('status-later', '');
     var ceremonyId;
     challenge().then(function (c) {
       ceremonyId = c.ceremonyId;
@@ -144,7 +178,7 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
             clientDataJson: enc(a.response.clientDataJSON), signature: enc(a.response.signature) } });
         });
     }).then(function (r) {
-      if (!r.ok) throw new Error(vouch ? 'That passkey can\'t vouch: it may be revoked or still in its cooling-off window.' : 'Confirm who you are first (above), in this browser, within the last 10 minutes.');
+      if (!r.ok) throw new Error(vouch ? 'That passkey can\'t vouch: it may be removed or still in its cooling-off window.' : 'Confirm who you are first (step 1), in this browser, within the last 10 minutes.');
       return r.json();
     }).then(function (options) {
       return confirmAccount(options.account.handle).then(function () { return create(ceremonyId, options); });
@@ -152,31 +186,29 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
       if (!r.ok) throw new Error('The passkey was not added. Start again.');
       return r.json();
     }).then(function (done) {
-      status(done.kind === 'first'
-        ? 'Passkey added. Anything it signs stays pending for its cooling-off window. We emailed you a link to cancel it if this wasn\'t you.'
+      say(out, done.kind === 'first'
+        ? 'Passkey added. Anything it signs stays pending for its cooling-off window. We emailed you a link to remove it if this wasn\'t you.'
         : 'Passkey added. We emailed you a notice.');
-    }).catch(function (e) { status(e && e.message && e.message !== 'refused' ? e.message : 'That didn\'t work. Start again.'); });
+    }).catch(function (e) { say(out, e && e.message && e.message !== 'refused' ? e.message : 'That didn\'t work. Start again.'); });
   };
   if ($('add-first')) $('add-first').addEventListener('click', function () { register(false); });
   if ($('add-later')) $('add-later').addEventListener('click', function () { register(true); });
   if ($('end-window')) $('end-window').addEventListener('click', function () {
-    status('');
+    say('status-window', '');
     post('/passkeys/window/preview').then(function (r) {
-      if (!r.ok) throw new Error('none');
+      if (!r.ok) throw new Error('Nothing to end. Confirm who you are first, with a different method than you used to add the passkey, within 10 minutes.');
       return r.json();
     }).then(function (p) {
       var w = $('window-passkey'); var b = $('confirm-window');
-      w.textContent = 'This ends the cooling-off window of the passkey "' + p.label + '", added ' + new Date(p.registeredAt).toLocaleString() + '. Anything it signed then counts. Continue only if you added it.';
-      w.hidden = false; b.hidden = false;
+      w.textContent = 'This ends the cooling-off window of the passkey "' + p.label + '", added ' + new Date(p.registeredAt).toLocaleString() + ' after confirming with ' + p.method + '. Anything it signed then counts. Continue only if you added it.';
+      w.hidden = false; b.hidden = false; w.focus();
       b.onclick = function () {
         b.hidden = true;
         post('/passkeys/window/end').then(function (r) {
-          status(r.ok ? 'The cooling-off window has ended. Anything the passkey signed is no longer pending.' : 'Not ended. Start again.');
-        });
+          say('status-window', r.ok ? 'The cooling-off window has ended. Anything the passkey signed is no longer pending.' : 'Not ended. Start again.');
+        }).catch(function (e) { say('status-window', e.message); });
       };
-    }).catch(function () {
-      status('Nothing to end. Confirm who you are first, with a different method than you used to add the passkey, within 10 minutes.');
-    });
+    }).catch(function (e) { say('status-window', e.message); });
   });
 })();
 `;

@@ -409,8 +409,8 @@ export function passkeyNoticeEmail(n: PasskeyNoticeContent): { subject: string; 
       subject: 'A passkey was added to your Hadron account',
       html: `${what}
 <p>Anything it signs stays pending until ${n.windowEndsAt ? when(n.windowEndsAt) : 'its cooling-off window ends'}.</p>
-<p><strong>If this wasn't you</strong>, cancel it now. No sign-in is needed, and it also ends the sign-ins it completed:</p>
-<p><a href="${esc(n.cancelUrl)}">Cancel this passkey</a></p>
+<p><strong>If this wasn't you</strong>, remove it now. No sign-in is needed, and it also signs out any sessions it started:</p>
+<p><a href="${esc(n.cancelUrl)}">Remove this passkey</a></p>
 <p>The link works once, and only until the cooling-off window ends.</p>`,
     };
   }

@@ -13,7 +13,7 @@ export const PAGE_HEADERS = {
 };
 
 export const page = (title: string, body: string) => `<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title></head>
+<meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>${title}</title></head>
 <body style="font-family:system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem">${body}</body></html>`;
 
 /** Send a page with the ceremony headers. */

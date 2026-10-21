@@ -121,3 +121,21 @@ export async function consumeFreshSignIn(
    RETURNING id, method`;
   return rows[0] ?? null;
 }
+
+/**
+ * #1631 PR2 (Uma's UX read): is there ONE confirmed, unspent, fresh sign-in on this browser, and for how much longer?
+ * For the register page to show step 1 as done. Spends nothing and names no user.
+ */
+export async function peekFreshSignIn(
+  db: PrismaClient,
+  input: { browserNonceHash: string },
+): Promise<{ method: FreshSignInMethod; secondsLeft: number } | null> {
+  if (!HEX64.test(input.browserNonceHash)) return null;
+  const rows = await db.$queryRaw<Array<{ method: FreshSignInMethod; seconds_left: number }>>`
+    SELECT method, EXTRACT(EPOCH FROM (signed_in_at + make_interval(secs => ${FRESH_SIGN_IN_MAX_AGE_SECONDS})
+      - (clock_timestamp() AT TIME ZONE 'UTC')))::int AS seconds_left
+      FROM fresh_sign_ins
+     WHERE browser_nonce_hash = ${input.browserNonceHash} AND confirmed_at IS NOT NULL AND consumed_at IS NULL
+       AND signed_in_at >= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(secs => ${FRESH_SIGN_IN_MAX_AGE_SECONDS})`;
+  return rows.length === 1 ? { method: rows[0].method, secondsLeft: Math.max(0, rows[0].seconds_left) } : null;
+}

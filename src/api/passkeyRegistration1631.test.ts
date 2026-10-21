@@ -221,6 +221,12 @@ describe('the cancel link (040:08 S6-S9)', () => {
     expect(await again.text()).toBe(await unknown.text());
   });
 
+  it('a refused link still says what to do if you did not add the passkey (Uma P2-3), and the page says Remove', async () => {
+    expect(await (await realFetch(`${base}/passkeys/cancel?token=${token}`)).text()).toContain('Remove this passkey');
+    const body = await (await cancel('Z'.repeat(43))).text();
+    expect(body).toContain("If you didn't add this passkey");
+  });
+
   it('refuses a cross-origin POST', async () => {
     expect((await cancel(token, 'https://evil.example')).status).toBe(403);
     expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: passkeyId } })).revokedAt).toBeNull();
@@ -258,7 +264,7 @@ describe('end the window early (040:07 S2, S7)', () => {
     });
     const r = await post('/passkeys/window/preview', {}, browser);
     expect(r.status).toBe(200);
-    expect(await r.json()).toMatchObject({ label: 'My laptop' });
+    expect(await r.json()).toMatchObject({ label: 'My laptop', method: 'Google' });
     // The preview spent nothing: the step itself still succeeds.
     expect((await post('/passkeys/window/end', {}, browser)).status).toBe(200);
   });
@@ -290,6 +296,29 @@ describe('the server-hosted pages', () => {
     expect(html).toContain('name="next" value="register"');
     expect(html).toContain('src="/passkeys/assets/ceremony.js"');
     expect(html).not.toMatch(/<script>(?!<\/script>)/);
+  });
+
+  it('/passkeys/register shows step 1 done once this browser is confirmed, and gates step 2 until then (Uma P2-1)', async () => {
+    const before = await (await realFetch(`${base}/passkeys/register`)).text();
+    expect(before).toMatch(/<button id="add-first" disabled/);
+    expect(before).toContain('Available once step 1 is done');
+    expect(before).toContain('cooling-off window of 72 hours');
+    const browser = await signInLeg();
+    const after = await (await realFetch(`${base}/passkeys/register`, { headers: { cookie: browser } })).text();
+    expect(after).toMatch(/Confirmed with GitHub<\/strong>, (10|9) minute\(s\) left/);
+    expect(after).toMatch(/<button id="add-first">/);
+    expect(after).not.toContain('action="/passkeys/sign-in/github/start"');
+    // Rendering spent nothing.
+    expect(await db.freshSignIn.count({ where: { consumedAt: { not: null } } })).toBe(0);
+  });
+
+  it('"Not my account: stop" forgets the ceremony and the confirmation cookies (Uma P2-2)', async () => {
+    const r = await post('/passkeys/register/stop', {});
+    expect(r.status).toBe(200);
+    const set = r.headers.getSetCookie();
+    expect(set.some((c) => c.startsWith('hadron_ceremony=;'))).toBe(true);
+    expect(set.some((c) => c.startsWith('hadron_ceremony_browser=;'))).toBe(true);
+    expect((await post('/passkeys/register/stop', {}, undefined, {}, 'https://evil.example')).status).toBe(403);
   });
 
   it('/passkeys/window/end carries next=window, and the script is served as JavaScript', async () => {

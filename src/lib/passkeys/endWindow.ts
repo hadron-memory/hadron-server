@@ -47,16 +47,16 @@ export async function endWindowEarly(db: PrismaClient, input: { signInBrowserHas
 }
 
 /** What the end-window step would act on, for the page to show before the POST (Rook P3-2). Spends nothing. */
-export async function previewWindowEnd(db: PrismaClient, input: { signInBrowserHash: string }): Promise<{ label: string; registeredAt: Date } | null> {
+export async function previewWindowEnd(db: PrismaClient, input: { signInBrowserHash: string }): Promise<{ label: string; registeredAt: Date; method: string } | null> {
   if (!HEX64.test(input.signInBrowserHash)) return null;
   const signIns = await db.$queryRaw<Array<{ user_id: string; method: string }>>`
     SELECT user_id, method FROM fresh_sign_ins
      WHERE browser_nonce_hash = ${input.signInBrowserHash} AND confirmed_at IS NOT NULL AND consumed_at IS NULL
        AND signed_in_at >= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(secs => ${FRESH_SIGN_IN_MAX_AGE_SECONDS})`;
   if (signIns.length !== 1) return null;
-  const [p] = await db.$queryRaw<Array<{ label: string; registered_at: Date }>>`
-    SELECT c.label, c.registered_at FROM passkey_credentials c JOIN users u ON u.id = c.owner_id AND u.deleted_at IS NULL
+  const [p] = await db.$queryRaw<Array<{ label: string; registered_at: Date; registration_method: string }>>`
+    SELECT c.label, c.registered_at, c.registration_method FROM passkey_credentials c JOIN users u ON u.id = c.owner_id AND u.deleted_at IS NULL
      WHERE c.owner_id = ${signIns[0].user_id} AND c.revoked_at IS NULL AND c.window_outcome IS NULL AND c.window_ended_at IS NULL
        AND c.window_ends_at > (clock_timestamp() AT TIME ZONE 'UTC') AND c.registration_method <> ${signIns[0].method}`;
-  return p ? { label: p.label, registeredAt: p.registered_at } : null;
+  return p ? { label: p.label, registeredAt: p.registered_at, method: p.registration_method } : null;
 }

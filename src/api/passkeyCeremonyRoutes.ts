@@ -102,7 +102,7 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
   if (!signingSurfacePolicy(env).registration) return;
   // cor:aut:040:07: a misconfigured window (shorter than 72 hours, or not an integer) fails here, at boot.
   const windowHours = firstPasskeyWindowHours(env);
-  mountCeremonyClientPages(app);
+  mountCeremonyClientPages(app, { windowHours });
   const limiter = rateLimit({
     windowMs: 60_000, limit: PASSKEY_CEREMONY_RATE_LIMIT_PER_MINUTE, standardHeaders: false, legacyHeaders: false,
     handler: (_req, res) => { res.status(429).end(); },
@@ -216,18 +216,28 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
       const signInNonce = cookieValue(req, CEREMONY_BROWSER_COOKIE);
       const preview = signInNonce ? await previewWindowEnd(db, { signInBrowserHash: sha256Hex(signInNonce) }) : null;
       if (!preview) return void refuse(res);
-      res.status(200).set('Cache-Control', 'no-store').json({ label: preview.label, registeredAt: preview.registeredAt.toISOString() });
+      const methods: Record<string, string> = { github: 'GitHub', google: 'Google', apple: 'Apple', email: 'an email link' };
+      res.status(200).set('Cache-Control', 'no-store').json({ label: preview.label, registeredAt: preview.registeredAt.toISOString(), method: methods[preview.method] ?? preview.method });
     } catch { refuse(res); }
+  });
+
+  // Uma P2-2: "Not my account: stop" forgets this browser's ceremony and confirmation. Nothing is registered; a
+  // spent sign-in stays spent.
+  app.post('/passkeys/register/stop', limiter, (req: Request, res: Response) => {
+    if (!originAllowed(req)) return void refuse(res);
+    res.clearCookie(COOKIE, ceremonyCookie(req));
+    clearCeremonyBrowserCookie(req, res);
+    res.status(200).set('Cache-Control', 'no-store').json({ ok: true });
   });
 
   // The cancel link. The GET only renders, so a mail scanner spends nothing; the POST is the cancel.
   app.get(PASSKEY_CANCEL_PATH, (req, res) => {
     const token = req.query.token;
     if (typeof token !== 'string' || !CANCEL_TOKEN.test(token)) return void cancelRefused(res, 400);
-    sendPage(res, 200, 'Cancel this passkey', `<h1>Cancel this passkey?</h1>
-<p>This removes the passkey that was just added to your Hadron account, and ends the sign-ins it completed. Do it if you did not add it.</p>
+    sendPage(res, 200, 'Remove this passkey', `<h1>Remove this passkey?</h1>
+<p>This removes the passkey that was just added to your Hadron account, and signs out any sessions it started. Do it if you did not add it.</p>
 <form method="post" action="${PASSKEY_CANCEL_PATH}"><input type="hidden" name="token" value="${token}">
-<button type="submit">Cancel this passkey</button></form>`);
+<button type="submit">Remove this passkey</button></form>`);
   });
 
   app.post(PASSKEY_CANCEL_PATH, cancelLimiter, express.urlencoded({ extended: false, limit: '4kb' }), async (req: Request, res: Response) => {
@@ -236,7 +246,7 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
       if (!originAllowed(req) || typeof token !== 'string') return void cancelRefused(res);
       const userAgent = String(req.headers['user-agent'] ?? '').slice(0, 512) || 'unknown';
       if (!(await cancelFirstPasskey(db, { token, ip: req.ip ?? 'unknown', userAgent }))) return void cancelRefused(res);
-      sendPage(res, 200, 'Passkey cancelled', '<h1>Passkey cancelled</h1><p>The passkey was removed, and the sign-ins it completed have ended.</p>');
+      sendPage(res, 200, 'Passkey removed', '<h1>Passkey removed</h1><p>The passkey was removed, and any sessions it started are signed out. Nothing it signed will count.</p>');
     } catch { cancelRefused(res); }
   });
 
@@ -297,5 +307,7 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
 
 /** One answer for an unknown, used or out-of-window cancel link (Rook 6316353964): it says nothing about which. */
 function cancelRefused(res: Response, status = 403): void {
-  sendPage(res, status, 'Link not usable', '<h1>This link can\'t be used</h1><p>It may have been used already, or the passkey\'s cooling-off window has ended.</p>');
+  // Uma P2-3: one answer for every refusal, but never a dead end.
+  sendPage(res, status, 'Link not usable', `<h1>This link can't be used</h1><p>It may have been used already, or the passkey's cooling-off window has ended.</p>
+<p><strong>If you didn't add this passkey</strong>, sign in to Hadron and remove it from your account's passkeys, or contact Hadron support.</p>`);
 }
