@@ -118,7 +118,7 @@ describe('memoryEdges (#466)', () => {
     const page = await memoryEdges({ memoryRef: mem.id });
     expect(page.total).toBe(2); // soft-deleted excluded
     expect(page.edges.map((e: any) => e.loc)).toEqual(['edge.1', 'edge.2']);
-    expect(page.edges[0]).toEqual({ id: expect.any(String), loc: 'edge.1', name: 'rel1', sourceId: a.id, targetId: b.id });
+    expect(page.edges[0]).toEqual({ id: expect.any(String), loc: 'edge.1', name: 'rel1', sourceId: a.id, targetId: b.id, governedKind: null });
 
     const p2 = await memoryEdges({ memoryRef: mem.id, limit: 1, offset: 1 });
     expect(p2.edges.map((e: any) => e.loc)).toEqual(['edge.2']);
