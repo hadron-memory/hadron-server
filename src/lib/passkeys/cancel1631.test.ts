@@ -60,6 +60,12 @@ describe('cancel link', () => {
     expect((await cred()).cancelIp).toBe(after.cancelIp);
   });
 
+  it('a spent token never cancels, even while the window is still open', async () => {
+    await db.$executeRaw`UPDATE passkey_cancel_tokens SET used_at = now() WHERE passkey_id = ${first}`;
+    expect(await cancelFirstPasskey(db, { token, ...req })).toBe(false);
+    expect((await cred()).revokedAt).toBeNull();
+  });
+
   it('does nothing once the window has ended (040:08 S7)', async () => {
     await runOut(first);
     expect(await cancelFirstPasskey(db, { token, ...req })).toBe(false);
