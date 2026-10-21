@@ -5866,7 +5866,7 @@ export function createMcpServerInstance(
       governedCanReplay: () => true,
       clientId: auth.clientId ?? undefined,
       userId: auth.userId ?? undefined,
-      apiKeyId: auth.apiKeyId ?? undefined,
+      apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
       appId: auth.appId ?? undefined,
       sessionId: auth.sessionId ?? undefined,
       roles: auth.roles as Context['roles'],
