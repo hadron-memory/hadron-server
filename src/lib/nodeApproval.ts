@@ -356,6 +356,11 @@ export interface RevisionApproval {
   state: 'APPROVED' | 'NOT_APPROVED' | 'NOT_APPLICABLE';
   /** The covering record, with the revision it was recorded at. Null unless APPROVED. */
   record: NodeApprovalRecord | null;
+  /**
+   * Only when APPROVED: the exact content this verdict hashed, and the memory that captured it. An include serves
+   * THIS text, so what is served is what qualified; it never re-reads the revision after the verdict (#2041).
+   */
+  served?: { content: string | null; memoryId: string };
 }
 
 const NOT_APPROVED_REVISION: RevisionApproval = { state: 'NOT_APPROVED', record: null };
@@ -435,7 +440,65 @@ export async function revisionApprovalOf(
   // Prefer the record made AT this revision, else the earliest that covers it.
   const record = covering.find((c) => c.revision === revNo)
     ?? covering.reduce((a, b) => (b.revision < a.revision ? b : a));
-  return { state: 'APPROVED', record };
+  return { state: 'APPROVED', record, served: { content: (target ?? live).content, memoryId: captureMemoryId } };
+}
+
+/** How many revisions `newestApprovedRevisionOf` examines before it gives up (newest first). */
+export const NEWEST_APPROVED_REVISION_SCAN_CAP = 100;
+
+export interface NewestApprovedRevision {
+  /** Null when no examined revision is approved (or the node/memory yields nothing to read). */
+  found: { revNo: number; record: NodeApprovalRecord; source: 'live' | 'snapshot' } | null;
+  /** True when the scan stopped at the cap with older revisions unexamined: `found: null` is then not "never approved". */
+  truncated: boolean;
+}
+
+/**
+ * #2041 (cor:dmo:150:05, "a newer unapproved edit of an `approved` target is
+ * not broken: serve the newest approved revision") — the newest revision of
+ * the node that `revisionApprovalOf` reads APPROVED. It is a walk over that one
+ * predicate (live revision first, then the retained snapshots newest-first), so
+ * no second definition of "approved" exists. It reads no `approvedRevNo`
+ * pointer: that is the node's CURRENT approval, which a later edit supersedes
+ * and an encrypted entry can end.
+ *
+ * Only revisions that can be served from the node's CURRENT memory count: a
+ * snapshot captured in another memory (a node moved across memories) is never
+ * selected, and an encrypted memory yields nothing (NOT_APPLICABLE, nothing is
+ * read). A legacy snapshot with no `revNo` cannot be pinned and is skipped.
+ *
+ * Pure read; `db` may be a transaction client.
+ */
+export async function newestApprovedRevisionOf(
+  db: Pick<PrismaClient, 'node' | 'nodeRevision' | 'memory'> | Prisma.TransactionClient,
+  nodeId: string,
+  cap: number = NEWEST_APPROVED_REVISION_SCAN_CAP,
+): Promise<NewestApprovedRevision> {
+  const none: NewestApprovedRevision = { found: null, truncated: false };
+  const live = await db.node.findUnique({ where: { id: nodeId }, select: { memoryId: true, revSeq: true } });
+  if (!live) return none;
+  // Snapshots servable from the node's CURRENT memory only (a foreign-memory capture is never selected).
+  const snapshots = await db.nodeRevision.findMany({
+    where: { nodeId, revNo: { not: null }, OR: [{ memoryId: null }, { memoryId: live.memoryId }] },
+    select: { revNo: true },
+    orderBy: { revNo: 'desc' },
+    take: cap + 1,
+  });
+  const snapshotNos = new Set(snapshots.map((r) => r.revNo!));
+  // `revisionApprovalOf` resolves a number to its snapshot row first, whichever memory captured it, so the live
+  // revision is offered only while NO snapshot at all holds its number: a foreign-memory snapshot at `revSeq` would
+  // otherwise be read through, and reported as live.
+  const liveNumberHeld = (await db.nodeRevision.findFirst({ where: { nodeId, revNo: live.revSeq }, select: { id: true } })) != null;
+  const candidates = [...(liveNumberHeld ? [] : [live.revSeq]), ...snapshotNos].sort((a, b) => b - a);
+  const examined = candidates.slice(0, cap);
+  for (const revNo of examined) {
+    const verdict = await revisionApprovalOf(db, nodeId, revNo);
+    if (verdict.state === 'NOT_APPLICABLE') return none;
+    if (verdict.state === 'APPROVED') {
+      return { found: { revNo, record: verdict.record!, source: snapshotNos.has(revNo) ? 'snapshot' : 'live' }, truncated: false };
+    }
+  }
+  return { found: null, truncated: candidates.length > cap };
 }
 
 /**

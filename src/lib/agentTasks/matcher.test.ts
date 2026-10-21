@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1707 (Task Management T3) — the matcher (cor:agt:060:05, :06): who is free
  * for work, who a queued task goes to, when matching runs, and that
@@ -59,7 +60,7 @@ beforeEach(async () => {
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `match-${n}.example:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
   const worker = (name: string, role: string) =>
-    db.worker.create({ data: { appId: app.id, agentId, name, slug: name.toLowerCase(), role, heldByUserId: mia.id }, select: { id: true } });
+    db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name, slug: name.toLowerCase(), role, heldByUserId: mia.id }, select: { id: true } });
   baloo = await worker('Baloo', 'reviewer');
   liam = await worker('Liam', 'reviewer');
   rook = await worker('Rook', 'reviewer');
@@ -109,7 +110,7 @@ describe('cor:agt:060:06 — a queued task goes to the matching worker free for 
     await lastAssigned(baloo, '09:00');
     await lastAssigned(liam, '10:00');
     const t = await queued('11:00', NOT_CLAUDE_REVIEWER);
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 1 });
     expect(await assigneeOf(t.id)).toBe(baloo.id);
     const task = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
     expect(task).toMatchObject({ status: 'pending', assignedAt: at('11:01'), assignedBy: null, assignedByWorkerId: null });
@@ -223,7 +224,7 @@ describe('cor:agt:060:06 — a queued task goes to the matching worker free for 
       })),
     });
     const last = await queued('10:00', { role: 'reviewer' });
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 1 });
     expect(await assigneeOf(last.id)).toBe(baloo.id);
   });
 });
@@ -600,7 +601,7 @@ describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
       data: { appId: app.id, title: 'Parked', ownerUserId: mia.id, status: 'backlog', createdAt: at('11:00') },
       select: { id: true },
     });
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, matched: 0 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 0 });
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))
       .toMatchObject({ status: 'backlog', assigneeWorkerId: null, assigneeUserId: null });
     expect(await db.agentTeamEvent.findMany({ where: { taskId: t.id } })).toEqual([]);
@@ -609,7 +610,7 @@ describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
   it('a task parked FROM THE QUEUE (a real queue stint behind it) is not matched (#1790 Xylon P2-2)', async () => {
     await bind(baloo, 'codex', at('11:00'));
     const t = await queuedAt('10:00', { status: 'backlog' }); // queued at 10:00, parked since
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, matched: 0 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 0 });
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))
       .toMatchObject({ status: 'backlog', assigneeWorkerId: null, assigneeUserId: null });
   });
@@ -623,7 +624,7 @@ describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
     });
     await db.agentTask.update({ where: { id: older.id }, data: { status: 'pending' } });
     const younger = await queuedAt('11:00'); // queued continuously
-    expect(await taskMatcherTick(db, at('11:31'))).toEqual({ lost: 0, lapsed: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('11:31'))).toEqual({ lost: 0, lapsed: 0, expired: 0, matched: 1 });
     expect(await assigneeOf(older.id)).toBe(baloo.id);
     expect(await assigneeOf(younger.id)).toBeNull();
   });

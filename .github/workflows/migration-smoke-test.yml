@@ -6,8 +6,8 @@ name: Migration Smoke Test
 # `prisma migrate deploy` path that production runs.
 #
 # Strategy: simulate a real prod-like apply by setting up a DB
-# matching `origin/main` (via db push + marking main's migrations
-# applied), then running `prisma migrate deploy` to apply only
+# matching `origin/main` (via db push + main's raw SQL invariants + marking
+# main's migrations applied), then running `prisma migrate deploy` to apply only
 # the *new* migrations introduced in this PR.
 
 on:
@@ -15,11 +15,13 @@ on:
     paths:
       - 'prisma/migrations/**'
       - 'prisma/schema.prisma'
+      - '.github/workflows/migration-smoke-test.yml'
   push:
     branches: [main]
     paths:
       - 'prisma/migrations/**'
       - 'prisma/schema.prisma'
+      - '.github/workflows/migration-smoke-test.yml'
 
 jobs:
   smoke-test:
@@ -70,6 +72,12 @@ jobs:
           rm -rf prisma
           git checkout origin/main -- prisma/
           pnpm prisma db push --skip-generate --accept-data-loss
+          # db push omits functions/triggers/CHECKs from already-applied SQL
+          # migrations. Restore MAIN's invariants before claiming its migration
+          # list is applied, so a new migration may depend on those objects.
+          # This must run before restoring the PR tree below: replaying PR SQL
+          # here would mask defects in the migration being tested.
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f prisma/post-push.sql
 
           # Seed `_prisma_migrations` with main's migration list so
           # Prisma considers them already-applied. PSQL is available

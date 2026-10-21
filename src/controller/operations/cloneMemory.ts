@@ -1,4 +1,5 @@
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
+import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
 import { NOT_DECISION_FAMILY_WHERE } from '../../lib/decisions/index.js';
@@ -307,7 +308,8 @@ export async function cloneMemoryGraph(
       // source already exposed that edge within the same org).
       const isCrossOrg = args.targetOrganizationId !== source.organizationId;
       const edges = await tx.edge.findMany({
-        where: { deletedAt: null, sourceId: { in: [...idMap.keys()] } },
+        // Derived INCLUDE edges (#2040) are re-derived for the clones, not copied.
+        where: { deletedAt: null, sourceId: { in: [...idMap.keys()] }, OR: [{ governedKind: null }, { governedKind: { not: 'INCLUDE' } }] },
       });
       // Targets not in the live-ID map are either soft-deleted internal
       // nodes (skip the edge) or external nodes (keep the original id).
@@ -356,6 +358,8 @@ export async function cloneMemoryGraph(
       if (edgeRows.length > 0) {
         await tx.edge.createMany({ data: edgeRows, skipDuplicates: true });
       }
+      // #2040 — the copies' include edges are re-derived from their content.
+      await resyncDerivedIncludesForNodes(tx, nodeRows.map((r) => r.id as string));
 
       // ── PendingEdges ───────────────────────────────────────────────────
       // targetId is a free-form string (not a FK). Loc/URN-keyed references

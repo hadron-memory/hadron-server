@@ -674,6 +674,11 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- 20261011020000_tickers (pinned by src/lib/tickers/invariants.test.ts).
 \ir ticker-invariants.sql
 \ir delivery-settings-invariants.sql
+\ir channel-checks-invariants.sql
+
+-- #2022: stop signals, their coverage history and the stop holds of queued tasks. One source, shared verbatim with
+-- migration 20261020030000_stop_signals (pinned by src/lib/stopSignals/invariants.test.ts).
+\ir stop-signal-invariants.sql
 
 -- #1749: App key scopes (cor:aut:010:03). One source, shared verbatim with migration
 -- 20261011190000_app_key_scopes (pinned by src/lib/appKeyScopes/appKeyScopes.test.ts).
@@ -692,6 +697,14 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 
 -- #1631: shared passkey registry invariant guards.
 \ir passkey-invariants.sql
+
+-- #1897: sign-in lineage guards. One source, shared verbatim with migration
+-- 20261019120000_sign_in_lineage.
+\ir signin-invariants.sql
+
+-- #1631 PR1b slice 2: fresh sign-ins bound to the ceremony browser. One source, shared verbatim with migration
+-- 20261021080000_fresh_sign_ins (pinned by src/lib/passkeys/freshSignIn1631.test.ts).
+\ir fresh-sign-in-invariants.sql
 
 -- #1632: signing requests, append-only signature records, the content-change
 -- marker. One source, shared verbatim with migration 20261013160000_signing_requests.

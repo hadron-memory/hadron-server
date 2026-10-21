@@ -1043,11 +1043,17 @@ const IDLE_MARKERS: readonly RegExp[] = [
  * glyphs plus the worktree path) or Codex's `permissions:`/path lines, and
  * the collapsed-output indicators (`+ Show details`, `+ N lines (^t to
  * expand)`) that sit between a turn's output and its footer or notice
- * header (#1983 — weak on their own: a weak-only window still holds).
+ * header (#1983 — weak on their own: a weak-only window still holds), and
+ * Codex's background-process status line (`2 background terminals running ·
+ * /ps to view · /stop to close`), drawn between the `Worked for` footer and
+ * the composer for as long as a process the turn started keeps running
+ * (a dev server, a watcher). It says nothing about the turn: live capture,
+ * Greta 2026-10-21, held as unknown on every pass for 7.5 h.
  */
 const isWeakChrome = (s: string): boolean =>
   /^❯ /.test(s) || /^[▐▛█▝▜▀│╭╮╰╯ ]*[~❯]/.test(s) || /^permissions: /.test(s)
-  || /^\+ (Show details|\d+ lines)/.test(s);
+  || /^\+ (Show details|\d+ lines)/.test(s)
+  || /^\d+ background terminals? running · \/ps to view/.test(s);
 
 /**
  * The recap block — a completed turn's OWN summary chrome, positionally NEWER
@@ -1320,12 +1326,13 @@ const real = (p: string): string => {
 };
 
 /**
- * The worker id a CLI team-session binding in this worktree names, if any.
+ * The CLI team-session binding in this worktree, if any: its worker and, when
+ * the file records them, the session and App it was bound under.
  *
  * The binding lives in the worktree's git dir (`hadron team session start`).
  * An MCP-bound worker leaves none; absence is not a mismatch.
  */
-export function boundWorker(worktree: string): string | null {
+export function teamBinding(worktree: string): { workerId: string; sessionId?: string; appId?: string } | null {
   try {
     const dotGit = join(worktree, '.git');
     let gitDir = dotGit;
@@ -1334,10 +1341,17 @@ export function boundWorker(worktree: string): string | null {
       gitDir = isAbsolute(pointer) ? pointer : join(worktree, pointer);
     }
     const binding = JSON.parse(readFileSync(join(gitDir, 'hadron-team-session.json'), 'utf8'));
-    return typeof binding.workerId === 'string' && binding.workerId ? binding.workerId : null;
+    if (typeof binding.workerId !== 'string' || !binding.workerId) return null;
+    const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
+    return { workerId: binding.workerId, sessionId: str(binding.sessionId), appId: str(binding.appId) };
   } catch {
     return null;
   }
+}
+
+/** The worker id a CLI team-session binding in this worktree names, if any. */
+export function boundWorker(worktree: string): string | null {
+  return teamBinding(worktree)?.workerId ?? null;
 }
 
 /**

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /** #1036: promised expiry applies before any reap; R5 chooses >=. */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -36,7 +37,7 @@ beforeEach(async () => {
   app = await db.app.create({ data: { organizationId: org.id, name: 'expiry', urn: `${org.urn}:a` } });
   const agent = await db.agent.create({ data: { organizationId: org.id, name: 'expiry', urn: `${org.urn}:agent` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-  worker = await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Expiry', slug: 'expiry', heldByUserId: holder.id } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Expiry', slug: 'expiry', heldByUserId: holder.id } });
   // Fake Date only: database/network timers remain real.
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(expiry);

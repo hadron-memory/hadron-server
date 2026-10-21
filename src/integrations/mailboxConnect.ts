@@ -14,7 +14,7 @@
 import crypto from 'crypto';
 import type { Express } from 'express';
 import { issueExchangeStartNonce, redeemExchangeStartNonce } from '../auth/authHandoff.js';
-import { verifyJwt } from '../auth/index.js';
+import { verifyAuthenticatedJwt } from '../auth/index.js';
 import { requireOrgRole } from '../api/graphql/schema/resolvers.helpers.js';
 import { createToolConnection, deleteToolConnection, subscribeToolFolder } from '../lib/emailClient.js';
 import { db } from './db/client.js';
@@ -69,7 +69,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     let userId: string;
     let roles: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] | undefined;
     try {
-      const payload = await verifyJwt(authHeader.slice(7));
+      const payload = await verifyAuthenticatedJwt(authHeader.slice(7), db);
       // Admin impersonation: read-only sessions cannot start a mailbox
       // connection (a state-changing OAuth flow as the target).
       if (payload.imp) {

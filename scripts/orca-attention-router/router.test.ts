@@ -141,6 +141,18 @@ const CODEX_IDLE_NOTICE_CHIP = [
   '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/chip-t1 · Catch up Chip QA session',
   '  ? for shortcuts',
 ];
+/** Greta's verbatim capture, 2026-10-21: a completed Codex turn whose dev
+ * server keeps running, so Codex draws its background-process status line
+ * between the `Worked for` footer and the composer. */
+const CODEX_IDLE_BACKGROUND_GRETA = [
+  '• Checked and marked read through #28306. No new tagged messages; all four PRs remain open at unchanged heads. No task',
+  '  progress changed; merge coordination remains pending.',
+  '  Worked for 23s • 3:08 PM',
+  '  2 background terminals running · /ps to view · /stop to close',
+  '› Ask Codex to do anything',
+  '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-portal/greta · Recover Greta session after restart',
+  '  ? for shortcuts',
+];
 /** Andi's P2 negative controls (#1976 review, 2026-10-15): a deep indent with
  * NO recap header above it is an unrecognized CURRENT status — the flat ≥8
  * floor proved idle over an old marker + an 8/12-space status line (only 0/2
@@ -335,7 +347,7 @@ class FakeCLIs {
       }
       // attendeeRegister: the winning row for the team Channel.
       const w = argv[argv.indexOf('-F') + 1].replace(/^w=/, '');
-      const ids = this.mentionOnly ?? new Set(['w-eli', 'w-baloo', 'w-ada', 'w-diego', 'w-gene', 'w-xavier', 'w-atilla', 'w-riana', 'w-andi', 'w-yuri', 'w-chip']);
+      const ids = this.mentionOnly ?? new Set(['w-eli', 'w-baloo', 'w-ada', 'w-diego', 'w-gene', 'w-xavier', 'w-atilla', 'w-riana', 'w-andi', 'w-yuri', 'w-chip', 'w-greta']);
       const row = this.registerRow?.(w) ?? { namedBy: 'WORKER', channel: { id: CHANNEL }, entry: { mentionOnly: ids.has(w) } };
       return out({ data: { attendeeRegister: [row] } });
     }
@@ -693,6 +705,38 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     const out = poll(c);
     expect(out.nudged).toEqual([]);
     expect(out.held.Andi).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('the background-terminals status line trails a Worked-for footer and DELIVERS (Greta, held 7.5 h as unknown, 2026-10-21)', () => {
+    const c = cfg(['w-greta', 'Greta']);
+    fake.terminal('greta', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-greta', 'Greta')];
+    fake.screens.set('term_greta', { tail: CODEX_IDLE_BACKGROUND_GRETA });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Greta'], adopted: true });
+  });
+
+  it('the background-terminals line alone is weak: with no completed-turn marker the window still holds', () => {
+    const c = cfg(['w-greta', 'Greta']);
+    fake.terminal('greta', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-greta', 'Greta')];
+    fake.screens.set('term_greta', { tail: ['  2 background terminals running · /ps to view · /stop to close', ...CODEX_IDLE_BACKGROUND_GRETA.slice(4)] });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Greta).toContain('no positive liveness evidence');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a running turn beside the background-terminals line is still busy', () => {
+    const c = cfg(['w-greta', 'Greta']);
+    fake.terminal('greta', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-greta', 'Greta')];
+    fake.screens.set('term_greta', {
+      tail: [...CODEX_IDLE_BACKGROUND_GRETA.slice(0, 3), '• Working (6s • esc to interrupt)', ...CODEX_IDLE_BACKGROUND_GRETA.slice(3)],
+    });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
     expect(fake.sent).toEqual([]);
   });
 

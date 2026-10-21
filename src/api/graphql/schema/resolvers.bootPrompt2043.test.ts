@@ -13,11 +13,23 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
 }));
+
+// Pierces the fail-fast merge preflights so a test can reach the in-transaction recheck.
+const preflight = vi.hoisted(() => ({ off: false }));
+vi.mock('../../../lib/bootPrompt.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../../lib/bootPrompt.js')>();
+  return {
+    ...real,
+    assertNoBootPromptMergeCollisions: (...a: Parameters<typeof real.assertNoBootPromptMergeCollisions>) => (preflight.off ? Promise.resolve() : real.assertNoBootPromptMergeCollisions(...a)),
+    assertNoBootPromptRowsForWorkerSession: (...a: Parameters<typeof real.assertNoBootPromptRowsForWorkerSession>) => (preflight.off ? Promise.resolve() : real.assertNoBootPromptRowsForWorkerSession(...a)),
+  };
+});
 
 let admin: { id: string };
 let orgId: string;
@@ -51,7 +63,7 @@ beforeEach(async () => {
   const app = await db.app.create({ data: { id: generateId(), name: 'Boot App', urn: 'boot.example:app', organizationId: org.id } });
   const agent = await db.agent.create({ data: { id: generateId(), name: 'Boot agent', urn: 'boot.example:agent', organizationId: org.id } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-  workerId = (await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } })).id;
+  workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } })).id;
 });
 
 describe('guard A: a generic write never touches a compiled node (#2043)', () => {
@@ -233,6 +245,39 @@ describe('merge target collisions (#2043, Ruth P2)', () => {
     expect(await snapshot(tSource.id)).toEqual(beforeSrc);
     // control: the same collision by a non-session caller on an ordinary-role target is allowed (admin may fold onto a source).
     expect(await codeOf(resolvers.Mutation.mergeMemories(null, { input: { source: memory.id, target: target.id } }, ctx()))).toBe('NO_ERROR');
+  });
+});
+
+describe('merge batches recheck under their locks (#2043, Jane/Cameron P2)', () => {
+  it('with the preflights pierced, the fold and the relocate batch still refuse boot-prompt rows', async () => {
+    preflight.off = true;
+    try {
+      const target = await resolvers.Mutation.createMemory(null, { orgId, name: 'late-target' }, ctx());
+      // fold: plain source onto a compiled target, and onto a boot-prompt target under a worker session.
+      const tCompiled = await withCompileWrite(() => db.node.create({ data: {
+        id: generateId(), memoryId: target.id, loc: 'boot:compiled', name: 'TC', content: 'compiled', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE,
+      } }));
+      const tSource = await db.node.create({ data: { id: generateId(), memoryId: target.id, loc: 'boot:source', name: 'TS', content: 'target source', role: 'boot-prompt' } });
+      await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'boot:compiled', name: 'S1', content: 'forged' } });
+      const before = await snapshot(tCompiled.id);
+      expect(await codeOf(resolvers.Mutation.mergeMemories(null, { input: { source: memory.id, target: target.id } }, ctx())))
+        .toBe('BOOT_PROMPT_COMPILED_WRITE');
+      expect(await snapshot(tCompiled.id)).toEqual(before);
+      await db.node.deleteMany({ where: { memoryId: memory.id, loc: 'boot:compiled' } });
+      await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'boot:source', name: 'S2', content: 'plain over boot' } });
+      const beforeSrc = await snapshot(tSource.id);
+      expect(await asWorker(() => codeOf(resolvers.Mutation.mergeMemories(null, { input: { source: memory.id, target: target.id } }, ctx()))))
+        .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+      expect(await snapshot(tSource.id)).toEqual(beforeSrc);
+      // relocate: a boot-prompt source with no counterpart is not moved by a worker session.
+      await db.node.deleteMany({ where: { memoryId: memory.id } });
+      const bp = await source('boot:relocate');
+      expect(await asWorker(() => codeOf(resolvers.Mutation.mergeMemories(null, { input: { source: memory.id, target: target.id } }, ctx()))))
+        .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+      expect((await db.node.findUniqueOrThrow({ where: { id: bp.id } })).memoryId).toBe(memory.id);
+    } finally {
+      preflight.off = false;
+    }
   });
 });
 

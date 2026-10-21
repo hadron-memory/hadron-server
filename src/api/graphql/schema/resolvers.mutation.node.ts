@@ -17,6 +17,7 @@ import {
 } from '../../../lib/protectedLoc.js';
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
+import { assertNoGovernedRemoval, governedRemovalError } from '../../../lib/governedRemoval.js';
 import {
   assertGovernedWrite,
   assertRoleDeclaredForWrite,
@@ -28,7 +29,7 @@ import {
   type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
-import { assertRoleWritersForWrite, roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
+import { assertEdgeSourceWritersById, assertRoleWritersForWrite, lockEdgeUnderSourceWriters, roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../../lib/specCorpus.js';
 import { carryGovernedSignals } from '../../../lib/governedSignals.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
@@ -155,7 +156,10 @@ import {
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
 import { concealUnreadableInstallWrite, findInstallMemory, lockInstallAuthorityFirst, resolveInstallTarget, withInstallMemory, type InstallTarget } from './installMemory.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
+import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
+import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
+import { memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
 
 /**
  * #1606 (cor:dmo:110:01/04) — no generic edge write alters or removes a
@@ -163,6 +167,9 @@ import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '..
  */
 async function refuseGovernedEdge(tx: Pick<Prisma.TransactionClient, 'edge'>, edgeId: string): Promise<void> {
   const edge = await tx.edge.findUnique({ where: { id: edgeId }, select: { governedKind: true } });
+  if (edge?.governedKind === 'INCLUDE') {
+    throw includeRefusal('INCLUDE_EDGE_DERIVED', 'This edge is derived from an include tag in the source node\'s content; edit that content instead.');
+  }
   if (edge?.governedKind) throw commentGovernedError('edge', 'edits');
 }
 
@@ -921,6 +928,24 @@ async function writeNodeCoreRaw(
           ...inlineEdgeTargets.map((target) => target.memoryId),
         ]);
       }
+      // #2040 — include tags are checked and their derived edges synced in the
+      // writer's own transaction, on the plaintext the caller supplied. A
+      // refusal throws, so the content, revision and edges roll back together.
+      const readableForIncludes = typeof input.content === 'string' && input.content.includes('{{>')
+        ? await getAccessibleMemoryIds(ctx)
+        : null;
+      async function finalizeNodeWrite<T extends { id: string; loc: string; memoryId: string }>(
+        tx: Prisma.TransactionClient,
+        writtenNode: T,
+      ): Promise<T> {
+        if (input.content !== undefined) {
+          const tags = await assertIncludesWritable(tx, writtenNode, input.content, readableForIncludes);
+          const result = await replaceInlineEdges(tx, writtenNode);
+          await syncDerivedIncludesEdges(tx, writtenNode, tags, readableForIncludes);
+          return result;
+        }
+        return replaceInlineEdges(tx, writtenNode);
+      }
       async function replaceInlineEdges<T extends { id: string; loc: string; memoryId: string }>(
         tx: Prisma.TransactionClient,
         writtenNode: T,
@@ -944,7 +969,9 @@ async function writeNodeCoreRaw(
           });
         }
 
-        await tx.edge.deleteMany({ where: { sourceId: writtenNode.id } });
+        // Derived INCLUDE edges (#2040) belong to the content writer, not the
+        // client's edge list: they survive an inline-edge replacement.
+        await tx.edge.deleteMany({ where: { sourceId: writtenNode.id, governedKind: null } });
         await tx.pendingEdge.deleteMany({ where: { sourceId: writtenNode.id } });
         if (resolvedEdges.length > 0) {
           const { count } = await tx.edge.createMany({
@@ -1199,7 +1226,11 @@ async function writeNodeCoreRaw(
             // #1331 — the writer level of the role before AND after, on the locked row.
             await assertRoleWritersForWrite(
               tx, ctx, input.memoryId,
-              { priorRole: current.role, nextRole: input.role === undefined ? current.role : input.role },
+              {
+                priorRole: current.role, nextRole: input.role === undefined ? current.role : input.role,
+                priorRunnable: current.isRunnable,
+                nextRunnable: mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+              },
               { platformWrite: opts?.platformWrite },
             );
 
@@ -1298,7 +1329,7 @@ async function writeNodeCoreRaw(
                   deletedAt: null,
                 };
             const updated = await tx.node.update({ where, data, include });
-            return { conflict: false, node: await replaceInlineEdges(tx, updated) };
+            return { conflict: false, node: await finalizeNodeWrite(tx, updated) };
           });
           if (result.conflict) {
             throw new GraphQLError(
@@ -1508,7 +1539,11 @@ async function writeNodeCoreRaw(
             // #1331 — the writer level of the role before AND after, on the locked row.
             await assertRoleWritersForWrite(
               tx, ctx, input.memoryId,
-              { priorRole: authoritative?.role ?? null, nextRole: input.role === undefined ? (authoritative?.role ?? null) : input.role },
+              {
+                priorRole: authoritative?.role ?? null, nextRole: input.role === undefined ? (authoritative?.role ?? null) : input.role,
+                priorRunnable: authoritative?.isRunnable ?? null,
+                nextRunnable: mergedGovernedState(authoritative, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+              },
               { platformWrite: opts?.platformWrite },
             );
 
@@ -1521,11 +1556,11 @@ async function writeNodeCoreRaw(
             if (reviving && authoritative) {
               await tx.nodeEmbedding.deleteMany({ where: { nodeId: authoritative.id } });
               const indexed = await tx.memory.findUniqueOrThrow({
-                where: { id: input.memoryId }, select: { vectorIndexEnabled: true },
+                where: { id: input.memoryId }, select: { vectorIndexEnabled: true, class: true },
               });
               // Invalidate an old embed before post-commit enqueue runs.
               // Unindexed memories keep the normal null pending marker.
-              revivedPendingAt = pendingAtForRevival(authoritative.embeddingPendingAt, indexed.vectorIndexEnabled);
+              revivedPendingAt = pendingAtForRevival(authoritative.embeddingPendingAt, memoryIsVectorIndexed(indexed));
             }
 
             // #1183 — resurrect from the AUTHORITATIVE row, not the stale
@@ -1579,7 +1614,7 @@ async function writeNodeCoreRaw(
             // #1606 — restoring a target restores the threads its soft delete
             // took (cause TARGET), never ones an admin deleted.
             if (reviving) await restoreThreadsOfTargets(tx, [upserted.id]);
-            return replaceInlineEdges(tx, upserted);
+            return finalizeNodeWrite(tx, upserted);
           });
         }
       } catch (e) {
@@ -2651,8 +2686,10 @@ export const nodeMutations = {
       // Judged again under the lock in the write pass.
       for (let i = scannedNodes.length - 1; i >= 0; i--) {
         const row = scannedNodes[i]!;
-        if (!row.role) continue;
-        if (await roleWritersRefusal(ctx.db, ctx, row.memoryId, { priorRole: row.role, nextRole: row.role })) {
+        if (!row.role && row.isRunnable !== true) continue;
+        if (await roleWritersRefusal(ctx.db, ctx, row.memoryId, {
+          priorRole: row.role, nextRole: row.role, priorRunnable: row.isRunnable, nextRunnable: row.isRunnable,
+        })) {
           skipCounts.governed += 1;
           scannedNodes.splice(i, 1);
         }
@@ -2827,6 +2864,7 @@ export const nodeMutations = {
         // replacement was computed from a read taken BEFORE this lock, so a row
         // whose tracked state changed since then refuses the whole batch
         // (all-or-nothing, as below) instead of overwriting the newer write.
+        let readableForIncludes: string[] | null = null;
         const planMemory = new Map(plans.map((p) => [p.raw.id, p.raw.memoryId]));
         // #1753 — memory rows BEFORE node rows (promotion's order). Holding the
         // memory state through the batch still stops a pre-flip plan writing
@@ -2852,12 +2890,16 @@ export const nodeMutations = {
         // rule tightened, or its role changed, since selection) is dropped.
         for (const memoryId of [...plannedEncryption.keys()].sort()) await lockMemoryConfigShared(tx, memoryId);
         const lockedRoles = new Map((await tx.node.findMany({
-          where: { id: { in: [...planMemory.keys()] } }, select: { id: true, role: true },
-        })).map((r) => [r.id, r.role] as const));
+          where: { id: { in: [...planMemory.keys()] } }, select: { id: true, role: true, isRunnable: true },
+        })).map((r) => [r.id, r] as const));
         for (let i = plans.length - 1; i >= 0; i--) {
           const plan = plans[i]!;
-          const role = lockedRoles.get(plan.raw.id) ?? null;
-          if (role && await roleWritersRefusal(tx, ctx, plan.raw.memoryId, { priorRole: role, nextRole: role })) {
+          const locked = lockedRoles.get(plan.raw.id);
+          const role = locked?.role ?? null;
+          const runnable = locked?.isRunnable ?? null;
+          if ((role || runnable === true) && await roleWritersRefusal(tx, ctx, plan.raw.memoryId, {
+            priorRole: role, nextRole: role, priorRunnable: runnable, nextRunnable: runnable,
+          })) {
             skipCounts.governed += 1;
             planMemory.delete(plan.raw.id);
             plans.splice(i, 1);
@@ -2930,6 +2972,14 @@ export const nodeMutations = {
 
           Object.assign(data, clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
+          // #2040 — a replace that rewrites content re-checks its include tags; a
+          // refusal throws and rolls the whole batch back with it.
+          if (p.contentChanged) {
+            const text = p.plaintext.content;
+            readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+            const tags = await assertIncludesWritable(tx, raw, text, readableForIncludes);
+            await syncDerivedIncludesEdges(tx, raw, tags, readableForIncludes);
+          }
         }
       }));
 
@@ -3163,6 +3213,10 @@ export const nodeMutations = {
           // #1641 §3.2 — a decision is withdrawn, never deleted, and deleting a
           // log or an ancestor of one would erase decision history.
           await refuseDecisionFamily(tx, affectedIds, 'Deleting this node');
+          // A governed node is removed only after its marker is cleared through
+          // the kind's door: the whole affected set is judged here, on locked
+          // rows, before any write.
+          await assertNoGovernedRemoval(tx, memoryId, affectedIds);
           if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
           else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy, at: now });
 
@@ -3401,6 +3455,8 @@ export const nodeMutations = {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
+        // Writer level of the source node, on the locked source.
+        await assertEdgeSourceWritersById(tx, ctx, locked.source.id);
         return tx.edge.create({
           data: {
             id: generateId(),
@@ -3538,9 +3594,8 @@ export const nodeMutations = {
         // A Channel reuse may archive this edge after resolveEdgeRef's
         // preflight. Serialize with that archive's edge UPDATE and refuse a
         // tombstone instead of letting a stale update reoccupy its old loc.
-        const [current] = await tx.$queryRaw<Array<{ id: string; deleted_at: Date | null }>>`
-          SELECT id, deleted_at FROM edges WHERE id = ${resolvedEdgeId} FOR UPDATE
-        `;
+        // Source node first, then the edge row (the order node writes take); the source is revalidated under the edge lock.
+        const current = await lockEdgeUnderSourceWriters(tx, ctx, resolvedEdgeId);
         if (!current || current.deleted_at) {
           throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
             extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
@@ -3628,6 +3683,11 @@ export const nodeMutations = {
           });
         }
         await requireMemoryWriteAccess(txCtx, edgeMem.memoryId);
+        // Writer level of the edge's current source, locked before the edge.
+        const lockedEdge = await lockEdgeUnderSourceWriters(tx, ctx, resolvedEdgeId);
+        if (!lockedEdge || lockedEdge.deleted_at) {
+          throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
+        }
         await refuseGovernedEdge(tx, resolvedEdgeId);
         await tx.edge.delete({ where: { id: resolvedEdgeId } });
       });
@@ -4084,9 +4144,13 @@ export const nodeMutations = {
         }
         // #1331 — the target is written, and a source that is deleted or whose edges
         // are re-pointed is written too: each role's writer level, on the locked rows.
-        await assertRoleWritersForWrite(tx, ctx, target.memoryId, { priorRole: lockedTarget.role, nextRole: lockedTarget.role });
+        await assertRoleWritersForWrite(tx, ctx, target.memoryId, {
+          priorRole: lockedTarget.role, nextRole: lockedTarget.role, priorRunnable: lockedTarget.isRunnable, nextRunnable: lockedTarget.isRunnable,
+        });
         if (takesSource) {
-          await assertRoleWritersForWrite(tx, ctx, source.memoryId, { priorRole: lockedSource.role, nextRole: lockedSource.role });
+          await assertRoleWritersForWrite(tx, ctx, source.memoryId, {
+            priorRole: lockedSource.role, nextRole: lockedSource.role, priorRunnable: lockedSource.isRunnable, nextRunnable: lockedSource.isRunnable,
+          });
         }
         // #1682 review (Baloo P2) — the AUTHORITATIVE live-thread refusal, under
         // the source lock and before any write. The pre-lock count above is only
@@ -4098,6 +4162,13 @@ export const nodeMutations = {
         // content is rendered from its payload, and a fold would rewrite it.
         const mergedDecisions = [lockedSource, lockedTarget].filter((n) => isDecisionFamilyRole(n.role));
         if (mergedDecisions.length > 0) throw decisionContainedError('Merging these nodes', mergedDecisions.map((n) => n.loc));
+        // A hard-deleted source is a removal. The source row was locked FOR
+        // UPDATE and re-read above, so this judges its current state: a governed
+        // node is removed only after its marker is cleared through the kind's door.
+        if (deleteSource) {
+          const kinds = governedKindsOf({ role: lockedSource.role, isRunnable: lockedSource.isRunnable });
+          if (kinds.length > 0) throw governedRemovalError([{ id: lockedSource.id, loc: lockedSource.loc, kinds }]);
+        }
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
@@ -4123,6 +4194,14 @@ export const nodeMutations = {
               ...placeholderFillPatch(lockedTarget, 'content' in changed ? changed.content : undefined),
             },
           });
+          // #2040 — the folded plaintext is re-checked for include tags (a merge
+          // can combine two nodes' tags into a cycle); a refusal rolls it back.
+          if ('content' in changed) {
+            const text = changed.content as string | null;
+            const readable = text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+            const tags = await assertIncludesWritable(tx, target, text, readable);
+            await syncDerivedIncludesEdges(tx, target, tags, readable);
+          }
         }
 
         if (fields.has('EDGES')) {
@@ -4445,8 +4524,12 @@ export const nodeMutations = {
       // role before AND after (fast refusal; the authoritative check is under the lock below).
       {
         const restoredRole = (restoreFields as { role?: string | null }).role;
+        const restored = mergedGovernedState(node, {
+          role: restoredRole, isRunnable: (restoreFields as { isRunnable?: boolean | null }).isRunnable,
+        });
         const refusal = await roleWritersRefusal(ctx.db, ctx, node.memoryId, {
           priorRole: node.role, nextRole: restoredRole === undefined ? node.role : restoredRole,
+          priorRunnable: node.isRunnable, nextRunnable: restored.isRunnable,
         });
         if (refusal) throw refusal;
       }
@@ -4547,6 +4630,10 @@ export const nodeMutations = {
           const restoredRole = (restoreFields as { role?: string | null }).role;
           await assertRoleWritersForWrite(tx, ctx, current.memoryId, {
             priorRole: current.role, nextRole: restoredRole === undefined ? current.role : restoredRole,
+            priorRunnable: current.isRunnable,
+            nextRunnable: mergedGovernedState(current, {
+              role: restoredRole, isRunnable: (restoreFields as { isRunnable?: boolean | null }).isRunnable,
+            }).isRunnable,
           });
         }
         // #1330 — deliberately NO strict-sub-role check (`assertRoleDeclaredForWrite`):
@@ -4634,6 +4721,14 @@ export const nodeMutations = {
           data: writeData,
           include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
         });
+        // #2040 — the restored text is re-checked: an old revision can hold a tag
+        // that would now make a cycle. A refusal rolls the restore back.
+        {
+          const text = plaintextFields.content as string | null;
+          const readable = text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+          const tags = await assertIncludesWritable(tx, current, text, readable);
+          await syncDerivedIncludesEdges(tx, current, tags, readable);
+        }
         return { restored, restoredPlaintext: plaintextFields, destinationEncrypted: selectedDestination.isEncrypted };
       });
       // 033 — re-embed the restored content (revision snapshots are plaintext on
@@ -4797,7 +4892,10 @@ export const nodeMutations = {
         );
       }
       decryptNodeFields(node, memEncInfo);
-      const markdown = node.content && node.content.trim().length > 0 ? node.content : `# ${node.name}`;
+      // A Google Doc is a read for a human: includes resolve with the exporter's
+      // access (cor:dmo:150:03); variables stay as stored, as before.
+      const exported = await resolveNodeContent(ctx, node, { mode: 'includes' });
+      const markdown = exported && exported.trim().length > 0 ? exported : `# ${node.name}`;
 
       const { file } = await runOwnedEmailOperation<{ file: ToolDriveFile }>(ctx, connectionRef, 'create-doc', {
         title: title?.trim() || node.name,

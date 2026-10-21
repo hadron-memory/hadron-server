@@ -289,7 +289,7 @@ export const INSTALL_CONCEALED = '__installConcealed';
  * gains later is concealed until someone decides it is not content; the earlier blocklist let a
  * preexisting title (`name`) through on a partial update. `name` is set to the loc, never the title.
  */
-const CONCEALED_NODE_KEEPS = ['id', 'memoryId', 'loc', 'nodeType', 'objectType', 'revision', 'isLink', 'isPlaceholder', 'createdAt', 'updatedAt'] as const;
+const CONCEALED_NODE_KEEPS = ['id', 'memoryId', 'loc', 'nodeType', 'objectType', 'revision', 'revSeq', 'isLink', 'isPlaceholder', 'createdAt', 'updatedAt'] as const;
 
 function concealedInstallNode(node: Record<string, any>): Record<string, any> {
   const out: Record<string, any> = { [INSTALL_CONCEALED]: true, tags: [], outgoingEdges: [], incomingEdges: [], embeddingAttempts: 0 };

@@ -1,4 +1,5 @@
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptMergeCollisions, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptMergeCollisions, assertNoBootPromptRows, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
+import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
@@ -583,6 +584,9 @@ async function runMerge(
           // Reentrant memory locks; fresh governed/protected facts for the rows
           // now serialized by their source + destination address locks.
           await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
+          // #2043 — the preflight boot-prompt scan is fail-fast only: a role set or a
+          // compiled node created after it is caught here, on the locked rows.
+          await assertNoBootPromptRows(tx, rows.map((r) => r.id), 'merge');
           if (args.principal) {
             await assertRoleWritersForNodes(tx, args.principal, rows, { from: sourceMemoryId, to: targetMemoryId });
           }
@@ -734,6 +738,9 @@ async function runMerge(
       await lockMergeMemoryRows(tx);
       // #1468 — the folded source rows are deleted below: authoritative here.
       await assertNoMintedSpecRemoval(tx, sourceMemoryId, srcRows.map((r) => r.id), 'merge out of its corpus');
+      // #2043 — boot-prompt guard on the node-locked source+target rows BEFORE reconciliation
+      // mints any revision; the post-read check below covers rows re-read after it.
+      await assertNoBootPromptRows(tx, foldIds, 'merge');
       for (const id of foldIds) {
         const reconciled = await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: foldMemory.get(id)! });
         if (reconciled == null) throw new Error(`merge node ${id} moved or vanished during the fold; retry the merge`);
@@ -758,6 +765,9 @@ async function runMerge(
       // inside this transaction, under the Channel-memory locks. The Phase-1
       // preflight cannot cover a fold that runs transactions later.
       await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], [...srcRows, ...tgtRows], 'merge');
+      // #2043 — authoritative boot-prompt recheck on the locked source AND target rows
+      // (the preflight collision scan cannot see a role or compiled node added since).
+      await assertNoBootPromptRows(tx, [...srcRows, ...tgtRows].map((r) => r.id), 'merge');
       if (args.principal) {
         await assertRoleWritersForNodes(tx, args.principal, srcRows, { from: sourceMemoryId, to: targetMemoryId });
         await assertRoleWritersForNodes(tx, args.principal, tgtRows, { from: targetMemoryId });
@@ -932,6 +942,11 @@ async function runMerge(
     progress.edgesDroppedCount += batch.dropped;
   }
 
+  // Derived INCLUDE edges (#2040) are not relocated (their loc is id-derived and
+  // the governed-edge trigger forbids rewriting them): drop the source memory's,
+  // then re-derive them for the target's nodes once Phase 3 has settled.
+  await db.edge.deleteMany({ where: { memoryId: sourceMemoryId, governedKind: 'INCLUDE' } });
+
   // === Phase 3: relocate the surviving source-memory edges into the target. ===
   // After Phases 2-3 the source memory holds no live nodes, so every edge
   // still denormalized to it is sourced from a relocated node (its endpoints
@@ -970,6 +985,20 @@ async function runMerge(
     progress.edgesMovedCount += move.length;
     progress.edgesDroppedCount += drop.length;
     if (edges.length < batchSize) break;
+  }
+
+  {
+    // #2040 — re-derive include edges for the target's nodes that carry tags.
+    // Encrypted content is ciphertext and never matches; those wait for their
+    // next content write.
+    const tagged = await db.node.findMany({
+      where: { memoryId: targetMemoryId, deletedAt: null, content: { contains: '{{>' } },
+      select: { id: true },
+    });
+    for (let i = 0; i < tagged.length; i += batchSize) {
+      const ids = tagged.slice(i, i + batchSize).map((n) => n.id);
+      await db.$transaction((tx) => resyncDerivedIncludesForNodes(tx, ids), BATCH_TX_OPTS);
+    }
   }
 
   // === Final: soft-delete the now-empty source memory when asked. ===

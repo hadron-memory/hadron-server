@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../lib/workerSignature.js';
 /**
  * #947 — worklog operations through the REAL wire (createServer() + a GraphQL
  * POST), because resolver-level tests cannot see two whole failure classes:
@@ -111,7 +112,7 @@ beforeAll(async () => {
   // #974: bind the session to a Worker casting so the wire test exercises the
   // workerName + workerId selection fields for a worker-bound record.
   worker = await db.worker.create({
-    data: { appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
   });
   session = await M.startSession(
     {},

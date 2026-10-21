@@ -88,14 +88,15 @@ import { installWriteAllowed } from './installMemory.js';
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
 
 /**
- * The STORED (uncompiled) content of a Node whose `content` a read resolver
- * replaced with rendered Mustache output (`node(ref:)` / `nextNode` without
- * `raw`). Field resolvers that verify the parent against the database —
- * `Node.authorship`'s and `Node.revision`'s reconcile — must compare stored
- * state, not presentation. A Symbol key is never serialized by GraphQL, so the
- * wire shape is unchanged (#1326 review, Codex on #1397 `138e8185`).
+ * Marks a Node row whose `content` field answers with the STORED text unless a
+ * query asks otherwise: `node(raw: true)` / `nextNode(raw: true)` set it for
+ * the node they return, and `nodeBatch` sets it on every node (R21 A: a bulk
+ * read resolves only for `content(raw: false)`). `Node.content` reads it as its
+ * default; an explicit `content(raw:)` wins. The row itself is never rewritten,
+ * so field resolvers that verify the parent against the database see stored
+ * text. A Symbol key is never serialized by GraphQL (#2041).
  */
-export const STORED_NODE_CONTENT: unique symbol = Symbol('storedNodeContent');
+export const CONTENT_RAW_DEFAULT: unique symbol = Symbol('contentRawDefault');
 
 export interface Context {
   login?: import('../../../auth/jwt.js').HadronJwtPayload['login'];
@@ -131,6 +132,7 @@ export interface Context {
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (#562)
+  signInId?: string;       // #1897: the factor-protected sign-in this credential descends from (JWT sid or key root)
   oauthScopes?: string[];  // immutable OAuth grant on the presented hdr_user_ key (#1261)
   // Admin impersonation: set when the request authenticated with an
   // impersonation JWT — userId is the TARGET, roles is [], and reads must be
@@ -138,6 +140,10 @@ export interface Context {
   // org-scope chokepoints in this file + src/lib/auth consult it). Mutations
   // are blocked wholesale by the read-only Apollo plugin.
   impersonation?: ImpersonationContext;
+  /** #2198 — task warnings collected during this request (see resolvers.taskWarnings.ts); lazily created. */
+  taskWarnings?: { path: string; warning: import('./resolvers.taskWarnings.js').TaskWarning }[];
+  /** #2198 — request-local gate/register answers and the read time spent on them (resolvers.taskWarnings.ts). */
+  taskWarningState?: import('./resolvers.taskWarnings.js').TaskWarningState;
   // Request-scoped memo for Edge.source/target lazy loads — avoids an N+1 of
   // identical node.findUnique calls when many edges in one response share an
   // endpoint (lazily created on first use; see loadEdgeEndpointNode). #381.
@@ -625,6 +631,7 @@ function userPrincipalOnly(ctx: Context): Context {
     roles: ctx.roles,
     organizationId: ctx.organizationId,
     apiKeyId: ctx.apiKeyId,
+    signInId: ctx.signInId,
     oauthScopes: ctx.oauthScopes,
     impersonation: ctx.impersonation,
   };

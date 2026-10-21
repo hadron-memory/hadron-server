@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /** #1626: every listed record must pass cor:acl:010:01's point-read gate. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildSchema, defaultFieldResolver, graphql } from 'graphql';
@@ -58,7 +59,7 @@ beforeEach(async () => {
       userId: ['personal', 'private'].includes(name) ? users.admin : null,
     } });
   }
-  await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'List worker', slug: 'list-worker', memoryId: rows.worker.id, heldByUserId: users.holder, heldAt: new Date() } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'List worker', slug: 'list-worker', memoryId: rows.worker.id, heldByUserId: users.holder, heldAt: new Date() } });
   await db.memoryMember.create({ data: { memoryId: rows.group.id, userId: users.groupMember, role: 'reader' } });
   for (const name of ['knowledge', 'worker']) {
     await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: rows[name].id, role: 'read' } });
@@ -142,7 +143,7 @@ describe('#1626 record/list parity', () => {
     await db.appAgent.create({ data: { appId: otherApp.id, agentId: agent.id } });
     const team = await db.memory.create({ data: { name: 'Other team', urn: 'list-other.test:team', organizationId: otherOrg.id, appId: otherApp.id, class: 'app', sharedMemoryOfAgentId: agent.id } });
     const worker = await db.memory.create({ data: { name: 'Other worker', urn: 'list-other.test:worker', organizationId: otherOrg.id, appId: otherApp.id, class: 'app' } });
-    await db.worker.create({ data: { appId: otherApp.id, agentId: agent.id, name: 'Other worker', slug: 'other', memoryId: worker.id } });
+    await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: otherApp.id, agentId: agent.id, name: 'Other worker', slug: 'other', memoryId: worker.id } });
     const external = await db.user.create({ data: { handle: 'list-external', roles: ['READER'] } });
     await db.appMember.create({ data: { appId: otherApp.id, userId: external.id, role: 'reader' } });
     const nonMemberAdmin = await db.user.create({ data: { handle: 'list-non-member-admin', roles: ['ADMIN'] } });
