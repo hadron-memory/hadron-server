@@ -265,6 +265,7 @@ describe('Agent.extendedBy: the continuation reveals nothing about hidden rows',
       const c = asUser(memberA);
       const good = seal(kids['aaa-public-b'], c);
       const flipped = good.slice(0, 20) + (good[20] === 'A' ? 'B' : 'A') + good.slice(21);
+      // The over-long case is a DoS bound (refused before any decrypt), not an integrity check: a long token would fail GCM anyway.
       for (const bad of [flipped, good.slice(0, -4), 'not a token!', 'A'.repeat(EXTENDED_BY_CURSOR_MAX_LENGTH + 1), '']) {
         expect(await code(page(parent, { first: 1, after: bad }, c))).toBe('BAD_USER_INPUT');
       }
@@ -282,10 +283,31 @@ describe('Agent.extendedBy: the continuation reveals nothing about hidden rows',
       await attempt(seal(kids['aaa-public-b'], c, { base: otherParent.id }));              // wrong parent
       await attempt(seal(kids['aaa-public-b'], c), asUser(stranger));                       // wrong principal
       await attempt(sealExtendedByCursor(kids['aaa-public-b'], bind(c), Date.now() - 3_600_000)); // expired
-      await attempt(encryptToken(JSON.stringify({ v: EXTENDED_BY_CURSOR_VERSION + 1, exp: Date.now() + 60_000, ...bind(c), id: kids['aaa-public-b'] })));
+      // url-safe, exactly as sealExtendedByCursor emits, so the token reaches the version check instead of the charset guard (Rook §10 P2-1)
+      const nextVersion = encryptToken(JSON.stringify({ v: EXTENDED_BY_CURSOR_VERSION + 1, exp: Date.now() + 60_000, ...bind(c), id: kids['aaa-public-b'] }))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      expect(nextVersion).toMatch(/^[A-Za-z0-9_-]+$/);
+      await attempt(nextVersion);
       await attempt(seal(generateId(), c));                                                 // no such row
       await attempt(seal(otherParent.id, c));                                               // exists, not a child of this parent
       expect(new Set(msgs)).toEqual(new Set(['invalid cursor']));
+    });
+
+    it('a token minted under one impersonation org fails under another org and without impersonation (Rook §10 P2-2)', async () => {
+      const imp = (orgId: string): Context => ({
+        db, userId: memberA, roles: ['READER'],
+        impersonation: { sessionId: 'imp-session', actorUserId: admin, orgId, expiresAt: new Date(Date.now() + 3_600_000) },
+      } as Context);
+      const underA = imp(orgA.id);
+      const token = sealExtendedByCursor(kids['aaa-public-b'], {
+        base: parent.id, aud: extendedByAudience({ userId: memberA, admin: false, impersonationOrgId: orgA.id }),
+      });
+      // Control: the same subject under the same impersonation org opens it.
+      await expect(page(parent, { first: 1, after: token }, underA)).resolves.toBeDefined();
+      for (const other of [imp(orgB.id), asUser(memberA)]) {
+        const e = await page(parent, { first: 1, after: token }, other).then(() => null, (x: Error) => x);
+        expect(e?.message).toBe('invalid cursor');
+      }
     });
 
     it('a token opened with the wrong binding throws the one error type', () => {
