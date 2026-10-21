@@ -21,7 +21,8 @@
  * rather than being guessed into one.
  */
 
-import { FAMILY_PATTERN } from './availability.js';
+/** Valid custom tokens remain legal; provider aliases have one canonical identity. */
+export const FAMILY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 /** Model-name fragments, checked in order. GLM first: a GLM model id never names Claude, but be explicit. */
 const MODEL_FAMILIES: readonly [RegExp, string][] = [
@@ -45,7 +46,14 @@ const TOOL_FAMILIES: Readonly<Record<string, string>> = {
 export function normalizeFamily(value: string | null | undefined): string | null {
   if (value == null) return null;
   const v = value.trim().toLowerCase();
-  return FAMILY_PATTERN.test(v) ? v : null;
+  if (!FAMILY_PATTERN.test(v)) return null;
+  return v === 'anthropic' ? 'claude' : v === 'openai' ? 'codex' : v;
+}
+
+/** All persisted spellings of an identity, for indexed reads of legacy rows. */
+export function familySpellings(family: string): string[] {
+  const f = normalizeFamily(family);
+  return f === 'claude' ? ['claude', 'anthropic'] : f === 'codex' ? ['codex', 'openai'] : f ? [f] : [];
 }
 
 /** The family a reported model and tool imply, or null when they don't classify the session. */

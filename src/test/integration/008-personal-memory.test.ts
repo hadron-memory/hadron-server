@@ -8,6 +8,7 @@
  * the focused unit-shape tests.
  */
 
+import { restoreChkMemoryClassAppId } from '../memoryClassCheck.js';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import {
@@ -278,19 +279,9 @@ describe('T049: access-control gate 3 enforces Memory.app_id === the call\'s App
            SET class = 'knowledge', user_id = NULL, visibility = 'ORGANIZATION'
          WHERE class = 'personal' AND app_id IS NULL
       `);
-      // Re-add the constraint in its CURRENT (034 + #653) form so subsequent
-      // tests don't trip on a stale shape. app_id required for class='app',
-      // forbidden for class='system', optional for knowledge/group/personal/
-      // private. Must stay in sync with prisma/post-push.sql + globalSetup.ts.
-      await db.$executeRawUnsafe(`
-        ALTER TABLE memories
-          ADD CONSTRAINT chk_memory_class_app_id
-          CHECK (
-            (class = 'app' AND app_id IS NOT NULL)
-            OR (class = 'system' AND app_id IS NULL)
-            OR (class IN ('knowledge', 'group', 'personal', 'private'))
-          )
-      `);
+      // Re-add the constraint exactly as prisma/post-push.sql defines it, so later files in this worker see the real
+      // shape (a hand-copied one lost the #2064 install-memory arm and broke them).
+      await restoreChkMemoryClassAppId((sql) => db.$executeRawUnsafe(sql));
     }
   });
 });
