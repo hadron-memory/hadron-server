@@ -2321,6 +2321,7 @@ describe('#2138 — fresh ticks after two unreconciled cadences', () => {
     await go(at(T0 + 1_200_000));
     expect(f.sent).toHaveLength(2);
     expect(f.sent[1]).not.toBe(old.text);
+    expect(f.sent[1]).toContain('run your base tick (coordinator-system:tasks:on-base-tick)');
     expect(f.retries).toEqual(['r1']);
     expect(current()).toMatchObject({state: 'ambiguous', requestId: 'r2', coverage: ['T:3'], checkedBefore: null});
     expect(archived()).toEqual([expect.objectContaining({...old, workerId: 'w-ada'})]);
