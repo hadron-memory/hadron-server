@@ -46,7 +46,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { isAppParticipant } from './resolvers.helpers.js';
 import { collectRegisterRows, resolveRegister, toGqlRegisterRows, type RegisterAttendee } from '../../../lib/resolveRegister.js';
-import { advanceReadState } from '../../../lib/channelReadState.js';
+import { advanceReadState, readStateIncarnations } from '../../../lib/channelReadState.js';
 import { OPEN_SESSION_SCAN_CAP, isSessionLive, loadLastEventBySession, recentlyTouchedFilter } from '../../../lib/sessionActivity.js';
 
 type RegisterRoleInput = 'WATCH' | 'POST' | 'BOTH';
@@ -291,7 +291,8 @@ async function readStateRow(ctx: Context, attendee: RegisterAttendee, channelId:
   });
   // Only the attendee URN is needed here; no access fields are projected.
   const view = await resolveRegister(ctx.db, { attendee, rows: [] });
-  return { attendeeUrn: view?.attendeeUrn ?? null, channelId, lastSeenSeq: row?.lastSeenSeq ?? 0, updatedAt: row?.updatedAt ?? new Date(0) };
+  const incarnations = await readStateIncarnations(ctx.db, attendee, channelId);
+  return { attendeeUrn: view?.attendeeUrn ?? null, channelId, lastSeenSeq: row?.lastSeenSeq ?? 0, updatedAt: row?.updatedAt ?? new Date(0), ...incarnations };
 }
 
 export const readStateQueries = {
