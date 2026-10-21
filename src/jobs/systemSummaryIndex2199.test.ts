@@ -216,6 +216,8 @@ describe('other sites that decide whether a write is queued', () => {
   it('a node moved into a system memory (setting off) is queued; into a knowledge memory (setting off) it is not', async () => {
     const src = await memory({ cls: 'knowledge', flag: false });
     const sys = await memory({ cls: 'system', flag: false });
+    // #2206: a system memory is written as a live Agent's definition, by whoever manages that Agent.
+    await db.agent.create({ data: { id: generateId(), name: 'Mv Agent', urn: `idx2199:mv-agent-${generateId().toLowerCase()}`, organizationId: orgId, systemMemoryId: sys } });
     const kn = await memory({ cls: 'knowledge', flag: false });
     const a = await node(src, 'mv-a', 'sum');
     const b = await node(src, 'mv-b', 'sum');

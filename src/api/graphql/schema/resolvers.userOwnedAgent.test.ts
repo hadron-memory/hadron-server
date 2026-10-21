@@ -350,7 +350,10 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     // surface. GraphQL's node gate was never widened; MCP's now matches.
     expect(await canReadMemory(db, { userId: otherId, roles: ['ADMIN'] } as never, memId)).toBe(false);
     expect(await canReadMemory(db, { userId: otherId, roles: ['READER'] } as never, memId)).toBe(false);
-    expect(await canWriteToMemory(db, { userId: otherId, roles: ['ADMIN'] } as never, memId)).toBe(false);
+    // #2206 case 2 (cor:dmo:050:13; Vera's FIT on #2206, 6325610986): managing the Agent includes WRITING its system
+    // memory, so the admin writes it. The write is never a content read: its response is concealed and move, merge
+    // and search-replace refuse (src/mcp/systemMemoryWrite2206.test.ts). Content stays closed until #1734.
+    expect(await canWriteToMemory(db, { userId: otherId, roles: ['ADMIN'] } as never, memId)).toBe(true);
     // The record read the ruling grants stays open over GraphQL.
     expect((await resolvers.Query.memory(null, { ref: memId }, admin()))?.id).toBe(memId);
   });

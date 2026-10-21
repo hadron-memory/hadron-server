@@ -158,6 +158,7 @@ import {
   filterReadableMemoryIds,
   getAccessibleMemoryIds,
   getMemoryAccess,
+  isWriteBeyondRead,
 } from './access-control.js';
 import { globalSearch } from '../lib/global-search/index.js';
 import {
@@ -7897,7 +7898,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // a later refusal would leak through the loc validation and the source
       // node lookup that run in between.
       const fromMemory = await resolveVisibleMemoryByUrn(auth, fromMemoryUrn, 'write');
-      if (!fromMemory) {
+      // #2206 (B): a move carries the node's content (and its render, below) to the caller, so a source memory the
+      // caller may write but not read answers as one it cannot see.
+      if (!fromMemory || (await isWriteBeyondRead(db, auth, fromMemory.id))) {
         return textResult(`Source memory not found: "${fromMemoryUrn}".`);
       }
       const toMemory = await resolveVisibleMemoryByUrn(auth, toMemoryUrn, 'write');

@@ -38,6 +38,7 @@ import { LINK_CAP_MEMORY_SELECT, cappedLinkLevel, type LinkCapMemory } from '../
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
 import { installMemoryAudience, isInstallMemoryRow, readableInstallMemoryIds } from '../lib/auth/installMemory.js';
+import { canManageAgentSystemMemory } from '../lib/auth/managedSystemMemory.js';
 
 // ---------------------------------------------------------------------------
 // Shared fold algorithm
@@ -440,6 +441,7 @@ export async function getPrincipalAppMemoryAccess(
     appId?: string | null;
     sessionId?: string | null;
     impersonation?: { orgId: string } | null;
+    clientId?: string | null;
   },
 ): Promise<Map<string, string>> {
   const folds: Array<{ appId: string; map: Map<string, string> }> = [];
@@ -473,6 +475,8 @@ export async function getPrincipalAppMemoryAccess(
       folds.map((f) => f.appId),
     )),
   );
+  // #2206 case 3: and every installed, licensed Agent's own system memory of each App the user participates in.
+  folds.push(...(await participantSystemMemoryFolds(db, principal)));
 
   const admitted = await admissibleFoldRows(db, principal.userId ?? null, folds, !principal.impersonation);
 
@@ -559,6 +563,47 @@ async function participantTeamSpaceFolds(
   const apps = await db.app.findMany({ where: { id: { in: ids } }, select: { id: true, ownerUserId: true } });
   const maps = await Promise.all(apps.map((app) => getAppTeamSpaceAccess(db, app, userId, !principal.impersonation)));
   return apps.map((app, i) => ({ appId: app.id, map: maps[i] }));
+}
+
+/**
+ * #2206 case 3 (cor:acl:010:01, the `system` row; Vera 6319156558): an App's participants read, through that App,
+ * the system memory of EVERY Agent installed and licensed in it, read-only. {@link getAppMemoryAccess} folds only the
+ * first-installed Agent (its items carry roles, and `appNodes` alone widens to every install), so a member driving a
+ * worker cast on a second installed Agent could not read that Agent's definition, and an org CONTRIBUTOR who is no
+ * member reached none of them.
+ *
+ * System memories only: an Agent's item memories keep their install-role audience, and nothing here writes. Only the
+ * user acting as themselves: no user (an App key, a session-isolated principal) and an AppRun (an App acting, with
+ * at most an on-behalf-of user) keep the folds they had. Participation is the shared set ({@link participantAppIds}:
+ * members, org CONTRIBUTOR+, a user-owned App's owner, bounded under impersonation), over live, installed Apps; a
+ * soft-deleted Agent, an unlicensed install or a soft-deleted memory grants nothing. {@link admissibleFoldRows} then
+ * applies the shared row rules (a user-owned Agent's memory stays its owner's).
+ */
+export async function participantSystemMemoryFolds(
+  db: PrismaClient,
+  principal: { userId?: string | null; impersonation?: { orgId: string } | null; clientId?: string | null },
+): Promise<Array<{ appId: string; map: Map<string, string> }>> {
+  if (!principal.userId || isRunPrincipal(principal)) return [];
+  const ids = await participantAppIds(db, principal, { includeMemberships: true });
+  if (ids.length === 0) return [];
+  const apps = await db.app.findMany({
+    where: { id: { in: ids }, deletedAt: null, uninstalledAt: null },
+    select: {
+      id: true, organizationId: true, ownerUserId: true,
+      appAgents: { select: { agent: { select: { id: true, organizationId: true, ownerUserId: true, systemMemoryId: true, deletedAt: true } } } },
+    },
+  });
+  const perApp = await Promise.all(apps.map(async (app) => {
+    const agents = app.appAgents.map((install) => install.agent).filter((agent) => agent !== null && agent.deletedAt === null);
+    const licensed = await activeAgentInstallLicenseIds(db, app, agents);
+    return { appId: app.id, systemIds: agents.filter((a) => licensed.has(a.id) && a.systemMemoryId !== null).map((a) => a.systemMemoryId!) };
+  }));
+  const wanted = [...new Set(perApp.flatMap((p) => p.systemIds))];
+  if (wanted.length === 0) return [];
+  const live = new Set((await db.memory.findMany({ where: { id: { in: wanted }, deletedAt: null }, select: { id: true } })).map((m) => m.id));
+  return perApp
+    .map(({ appId, systemIds }) => ({ appId, map: new Map(systemIds.filter((id) => live.has(id)).map((id) => [id, 'READ_ONLY'] as [string, string])) }))
+    .filter(({ map }) => map.size > 0);
 }
 
 /**
@@ -998,6 +1043,9 @@ export async function canWriteToMemory(
     if (auth.userId === memory.ownerUserId) return true;
     // #1764: and the team space of a user-owned App admits that App's members.
     if (await isUserOwnedTeamSpaceMember(db, auth, { id: memoryId, ...memory }, { hold: true })) return true;
+    // #2206 case 2 (cor:dmo:050:13): a user-owned Agent's system memory is also written by whoever manages the Agent,
+    // which includes platform admins. Only that row; every other user-owned memory stays the owner's.
+    if (memory.class === 'system' && await canManageAgentSystemMemory(db, auth, memoryId)) return true;
     return memory.class === 'app' &&
       (await getWorkerMemoryAccess(db, auth)).includes(memoryId);
   }
@@ -1034,6 +1082,11 @@ export async function canWriteToMemory(
   // The scoped map gives non-app memories read reach at most.
   if (auth.appId && auth.sessionId && !auth.userId) return false;
 
+  // #2206 case 1 (cor:dmo:050:13): an org-owned Agent's system memory is written by whoever manages the Agent, the
+  // org's ADMINs and OWNERs, on every transport and with or without a selected App. App participation is not
+  // management, and the access map below never grants this write.
+  if (memory.class === 'system' && await canManageAgentSystemMemory(db, auth, memoryId)) return true;
+
   // Non-personal memory: standard checks. Per D-2026-05-21-003, when
   // auth.appId is unset (multi-App OAuth caller without selection),
   // getMemoryAccess unions across all the user's accessible Apps —
@@ -1043,6 +1096,25 @@ export async function canWriteToMemory(
 
   const access = await getMemoryAccess(db, auth);
   return access.get(memoryId) === 'READ_WRITE';
+}
+
+/**
+ * #2206: a memory this caller may write but may not read the content of, so a write's response is concealed
+ * (`concealWriteBeyondRead`) and every operation that would move or reveal existing content (move, merge,
+ * search-replace, dry run included) answers as for a memory the caller cannot see. Today that is a user-owned Agent's
+ * system memory written by a platform admin, who manages the Agent (cor:dmo:050:13) but reads its content only once
+ * #1734 builds that read; judged by the canonical content gate, so it lifts by itself when #1734 widens it. An App's
+ * install memory keeps its own audience rules (installMemory.ts) and is not answered here.
+ */
+export async function isWriteBeyondRead(
+  db: PrismaClient,
+  auth: AuthContext,
+  memoryId: string,
+): Promise<boolean> {
+  const memory = await db.memory.findUnique({ where: { id: memoryId }, select: { class: true, ownerUserId: true, isInstallMemory: true } });
+  if (!memory || memory.class !== 'system' || memory.isInstallMemory || memory.ownerUserId === null) return false;
+  if (auth.userId === memory.ownerUserId) return false;
+  return !(await canReadMemory(db, auth, memoryId));
 }
 
 type MemoryReadRow = Pick<

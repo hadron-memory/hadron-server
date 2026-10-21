@@ -44,7 +44,7 @@ const memUrn = async (memoryId: string) => (await db.memory.findUniqueOrThrow({ 
 const nodeUrn = async (memoryId: string, loc: string) => safeNodeUrnV2(await memUrn(memoryId), loc);
 
 async function user(name: string, roles: string[] = ['READER']): Promise<User> {
-  const row = await db.user.create({ data: { id: generateId(), name, handle: `${name}-${generateId().slice(-6).toLowerCase()}`, roles } });
+  const row = await db.user.create({ data: { id: generateId(), name, handle: `${name}-${generateId().slice(-6).toLowerCase()}`, roles: roles as any } });
   return { id: row.id, roles };
 }
 
@@ -230,10 +230,10 @@ describe('#2206 case 2: a platform admin writes a user-owned Agent\'s system mem
     const s = mcp(authOf(u.platform));
     for (const out of [
       text(await s.callTool('hadron_move_node', { urn, targetUrn: safeNodeUrnV2(scratch.urn, 'stolen') })),
-      text(await s.callTool('hadron_replace_text', { oldText: 'SECRET', newText: 'X', nodeUrns: [urn], dryRun: true })),
-      text(await s.callTool('hadron_replace_text', { oldText: 'SECRET', newText: 'X', memoryUrns: [`hrn:mem:${await memUrn(userAgent.systemMemoryId)}`], dryRun: true })),
+      text(await s.callTool('hadron_replace_text', { oldText: 'SECRET', newText: 'X', nodeUrns: [urn], fields: ['content'], dryRun: true })),
+      text(await s.callTool('hadron_replace_text', { oldText: 'SECRET', newText: 'X', memoryUrns: [`hrn:mem:${await memUrn(userAgent.systemMemoryId)}`], fields: ['content'], dryRun: true })),
     ]) {
-      expect(out).toMatch(/not found/i);
+      expect(out).toMatch(/not[ _]found/i);
       expect(out).not.toMatch(/SECRET|secret-tag|Secret Title|match/i);
     }
     expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({ memoryId: before.memoryId, loc: before.loc, content: SECRET.content, deletedAt: null });

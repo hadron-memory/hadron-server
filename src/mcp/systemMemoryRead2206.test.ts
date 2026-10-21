@@ -11,6 +11,7 @@ import type { AuthContext } from '../middleware/auth.js';
 import { canReadMemory, canWriteToMemory } from './access-control.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
+import { systemMemoryReadGrants } from '../lib/auth/systemMemoryRead.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -59,7 +60,12 @@ describe('#2206 case 3: the App participant read fold', () => {
       }
       const ids = await getAccessibleMemoryIds({ db, userId: who.id, roles: ['READER'] } as unknown as Context);
       expect(ids).toContain(second.systemMemoryId); // the list gate agrees with the point gate
+      // and the GraphQL record gate (the memory row itself) admits the same participant, read-only
+      const grants = await systemMemoryReadGrants(db, { userId: who.id, roles: ['READER'] }, second.systemMemoryId);
+      expect(grants.some((g) => g.source === 'APP_MEMBER')).toBe(true);
+      expect(grants.every((g) => !g.caps.write)).toBe(true);
     }
+    expect(await systemMemoryReadGrants(db, { userId: reader.id, roles: ['READER'] }, second.systemMemoryId)).toEqual([]);
   });
 
   it('no reach for non-participants, runs, or App keys; the item memory is not widened', async () => {

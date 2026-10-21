@@ -83,6 +83,7 @@ import {
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isUserOwnedAgentDefinition } from '../../../lib/auth/userOwnedAgentDefinition.js';
+import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemory.js';
 import { isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { installWriteAllowed } from './installMemory.js';
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
@@ -2639,6 +2640,8 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   if (memory.ownerUserId !== null) {
     if (ctx.userId === memory.ownerUserId) return;
     if (memory.class === 'app' && await canWriteToMemory(ctx.db, ctx, memoryId)) return;
+    // #2206 case 2: a user-owned Agent's system memory, by whoever manages the Agent (the shared predicate).
+    if (memory.class === 'system' && await canManageAgentSystemMemory(ctx.db, ctx, memoryId)) return;
     throw memoryWriteForbidden();
   }
 
@@ -2673,11 +2676,12 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     throw memoryWriteForbidden();
   }
 
-  // Definition authoring uses the same org-management gate as Agent edits.
-  // User-owned and platform-admin cases were already decided above.
+  // Definition authoring follows whoever manages the Agent (#2206, cor:dmo:050:13), through the one predicate MCP
+  // shares: a live Agent's own system memory with matching tenant, never a class-only org-ADMIN shortcut (a system
+  // row no live Agent points at is nobody's definition). User-owned and platform-admin cases were decided above.
   if (memory.class === 'system') {
-    await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
-    return;
+    if (await canManageAgentSystemMemory(ctx.db, ctx, memoryId)) return;
+    throw memoryWriteForbidden();
   }
 
   // One shared predicate for GraphQL and MCP: free-standing knowledge via
