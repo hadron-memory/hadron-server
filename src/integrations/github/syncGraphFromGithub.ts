@@ -893,7 +893,7 @@ const syncGraphFromGithubAsSystem = async (
             select: { id: true },
           });
           try {
-            await assertIncludesWritable(tx, { id: selfRow?.id ?? prospectiveNodeId(loc), memoryId: graph.id, loc }, update.content, [graph.id], includeOverlay);
+            await assertIncludesWritable(tx, { id: selfRow?.id ?? prospectiveNodeId(loc), memoryId: graph.id, loc }, update.content, [graph.id], includeOverlay, { includeSystemWrite: true });
           } catch (e) {
             const text = includeRefusalText(e);
             if (!text) throw e;

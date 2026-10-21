@@ -231,7 +231,7 @@ describe('every principal writer runs the check', () => {
   it('batch replace, node merge-into and restore-revision refuse an added unreadable tag and keep an unchanged one', async () => {
     await create('r', 'swap-me');
     const replaced = await refusal(M.searchReplaceInNodes(null, { input: {
-      oldText: 'swap-me', newText: secret(), memoryIds: [memoryId], fields: ['CONTENT'],
+      oldText: 'swap-me', newText: secret(), memoryIds: [memoryId], fields: ['content'],
     } }, as()));
     expect(replaced.code).toBe('INCLUDE_TARGET_UNAVAILABLE');
     expect(await contentOf('r')).toBe('swap-me');
@@ -255,7 +255,7 @@ describe('every principal writer runs the check', () => {
   it('git sync and the root-node seam are the only callers without the check (source guard)', async () => {
     const { execSync } = await import('child_process');
     const importers = execSync(
-      "git grep -l \"controller/operations/createNode\" -- 'src/**/*.ts' ':!src/**/*.test.ts'", { encoding: 'utf8' },
+      "git grep -l \"operations/createNode\" -- 'src/**/*.ts' ':!src/**/*.test.ts'", { encoding: 'utf8' },
     ).trim().split('\n').sort();
     expect(importers).toEqual([
       'src/api/graphql/schema/resolvers.mutation.appMemory.ts',

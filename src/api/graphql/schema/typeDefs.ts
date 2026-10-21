@@ -9140,10 +9140,13 @@ export const typeDefs = `#graphql
     Phase 0 D1); a soft-deleted node at the target loc is resurrected.
     'name' is required here and only here (D4).
     Include tags (#2040): content may carry {{> target settings}} tags. Writes
-    that make a tag malformed refuse INVALID_INCLUDE, and one that would make
-    the node include itself INCLUDE_CYCLE; nothing is written. A chain deeper
-    than 10 is not refused: it saves, and reads show the broken-include notice
-    past level 10 (#2134). Each tag's target gets a derived edge
+    that make a tag malformed refuse INVALID_INCLUDE; a tag the write adds or
+    changes whose target is missing, deleted or not readable by the writer
+    refuses INCLUDE_TARGET_UNAVAILABLE (one error for all three; tags already
+    stored are not re-checked, #2041); and one that would make the node include
+    itself INCLUDE_CYCLE; nothing is written. A chain deeper than 10 is not
+    refused: it saves, and reads show the broken-include notice past level 10
+    (#2134). Each tag's target gets a derived edge
     (governed kind INCLUDE) that only the content owns: editing or deleting it
     directly refuses INCLUDE_EDGE_DERIVED.
     """
@@ -9303,10 +9306,13 @@ export const typeDefs = `#graphql
     preserved ('name' included, D4; 'abstract' keeps its omit/null/string
     contract; omitted 'tags' are preserved, issue #235).
     Include tags (#2040): content may carry {{> target settings}} tags. Writes
-    that make a tag malformed refuse INVALID_INCLUDE, and one that would make
-    the node include itself INCLUDE_CYCLE; nothing is written. A chain deeper
-    than 10 is not refused: it saves, and reads show the broken-include notice
-    past level 10 (#2134). Each tag's target gets a derived edge
+    that make a tag malformed refuse INVALID_INCLUDE; a tag the write adds or
+    changes whose target is missing, deleted or not readable by the writer
+    refuses INCLUDE_TARGET_UNAVAILABLE (one error for all three; tags already
+    stored are not re-checked, #2041); and one that would make the node include
+    itself INCLUDE_CYCLE; nothing is written. A chain deeper than 10 is not
+    refused: it saves, and reads show the broken-include notice past level 10
+    (#2134). Each tag's target gets a derived edge
     (governed kind INCLUDE) that only the content owns: editing or deleting it
     directly refuses INCLUDE_EDGE_DERIVED.
     """
