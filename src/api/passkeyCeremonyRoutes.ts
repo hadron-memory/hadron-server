@@ -10,7 +10,9 @@
  * - `revoke/start` is opened only by an existing passkey's assertion over a server-issued challenge:
  *   the challenge is the ceremony id's own random bytes, the browser is the HttpOnly cookie holder
  *   (stored only as its SHA-256), the Origin must be on the SIGNING_CEREMONY_ORIGINS allowlist (an
- *   empty list refuses), and no durable session is minted.
+ *   empty list refuses), and no durable session is minted. A credential counts only while its
+ *   enrollment RP ID equals the deployment's (#1631 PR1b, Eden #10470), and each credential has its
+ *   own attempt budget across client addresses, on top of the per-IP one.
  *
  * Order for `revoke/start`: load the credential snapshot without locks, verify OUTSIDE any
  * transaction, then in one transaction take the user authority anchor, recheck the live owner and
@@ -31,6 +33,8 @@ const COOKIE = 'hadron_ceremony';
 const CEREMONY_TTL_SECONDS = 300;
 /** Requests a minute per client IP, across the ceremony routes. */
 export const PASSKEY_CEREMONY_RATE_LIMIT_PER_MINUTE = 30;
+/** revoke/start attempts per credential per 15 minutes, whatever client address they come from. */
+export const PASSKEY_REVOKE_PER_CREDENTIAL_LIMIT = 10;
 
 const sha256Hex = (b: Uint8Array | string) => createHash('sha256').update(b).digest('hex');
 const refuse = (res: Response) => res.status(403).type('application/json').set('Cache-Control', 'no-store').send('{"error":"forbidden"}');
@@ -63,6 +67,14 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
     handler: (_req, res) => { res.status(429).end(); },
   });
   const json = express.json({ limit: '16kb' });
+  // Keyed on the DECODED credential id, so base64url spellings of the same bytes share one budget.
+  // A body with no usable id is skipped here: it is refused anyway, and the per-IP limiter still counts it.
+  const perCredential = rateLimit({
+    windowMs: 15 * 60_000, limit: PASSKEY_REVOKE_PER_CREDENTIAL_LIMIT, standardHeaders: false, legacyHeaders: false,
+    skip: (req) => !b64((req.body as Record<string, unknown> | undefined)?.credentialId, 512),
+    keyGenerator: (req) => `credential:${sha256Hex(b64((req.body as Record<string, unknown>).credentialId, 512)!)}`,
+    handler: (_req, res) => { res.status(429).end(); },
+  });
 
   app.post('/passkeys/register/start', limiter, (_req, res) => { refuse(res); });
 
@@ -80,7 +92,7 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
     } catch { refuse(res); }
   });
 
-  app.post('/passkeys/revoke/start', limiter, json, async (req: Request, res: Response) => {
+  app.post('/passkeys/revoke/start', limiter, json, perCredential, async (req: Request, res: Response) => {
     try {
       if (!originAllowed(req)) return void refuse(res);
       const nonce = cookieValue(req);
@@ -93,15 +105,17 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
       if (!nonce || !credentialId || !authenticatorData || !clientDataJson || !signature || !ceremonyId) return void refuse(res);
 
       // Snapshot without locks; the deciding transaction revalidates it under lock.
-      const [row] = await db.$queryRaw<Array<{ id: string; owner_id: string; public_key: Buffer; counter: bigint; revoked_at: Date | null }>>`
-        SELECT id, owner_id, public_key, counter, revoked_at FROM passkey_credentials WHERE credential_id = ${credentialId}`;
-      if (!row || row.revoked_at !== null) return void refuse(res);
+      const [row] = await db.$queryRaw<Array<{ id: string; owner_id: string; public_key: Buffer; counter: bigint; revoked_at: Date | null; enrollment_rp_id: string }>>`
+        SELECT id, owner_id, public_key, counter, revoked_at, enrollment_rp_id FROM passkey_credentials WHERE credential_id = ${credentialId}`;
+      const rpId = passkeyRpId();
+      // Immutable column, so the unlocked read is final: no decide-time recheck needed.
+      if (!row || row.revoked_at !== null || row.enrollment_rp_id !== rpId) return void refuse(res);
 
       const verified = await verifyCeremonyAssertion({
         assertion: { authenticatorData, clientDataJson, signature },
         credential: { passkeyId: row.id, ownerId: row.owner_id, credentialId, publicKey: row.public_key, counter: row.counter },
         expectedChallenge: Buffer.from(ceremonyId, 'base64url'),
-        rpId: passkeyRpId(),
+        rpId,
         origins: signingCeremonyOrigins(),
       });
 
