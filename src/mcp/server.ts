@@ -9107,8 +9107,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     {
       session: z.string().optional().describe('Pick one of a listed answer\'s sessions by its id. Omit on the first call.'),
       description: z.string().optional().describe('What the next session is about, used only when the redemption starts a new one (after a rotation).'),
-      llmModel: z.string().optional().describe('LLM model, recorded only on a session the redemption starts.'),
-      family: z.string().optional().describe('Model family (claude, codex, glm…), recorded only on a session the redemption starts.'),
+      llmModel: z.string().optional().describe('LLM model: recorded on a session the redemption starts, and refreshed on an open session it resumes (never cleared when omitted).'),
+      family: z.string().optional().describe('Model family (claude, codex, glm…): recorded on a session the redemption starts, and refreshed on an open session it resumes. Wins over the family the model implies; an invalid token is refused before a claim is spent.'),
     },
     async ({ session, description, llmModel, family }) => {
       const mcpCtx: Context = {
