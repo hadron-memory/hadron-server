@@ -13,6 +13,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
+import { renderRosterEntry } from '../../../mcp/agentTaskTools.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -131,6 +132,44 @@ describe('#2178 safe roster enrichment — red first', () => {
     await task({title:'selected title 2178',status:'started',assigneeWorkerId:w.Kit.id,assignedAt:ago(1)});
     const srv=createTestableMcpServer({userId:mia.id,roles:['READER'],clientId:`user:${mia.id}`} as AuthContext);
     expect(await srv.callToolText('hadron_team_roster',{appRef:app.id})).toContain('selected title 2178');
+  });
+
+  it('renders stored pause tense against the roster snapshot, including equality, rather than the host clock', async () => {
+    const r = await entry('Kit');
+    const asOf = new Date('2030-01-01T00:00:00.000Z');
+    const ended = new Date(asOf.getTime() - 1);
+    const future = new Date(asOf.getTime() + 1);
+    expect(renderRosterEntry({ ...r, pausedUntil: ended }, asOf)).toContain(`own pause ended ${ended.toISOString()}`);
+    expect(renderRosterEntry({ ...r, pausedUntil: asOf }, asOf)).toContain(`own pause ended ${asOf.toISOString()}`);
+    expect(renderRosterEntry({ ...r, pausedUntil: future }, asOf)).toContain(`own pause until ${future.toISOString()}`);
+  });
+
+  it('labels the selected task as an assignment and expired pause as ended on actual MCP', async () => {
+    await task({ title: 'pending display only', status: 'pending', assigneeWorkerId: w.Kit.id });
+    const expired = ago(10);
+    await db.workerWakeSettings.create({ data: { workerId: w.Kit.id, pausedUntil: expired } });
+    const srv = createTestableMcpServer({ userId: mia.id, roles: ['READER'], clientId: `user:${mia.id}` } as AuthContext);
+    const text = await srv.callToolText('hadron_team_roster', { appRef: app.id });
+    expect(text).toContain('top assignment');
+    expect(text).toContain(`own pause ended ${expired.toISOString()}`);
+    expect(text).not.toContain('current task');
+  });
+
+  it('orders a defensive null assignment after a dated one without relaxing production task constraints', async () => {
+    // Assigned tasks currently require assignedAt. A transaction-local synthetic relation exercises the real
+    // read SQL's defensive ordering without weakening that CHECK or creating an invalid production-shaped row.
+    await db.$transaction(async (tx) => {
+      await tx.$executeRaw`CREATE TEMP TABLE agent_tasks (
+        id text, title text, status text, app_id text, assignee_worker_id text,
+        assigned_at timestamp, created_at timestamp
+      ) ON COMMIT DROP`;
+      await tx.$executeRaw`INSERT INTO agent_tasks VALUES
+        ('null-task', 'undated', 'pending', 'synthetic-app', 'synthetic-worker', NULL, '2000-01-01'),
+        ('dated-task', 'dated', 'pending', 'synthetic-app', 'synthetic-worker', '2001-01-01', '2001-01-01')`;
+      expect(await loadRosterTaskSummaries(tx, 'synthetic-app', ['synthetic-worker'])).toEqual(new Map([
+        ['synthetic-worker', { id: 'dated-task', title: 'dated', status: 'pending' }],
+      ]));
+    });
   });
 
   it('projects the nullable leaf and enum through the actual GraphQL schema', async () => {
