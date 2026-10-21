@@ -8,6 +8,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../../test/softPasskey.js';
 import { createCeremony } from './ceremony.js';
+import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { confirmFreshSignIn, recordIdpSignIn, startEmailSignIn } from './freshSignIn.js';
 import {
   bindFirstRegistration, bindLaterRegistration, finishRegistration, firstPasskeyWindowHours, LABEL_MAX_LENGTH,
@@ -202,6 +203,14 @@ describe('later passkey: binding with a vouch', () => {
     expect(await bindLater(id2, vouchBody(key, id2))).toBeNull();
   });
 
+  it('refuses a voucher whose counter did not advance (a cloned authenticator)', async () => {
+    const id = await ceremony();
+    expect(await bindLater(id, vouchBody(key, id, { counter: 5 }))).not.toBeNull();
+    const id2 = await ceremony();
+    expect(await bindLater(id2, vouchBody(key, id2, { counter: 5 }))).toBeNull();
+    expect((await ceremonyRow(id2)).userId).toBeNull();
+  });
+
   it('refuses a ceremony from another browser, and binds once', async () => {
     const id = await ceremony();
     expect(await bindLater(id, vouchBody(key, id), 'other-ceremony-browser')).toBeNull();
@@ -322,6 +331,53 @@ describe('finish', () => {
     await bindFirst(id);
     expect(await finish(id, reused)).toBeNull();
     expect(await db.passkeyCredential.count()).toBe(1);
+  });
+
+  it('two concurrent finishes of ONE ceremony register once', async () => {
+    await freshSignIn();
+    const id = await ceremony();
+    await bindFirst(id);
+    const results = await Promise.all([finish(id, softPasskey()), finish(id, softPasskey())]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await db.passkeyCredential.count({ where: { ownerId: ana } })).toBe(1);
+  });
+
+  it('two concurrent finishes of ONE later-passkey ceremony register once (nothing else masks the single use)', async () => {
+    const voucher = softPasskey();
+    await insertSoftPasskey(db, ana, voucher);
+    const id = await ceremony();
+    await bindLater(id, vouchBody(voucher, id));
+    const results = await Promise.all([finish(id, softPasskey(), { signInCookie: null }), finish(id, softPasskey(), { signInCookie: null })]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await db.passkeyCredential.count({ where: { ownerId: ana } })).toBe(2);
+  });
+
+  it('finish waits on the user authority anchor, and refuses once a passkey committed meanwhile (deterministic race)', async () => {
+    await freshSignIn();
+    const id = await ceremony();
+    await bindFirst(id);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let anchored!: () => void;
+    const anchorTaken = new Promise<void>((r) => { anchored = r; });
+    const holder = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'user', id: ana }], 'exclusive');
+      anchored();
+      await held;
+      await tx.$executeRaw`INSERT INTO passkey_credentials
+        (id, owner_id, credential_id, public_key, algorithm, user_handle, enrollment_rp_id, label, registered_at, counter, transports, backup_eligible, backed_up)
+        VALUES ('race-winner', ${ana}, ${randomBytes(16)}, ${softPasskey().cosePublicKey}, -7, ${randomBytes(32)}, ${RP}, 'Winner',
+          (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3), 0, ARRAY['internal'], false, false)`;
+    }, { timeout: 20_000 });
+    await anchorTaken;
+    let settled = false;
+    const racer = finish(id, softPasskey()).then((r) => { settled = true; return r; });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(settled).toBe(false);
+    release();
+    await holder;
+    expect(await racer).toBeNull();
+    expect(await db.passkeyCredential.count({ where: { ownerId: ana } })).toBe(1);
   });
 
   it('two concurrent first-passkey finishes for one user register at most one', async () => {
