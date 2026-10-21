@@ -1,3 +1,4 @@
+import { assertBootPromptWriteAllowed, assertNoBootPromptRows } from '../lib/bootPrompt.js';
 import { sessionEndReason } from '../lib/sessionEndReason.js';
 import { governedKindAnnotation } from '../lib/edgeGovernedKind.js';
 import { GraphQLError } from 'graphql';
@@ -289,6 +290,7 @@ import {
 } from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
+import { memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -3989,6 +3991,8 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — a comment is never rewritten as a section.
         assertNotCommentWrite(parentGovernedProbe?.nodeType, undefined, 'update');
+        // #2043 — the same boot-prompt guards the shared writer applies.
+        assertBootPromptWriteAllowed(parentGovernedProbe, {}, 'update');
         assertGovernedWrite(
           parentGovernedProbe,
           mergedGovernedState(parentGovernedProbe, {}),
@@ -5975,6 +5979,7 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — no generic create makes or resurrects a comment.
         assertNotCommentWrite(governedProbe?.nodeType, nodeType, 'create');
+        assertBootPromptWriteAllowed(governedProbe, { nodeType, role: normalizeRole(role) }, 'create');
         assertGovernedWrite(
           governedProbe,
           mergedGovernedState(governedProbe, { role, isRunnable }),
@@ -6368,10 +6373,10 @@ export function createMcpServerInstance(
           // Invalidate an old in-flight embed before the asynchronous enqueue
           // restamps the marker after commit.
           const indexed = pre?.deletedAt
-            ? await tx.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { vectorIndexEnabled: true } })
+            ? await tx.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { vectorIndexEnabled: true, class: true } })
             : null;
           const revivedPendingAt = pre?.deletedAt
-            ? pendingAtForRevival(pre.embeddingPendingAt, indexed!.vectorIndexEnabled)
+            ? pendingAtForRevival(pre.embeddingPendingAt, memoryIsVectorIndexed(indexed!))
             : undefined;
           const written = await tx.node.upsert({
             ...upsertArgs,
@@ -6542,6 +6547,7 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — no generic update edits, makes or unmakes a comment.
         assertNotCommentWrite(existing?.nodeType, nodeType, 'update');
+        assertBootPromptWriteAllowed(existing, { nodeType, role: normalizeRole(role) }, 'update');
         assertGovernedWrite(
           existing,
           mergedGovernedState(existing, { role, isRunnable }),
@@ -7645,6 +7651,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         if ((await commentIdsAmong(tx, affectedIds)).length > 0) {
           return { refused: 'comment', message: commentGovernedError('delete', 'removes').message };
         }
+        await assertNoBootPromptRows(tx, affectedIds, 'delete');
         // #1641 §3.2 — a decision is withdrawn, never deleted.
         const decisions = await decisionFamilyAmong(tx, affectedIds);
         if (decisions.length > 0) {

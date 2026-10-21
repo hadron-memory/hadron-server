@@ -1,3 +1,5 @@
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, withSyncCaller } from '../../lib/bootPrompt.js';
+import { currentActor } from '../../lib/requestActor.js';
 import { assertIncludesWritable, prospectiveNodeId, includeRefusalText, storedIncludeTags, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
 import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
@@ -986,6 +988,17 @@ const syncGraphFromGithubAsSystem = async (
             refusedRoleLocs.add(loc);
             return true;
           }
+          // #2043 — git sync never writes a compiled boot prompt (a compile does):
+          // a file landing on one is skipped and the node kept. A worker session's
+          // sync that would create or change any boot-prompt node is refused whole
+          // (cor:agt:040:11); the server's own webhook/startup syncs carry no worker.
+          if (prior?.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+            console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — it is a compiled boot prompt, written only by a compile`);
+            protectedRowIds.add(prior.id);
+            refusedRoleLocs.add(loc);
+            return true;
+          }
+          assertNoWorkerSessionBootPromptWrite(prior?.role, governedSignalsFromMirror(node).role ?? undefined, 'import');
           const signals = governedSignalsFromMirror(node);
           // #1641 §3.2 — no mirror ever writes a decision or a decision log:
           // anyone with push access could otherwise forge one. A file that
@@ -1306,8 +1319,13 @@ const syncGraphFromGithubAsSystem = async (
             ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
             : {}),
           ...unreadableLocFilter,
+          // #2043 — repo-wins cleanup never removes a compiled boot prompt, file or no file:
+          // only a compile (or a deliberate delete) removes one.
+          nodeType: { not: COMPILED_BOOT_PROMPT_NODE_TYPE },
         };
         const pruned = await tx.node.findMany({ where: cleanupWhere, select: { id: true, loc: true } });
+        // #2043 (cor:agt:040:11) — nor does a worker session's sync delete a boot-prompt source.
+        await assertNoBootPromptRows(tx, pruned.map((n) => n.id), 'import');
         if (memoryState.readBranch == null && !memoryState.readBranchCorrected && pruned.length > 0) {
           // #1566: old blank-read syncs could ingest the write branch and
           // adopt Hadron-created nodes as repo-owned. Boot sync runs before an
@@ -1728,4 +1746,4 @@ function extractOwnerRepo(gitUrl: string): string {
  * the system even inside a worker's request: node and revision then agree.
  */
 export const syncGraphFromGithub: typeof syncGraphFromGithubAsSystem = (...args) =>
-  runAsSystem(() => syncGraphFromGithubAsSystem(...args));
+  withSyncCaller(boundWorkerId(), () => runAsSystem(() => syncGraphFromGithubAsSystem(...args)));
