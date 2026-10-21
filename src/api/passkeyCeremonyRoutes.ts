@@ -5,8 +5,13 @@
  * mounted, so the paths are ordinary 404s with no switch oracle. Every failure is one uniform
  * 403 `{"error":"forbidden"}`: nothing says whether a proof was missing, forged, expired or consumed.
  *
- * - `register/start` still refuses everyone: a first credential has no passkey to prove with, and
- *   the fresh-IdP/email-bound proof is PR1b.
+ * - Registration (#1631 PR2, cor:aut:040:02): `register/challenge` opens a REGISTER ceremony;
+ *   `register/start` binds it, from the ONE fresh sign-in on this browser (a first passkey) or from an
+ *   out-of-window passkey's assertion (a later one), and returns the creation options naming whose
+ *   account it is; `register/finish` verifies the creation response and registers. No bearer
+ *   credential, session cookie or request field ever names the user. See `lib/passkeys/registration.ts`.
+ * - The cancel link (cor:aut:040:08, Exceptions): `GET /passkeys/cancel` only renders; the POST
+ *   revokes a first passkey in its window, once, with no sign-in, and ends the sign-ins it completed.
  * - `revoke/start` is opened only by an existing passkey's assertion over a server-issued challenge:
  *   the challenge is the ceremony id's own random bytes, the browser is the HttpOnly cookie holder
  *   (stored only as its SHA-256), the Origin must be on the SIGNING_CEREMONY_ORIGINS allowlist (an
@@ -24,6 +29,11 @@ import rateLimit from 'express-rate-limit';
 import { db } from '../integrations/db/client.js';
 import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
 import { createCeremony, decideCeremonyAssertion, verifyCeremonyAssertion } from '../lib/passkeys/ceremony.js';
+import { bindFirstRegistration, bindLaterRegistration, finishRegistration, firstPasskeyWindowHours, type RegistrationBinding } from '../lib/passkeys/registration.js';
+import { CANCEL_TOKEN, cancelFirstPasskey } from '../lib/passkeys/cancel.js';
+import { CEREMONY_BROWSER_COOKIE, clearCeremonyBrowserCookie } from './freshSignInRoutes.js';
+import { sendPage } from './ceremonyPages.js';
+import { PASSKEY_CANCEL_PATH } from '../jobs/sendPasskeyRegistrationNotices.js';
 import { passkeyRpId, signingCeremonyOrigins } from '../lib/signing/config.js';
 import { signingSurfacePolicy } from '../lib/signing/surface.js';
 
@@ -40,12 +50,33 @@ const sha256Hex = (b: Uint8Array | string) => createHash('sha256').update(b).dig
 const refuse = (res: Response) => res.status(403).type('application/json').set('Cache-Control', 'no-store').send('{"error":"forbidden"}');
 
 /** The browser's cookie value, parsed locally so route order never depends on a global parser. */
-function cookieValue(req: Request): string | null {
+function cookieValue(req: Request, name = COOKIE): string | null {
   for (const part of (req.headers.cookie ?? '').split(';')) {
     const [k, ...v] = part.trim().split('=');
-    if (k === COOKIE) return v.join('=') || null;
+    if (k === name) return v.join('=') || null;
   }
   return null;
+}
+
+export const PASSKEY_REGISTER_CHALLENGE_PATH = '/passkeys/register/challenge';
+export const PASSKEY_REGISTER_FINISH_PATH = '/passkeys/register/finish';
+/** Cancel POSTs a minute per client IP. */
+export const PASSKEY_CANCEL_RATE_LIMIT_PER_MINUTE = 10;
+const RP_NAME = 'Hadron';
+const ceremonyIdOf = (v: unknown) => (typeof v === 'string' && /^[A-Za-z0-9_-]{20,64}$/.test(v) ? v : null);
+
+/** WebAuthn creation options for a bound ceremony. The page shows `user.name` before the prompt (Rook Q2.3). */
+function creationOptions(ceremonyId: string, b: RegistrationBinding, rpId: string) {
+  return {
+    rp: { id: rpId, name: RP_NAME },
+    user: { id: b.userHandle.toString('base64url'), name: b.handle, displayName: b.handle },
+    challenge: ceremonyId,
+    pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+    authenticatorSelection: { userVerification: 'required', residentKey: 'preferred' },
+    attestation: 'none',
+    excludeCredentials: b.excludeCredentialIds.map((id) => ({ type: 'public-key', id: id.toString('base64url') })),
+    timeout: CEREMONY_TTL_SECONDS * 1000,
+  };
 }
 
 /** Exact allowlist match on the Origin header; absent or unlisted refuses, and an empty allowlist refuses. */
@@ -62,6 +93,8 @@ const b64 = (v: unknown, max = 4096): Buffer | null => {
 /** Mount the ceremony routes when the registration switch is on; the switch is read once, at mount. */
 export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv = process.env): void {
   if (!signingSurfacePolicy(env).registration) return;
+  // cor:aut:040:07: a misconfigured window (shorter than 72 hours, or not an integer) fails here, at boot.
+  const windowHours = firstPasskeyWindowHours(env);
   const limiter = rateLimit({
     windowMs: 60_000, limit: PASSKEY_CEREMONY_RATE_LIMIT_PER_MINUTE, standardHeaders: false, legacyHeaders: false,
     handler: (_req, res) => { res.status(429).end(); },
@@ -76,7 +109,102 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
     handler: (_req, res) => { res.status(429).end(); },
   });
 
-  app.post('/passkeys/register/start', limiter, (_req, res) => { refuse(res); });
+  const cancelLimiter = rateLimit({
+    windowMs: 60_000, limit: PASSKEY_CANCEL_RATE_LIMIT_PER_MINUTE, standardHeaders: false, legacyHeaders: false,
+    handler: (_req, res) => { res.status(429).end(); },
+  });
+  const ceremonyCookie = (req: Request) => ({
+    httpOnly: true, sameSite: 'strict' as const, path: '/passkeys',
+    secure: req.secure || req.headers.origin?.startsWith('https://') === true,
+  });
+
+  // Open a REGISTER ceremony for this browser. Nothing here proves anyone or names a user.
+  app.post(PASSKEY_REGISTER_CHALLENGE_PATH, limiter, async (req, res) => {
+    try {
+      if (!originAllowed(req)) return void refuse(res);
+      const nonce = randomBytes(32).toString('base64url');
+      const { id } = await db.$transaction((tx) => createCeremony(tx, {
+        purpose: 'REGISTER', browserNonceHash: sha256Hex(nonce), ttlSeconds: CEREMONY_TTL_SECONDS, challengeIsId: true,
+      }));
+      res.cookie(COOKIE, nonce, { ...ceremonyCookie(req), maxAge: CEREMONY_TTL_SECONDS * 1000 });
+      res.status(200).set('Cache-Control', 'no-store').json({ ceremonyId: id, challenge: id });
+    } catch { refuse(res); }
+  });
+
+  // The step begins here: bind the ceremony to who registers and which kind, then return the creation options.
+  // The user comes ONLY from this browser's fresh sign-in or from the vouching passkey's owner, never from a bearer
+  // credential, a session cookie or a request field (Rook Q2.2).
+  app.post('/passkeys/register/start', limiter, json, async (req: Request, res: Response) => {
+    try {
+      if (!originAllowed(req)) return void refuse(res);
+      const nonce = cookieValue(req);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const ceremonyId = ceremonyIdOf(body.ceremonyId);
+      if (!nonce || !ceremonyId) return void refuse(res);
+      const rpId = passkeyRpId();
+      let bound: RegistrationBinding | null;
+      if (body.vouch !== undefined) {
+        const v = (body.vouch ?? {}) as Record<string, unknown>;
+        const credentialId = b64(v.credentialId, 512);
+        const authenticatorData = b64(v.authenticatorData);
+        const clientDataJson = b64(v.clientDataJson);
+        const signature = b64(v.signature);
+        if (!credentialId || !authenticatorData || !clientDataJson || !signature) return void refuse(res);
+        bound = await bindLaterRegistration(db, {
+          ceremonyId, ceremonyNonceHash: sha256Hex(nonce), vouch: { credentialId, authenticatorData, clientDataJson, signature },
+          rpId, origins: signingCeremonyOrigins(),
+        });
+      } else {
+        const signInNonce = cookieValue(req, CEREMONY_BROWSER_COOKIE);
+        if (!signInNonce) return void refuse(res);
+        bound = await bindFirstRegistration(db, { ceremonyId, ceremonyNonceHash: sha256Hex(nonce), signInBrowserHash: sha256Hex(signInNonce) });
+      }
+      if (!bound) return void refuse(res);
+      res.status(200).set('Cache-Control', 'no-store').json({ publicKey: creationOptions(ceremonyId, bound, rpId), account: { handle: bound.handle } });
+    } catch { refuse(res); }
+  });
+
+  app.post(PASSKEY_REGISTER_FINISH_PATH, limiter, express.json({ limit: '64kb' }), async (req: Request, res: Response) => {
+    try {
+      if (!originAllowed(req)) return void refuse(res);
+      const nonce = cookieValue(req);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const ceremonyId = ceremonyIdOf(body.ceremonyId);
+      const response = body.response;
+      if (!nonce || !ceremonyId || typeof response !== 'object' || response === null || typeof body.label !== 'string') return void refuse(res);
+      const signInNonce = cookieValue(req, CEREMONY_BROWSER_COOKIE);
+      const registered = await finishRegistration(db, {
+        ceremonyId, ceremonyNonceHash: sha256Hex(nonce), signInBrowserHash: signInNonce ? sha256Hex(signInNonce) : null,
+        response: response as Parameters<typeof finishRegistration>[1]['response'], label: body.label,
+        rpId: passkeyRpId(), origins: signingCeremonyOrigins(), windowHours,
+      });
+      if (!registered) return void refuse(res);
+      // The ceremony and the fresh sign-in are spent: clear both browser cookies.
+      res.clearCookie(COOKIE, ceremonyCookie(req));
+      clearCeremonyBrowserCookie(req, res);
+      res.status(200).set('Cache-Control', 'no-store').json({ ok: true, kind: registered.kind });
+    } catch { refuse(res); }
+  });
+
+  // The cancel link. The GET only renders, so a mail scanner spends nothing; the POST is the cancel.
+  app.get(PASSKEY_CANCEL_PATH, (req, res) => {
+    const token = req.query.token;
+    if (typeof token !== 'string' || !CANCEL_TOKEN.test(token)) return void cancelRefused(res, 400);
+    sendPage(res, 200, 'Cancel this passkey', `<h1>Cancel this passkey?</h1>
+<p>This removes the passkey that was just added to your Hadron account, and ends the sign-ins it completed. Do it if you did not add it.</p>
+<form method="post" action="${PASSKEY_CANCEL_PATH}"><input type="hidden" name="token" value="${token}">
+<button type="submit">Cancel this passkey</button></form>`);
+  });
+
+  app.post(PASSKEY_CANCEL_PATH, cancelLimiter, express.urlencoded({ extended: false, limit: '4kb' }), async (req: Request, res: Response) => {
+    try {
+      const token = (req.body as { token?: unknown } | undefined)?.token;
+      if (!originAllowed(req) || typeof token !== 'string') return void cancelRefused(res);
+      const userAgent = String(req.headers['user-agent'] ?? '').slice(0, 512) || 'unknown';
+      if (!(await cancelFirstPasskey(db, { token, ip: req.ip ?? 'unknown', userAgent }))) return void cancelRefused(res);
+      sendPage(res, 200, 'Passkey cancelled', '<h1>Passkey cancelled</h1><p>The passkey was removed, and the sign-ins it completed have ended.</p>');
+    } catch { cancelRefused(res); }
+  });
 
   // Issue a challenge to the browser that will answer it. Nothing here proves anyone; it only opens a ceremony.
   app.post(PASSKEY_REVOKE_CHALLENGE_PATH, limiter, async (req, res) => {
@@ -131,4 +259,9 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
       res.status(200).set('Cache-Control', 'no-store').json({ ok: true });
     } catch { refuse(res); }
   });
+}
+
+/** One answer for an unknown, used or out-of-window cancel link (Rook 6316353964): it says nothing about which. */
+function cancelRefused(res: Response, status = 403): void {
+  sendPage(res, status, 'Link not usable', '<h1>This link can\'t be used</h1><p>It may have been used already, or the passkey\'s cooling-off window has ended.</p>');
 }

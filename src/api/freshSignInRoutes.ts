@@ -38,6 +38,7 @@ import {
 } from '../lib/passkeys/freshSignIn.js';
 import { signingCeremonyOrigins } from '../lib/signing/config.js';
 import { signingSurfacePolicy } from '../lib/signing/surface.js';
+import { page, PAGE_HEADERS } from './ceremonyPages.js';
 
 export const CEREMONY_BROWSER_COOKIE = 'hadron_ceremony_browser';
 /** The IdP leg id, set by the callback for the confirm path only. */
@@ -85,18 +86,6 @@ function issueCeremonyBrowser(req: Request, res: Response): string {
 export function clearCeremonyBrowserCookie(req: Request, res: Response): void {
   res.clearCookie(CEREMONY_BROWSER_COOKIE, cookieOptions(req));
 }
-
-const PAGE_HEADERS = {
-  'Cache-Control': 'no-store',
-  // The emailed token rides in the verify page's URL: never hand it to a third party, never frame the button.
-  'Referrer-Policy': 'no-referrer',
-  'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
-  'X-Frame-Options': 'DENY',
-};
-
-const page = (title: string, body: string) => `<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title></head>
-<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem">${body}</body></html>`;
 
 function refusePage(res: Response, status = 403): void {
   res.status(status).set(PAGE_HEADERS).type('html').send(page('Not confirmed',

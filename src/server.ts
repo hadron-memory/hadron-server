@@ -37,6 +37,8 @@ import {
 } from './auth/index.js';
 import { issueLoginCode, redeemLoginCode } from './auth/authHandoff.js';
 import { startUserDeletionNoticeLoop } from './jobs/sendUserDeletionNotices.js';
+import { startPasskeyRegistrationNoticeLoop } from './jobs/sendPasskeyRegistrationNotices.js';
+import { signingSurfacePolicy } from './lib/signing/surface.js';
 import {
   createPendingLoginState,
   claimPendingLoginState,
@@ -1881,6 +1883,12 @@ export async function createServer(): Promise<Express> {
   // #1647 — resume pending notices of admin-initiated account erasures (restart-safe outbox).
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_USER_DELETION_NOTICES !== 'true') {
     startUserDeletionNoticeLoop(db);
+  }
+
+  // #1631 PR2 — send every passkey registration's email notice (restart-safe outbox). Dark with the
+  // registration switch: nothing registers while it is off, so the loop doesn't run either.
+  if (process.env.NODE_ENV !== 'test' && signingSurfacePolicy().registration) {
+    startPasskeyRegistrationNoticeLoop(db);
   }
 
   // Background job: purge soft-deleted assets past their 24h recovery
