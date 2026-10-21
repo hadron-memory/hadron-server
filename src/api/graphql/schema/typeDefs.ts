@@ -1548,6 +1548,13 @@ export const typeDefs = `#graphql
     aiAgent: String
     createdAt: DateTime!
     updatedAt: DateTime!
+    """
+    #2193: this node's memory record, exactly as Query.memory answers it to the
+    caller, or null when the caller may not read that record (or it is
+    deleted). Being able to see a node does not make its memory's record
+    readable: use urn or memoryId for the address. Always null on an
+    inherited node.
+    """
     memory: Memory
     outgoingEdges: [Edge!]!
     incomingEdges: [Edge!]!

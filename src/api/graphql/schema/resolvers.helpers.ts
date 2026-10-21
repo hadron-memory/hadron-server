@@ -163,6 +163,9 @@ export interface Context {
   // response's nodes/edges overwhelmingly share a memory, so the memory-urn
   // lookup is memoized per request (lazily created; see loadMemoryUrn).
   memoryUrnCache?: Map<string, Promise<string | null>>;
+  // #2193 — Node.memory's record read, memoized per memory: a node list loads
+  // and gates each distinct memory once (see loadReadableMemoryRecord).
+  memoryRecordCache?: Map<string, Promise<unknown | null>>;
   // Request-scoped per-parent reconciliation. Node.revision,
   // Node.contentValidation and Node.authorship can all resolve on one GraphQL
   // Node object; share its locked read without mixing distinct parent states.
@@ -1249,6 +1252,33 @@ export async function canReadMemoryRecord(
   // Scope the shared gate to THIS memory so it stays an indexed point-read.
   const accessibleIds = await accessible();
   return accessibleIds === null || accessibleIds.includes(memory.id);
+}
+
+/**
+ * #2193 — a memory's RECORD as `Query.memory` would answer it to this caller:
+ * the same full-row load, the same deleted check and the same
+ * {@link canReadMemoryRecord}, so impersonation, App-key, run and session
+ * scope match it by construction. Unreadable, deleted and missing are all
+ * null (cor:api:140:03).
+ *
+ * For a nested entity field such as `Node.memory` (cor:acl:110): the parent
+ * that admitted the node authorized the NODE, by its own rule, and never the
+ * memory record. Memoized per memory under a `*Cache` key, so a node list
+ * loads and gates each distinct memory once and `withoutRequestCaches` strips
+ * the memo like the others.
+ */
+export function loadReadableMemoryRecord(ctx: Context, memoryId: string): Promise<unknown | null> {
+  const cache = (ctx.memoryRecordCache ??= new Map<string, Promise<unknown | null>>());
+  let pending = cache.get(memoryId);
+  if (!pending) {
+    pending = (async () => {
+      const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, include: MEMORY_INCLUDE });
+      if (!memory || memory.deletedAt) return null;
+      return (await canReadMemoryRecord(ctx, memory)) ? memory : null;
+    })();
+    cache.set(memoryId, pending);
+  }
+  return pending;
 }
 
 // The ordering moved to src/lib/auth/orgRole.ts (#1196): this module imports
