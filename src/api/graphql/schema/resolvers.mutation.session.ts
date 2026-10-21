@@ -1,3 +1,5 @@
+import { lockStopFence } from '../../../lib/stopSignals/state.js';
+import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { storedIncludeTags, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // sessionMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
@@ -1134,6 +1136,11 @@ export const sessionMutations = {
         // checked lifecycle. Recheck the settled App in the transaction before
         // claiming a name or inserting a session. An explicit Worker ref may
         // have replaced a stale selection above; only the final App matters.
+        // #2022 (Diego #2166 P2-2): a bind that sets reportsTo is a stop-coverage writer, so it takes the App's stop
+        // fence EXCLUSIVE before any row lock, the App row included: an App-row writer (setTeamPause, under the
+        // App's anchors) holds the fence shared before it updates that row, so taking the fence after the App row
+        // here was a real deadlock (40P01). This path takes no authority anchors, so the fence is its first lock.
+        if (reportsToId && appId) await lockStopFence(tx, appId, 'exclusive');
         if (appId) {
           await lockSessionAppActive(tx, appId);
         }
@@ -1433,6 +1440,8 @@ export const sessionMutations = {
               );
             },
           });
+          // #2022 (R95): a team signal covers the worker from the moment it joins the team.
+          await reconcileStopCoverage(tx, bindAppId, new Date());
         }
         if (supersedes.length > 0) {
           const ids = supersedes.map((r) => r.id).filter((id) => id !== created.id);
