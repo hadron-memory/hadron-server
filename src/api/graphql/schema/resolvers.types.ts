@@ -199,7 +199,7 @@ async function callerReadableAgentFilter(ctx: Context): Promise<Record<string, u
   return { ...live, OR: or };
 }
 
-async function directReadableAgentFilter(ctx: Context): Promise<Record<string, unknown>> {
+export async function directReadableAgentFilter(ctx: Context): Promise<Record<string, unknown>> {
   const live = { deletedAt: null };
   // Query.agent applies strict user ownership before its org/admin branch.
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) {
@@ -230,7 +230,7 @@ type NestedAgentRow = {
 };
 
 /** Match the Agent read gate, including the App credential's installed-Agent authority. */
-async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context, agent: T | null | undefined): Promise<T | null> {
+export async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context, agent: T | null | undefined): Promise<T | null> {
   if (!agent || agent.deletedAt) return null;
   if (agent.visibility === 'PUBLIC') return agent;
   if (ctx.appId && !ctx.userId && !ctx.impersonation) {

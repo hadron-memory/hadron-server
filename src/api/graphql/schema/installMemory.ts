@@ -309,6 +309,7 @@ const CONCEALED_FIELDS: Record<string, () => unknown> = {
   createdByAgent: () => null,
   updatedByWorker: () => null,
   updatedByAgent: () => null,
+  updatedByUser: () => null,
   asComment: () => null,
   asset: () => null,
   inheritedFrom: () => null,

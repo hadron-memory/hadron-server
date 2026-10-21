@@ -807,4 +807,27 @@ describe('a headless run writes as its agent (#1610)', () => {
     // Outside the run nothing leaks.
     expect(currentActor()).toEqual({ workerId: null, agentId: null });
   });
+
+  it('a run edit stamps the node with the run\'s user, the same user its revision records (#2176, Brooks P2-1)', async () => {
+    const { editorFromAuth } = await import('../lib/nodeRevisionSnapshot.js');
+    const { runAuthContext } = await import('../lib/auth/runPrincipal.js');
+    const { createDbOrgAndGraph, createDbNode } = await import('../test/helpers.js');
+    const { graph } = await createDbOrgAndGraph(db, { orgName: 'run-edit-org', graphName: 'run-edit' });
+    const node = await createDbNode(db, { loc: 'note', memoryId: graph.id, content: 'before' });
+    const edits: Array<{ revisionEditor: string | null }> = [];
+    let runId = '';
+    const capture = deps({
+      llm: vi.fn(async () => {
+        const run = await db.appRun.findUniqueOrThrow({ where: { id: runId } });
+        edits.push({ revisionEditor: editorFromAuth(runAuthContext(run)).userId ?? null });
+        await db.node.update({ where: { id: node.id }, data: { content: 'run edit' } });
+        return { text: 'done', tokensIn: 1, tokensOut: 1, provider: 'anthropic', model: 'test' };
+      }),
+    });
+    await db.appMember.create({ data: { appId, userId, role: 'member' } });
+    runId = (await mint({ userId })).id;
+    expect(await executeAppRun(db, runId, capture)).toBe('completed');
+    expect(edits).toEqual([{ revisionEditor: userId }]);
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).updatedByUserId).toBe(userId);
+  });
 });
