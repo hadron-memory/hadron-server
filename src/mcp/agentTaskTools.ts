@@ -97,8 +97,8 @@ function refusal(e: unknown) {
   throw e;
 }
 
-/** One roster line (plan §7.4): the state, then the facts behind it. Ids and words only. */
-export function renderRosterEntry(r: RosterRow): string {
+/** One roster line at the server's read instant, including stored pause history with explicit tense. */
+export function renderRosterEntry(r: RosterRow, asOf: Date): string {
   const facts = [
     r.role ? `role ${r.role}` : null,
     r.bound
@@ -110,8 +110,8 @@ export function renderRosterEntry(r: RosterRow): string {
     r.unavailableFamilies.length ? `family unavailable: ${r.unavailableFamilies.join('/')}` : null,
     r.startedTaskIds.length ? `started ${r.startedTaskIds.join(', ')}` : null,
     r.pendingTaskIds.length ? `pending ${r.pendingTaskIds.join(', ')}` : null,
-    r.currentTask ? `current task ${r.currentTask.id} (${r.currentTask.status}): ${JSON.stringify(r.currentTask.title)}` : null,
-    r.pausedUntil ? `own pause timestamp ${r.pausedUntil.toISOString()}` : null,
+    r.currentTask ? `top assignment ${r.currentTask.id} (${r.currentTask.status}): ${JSON.stringify(r.currentTask.title)}` : null,
+    r.pausedUntil ? `own pause ${r.pausedUntil > asOf ? 'until' : 'ended'} ${r.pausedUntil.toISOString()}` : null,
     r.waitingOnTaskIds.length ? `waiting on ${r.waitingOnTaskIds.join(', ')} since ${r.waitingSince?.toISOString()}` : null,
     r.alarmEventIds.length ? `woken on alarm ${r.alarmEventIds.join(', ')}` : null,
     r.unreactedChildTaskId ? `child ${r.unreactedChildTaskId} ended (finished or cancelled)` : null,
@@ -575,7 +575,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       read(session, async (ctx) => {
         const { workers, asOf } = await QA.teamRoster({}, { appRef }, ctx);
         if (!workers.length) return textResult('This App has no workers that are not retired.');
-        return textResult([`Roster as of ${asOf.toISOString()}:`, ...workers.map(renderRosterEntry)].join('\n'));
+        return textResult([`Roster as of ${asOf.toISOString()}:`, ...workers.map((r) => renderRosterEntry(r, asOf))].join('\n'));
       }),
   );
 }

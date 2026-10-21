@@ -13094,7 +13094,7 @@ export const typeDefs = `#graphql
     checkStatus: WorkerCheckStatus
     "The worker's own stored pause timestamp, including expired history; use checkStatus for current pause state. Separate from team pause and availability."
     pausedUntil: DateTime
-    "Readable STARTED before PENDING, then oldest assignment (null last), creation time and id. Null when none is readable; ending a session does not clear an assignment. Display only."
+    "The worker's top open assignment you can read, for display only. STARTED before PENDING, then oldest assignment (null last), creation time and id. Null when none is readable; ending a session does not clear an assignment."
     currentTask: TeamRosterTaskSummary
   }
 

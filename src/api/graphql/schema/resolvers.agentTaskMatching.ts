@@ -46,7 +46,9 @@ export const agentTaskMatchingQueries = {
         workers: entries.map((e) => ({ ...e, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
           pausedUntil: pauses.get(e.workerId) ?? null, currentTask: tasks.get(e.workerId) ?? null })),
       };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+    // An explicit, bounded read budget avoids imposing Prisma's implicit 5s interactive-transaction default
+    // on the now-serialized bulk roster loaders. This does not change query/lock or test timeouts.
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 20_000 });
   },
 };
 
