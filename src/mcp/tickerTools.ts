@@ -421,7 +421,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
         const lines: string[] = [];
         for (const w of page.wakes) {
           const why = (w.reasons as Row[])
-            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : r.kind === 'TASK' ? `task ${JSON.stringify(r.task.title)} (${r.task.ref})${r.task.standbyHeld ? ` — ${r.task.standbyHeld} message${r.task.standbyHeld === 1 ? ' was' : 's were'} held while you were on standby` : ''}` : 'mention'))
+            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : r.kind === 'STOP' ? `stop signal ${r.stop.level} ${r.stop.notice.toLowerCase()}${r.stop.interrupt ? ' (interrupt)' : ''}` : r.kind === 'TASK' ? `task ${JSON.stringify(r.task.title)} (${r.task.ref})${r.task.standbyHeld ? ` — ${r.task.standbyHeld} message${r.task.standbyHeld === 1 ? ' was' : 's were'} held while you were on standby` : ''}` : 'mention'))
             .join(' + ');
           const ch = (w.channels as Row[]).map((c) => `${c.channel.name} ${c.fromSeq}-${c.throughSeq}`).join(', ');
           lines.push(

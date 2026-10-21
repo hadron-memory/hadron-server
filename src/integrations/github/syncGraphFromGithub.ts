@@ -325,7 +325,7 @@ const syncGraphFromGithubAsSystem = async (
    * is kept as it was; every other file still syncs.
    */
   skippedUndeclaredRoles?: SkippedUndeclaredRole[];
-  /** #2040 — files NOT synced because an include tag is malformed, nests too deep or cycles. */
+  /** #2040 — files NOT synced because an include tag is malformed or cycles. */
   skippedInvalidIncludes?: SkippedInvalidInclude[];
   /**
    * #1330 — files left for the next sync because the node they would write
