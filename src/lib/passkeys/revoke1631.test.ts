@@ -64,6 +64,16 @@ describe('proving with another passkey (040:08 S1)', () => {
     expect((await rec(phoneId)).revokedAt).toBeNull();
   });
 
+  it('a lone first passkey in its window proves, but has nothing to revoke: never itself (Rook Q1.5)', async () => {
+    const zoe = (await db.user.create({ data: { handle: 'rev-zoe', roles: [] } })).id;
+    const only = softPasskey(); const onlyId = await insertSoftPasskey(db, zoe, only, { firstWindow: true });
+    const id = await ceremony();
+    const b = await byPasskey(id, only);
+    expect(b!.passkeys.map((p) => [p.passkeyId, p.prover, p.inWindow])).toEqual([[onlyId, true, true]]);
+    expect(await finish(id, only)).toBeNull();
+    expect((await rec(onlyId)).revokedAt).toBeNull();
+  });
+
   it('a passkey still in its cooling-off window may prove (no window exclusion for revoking)', async () => {
     const fresh = softPasskey();
     await insertSoftPasskey(db, ana, fresh, { firstWindow: true });

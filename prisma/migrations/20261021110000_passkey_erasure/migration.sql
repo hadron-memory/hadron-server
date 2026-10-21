@@ -76,12 +76,12 @@ BEGIN
     AND NOT (NEW.cancelled_at IS NOT DISTINCT FROM OLD.cancelled_at
       AND (NEW.cancel_ip IS NOT DISTINCT FROM OLD.cancel_ip OR NEW.cancel_ip = '')
       AND (NEW.cancel_user_agent IS NOT DISTINCT FROM OLD.cancel_user_agent OR NEW.cancel_user_agent = '')
-      AND EXISTS (SELECT 1 FROM users u WHERE u.id = NEW.owner_id AND u.deleted_at IS NOT NULL)) THEN
+      AND EXISTS (SELECT 1 FROM users u WHERE u.id = OLD.owner_id AND u.deleted_at IS NOT NULL)) THEN
     RAISE EXCEPTION 'Passkey cancellation provenance is immutable' USING ERRCODE = '23514';
   END IF;
   -- The label is set at registration and never edited (cor:aut:040:05); account deletion erases it to '' (once).
   IF NEW.label IS DISTINCT FROM OLD.label
-    AND NOT (NEW.label = '' AND EXISTS (SELECT 1 FROM users u WHERE u.id = NEW.owner_id AND u.deleted_at IS NOT NULL)) THEN
+    AND NOT (NEW.label = '' AND EXISTS (SELECT 1 FROM users u WHERE u.id = OLD.owner_id AND u.deleted_at IS NOT NULL)) THEN
     RAISE EXCEPTION 'Passkey label is immutable' USING ERRCODE = '23514';
   END IF;
   IF NEW.counter < OLD.counter OR (OLD.last_used_at IS NOT NULL AND (NEW.last_used_at IS NULL OR NEW.last_used_at < OLD.last_used_at)) THEN

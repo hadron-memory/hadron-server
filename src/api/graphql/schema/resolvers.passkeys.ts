@@ -18,8 +18,9 @@ export const passkeyQueries = {
       orderBy: [{ registeredAt: 'desc' }, { id: 'desc' }],
     });
     return rows.map((r) => ({
+      // No credential id and no cancel IP/UA over a bearer (Rook §10, #1631 6325976373): an agent holding the bearer
+      // could spend each credential's sign-in budget, or learn where the canceller was. The proved revoke page has them.
       id: r.id,
-      credentialId: Buffer.from(r.credentialId).toString('base64url'),
       label: r.label,
       transports: r.transports,
       backupEligible: r.backupEligible,
@@ -30,7 +31,7 @@ export const passkeyQueries = {
       window: r.windowEndsAt
         ? { endsAt: r.windowEndsAt, endedAt: r.windowEndedAt, outcome: r.windowOutcome, registrationMethod: r.registrationMethod }
         : null,
-      cancel: r.cancelledAt ? { at: r.cancelledAt, ip: r.cancelIp, userAgent: r.cancelUserAgent } : null,
+      cancel: r.cancelledAt ? { at: r.cancelledAt } : null,
     }));
   },
 };

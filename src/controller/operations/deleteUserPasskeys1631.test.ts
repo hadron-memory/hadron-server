@@ -64,6 +64,35 @@ describe('account deletion erases a passkey record\'s identifying parts and keep
   });
 });
 
+describe('the erasure commits with the deletion, or not at all (Rook Q2.3)', () => {
+  it('a failing erase rolls the whole deletion back: the user stays live and the label stays', async () => {
+    await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION test_fail_erase() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.label = '' THEN RAISE EXCEPTION 'injected erase failure'; END IF; RETURN NEW; END $$`);
+    await db.$executeRawUnsafe('CREATE TRIGGER test_fail_erase BEFORE UPDATE ON passkey_credentials FOR EACH ROW EXECUTE FUNCTION test_fail_erase()');
+    try {
+      await expect(deleteUserAccount(db, { targetUserId: ana, actorUserId: ana })).rejects.toThrow(/injected erase failure/);
+    } finally {
+      await db.$executeRawUnsafe('DROP TRIGGER IF EXISTS test_fail_erase ON passkey_credentials');
+      await db.$executeRawUnsafe('DROP FUNCTION IF EXISTS test_fail_erase()');
+    }
+    expect((await db.user.findUniqueOrThrow({ where: { id: ana } })).deletedAt).toBeNull();
+    expect((await rec(kept)).label).toBe('Work laptop');
+  });
+});
+
+describe('a user merge never moves a passkey (Vera; Holger decides refuse versus leave-behind)', () => {
+  it('the source\'s passkeys keep their owner after a merge', async () => {
+    const { mergeUsers } = await import('../../test/mergeConsent.js');
+    const target = (await db.user.create({ data: { handle: 'erase-target', roles: [] } })).id;
+    const admin = (await db.user.create({ data: { handle: 'erase-admin', roles: ['ADMIN'] } })).id;
+    await mergeUsers(db, { sourceUserId: ana, targetUserId: target, actorUserId: admin } as never);
+    expect((await db.user.findUniqueOrThrow({ where: { id: ana } })).deletedAt).not.toBeNull();
+    expect((await rec(kept)).ownerId).toBe(ana);
+    expect((await rec(cancelled)).ownerId).toBe(ana);
+    expect(await db.passkeyCredential.count({ where: { ownerId: target } })).toBe(0);
+  });
+});
+
 describe('the guard allows the erasure and nothing else', () => {
   it('a live owner\'s label and cancel record cannot change, even to the erased values', async () => {
     await expect(db.$executeRaw`UPDATE passkey_credentials SET label = 'Renamed' WHERE id = ${kept}`).rejects.toThrow(/immutable/i);

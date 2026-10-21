@@ -3339,8 +3339,6 @@ export const typeDefs = `#graphql
   """#1631 (cor:aut:040:05): a passkey record, as its owner sees it. Never a private key."""
   type PasskeyCredential {
     id: ID!
-    """The authenticator's credential id, base64url."""
-    credentialId: String!
     """The owner's name for it; empty once the owner's account is deleted."""
     label: String!
     transports: [String!]!
@@ -3351,7 +3349,11 @@ export const typeDefs = `#graphql
     revokedAt: DateTime
     """A first passkey's cooling-off window (cor:aut:040:07); null for a later passkey."""
     window: PasskeyWindow
-    """How its cancel link was used (cor:aut:040:08), seen only by the owner; null if never cancelled."""
+    """
+    When its cancel link was used (cor:aut:040:08); null if never cancelled. The cancel IP address and user agent,
+    and the credential id, are shown only on the interactive revocation page after the owner proves who they are,
+    never over a bearer credential (#1631 PR3 §10).
+    """
     cancel: PasskeyCancelRecord
   }
 
@@ -3366,8 +3368,6 @@ export const typeDefs = `#graphql
 
   type PasskeyCancelRecord {
     at: DateTime!
-    ip: String
-    userAgent: String
   }
 
   """

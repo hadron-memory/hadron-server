@@ -38,12 +38,15 @@ describe('myPasskeys', () => {
     const phone = list.find((p: any) => p.label === 'Phone');
     expect(phone.revokedAt).not.toBeNull();
     expect(phone.window).toMatchObject({ outcome: 'cancelled' });
-    expect(phone.cancel).toMatchObject({ ip: '203.0.113.4', userAgent: 'MailApp/9' });
     expect(phone.cancel.at).toBeInstanceOf(Date);
+    // Rook §10 (6325976373): the bearer list carries no cancel IP/UA (where the canceller was) and no credential ids
+    // (a bearer-holding agent could spend each one's sign-in budget). Those are shown only after an interactive proof.
+    expect(phone.cancel).not.toHaveProperty('ip');
+    expect(phone.cancel).not.toHaveProperty('userAgent');
+    for (const p of list) expect(p).not.toHaveProperty('credentialId');
     const laptop = list.find((p: any) => p.label === 'Laptop');
     expect(laptop.window).toBeNull();
     expect(laptop.cancel).toBeNull();
-    expect(laptop.credentialId).toMatch(/^[A-Za-z0-9_-]+$/);
     expect((await Q.myPasskeys({}, {}, ctx({ userId: bea }))).map((p: any) => p.label)).toEqual(['Bea key']);
   });
 
@@ -63,6 +66,9 @@ describe('dark with the registration switch (#1895)', () => {
     vi.stubEnv('PASSKEY_REGISTRATION_ENABLED', 'true');
     const on = deploymentSchema();
     expect(on.typeDefs).toMatch(/myPasskeys: \[PasskeyCredential!\]!/);
+    const credentialType = /type PasskeyCredential \{[\s\S]*?\n  \}/.exec(on.typeDefs)![0];
+    expect(credentialType).not.toMatch(/credentialId/);
+    expect(/type PasskeyCancelRecord \{[\s\S]*?\n  \}/.exec(on.typeDefs)![0]).not.toMatch(/ip|userAgent/);
     vi.stubEnv('PASSKEY_REGISTRATION_ENABLED', 'false');
     const off = deploymentSchema();
     expect(off.typeDefs).not.toContain('myPasskeys');

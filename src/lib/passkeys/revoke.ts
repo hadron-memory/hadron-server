@@ -34,6 +34,8 @@ export interface OwnerPasskey {
   inWindow: boolean;
   /** The passkey that proved this ceremony; it can't be revoked by it. */
   prover: boolean;
+  /** The cancel record, shown to the owner only here, after an interactive proof (never over a bearer). */
+  cancel: { at: Date; ip: string | null; userAgent: string | null } | null;
 }
 
 export interface RevokeBinding { userId: string; passkeys: OwnerPasskey[] }
@@ -146,12 +148,13 @@ export async function finishRevoke(
 /** The owner's passkeys, as the revocation page lists them after the proof. */
 async function ownerPasskeys(tx: Prisma.TransactionClient, userId: string, proverId: string | null): Promise<OwnerPasskey[]> {
   const rows = await tx.$queryRaw<Array<{ id: string; credential_id: Buffer; label: string; registered_at: Date; last_used_at: Date | null;
-    revoked_at: Date | null; in_window: boolean }>>`
-    SELECT id, credential_id, label, registered_at, last_used_at, revoked_at,
+    revoked_at: Date | null; in_window: boolean; cancelled_at: Date | null; cancel_ip: string | null; cancel_user_agent: string | null }>>`
+    SELECT id, credential_id, label, registered_at, last_used_at, revoked_at, cancelled_at, cancel_ip, cancel_user_agent,
            (revoked_at IS NULL AND window_outcome IS NULL AND window_ends_at > (clock_timestamp() AT TIME ZONE 'UTC')) AS in_window
       FROM passkey_credentials WHERE owner_id = ${userId} ORDER BY registered_at DESC, id DESC`;
   return rows.map((r) => ({
     passkeyId: r.id, credentialId: Buffer.from(r.credential_id), label: r.label, registeredAt: r.registered_at,
     lastUsedAt: r.last_used_at, revokedAt: r.revoked_at, inWindow: r.in_window, prover: r.id === proverId,
+    cancel: r.cancelled_at ? { at: r.cancelled_at, ip: r.cancel_ip, userAgent: r.cancel_user_agent } : null,
   }));
 }
