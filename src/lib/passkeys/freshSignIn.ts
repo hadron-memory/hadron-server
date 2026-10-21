@@ -31,7 +31,20 @@ const HEX64 = /^[0-9a-f]{64}$/;
 
 /** Delete rows older than the retention window. Called lazily from the leg start routes. */
 export async function sweepFreshSignIns(db: PrismaClient): Promise<void> {
-  throw new Error('not implemented');
+  await db.$executeRaw`DELETE FROM fresh_sign_ins
+    WHERE created_at < (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(hours => ${FRESH_SIGN_IN_RETENTION_HOURS}::int)`;
+}
+
+async function insertLeg(
+  db: PrismaClient,
+  input: { userId: string; method: FreshSignInMethod; browserNonceHash: string; secret: string; proved: boolean },
+): Promise<void> {
+  if (!HEX64.test(input.browserNonceHash)) throw new Error('browser nonce hash must be 64 lowercase hex');
+  // signed_in_at: any non-null value asks the guard to stamp the database clock; null leaves the email leg unproved.
+  await db.$executeRaw`INSERT INTO fresh_sign_ins (id, user_id, method, browser_nonce_hash, leg_hash, expires_at, signed_in_at)
+    VALUES (${generateId()}, ${input.userId}, ${input.method}, ${input.browserNonceHash}, ${sha256Hex(input.secret)},
+            (clock_timestamp() AT TIME ZONE 'UTC') + make_interval(secs => ${FRESH_SIGN_IN_LEG_TTL_SECONDS}),
+            CASE WHEN ${input.proved} THEN (clock_timestamp() AT TIME ZONE 'UTC') END)`;
 }
 
 /**
@@ -42,7 +55,9 @@ export async function recordIdpSignIn(
   db: PrismaClient,
   input: { userId: string; method: Exclude<FreshSignInMethod, 'email'>; browserNonceHash: string },
 ): Promise<{ legId: string }> {
-  throw new Error('not implemented');
+  const legId = randomBytes(32).toString('base64url');
+  await insertLeg(db, { ...input, secret: legId, proved: true });
+  return { legId };
 }
 
 /** Open an email leg for a live user: the returned token goes only into the email. Nothing is proved yet. */
@@ -50,7 +65,9 @@ export async function startEmailSignIn(
   db: PrismaClient,
   input: { userId: string; browserNonceHash: string },
 ): Promise<{ token: string }> {
-  throw new Error('not implemented');
+  const token = randomBytes(32).toString('base64url');
+  await insertLeg(db, { ...input, method: 'email', secret: token, proved: false });
+  return { token };
 }
 
 /**
@@ -62,7 +79,15 @@ export async function confirmFreshSignIn(
   db: PrismaClient,
   input: { legSecret: string; browserNonceHash: string },
 ): Promise<boolean> {
-  throw new Error('not implemented');
+  if (!HEX64.test(input.browserNonceHash) || input.legSecret.length === 0) return false;
+  const rows = await db.$queryRaw<Array<{ id: string }>>`UPDATE fresh_sign_ins f
+     SET signed_in_at = COALESCE(f.signed_in_at, clock_timestamp() AT TIME ZONE 'UTC'),
+         confirmed_at = clock_timestamp() AT TIME ZONE 'UTC'
+   WHERE f.leg_hash = ${sha256Hex(input.legSecret)} AND f.browser_nonce_hash = ${input.browserNonceHash}
+     AND f.confirmed_at IS NULL AND f.expires_at > (clock_timestamp() AT TIME ZONE 'UTC')
+     AND EXISTS (SELECT 1 FROM users u WHERE u.id = f.user_id AND u.deleted_at IS NULL)
+   RETURNING f.id`;
+  return rows.length === 1;
 }
 
 /**
@@ -76,7 +101,19 @@ export async function consumeFreshSignIn(
   tx: Prisma.TransactionClient,
   input: { browserNonceHash: string; actingUserId: string; purpose: FreshSignInPurpose },
 ): Promise<{ id: string; method: FreshSignInMethod } | null> {
-  throw new Error('not implemented');
+  if (!HEX64.test(input.browserNonceHash)) return null;
+  const rows = await tx.$queryRaw<Array<{ id: string; method: FreshSignInMethod }>>`UPDATE fresh_sign_ins
+     SET consumed_at = clock_timestamp() AT TIME ZONE 'UTC', consumed_for = ${input.purpose}
+   WHERE id = (
+     SELECT id FROM fresh_sign_ins
+      WHERE browser_nonce_hash = ${input.browserNonceHash} AND user_id = ${input.actingUserId}
+        AND confirmed_at IS NOT NULL AND consumed_at IS NULL
+        AND signed_in_at >= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(secs => ${FRESH_SIGN_IN_MAX_AGE_SECONDS})
+        AND (${input.purpose} <> 'revoke' OR method <> 'email')
+      ORDER BY signed_in_at DESC
+      LIMIT 1
+      FOR UPDATE)
+     AND consumed_at IS NULL
+   RETURNING id, method`;
+  return rows[0] ?? null;
 }
-
-void sha256Hex; void HEX64; void randomBytes; void generateId;
