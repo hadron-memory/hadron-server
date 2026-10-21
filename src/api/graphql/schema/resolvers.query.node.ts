@@ -92,6 +92,7 @@ import {
 import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 import { approvalStatePrismaWhere, mintedPrismaWhere, type NodeApprovalState } from '../../../lib/nodeApproval.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { INDEXED_MEMORY_WHERE } from '../../../lib/embedding/indexing.js';
 
 /** findNodes' arguments (cor:api:090), shared by the resolver and its spec-049 scope wrapper. */
 export interface FindNodesArgs {
@@ -1522,7 +1523,8 @@ export const nodeQueries = {
 
       // ── VECTOR / HYBRID: narrow to vector-indexed memories ──
       const indexed = await ctx.db.memory.findMany({
-        where: { id: { in: scopeIds }, vectorIndexEnabled: true, deletedAt: null },
+        // #2199: a system memory is indexed by summary whatever its setting; indexing grants no access (scopeIds is already the caller's).
+        where: { id: { in: scopeIds }, deletedAt: null, ...INDEXED_MEMORY_WHERE },
         select: { id: true },
       });
       const indexedIds = indexed.map((m) => m.id);

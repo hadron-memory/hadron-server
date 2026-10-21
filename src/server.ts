@@ -121,6 +121,7 @@ import {
 } from './integrations/googleDrive/auth.js';
 import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
 import { preserveHeartbeatIfLapsed } from './lib/sessionActivity.js';
+import { INDEXED_MEMORY_WHERE } from './lib/embedding/indexing.js';
 
 /**
  * #557: named once, because the raw-body capture in the body parser and the
@@ -1932,7 +1933,7 @@ export async function createServer(): Promise<Express> {
       console.error('[embed-worker] failed to start bus listener (sweep continues):', err);
     });
     void db.memory
-      .count({ where: { vectorIndexEnabled: true, deletedAt: null } })
+      .count({ where: { ...INDEXED_MEMORY_WHERE, deletedAt: null } })
       .then((n) => {
         if (n > 0 && !isEmbeddingConfigured()) {
           console.warn(

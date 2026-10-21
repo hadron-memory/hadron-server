@@ -75,6 +75,7 @@ import {
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { backfillMemoryEmbeddings } from '../../../services/embedding/enqueue.js';
 import { assertNoLiveAgentReferences } from '../../../lib/agentLiveReferences.js';
 import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 
@@ -300,6 +301,14 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
     }
     throw e;
   });
+  // #2199 (cor:rag:010:01 r17): a memory promoted to class='system' is always summary-indexed. Its existing nodes were
+  // written while it was an ordinary memory, so stamp them for the drain (post-commit; a fresh auto-provisioned memory
+  // is empty and every later write enqueues itself). Never fails the create.
+  if (systemMemoryId && createdAgent.systemMemoryId) {
+    await backfillMemoryEmbeddings(ctx.db, createdAgent.systemMemoryId).catch((err) => {
+      console.warn('[createAgent] system memory embedding backfill failed:', err);
+    });
+  }
   return createdAgent;
 }
 
@@ -811,6 +820,14 @@ export const agentMutations = {
         throw err;
       }
       break;
+      }
+
+      // #2199: a memory promoted to class='system' by this update is now always summary-indexed — stamp its existing
+      // nodes post-commit (the provisioning-seam half of the amendment; never fails the update).
+      if (promoteSystemMemoryId && published?.systemMemoryId === promoteSystemMemoryId) {
+        await backfillMemoryEmbeddings(ctx.db, promoteSystemMemoryId).catch((err) => {
+          console.warn('[updateAgent] system memory embedding backfill failed:', err);
+        });
       }
 
       // ── URN sync for an auto-derived system memory.

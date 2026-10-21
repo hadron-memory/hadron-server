@@ -289,6 +289,7 @@ import {
 } from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
+import { memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -6368,10 +6369,10 @@ export function createMcpServerInstance(
           // Invalidate an old in-flight embed before the asynchronous enqueue
           // restamps the marker after commit.
           const indexed = pre?.deletedAt
-            ? await tx.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { vectorIndexEnabled: true } })
+            ? await tx.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { vectorIndexEnabled: true, class: true } })
             : null;
           const revivedPendingAt = pre?.deletedAt
-            ? pendingAtForRevival(pre.embeddingPendingAt, indexed!.vectorIndexEnabled)
+            ? pendingAtForRevival(pre.embeddingPendingAt, memoryIsVectorIndexed(indexed!))
             : undefined;
           const written = await tx.node.upsert({
             ...upsertArgs,
