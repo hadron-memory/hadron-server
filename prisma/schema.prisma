@@ -1387,6 +1387,14 @@ model Node {
   createdByAgentId    String?             @map("created_by_agent_id")
   updatedByWorkerId   String?             @map("updated_by_worker_id")
   updatedByAgentId    String?             @map("updated_by_agent_id")
+  /// #2176 — the User behind the last authored edit, beside the Worker / Agent
+  /// above and stamped with them in one place (src/integrations/db/client.ts).
+  /// It is exactly what NodeRevision.editedBy records for the same edit
+  /// (`editorFromAuth`): the request's validated `auth.userId`, from the
+  /// RequestActor holder, never a clientId or a credential holder. An authored
+  /// edit with no user behind it clears it. Null = unknown (nodes edited before
+  /// #2176 are not backfilled). No FK, like the audit stamps (cor:dmo:010:01).
+  updatedByUserId     String?             @map("updated_by_user_id")
 
   memory                   Memory                        @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   outgoingEdges            Edge[]                        @relation("SourceNode")
