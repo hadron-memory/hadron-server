@@ -760,7 +760,7 @@ export const memoryQueries = {
           orderBy: { loc: 'asc' }, // edge loc is unique per memory → stable paging
           skip,
           take,
-          select: { id: true, loc: true, name: true, sourceId: true, targetId: true },
+          select: { id: true, loc: true, name: true, sourceId: true, targetId: true, governedKind: true },
         }),
       ]);
       return { total, edges };
