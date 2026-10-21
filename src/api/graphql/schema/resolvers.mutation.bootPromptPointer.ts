@@ -96,6 +96,10 @@ async function writePointer(
           await setBootPromptPointer(tx, txCtx, owner, nodeRef, (memoryId) => isMemoryReadableFresh(txCtx, memoryId, tx));
         },
         {
+          // Gene's #2219 BLIND P2: the AGENT pointer UPDATEs its own anchor row, so two saves holding it shared would
+          // each wait for the other to upgrade (40P01). Exclusive serializes them first, the inTaskWriteTx precedent.
+          // APP_AGENT and WORKER update child rows of their App anchor, so they keep the shared hold.
+          lockMode: target.field === 'AGENT' ? 'exclusive' : 'shared',
           afterLock: async (tx) => {
             if (appId && ctx.userId) {
               await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${appId} AND user_id = ${ctx.userId} FOR SHARE`;
