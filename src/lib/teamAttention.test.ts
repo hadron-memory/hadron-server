@@ -185,13 +185,15 @@ afterEach(() => {
 });
 
 describe('worker-owned ordinary reads', () => {
-  it('#1628 exposes the opt-out only on the GraphQL team-chat read, defaulting true', () => {
+  it('#1628 exposes the opt-out on the GraphQL team-chat read, defaulting true (and, since #2181, on the pinned channelMessages)', () => {
     const schema = buildSchema(typeDefs);
     const field = schema.getQueryType()!.getFields().teamChatMessages;
     expect(field.args.find((arg) => arg.name === 'advanceReadState')?.defaultValue).toBe(true);
     expect(validate(schema, parse('{ teamChatMessages(appRef: "x", advanceReadState: false) { total } }'))).toEqual([]);
-    expect(validate(schema, parse('{ channelMessages(channelRef: "x", advanceReadState: false) { total } }')))
-      .toHaveLength(1);
+    // #2181: a pinned page must be able to defer its acknowledgement too (the client contract of hadron-cli#957).
+    expect(schema.getQueryType()!.getFields().channelMessages.args.find((arg) => arg.name === 'advanceReadState')?.defaultValue).toBe(true);
+    expect(validate(schema, parse('{ channelMessages(channelRef: "x", beforeSeq: 2, expectedIncarnation: 1, advanceReadState: false) { total } }')))
+      .toEqual([]);
     // Older-server refusal is a validation error naming exactly the new field/argument.
     const oldSchema = buildSchema(typeDefs.replace('advanceReadState: Boolean = true', ''));
     expect(validate(oldSchema, parse('{ teamChatMessages(appRef: "x", advanceReadState: false) { total } }'))[0].message)

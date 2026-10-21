@@ -178,6 +178,21 @@ async function holdRecreation() {
   return { release, done: tx };
 }
 
+/** Hold the Channel row FOR UPDATE (not a recreation): anything that fences on it must wait. */
+async function holdChannelRowForUpdate() {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let locked!: () => void;
+  const ready = new Promise<void>((r) => { locked = r; });
+  const tx = db.$transaction(async (t) => {
+    await t.$queryRaw`SELECT id FROM channels WHERE id = ${channel.id} FOR UPDATE`;
+    locked();
+    await gate;
+  }, { timeout: 30_000 });
+  await ready;
+  return { release, done: tx };
+}
+
 /** Hold the worker's read-state row (so a guarded effect blocks AFTER it took the Channel row lock). */
 async function holdReadStateRow() {
   let release!: () => void;
@@ -287,6 +302,24 @@ describe('#2181 the mark fence', () => {
   it('a pinned mark past the watermark of the pinned incarnation is SEQ_BEYOND_WATERMARK', async () => {
     await post('one');
     await expect(mark(5, 1)).rejects.toMatchObject({ extensions: { code: 'SEQ_BEYOND_WATERMARK', lastSeq: 1 } });
+  });
+
+  it('a session that ends while the mark waits for the Channel row is refused with nothing written', async () => {
+    await post('one');
+    const held = await holdChannelRowForUpdate();
+    const marking = mark(1, 1).then((v: unknown) => ({ v }), (e: unknown) => ({ e }));
+    await waitForLockWaiters(db, 1);
+    await db.session.update({ where: { id: sessionId }, data: { endedAt: new Date() } });
+    held.release();
+    await held.done;
+    expect(((await marking) as { e?: unknown }).e).toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+    expect(await readState()).toBeNull();
+  });
+
+  it('the refusal names the channel, says it was recreated and says not to repeat the call', async () => {
+    await post('one');
+    await recreate();
+    await expect(mark(1, 1)).rejects.toThrow(new RegExp(`Channel ${channel.id} was recreated since you read it \\(it is now incarnation 2, you pinned 1\\).*do not repeat this call`));
   });
 
   it('a lapsed session resumes only with the mark, and a refused mark leaves it lapsed', async () => {
@@ -419,7 +452,7 @@ describe('#2181 the pinned read', () => {
   });
 
   it('a mentions read is fenced the same way: refused with no delivery mark and no stamp', async () => {
-    await post('hello @Dara', { mentions: ['Dara'] });
+    await post('hello @dara', { mentions: ['dara'] });
     const held = await holdRecreation();
     const reading = readPinned(1, { mentionsRef: worker.id }).then((v: unknown) => ({ v }), (e: unknown) => ({ e }));
     await waitForLockWaiters(db, 1);
@@ -430,11 +463,60 @@ describe('#2181 the pinned read', () => {
     expect(await db.workerDeliveryChannel.count({ where: { workerId: worker.id } })).toBe(0);
   });
 
-  it('a read that opts out of the cursor is still fenced, and stamps the check when current', async () => {
+  it('a pinned read that opts out of the cursor still stamps the check, moves no position, and is still fenced', async () => {
     await post('one');
     await readPinned(1, { advanceReadState: false });
-    // channelMessages takes no advanceReadState; the stamp is the only effect of a current pinned read of the team channel
+    expect(await readState()).toMatchObject({ lastSeenSeq: 0 });
     expect((await readState())?.lastCheckedAt).not.toBeNull();
+    await db.channelReadState.deleteMany({ where: { channelId: channel.id } });
+    await recreate();
+    await expect(readPinned(1, { advanceReadState: false })).rejects.toMatchObject(changed(2));
+    expect(await readState()).toBeNull();
+  });
+
+  it('a session that ends while the read waits for the Channel row gets no effects', async () => {
+    await post('one');
+    const held = await holdChannelRowForUpdate();
+    const reading = readPinned(1).then((v: unknown) => ({ v }), (e: unknown) => ({ e }));
+    await waitForLockWaiters(db, 1);
+    await db.session.update({ where: { id: sessionId }, data: { endedAt: new Date() } });
+    held.release();
+    await held.done;
+    await reading;
+    expect(await readState()).toBeNull();
+  });
+
+  it('the pinned mentions stamp comes after the wake lock: the read waits for it holding no read-state row', async () => {
+    await post('hello @dara', { mentions: ['dara'] });
+    await db.channelReadState.create({ data: { id: generateId(), workerId: worker.id, channelId: channel.id, lastSeenSeq: 0, channelIncarnation: 1 } });
+    // Another transaction holds the worker's wake lock (as acknowledgeDeliveryBatches does before it raises read state).
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const ready = new Promise<void>((r) => { locked = r; });
+    const wake = db.$transaction(async (t) => {
+      await t.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + worker.id}, 0))`;
+      locked();
+      await gate;
+    }, { timeout: 30_000 });
+    await ready;
+    const reading = readPinned(1, { mentionsRef: worker.id });
+    await waitForLockWaiters(db, 1); // the read is blocked on the wake lock
+    const probe = new Client({ connectionString: process.env.DATABASE_URL });
+    await probe.connect();
+    try {
+      // The read holds no lock on the read-state row yet: an ack-style writer can take it without waiting (no cycle).
+      await probe.query('BEGIN');
+      await expect(probe.query('SELECT id FROM channel_read_states WHERE worker_id = $1 AND channel_id = $2 FOR UPDATE NOWAIT', [worker.id, channel.id]))
+        .resolves.toBeDefined();
+      await probe.query('ROLLBACK');
+    } finally {
+      await probe.end();
+    }
+    release();
+    await wake;
+    expect(await reading).toMatchObject({ total: 1 });
+    expect((await readState())?.lastCheckedAt).not.toBeNull(); // the pinned mentions read still counts as a check
   });
 });
 
@@ -452,7 +534,7 @@ describe('#2181 MCP parity', () => {
     await recreate();
     const stale = await server.callToolText('hadron_team_chat_mark_read', { session: sessionId, app: app.id, channel: channel.id, seq: 1, expectedIncarnation: 1 });
     expect(stale).toContain('[channel_incarnation_changed]');
-    expect(stale).toContain('current incarnation 2');
+    expect(stale).toContain('now incarnation 2');
     const staleRead = await server.callToolText('hadron_channel_read', { channel: channel.id, sinceSeq: 0, session: sessionId, expectedIncarnation: 1 });
     expect(staleRead).toContain('[channel_incarnation_changed]');
   });

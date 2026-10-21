@@ -1548,9 +1548,11 @@ export const teamChatQueries = {
     {
       channelRef,
       expectedIncarnation,
+      advanceReadState,
       ...args
     }: {
       channelRef: string;
+      advanceReadState?: boolean | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
       mentionsRef?: string | null;
@@ -1583,6 +1585,7 @@ export const teamChatQueries = {
           channelId: target.channelId,
           capturedHead: target.lastSeq,
           expectedIncarnation,
+          advanceReadState,
           ...args,
           page,
         });

@@ -189,18 +189,22 @@ function fail(message: string, code: string, extra: Record<string, unknown> = {}
 }
 
 /**
- * #2181 — the typed refusal for a guarded read or mark whose Channel is no longer the incarnation the caller sampled.
- * The server never retargets or re-samples: the caller reads the current incarnation and pages again.
+ * #2181 — the typed refusal for a guarded read or mark whose Channel is no longer the incarnation the caller read.
+ * The server never retargets: the caller reads the current incarnation and pages again.
  */
-export function channelIncarnationChanged(channelId: string, currentIncarnation: number | null): GraphQLError {
-  return new GraphQLError(`The Channel is no longer the incarnation you sampled (current incarnation ${currentIncarnation ?? 'unknown'}); read it again and mark from the new sample. Do not retry this call.`, {
-    extensions: { code: 'CHANNEL_INCARNATION_CHANGED', channelId, currentIncarnation },
-  });
+export function channelIncarnationChanged(channelId: string, currentIncarnation: number | null, expected?: number): GraphQLError {
+  const pinned = expected != null ? `, you pinned ${expected}` : '';
+  return new GraphQLError(
+    `Channel ${channelId} was recreated since you read it (it is now incarnation ${currentIncarnation ?? 'unknown'}${pinned}). ` +
+      'Read it again and pin the new incarnation; do not repeat this call.',
+    { extensions: { code: 'CHANNEL_INCARNATION_CHANGED', channelId, currentIncarnation } },
+  );
 }
 
 /**
  * #2181 — the deciding fence. Takes the Channel row `FOR SHARE` as the FIRST statement of the caller's transaction and
- * compares its live incarnation with the expected one. Every supported delete / recreate / restore writer ends in an
+ * compares its live incarnation with the expected one (after any authorization anchors the caller's transaction
+ * already took; no row lock of the read/ack protocols precedes it). Every supported delete / recreate / restore writer ends in an
  * `UPDATE channels` on this row, so it serializes with the guarded effects in both orders; read-state rows are only
  * ever locked after it (channel row, then read-state row). A mismatch throws and the caller's transaction writes nothing.
  */
@@ -209,7 +213,7 @@ export async function fenceChannelIncarnation(tx: Prisma.TransactionClient, chan
     SELECT incarnation, deleted_at FROM channels WHERE id = ${channelId} FOR SHARE`;
   const row = rows[0];
   if (!row || row.deleted_at) fail('No readable registered Channel matches.', 'CHANNEL_NOT_FOUND');
-  if (row.incarnation !== expected) throw channelIncarnationChanged(channelId, row.incarnation);
+  if (row.incarnation !== expected) throw channelIncarnationChanged(channelId, row.incarnation, expected);
 }
 
 function tokenSigningKey(): Buffer {
@@ -1828,16 +1832,39 @@ async function advanceOwnChannelReadFenced(
 
 type FencedEffects = { refused: boolean; stamped: boolean };
 
-/** Fence, then revive a lapsed session and stamp the check, all inside the caller's transaction. */
+/**
+ * #2181 — the deciding session check, inside the fenced transaction: a session that was live when the request arrived may
+ * have ended while the transaction waited for the Channel row, so it is revalidated here (worker, then session rows
+ * FOR SHARE, the lifecycle order the mentions mark uses) before any effect; a lapsed one is resumed here instead.
+ */
+async function sessionEligibleInTx(
+  ctx: Context,
+  tx: Prisma.TransactionClient,
+  session: { workerId: string; appId: string; sessionId: string; lapsed?: boolean },
+): Promise<boolean> {
+  if (session.lapsed) return resumeOwnLapsedSessionInTx(ctx, tx, session.sessionId);
+  await tx.$queryRaw`SELECT id FROM workers WHERE id = ${session.workerId} FOR SHARE`;
+  await tx.$queryRaw`SELECT id FROM sessions WHERE id = ${session.sessionId} FOR SHARE`;
+  const live = await ownLiveSessionWorker({ ...ctx, db: tx as never }, session.sessionId, session.appId, { readOnly: true });
+  return !!live && !live.lapsed && live.workerId === session.workerId;
+}
+
+/**
+ * Fence, then check (or revive) the session and, unless the caller stamps later, stamp the check, all inside the caller's
+ * transaction. `stamp: false` is for a transaction that must take other locks first (the mentions mark takes the worker's
+ * wake lock before it touches the read-state row, as every other writer does).
+ */
 async function fencedCheckEffects(
   ctx: Context,
   tx: Prisma.TransactionClient,
-  session: { workerId: string; sessionId: string; lapsed?: boolean },
+  session: { workerId: string; appId: string; sessionId: string; lapsed?: boolean },
   channelId: string,
   expected: number,
+  opts: { stamp?: boolean } = {},
 ): Promise<FencedEffects> {
   await fenceChannelIncarnation(tx, channelId, expected);
-  if (session.lapsed && !(await resumeOwnLapsedSessionInTx(ctx, tx, session.sessionId))) return { refused: true, stamped: false };
+  if (!(await sessionEligibleInTx(ctx, tx, session))) return { refused: true, stamped: false };
+  if (opts.stamp === false) return { refused: false, stamped: false };
   return { refused: false, stamped: await stampChannelCheck(tx as never, session.workerId, channelId) };
 }
 
@@ -1934,7 +1961,7 @@ async function advanceOwnMentionsRead(
   try {
     const advanced = await withAuthorizedTx(ctx, anchors, async () => undefined, async (tx, txCtx) => {
       if (fence) {
-        fencedEffects = await fencedCheckEffects(ctx, tx, session, args.channelId, fence.expected);
+        fencedEffects = await fencedCheckEffects(ctx, tx, session, args.channelId, fence.expected, { stamp: false });
         if (fencedEffects.refused) return null;
       }
       if (ctx.userId) {
@@ -1948,6 +1975,9 @@ async function advanceOwnMentionsRead(
       await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtextextended(${`tickers:${appId}`}, 0))`;
       await tx.$queryRaw`SELECT id FROM tickers WHERE app_id = ${appId} AND deleted_at IS NULL FOR SHARE`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + workerId}, 0))`;
+      // #2181: the check stamp locks the read-state row, so it comes only after the wake lock (wake lock, then read-state
+      // row, as acknowledgeDeliveryBatches and the unpinned mentions mark take them).
+      if (fence && fencedEffects) fencedEffects = { refused: false, stamped: await stampChannelCheck(tx as never, workerId, args.channelId) };
 
       // Read-only: the heartbeat already ran outside (maybeAdvanceOwnChannelRead); an UPDATE of the session row here
       // would wait on another reader's FOR SHARE while that reader waits on this wake lock (George P2 on 8ed33339).
@@ -2044,7 +2074,7 @@ export async function markOwnTeamChatRead(
       if (args.seq > lockedRow.channel.lastSeq) {
         fail(`seq ${args.seq} is beyond the Channel watermark (${lockedRow.channel.lastSeq}).`, 'SEQ_BEYOND_WATERMARK', { lastSeq: lockedRow.channel.lastSeq });
       }
-      if (session.lapsed && !(await resumeOwnLapsedSessionInTx(ctx, tx, session.sessionId))) {
+      if (!(await sessionEligibleInTx(ctx, tx, session))) {
         fail('That session is not one of your live Worker sessions in this App.', 'SESSION_NOT_LIVE');
       }
       const lastSeenSeq = await advanceReadState(tx as never, { workerId }, row.channel.id, args.seq);

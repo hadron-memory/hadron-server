@@ -739,9 +739,9 @@ export const typeDefs = `#graphql
     "#2181 — the Channel's CURRENT incarnation (the same value as Channel.incarnation)."
     channelIncarnation: Int!
     """
-    #2181 — the incarnation the stored cursor was last RAISED under. NULL = legacy or never advanced under a known one;
-    it is never backfilled and never relabelled, so a stale cursor is not presented as current. Confirm a mark from
-    readback only when this equals channelIncarnation and your sampled incarnation, and lastSeenSeq >= your seq.
+    #2181 — the incarnation the stored cursor was last RAISED under. NULL is a legacy cursor: it is never backfilled and
+    never relabelled. Treat your cursor as current only when this equals both channelIncarnation and the incarnation you
+    read, and lastSeenSeq >= your seq.
     """
     cursorIncarnation: Int
   }
@@ -853,7 +853,7 @@ export const typeDefs = `#graphql
     lastSeenSeq: Int!
     "#2181 — the Channel's CURRENT incarnation (with expectedIncarnation, the value that was fenced)."
     channelIncarnation: Int!
-    "#2181 — the incarnation the stored cursor was last raised under; NULL = legacy. See ChannelReadState.cursorIncarnation."
+    "#2181 — the incarnation the stored cursor was last raised under; NULL is a legacy cursor. See ChannelReadState.cursorIncarnation."
     cursorIncarnation: Int
   }
 
@@ -8413,11 +8413,16 @@ export const typeDefs = `#graphql
       limit: Int
       offset: Int
       """
-      #2181 — pin the read to the Channel incarnation you sampled. A different incarnation, before or after the page is
+      #2181 — pin the read to the Channel incarnation you read. A different incarnation, before or after the page is
       read, is CHANNEL_INCARNATION_CHANGED with nothing returned and no cursor, check stamp or session resume applied;
-      the server never retargets or re-samples. Omitted: the read is UNFENCED, as before.
+      the server never retargets. Omitted: the read is UNFENCED, as before.
       """
       expectedIncarnation: Int
+      """
+      #2181 — as on teamChatMessages: only false suppresses automatic read-cursor advancement (session attribution, the
+      check stamp and the heartbeat remain), so a pinned page can be acknowledged explicitly after it is delivered.
+      """
+      advanceReadState: Boolean = true
     ): TeamChatMessagesPage!
 
     """
@@ -10934,10 +10939,10 @@ export const typeDefs = `#graphql
       channelRef: ID!
       seq: Int!
       """
-      #2181 — fence the mark to the incarnation you sampled. It runs in one transaction behind the Channel row lock: a
-      different incarnation is CHANNEL_INCARNATION_CHANGED (never retry it; read again and mark from the new sample)
+      #2181 — fence the mark to the incarnation you read. It runs in one transaction behind the Channel row lock: a
+      different incarnation is CHANNEL_INCARNATION_CHANGED (never repeat it; read again and pin the new incarnation)
       and no cursor, check stamp or session resume is applied. A successful fenced response confirms
-      channelIncarnation = your sample and lastSeenSeq >= seq, even when an equal or lower mark left a legacy NULL
+      channelIncarnation = the incarnation you pinned and lastSeenSeq >= seq, even when an equal or lower mark left a legacy NULL
       cursorIncarnation in place. Omitted: the mark is UNFENCED, as before.
       """
       expectedIncarnation: Int

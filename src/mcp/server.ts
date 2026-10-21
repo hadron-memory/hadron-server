@@ -10122,7 +10122,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
       session: z.string().optional().describe('Your session id — passing it keeps that session alive (#1081).'),
-      expectedIncarnation: z.number().int().optional().describe('#2181: pin the read to the Channel incarnation you sampled (the "incarnation" on the final line of a read). A different one is [channel_incarnation_changed] with no page and no cursor, check or resume applied; omitted, the read is unfenced.'),
+      expectedIncarnation: z.number().int().optional().describe('#2181: pin the read to the Channel incarnation you read (the "incarnation" on the final line of a read). A different one is [channel_incarnation_changed] with no page and no cursor, check or resume applied; omitted, the read is unfenced.'),
     },
     async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession, expectedIncarnation }) => {
       // A blank session is no session, for every consumer below (#1362 review).
@@ -10257,7 +10257,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. On an ordinary read, passing it keeps that session alive (#1081). Monitor mode uses it only as an App hint and does not heartbeat or wake the session.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
       channel: z.string().optional().describe('Spec 049: read THIS Channel (its id or address, from hadron_list_channels) instead of the App\'s default team chat.'),
-      expectedIncarnation: z.number().int().optional().describe('#2181: with channel, pin the read to the Channel incarnation you sampled; see hadron_channel_read.'),
+      expectedIncarnation: z.number().int().optional().describe('#2181: with channel, pin the read to the Channel incarnation you read; see hadron_channel_read.'),
       monitor: z.boolean().optional().describe('Use the register + stored ChannelReadState for your live Worker sessions. Incompatible with sinceSeq, beforeSeq, mentions and offset.'),
       monitorFor: z.string().optional().describe('With monitor:true, narrow to one Worker by name, id or URN. It must be bound to one of your live sessions in this App.'),
       acknowledge: z.array(z.object({
@@ -10474,7 +10474,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         app: z.string().optional().describe('The App. Omit to recover it from session or the active selection.'),
         channel: z.string().optional().describe('Channel id or address. Omit for the team Channel hadron_team_chat_read serves for the App.'),
         seq: z.number().int().min(0).describe('Read through this exact sequence.'),
-        expectedIncarnation: z.number().int().optional().describe('#2181: fence the mark to the Channel incarnation you sampled (the "incarnation" on the final line of a read). A different one is [channel_incarnation_changed] — never retry it; read again and mark from the new sample. The result names channelIncarnation and cursorIncarnation (null = legacy cursor, never relabelled). Omitted, the mark is unfenced.'),
+        expectedIncarnation: z.number().int().optional().describe('#2181: fence the mark to the Channel incarnation you read (the "incarnation" on the final line of a read). A different one is [channel_incarnation_changed] — never repeat it; read again and pin the new incarnation. The result names channelIncarnation and cursorIncarnation (null = legacy cursor, never relabelled). Omitted, the mark is unfenced.'),
       },
       async ({ session, app, channel, seq, expectedIncarnation }) => {
         await heartbeatSession(session);
