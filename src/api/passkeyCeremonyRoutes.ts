@@ -33,7 +33,7 @@ import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
 import { createCeremony, decideCeremonyAssertion, verifyCeremonyAssertion } from '../lib/passkeys/ceremony.js';
 import { bindFirstRegistration, bindLaterRegistration, finishRegistration, firstPasskeyWindowHours, type RegistrationBinding } from '../lib/passkeys/registration.js';
 import { CANCEL_TOKEN, cancelFirstPasskey } from '../lib/passkeys/cancel.js';
-import { endWindowEarly } from '../lib/passkeys/endWindow.js';
+import { endWindowEarly, previewWindowEnd } from '../lib/passkeys/endWindow.js';
 import { CEREMONY_BROWSER_COOKIE, clearCeremonyBrowserCookie } from './freshSignInRoutes.js';
 import { sendPage } from './ceremonyPages.js';
 import { mountCeremonyClientPages } from './ceremonyClientPages.js';
@@ -77,7 +77,9 @@ function creationOptions(ceremonyId: string, b: RegistrationBinding, rpId: strin
     user: { id: b.userHandle.toString('base64url'), name: b.handle, displayName: b.handle },
     challenge: ceremonyId,
     pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
-    authenticatorSelection: { userVerification: 'required', residentKey: 'preferred' },
+    // cor:aut:040:05: every credential is discoverable; the vouch flow asks with an empty allowCredentials.
+    authenticatorSelection: { userVerification: 'required', residentKey: 'required', requireResidentKey: true },
+    extensions: { credProps: true },
     attestation: 'none',
     excludeCredentials: b.excludeCredentialIds.map((id) => ({ type: 'public-key', id: id.toString('base64url') })),
     timeout: CEREMONY_TTL_SECONDS * 1000,
@@ -203,6 +205,18 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
       if (!ended) return void refuse(res);
       clearCeremonyBrowserCookie(req, res);
       res.status(200).set('Cache-Control', 'no-store').json({ ok: true });
+    } catch { refuse(res); }
+  });
+
+  // What window/end would act on, shown before the POST so a person talked into confirming sees a passkey they never
+  // added (Rook P3-2). Spends nothing; the same identity source and refusal as window/end.
+  app.post('/passkeys/window/preview', limiter, async (req: Request, res: Response) => {
+    try {
+      if (!originAllowed(req)) return void refuse(res);
+      const signInNonce = cookieValue(req, CEREMONY_BROWSER_COOKIE);
+      const preview = signInNonce ? await previewWindowEnd(db, { signInBrowserHash: sha256Hex(signInNonce) }) : null;
+      if (!preview) return void refuse(res);
+      res.status(200).set('Cache-Control', 'no-store').json({ label: preview.label, registeredAt: preview.registeredAt.toISOString() });
     } catch { refuse(res); }
   });
 

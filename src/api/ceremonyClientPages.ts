@@ -63,6 +63,8 @@ ${signInForms('register')}
 <p>Confirm who you are with a method you did <strong>not</strong> use to add the passkey. Then anything it signed stops being pending.</p>
 ${signInForms('window')}
 <p><button id="end-window">End the window now</button></p>
+<p id="window-passkey" hidden></p>
+<p><button id="confirm-window" hidden>Yes, I added this passkey: end the window</button></p>
 </main>`);
   });
 
@@ -158,9 +160,22 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
   if ($('add-first')) $('add-first').addEventListener('click', function () { register(false); });
   if ($('add-later')) $('add-later').addEventListener('click', function () { register(true); });
   if ($('end-window')) $('end-window').addEventListener('click', function () {
-    post('/passkeys/window/end').then(function (r) {
-      status(r.ok ? 'The cooling-off window has ended. Anything the passkey signed is no longer pending.'
-        : 'Not ended. Confirm who you are first, with a different method than you used to add the passkey, within 10 minutes.');
+    status('');
+    post('/passkeys/window/preview').then(function (r) {
+      if (!r.ok) throw new Error('none');
+      return r.json();
+    }).then(function (p) {
+      var w = $('window-passkey'); var b = $('confirm-window');
+      w.textContent = 'This ends the cooling-off window of the passkey "' + p.label + '", added ' + new Date(p.registeredAt).toLocaleString() + '. Anything it signed then counts. Continue only if you added it.';
+      w.hidden = false; b.hidden = false;
+      b.onclick = function () {
+        b.hidden = true;
+        post('/passkeys/window/end').then(function (r) {
+          status(r.ok ? 'The cooling-off window has ended. Anything the passkey signed is no longer pending.' : 'Not ended. Start again.');
+        });
+      };
+    }).catch(function () {
+      status('Nothing to end. Confirm who you are first, with a different method than you used to add the passkey, within 10 minutes.');
     });
   });
 })();

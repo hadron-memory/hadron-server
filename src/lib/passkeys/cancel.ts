@@ -46,10 +46,11 @@ export async function cancelFirstPasskey(
   if (!probe) return false;
   return db.$transaction(async (tx) => {
     await lockAuthorityAnchors(tx, [{ kind: 'user', id: probe.owner_id }], 'exclusive');
-    // The platform clock is the transaction's (the passkey guard compares revocation times with it).
+    // Eligibility is decided by the clock NOW, after the anchor wait (findings:db-clock-must-order-after-lock-wait);
+    // the times recorded below use the transaction's clock, which the passkey guard requires and which is earlier.
     const open = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM passkey_credentials
       WHERE id = ${probe.passkey_id} AND owner_id = ${probe.owner_id} AND revoked_at IS NULL AND window_outcome IS NULL
-        AND window_ends_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3)
+        AND window_ends_at > (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3)
       FOR UPDATE`;
     if (open.length !== 1) return false;
     const spent = await tx.$queryRaw<Array<{ id: string }>>`UPDATE passkey_cancel_tokens SET used_at = clock_timestamp()

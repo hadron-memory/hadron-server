@@ -149,6 +149,8 @@ export async function finishRegistration(
   // Rook Q1.1: a first passkey's ceremony carries a spent fresh sign-in, so finish needs that browser too.
   if (bound.kind === 'first' && input.signInBrowserHash !== bound.sign_in_browser_hash) return null;
   if (clientDataType(Buffer.from(input.response.response?.clientDataJSON ?? '', 'base64url')) !== 'webauthn.create') return null;
+  // cor:aut:040:05: a credential the client reports as not discoverable is refused (the options require one).
+  if ((input.response.clientExtensionResults as { credProps?: { rk?: unknown } } | undefined)?.credProps?.rk === false) return null;
   let info: NonNullable<Awaited<ReturnType<typeof verifyRegistrationResponse>>['registrationInfo']>;
   try {
     const v = await verifyRegistrationResponse({
