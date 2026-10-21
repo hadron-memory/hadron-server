@@ -84,10 +84,14 @@ export interface IncludeWriteOptions {
   includeSystemWrite?: true;
 }
 
-/** A tag's identity for "added or changed": kind, target and settings, never its spelling. */
+/**
+ * A tag's identity for "added or changed": kind, target and settings, never its
+ * spelling. `rev` is keyed as a string: JSON would write a rev too large for a
+ * number (Infinity) as null, the same as no rev (Gene, #2226).
+ */
 export function includeTagKey(tag: IncludeTag): string {
   const { rev, approved, signed } = tag.settings;
-  return JSON.stringify([tag.kind, tag.target, rev ?? null, approved === true, signed === true]);
+  return JSON.stringify([tag.kind, tag.target, rev === undefined ? null : String(rev), approved === true, signed === true]);
 }
 
 /** Keys of the tags in the stored text; text that no longer parses has none, so every tag is checked. */

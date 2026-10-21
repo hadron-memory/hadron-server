@@ -169,6 +169,13 @@ describe('only added or changed tags are checked (R110)', () => {
     expect(await contentOf('a')).toBe(`head ${secret()}`);
   });
 
+  it('a rev too large for a number is still a settings change, never an alias for no rev (Gene, #2226 P2)', async () => {
+    await seed('a', `head ${secret()}`);
+    const huge = '9'.repeat(400); // parses to Infinity
+    expect(await code(update('a', `head {{> hrn:node:${foreignUrn}:secret rev=${huge}}}`))).toBe('INCLUDE_TARGET_UNAVAILABLE');
+    expect(await contentOf('a')).toBe(`head ${secret()}`);
+  });
+
   it('the same target rewritten as another tag form is a changed tag', async () => {
     await create('b', 'B');
     await seed('a', '{{> b}}');
