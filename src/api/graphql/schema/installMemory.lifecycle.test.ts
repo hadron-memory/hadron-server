@@ -484,6 +484,24 @@ describe('#2044 install memory — list surfaces', () => {
     const found = await Q.findNodes({}, { filter: { memoryIds: [row!.id] }, limit: 10 }, ctxOf(reader.id)).catch(() => ({ items: [] }));
     expect(found.items ?? found.nodes ?? []).toHaveLength(0);
   });
+
+  it('#2215: an install memory is always summary-indexed (class system), and a search WITHOUT a memory filter still shows its nodes only to the audience', async () => {
+    const f = await fixture();
+    await f.create(f.admin, 'prompts:lane', { name: 'Install Lane', content: 'zzqx-install-marker body', abstract: 'zzqx-install-marker abstract' });
+    const [row] = await f.installRows();
+    const reader = await f.user('indexed-reader');
+    await db.orgMember.create({ data: { organizationId: orgId, userId: reader.id, role: 'READER' } });
+    const search = async (u: { id: string }) => {
+      const out = await Q.findNodes({}, { query: 'zzqx-install-marker', mode: 'keyword', filter: { memoryClasses: ['system'] }, orgId, limit: 20 }, ctxOf(u.id))
+        .catch(() => ({ hits: [] }));
+      return ((out.hits ?? []) as Array<{ node: { memoryId: string } }>).filter((h) => h.node.memoryId === row!.id);
+    };
+    const { memoryIsVectorIndexed } = await import('../../../lib/embedding/indexing.js');
+    expect(memoryIsVectorIndexed({ class: row!.class, vectorIndexEnabled: row!.vectorIndexEnabled })).toBe(true);
+    expect((await search(f.contributor)).length).toBeGreaterThan(0);
+    expect(await search(reader)).toHaveLength(0);
+    expect(await search(f.stranger)).toHaveLength(0);
+  });
 });
 
 describe('#2044 install memory — the one-Agent-per-system-memory assumptions', () => {
