@@ -43,7 +43,7 @@ beforeEach(async () => {
   vi.stubEnv('GITHUB_ORG', '');
   vi.stubEnv('BASE_URL', 'https://api.example.test');
   ghIdentity = { id: 4242, login: 'octo-alice', name: 'Alice', avatar_url: 'https://a.example/x.png' };
-  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+  vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url === 'https://github.com/login/oauth/access_token') return Response.json({ access_token: 'gh-token' });
     if (url === 'https://api.github.com/user') return Response.json(ghIdentity);
