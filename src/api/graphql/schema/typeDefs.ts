@@ -2727,7 +2727,21 @@ export const typeDefs = `#graphql
     approvedAt: DateTime
   }
 
+  "Only safe identity scalars for a live organization shared with the effective human viewer."
+  type SharedOrganization {
+    id: ID!
+    name: String!
+    urn: String!
+  }
+
+  type SharedOrganizationsPage {
+    items: [SharedOrganization!]!
+    total: Int!
+  }
+
   type User {
+    "Live shared memberships only; null for unsupported viewers or deleted users, empty for no intersection. Default 20, cap 200, nonnegative offset, organization id order. Impersonation stays in its one organization. Pages are live across requests."
+    sharedOrganizations(limit: Int, offset: Int): SharedOrganizationsPage
     id: ID!
     handle: String
     "User-layer action-policy link (cor:acl:040:02, #510) — constrains runs made on the user's behalf. Null = no restriction, or hidden from viewers without personal-field access. Self-authored via updateMyPolicy."

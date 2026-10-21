@@ -1,4 +1,5 @@
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
+import { sharedOrganizations } from './sharedOrganizations.js';
 import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
@@ -1837,6 +1838,8 @@ export const typeResolvers = {
     ) => ((await canSeeOrgMemberRole(ctx, m)) ? m.role : null),
   },
   User: {
+    sharedOrganizations: (u: { id: string }, args: { limit?: number | null; offset?: number | null }, ctx: Context) =>
+      sharedOrganizations(u.id, args, ctx),
     // Canonical hrn:user:<handle> URN (spec cor:urn:010:01) — lowercase, and
     // null for a handle-less or not-URN-legal (grandfathered) handle.
     urn: (u: { handle?: string | null }) => userUrn(u.handle),
