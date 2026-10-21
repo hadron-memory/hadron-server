@@ -161,11 +161,27 @@ async function race<A, B>(first: (c: typeof db) => Promise<A>, second: () => Pro
     two = second().then((v) => { secondDone = true; return { ok: true as const, v }; }, (e: unknown) => { secondDone = true; return { ok: false as const, e }; });
     await blockedBehind(holderPid, app.id);
     expect(secondDone, 'the second side finished while the first held the fence').toBe(false);
-  } finally {
-    // Never leave a held transaction behind a failed assertion: release, and let both sides settle.
+  } catch (e) {
+    // Never leave a held transaction behind a failed assertion: release, let both sides settle, then fail (Juliet P3).
     h.release();
+    await Promise.allSettled([one, ...(two ? [two] : [])]);
+    throw e;
   }
+  h.release();
   return { first: await one, second: await two! };
+}
+
+/**
+ * Juliet #2172 P2: `sweepExpiredStopSignals` catches a per-App failure, logs it and returns [], so "the sweep recorded
+ * nothing" alone would also pass a sweep that FAILED (a deadlock included). Every sweep schedule therefore also asserts
+ * that no sweep failure was logged while it ran.
+ */
+function sweepFailureOracle() {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  return {
+    failures: () => spy.mock.calls.filter((c) => String(c[0]).startsWith('[stop-signals] expiry sweep')).length,
+    restore: () => spy.mockRestore(),
+  };
 }
 const deadlocked = (r: { ok: boolean; e?: unknown }) => !r.ok && /40P01|deadlock/i.test(String((r as any).e?.message ?? r.e));
 
@@ -293,6 +309,13 @@ describe('5 — a lift against the expiry sweep (one end, one resume)', () => {
     signal = { id: s.id, until };
   });
   const sweepAfterUntil = (c: typeof db) => sweepExpiredStopSignals(c, new Date(signal.until.getTime() + 1));
+  let oracle: ReturnType<typeof sweepFailureOracle>;
+  beforeEach(() => { oracle = sweepFailureOracle(); });
+  afterEach(() => {
+    const n = oracle.failures();
+    oracle.restore();
+    expect(n, 'a sweep failed (logged and swallowed) while the schedule ran').toBe(0);
+  });
 
   it('the lift holds the fence first: the sweep waits and records nothing; lifted once, one resume', async () => {
     const r = await race((c) => liftSignal(ctx(max.id, { db: c }), signal.id), () => sweepAfterUntil(db), 'exclusive');
@@ -317,6 +340,7 @@ describe('5 — a lift against the expiry sweep (one end, one resume)', () => {
 
 describe('6 — two expiry sweeps of one App (the sweep takes the fence exclusive)', () => {
   it('the second waits; one stop.expired and one resume per worker, whichever sweep wins', async () => {
+    const oracle = sweepFailureOracle();
     const until = new Date(Date.now() + 1000);
     const s = await setSignal(ctx(max.id), { level: 'PAUSE', scope: 'TEAM', worker: 'Ada', until });
     const later = new Date(until.getTime() + 1);
@@ -325,6 +349,27 @@ describe('6 — two expiry sweeps of one App (the sweep takes the fence exclusiv
     expect([...(r.first as any).v, ...(r.second as any).v]).toEqual([s.id]);
     expect(await ends()).toEqual([{ type: 'stop.expired' }]);
     for (const w of [ada, liam, dan]) expect(await notices(w)).toEqual(['pause:stop', 'pause:resume']);
+    const n = oracle.failures();
+    oracle.restore();
+    expect(n, 'a sweep failed (logged and swallowed) while the schedule ran').toBe(0);
+  });
+
+  it('the oracle itself: an injected sweep failure returns [] AND is caught by it', async () => {
+    const until = new Date(Date.now() + 500);
+    await setSignal(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Kit', until });
+    const oracle = sweepFailureOracle();
+    const failing = new Proxy(db, {
+      get(target, prop) {
+        if (prop === '$transaction') return async () => { throw new Error('injected sweep failure'); };
+        const v = (target as any)[prop];
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    }) as typeof db;
+    const out = await sweepExpiredStopSignals(failing, new Date(until.getTime() + 1));
+    const n = oracle.failures();
+    oracle.restore();
+    expect(out).toEqual([]); // indistinguishable from "nothing to record" by its result alone
+    expect(n).toBe(1);
   });
 });
 
@@ -350,12 +395,19 @@ describe('the barrier evidence (Xan #2172 LOCAL P2)', () => {
       // The stop fence itself, held by another backend: still not "behind `pid`".
       const fence = heldAtFence('exclusive');
       const setting = M.setTeamStopSignal({}, { input: { appRef: app.id, level: 'PAUSE', scope: 'WORKER', worker: 'Kit' } }, ctx(max.id, { db: fence.client }));
-      const fencePid = await fence.reached;
-      const second = M.setTeamStopSignal({}, { input: { appRef: app.id, level: 'PAUSE', scope: 'WORKER', worker: 'Kit' } }, ctx(max.id));
-      await expect(blockedBehind(pid, app.id, 600)).rejects.toThrow(/no backend was seen waiting/);
-      await blockedBehind(fencePid, app.id); // the positive control
-      fence.release();
-      await Promise.all([setting, second]);
+      let second: Promise<unknown> | null = null;
+      try {
+        const fencePid = await fence.reached;
+        second = M.setTeamStopSignal({}, { input: { appRef: app.id, level: 'PAUSE', scope: 'WORKER', worker: 'Kit' } }, ctx(max.id));
+        await expect(blockedBehind(pid, app.id, 600)).rejects.toThrow(/no backend was seen waiting/);
+        await blockedBehind(fencePid, app.id); // the positive control
+      } finally {
+        // Settle the fence's two sides whatever happened (Juliet P3).
+        fence.release();
+        await Promise.allSettled([setting, ...(second ? [second] : [])]);
+      }
+      await expect(setting).resolves.toBeTruthy();
+      await expect(second!).resolves.toBeTruthy();
     } finally {
       releaseHolder();
       await holder;
