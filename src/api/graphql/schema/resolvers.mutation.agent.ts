@@ -17,6 +17,7 @@ class AgentLinkSetChangedError extends Error {
 }
 import {
   assertSystemMemoryOwner,
+  assertNotInstallMemory,
   repairAgentSystemMemoryOwner,
 } from '../../../lib/agentSystemMemory.js';
 import {
@@ -208,6 +209,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
     let resolvedSystemMemoryId: string;
     if (systemMemoryId) {
       const target = await tx.memory.findUniqueOrThrow({ where: { id: systemMemoryId } });
+      assertNotInstallMemory(target);
       // spec 047 / #949: the promoted memory must share the agent's owner —
       // same org (org-owned) OR same user (user-owned). One shared assertion
       // so this path and updateAgent's first-attach can't drift.
@@ -568,6 +570,7 @@ export const agentMutations = {
           // waves through ANOTHER user's memory
           // (findings:org-xor-owner-null-comparison-bypass). The shared
           // assertion branches on the ownership class first.
+          assertNotInstallMemory(target);
           assertSystemMemoryOwner(agent, {
             organizationId: target.organizationId,
             ownerUserId: target.ownerUserId,
@@ -733,8 +736,9 @@ export const agentMutations = {
           }
           const lockedTarget = await tx.memory.findUniqueOrThrow({
             where: { id: promoteSystemMemoryId },
-            select: { organizationId: true, ownerUserId: true, id: true, deletedAt: true },
+            select: { organizationId: true, ownerUserId: true, id: true, deletedAt: true, appId: true, installOfAgentId: true, isInstallMemory: true },
           });
+          assertNotInstallMemory(lockedTarget);
           if (lockedTarget.deletedAt) {
             throw new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
           }

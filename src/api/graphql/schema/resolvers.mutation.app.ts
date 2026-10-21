@@ -1,3 +1,4 @@
+import type { Prisma } from '../../../generated/prisma/index.js';
 import { requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
@@ -89,6 +90,31 @@ async function assertNoWorkers(
     throw new GraphQLError(
       `Cannot ${action} the URN "${appUrn}": the deleted App holding it still has ${workers} worker casting(s), whose names are permanently reserved (cor:agt:020:02).`,
       { extensions: { code: 'WORKER_NAMES_RESERVED', appId, workers } },
+    );
+  }
+}
+
+/**
+ * #2044, R29 (Holger 2026-10-18): reclaiming an App's URN hard-deletes the soft-deleted App
+ * holder, and `Memory.appId` cascades. Ruling A keeps an App's install memories when the App
+ * is deleted ("org admins delete them by hand"), so the hard path is REFUSED while any
+ * remain, never silently completed. The App row is locked first, in the transaction that
+ * deletes it, so the count and the delete serialise against a creation (which holds the same
+ * row shared and refuses a deleted App).
+ */
+async function assertNoInstallMemories(
+  tx: Prisma.TransactionClient,
+  appId: string,
+  appUrn: string,
+): Promise<void> {
+  await tx.$queryRaw`SELECT id FROM apps WHERE id = ${appId} FOR UPDATE`;
+  const remaining = await tx.memory.count({
+    where: { appId, class: 'system', isInstallMemory: true, deletedAt: null },
+  });
+  if (remaining > 0) {
+    throw new GraphQLError(
+      `Cannot reclaim the URN "${appUrn}": the deleted App holding it still has ${remaining} install memor${remaining === 1 ? 'y' : 'ies'}, which are kept when an App is deleted. Whoever manages the App deletes them first (deleteMemory).`,
+      { extensions: { code: 'INSTALL_MEMORIES_REMAIN', appId, installMemories: remaining } },
     );
   }
 }
@@ -446,6 +472,7 @@ export const appMutations = {
           // #1468 — the delete cascades the App's memories: refused while one
           // is a stamped corpus still holding a spec.
           await ctx.db.$transaction(async (tx) => {
+            await assertNoInstallMemories(tx, existing.id, appUrn);
             await detachAppOwnerMemories(tx, [existing.id]);
             const doomed = await tx.memory.findMany({ where: { appId: existing.id }, select: { id: true } });
             await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
@@ -647,6 +674,7 @@ export const appMutations = {
               await assertNoWorkers(ctx.db, depCollision.id, depUrn, 'reclaim');
               // #1468 — same cascade rule as the parent App branch.
               await ctx.db.$transaction(async (tx) => {
+                await assertNoInstallMemories(tx, depCollision.id, depUrn);
                 await detachAppOwnerMemories(tx, [depCollision.id]);
                 const doomed = await tx.memory.findMany({ where: { appId: depCollision.id }, select: { id: true } });
                 await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');

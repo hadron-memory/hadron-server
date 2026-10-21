@@ -778,6 +778,22 @@ model Memory {
   /// memory when its App was renamed. Enforced by chk_memory_shared_agent_scope
   /// (set ⇒ `class='app'` AND `app_id IS NOT NULL`).
   sharedMemoryOfAgentId String? @map("shared_memory_of_agent_id")
+  /// #2044 (S7) — the IDENTITY of an App's INSTALL MEMORY: the Agent this
+  /// `class='system'` row customises for `appId` (cor:agt:040:06). Set ONLY
+  /// there; NULL on every other row, including an Agent's own system memory
+  /// (which is `app_id IS NULL` and is reached through `Agent.systemMemoryId`,
+  /// a pointer an install memory never has). Identity is by COLUMNS, never by
+  /// URN, so a renamed App or Agent cannot orphan it. One LIVE row per
+  /// (app_id, install_of_agent_id): the partial unique index lives in
+  /// prisma/post-push.sql (Prisma cannot model the WHERE). Enforced by
+  /// chk_memory_class_app_id (system ⇒ both set or both NULL).
+  installOfAgentId      String? @map("install_of_agent_id")
+  /// R94 C (#2064): TRUE for an App's install memory, for its whole life. The
+  /// link to the Agent above is NULLed when the Agent is erased with its
+  /// owner's account (the memory stays with its App, a detached install), so
+  /// the discriminator every gate branches on cannot be that link. Enforced by
+  /// chk_memory_class_app_id: class='system' with an app_id ⇔ TRUE.
+  isInstallMemory       Boolean @default(false) @map("is_install_memory")
 
   /// Globally unique identifier, e.g. "baragaun.com:secureid".
   /// Derived from `org.urn + ":" + slug`.
@@ -969,6 +985,11 @@ model Memory {
   // the legacy key), and user-account deletion cascades the App's memories away
   // in the same pass, so the window is narrow and self-closing.
   sharedMemoryOfAgent Agent?            @relation("SharedMemoriesOfAgent", fields: [sharedMemoryOfAgentId], references: [id], onDelete: SetNull)
+  // #2044 / R94 C: SetNull. Org Agents are soft-deleted, so this fires only for
+  // user-account deletion: another App's install memory of the erased Agent is
+  // KEPT and detached (never erased, never blocking the erasure). It stays an
+  // install memory through `isInstallMemory`, not through this link.
+  installOfAgent      Agent?            @relation("InstallMemoriesOfAgent", fields: [installOfAgentId], references: [id], onDelete: SetNull)
   user                User?             @relation("UserMemoriesOwned", fields: [userId], references: [id], onDelete: SetNull)
   // 008-agent-installation: hard App deletion cascades to its personal/app
   // memories (per data-model.md "Cascade behavior"). The CHECK constraint
@@ -1008,6 +1029,7 @@ model Memory {
   @@index([anonymousExpiresAt])
   @@index([userId])
   @@index([appId])
+  @@index([installOfAgentId])
   @@index([ownerUserId])
   @@index([legacyUrn])
   @@map("memories")
@@ -2047,6 +2069,8 @@ model Agent {
   /// #723 — the per-App `shared` app-class memories this Agent is the identity
   /// of (at most one per App).
   sharedMemories     Memory[]            @relation("SharedMemoriesOfAgent")
+  /// #2044 — the per-App install memories that customise this Agent.
+  installMemories    Memory[]            @relation("InstallMemoriesOfAgent")
   sessions           Session[]           @relation("SessionAgent")
   userSubscriptions  AgentSubscription[] @relation("AgentUserSubscriptions")
   // 023-app-shape Phase 2b: App↔Agent goes through `AppAgent` (N:M).
