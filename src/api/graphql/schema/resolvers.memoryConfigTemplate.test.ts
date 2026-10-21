@@ -1,3 +1,4 @@
+import { WORKER_CONNECTION_LIMIT } from '../../../test/dbWorkers.js';
 import { mergeUsers } from '../../../test/mergeConsent.js';
 /**
  * #1325 part (c) — the MemoryConfigTemplate API, through the executable schema
@@ -57,6 +58,15 @@ function dataOf(r: Gql): NonNullable<Gql['data']> {
   }
   return r.data;
 }
+/**
+ * How many writers the same-row concurrency tests fire at one template. Each interactive
+ * transaction pins a pool connection while it waits on the template's row lock, so more
+ * writers than the worker pool leaves the surplus unable to START a transaction inside
+ * Prisma's 2 s maxWait once the lock holder is slow, and the call fails with null data
+ * (#2183). Staying below the pool keeps one connection free; the invariants under test
+ * need contention, not a particular count.
+ */
+const CONCURRENT_WRITERS = Math.max(2, Math.min(8, WORKER_CONNECTION_LIMIT - 1));
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const RULE = `role authorTask authorTaskId authorTaskState validationTask validationTaskState descriptionNode descriptionNodeState
@@ -617,7 +627,7 @@ describe('update and delete: wholesale rules, optimistic concurrency, soft delet
 
   it('each concurrent replacement returns its OWN rules beside its own revision', async () => {
     const t = await mkOrgTpl();
-    const roles = ['r-a', 'r-b', 'r-c', 'r-d', 'r-e', 'r-f', 'r-g', 'r-h'];
+    const roles = ['r-a', 'r-b', 'r-c', 'r-d', 'r-e', 'r-f', 'r-g', 'r-h'].slice(0, CONCURRENT_WRITERS);
     const out = await Promise.all(roles.map((role) => gql(as(orgAdmin), UPDATE, { r: t.id, i: { rules: [{ role }], description: role } })));
     for (const [i, r] of out.entries()) {
       const got = dataOf(r).updateMemoryConfigTemplate.template;
@@ -628,7 +638,7 @@ describe('update and delete: wholesale rules, optimistic concurrency, soft delet
 
   it('concurrent updates serialize: each returns its own write and a distinct revision', async () => {
     const t = await mkOrgTpl();
-    const descs = ['a', 'b', 'c', 'd', 'e', 'f'];
+    const descs = ['a', 'b', 'c', 'd', 'e', 'f'].slice(0, CONCURRENT_WRITERS);
     const out = await Promise.all(descs.map((d) => gql(as(orgAdmin), UPDATE, { r: t.id, i: { description: d } })));
     const got = out.map((r) => dataOf(r).updateMemoryConfigTemplate.template);
     expect(got.map((g) => g.description)).toEqual(descs);
