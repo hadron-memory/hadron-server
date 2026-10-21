@@ -21,7 +21,7 @@
  * hrn:node:hadronmemory.com:hadron-dev-team-vera:work:2138-experiment-spec
  */
 
-import type { Prisma, PrismaClient, SessionType } from '../generated/prisma/index.js';
+import { Prisma, type PrismaClient, type SessionType } from '../generated/prisma/index.js';
 import { isSessionLive, loadLastEventBySession, recentlyTouchedFilter } from './sessionActivity.js';
 import { loadPendingReasons, type PendingReason } from './tickers/checkPending.js';
 
@@ -49,6 +49,8 @@ export type WorkerCheckInputs = {
   pausedUntil: Date | null;
   /** When the App's last TEAM pause ended (`App.teamResumedAt`); restarts the clock like a worker's own pause. */
   teamResumedAt?: Date | null;
+  /** #2022: when the latest `pause` / `halt` stop signal coverage of the worker ended; restarts the clock likewise. */
+  stopEndedAt?: Date | null;
 };
 
 export type CheckSettings = { checkPeriodSeconds: number; failedChecksToOverdue: number };
@@ -83,6 +85,8 @@ export function deriveWorkerCheckStatus(i: WorkerCheckInputs, s: CheckSettings, 
     i.pausedUntil && i.pausedUntil.getTime() <= now.getTime() ? i.pausedUntil.getTime() : -Infinity,
     // #2138 §3.6: a team pause that has ended restarts every worker's clock (an active one is TEAM_PAUSED above).
     i.teamResumedAt?.getTime() ?? -Infinity,
+    // #2022: a stop signal's coverage that has ended (an active one is STOPPED above).
+    i.stopEndedAt && i.stopEndedAt.getTime() <= now.getTime() ? i.stopEndedAt.getTime() : -Infinity,
   );
   return out(now.getTime() - clockStart > overdueAfterMs(s) ? 'OVERDUE' : 'OK');
 }
@@ -129,6 +133,14 @@ export async function loadWorkerCheckStatuses(
     db.workerWakeSettings.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, pausedUntil: true } }),
     loadPendingReasons(db, appId, ids, now),
   ]);
+  // #2022: the latest end of each worker's pause/halt coverage (the earliest of leaving it, its signal's end, its until).
+  const stopEnds = await db.$queryRaw<{ workerId: string; endedAt: Date }[]>(Prisma.sql`
+    SELECT c.worker_id AS "workerId", max(LEAST(c.left_at, s.ended_at, s.until)) AS "endedAt"
+    FROM team_stop_coverage c JOIN team_stop_signals s ON s.id = c.signal_id
+    WHERE c.app_id = ${appId} AND c.worker_id IN (${Prisma.join(ids)}) AND s.level IN ('pause', 'halt')
+      AND LEAST(c.left_at, s.ended_at, s.until) IS NOT NULL
+    GROUP BY c.worker_id`);
+  const stopEndOf = new Map(stopEnds.map((r) => [r.workerId, r.endedAt]));
 
   // The same liveness predicate as the roster's liveSession and startSession's gate (cor:agt:020:11).
   const lastEvents = await loadLastEventBySession(db as never, sessions.map((s) => s.id));
@@ -154,6 +166,7 @@ export async function loadWorkerCheckStatuses(
           lastCheckedAt: checkedAt.get(w.id) ?? null,
           pausedUntil: wake.get(w.id)?.pausedUntil ?? null,
           teamResumedAt: app.teamResumedAt,
+          stopEndedAt: stopEndOf.get(w.id) ?? null,
         },
         settings,
         now,

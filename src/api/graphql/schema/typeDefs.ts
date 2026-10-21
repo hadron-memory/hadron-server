@@ -6979,6 +6979,12 @@ export const typeDefs = `#graphql
     "#1748 — the wakes due now (hrn:node:hadronmemory.com:specs:cor:agt:080:08). Counts and seq ranges only; reads nothing it does not return."
     dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String): DueWakePage!
     """
+    #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:07) — an App's stop signals, oldest set first. A person in the App sees
+    every signal (worker narrows to those covering that worker now); a worker's session sees the live ones covering it; a
+    host key sees its own host's. includeEnded adds ended ones (not for a worker's session). first: default 50, max 200.
+    """
+    teamStopSignals(appRef: String!, worker: String, includeEnded: Boolean, first: Int, after: String): StopSignalPage!
+    """
     #2017 (S1) — the ready-to-deliver batches of the workers registered on the calling host (hrn:node:hadronmemory.com:specs:cor:agt:080:22, :26).
     An own live session reads only its bound worker. A host App key needs attention:deliver AND host:operate;
     the host is the key's, the request names none, and a worker not on that host is absent. The text is written by the server and typed unchanged. Reading moves nothing; acknowledge the batch ids.
@@ -8763,6 +8769,17 @@ export const typeDefs = `#graphql
     setAppDeliverySettings(appRef: String!, input: AppDeliverySettingsInput!): AppDeliverySettings!
     "#2138: pause or resume the whole team, as whoever manages the App. Separate from each worker's own pause: a worker cannot lift it, and ending it clears no self-pause. While paused, no worker is nudged and every worker's check status is PENDING (TEAM_PAUSED)."
     setTeamPause(appRef: String!, paused: Boolean!): TeamPause!
+    """
+    #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:01, :06) — set a stop signal. Whoever manages the App: any level and
+    scope. A host key: a HALT on its own host only. Never replaces another signal. Refusals: APP_MANAGER_REQUIRED,
+    HOST_SCOPE_REQUIRED, STOP_SIGNAL_SCOPE_FORBIDDEN, STOP_SIGNAL_NOT_FOUND (the target), BAD_USER_INPUT, APP_NOT_FOUND.
+    """
+    setTeamStopSignal(input: SetTeamStopSignalInput!): StopSignal!
+    """
+    #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:05, :06) — lift a stop signal. Whoever manages the App, any; a host key, a HALT on its own host.
+    Lifting one never ends another. changed is false when it had already ended. Refusals as setTeamStopSignal.
+    """
+    liftTeamStopSignal(appRef: String!, id: ID!): LiftStopSignalResult!
 
     """
     #1747 — subscribe a worker to a ticker (hrn:node:hadronmemory.com:specs:cor:agt:080:20, :25). Its holder and whoever manages
@@ -12084,6 +12101,8 @@ export const typeDefs = `#graphql
     TICK
     "#1708 — a task event the worker must act on (an assignment, a child's finish, an alarm's woken position, #1709 a request to end its session). Wakes at once, like a mention."
     TASK
+    "#2022 — a stop-signal notice (hrn:node:hadronmemory.com:specs:cor:agt:090:04): ahead of everything else, past the floor, the busy delay and the budget's refusal. Not yet offered (DARK until the host consumer ships)."
+    STOP
   }
 
   "#1708 — which task event a TASK reason is for."
@@ -12217,6 +12236,94 @@ export const typeDefs = `#graphql
     ticker: Ticker
     "Set for kind TASK."
     task: DueTaskReason
+    "#2022 — set for kind STOP."
+    stop: DueStopReason
+  }
+
+  "#2022 — whether a stop notice tells the worker to stop or that it may resume."
+  enum StopNoticeKind {
+    STOP
+    RESUME
+  }
+
+  "#2022 — the stop-signal notice a STOP reason delivers. Acknowledging the wake records its delivery; it moves no chat mark."
+  type DueStopReason {
+    "The notice; acknowledging the wake records delivery on it."
+    eventId: ID!
+    signalId: ID!
+    level: StopSignalLevel!
+    notice: StopNoticeKind!
+    "True only for a halt's stop notice: the one notice that interrupts the worker."
+    interrupt: Boolean!
+  }
+
+  "#2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:01) — a stop signal's level. Each stops everything the one before it does."
+  enum StopSignalLevel {
+    "Stops assignment only: matching skips the covered workers and a manual assignment to one is refused (TASK_STOPPED). Its coordinators are told (the notice is recorded but not yet delivered)."
+    PAUSE_DISPATCH
+    "Also stops ticks and stall time. Each covered worker is told to finish or stop at its next sub-task (the notice is recorded but not yet delivered)."
+    PAUSE
+    "Also interrupts each covered worker, to save its work and write a hand-off (the notice is recorded but not yet delivered: no interrupt happens yet)."
+    HALT
+  }
+
+  "#2022 — a stop signal's scope: one worker, a team (its head and the whole reporting tree under it), or the workers a host registration lists."
+  enum StopSignalScope {
+    WORKER
+    TEAM
+    HOST
+  }
+
+  enum StopSignalEndKind {
+    LIFTED
+    EXPIRED
+  }
+
+  "#2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:01) — a stop signal. Ids and times only; it never changes once set, except that its end is recorded."
+  type StopSignal {
+    id: ID!
+    level: StopSignalLevel!
+    scope: StopSignalScope!
+    "WORKER and TEAM: the target worker (a team by its head)."
+    targetWorkerId: ID
+    "HOST: the target host's id."
+    targetHostId: String
+    setAt: DateTime!
+    "When it ends on its own, if set to."
+    until: DateTime
+    "The person who set it; null when a host key did."
+    setByUserId: ID
+    setByHostKey: Boolean!
+    "Not ended and its until, when given, still ahead."
+    live: Boolean!
+    "When it was lifted, or its until (an expiry is in effect at its until)."
+    endedAt: DateTime
+    endKind: StopSignalEndKind
+    endedByUserId: ID
+    endedByHostKey: Boolean!
+  }
+
+  type StopSignalPage {
+    signals: [StopSignal!]!
+    pageInfo: DueWakePageInfo!
+  }
+
+  type LiftStopSignalResult {
+    signal: StopSignal!
+    "False when it had already ended: nothing changed and nobody was told again."
+    changed: Boolean!
+  }
+
+  input SetTeamStopSignalInput {
+    appRef: String!
+    level: StopSignalLevel!
+    scope: StopSignalScope!
+    "WORKER and TEAM: the target worker (a team by its head)."
+    worker: String
+    "HOST: the host's id. A host key may omit it: its own host is taken from its binding."
+    host: String
+    "When it ends on its own; later than now. Omitted: until lifted."
+    until: DateTime
   }
 
   type AcknowledgeWakesResult {
@@ -12788,10 +12895,12 @@ export const typeDefs = `#graphql
     OVERDUE
   }
 
-  "#2138 §3.4 — why a worker is PENDING. Precedence: TEAM_PAUSED, PAUSED, ISOLATED, STANDBY, NO_TASK."
+  "#2138 §3.4 — why a worker is PENDING. Precedence: TEAM_PAUSED, STOPPED, PAUSED, ISOLATED, STANDBY, NO_TASK."
   enum WorkerPendingReason {
     "A team pause is in force (App.teamPausedAt); the worker can't lift it."
     TEAM_PAUSED
+    "#2022: a PAUSE or HALT stop signal covers the worker, so it is not ticked (hrn:node:hadronmemory.com:specs:cor:agt:090:03)."
+    STOPPED
     "Its own pause (pausedUntil) is in force."
     PAUSED
     "In isolation (unreachable until isolation is built)."
