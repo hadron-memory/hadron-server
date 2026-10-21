@@ -212,6 +212,7 @@ describe('an inherited node shows its content and none of the base tenant\'s rec
     expect(served.map((e: any) => e.target.id)).toEqual([ids.backOpenPr]); // the child's override (#1893)
     expect(await N.incomingEdges(got, {}, ctx(reader))).toEqual([]);
     expect(await N.memory(got, {}, ctx(reader))).toBeNull();
+    expect(await N.deletedAt(got, {}, ctx(reader))).toBeNull();
     expect(await N.authorship(got, {}, ctx(reader))).toBeNull();
     expect(await N.createdByWorker(got, {}, ctx(reader))).toBeNull();
     expect(await N.signingRequests(got, {}, ctx(reader))).toEqual([]);

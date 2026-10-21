@@ -48,6 +48,8 @@ import {
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
+import { beginPasskeySignIn, mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
+import { signingSurfacePolicy } from './lib/signing/surface.js';
 import { completeCeremonyLeg, mountFreshSignInRoutes } from './api/freshSignInRoutes.js';
 import { googleReauthenticatedSince } from './auth/google.js';
 import {
@@ -940,6 +942,9 @@ export async function createServer(): Promise<Express> {
     },
   );
 
+  // #1897 B1: read once, at mount, with the routes it pairs with (restart semantics are #1895's).
+  const passkeySignInOn = signingSurfacePolicy().registration;
+
   app.get('/auth/email/verify', async (req, res) => {
     const { token, redirect: redirectParam, return_to: returnToRaw } = req.query as {
       token?: string;
@@ -1019,6 +1024,23 @@ export async function createServer(): Promise<Express> {
       // onboarding hint only.
       const isNew = user.createdAt.getTime() >= startedAt;
 
+      // #1897 slice B1 (cor:aut:030:02): with the registration switch on, a magic link alone signs nobody in.
+      // The account exists as above (R82), but no handoff code, JWT, cookie or key is published until the
+      // person's passkey completes the server-hosted step. The portal continuation carries the ORIGINAL
+      // clientStateHash through unchanged. A user with no usable passkey gets the same fixed refusal as a bad
+      // token: enrollment is B2, and signing in without the factor is never the fallback.
+      if (passkeySignInOn) {
+        const dest = redirectParam && isServerLocalPath(redirectParam) ? redirectParam : '/';
+        const begun = await beginPasskeySignIn(req, res, {
+          userId: user.id,
+          continuation: isOptionC
+            ? { kind: 'OAUTH', returnTo: returnTo! }
+            : { kind: 'PORTAL', clientStateHash: result.clientStateHash, redirect: dest, isNew },
+        });
+        if (!begun) res.status(400).json({ error: 'Invalid or expired token' });
+        return;
+      }
+
       // #804 Option-C: same contract as the github/google/apple callbacks —
       // set the JWT as an HttpOnly `hadron_token` cookie on THIS server's
       // origin and 302 to the validated server-local return_to (the original
@@ -1085,6 +1107,7 @@ export async function createServer(): Promise<Express> {
   // NODE_ENV + localhost Host; otherwise indistinguishable from a 404).
   mountDevLoginRoutes(app, db);
   mountPasskeyCeremonyRoutes(app);
+  mountPasskeySignInRoutes(app);
   mountFreshSignInRoutes(app, { emailSendPerIpRateLimit, emailRecipientRateLimit });
 
   // #477 Sink 1 — login handoff exchange. The portal's server `load` (NOT the
