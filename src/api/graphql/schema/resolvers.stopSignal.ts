@@ -8,6 +8,7 @@
  * - **A host key** (`host:operate`, cor:agt:070:04): a `halt` on its OWN host only, the host taken from the key's
  *   binding and never from the request (a named host that isn't the key's refuses); and lift a `halt` on its own
  *   host (Proposed). Every call is recorded as a host-key use with action `stop`, refusals included (cor:agt:070:07).
+ * - **Not yet (#2173, R95):** until the stop-notice lane is in effect, setting ANY signal answers STOP_SIGNAL_UNAVAILABLE.
  * - **A worker's session** acts with the worker's own rights, never its holder's (H26 reading A, Proposed): refused.
  *
  * Who may see (090:07, Proposed): a person who participates in the App sees every signal; a worker through its own
@@ -35,6 +36,7 @@ import { keyHostId, recordHostKeyUse } from '../../../lib/hostOperations/hostKey
 import { currentActor } from '../../../lib/requestActor.js';
 import { lockStopFence, isLive, coveringSignals, SIGNAL_COLUMNS, type StopLevel, type StopScope, type StopSignal } from '../../../lib/stopSignals/state.js';
 import { liftStopSignal, setStopSignal } from '../../../lib/stopSignals/lifecycle.js';
+import { s6NoticesAvailable } from '../../../lib/stopSignals/delivery.js';
 import type { StopActor } from '../../../lib/stopSignals/notices.js';
 import { Prisma as P } from '../../../generated/prisma/index.js';
 
@@ -46,6 +48,21 @@ const PAGE_DEFAULT = 50;
 const PAGE_MAX = 200;
 
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
+/**
+ * #2173 (S6d, R95): a stop signal must not take effect before a consumer can tell the worker. Enforcement is live while
+ * the notice lane is dark (#2166), so setting ANY signal (every level, every scope, a person or a host key) is refused
+ * until the lane is in effect, behind the SAME switch the notice delivery reads (`s6NoticesAvailable`): the change that
+ * turns #2169 on lifts this refusal with it. Lifting and listing are unaffected, and a signal recorded before is untouched.
+ * Placed AFTER the caller's own gates (manager, host scope), so only a caller who could have set one learns the lane state.
+ */
+const stopSignalUnavailable = (): GraphQLError =>
+  taskError(
+    'STOP_SIGNAL_UNAVAILABLE',
+    'Stop signals cannot be set yet: a stopped worker would not be told (R95), because the stop-notice lane is not in effect (hadron-server#2169). ' +
+      'The refusal lifts when the notice lane is turned on. Lifting a signal and listing signals still work.',
+  );
+const requireNoticeLane = (): void => { if (!s6NoticesAvailable()) throw stopSignalUnavailable(); };
+
 const notFound = (): GraphQLError => taskError('STOP_SIGNAL_NOT_FOUND', 'No stop signal with that id in this App.');
 const targetNotFound = (): GraphQLError => taskError('STOP_SIGNAL_NOT_FOUND', 'No such worker or host in this App.');
 const managerRequired = (): GraphQLError =>
@@ -186,6 +203,7 @@ async function setSignal(input: SetTeamStopSignalInput, ctx: Context): Promise<S
       const { app, host, authorize } = await hostKeyEntry(ctx, input.appRef);
       if (level !== 'halt' || scope !== 'host') throw scopeForbidden();
       if (hostRef && hostRef !== host.hostId) throw hostScopeRequired();
+      requireNoticeLane(); // #2173: after the key's own gates, inside the recorded call, so the refusal is a recorded stop use
       const view = await ctx.db.$transaction(async (tx) => {
         await authorize(tx);
         await lockStopFence(tx, app.id, 'exclusive');
@@ -210,6 +228,7 @@ async function setSignal(input: SetTeamStopSignalInput, ctx: Context): Promise<S
   const { app, actor } = await personEntry(ctx, input.appRef);
   const view = await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
     if (!(await actorManagesApp(txCtx, fresh, actor))) throw managerRequired();
+    requireNoticeLane(); // #2173: after the manager gate, before anything is read or written
     const now = new Date();
     const until = parseUntil(input.until, now);
     const targetWorkerId = scope === 'host' ? null : await targetWorker(txCtx, fresh.id, workerRef as string);

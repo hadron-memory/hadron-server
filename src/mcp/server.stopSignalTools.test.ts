@@ -5,13 +5,14 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
  * #1697/#1701); a worker's session is refused by the resolver with the GraphQL code; the list reads without a session;
  * refusals arrive as `[code] message` envelopes.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { createTestableMcpServer } from './server.js';
 import { STOP_SIGNAL_WRITE_TOOLS } from './stopSignalTools.js';
+import { setS6NoticesAvailableForTest } from '../lib/stopSignals/delivery.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -42,7 +43,9 @@ beforeEach(async () => {
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: holder.id, role: 'owner' } });
   anne = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Anne', slug: 'anne', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
+  setS6NoticesAvailableForTest(true); // #2173: setting a signal is refused while the notice lane is off; these tests need it on
 });
+afterEach(() => setS6NoticesAvailableForTest(false));
 
 describe('stop-signal tools', () => {
   it('every write refuses without a session, and writes nothing', async () => {
@@ -71,5 +74,19 @@ describe('stop-signal tools', () => {
     const r = text(await mcp(authOf(holder.id)).callTool('hadron_stop_signal_set', { appRef: app.id, level: 'PAUSE_DISPATCH', scope: 'TEAM', worker: 'Anne', session: asAnne.id }));
     expect(code(r)).toBe('APP_MANAGER_REQUIRED');
     expect(await db.teamStopSignal.count()).toBe(0);
+  });
+
+  it('#2173: with the notice lane off, hadron_stop_signal_set answers [stop_signal_unavailable] (the GraphQL code), writes nothing, and lift still works', async () => {
+    const s = mcp(authOf(admin.id));
+    const plain = await session({ userId: admin.id });
+    const made = text(await s.callTool('hadron_stop_signal_set', { appRef: app.id, level: 'PAUSE', scope: 'WORKER', worker: 'Anne', session: plain.id })); // lane on
+    const id = /^- (\S+)/.exec(made)![1];
+    setS6NoticesAvailableForTest(false);
+    for (const level of ['PAUSE_DISPATCH', 'PAUSE', 'HALT']) {
+      const r = text(await s.callTool('hadron_stop_signal_set', { appRef: app.id, level, scope: 'TEAM', worker: 'Anne', session: plain.id }));
+      expect({ level, code: code(r) }).toEqual({ level, code: 'STOP_SIGNAL_UNAVAILABLE' });
+    }
+    expect(await db.teamStopSignal.count()).toBe(1); // only the one recorded before
+    expect(text(await s.callTool('hadron_stop_signal_lift', { appRef: app.id, id, session: plain.id }))).toMatch(/^lifted\n/);
   });
 });

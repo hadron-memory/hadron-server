@@ -155,7 +155,8 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
     'Set a STOP SIGNAL on an App (cor:agt:090): PAUSE_DISPATCH stops assignment; PAUSE also stops ticks and stall time; ' +
       'HALT also interrupts (its notices are recorded but not yet delivered, so no interrupt happens yet). Scope WORKER (one worker), TEAM (a head and its whole reporting tree) or HOST (the workers a ' +
       'host registration lists). Whoever manages the App, any level and scope; a host key, a HALT on its own host only. ' +
-      'Never replaces another signal.',
+      'Never replaces another signal. NOT AVAILABLE YET (R95, #2173): until the stop-notice lane is in effect (#2169) every set is refused with ' +
+      'STOP_SIGNAL_UNAVAILABLE, because a stopped worker would not be told; lifting and listing still work.',
     {
       appRef,
       level: z.enum(['PAUSE_DISPATCH', 'PAUSE', 'HALT']),
