@@ -257,15 +257,16 @@ export async function completeSigningRequestInTransaction(
   if (!node || computeApprovalHash(approvalFieldsOf(node, null)) !== row.approvalHash) {
     throw new SigningRefusal('SIGNING_REQUEST_ENDED', 'The node changed since this signature was requested.', { state: 'STALE' });
   }
-  const [credential] = await tx.$queryRaw<Array<{ id: string; owner_id: string; credential_id: Buffer; public_key: Buffer; counter: bigint; revoked_at: Date | null }>>`
-    SELECT id, owner_id, credential_id, public_key, counter, revoked_at FROM passkey_credentials
+  const [credential] = await tx.$queryRaw<Array<{ id: string; owner_id: string; credential_id: Buffer; public_key: Buffer; counter: bigint; revoked_at: Date | null; enrollment_rp_id: string }>>`
+    SELECT id, owner_id, credential_id, public_key, counter, revoked_at, enrollment_rp_id FROM passkey_credentials
      WHERE credential_id = ${opts.credentialId} FOR UPDATE`;
-  // SEC-6: the credential's owner is the person signing; never the userHandle.
-  if (!credential || credential.owner_id !== opts.signerId || credential.revoked_at !== null) {
+  const rpId = passkeyRpId();
+  // SEC-6: the credential's owner is the person signing; never the userHandle. A credential
+  // enrolled under another RP ID never counts here (#1631 PR1b, Eden #10470; cor:aut:040:06).
+  if (!credential || credential.owner_id !== opts.signerId || credential.revoked_at !== null || credential.enrollment_rp_id !== rpId) {
     throw new SigningRefusal('SIGNATURE_NOT_VERIFIED', 'The signature did not verify.');
   }
   const payload = signaturePayloadBytes(row.payloadVersion, { nodeId: row.nodeId, approvalHash: row.approvalHash, requestId: row.id });
-  const rpId = passkeyRpId();
   let newCounter: number;
   try {
     ({ newCounter } = await verifySigningAssertion({
