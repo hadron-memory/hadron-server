@@ -386,6 +386,31 @@ export async function sendCeremonySignInLink(to: string, verifyUrl: string): Pro
   assertProviderAck(result);
 }
 
+/** What a passkey registration notice says (cor:aut:040:02). */
+export interface PasskeyNoticeContent {
+  kind: 'first' | 'later';
+  label: string;
+  registeredAt: Date;
+  /** A first passkey's cancel link (cor:aut:040:07-08); absent for a later one. */
+  cancelUrl?: string;
+  windowEndsAt?: Date;
+}
+
+/**
+ * #1631 PR2: the registration notice's subject and HTML. Pure, so its escaping and its cancel link are pinned without a
+ * mail provider. The label is the user's input and is escaped (Rook, #1631 6316353964).
+ */
+export function passkeyNoticeEmail(n: PasskeyNoticeContent): { subject: string; html: string } {
+  throw new Error('not implemented');
+}
+
+/** Send a registration notice. Throws when the provider refuses, so the caller can count a try. */
+export async function sendPasskeyRegisteredNotice(to: string, n: PasskeyNoticeContent): Promise<void> {
+  const { subject, html } = passkeyNoticeEmail(n);
+  const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
+  assertProviderAck(await getResend().emails.send({ from: fromAddress, to, subject, html }));
+}
+
 export async function verifyMagicLink(
   token: string,
   db: PrismaClient,

@@ -41,6 +41,7 @@ CREATE TABLE "passkey_registration_notices" (
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
     "attempts" INTEGER NOT NULL DEFAULT 0,
     "lease_until" TIMESTAMP(3),
+    "claim_token" TEXT,
     "sent_at" TIMESTAMP(3),
     "failed_at" TIMESTAMP(3),
     "seen_at" TIMESTAMP(3),
