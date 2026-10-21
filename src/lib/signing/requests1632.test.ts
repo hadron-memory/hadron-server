@@ -343,7 +343,7 @@ describe('signature state on read (cor:dmo:130:04)', () => {
 
   it('a first passkey\'s signature reads PENDING while its window is open', async () => {
     key = softPasskey();
-    await db.$executeRaw`TRUNCATE TABLE node_signatures, signing_requests, passkey_credentials`;
+    await db.$executeRaw`TRUNCATE TABLE node_signatures, signing_requests, sign_ins, passkey_credentials CASCADE`;
     await insertSoftPasskey(db, signerId, key, { firstWindow: true });
     await complete(await create());
     expect((await status()).signatures[0].state).toBe('PENDING');

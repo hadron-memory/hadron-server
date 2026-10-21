@@ -26,7 +26,7 @@ import {
   RoleGovernedError,
   GOVERNED_KINDS,
 } from '../lib/governedRole.js';
-import { assertRoleWritersForNodes, assertRoleWritersForWrite, roleWriterRefusalText } from '../lib/nodeRoleWriters.js';
+import { assertEdgeSourceWritersById, assertRoleWritersForNodes, assertRoleWritersForWrite, roleWriterRefusalText } from '../lib/nodeRoleWriters.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import {
@@ -880,6 +880,14 @@ export async function addEdge(args: {
     }
     if (!(await canReadMemory(tx as typeof db, auth, target.memoryId, EXPLICIT_REF))) {
       return `Edge target not found: "${rawTarget}"`;
+    }
+    // Writer level of the source node, on the locked source.
+    try {
+      await assertEdgeSourceWritersById(tx, auth, locked.source.id);
+    } catch (e) {
+      const text = roleWriterRefusalText(e);
+      if (text) return text;
+      throw e;
     }
 
     // ON CONFLICT DO NOTHING is race-safe for simultaneous first creates.
@@ -3471,7 +3479,7 @@ export function createMcpServerInstance(
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
-    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -4035,13 +4043,30 @@ export function createMcpServerInstance(
           // insert trigger; a tombstone is left as the upsert leaves it.
           const prior = await tx.node.findUnique({
             where: { loc_memoryId: { loc, memoryId } },
-            select: { id: true, deletedAt: true, role: true },
+            select: { id: true, deletedAt: true, role: true, isRunnable: true },
           });
           let sectionChanged = false;
           // #1331 — an existing section keeps its role through this write, so the
           // role's writer level applies to the edit (and to reviving a tombstone).
           if (prior) {
-            await assertRoleWritersForWrite(tx, auth, memoryId, { priorRole: prior.role, nextRole: prior.role });
+            // Lock the section row first (live or tombstone: node before rulebook), then judge its locked state. The
+            // probe above is only a fast refusal; the generic owning-operation refusal is re-applied on the locked row.
+            await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
+            const lockedSection = await tx.node.findUniqueOrThrow({
+              where: { id: prior.id },
+              select: { loc: true, memoryId: true, role: true, isRunnable: true, nodeType: true },
+            });
+            if (lockedSection.loc !== loc || lockedSection.memoryId !== memoryId) {
+              throw new NodeMovedDuringWriteError(
+                `[write_conflict] the section at "${loc}" moved while this write waited — re-read and retry.`,
+              );
+            }
+            assertNotCommentWrite(lockedSection.nodeType, undefined, 'update');
+            assertGovernedWrite(lockedSection, mergedGovernedState(lockedSection, {}), 'update');
+            await assertRoleWritersForWrite(tx, auth, memoryId, {
+              priorRole: lockedSection.role, nextRole: lockedSection.role,
+              priorRunnable: lockedSection.isRunnable, nextRunnable: lockedSection.isRunnable,
+            });
           }
           if (prior && !prior.deletedAt) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
@@ -4094,6 +4119,7 @@ export function createMcpServerInstance(
         if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
         const includeText = includeRefusalText(e);
         if (includeText) return textResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
@@ -4334,7 +4360,7 @@ export function createMcpServerInstance(
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -4400,7 +4426,12 @@ export function createMcpServerInstance(
       } catch (e) {
         // findNodes throws BAD_USER_INPUT for a malformed boolean query, an
         // invalid regex, etc. The MCP contract surfaces tool errors as text.
-        return textResult(e instanceof Error ? e.message : 'Search failed.');
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === 'BAD_USER_INPUT') return textResult(e.message);
+        // #415: anything else, such as a regex statement the database
+        // cancelled at its budget, goes through the #1695 boundary, so a
+        // Prisma message (driver internals, the SQL shape) never reaches the
+        // caller.
+        return toolErrorResult(e, () => (e instanceof Error ? e.message : 'Search failed.'), 'hadron_find_nodes');
       }
       const memoryUrnOf = memoizedMemoryUrnLookup();
 
@@ -6326,6 +6357,8 @@ export function createMcpServerInstance(
           await assertRoleWritersForWrite(tx, auth, memoryId, {
             priorRole: pre?.role ?? null,
             nextRole: role === undefined ? (pre?.role ?? null) : role,
+            priorRunnable: pre?.isRunnable ?? null,
+            nextRunnable: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
           });
           // #1460 — the locked tombstone can retain vectors from its old
           // plaintext. Purge both kinds before the upsert makes it searchable.
@@ -6763,6 +6796,8 @@ export function createMcpServerInstance(
             await assertRoleWritersForWrite(tx, auth, memory.id, {
               priorRole: current.role,
               nextRole: role === undefined ? current.role : role,
+              priorRunnable: current.isRunnable,
+              nextRunnable: mergedGovernedState(current, { role, isRunnable }).isRunnable,
             });
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
@@ -6896,7 +6931,7 @@ export function createMcpServerInstance(
     userId: auth.userId ?? undefined,
     // #1868: the presented hdr_user_ key, for any gate on the door's path that
     // re-checks it (consistency with the other delegating contexts).
-    apiKeyId: auth.apiKeyId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -7114,7 +7149,7 @@ export function createMcpServerInstance(
         governedCanReplay: () => true,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -7149,7 +7184,7 @@ export function createMcpServerInstance(
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
-    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -7290,7 +7325,7 @@ export function createMcpServerInstance(
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -7424,7 +7459,7 @@ export function createMcpServerInstance(
           )}`,
         );
       } catch (err) {
-        return textResult(String((err as Error)?.message ?? err));
+        return textResult(roleWriterRefusalText(err) ?? String((err as Error)?.message ?? err));
       }
     },
   );
@@ -7440,7 +7475,7 @@ export function createMcpServerInstance(
         await resolvers.Mutation.deleteEdge({}, { edgeRef }, objectCtx());
         return textResult(`Edge deleted: ${edgeRef}`);
       } catch (err) {
-        return textResult(String((err as Error)?.message ?? err));
+        return textResult(roleWriterRefusalText(err) ?? String((err as Error)?.message ?? err));
       }
     },
   );
@@ -8733,7 +8768,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -9046,7 +9081,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -9099,7 +9134,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -9133,7 +9168,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -9272,7 +9307,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           db,
           clientId: auth.clientId ?? undefined,
           userId: auth.userId ?? undefined,
-          apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+          apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
           appId: auth.appId ?? undefined,
           sessionId: auth.sessionId ?? undefined,
           roles: auth.roles as Context['roles'],
@@ -9615,7 +9650,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           db,
           clientId: auth.clientId ?? undefined,
           userId: auth.userId ?? undefined,
-          apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+          apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
           appId: auth.appId ?? undefined,
           sessionId: auth.sessionId ?? undefined,
           roles: auth.roles as Context['roles'],
@@ -9655,7 +9690,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
-    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -10205,7 +10240,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -10556,7 +10591,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -10784,7 +10819,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -10964,7 +10999,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
     async ({ workerRef, confirmNoExternalAttribution }) => {
       const ctx: Context = {
         db, userId: auth.userId ?? undefined, appId: auth.appId ?? undefined,
-        clientId: auth.clientId ?? undefined, apiKeyId: auth.apiKeyId ?? undefined,
+        clientId: auth.clientId ?? undefined, apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
         sessionId: auth.sessionId ?? undefined, organizationId: auth.organizationId ?? undefined,
         roles: auth.roles as Context['roles'],
       };
@@ -11033,7 +11068,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         sessionBindingRefused: auth.sessionBindingRefused,
@@ -11114,7 +11149,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -11180,7 +11215,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -11294,7 +11329,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],

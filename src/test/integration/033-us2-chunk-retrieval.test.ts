@@ -70,8 +70,15 @@ function adminCtx(): GqlContext {
   return { db, roles: ['ADMIN'], userId: adminId };
 }
 
-beforeEach(async () => {
+/**
+ * Each test's fixture: an empty database, then one chunk-indexed memory.
+ * #2201 — the VACUUM drops the dead HNSW entries earlier files leave behind
+ * (`cleanDb` deletes rows, which never shrinks the graph); without it an HNSW
+ * plan can return no passages while live chunks exist.
+ */
+async function setUpSuite(): Promise<void> {
   await cleanDb(db);
+  await db.$executeRawUnsafe('VACUUM node_embeddings');
   process.env.EMBEDDING_API_URL = 'http://stub.local/api/embed';
 
   orgUrn = `us2-org-${generateId().slice(0, 8)}`;
@@ -99,7 +106,9 @@ beforeEach(async () => {
     },
   });
   memId = mem.id;
-});
+}
+
+beforeEach(setUpSuite);
 
 afterAll(() => {
   resetEmbeddingClientForTests();
@@ -333,5 +342,70 @@ describe('US2 — granularity:chunk rejection (PR-225 review)', () => {
     expect(((await call()).passages as unknown[]).length).toBeGreaterThan(0);
     // A floor above any cosine similarity (which is <= 1) drops them all.
     expect((await call(2)).passages).toEqual([]);
+  });
+});
+
+/**
+ * #2201 — `cleanDb` removes vectors by cascaded DELETE, so every earlier file in
+ * the worker's database leaves dead entries in the HNSW graph. On an HNSW plan
+ * pgvector fills `ef_search` from the graph before dead rows are dropped, so
+ * dead entries nearer the query than this file's orthogonal chunks empty the
+ * baseline searches above. Forcing the plan makes the CI flake deterministic.
+ */
+describe('#2201 — dead index entries from earlier files never empty the baseline', () => {
+  const PREFER_HNSW = 'SET LOCAL enable_sort = off';
+  /** `adminCtx()` whose ANN transaction prefers the HNSW index, as the planner may on CI. */
+  const hnswCtx = (): GqlContext => ({
+    ...adminCtx(),
+    db: new Proxy(db, {
+      get(target, prop) {
+        const v = Reflect.get(target, prop);
+        if (prop !== '$transaction') return typeof v === 'function' ? v.bind(target) : v;
+        return (arg: unknown, opts?: unknown) =>
+          typeof arg !== 'function'
+            ? (target.$transaction as any)(arg, opts)
+            : (target.$transaction as any)(async (tx: any) => {
+                await tx.$executeRawUnsafe(PREFER_HNSW);
+                return (arg as (tx: unknown) => unknown)(tx);
+              }, opts);
+      },
+    }),
+  });
+
+  /** Leaves `n` dead chunk vectors equal to `vec`, as an earlier file's cleanup does. */
+  async function leaveDeadVectors(n: number, vec: number[]): Promise<void> {
+    const nodeId = generateId();
+    await db.node.create({ data: { id: nodeId, memoryId: memId, loc: 'earlier-file', name: 'earlier-file', content: 'x' } });
+    await db.$executeRawUnsafe(
+      `INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, chunk_index, char_start, char_end, chunk_text, embedding)
+       SELECT md5(random()::text || g::text), $1, $2, 'chunk', 'test', 'stub-model', ${DIM}, g, 0, 1, 'x', $3::vector
+       FROM generate_series(1, ${n}) g`,
+      nodeId, memId, `[${vec.join(',')}]`,
+    );
+    await db.node.delete({ where: { id: nodeId } });
+    const [{ n: live }] = await db.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM node_embeddings WHERE node_id = ${nodeId}`;
+    expect(live).toBe(0);
+  }
+
+  it('the HNSW-preferring handle reaches the index, so the pin below tests what it names', async () => {
+    const plan = await hnswCtx().db.$transaction((tx) => tx.$queryRawUnsafe<{ 'QUERY PLAN': string }[]>(
+      `EXPLAIN SELECT ne.node_id FROM node_embeddings ne JOIN nodes n ON n.id = ne.node_id
+       WHERE ne.memory_id = '${memId}' AND ne.kind = 'chunk' ORDER BY ne.embedding <=> '[${oneHot(56).join(',')}]'::vector LIMIT 100`));
+    expect(plan.map((r) => r['QUERY PLAN']).join('\n')).toContain('node_embeddings_embedding_hnsw');
+  });
+
+  it('on the HNSW plan, the suite setup leaves passages findable after 400 dead exact-match vectors', async () => {
+    // 'anything' embeds to oneHot(56) under the stub's length fallback; dead
+    // vectors at distance 0 outrank the live chunks, which sit at distance 1.
+    await leaveDeadVectors(400, oneHot(56));
+    await setUpSuite();
+    setEmbeddingClientForTests(stubClient({}));
+    await seedNodeWithChunks('after-dead', '# A\nbody.\n\n## B\nmore.');
+    const result = await resolvers.Query.findNodes(
+      {},
+      { query: 'anything', filter: { memoryIds: [memUrn] }, mode: 'vector', granularity: 'chunk' },
+      hnswCtx(),
+    );
+    expect((result.passages as unknown[]).length).toBeGreaterThan(0);
   });
 });
