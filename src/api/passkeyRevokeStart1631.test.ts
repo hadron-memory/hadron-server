@@ -115,6 +115,23 @@ describe('#1631 revoke/start proof by existing passkey', () => {
     expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: passkeyId } })).counter).toBe(0n);
   });
 
+  it('refuses a credential enrolled under another RP ID, even with a valid assertion for this one, consuming nothing (#1631 PR1b)', async () => {
+    const owner = await db.user.create({ data: { handle: 'moved-owner', roles: [] } });
+    const moved = softPasskey();
+    const movedId = await insertSoftPasskey(db, owner.id, moved, { rpId: 'old.example' });
+    const c = await challenge();
+    const a = moved.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(c.ch, 'base64url'), origin: ORIGIN, rpId: 'example.test', counter: 1 });
+    const r = await start(JSON.stringify({
+      ceremonyId: c.ceremonyId, credentialId: moved.credentialId.toString('base64url'),
+      authenticatorData: a.authenticatorData.toString('base64url'), clientDataJson: a.clientDataJson.toString('base64url'), signature: a.signature.toString('base64url'),
+    }), c.cookie);
+    expect(r.status).toBe(403);
+    expect(await r.text()).toBe('{"error":"forbidden"}');
+    const [row] = await db.$queryRaw<Array<{ consumed_at: Date | null }>>`SELECT consumed_at FROM passkey_ceremonies WHERE id = ${c.ceremonyId}`;
+    expect(row.consumed_at).toBeNull();
+    expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: movedId } })).counter).toBe(0n);
+  });
+
   it('keeps register/start refusing everyone, even with a valid proof', async () => {
     const c = await challenge();
     const r = await fetch(`${base}/passkeys/register/start`, {
