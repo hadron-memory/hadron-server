@@ -71,6 +71,7 @@ import { isId } from './entityRef/shape.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
 import type { MemorySchema } from './memorySchema.js';
 import { clearNodeAuthorship } from './nodeAuthorship.js';
+import { memoryIsVectorIndexed } from './embedding/indexing.js';
 import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
@@ -485,7 +486,7 @@ export async function moveNodeSubtree(
       tx.memory.findUnique({ where: { id: srcMemoryId }, select: { isEncrypted: true, source: true } }),
       tx.memory.findUnique({
         where: { id: destMemoryId },
-        select: { isEncrypted: true, source: true, vectorIndexEnabled: true, schema: true },
+        select: { isEncrypted: true, source: true, vectorIndexEnabled: true, class: true, schema: true },
       }),
     ]);
     // Encryption: v1 refuses a cross-memory move touching an encrypted memory
@@ -551,7 +552,7 @@ export async function moveNodeSubtree(
           'and a chat is bound to the memory that hosts it. Move it within its memory.',
       );
     }
-    destVectorIndexEnabled = destMem?.vectorIndexEnabled ?? false;
+    destVectorIndexEnabled = destMem ? memoryIsVectorIndexed(destMem) : false;
     // Schema: a schema-governed destination rejects nodes with undeclared
     // objectType / invalid properties — the same enforceNodeSchemaOnWrite gate
     // every normal write applies. Validate every moved node up front.

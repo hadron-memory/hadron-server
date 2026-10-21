@@ -8833,6 +8833,17 @@ export const typeDefs = `#graphql
     in, alike), APP_UNINSTALLED, FORBIDDEN (impersonation), BAD_USER_INPUT.
     Every write re-checks the caller's participation and the App's state
     inside its transaction.
+    #2198 (experiment): createAgentTask, assignAgentTask, reassignAgentTask and
+    finishAgentTask may succeed WITH warnings, in the response's
+    \`extensions.warnings\` (not in \`errors\`): a list of
+    { path (the mutation's response key), code, text, register? }. Codes are a
+    closed list per release (task.create.no-source, task.assign.assignee-unavailable,
+    task.assign.assignee-busy, task.assign.assignee-paused,
+    task.finish.open-children); a client must tolerate unknown codes. \`text\` is
+    fixed per code. \`register\` appears only for a caller that has an Agent:
+    { state: mapped (taskLoc, taskUrn) | unmapped | unresolved }. A warning never
+    blocks and never reveals another worker's state to a caller who could not
+    already see it on the roster.
     """
     createAgentTask(input: CreateAgentTaskInput!): AgentTask!
 

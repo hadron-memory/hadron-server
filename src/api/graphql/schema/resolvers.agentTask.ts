@@ -98,6 +98,8 @@ import {
   type TaskParty,
 } from '../../../lib/agentTasks/events.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import { emitTaskWarnings, readAssigneeFacts, type TaskWarningCode } from './resolvers.taskWarnings.js';
+import type { GraphQLResolveInfo } from 'graphql';
 
 // ── Limits ────────────────────────────────────────────────────────────────
 
@@ -847,7 +849,7 @@ export const agentTaskMutations = {
    * not under an ended parent (TASK_ENDED, 050:07 open question; #1705
    * interim).
    */
-  createAgentTask: async (_: unknown, { input }: { input: CreateInput }, ctx: Context) => {
+  createAgentTask: async (_: unknown, { input }: { input: CreateInput }, ctx: Context, info?: GraphQLResolveInfo) => {
     if (!input) throw badInput('input is required.');
     const parentId = input.parentTaskId?.trim() || null;
     let app: TaskApp;
@@ -921,6 +923,8 @@ export const agentTaskMutations = {
     };
 
     const refused = parentId ? () => notFound(parentId) : () => appNotFound(input.appRef as string);
+    // #2198: advice decided inside the write transaction, filed after it commits.
+    const warn: TaskWarningCode[] = source === null ? ['task.create.no-source'] : [];
     const made = await inTaskWriteTx(ctx, app, actor, refused, async (tx, txCtx, app) => {
       if (parentId) {
         // Lock the parent so its assignee and status can't move under us,
@@ -933,6 +937,7 @@ export const agentTaskMutations = {
         refuseEnded(parent);
       }
       const { requirements, owner, assignee } = await resolveParties(txCtx, app);
+      await assigneeAdvice(tx, app.id, assignee, null, warn);
       return insertTask(tx, {
         app, parentId, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee, status,
         created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
@@ -944,6 +949,7 @@ export const agentTaskMutations = {
     const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
     // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
     await launchAssignee(ctx.db, created);
+    await emitTaskWarnings(ctx, info, created.appId, { codes: warn });
     return created;
   },
 
@@ -958,8 +964,10 @@ export const agentTaskMutations = {
     _: unknown,
     { taskId, assignee, closeSessionWhenDone }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null },
     ctx: Context,
+    info?: GraphQLResolveInfo,
   ) => {
     let party: TaskParty | null = null;
+    const warn: TaskWarningCode[] = [];
     const assigned = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, assigns it.", { taskId });
@@ -971,6 +979,7 @@ export const agentTaskMutations = {
       party ??= await resolveParty(txCtx, app, assignee, 'TASK_ASSIGNEE_INVALID');
       // #2022 (cor:agt:090:03): never to a worker a live stop signal covers.
       if (party.workerId) await refuseStoppedAssignee(tx, app.id, party.workerId, new Date(), task.id);
+      await assigneeAdvice(tx, app.id, party, task.id, warn);
       const close = closeSessionWhenDone ?? task.closeSessionWhenDone;
       // #1754 (cor:agt:050:02): assigning a backlog task makes it ready work.
       // The write is a guarded updateMany on the consumed state (no assignee,
@@ -1005,6 +1014,7 @@ export const agentTaskMutations = {
     });
     // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no live session through its host.
     await launchAssignee(ctx.db, assigned);
+    await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn });
     return assigned;
   },
 
@@ -1087,8 +1097,10 @@ export const agentTaskMutations = {
     _: unknown,
     { taskId, assignee, closeSessionWhenDone }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null },
     ctx: Context,
+    info?: GraphQLResolveInfo,
   ) => {
     let party: TaskParty | null = null;
+    const warn: TaskWarningCode[] = [];
     const reassigned = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, reassigns it.", { taskId });
@@ -1104,6 +1116,7 @@ export const agentTaskMutations = {
       }
       // #2022 (cor:agt:090:03): never to a worker a live stop signal covers; moving it away is not refused.
       if (party.workerId) await refuseStoppedAssignee(tx, app.id, party.workerId, new Date(), task.id);
+      await assigneeAdvice(tx, app.id, party, task.id, warn);
       const close = closeSessionWhenDone ?? task.closeSessionWhenDone;
       await tx.agentTask.update({
         where: { id: task.id },
@@ -1115,6 +1128,7 @@ export const agentTaskMutations = {
       });
     });
     await launchAssignee(ctx.db, reassigned);
+    await emitTaskWarnings(ctx, info, reassigned.appId, { codes: warn });
     return reassigned;
   },
 
@@ -1162,6 +1176,7 @@ export const agentTaskMutations = {
     _: unknown,
     { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null } },
     ctx: Context,
+    info?: GraphQLResolveInfo,
   ) => {
     const outcome = (result?.outcome ?? '').trim();
     if (!TASK_OUTCOME_PATTERN.test(outcome)) {
@@ -1169,6 +1184,7 @@ export const agentTaskMutations = {
     }
     const summary = optionalText(result?.summary, TASK_SUMMARY_MAX, 'summary');
     const evidence = optionalText(result?.evidence, TASK_EVIDENCE_MAX, 'evidence');
+    const warn: TaskWarningCode[] = [];
     const finished = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
         throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee finishes it and sets its result.", { taskId });
@@ -1177,6 +1193,8 @@ export const agentTaskMutations = {
       if (task.status !== 'started') {
         throw taskError('TASK_INVALID_TRANSITION', 'Start the task before finishing it.', { taskId, status: task.status });
       }
+      // #2198: finishing with open children still succeeds (as it always has); the response says so.
+      if ((await tx.agentTask.count({ where: { parentTaskId: task.id, status: { in: OPEN } } })) > 0) warn.push('task.finish.open-children');
       await tx.agentTask.update({
         where: { id: task.id },
         data: {
@@ -1193,6 +1211,7 @@ export const agentTaskMutations = {
     });
     // #1707: a worker may have freed up (cor:agt:060:06).
     await matchAfterChange(ctx.db, finished.appId);
+    await emitTaskWarnings(ctx, info, finished.appId, { codes: warn });
     return finished;
   },
 
@@ -1223,6 +1242,26 @@ export const agentTaskMutations = {
     return cancelled;
   },
 };
+
+/**
+ * #2198: the advice an assignment earns, read in the write transaction: `unavailable`, `busy` and `paused` are pushed
+ * onto `warn` (the privacy gate is applied after commit). Nothing for a user assignee, no assignee, or the caller
+ * itself (a worker taking work for itself is not advised about its own state).
+ */
+async function assigneeAdvice(
+  tx: Prisma.TransactionClient,
+  appId: string,
+  assignee: TaskParty | null,
+  excludeTaskId: string | null,
+  warn: TaskWarningCode[],
+): Promise<void> {
+  const workerId = assignee?.workerId ?? null;
+  if (!workerId || workerId === currentActor().workerId) return;
+  const facts = await readAssigneeFacts(tx, { appId, workerId, excludeTaskId, now: new Date() });
+  if (facts.unavailable) warn.push('task.assign.assignee-unavailable');
+  if (facts.busy) warn.push('task.assign.assignee-busy');
+  if (facts.paused) warn.push('task.assign.assignee-paused');
+}
 
 /**
  * #1709 (cor:agt:070:08; Holger via Vera #10773 (6): assignment by hand launches too, not only matching). After the

@@ -4131,6 +4131,10 @@ model PasskeyCredential {
   algorithm          Int
   /// Random authenticator user handle, not an email, User.id or session bearer.
   userHandle         Bytes     @map("user_handle")
+  /// The WebAuthn RP ID the credential was registered under (Eden #10470), recorded at
+  /// enrollment and immutable. Never inferred from the current PASSKEY_RP_ID: an assertion
+  /// counts only while it equals the deployment's RP ID (cor:aut:040:06).
+  enrollmentRpId     String    @map("enrollment_rp_id")
   label              String
   registeredAt       DateTime  @default(dbgenerated("(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)")) @map("registered_at")
   lastUsedAt         DateTime? @map("last_used_at")

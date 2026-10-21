@@ -237,6 +237,18 @@ describe('complete: server-side verification, one record, one end (cor:dmo:130:0
     expect((await refusal(complete(req))).code).toBe('SIGNATURE_NOT_VERIFIED');
   });
 
+  it('refuses the signer\'s own passkey enrolled under another RP ID, even with a valid assertion for this one (#1631 PR1b)', async () => {
+    const req = await create();
+    const moved = softPasskey();
+    await insertSoftPasskey(db, signerId, moved, { rpId: 'old.example' });
+    expect((await refusal(complete(req, { credentialId: moved.credentialId,
+      assertion: moved.assert({ payload: signaturePayloadBytes(SIGNATURE_PAYLOAD_V1, req), origin: ORIGIN, rpId: RP }) }))).code)
+      .toBe('SIGNATURE_NOT_VERIFIED');
+    expect((await db.signingRequest.findUniqueOrThrow({ where: { id: req.id } })).state).toBe('open');
+    // Control: the same request completes with the passkey enrolled under this RP ID.
+    expect((await complete(req)).state).toBe('completed');
+  });
+
   it('only a writer of the memory, and only the named signer, may sign', async () => {
     const req = await create();
     expect((await refusal(complete(req, { mayWrite: notWriter }))).code).toBe('SIGNER_NOT_ELIGIBLE');

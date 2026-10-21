@@ -27,7 +27,7 @@ import {
   type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
-import { assertRoleWritersForWrite, roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
+import { assertEdgeSourceWritersById, assertRoleWritersForWrite, lockEdgeUnderSourceWriters, roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../../lib/specCorpus.js';
 import { carryGovernedSignals } from '../../../lib/governedSignals.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
@@ -157,6 +157,7 @@ import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
+import { memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
 
 /**
  * #1606 (cor:dmo:110:01/04) — no generic edge write alters or removes a
@@ -1220,7 +1221,11 @@ async function writeNodeCoreRaw(
             // #1331 — the writer level of the role before AND after, on the locked row.
             await assertRoleWritersForWrite(
               tx, ctx, input.memoryId,
-              { priorRole: current.role, nextRole: input.role === undefined ? current.role : input.role },
+              {
+                priorRole: current.role, nextRole: input.role === undefined ? current.role : input.role,
+                priorRunnable: current.isRunnable,
+                nextRunnable: mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+              },
               { platformWrite: opts?.platformWrite },
             );
 
@@ -1529,7 +1534,11 @@ async function writeNodeCoreRaw(
             // #1331 — the writer level of the role before AND after, on the locked row.
             await assertRoleWritersForWrite(
               tx, ctx, input.memoryId,
-              { priorRole: authoritative?.role ?? null, nextRole: input.role === undefined ? (authoritative?.role ?? null) : input.role },
+              {
+                priorRole: authoritative?.role ?? null, nextRole: input.role === undefined ? (authoritative?.role ?? null) : input.role,
+                priorRunnable: authoritative?.isRunnable ?? null,
+                nextRunnable: mergedGovernedState(authoritative, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+              },
               { platformWrite: opts?.platformWrite },
             );
 
@@ -1542,11 +1551,11 @@ async function writeNodeCoreRaw(
             if (reviving && authoritative) {
               await tx.nodeEmbedding.deleteMany({ where: { nodeId: authoritative.id } });
               const indexed = await tx.memory.findUniqueOrThrow({
-                where: { id: input.memoryId }, select: { vectorIndexEnabled: true },
+                where: { id: input.memoryId }, select: { vectorIndexEnabled: true, class: true },
               });
               // Invalidate an old embed before post-commit enqueue runs.
               // Unindexed memories keep the normal null pending marker.
-              revivedPendingAt = pendingAtForRevival(authoritative.embeddingPendingAt, indexed.vectorIndexEnabled);
+              revivedPendingAt = pendingAtForRevival(authoritative.embeddingPendingAt, memoryIsVectorIndexed(indexed));
             }
 
             // #1183 — resurrect from the AUTHORITATIVE row, not the stale
@@ -2670,8 +2679,10 @@ export const nodeMutations = {
       // Judged again under the lock in the write pass.
       for (let i = scannedNodes.length - 1; i >= 0; i--) {
         const row = scannedNodes[i]!;
-        if (!row.role) continue;
-        if (await roleWritersRefusal(ctx.db, ctx, row.memoryId, { priorRole: row.role, nextRole: row.role })) {
+        if (!row.role && row.isRunnable !== true) continue;
+        if (await roleWritersRefusal(ctx.db, ctx, row.memoryId, {
+          priorRole: row.role, nextRole: row.role, priorRunnable: row.isRunnable, nextRunnable: row.isRunnable,
+        })) {
           skipCounts.governed += 1;
           scannedNodes.splice(i, 1);
         }
@@ -2872,12 +2883,16 @@ export const nodeMutations = {
         // rule tightened, or its role changed, since selection) is dropped.
         for (const memoryId of [...plannedEncryption.keys()].sort()) await lockMemoryConfigShared(tx, memoryId);
         const lockedRoles = new Map((await tx.node.findMany({
-          where: { id: { in: [...planMemory.keys()] } }, select: { id: true, role: true },
-        })).map((r) => [r.id, r.role] as const));
+          where: { id: { in: [...planMemory.keys()] } }, select: { id: true, role: true, isRunnable: true },
+        })).map((r) => [r.id, r] as const));
         for (let i = plans.length - 1; i >= 0; i--) {
           const plan = plans[i]!;
-          const role = lockedRoles.get(plan.raw.id) ?? null;
-          if (role && await roleWritersRefusal(tx, ctx, plan.raw.memoryId, { priorRole: role, nextRole: role })) {
+          const locked = lockedRoles.get(plan.raw.id);
+          const role = locked?.role ?? null;
+          const runnable = locked?.isRunnable ?? null;
+          if ((role || runnable === true) && await roleWritersRefusal(tx, ctx, plan.raw.memoryId, {
+            priorRole: role, nextRole: role, priorRunnable: runnable, nextRunnable: runnable,
+          })) {
             skipCounts.governed += 1;
             planMemory.delete(plan.raw.id);
             plans.splice(i, 1);
@@ -3432,6 +3447,8 @@ export const nodeMutations = {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
+        // Writer level of the source node, on the locked source.
+        await assertEdgeSourceWritersById(tx, ctx, locked.source.id);
         return tx.edge.create({
           data: {
             id: generateId(),
@@ -3569,9 +3586,8 @@ export const nodeMutations = {
         // A Channel reuse may archive this edge after resolveEdgeRef's
         // preflight. Serialize with that archive's edge UPDATE and refuse a
         // tombstone instead of letting a stale update reoccupy its old loc.
-        const [current] = await tx.$queryRaw<Array<{ id: string; deleted_at: Date | null }>>`
-          SELECT id, deleted_at FROM edges WHERE id = ${resolvedEdgeId} FOR UPDATE
-        `;
+        // Source node first, then the edge row (the order node writes take); the source is revalidated under the edge lock.
+        const current = await lockEdgeUnderSourceWriters(tx, ctx, resolvedEdgeId);
         if (!current || current.deleted_at) {
           throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
             extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
@@ -3659,6 +3675,11 @@ export const nodeMutations = {
           });
         }
         await requireMemoryWriteAccess(txCtx, edgeMem.memoryId);
+        // Writer level of the edge's current source, locked before the edge.
+        const lockedEdge = await lockEdgeUnderSourceWriters(tx, ctx, resolvedEdgeId);
+        if (!lockedEdge || lockedEdge.deleted_at) {
+          throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
+        }
         await refuseGovernedEdge(tx, resolvedEdgeId);
         await tx.edge.delete({ where: { id: resolvedEdgeId } });
       });
@@ -4113,9 +4134,13 @@ export const nodeMutations = {
         }
         // #1331 — the target is written, and a source that is deleted or whose edges
         // are re-pointed is written too: each role's writer level, on the locked rows.
-        await assertRoleWritersForWrite(tx, ctx, target.memoryId, { priorRole: lockedTarget.role, nextRole: lockedTarget.role });
+        await assertRoleWritersForWrite(tx, ctx, target.memoryId, {
+          priorRole: lockedTarget.role, nextRole: lockedTarget.role, priorRunnable: lockedTarget.isRunnable, nextRunnable: lockedTarget.isRunnable,
+        });
         if (takesSource) {
-          await assertRoleWritersForWrite(tx, ctx, source.memoryId, { priorRole: lockedSource.role, nextRole: lockedSource.role });
+          await assertRoleWritersForWrite(tx, ctx, source.memoryId, {
+            priorRole: lockedSource.role, nextRole: lockedSource.role, priorRunnable: lockedSource.isRunnable, nextRunnable: lockedSource.isRunnable,
+          });
         }
         // #1682 review (Baloo P2) — the AUTHORITATIVE live-thread refusal, under
         // the source lock and before any write. The pre-lock count above is only
@@ -4488,8 +4513,12 @@ export const nodeMutations = {
       // role before AND after (fast refusal; the authoritative check is under the lock below).
       {
         const restoredRole = (restoreFields as { role?: string | null }).role;
+        const restored = mergedGovernedState(node, {
+          role: restoredRole, isRunnable: (restoreFields as { isRunnable?: boolean | null }).isRunnable,
+        });
         const refusal = await roleWritersRefusal(ctx.db, ctx, node.memoryId, {
           priorRole: node.role, nextRole: restoredRole === undefined ? node.role : restoredRole,
+          priorRunnable: node.isRunnable, nextRunnable: restored.isRunnable,
         });
         if (refusal) throw refusal;
       }
@@ -4589,6 +4618,10 @@ export const nodeMutations = {
           const restoredRole = (restoreFields as { role?: string | null }).role;
           await assertRoleWritersForWrite(tx, ctx, current.memoryId, {
             priorRole: current.role, nextRole: restoredRole === undefined ? current.role : restoredRole,
+            priorRunnable: current.isRunnable,
+            nextRunnable: mergedGovernedState(current, {
+              role: restoredRole, isRunnable: (restoreFields as { isRunnable?: boolean | null }).isRunnable,
+            }).isRunnable,
           });
         }
         // #1330 — deliberately NO strict-sub-role check (`assertRoleDeclaredForWrite`):
