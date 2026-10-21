@@ -256,6 +256,50 @@ describe('end the window early (040:07 S2, S7)', () => {
   });
 });
 
+describe('the server-hosted pages', () => {
+  it('/passkeys/register: same-origin script only, unframeable, the sign-in forms carry next=register', async () => {
+    const r = await realFetch(`${base}/passkeys/register`);
+    expect(r.status).toBe(200);
+    const csp = r.headers.get('content-security-policy')!;
+    expect(csp).toContain("script-src 'self'");
+    expect(csp).not.toMatch(/script-src[^;]*unsafe-inline/);
+    expect(csp).toMatch(/default-src 'none'/);
+    expect(csp).toMatch(/frame-ancestors 'none'/);
+    expect(r.headers.get('referrer-policy')).toBe('no-referrer');
+    const html = await r.text();
+    expect(html).toContain(`data-rp-id="${RP}"`);
+    expect(html).toContain('action="/passkeys/sign-in/github/start"');
+    expect(html).toContain('name="next" value="register"');
+    expect(html).toContain('src="/passkeys/assets/ceremony.js"');
+    expect(html).not.toMatch(/<script>(?!<\/script>)/);
+  });
+
+  it('/passkeys/window/end carries next=window, and the script is served as JavaScript', async () => {
+    expect(await (await realFetch(`${base}/passkeys/window/end`)).text()).toContain('name="next" value="window"');
+    const js = await realFetch(`${base}/passkeys/assets/ceremony.js`);
+    expect(js.headers.get('content-type')).toMatch(/^application\/javascript/);
+    expect(js.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(await js.text()).toContain('navigator.credentials.create');
+  });
+
+  it('the confirm page links back to the page the leg started from', async () => {
+    ghId = 4242;
+    const start = await realFetch(`${base}/passkeys/sign-in/github/start`, {
+      method: 'POST', redirect: 'manual', headers: { origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded' }, body: 'next=window',
+    });
+    const browser = cookieNamed(start, 'hadron_ceremony_browser');
+    const next = cookieNamed(start, 'hadron_ceremony_next');
+    expect(next).toBe('hadron_ceremony_next=window');
+    const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+    const cb = await realFetch(`${base}/auth/github/callback?code=c&state=${state}`, { redirect: 'manual' });
+    const ok = await realFetch(`${base}/passkeys/sign-in/confirm`, {
+      method: 'POST', redirect: 'manual',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: ORIGIN, cookie: `${browser}; ${cookieNamed(cb, 'hadron_ceremony_leg')}; ${next}` }, body: '',
+    });
+    expect(await ok.text()).toContain('href="/passkeys/window/end"');
+  });
+});
+
 describe('mounting', () => {
   it('a first-passkey window shorter than 72 hours fails at boot (cor:aut:040:07)', async () => {
     vi.stubEnv('PASSKEY_FIRST_WINDOW_HOURS', '48');
@@ -270,6 +314,9 @@ describe('mounting', () => {
       expect((await post(path, {})).status).toBe(404);
     }
     expect((await realFetch(`${base}/passkeys/cancel?token=${'a'.repeat(43)}`)).status).toBe(404);
+    for (const path of ['/passkeys/register', '/passkeys/window/end', '/passkeys/assets/ceremony.js']) {
+      expect((await realFetch(`${base}${path}`)).status).toBe(404);
+    }
   });
 });
 

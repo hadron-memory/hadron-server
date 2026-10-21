@@ -43,6 +43,11 @@ import { page, PAGE_HEADERS } from './ceremonyPages.js';
 export const CEREMONY_BROWSER_COOKIE = 'hadron_ceremony_browser';
 /** The IdP leg id, set by the callback for the confirm path only. */
 export const CEREMONY_LEG_COOKIE = 'hadron_ceremony_leg';
+/** Which passkey page the leg was started from, so the confirm page can link back. Not a secret; allowlisted. */
+export const CEREMONY_NEXT_COOKIE = 'hadron_ceremony_next';
+export const CEREMONY_NEXT_PAGES = { register: '/passkeys/register', window: '/passkeys/window/end' } as const;
+type NextPage = keyof typeof CEREMONY_NEXT_PAGES;
+const nextPageOf = (v: unknown): NextPage => (v === 'window' ? 'window' : 'register');
 /** The browser binding outlives an IdP round trip, but never the pending login state it rides with. */
 export const CEREMONY_BROWSER_TTL_SECONDS = FRESH_SIGN_IN_LEG_TTL_SECONDS;
 if (CEREMONY_BROWSER_TTL_SECONDS * 1000 > LOGIN_STATE_TTL_MS) {
@@ -80,6 +85,11 @@ function issueCeremonyBrowser(req: Request, res: Response): string {
   const nonce = randomBytes(32).toString('base64url');
   res.cookie(CEREMONY_BROWSER_COOKIE, nonce, { ...cookieOptions(req), maxAge: CEREMONY_BROWSER_TTL_SECONDS * 1000 });
   return sha256Hex(nonce);
+}
+
+/** Remember which page started the leg (register by default). */
+function rememberNextPage(req: Request, res: Response, next: unknown): void {
+  res.cookie(CEREMONY_NEXT_COOKIE, nextPageOf(next), { ...cookieOptions(req), maxAge: CEREMONY_BROWSER_TTL_SECONDS * 1000 });
 }
 
 /** Clear the ceremony browser cookie. The ceremony step that consumes a fresh sign-in calls this on success. */
@@ -153,7 +163,7 @@ export function mountFreshSignInRoutes(
   const json = express.json({ limit: '4kb' });
   const form = express.urlencoded({ extended: false, limit: '4kb' });
 
-  app.post('/passkeys/sign-in/:provider/start', limiter, async (req: Request, res: Response) => {
+  app.post('/passkeys/sign-in/:provider/start', limiter, form, async (req: Request, res: Response) => {
     try {
       const provider = req.params.provider as LoginProvider;
       if (!Object.hasOwn(PROVIDERS, provider) || !originAllowed(req) || !PROVIDERS[provider].configured()) {
@@ -161,6 +171,7 @@ export function mountFreshSignInRoutes(
       }
       await sweep();
       const ceremonyNonceHash = issueCeremonyBrowser(req, res);
+      rememberNextPage(req, res, (req.body as { next?: unknown } | undefined)?.next);
       const state = randomBytes(16).toString('hex');
       await createPendingLoginState(state, provider, { redirect: '/', ceremonyNonceHash });
       res.status(303).set('Cache-Control', 'no-store').location(PROVIDERS[provider].url(state)).end();
@@ -186,6 +197,7 @@ export function mountFreshSignInRoutes(
     async (req: Request, res: Response) => {
       const email = String((req.body as { email: string }).email).trim().toLowerCase();
       const browserNonceHash = issueCeremonyBrowser(req, res);
+      rememberNextPage(req, res, (req.body as { next?: unknown } | undefined)?.next);
       try {
         await sweep();
         const user = await db.user.findFirst({ where: { email, deletedAt: null }, select: { id: true, email: true } });
@@ -222,8 +234,10 @@ export function mountFreshSignInRoutes(
       const nonce = cookieValue(req);
       if (!originAllowed(req) || !nonce || typeof secret !== 'string' || !LEG_SECRET.test(secret)) return void refusePage(res);
       if (!(await confirmFreshSignIn(db, { legSecret: secret, browserNonceHash: sha256Hex(nonce), channel }))) return void refusePage(res);
+      const back = CEREMONY_NEXT_PAGES[nextPageOf(cookieValue(req, CEREMONY_NEXT_COOKIE))];
       res.status(200).set(PAGE_HEADERS).type('html').send(page('Confirmed',
-        '<h1>Confirmed</h1><p>Return to the passkey page in this browser to continue. You have not been signed in.</p>'));
+        `<h1>Confirmed</h1><p>You have not been signed in. Continue on the passkey page in this browser, within 10 minutes.</p>
+<p><a href="${back}">Continue</a></p>`));
     } catch (err) {
       Sentry.captureException(err);
       refusePage(res);

@@ -36,6 +36,7 @@ import { CANCEL_TOKEN, cancelFirstPasskey } from '../lib/passkeys/cancel.js';
 import { endWindowEarly } from '../lib/passkeys/endWindow.js';
 import { CEREMONY_BROWSER_COOKIE, clearCeremonyBrowserCookie } from './freshSignInRoutes.js';
 import { sendPage } from './ceremonyPages.js';
+import { mountCeremonyClientPages } from './ceremonyClientPages.js';
 import { PASSKEY_CANCEL_PATH } from '../jobs/sendPasskeyRegistrationNotices.js';
 import { passkeyRpId, signingCeremonyOrigins } from '../lib/signing/config.js';
 import { signingSurfacePolicy } from '../lib/signing/surface.js';
@@ -99,6 +100,7 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
   if (!signingSurfacePolicy(env).registration) return;
   // cor:aut:040:07: a misconfigured window (shorter than 72 hours, or not an integer) fails here, at boot.
   const windowHours = firstPasskeyWindowHours(env);
+  mountCeremonyClientPages(app);
   const limiter = rateLimit({
     windowMs: 60_000, limit: PASSKEY_CEREMONY_RATE_LIMIT_PER_MINUTE, standardHeaders: false, legacyHeaders: false,
     handler: (_req, res) => { res.status(429).end(); },
