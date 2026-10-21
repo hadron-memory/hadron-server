@@ -471,6 +471,23 @@ async function runDeletionTxn(
         },
       });
 
+      // ── 5. #1631 PR3 / cor:aut:040:05 (#10404): passkey records ────────
+      // Each record stays as a verification record (public key, credential id, times, window outcome); its
+      // identifying parts are erased: the label, and the cancel record's IP address and user agent. The guard
+      // admits exactly this, and only now that the user row is soft-deleted (step 4 above).
+      await tx.$executeRaw`UPDATE passkey_credentials SET label = '',
+          cancel_ip = CASE WHEN cancelled_at IS NOT NULL THEN '' END,
+          cancel_user_agent = CASE WHEN cancelled_at IS NOT NULL THEN '' END
+        WHERE owner_id = ${targetUserId}`;
+      // Ceremony state carries no history worth keeping: a deleted user can't confirm, register or revoke.
+      await tx.freshSignIn.deleteMany({ where: { userId: targetUserId } });
+      await tx.passkeyCeremony.deleteMany({ where: { userId: targetUserId } });
+      // An unsent notice can no longer be delivered (the address is erased); settle it without its cancel token.
+      await tx.passkeyRegistrationNotice.updateMany({
+        where: { userId: targetUserId, sentAt: null, failedAt: null },
+        data: { failedAt: now, cancelTokenEnc: null, leaseUntil: null, claimToken: null },
+      });
+
       return {
         toolConnections: toolConnections as Array<{
           provider: string;
