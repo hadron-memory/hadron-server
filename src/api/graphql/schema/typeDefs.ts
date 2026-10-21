@@ -1773,16 +1773,21 @@ export const typeDefs = `#graphql
     expiresAt: DateTime!
   }
 
-  "#1956 — resumeSession's optional input. Everything but \`session\` is provenance for a session the redemption starts."
+  "#1956 — resumeSession's optional input. Provenance for a session the redemption starts; on an open session it resumes, only \`llmModel\` and \`family\` are refreshed (#2086)."
   input ResumeSessionInput {
     "Pick one of a CHOOSE answer's candidates by its sessionId."
     session: ID
     "What the next session is about, when the redemption starts one (its plan)."
     description: String
+    "Recorded on a session the redemption starts. Never replaces the tool of a session it resumes."
     tool: String
+    "Recorded on a session the redemption starts only."
     host: String
+    "Recorded on a session the redemption starts, and refreshed on an open session it resumes (#2086). Omitted or null never clears."
     llmModel: String
+    "Recorded on a session the redemption starts, and refreshed on an open session it resumes (#2086). Wins over the family a model implies; an invalid token is refused before any claim is spent."
     family: String
+    "Recorded on a session the redemption starts only."
     transcriptPath: String
   }
 
