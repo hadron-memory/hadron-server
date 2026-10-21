@@ -19,6 +19,19 @@ import type { Context } from './resolvers.helpers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
+// Gene's #2219 BLIND P2: a test hook that runs once a setter holds its owner locks, just before it writes. Null = pass through.
+const pointerHook: { beforeSet: null | (() => Promise<void>) } = { beforeSet: null };
+vi.mock('../../../lib/bootPromptPointer.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../../lib/bootPromptPointer.js')>();
+  return {
+    ...real,
+    setBootPromptPointer: async (...args: Parameters<typeof real.setBootPromptPointer>) => {
+      if (pointerHook.beforeSet) await pointerHook.beforeSet();
+      return real.setBootPromptPointer(...args);
+    },
+  };
+});
+
 const M = resolvers.Mutation as any;
 let orgId: string;
 
@@ -204,5 +217,30 @@ describe('#2045 8b setters', () => {
     const f = await fixture();
     await setters.WORKER(f, f.installNode.id, ctxOf(f.admin.id));
     expect(await storedId(f, 'WORKER')).toBe(f.installNode.id);
+  });
+});
+
+describe('#2219 BLIND P2 (Gene): concurrent saves of one Agent pointer', () => {
+  it('two valid saves of the same Agent pointer both land: the writer of the anchored Agent row never upgrades a shared hold', async () => {
+    const f = await fixture();
+    // Release each save once BOTH hold their owner locks, or after a bound: a shared hold upgraded by two writers at once
+    // deadlocks (40P01, one save fails); serialized writers reach the hook one at a time and finish on the bound.
+    let arrived = 0;
+    let open!: () => void;
+    const both = new Promise<void>((r) => { open = r; });
+    pointerHook.beforeSet = async () => {
+      if (++arrived === 2) open();
+      await Promise.race([both, new Promise((r) => setTimeout(r, 1500))]);
+    };
+    try {
+      const outcomes = await Promise.allSettled([
+        setters.AGENT(f, f.agentNode.id, ctxOf(f.admin.id)),
+        setters.AGENT(f, f.agentNode.id, ctxOf(f.admin.id)),
+      ]);
+      expect(outcomes.map((o) => (o.status === 'rejected' ? String((o.reason as Error).message) : 'ok'))).toEqual(['ok', 'ok']);
+    } finally {
+      pointerHook.beforeSet = null;
+    }
+    expect(await storedId(f, 'AGENT')).toBe(f.agentNode.id);
   });
 });
