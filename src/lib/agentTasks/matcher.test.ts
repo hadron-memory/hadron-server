@@ -125,6 +125,31 @@ describe('#2191 matching constraints', () => {
     expect(await assigneeOf(t.id)).toBeNull();
   });
 
+  it('keeps explicit named assignment to usesTasks:false working', async () => {
+    process.env.DISABLE_TASK_MATCHER = 'true';
+    await db.agent.update({ where: { id: agentId }, data: { usesTasks: false } });
+    const t = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Explicit', assignee: { worker: baloo.id } } }, ctx(mia.id));
+    expect(t.assigneeWorkerId).toBe(baloo.id);
+  });
+
+  it('normalizes task requirement storage and retains custom tokens', async () => {
+    process.env.DISABLE_TASK_MATCHER = 'true';
+    const t = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Aliases', requirements: { familyNotIn: [' Anthropic ', 'claude', ' OPENAI ', 'Custom-7'] } } }, ctx(mia.id));
+    expect(t.requirements).toEqual({ familyNotIn: ['claude', 'codex', 'custom-7'] });
+    await expect(M.createAgentTask({}, { input: { appRef: app.id, title: 'Bad', requirements: { familyIn: ['not a token'] } } }, ctx(mia.id)))
+      .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
+
+  it('honors legacy alias availability and can deliberately clear it through the canonical key', async () => {
+    process.env.DISABLE_TASK_MATCHER = 'true';
+    await bind(baloo, 'codex', at('11:00'));
+    await db.modelFamilyAvailability.create({ data: { appId: app.id, family: 'openai', state: 'unavailable', reason: 'other', setAt: at('10:00'), setByUserId: admin.id } });
+    const t = await queued('11:00');
+    expect(await matchQueuedTasks(db, at('11:01'), { appId: app.id })).toEqual([]);
+    await M.setModelFamilyAvailability({}, { input: { appRef: app.id, family: 'OpenAI', state: 'AVAILABLE' } }, ctx(admin.id));
+    expect(await matchQueuedTasks(db, at('11:01'), { appId: app.id })).toEqual([{ taskId: t.id, workerId: baloo.id, family: 'codex' }]);
+  });
+
   it('does not weaken malformed legacy exclusions or conflicting family lists', () => {
     const w = { id: 'w', role: 'reviewer', freeFamilies: ['codex'] };
     for (const raw of [{ familyNotIn: [1] }, { familyIn: ['codex'], familyNotIn: ['codex'] }, { excludeWorkerIds: [false] }]) {
@@ -680,4 +705,98 @@ describe('#1961 the roster SDL states the shipped matching rule', () => {
     expect(state('AVAILABLE')).toContain('which the matcher leaves alone until its session is live again');
     for (const text of [field('liveSession'), state('AVAILABLE')]) expect(text).not.toMatch(/host-operations slice|until T6/);
   });
+});
+
+// Private per-worker DB only. A blocker-specific barrier proves the intended
+// transaction is waiting; unrelated waiters cannot satisfy this schedule.
+async function blockedBy(pid: number) {
+  const deadline = Date.now() + 3000;
+  for (;;) {
+    const [{ n }] = await db.$queryRaw<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM pg_stat_activity
+      WHERE datname = current_database() AND ${pid} = ANY(pg_blocking_pids(pid))`;
+    if (n > 0) return;
+    if (Date.now() > deadline) throw new Error('intended blocker has no waiter');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function hold(work: (tx: Prisma.TransactionClient) => Promise<void>) {
+  let ready!: (pid: number) => void;
+  const held = new Promise<number>((resolve) => { ready = resolve; });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const done = db.$transaction(async (tx) => {
+    const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await work(tx);
+    ready(pid);
+    await gate;
+  }, { timeout: 10000 });
+  return { held, release, done };
+}
+
+describe('#2191 deciding checks after real lock waits', () => {
+  for (const change of ['usesTasks', 'role', 'family'] as const) {
+    it(`an already-deciding assignment fences a later ${change} change without an upgrade cycle`, async () => {
+      const session = await bind(baloo, 'codex', at('11:00'));
+      const requirements = { role: 'reviewer', familyIn: ['codex'] };
+      const task = await queued('11:00', requirements);
+      let ready!: (pid: number) => void;
+      const held = new Promise<number>((resolve) => { ready = resolve; });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const pending = __matcherTesting.tryAssign(db, { ...task, appId: app.id, requirements, closeSessionWhenDone: false }, baloo.id, 'codex', at('11:01'), {
+        afterWorkerCheck: async () => {
+          const [row] = await db.$queryRaw<Array<{ pid: number }>>`
+            SELECT l.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+            WHERE a.datname = current_database() AND l.locktype = 'advisory' AND l.granted
+              AND l.classid::bigint = (hashtext('agent-task-matcher:worker')::bigint & 4294967295)
+              AND l.objid::bigint = (hashtext(${baloo.id})::bigint & 4294967295) AND l.objsubid = 2`;
+          ready(row.pid);
+          await gate;
+        },
+      });
+      const pid = await held;
+      const changed = (change === 'usesTasks'
+        ? db.agent.update({ where: { id: agentId }, data: { usesTasks: false } })
+        : change === 'role'
+          ? db.worker.update({ where: { id: baloo.id }, data: { role: 'engineer' } })
+          : db.session.update({ where: { id: session.id }, data: { family: 'claude' } })).then((row) => row);
+      try { await blockedBy(pid); } finally { release(); }
+      expect(await pending).toBe('assigned');
+      await changed;
+      expect(await assigneeOf(task.id)).toBe(baloo.id);
+    });
+  }
+
+  it('an Agent flag change that wins the row lock is honored', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    const task = await queued('11:00');
+    const h = hold(async (tx) => { await tx.agent.update({ where: { id: agentId }, data: { usesTasks: false } }); });
+    const pid = await h.held;
+    const pending = __matcherTesting.tryAssign(db, { ...task, appId: app.id, requirements: null, closeSessionWhenDone: false }, baloo.id, 'codex', at('11:01'), {});
+    try { await blockedBy(pid); } finally { h.release(); }
+    await h.done;
+    expect(await pending).toBe('worker-not-free');
+    expect(await assigneeOf(task.id)).toBeNull();
+  });
+
+  for (const change of ['role', 'family'] as const) {
+    it(`rechecks ${change} changed while waiting for the worker advisory lock`, async () => {
+      const session = await bind(baloo, 'codex', at('11:00'));
+      const requirements = { role: 'reviewer', familyIn: ['codex'] };
+      const task = await queued('11:00', requirements);
+      const h = hold(async (tx) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('agent-task-matcher:worker'), hashtext(${baloo.id}))`; });
+      const pid = await h.held;
+      const pending = __matcherTesting.tryAssign(db, { ...task, appId: app.id, requirements, closeSessionWhenDone: false }, baloo.id, 'codex', at('11:01'), {});
+      try {
+        await blockedBy(pid);
+        if (change === 'role') await db.worker.update({ where: { id: baloo.id }, data: { role: 'engineer' } });
+        else await db.session.update({ where: { id: session.id }, data: { family: 'claude' } });
+      } finally { h.release(); }
+      await h.done;
+      expect(await pending).toBe('worker-not-free');
+      expect(await assigneeOf(task.id)).toBeNull();
+    });
+  }
 });

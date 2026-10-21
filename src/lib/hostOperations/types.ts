@@ -12,6 +12,8 @@
  * shapes (prisma/host-operation-invariants.sql `host_operation_args_ok`).
  */
 
+import { normalizeFamily } from '../agentTasks/family.js';
+
 /** The closed set (cor:agt:070:03). */
 export const HOST_OPERATION_TYPES = ['worktree.create', 'worker.start', 'worker.deliver', 'worker.end', 'worktree.remove'] as const;
 export type HostOperationType = (typeof HOST_OPERATION_TYPES)[number];
@@ -91,7 +93,7 @@ export function validateHostOperation(type: unknown, args: unknown): { type: Hos
         : 'a name token (letters, digits and . _ / @ + -, starting with a letter or digit, no "..", "//" or trailing "/")';
       throw new HostOperationArgsError('BAD_HOST_OPERATION_ARGS', `${type}'s "${k}" must be ${what}.`);
     }
-    out[k] = v as string;
+    out[k] = kind === 'family' ? normalizeFamily(v as string)! : v as string;
   }
   for (const k of Object.keys(spec.required)) {
     if (!(k in out)) throw new HostOperationArgsError('BAD_HOST_OPERATION_ARGS', `${type} needs "${k}".`);

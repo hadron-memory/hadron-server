@@ -34,6 +34,7 @@
 // escalation holds the alarm FOR SHARE while it wakes the next owner, so an
 // acknowledgement and a wake never interleave.
 
+import { familySpellings, normalizeFamily } from '../../../lib/agentTasks/family.js';
 import {
   HOST_REPORT_TIMEOUT_DEFAULT_MINUTES,
   HOST_REPORT_TIMEOUT_MAX_MINUTES,
@@ -65,7 +66,7 @@ import {
   type AvailabilityReason,
   type AvailabilitySetter,
 } from '../../../lib/agentTasks/events.js';
-import { FAMILY_PATTERN, recordInEffect } from '../../../lib/agentTasks/availability.js';
+import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { effectiveWindows, STALL_WINDOW_DEFAULTS, type StallWindows } from '../../../lib/agentTasks/stall.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 import {
@@ -325,8 +326,8 @@ export const agentTaskAlarmMutations = {
     if (!input) throw badInput('input is required.');
     const now = new Date();
     const value = normalizeAvailability(input, now);
-    const family = (input.family ?? '').trim().toLowerCase();
-    if (!FAMILY_PATTERN.test(family)) {
+    const family = normalizeFamily(input.family);
+    if (!family) {
       throw badInput('family is a lowercase token (letters, digits, ".", "_" or "-"; up to 64 characters), e.g. claude or codex.');
     }
     const { app, actor } = await resolveParticipatedApp(ctx, input.appRef);
@@ -336,6 +337,11 @@ export const agentTaskAlarmMutations = {
         throw notPermitted("Only whoever manages the App sets a model family's availability.");
       }
       const data = { ...value, setAt: now, ...setByColumns(ctx) };
+      // Existing aliases are the same availability key. A deliberate setter
+      // updates these records too; historical events remain untouched.
+      await tx.modelFamilyAvailability.updateMany({
+        where: { appId: freshApp.id, family: { in: familySpellings(family) } }, data,
+      });
       await tx.modelFamilyAvailability.upsert({
         where: { appId_family: { appId: freshApp.id, family } },
         create: { appId: freshApp.id, family, ...data },

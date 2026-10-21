@@ -100,6 +100,13 @@ describe('startSession family, and Worker.family following the binding', () => {
     expect(await familyOf()).toBe('codex');
   });
 
+  it('#2191 aliases use the same canonical storage on start and update', async () => {
+    const s = await start({ family: ' Anthropic ' });
+    expect(s.family).toBe('claude');
+    expect((await M.updateSession({}, { id: s.id, family: ' OpenAI ' }, ctx(mia.id))).family).toBe('codex');
+    expect(await familyOf()).toBe('codex');
+  });
+
   it('omitted, it is derived: a GLM session in Claude Code binds as glm', async () => {
     const s = await start({ tool: 'claude-code', llmModel: 'glm-4.6' });
     expect(s.family).toBe('glm');

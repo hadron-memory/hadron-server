@@ -13,6 +13,7 @@
 // (`roles:<role>` nodes, `data.names`), read at CASTING time — and only when
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
+import { normalizeFamily } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { GraphQLError } from 'graphql';
@@ -1888,7 +1889,7 @@ async function queryWorkerActivity(
         hasLiveSession: row.live,
         lastActiveAt: row.lastActiveAt,
         bound: row.bound,
-        bindingFamily: row.bindingFamily ?? null,
+        bindingFamily: normalizeFamily(row.bindingFamily),
       },
     ]),
   );
