@@ -21,6 +21,11 @@
  * address locks first, so no row can join the set afterwards, and takes no
  * advisory key after these row locks, so this adds no lock-order inversion.
  *
+ * Writer level. Removing a node writes it, so after the governed refusal the
+ * generic delete doors judge every locked row's role and runnable state with
+ * the shared predicate (cor:acl:130:07, `assertRoleWritersForNodes`), whose
+ * rulebook lock comes after these row locks, as for any node write.
+ *
  * The register stays the single source of truth: this module asks
  * `governedKindsOf`, it does not restate what makes a node governed.
  */
@@ -38,34 +43,73 @@ export interface GovernedRemovalHit {
   kinds: GovernedKindEntry[];
 }
 
+/** A row a removal locked, with the state its writer level and governed kind are judged on. */
+export interface RemovalRow {
+  id: string;
+  loc: string;
+  role: string | null;
+  isRunnable: boolean | null;
+}
+
 /**
- * Lock the given node rows, then return the ones that are governed at that
- * moment. Run inside the removal's transaction, after its address locks and
- * before its first write; the row locks are held to commit, so the answer stays
- * true through the removal.
+ * Lock the given node rows and return their state at that moment. Run inside
+ * the removal's transaction, after its address locks and before its first
+ * write; the row locks are held to commit, so the answer stays true through
+ * the removal. The writer level (`assertRoleWritersForNodes`) is judged on
+ * these rows, so its rulebook lock comes after them.
  *
  * `nodeIds` must all belong to `memoryId`. A row that has since left the memory
  * is ignored here; the caller's own concurrency checks own that case.
  */
-export async function lockGovernedRowsIn(
+export async function lockRemovalRows(
   tx: Prisma.TransactionClient,
   memoryId: string,
   nodeIds: readonly string[],
-): Promise<GovernedRemovalHit[]> {
+  opts: { hard?: boolean } = {},
+): Promise<RemovalRow[]> {
   if (nodeIds.length === 0) return [];
   const ids = [...new Set(nodeIds)].sort();
   const rows = await tx.$queryRaw<Array<{ id: string; loc: string; role: string | null; is_runnable: boolean | null }>>`
     SELECT id, loc, role, is_runnable FROM nodes
     WHERE id = ANY(${ids}::text[]) AND memory_id = ${memoryId}
     ORDER BY id FOR NO KEY UPDATE`;
+  // A hard delete's ON DELETE SET NULL writes every rule row (in any memory)
+  // that references a removed node. A rule writer holds its row and then waits
+  // for the rulebook exclusively, so these rows are locked here, before the
+  // rulebook: nodes, then rules, then the rulebook, the order rule writers and
+  // the GitHub sync take them in. A rule cannot start referencing a locked node
+  // meanwhile: a rule writer takes its referenced nodes FOR SHARE first.
+  if (opts.hard) {
+    await tx.$queryRaw`
+      SELECT id FROM node_role_rules
+      WHERE description_node_id = ANY(${ids}::text[])
+         OR author_task_id = ANY(${ids}::text[])
+         OR validation_task_id = ANY(${ids}::text[])
+      ORDER BY id FOR UPDATE`;
+  }
+  return rows.map((r) => ({ id: r.id, loc: r.loc, role: r.role, isRunnable: r.is_runnable }));
+}
+
+/** The governed rows among locked ones, by loc. */
+export function governedAmong(rows: readonly RemovalRow[]): GovernedRemovalHit[] {
   return rows
-    .map((r) => ({ id: r.id, loc: r.loc, kinds: governedKindsOf({ role: r.role, isRunnable: r.is_runnable }) }))
+    .map((r) => ({ id: r.id, loc: r.loc, kinds: governedKindsOf({ role: r.role, isRunnable: r.isRunnable }) }))
     .filter((r) => r.kinds.length > 0)
     .sort((a, b) => (a.loc < b.loc ? -1 : a.loc > b.loc ? 1 : 0));
 }
 
+/** Lock the given node rows, then return the ones that are governed at that moment ({@link lockRemovalRows}). */
+export async function lockGovernedRowsIn(
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  nodeIds: readonly string[],
+): Promise<GovernedRemovalHit[]> {
+  return governedAmong(await lockRemovalRows(tx, memoryId, nodeIds));
+}
+
 /**
- * Lock the given node rows, then refuse when any is governed.
+ * Lock the given node rows, then refuse when any is governed. Returns the
+ * locked rows, for the writer-level check that follows.
  *
  * @throws GraphQLError `ROLE_GOVERNED` (`op: 'delete'`, `refusal: 'removes'`).
  */
@@ -74,9 +118,12 @@ export async function assertNoGovernedRemoval(
   memoryId: string,
   nodeIds: readonly string[],
   surface: 'graphql' | 'mcp' = 'graphql',
-): Promise<void> {
-  const hits = await lockGovernedRowsIn(tx, memoryId, nodeIds);
+  opts: { hard?: boolean } = {},
+): Promise<RemovalRow[]> {
+  const rows = await lockRemovalRows(tx, memoryId, nodeIds, opts);
+  const hits = governedAmong(rows);
   if (hits.length > 0) throw governedRemovalError(hits, surface);
+  return rows;
 }
 
 /**
