@@ -70,9 +70,11 @@ async function fixture() {
   await createDbAppAgent(db, app.id, other.id);
   await createDbAppAgent(db, app2.id, agent.id);
   await createDbAppMember(db, app.id, member.id, 'member');
-  const install1 = await install('install-one', agent.id, app.id);
+  // Rook's #2219 P3: the competing install memories are created FIRST, so a lookup that lost its appId or installOfAgentId
+  // filter would find one of them before install-one and the WRONG_MEMORY pins would catch it.
   const installOther = await install('install-other', other.id, app.id);
   const install2 = await install('install-two', agent.id, app2.id);
+  const install1 = await install('install-one', agent.id, app.id);
   const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', signature: '', trailer: '' } });
 
   const foreignMem = await sysMemory(otherOrgId, 'foreign-sys');

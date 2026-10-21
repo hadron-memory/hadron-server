@@ -220,6 +220,112 @@ describe('#2045 8b setters', () => {
   });
 });
 
+describe('#2219 §10 (Rook): revoked authority and the tenancy-move retry', () => {
+  it.each(FIELDS)('%s: a REVOKED org admin (OrgMember.deletedAt) is FORBIDDEN, nothing written', async (field) => {
+    const f = await fixture();
+    // Past the owner's read gate (a PUBLIC Agent; an App member for the App fields), so the manager predicate decides.
+    await db.agent.update({ where: { id: f.agent.id }, data: { visibility: 'PUBLIC' } });
+    await createDbAppMember(db, f.app.id, f.admin.id, 'member');
+    await db.orgMember.updateMany({ where: { organizationId: orgId, userId: f.admin.id }, data: { deletedAt: new Date() } });
+    expect(await codeOf(setters[field](f, nodeFor(f, field).id, ctxOf(f.admin.id)))).toBe('FORBIDDEN');
+    expect(await storedId(f, field)).toBeNull();
+  });
+
+  /** Move the Agent (and its system memory) to a new org WHILE the write waits on the Agent anchor, after its pre-read. */
+  async function movedDuringWrite(f: F, newOrgId: string, callerId: string) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    const move = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'agent', id: f.agent.id }], 'exclusive');
+      held();
+      await gate;
+      const agent = await tx.agent.findUniqueOrThrow({ where: { id: f.agent.id }, select: { systemMemoryId: true } });
+      await tx.memory.update({ where: { id: agent.systemMemoryId! }, data: { organizationId: newOrgId } });
+      await tx.agent.update({ where: { id: f.agent.id }, data: { organizationId: newOrgId } });
+    }, { timeout: 20_000 });
+    await isHeld;
+    const writing = setters.AGENT(f, f.agentNode.id, ctxOf(callerId)).then(() => 'wrote', (e: Error) => e);
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      release();
+      await move;
+    }
+    return writing;
+  }
+
+  const newOrg = async () => {
+    const org = await db.organization.create({ data: { id: generateId(), name: 'bs-org-two', urn: 'bs-org-two' } });
+    const admin = await user('new-admin');
+    await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
+    return { org, admin };
+  };
+
+  it("AGENT: the owner moved to another org mid-write: the OLD org's admin is refused under the new tenant, nothing written", async () => {
+    const f = await fixture();
+    await db.agent.update({ where: { id: f.agent.id }, data: { visibility: 'PUBLIC' } });
+    const { org } = await newOrg();
+    const out = await movedDuringWrite(f, org.id, f.admin.id);
+    expect(out).not.toBe('wrote');
+    expect((out as GraphQLError).extensions?.code).toBe('FORBIDDEN');
+    expect(await storedId(f, 'AGENT')).toBeNull();
+  });
+
+  it("AGENT: the owner moved to another org mid-write: the NEW org's admin is decided under the new tenant and writes", async () => {
+    const f = await fixture();
+    await db.agent.update({ where: { id: f.agent.id }, data: { visibility: 'PUBLIC' } });
+    const { org, admin } = await newOrg();
+    expect(await movedDuringWrite(f, org.id, admin.id)).toBe('wrote');
+    expect(await storedId(f, 'AGENT')).toBe(f.agentNode.id);
+  });
+
+  it("AGENT: after a mid-write move the retry holds the NEW org's anchor: a demotion there racing the write wins", async () => {
+    const f = await fixture();
+    await db.agent.update({ where: { id: f.agent.id }, data: { visibility: 'PUBLIC' } });
+    const { org, admin } = await newOrg();
+    const barrier = () => {
+      let open!: () => void;
+      const p = new Promise<void>((r) => { open = r; });
+      return { p, open };
+    };
+    const moveGate = barrier(), moveHeld = barrier(), demoteGate = barrier(), demoteHeld = barrier();
+    // The new org's revoker holds ITS anchor only, so only a writer anchored on the new tenant waits for it.
+    const demotion = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'org', id: org.id }], 'exclusive');
+      await tx.orgMember.updateMany({ where: { organizationId: org.id, userId: admin.id }, data: { role: 'READER' } });
+      demoteHeld.open();
+      await demoteGate.p;
+    }, { timeout: 20_000 });
+    const move = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'agent', id: f.agent.id }], 'exclusive');
+      moveHeld.open();
+      await moveGate.p;
+      const agent = await tx.agent.findUniqueOrThrow({ where: { id: f.agent.id }, select: { systemMemoryId: true } });
+      await tx.memory.update({ where: { id: agent.systemMemoryId! }, data: { organizationId: org.id } });
+      await tx.agent.update({ where: { id: f.agent.id }, data: { organizationId: org.id } });
+    }, { timeout: 20_000 });
+    await Promise.all([demoteHeld.p, moveHeld.p]);
+    const writing = setters.AGENT(f, f.agentNode.id, ctxOf(admin.id)).then(() => 'wrote', (e: Error) => e);
+    let settledEarly: unknown = 'pending';
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1); // the write, behind the move on the Agent anchor
+      moveGate.open();
+      await move;
+      // The retry re-anchors on the new org and waits for the demotion; a writer that kept the old anchors finishes now.
+      settledEarly = await Promise.race([writing, waitForLockWaitersOfType(db, 'advisory', 1, 3_000).then(() => 'pending')]);
+    } finally {
+      moveGate.open();
+      demoteGate.open();
+      await Promise.allSettled([move, demotion]);
+    }
+    expect(settledEarly).toBe('pending');
+    expect(((await writing) as GraphQLError).extensions?.code).toBe('FORBIDDEN');
+    expect(await storedId(f, 'AGENT')).toBeNull();
+  });
+});
+
 describe('#2219 BLIND P2 (Gene): concurrent saves of one Agent pointer', () => {
   it('two valid saves of the same Agent pointer both land: the writer of the anchored Agent row never upgrades a shared hold', async () => {
     const f = await fixture();
