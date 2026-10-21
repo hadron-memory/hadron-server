@@ -2,6 +2,8 @@ import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js'
 import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // typeResolvers — GraphQL type-level field resolvers extracted from resolvers.ts
@@ -2013,18 +2015,18 @@ export const typeResolvers = {
     // ADMIN/OWNER of the org. Non-admins get an empty list (silent rather
     // than erroring — same shape as User.appMemberships).
     agentOrgGrants: async (org: { id: string }, _: unknown, ctx: Context) => {
-      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin && ctx.organizationId !== org.id) return [];
-      if (!isPlatformAdmin) {
-        const member = await ctx.db.orgMember.findFirst({
-          where: {
-            organizationId: org.id,
-            userId: ctx.userId ?? '',
-            ...LIVE_ORG_MEMBERSHIP,
-            role: { in: ['ADMIN', 'OWNER'] },
-          },
-        });
-        if (!member) return [];
+      // A headless run acts for its App, never as the admin it runs on behalf of (Xan's disposition on #2188), even with a platform role.
+      if (isRunPrincipal(ctx)) return [];
+      // An org-scoped client (app key / OAuth client) stays pinned to its own
+      // org; a user token carries no organizationId, so the role gate decides.
+      if (ctx.organizationId && ctx.organizationId !== org.id && !isPlatformAdmin(ctx)) return [];
+      // A worker-bound session acts for its Worker, never as the org admin whose token it rides (as stopSignal's personEntry).
+      if (currentActor().workerId || currentActorAmbiguity()) return [];
+      try {
+        await requireOrgRole(ctx, org.id, 'ADMIN');
+      } catch (e) {
+        if (e instanceof Error && e.message === 'Forbidden') return [];
+        throw e;
       }
       return ctx.db.agentOrgGrant.findMany({
         where: { orgId: org.id },
