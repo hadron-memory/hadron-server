@@ -405,16 +405,31 @@ describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
     expect(follow(nudgeText(['coordinator-tick'], []), chat, true).marked).toBeNull();
   });
 
-  it('a tick nudge names the exact commands, in order, on one line (pinned text)', async () => {
+  // #2138 (Marco #26709): the coordinator's ticker asks for its base tick, the tagged check first, then the sweep.
+  const BASE = `run your base tick (coordinator-system:tasks:on-base-tick): first the tagged check: ${CHECK}; then the sweep of your owned tasks, alarms and ready heads`;
+
+  it('a tick nudge names the exact commands, in order, on one line (pinned text): the coordinator-tick runs the base tick', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     await go();
-    expect(f.sent).toEqual([`Hadron ticker wake (coordinator-tick): ${CHECK}; then end your turn. No unfiltered chat catch-up.`]);
+    expect(f.sent).toEqual([`Hadron ticker wake (coordinator-tick): ${BASE}; then end your turn. No unfiltered chat catch-up.`]);
     expect(f.sent[0]).not.toContain('\n');
   });
 
+  it('#2138: a team-tick nudge keeps today\'s text; a wake carrying both tickers is the coordinator\'s (pinned texts)', () => {
+    expect(nudgeText(['team-tick'], [])).toBe(`Hadron ticker wake (team-tick): ${CHECK}; then end your turn. No unfiltered chat catch-up.`);
+    expect(nudgeText(['coordinator-tick', 'team-tick'], [])).toBe(
+      `Hadron ticker wake (coordinator-tick, team-tick): ${BASE}; then end your turn. No unfiltered chat catch-up.`,
+    );
+    expect(nudgeText(['team-tick', 'coordinator-tick'], [])).toContain(BASE);
+    for (const t of [nudgeText(['team-tick'], []), nudgeText(['coordinator-tick'], [])]) expect(t).not.toContain('\n');
+  });
+
   it('a task nudge names the same reads and mark, then the task, on one line (pinned text)', () => {
+    expect(nudgeText(['team-tick'], ['t1'])).toBe(
+      `Hadron task assigned (t1; ticker team-tick): ${CHECK}; then start the task (\`hadron team task get t1\`). No unfiltered chat catch-up.`,
+    );
     expect(nudgeText(['coordinator-tick'], ['t1'])).toBe(
-      `Hadron task assigned (t1; ticker coordinator-tick): ${CHECK}; then start the task (\`hadron team task get t1\`). No unfiltered chat catch-up.`,
+      `Hadron task assigned (t1; ticker coordinator-tick): ${BASE}; then start the task (\`hadron team task get t1\`). No unfiltered chat catch-up.`,
     );
     expect(nudgeText([], ['t1', 't2'])).toContain('(`hadron team task list`)');
     for (const t of [nudgeText(['a'], []), nudgeText([], ['t1']), nudgeText(['a'], ['t1', 't2'])]) expect(t).not.toContain('\n');

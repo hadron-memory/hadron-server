@@ -955,10 +955,15 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
  * output the worker's tool truncated or saved counts only once the worker has read the rest (George's #2156 residual).
  */
 export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>): string {
-  const check = 'run `hadron team chat read --mentions-me --limit 1` (it prints `cursor #C; channel head #H`), '
+  const tagged = 'run `hadron team chat read --mentions-me --limit 1` (it prints `cursor #C; channel head #H`), '
     + 'then `hadron team chat read --mentions-me --since C --all` and act on the tagged messages it returns; '
     + 'only if that read succeeded and you saw all of its output (if your tool truncated or saved it, read the rest first; '
     + 'if you can\'t, don\'t mark), run `hadron team chat mark-read --through H` with the H that read printed';
+  // #2138 (Marco #26709): a coordinator's ticker asks for its base tick, the tagged check FIRST and then the sweep, so
+  // the nudge never tells a coordinator to skip the sweep. A wake that carries both tickers is the coordinator's.
+  const check = tickers.some((t) => BASE_TICK_TICKERS.has(t))
+    ? `run your base tick (${BASE_TICK_TASK}): first the tagged check: ${tagged}; then the sweep of your owned tasks, alarms and ready heads`
+    : tagged;
   const rule = 'No unfiltered chat catch-up.';
   if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): ${check}; then end your turn. ${rule}`;
   const all = tasks.map((t): NudgeTask => (typeof t === 'string' ? { id: t, event: 'ASSIGNED' } : t));
@@ -982,6 +987,13 @@ export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>): 
   ];
   return `Hadron task wake (${items.join('; ')}${ticker}): ${check}; then ${actions.join('; ')}. ${rule}`;
 }
+
+/**
+ * #2138 (Marco #26709): the tickers whose nudge asks for the coordinator's base tick rather than the bare tagged check,
+ * and the task that tick is. Named by ticker name, the way the wake reports it.
+ */
+export const BASE_TICK_TICKERS: ReadonlySet<string> = new Set(['coordinator-tick']);
+const BASE_TICK_TASK = 'coordinator-system:tasks:on-base-tick';
 
 /** A task event a nudge names (#1704). An alarm carries its event id (what `team alarm ack` takes) and its stall rule. */
 export interface NudgeTask { id: string; event: 'ASSIGNED' | 'ALARM' | 'CHILD_FINISHED'; eventId?: string; rule?: string }

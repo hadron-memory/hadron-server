@@ -64,7 +64,11 @@ subscriber read stops the pass, as a failed `dueWakes` read does.
   tool truncated or saved it, read the rest first; if you can't, don't mark),
   `hadron team chat mark-read --through H` with the H that read printed; then
   end your turn. Never an unfiltered
-  catch-up. Why two reads: a read without `--since` returns only the newest
+  catch-up. A `coordinator-tick` wake (or one carrying it with another ticker)
+  asks for the coordinator's base tick instead: "run your base tick
+  (coordinator-system:tasks:on-base-tick): first the tagged check: …; then the
+  sweep of your owned tasks, alarms and ready heads", so the nudge never tells
+  a coordinator to skip its sweep (#2138, Marco #26709). Why two reads: a read without `--since` returns only the newest
   page (George, #2156 P2), so marking through its head could bury older
   tagged messages; `--since C --all` walks every page forward from the read
   mark and fails as a whole if a page fails. Each read samples its head before
