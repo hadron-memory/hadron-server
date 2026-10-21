@@ -127,7 +127,9 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
     var f = new FormData(emailForm);
     // Andi P3: the status line of THIS page, for the result and for an error alike.
     var out = main.dataset.page === 'window' ? 'status-window' : 'status-first';
-    post('/passkeys/sign-in/email', { email: f.get('email'), next: f.get('next') }).then(function () {
+    post('/passkeys/sign-in/email', { email: f.get('email'), next: f.get('next') }).then(function (r) {
+      // Dorian P3: a refused or failed request is not a sent link.
+      if (!r.ok) throw new Error(r.status === 400 ? 'Enter a valid email address.' : 'That didn\'t work. Try again.');
       say(out, 'If that address belongs to an account, a link is on its way. Open it in this browser.');
     }).catch(function (e) { say(out, e && e.message ? e.message : 'That didn\'t work. Try again.'); });
   });
@@ -144,7 +146,13 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
       $('confirm-account').onclick = function () { box.hidden = true; resolve(); };
       $('stop-account').onclick = function () {
         box.hidden = true;
-        post('/passkeys/register/stop').then(function () { reject(new Error('Stopped. Nothing was added, and this page forgot the confirmation.')); });
+        // Dorian P3: stop always ends with a visible result, even when the request fails; nothing was added either way.
+        post('/passkeys/register/stop').then(function (r) {
+          reject(new Error(r.ok ? 'Stopped. Nothing was added, and this page forgot the confirmation.'
+            : 'Stopped. Nothing was added. Close this page to make sure the confirmation is forgotten.'));
+        }, function (e) {
+          reject(new Error(e && e.message === TOO_MANY ? TOO_MANY + ' Nothing was added.' : 'Stopped. Nothing was added. Close this page to make sure the confirmation is forgotten.'));
+        });
       };
     });
   };
