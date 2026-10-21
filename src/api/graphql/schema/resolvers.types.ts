@@ -62,6 +62,7 @@ import {
   loadEdgeEndpointNode,
   isMemoryReadableCached,
   canReadMemoryRecord,
+  loadReadableMemoryRecord,
   filterReadableMemoryRecords,
   loadMemoryUrn,
   loadAppUrn,
@@ -974,13 +975,17 @@ export const typeResolvers = {
       }
       return asset;
     },
-    // `node { memory { urn … } }` powers full-URN rendering in clients
-    // (the portal composes `<memory.urn>::<loc>`). The generic `nodes`
-    // query doesn't `include` the relation, so resolve it lazily by
-    // memoryId — use the preloaded relation when a resolver already
-    // included it (e.g. appNodes). Same pattern as MemoryShare.memory.
-    memory: async (n: { memoryId: string; memory?: unknown }, _: unknown, ctx: Context) =>
-      n.memory ?? ctx.db.memory.findUnique({ where: { id: n.memoryId } }),
+    // #2193 (cor:acl:110, cor:api:140:03): the memory RECORD, exactly as
+    // Query.memory answers it to this caller, else null. The parent that
+    // handed out this node authorized the node by its own rule (a Worker's
+    // team-visible handoff, an App's install scope), never the memory record,
+    // so the record is gated here, once per memory per request. A client that
+    // only needs the address has Node.urn / Node.memoryId.
+    //
+    // A preloaded `memory` is deliberately ignored, never trusted (#474):
+    // appNodes preloads a truncated row (id/urn/name/organizationId) for
+    // Node.urn, and a preload is no authorization decision either.
+    memory: (n: { memoryId: string }, _: unknown, ctx: Context) => loadReadableMemoryRecord(ctx, n.memoryId),
     // #481 — see resolveNodeUrnField.
     urn: (
       n: { loc: string; memoryId: string; memory?: { urn?: string } | null },
