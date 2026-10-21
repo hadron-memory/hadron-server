@@ -694,6 +694,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- 20261021080000_fresh_sign_ins (pinned by src/lib/passkeys/freshSignIn1631.test.ts).
 \ir fresh-sign-in-invariants.sql
 
+-- #1631 PR2: passkey registration lifecycle (cancel tokens). One source, shared verbatim with migration
+-- 20261021090000_passkey_registration (pinned by src/lib/passkeys/cancel1631.test.ts).
+\ir passkey-registration-invariants.sql
+
 -- #1632: signing requests, append-only signature records, the content-change
 -- marker. One source, shared verbatim with migration 20261013160000_signing_requests.
 \ir signing-invariants.sql
