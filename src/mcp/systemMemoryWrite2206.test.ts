@@ -296,3 +296,23 @@ describe('#2233 BLIND P2 (Gene): the platform arm is decided on live authority, 
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).name).toBe('Owner Raced');
   });
 });
+
+describe('#2233 §10 P3s (Ralion): the tenant match and the orphan narrowing are pinned', () => {
+  it('P3-1: an Agent whose pointer names ANOTHER owner\'s system memory gives the platform admin no write to it', async () => {
+    const victim = await user('victim');
+    const theirs = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'theirs', urn: `${generateId().toLowerCase()}:theirs`, ownerUserId: victim.id } });
+    await db.agent.create({ data: { id: generateId(), name: 'Crossed', urn: `${generateId().toLowerCase()}:crossed`, ownerUserId: u.agentOwner.id, systemMemoryId: theirs.id } });
+    expect(await canWriteToMemory(db, authOf(u.platform), theirs.id)).toBe(false);
+    await expect(requireMemoryWriteAccess(ctxOf(u.platform), theirs.id)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  });
+
+  it('P3-2: an org ADMIN no longer writes an org-owned system row no live Agent points at, on GraphQL unselected or selected', async () => {
+    const orphan = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'org-orphan', urn: `${org.id.toLowerCase()}:org-orphan`, organizationId: org.id } });
+    await expect(requireMemoryWriteAccess(ctxOf(u.orgAdmin), orphan.id)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    await expect(requireMemoryWriteAccess(ctxOf(u.orgAdmin, { appId: app.id }), orphan.id)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await canWriteToMemory(db, authOf(u.orgAdmin), orphan.id)).toBe(false);
+    // A soft-deleted Agent's definition is an orphan too.
+    await db.agent.update({ where: { id: orgAgent.id }, data: { deletedAt: new Date() } });
+    await expect(requireMemoryWriteAccess(ctxOf(u.orgAdmin), orgAgent.systemMemoryId)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  });
+});
