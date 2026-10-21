@@ -406,7 +406,7 @@ export const typeDefs = `#graphql
     AGENT_SYSTEM
     "A memory linked to an Agent installed in this App."
     AGENT_LINK
-    "A base Agent's system memory, with nodes inherited by an installed Agent's system memory (cor:dmo:050:14)."
+    "A base Agent's system memory, with nodes inherited by an installed Agent's system memory (hrn:node:hadronmemory.com:specs:cor:dmo:050:14)."
     INHERITED_BASE
     "The App's own team space, listed for App participants only."
     TEAM_SPACE
