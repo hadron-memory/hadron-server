@@ -119,6 +119,9 @@ beforeEach(async () => {
   await memory('KnowEmpty', {}, false);
   await memory('KnowB');
   await memory('KnowC', { orgId: foreignOrg.id });
+  // Linked by Alpha, but in an org Alpha's tenant cannot reach: the link is a
+  // limit, never a grant (cor:dmo:050:09), so it caps to nothing.
+  await memory('KnowF', { orgId: foreignOrg.id });
   await memory('TeamSpace', { class: 'app', appId, sharedMemoryOfAgentId: agent.Alpha });
   await memory('WorkerMem', { class: 'app', appId });
   await memory('OtherAppMem', { class: 'app', appId: otherAppId });
@@ -129,6 +132,7 @@ beforeEach(async () => {
   await link('Alpha', 'KnowEmpty');
   await link('Alpha', 'WorkerMem');
   await link('Alpha', 'OtherAppMem');
+  await link('Alpha', 'KnowF', 'read-write');
   await link('Beta', 'KnowShared', 'read-write');
   await link('Beta', 'KnowB');
   await link('Gamma', 'KnowC');
@@ -164,9 +168,9 @@ describe('#2190 — what is in scope, and why', () => {
     expect(keysOf(await scopeAll('external'))).toEqual(['KnowA', 'KnowEmpty', 'KnowShared', 'TeamSpace', 'sysAlpha']);
   });
 
-  it('never lists a worker memory, another App\'s memory, an unlicensed Agent\'s memory, or a base with nothing inherited', async () => {
+  it('never lists a worker memory, another App\'s memory, an unlicensed Agent\'s memory, a link capped to nothing, or a base with nothing inherited', async () => {
     const keys = keysOf(await scopeAll('admin'));
-    for (const k of ['WorkerMem', 'OtherAppMem', 'KnowC', 'sysGamma', 'sysRoot']) expect(keys).not.toContain(k);
+    for (const k of ['WorkerMem', 'OtherAppMem', 'KnowC', 'KnowF', 'sysGamma', 'sysRoot']) expect(keys).not.toContain(k);
   });
 
   it('one row per memory, with every source in kind then install order', async () => {
@@ -212,6 +216,17 @@ describe('#2190 — viewerCanWrite is the viewer\'s createNode gate, not the Age
         expect(row.viewerCanWrite, `${who} on ${keyOf(row.memoryId)}`).toBe(wrote);
       }
     }
+  });
+});
+
+describe('#2190 — a write-gate failure is a failure, never a read-only answer', () => {
+  it('fails the field when the gate errors with anything but its FORBIDDEN denial', async () => {
+    const boom = new Error('simulated memory lookup failure');
+    const memory = new Proxy(db.memory, {
+      get: (target, prop, recv) => (prop === 'findUniqueOrThrow' ? () => Promise.reject(boom) : Reflect.get(target, prop, recv)),
+    });
+    const failing = new Proxy(db, { get: (target, prop, recv) => (prop === 'memory' ? memory : Reflect.get(target, prop, recv)) });
+    await expect(App.memoryScope({ id: appId }, {}, { ...ctx('member'), db: failing as typeof db })).rejects.toBe(boom);
   });
 });
 
