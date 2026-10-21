@@ -6,6 +6,8 @@
  * needs (origin, RP ID, UV, type, challenge payload) is explicit.
  */
 import { createHash, generateKeyPairSync, randomBytes, sign, type KeyObject } from 'node:crypto';
+import { isoCBOR } from '@simplewebauthn/server/helpers';
+import type { RegistrationResponseJSON } from '@simplewebauthn/server';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
 import { passkeyRpId } from '../lib/signing/config.js';
@@ -29,13 +31,20 @@ export interface SoftPasskey {
   assert(opts: { payload: Buffer; rawChallenge?: Buffer; origin: string; rpId: string; uv?: boolean; type?: string; counter?: number }): {
     authenticatorData: Buffer; clientDataJson: Buffer; signature: Buffer;
   };
+  /**
+   * #1631 PR2: a registration response (`navigator.credentials.create`) with attestation `none`, over
+   * `rawChallenge`. Every knob a refusal test needs is explicit: origin, RP ID, UV, the clientData type.
+   */
+  create(opts: { rawChallenge: Buffer; origin: string; rpId: string; uv?: boolean; type?: string }): RegistrationResponseJSON;
 }
 
 export function softPasskey(): SoftPasskey {
   const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const credentialId = randomBytes(16);
+  const cosePublicKey = coseEs256(publicKey);
   return {
-    credentialId: randomBytes(16),
-    cosePublicKey: coseEs256(publicKey),
+    credentialId,
+    cosePublicKey,
     assert({ payload, rawChallenge, origin, rpId, uv = true, type = 'webauthn.get', counter = 0 }) {
       const counterBytes = Buffer.alloc(4);
       counterBytes.writeUInt32BE(counter);
@@ -45,6 +54,24 @@ export function softPasskey(): SoftPasskey {
       }));
       const signature = sign('sha256', Buffer.concat([authenticatorData, sha256(clientDataJson)]), privateKey);
       return { authenticatorData, clientDataJson, signature };
+    },
+    create({ rawChallenge, origin, rpId, uv = true, type = 'webauthn.create' }) {
+      const idLen = Buffer.alloc(2);
+      idLen.writeUInt16BE(credentialId.length);
+      // flags: UP (0x01), UV (0x04), AT (0x40, attested credential data present); counter 0; AAGUID all zero.
+      const authData = Buffer.concat([
+        sha256(rpId), Buffer.from([0x41 | (uv ? 0x04 : 0)]), Buffer.alloc(4),
+        Buffer.alloc(16), idLen, credentialId, cosePublicKey,
+      ]);
+      const attestationObject = Buffer.from(isoCBOR.encode(new Map<string, unknown>([
+        ['fmt', 'none'], ['attStmt', new Map()], ['authData', new Uint8Array(authData)],
+      ]) as never));
+      const clientDataJson = Buffer.from(JSON.stringify({ type, challenge: rawChallenge.toString('base64url'), origin, crossOrigin: false }));
+      return {
+        id: credentialId.toString('base64url'), rawId: credentialId.toString('base64url'), type: 'public-key',
+        response: { clientDataJSON: clientDataJson.toString('base64url'), attestationObject: attestationObject.toString('base64url'), transports: ['internal'] },
+        clientExtensionResults: {},
+      };
     },
   };
 }
