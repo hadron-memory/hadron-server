@@ -40,6 +40,7 @@ const Q = resolvers.Query as unknown as {
 };
 const M = resolvers.Mutation as unknown as {
   setAppDeliverySettings: Resolver<{ appRef: string; input: unknown }, Row>;
+  setTeamPause: Resolver<{ appRef: string; paused: boolean }, Row>;
   createTicker: Resolver<{ appRef: string; input: Row }, Row>;
   updateTicker: Resolver<{ ref: string; input: Row }, Row>;
   deleteTicker: Resolver<{ ref: string }, boolean>;
@@ -58,7 +59,7 @@ const FW = tickerFieldResolvers.WorkerWakeSettings;
 export const TICKER_WRITE_TOOLS = [
   'hadron_ticker_create', 'hadron_ticker_update', 'hadron_ticker_delete',
   'hadron_ticker_subscribe', 'hadron_ticker_unsubscribe', 'hadron_ack_wakes',
-  'hadron_delivery_settings_set', 'hadron_team_chat_inbox_ack',
+  'hadron_delivery_settings_set', 'hadron_set_team_pause', 'hadron_team_chat_inbox_ack',
   'hadron_isolate_worker', 'hadron_clear_worker_isolation',
 ] as const;
 /**
@@ -203,6 +204,13 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
 
   // #2025: thin over the shared manager transaction; cadence/window changes affect tickers too.
   server.tool(
+    'hadron_set_team_pause',
+    'Pause or resume the WHOLE TEAM of an App, as whoever manages it (#2138). Separate from each worker\'s own pause: a worker cannot lift it and ending it clears no self-pause. While paused no worker is nudged and every worker\'s check status is PENDING (TEAM_PAUSED). Idempotent.',
+    { appRef: z.string().describe('The App id or URN.'), paused: z.boolean().describe('true pauses the team, false resumes it.'), session: SESSION_WRITE },
+    async ({ appRef, paused, session }) => write('hadron_set_team_pause', session, async (ctx) =>
+      JSON.stringify(await M.setTeamPause({}, { appRef, paused }, ctx))),
+  );
+  server.tool(
     'hadron_delivery_settings_get',
     'Read an App’s delivery settings as a participant (cor:agt:080:05). The batching window is also the ticker cadence floor. Standby is not effective until S7.',
     { appRef: z.string().describe('The App id or URN.'), session: SESSION_READ },
@@ -218,6 +226,8 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
         busyDelaySeconds: z.number().nullable().optional().describe('Whole seconds 1..86400, Proposed bounds.'),
         stuckWindowSeconds: z.number().nullable().optional().describe('Whole seconds 1..604800 and greater than busy delay + window, Proposed bounds/relation.'),
         standbyEnabled: z.boolean().nullable().optional().describe('False clears; true is refused until S7 behavior ships.'),
+        checkPeriodSeconds: z.number().nullable().optional().describe('#2138: whole seconds 60..86400; a worker with a task is expected to check its team channel this often. Set together with the team ticker cadence.'),
+        failedChecksToOverdue: z.number().nullable().optional().describe('#2138: whole number 1..100; OVERDUE after this many missed periods + 5 minutes.'),
       }).passthrough().describe('Atomic patch. Unknown fields are refused by the shared resolver, never silently removed.'),
       session: SESSION_WRITE,
     },
@@ -252,7 +262,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       quietHours: quietHours.optional(),
       channelIds: z.array(z.string()).optional().describe('Channels whose unread can wake a subscriber. Not a grant. Omit for every channel the subscriber watches.'),
       relevance: z.enum(['ALL', 'MENTIONS']).optional().describe('Default ALL.'),
-      reasons: z.array(z.enum(['read-team-channel', 'every-tick'])).min(1).optional().describe('Why it fires (cor:agt:080:10). Default [read-team-channel]: only when there is relevant unread. every-tick fires on every tick; the floor, daily budget, pause and dormancy still apply. Never empty.'),
+      reasons: z.array(z.enum(['read-team-channel', 'every-tick', 'live-check'])).min(1).optional().describe('Why it fires (cor:agt:080:10). Default [read-team-channel]: only when there is relevant unread. every-tick fires on every tick; live-check fires when the worker has not checked its team channel within the cadence, whatever is unread, and never for a worker not expected to check; the floor, daily budget, pause and dormancy still apply. Never empty.'),
       enabled: z.boolean().optional().describe('Default true.'),
       session: SESSION_WRITE,
     },
@@ -277,7 +287,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       channelIds: z.array(z.string()).optional(),
       clearChannels: z.boolean().optional(),
       relevance: z.enum(['ALL', 'MENTIONS']).optional(),
-      reasons: z.array(z.enum(['read-team-channel', 'every-tick'])).min(1).optional(),
+      reasons: z.array(z.enum(['read-team-channel', 'every-tick', 'live-check'])).min(1).optional(),
       enabled: z.boolean().optional(),
       session: SESSION_WRITE,
     },
@@ -411,7 +421,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
         const lines: string[] = [];
         for (const w of page.wakes) {
           const why = (w.reasons as Row[])
-            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : r.kind === 'TASK' ? `task ${JSON.stringify(r.task.title)} (${r.task.ref})${r.task.standbyHeld ? ` — ${r.task.standbyHeld} message${r.task.standbyHeld === 1 ? ' was' : 's were'} held while you were on standby` : ''}` : 'mention'))
+            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : r.kind === 'STOP' ? `stop signal ${r.stop.level} ${r.stop.notice.toLowerCase()}${r.stop.interrupt ? ' (interrupt)' : ''}` : r.kind === 'TASK' ? `task ${JSON.stringify(r.task.title)} (${r.task.ref})${r.task.standbyHeld ? ` — ${r.task.standbyHeld} message${r.task.standbyHeld === 1 ? ' was' : 's were'} held while you were on standby` : ''}` : 'mention'))
             .join(' + ');
           const ch = (w.channels as Row[]).map((c) => `${c.channel.name} ${c.fromSeq}-${c.throughSeq}`).join(', ');
           lines.push(

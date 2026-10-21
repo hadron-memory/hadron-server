@@ -2738,6 +2738,8 @@ export const typeDefs = `#graphql
     id: ID!
     name: String!
     urn: String!
+    "#2138: when the whole team was paused (setTeamPause), or null. Separate from every worker's own pause."
+    teamPausedAt: DateTime
     "Spec 049 Phase 4: the App's default Channel — the row its team chat became (null until provisioned)."
     defaultChannel: Channel
     "App-layer action-policy link (cor:acl:040:02, #510). Null = no restriction. Org-admin-authored via updateApp."
@@ -4065,6 +4067,8 @@ export const typeDefs = `#graphql
     visibility: AgentVisibility!
     "cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement, not access)."
     listedOnMarketplace: Boolean!
+    "#2138: false means every Worker cast from this Agent counts as having a task and is expected to check its team channel every period (coordinators, the lifecycle agent). Default true."
+    usesTasks: Boolean!
     type: AgentType!
     surfaces: [String!]!
     # #928/#974 persona dressing (cor:agt:020:01): universal metadata that
@@ -4631,6 +4635,12 @@ export const typeDefs = `#graphql
     one). Masked to null on deny, like heldByUserId.
     """
     lastActiveAt: DateTime
+    """
+    #2138 §3.4 (experimental) — whether this worker is checking its team
+    channel as expected, derived at read time. Masked to null on the same read
+    gate as hasLiveSession.
+    """
+    checkStatus: WorkerCheckStatus
     "The role-agent behind the casting."
     agent: Agent
     "The App whose staff this casting fills."
@@ -6974,6 +6984,12 @@ export const typeDefs = `#graphql
     "#1748 — the wakes due now (hrn:node:hadronmemory.com:specs:cor:agt:080:08). Counts and seq ranges only; reads nothing it does not return."
     dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String): DueWakePage!
     """
+    #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:07) — an App's stop signals, oldest set first. A person in the App sees
+    every signal (worker narrows to those covering that worker now); a worker's session sees the live ones covering it; a
+    host key sees its own host's. includeEnded adds ended ones (not for a worker's session). first: default 50, max 200.
+    """
+    teamStopSignals(appRef: String!, worker: String, includeEnded: Boolean, first: Int, after: String): StopSignalPage!
+    """
     #2017 (S1) — the ready-to-deliver batches of the workers registered on the calling host (hrn:node:hadronmemory.com:specs:cor:agt:080:22, :26).
     An own live session reads only its bound worker. A host App key needs attention:deliver AND host:operate;
     the host is the key's, the request names none, and a worker not on that host is absent. The text is written by the server and typed unchanged. Reading moves nothing; acknowledge the batch ids.
@@ -8756,6 +8772,21 @@ export const typeDefs = `#graphql
     setAppTickerSettings(appRef: String!, input: AppTickerSettingsInput!): AppTickerSettings!
     "App managers only; omitted preserves, null refuses. Standby activation is unavailable until S7 (hrn:node:hadronmemory.com:specs:cor:agt:080:19)."
     setAppDeliverySettings(appRef: String!, input: AppDeliverySettingsInput!): AppDeliverySettings!
+    "#2138: pause or resume the whole team, as whoever manages the App. Separate from each worker's own pause: a worker cannot lift it, and ending it clears no self-pause. While paused, no worker is nudged and every worker's check status is PENDING (TEAM_PAUSED)."
+    setTeamPause(appRef: String!, paused: Boolean!): TeamPause!
+    """
+    #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:01, :06) — set a stop signal. Whoever manages the App: any level and
+    scope. A host key: a HALT on its own host only. Never replaces another signal. Refusals: APP_MANAGER_REQUIRED,
+    HOST_SCOPE_REQUIRED, STOP_SIGNAL_SCOPE_FORBIDDEN, STOP_SIGNAL_NOT_FOUND (the target), BAD_USER_INPUT, APP_NOT_FOUND.
+    #2173 (R95): until the stop-notice lane is in effect, setting ANY signal is refused with STOP_SIGNAL_UNAVAILABLE (a worker
+    would be stopped without being told); lifting and listing are unaffected, and the refusal lifts when the lane is turned on.
+    """
+    setTeamStopSignal(input: SetTeamStopSignalInput!): StopSignal!
+    """
+    #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:05, :06) — lift a stop signal. Whoever manages the App, any; a host key, a HALT on its own host.
+    Lifting one never ends another. changed is false when it had already ended. Refusals as setTeamStopSignal.
+    """
+    liftTeamStopSignal(appRef: String!, id: ID!): LiftStopSignalResult!
 
     """
     #1747 — subscribe a worker to a ticker (hrn:node:hadronmemory.com:specs:cor:agt:080:20, :25). Its holder and whoever manages
@@ -9012,9 +9043,10 @@ export const typeDefs = `#graphql
     Phase 0 D1); a soft-deleted node at the target loc is resurrected.
     'name' is required here and only here (D4).
     Include tags (#2040): content may carry {{> target settings}} tags. Writes
-    that make a tag malformed refuse INVALID_INCLUDE, one that would make the
-    node include itself INCLUDE_CYCLE, and a chain deeper than 10
-    INCLUDE_TOO_DEEP; nothing is written. Each tag's target gets a derived edge
+    that make a tag malformed refuse INVALID_INCLUDE, and one that would make
+    the node include itself INCLUDE_CYCLE; nothing is written. A chain deeper
+    than 10 is not refused: it saves, and reads show the broken-include notice
+    past level 10 (#2134). Each tag's target gets a derived edge
     (governed kind INCLUDE) that only the content owns: editing or deleting it
     directly refuses INCLUDE_EDGE_DERIVED.
     """
@@ -9174,9 +9206,10 @@ export const typeDefs = `#graphql
     preserved ('name' included, D4; 'abstract' keeps its omit/null/string
     contract; omitted 'tags' are preserved, issue #235).
     Include tags (#2040): content may carry {{> target settings}} tags. Writes
-    that make a tag malformed refuse INVALID_INCLUDE, one that would make the
-    node include itself INCLUDE_CYCLE, and a chain deeper than 10
-    INCLUDE_TOO_DEEP; nothing is written. Each tag's target gets a derived edge
+    that make a tag malformed refuse INVALID_INCLUDE, and one that would make
+    the node include itself INCLUDE_CYCLE; nothing is written. A chain deeper
+    than 10 is not refused: it saves, and reads show the broken-include notice
+    past level 10 (#2134). Each tag's target gets a derived edge
     (governed kind INCLUDE) that only the content owns: editing or deleting it
     directly refuses INCLUDE_EDGE_DERIVED.
     """
@@ -10122,7 +10155,7 @@ export const typeDefs = `#graphql
 
     orgId accepts the org's ID or URN.
     """
-    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String): Agent!
+    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean): Agent!
 
     """
     Update an Agent.
@@ -10134,7 +10167,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, registerDefaults: RegisterDefaultsInput): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, registerDefaults: RegisterDefaultsInput): Agent!
 
     """
     Soft-delete an Agent and its owned system memory. Refuses while a live
@@ -12042,6 +12075,8 @@ export const typeDefs = `#graphql
     READ_TEAM_CHANNEL
     "Fires on every tick, with or without unread. The floor, budget, pause and dormancy still apply."
     EVERY_TICK
+    "#2138: fires when the subscriber has not checked its team channel within the ticker's cadence, whatever is unread, and never for a worker not expected to check (no task, isolated, paused, or a team pause)."
+    LIVE_CHECK
   }
 
   "#1747 — how a ticker relevance narrows what can make a subscriber due (hrn:node:hadronmemory.com:specs:cor:agt:080:01)."
@@ -12073,6 +12108,8 @@ export const typeDefs = `#graphql
     TICK
     "#1708 — a task event the worker must act on (an assignment, a child's finish, an alarm's woken position, #1709 a request to end its session). Wakes at once, like a mention."
     TASK
+    "#2022 — a stop-signal notice (hrn:node:hadronmemory.com:specs:cor:agt:090:04): ahead of everything else, past the floor, the busy delay and the budget's refusal. Not yet offered (DARK until the host consumer ships)."
+    STOP
   }
 
   "#1708 — which task event a TASK reason is for."
@@ -12206,6 +12243,94 @@ export const typeDefs = `#graphql
     ticker: Ticker
     "Set for kind TASK."
     task: DueTaskReason
+    "#2022 — set for kind STOP."
+    stop: DueStopReason
+  }
+
+  "#2022 — whether a stop notice tells the worker to stop or that it may resume."
+  enum StopNoticeKind {
+    STOP
+    RESUME
+  }
+
+  "#2022 — the stop-signal notice a STOP reason delivers. Acknowledging the wake records its delivery; it moves no chat mark."
+  type DueStopReason {
+    "The notice; acknowledging the wake records delivery on it."
+    eventId: ID!
+    signalId: ID!
+    level: StopSignalLevel!
+    notice: StopNoticeKind!
+    "True only for a halt's stop notice: the one notice that interrupts the worker."
+    interrupt: Boolean!
+  }
+
+  "#2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:01) — a stop signal's level. Each stops everything the one before it does."
+  enum StopSignalLevel {
+    "Stops assignment only: matching skips the covered workers and a manual assignment to one is refused (TASK_STOPPED). Its coordinators are told (the notice is recorded but not yet delivered)."
+    PAUSE_DISPATCH
+    "Also stops ticks and stall time. Each covered worker is told to finish or stop at its next sub-task (the notice is recorded but not yet delivered)."
+    PAUSE
+    "Also interrupts each covered worker, to save its work and write a hand-off (the notice is recorded but not yet delivered: no interrupt happens yet)."
+    HALT
+  }
+
+  "#2022 — a stop signal's scope: one worker, a team (its head and the whole reporting tree under it), or the workers a host registration lists."
+  enum StopSignalScope {
+    WORKER
+    TEAM
+    HOST
+  }
+
+  enum StopSignalEndKind {
+    LIFTED
+    EXPIRED
+  }
+
+  "#2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:01) — a stop signal. Ids and times only; it never changes once set, except that its end is recorded."
+  type StopSignal {
+    id: ID!
+    level: StopSignalLevel!
+    scope: StopSignalScope!
+    "WORKER and TEAM: the target worker (a team by its head)."
+    targetWorkerId: ID
+    "HOST: the target host's id."
+    targetHostId: String
+    setAt: DateTime!
+    "When it ends on its own, if set to."
+    until: DateTime
+    "The person who set it; null when a host key did."
+    setByUserId: ID
+    setByHostKey: Boolean!
+    "Not ended and its until, when given, still ahead."
+    live: Boolean!
+    "When it was lifted, or its until (an expiry is in effect at its until)."
+    endedAt: DateTime
+    endKind: StopSignalEndKind
+    endedByUserId: ID
+    endedByHostKey: Boolean!
+  }
+
+  type StopSignalPage {
+    signals: [StopSignal!]!
+    pageInfo: DueWakePageInfo!
+  }
+
+  type LiftStopSignalResult {
+    signal: StopSignal!
+    "False when it had already ended: nothing changed and nobody was told again."
+    changed: Boolean!
+  }
+
+  input SetTeamStopSignalInput {
+    appRef: String!
+    level: StopSignalLevel!
+    scope: StopSignalScope!
+    "WORKER and TEAM: the target worker (a team by its head)."
+    worker: String
+    "HOST: the host's id. A host key may omit it: its own host is taken from its binding."
+    host: String
+    "When it ends on its own; later than now. Omitted: until lifted."
+    until: DateTime
   }
 
   type AcknowledgeWakesResult {
@@ -12308,14 +12433,23 @@ export const typeDefs = `#graphql
     isolated: Boolean!
   }
 
+  "#2138: the App's team pause. teamPausedAt is null when the team is not paused."
+  type TeamPause {
+    teamPausedAt: DateTime
+  }
+
   "Delivery timing per App. Busy/stuck bounds and relation are Proposed (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
   type AppDeliverySettings {
-    "The existing ticker cadence floor and wake-rate ceiling, also the batching window. Changing it affects ticker cadence."
+    "The existing ticker cadence floor and wake-rate ceiling, also the batching window. Changing it affects ticker cadence. DEPRECATED (#2138): push batching is superseded by channel checks; kept readable, no new consumer."
     batchWindowSeconds: Int!
-    "Whole seconds, 1..86400; default 600."
+    "Whole seconds, 1..86400; default 600. DEPRECATED (#2138): superseded by channel checks."
     busyDelaySeconds: Int!
-    "Whole seconds, 1..604800; default 900. Must exceed busy delay plus batch window."
+    "Whole seconds, 1..604800; default 900. Must exceed busy delay plus batch window. DEPRECATED (#2138): superseded by channel checks."
     stuckWindowSeconds: Int!
+    "#2138: a worker with a task is expected to check its team channel every period. Whole seconds, 60..86400; default 600. Set together with the team ticker's cadence."
+    checkPeriodSeconds: Int!
+    "#2138: a worker with a task is OVERDUE after this many missed periods plus 5 minutes. Whole number, 1..100; default 2."
+    failedChecksToOverdue: Int!
     "Stored configuration; default false. Enabling is refused until standby behavior ships."
     standbyEnabled: Boolean!
     "False until S7 supplies standby behavior; configuration alone has no effect."
@@ -12329,6 +12463,10 @@ export const typeDefs = `#graphql
     busyDelaySeconds: Int
     stuckWindowSeconds: Int
     standbyEnabled: Boolean
+    "#2138: whole seconds, 60..86400."
+    checkPeriodSeconds: Int
+    "#2138: whole number, 1..100."
+    failedChecksToOverdue: Int
   }
 
   "#1747 — an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
@@ -12752,6 +12890,48 @@ export const typeDefs = `#graphql
     NOT_LAUNCHABLE
   }
 
+  "#2138 §3.4 (experimental) — a worker's check status. Draft spec: hrn:node:hadronmemory.com:hadron-dev-team-vera:work:2138-experiment-spec."
+  enum WorkerCheckState {
+    "No live session."
+    NO_SESSION
+    "Not expected to check now; pendingReason says why."
+    PENDING
+    "Has a task and checked within failedChecksToOverdue × checkPeriodSeconds + 5 minutes."
+    OK
+    "Has a task and hasn't checked for longer than that. Long turns show here on purpose."
+    OVERDUE
+  }
+
+  "#2138 §3.4 — why a worker is PENDING. Precedence: TEAM_PAUSED, STOPPED, PAUSED, ISOLATED, STANDBY, NO_TASK."
+  enum WorkerPendingReason {
+    "A team pause is in force (App.teamPausedAt); the worker can't lift it."
+    TEAM_PAUSED
+    "#2022: a PAUSE or HALT stop signal covers the worker, so it is not ticked (hrn:node:hadronmemory.com:specs:cor:agt:090:03)."
+    STOPPED
+    "Its own pause (pausedUntil) is in force."
+    PAUSED
+    "In isolation (unreachable until isolation is built)."
+    ISOLATED
+    "On standby (unreachable until standby is built)."
+    STANDBY
+    "No open task assigned, and its Agent uses tasks."
+    NO_TASK
+  }
+
+  """
+  #2138 §3.4 — a worker's check status. A worker HAS A TASK when an open task is
+  assigned to it or its Agent has usesTasks: false. The OVERDUE clock runs from
+  the latest of lastCheckedAt, its newest open assignment, its live session's
+  start and the end of its own pause.
+  """
+  type WorkerCheckStatus {
+    status: WorkerCheckState!
+    "Set only when status is PENDING."
+    pendingReason: WorkerPendingReason
+    "When it last checked the App's team channel through its own session; null if never."
+    lastCheckedAt: DateTime
+  }
+
   "#1707 — one worker on the team roster."
   type TeamRosterEntry {
     worker: AgentTaskParty!
@@ -12793,6 +12973,8 @@ export const typeDefs = `#graphql
     reportsTo: AgentTaskParty
     "#1726 — it reports to a worker that has since retired (retirement leaves the claim; the roster flags it)."
     reportsToRetired: Boolean!
+    "#2138 §3.4 (experimental) — whether it is checking its team channel as expected."
+    checkStatus: WorkerCheckStatus
   }
 
   "#1707 — the team roster of one App."

@@ -72,6 +72,7 @@ import { signingSurfacePolicy, switchCapabilities } from '../lib/signing/surface
 import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
 import { registerTickerTools } from './tickerTools.js';
+import { registerStopSignalTools } from './stopSignalTools.js';
 import { openThreadCounts, type CommentCounts } from '../lib/comments/summary.js';
 import { loadSignatureStatuses, type NodeSignatureStatusView } from '../lib/signing/status.js';
 import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
@@ -221,7 +222,8 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 import { resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
-import { composeWorkerPrompt, loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
+import { composeWorkerPrompt, loadAppWorkerActivity, loadAppWorkerCheckStatuses } from '../api/graphql/schema/resolvers.worker.js';
+import { renderCheckStatusLong, renderCheckStatusShort, type WorkerCheckStatus } from '../lib/workerCheckStatus.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 import { safeEqual } from '../lib/constantTime.js';
 
@@ -2151,6 +2153,8 @@ export function createMcpServerInstance(
     'hadron_team_roster',
     // #1747 — ticker reads (each takes its own optional session; wake settings enforces the write rule itself).
     'hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get',
+    // #2022 — the stop-signal list (its own optional session).
+    'hadron_stop_signal_list',
     // Per-connection selections and key handling: nothing authored.
     'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
     'hadron_unlock_memory', 'hadron_lock_memory',
@@ -3449,6 +3453,7 @@ export function createMcpServerInstance(
   // ── #1705 — agent tasks (cor:agt:050): thin over the GraphQL agent-task resolvers ──
   registerAgentTaskTools(server, { db, auth });
   registerTickerTools(server, { db, auth });
+  registerStopSignalTools(server, { db, auth });
   registerAutomationPinTools(server, { db, auth });
   // #1892 — an Agent's task and process lists (cor:dmo:050:15, :16).
   registerAgentDefinitionTools(server, { db, auth });
@@ -10564,6 +10569,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // same fact must not be able to disagree about it, and the MCP roster
         // and the GraphQL one are read by the same coordinator minutes apart.
         const activity = await loadAppWorkerActivity(ctx, page.items[0].appId);
+        // #2138 §3.4 — the same per-App derivation as Worker.checkStatus and the roster.
+        const checks = await loadAppWorkerCheckStatuses(ctx, page.items[0].appId);
         // The App's URN once for the PAGE, not once per worker (PR #1000
         // review, Copilot): every worker here belongs to the SAME App, so
         // calling the `Worker.urn` field resolver per item repeated one
@@ -10671,6 +10678,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // presence, which is #1034's confusion in a new place.
             if (!act?.lastActiveAt) flags.push('never driven');
             else if (!act.hasLiveSession) flags.push(`last recorded activity ${ageOf(act.lastActiveAt)}`);
+            // #2138 §3.4 — after the activity facts, which it is read beside.
+            const check = checks.get(w.id);
+            if (check) flags.push(renderCheckStatusShort(check));
             // #1026 — built from the SAME page-shared URN above, so the roster
             // costs no extra lookup per worker (the PR #1000 rule that pulled
             // the App URN out of the per-item path in the first place).
@@ -10767,7 +10777,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // template changes, which is why the contract forbids caching it.
         // #1090: one composition supplies the text AND its freshness facts —
         // the stamps below describe exactly this rendering.
-        const [briefing, workerUrn, agent, override, continuity, signature, trailer] = await Promise.all([
+        const [briefing, workerUrn, agent, override, continuity, signature, trailer, checkStatus] = await Promise.all([
           composeWorkerPrompt(ctx, worker),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
@@ -10786,6 +10796,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
           resolvers.Worker.continuity(worker, {}, ctx),
           resolvers.Worker.signature(worker, {}, ctx),
           resolvers.Worker.trailer(worker, {}, ctx),
+          // #2138 §3.4 — gated like hasLiveSession; null on deny.
+          resolvers.Worker.checkStatus(worker, {}, ctx) as Promise<WorkerCheckStatus | null>,
         ]);
         const prompt = briefing.text;
         const agentName = (agent as { name?: string } | null)?.name ?? null;
@@ -10879,6 +10891,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // than being assembled from it.
             (readUrl ? `URL: ${readUrl}\n` : '') +
             (agentName ? `Role agent: ${agentName}\n` : '') +
+            (checkStatus ? `${renderCheckStatusLong(checkStatus)}\n` : '') +
             // Only the caller's OWN driving session is named. Whose session it
             // is otherwise stays behind the takeover refusal, which is a
             // deliberate act rather than a listing (hadron_list_workers' rule).
