@@ -1138,7 +1138,7 @@ export const nodeQueries = {
         // comments; #1608 (cor:dmo:110:08) — content, comments or both, CONTENT
         // by default. Both ride AND so neither clobbers the nodeType key above.
         AND: [
-          ...(f.includeDeleted ? [{ OR: [{ deletedAt: null }, { memoryId: { in: recoverableIds } }] }] : []),
+          ...(f.includeDeleted ? [{ OR: [{ deletedAt: null }, { memoryId: { in: recoverableIds }, nodeType: { not: COMMENT_NODE_TYPE } }] }] : []),
           ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
           ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
           ...(scopeWhere ? [scopeWhere] : []),
@@ -2423,7 +2423,7 @@ export const nodeQueries = {
           // #1607 + #1608 — no comments in status sets; content, comments or
           // both by contentScope (CONTENT by default, cor:dmo:110:08).
           AND: [
-            ...(f.includeDeleted ? [{ OR: [{ deletedAt: null }, { memoryId: { in: recoverableAppMemoryIds } }] }] : []),
+            ...(f.includeDeleted ? [{ OR: [{ deletedAt: null }, { memoryId: { in: recoverableAppMemoryIds }, nodeType: { not: COMMENT_NODE_TYPE } }] }] : []),
             ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
             ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
             ...((sw) => (sw ? [sw] : []))(contentScopeWhere(effectiveContentScope(f))),

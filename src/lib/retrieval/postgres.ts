@@ -39,7 +39,7 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   const parts: string[] = [];
   const flt = f ?? {};
   if (flt.tombstoneMemoryIds !== undefined) {
-    parts.push(`(deleted_at IS NULL OR memory_id = ANY(${bind(flt.tombstoneMemoryIds)}::text[]))`);
+    parts.push(`(deleted_at IS NULL OR (node_type <> 'comment' AND memory_id = ANY(${bind(flt.tombstoneMemoryIds)}::text[])))`);
   }
   // Explicit nodeType wins; otherwise exclude system-type nodes (node_type is NOT NULL, default 'info').
   if (flt.nodeType) parts.push(`node_type = ${bind(flt.nodeType)}`);
@@ -238,7 +238,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
     const idPh = opts.ids.map((id) => bind(id)).join(', ');
     const memPh = opts.memoryIds.map((m) => bind(m)).join(', ');
     const deletedClause = opts.includeDeleted
-      ? opts.tombstoneMemoryIds === undefined ? '' : `AND (deleted_at IS NULL OR memory_id = ANY(${bind(opts.tombstoneMemoryIds)}::text[]))`
+      ? opts.tombstoneMemoryIds === undefined ? '' : `AND (deleted_at IS NULL OR (node_type <> 'comment' AND memory_id = ANY(${bind(opts.tombstoneMemoryIds)}::text[])))`
       : 'AND deleted_at IS NULL';
     const whereSql = compileNodeWhere(opts.where, bind);
     const sql = `

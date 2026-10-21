@@ -12,7 +12,7 @@ import { assertLocWritable } from '../../../lib/protectedLoc.js';
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { lockRemovalRows } from '../../../lib/governedRemoval.js';
 import { assertGovernedWrite } from '../../../lib/governedRole.js';
-import { assertNotCommentWrite } from '../../../lib/comments/index.js';
+import { COMMENT_NODE_TYPE, assertNotCommentWrite } from '../../../lib/comments/index.js';
 import { restoreThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
 import { assertBootPromptWriteAllowed } from '../../../lib/bootPrompt.js';
 import { assertRoleWritersForNodes } from '../../../lib/nodeRoleWriters.js';
@@ -96,7 +96,8 @@ export const recoveryQueries = {
       return Prisma.sql`(( ${n}.deleted_at IS NULL AND ${n}.memory_id = ANY(${readable}::text[])
         AND NOT EXISTS (SELECT 1 FROM nodes p WHERE p.memory_id = ${n}.memory_id AND p.deleted_at IS NOT NULL
           AND left(${n}.loc, length(p.loc) + 1) = p.loc || ':'))
-        OR (${n}.deleted_at IS NOT NULL AND ${n}.memory_id = ANY(${recoverable}::text[])))`;
+        OR (${n}.deleted_at IS NOT NULL AND ${n}.node_type <> ${COMMENT_NODE_TYPE}
+          AND ${n}.memory_id = ANY(${recoverable}::text[])))`;
     };
     const predicate = Prisma.sql`e.memory_id = ${memoryId} AND e.deleted_at IS NULL AND ${endpoint('s')} AND ${endpoint('t')}`;
     const { take, skip } = page(args);
@@ -125,13 +126,14 @@ export const recoveryQueries = {
   recoveryNode: async (_: unknown, args: { nodeRef: string }, ctx: Context) => {
     const target = await recoveryTarget(ctx, args.nodeRef);
     if (!target?.deletedAt) return null;
-    const node = await ctx.db.node.findFirst({ where: { id: target.id, memoryId: target.memoryId, loc: target.loc, deletedAt: { not: null } } });
+    const node = await ctx.db.node.findFirst({ where: { id: target.id, memoryId: target.memoryId, loc: target.loc,
+      deletedAt: { not: null }, nodeType: { not: COMMENT_NODE_TYPE } } });
     return node ? { ...await summary(ctx, node), description: node.description, _retainedNode: node } : null;
   },
   /** Writer-only tombstone listing, authorization before SQL count and pagination. */
   recoveryNodes: async (_: unknown, args: { memoryRef: string; limit?: number | null; offset?: number | null }, ctx: Context) => {
     const memoryId = await recoveryMemory(ctx, args.memoryRef);
-    const where = { memoryId, deletedAt: { not: null } };
+    const where = { memoryId, deletedAt: { not: null }, nodeType: { not: COMMENT_NODE_TYPE } };
     const [total, nodes] = await ctx.db.$transaction([
       ctx.db.node.count({ where }),
       ctx.db.node.findMany({ where, orderBy: [{ loc: 'asc' }, { id: 'asc' }], ...page(args) }),
@@ -145,6 +147,7 @@ export const recoveryFieldResolvers = {
     /** Key-required only when raw content is actually selected, never return ciphertext as recovered content. */
     content: async (parent: { _retainedNode: Node }, _: unknown, ctx: Context) => {
       const node = { ...parent._retainedNode };
+      if (node.nodeType === COMMENT_NODE_TYPE) throw nodeNotFoundError(node.id);
       if (!(await canRecoverMemory(withoutRequestCaches(ctx), node.memoryId))) throw nodeNotFoundError(node.id);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: node.memoryId }, select: { id: true, isEncrypted: true } });
       decryptNodeFields(node, memory);

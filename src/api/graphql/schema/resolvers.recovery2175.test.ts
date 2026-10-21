@@ -44,6 +44,27 @@ beforeEach(async () => {
 });
 
 describe('explicit recovery reads', () => {
+  it.each([{}, { query: 'feedback', mode: 'keyword' }, { query: 'feedback', mode: 'regex' }])('keeps independently deleted comments out of generic recovery and inventory: %j', async (search) => {
+    const target = await node('comments', { deletedAt: null, content: 'ordinary target' });
+    const removed = await M.createComment({}, { targetRef: target.id, body: 'removed feedback' }, ctx());
+    await M.deleteComment({}, { commentRef: removed.id, expectedRevision: 1 }, ctx());
+    expect((await db.node.findUniqueOrThrow({ where: { id: removed.id } })).content).toBe('removed feedback');
+    const live = await M.createComment({}, { targetRef: target.id, body: 'current feedback' }, ctx());
+    expect(await Q.recoveryNode({}, { nodeRef: removed.id }, ctx())).toBeNull();
+    expect(await Q.recoveryNodes({}, { memoryRef: memoryId }, ctx())).toMatchObject({ total: 0, items: [] });
+    const graph = await Q.recoveryEdges({}, { memoryRef: memoryId }, ctx());
+    expect(graph.total).toBe(1);
+    expect(graph.items.every((edge: any) => edge.source.id !== removed.id && edge.target.id !== removed.id)).toBe(true);
+    const inventory = await Q.findNodes({}, { ...search, filter: { memoryIds: [memoryId], includeDeleted: true, contentScope: 'COMMENTS' }, sort: 'loc', limit: 1 }, ctx());
+    expect(inventory.hits.map((hit: any) => hit.node.id)).toEqual([live.id]);
+    const both = await Q.findNodes({}, { ...search, filter: { memoryIds: [memoryId], includeDeleted: true, contentScope: 'BOTH', nodeType: 'comment' }, sort: 'loc', limit: 1 }, ctx());
+    expect(both.hits.map((hit: any) => hit.node.id)).toEqual([live.id]);
+    const mcp = createTestableMcpServer({ userId: writerId, roles: [], clientId: `user:${writerId}` });
+    expect(await mcp.callTool('hadron_get_recovery_node', { nodeRef: removed.id })).toMatchObject({ isError: true });
+    expect(JSON.parse(await mcp.callToolText('hadron_list_recovery_nodes', { memoryRef: memoryId }))).toMatchObject({ total: 0, items: [] });
+    expect(await mcp.callToolText('hadron_list_recovery_edges', { memoryRef: memoryId })).not.toContain(removed.id);
+    await expect(M.restoreNode({}, { nodeRef: removed.id }, ctx())).rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED', kind: 'comment' } });
+  });
   it('filters appNodes deleted inventory before its limit for readers while retaining writer recovery', async () => {
     const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
     const app = await db.app.create({ data: { name: 'Recovery app', urn: 'recovery2175.example:app', organizationId: memory.organizationId } });
@@ -156,8 +177,15 @@ describe('explicit recovery reads', () => {
   ])('does not infer a recovery audience from excluded principal %j', async (principal) => {
     const retained = await node('a');
     const excluded = { ...ctx(), ...principal } as Context;
+    if (excluded.impersonation) {
+      excluded.impersonation = { ...excluded.impersonation,
+        orgId: (await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).organizationId! };
+      const live = await node('live', { deletedAt: null });
+      expect(await Q.node({}, { ref: live.id }, excluded)).toMatchObject({ id: live.id });
+    }
     expect(await Q.recoveryNode({}, { nodeRef: retained.id }, excluded)).toBeNull();
     await expect(Q.recoveryNodes({}, { memoryRef: memoryId }, excluded)).rejects.toThrow();
+    await expect(M.restoreNode({}, { nodeRef: retained.id }, excluded)).rejects.toThrow();
   });
   it('refuses a reader-only listing rather than exposing its count', async () => {
     await node('a');
@@ -438,10 +466,13 @@ describe('single-node restore', () => {
     expect((await Q.memoryEdges({}, { memoryRef: memoryId }, ctx())).total).toBe(1);
     expect((await Q.recoveryEdges({}, { memoryRef: memoryId }, ctx())).total).toBe(1);
   });
-  it('removes a foreign denied tombstone from recovery graph count and page', async () => {
+  it('removes a foreign reader-only tombstone from recovery graph count and page', async () => {
     const live = await node('a', { deletedAt: null });
     const foreignMemory = await db.memory.create({ data: { class: 'knowledge', name: 'Other', urn: 'other2175.example:corpus',
       organization: { create: { name: 'Other', urn: 'other2175.example' } } } });
+    await db.orgMember.create({ data: { organizationId: foreignMemory.organizationId!, userId: writerId, role: 'READER' } });
+    const readable = await db.node.create({ data: { memoryId: foreignMemory.id, loc: 'live', name: 'Readable' } });
+    expect(await Q.node({}, { ref: readable.id }, ctx())).toMatchObject({ id: readable.id });
     const denied = await db.node.create({ data: { memoryId: foreignMemory.id, loc: 'private', name: 'Private', deletedAt: new Date() } });
     await db.edge.create({ data: { memoryId, sourceId: live.id, targetId: denied.id, loc: 'a:foreign:private' } });
     const retained = await node('z');
