@@ -401,7 +401,24 @@ export interface PasskeyNoticeContent {
  * mail provider. The label is the user's input and is escaped (Rook, #1631 6316353964).
  */
 export function passkeyNoticeEmail(n: PasskeyNoticeContent): { subject: string; html: string } {
-  throw new Error('not implemented');
+  const esc = (v: string) => v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const when = (d: Date) => `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+  const what = `<p>A passkey named <strong>${esc(n.label)}</strong> was added to your Hadron account on ${when(n.registeredAt)}.</p>`;
+  if (n.kind === 'first' && n.cancelUrl) {
+    return {
+      subject: 'A passkey was added to your Hadron account',
+      html: `${what}
+<p>Anything it signs stays pending until ${n.windowEndsAt ? when(n.windowEndsAt) : 'its cooling-off window ends'}.</p>
+<p><strong>If this wasn't you</strong>, cancel it now. No sign-in is needed, and it also ends the sign-ins it completed:</p>
+<p><a href="${esc(n.cancelUrl)}">Cancel this passkey</a></p>
+<p>The link works once, and only until the cooling-off window ends.</p>`,
+    };
+  }
+  return {
+    subject: 'A passkey was added to your Hadron account',
+    html: `${what}
+<p>It was vouched for by a passkey you already hold. If this wasn't you, revoke it from your account's passkey page.</p>`,
+  };
 }
 
 /** Send a registration notice. Throws when the provider refuses, so the caller can count a try. */

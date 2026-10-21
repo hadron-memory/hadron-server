@@ -87,6 +87,28 @@ describe('delivery', () => {
     expect(sent).toHaveLength(0);
   });
 
+  it('the last failed try settles failed at once, with no extra pass', async () => {
+    const { passkeyId } = await firstNotice();
+    failNext = MAX_NOTICE_ATTEMPTS;
+    for (let i = 0; i < MAX_NOTICE_ATTEMPTS; i++) await processPasskeyRegistrationNotices(db, sender);
+    expect((await notice(passkeyId)).failedAt).not.toBeNull();
+  });
+
+  it('a crashed final attempt (ceiling reached, lease expired) settles failed without a further send', async () => {
+    const { passkeyId } = await firstNotice();
+    await db.passkeyRegistrationNotice.update({ where: { passkeyId }, data: { attempts: MAX_NOTICE_ATTEMPTS, leaseUntil: new Date(Date.now() - 1000), claimToken: 'crashed' } });
+    await processPasskeyRegistrationNotices(db, sender);
+    expect(sent).toHaveLength(0);
+    expect((await notice(passkeyId)).failedAt).not.toBeNull();
+  });
+
+  it('a notice under another pass\'s live lease is not sent', async () => {
+    const { passkeyId } = await firstNotice();
+    await db.passkeyRegistrationNotice.update({ where: { passkeyId }, data: { attempts: 1, leaseUntil: new Date(Date.now() + 60_000), claimToken: 'other-pass' } });
+    await processPasskeyRegistrationNotices(db, sender);
+    expect(sent).toHaveLength(0);
+  });
+
   it('a failed try that later succeeds is sent', async () => {
     const { passkeyId } = await firstNotice();
     failNext = 1;

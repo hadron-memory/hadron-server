@@ -28,7 +28,62 @@ export async function processPasskeyRegistrationNotices(
   sender: PasskeyNoticeSender = emailSender,
   now: () => Date = () => new Date(),
 ): Promise<number> {
-  throw new Error('not implemented');
+  const pending = await db.passkeyRegistrationNotice.findMany({
+    where: { sentAt: null, failedAt: null },
+    orderBy: { createdAt: 'asc' },
+    take: 100,
+    include: {
+      user: { select: { email: true } },
+      passkey: { select: { label: true, registeredAt: true, windowEndsAt: true } },
+    },
+  });
+  let terminal = 0;
+  const unleased = (at: Date) => ({ OR: [{ leaseUntil: null }, { leaseUntil: { lt: at } }] });
+  const settle = { cancelTokenEnc: null, leaseUntil: null, claimToken: null };
+  const fail = async (id: string, extra: object = {}) => {
+    const done = await db.passkeyRegistrationNotice.updateMany({
+      where: { id, sentAt: null, failedAt: null, ...extra }, data: { failedAt: now(), ...settle },
+    });
+    terminal += done.count;
+  };
+  for (const notice of pending) {
+    if (!notice.user.email || !sender.configured()) { await fail(notice.id, unleased(now())); continue; }
+    const at = now();
+    // The ceiling: an expired lease on the last try is a crashed final attempt. No further send.
+    if (notice.attempts >= MAX_NOTICE_ATTEMPTS) { await fail(notice.id, { attempts: { gte: MAX_NOTICE_ATTEMPTS }, ...unleased(at) }); continue; }
+    const token = randomBytes(12).toString('hex');
+    const claimed = await db.passkeyRegistrationNotice.updateMany({
+      where: { id: notice.id, sentAt: null, failedAt: null, attempts: notice.attempts, ...unleased(at) },
+      data: { attempts: notice.attempts + 1, leaseUntil: new Date(at.getTime() + NOTICE_LEASE_MS), claimToken: token },
+    });
+    if (claimed.count === 0) continue;
+    const content: PasskeyNoticeContent = {
+      kind: notice.kind as 'first' | 'later', label: notice.passkey.label, registeredAt: notice.passkey.registeredAt,
+      ...(notice.kind === 'first' && notice.cancelTokenEnc ? {
+        cancelUrl: `${baseUrl()}${PASSKEY_CANCEL_PATH}?token=${decryptToken(notice.cancelTokenEnc)}`,
+        windowEndsAt: notice.passkey.windowEndsAt ?? undefined,
+      } : {}),
+    };
+    try {
+      await sender.send(notice.user.email, content);
+    } catch {
+      // Only the owner of this claim settles its failure: the last try fails, an earlier one releases the lease.
+      if (notice.attempts + 1 >= MAX_NOTICE_ATTEMPTS) await fail(notice.id, { claimToken: token });
+      else await db.passkeyRegistrationNotice.updateMany({ where: { id: notice.id, claimToken: token, sentAt: null, failedAt: null }, data: { leaseUntil: null, claimToken: null } });
+      continue;
+    }
+    // Delivered: sent whichever claim this is, and never overwritten after.
+    const sent = await db.passkeyRegistrationNotice.updateMany({
+      where: { id: notice.id, sentAt: null }, data: { sentAt: now(), failedAt: null, ...settle },
+    });
+    terminal += sent.count;
+  }
+  return terminal;
+}
+
+/** The public base URL links in mail point at (same rule as the magic link). */
+function baseUrl(): string {
+  return process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
 }
 
 /** Start the recurring pass (every minute, first run after 30s). */
@@ -51,4 +106,3 @@ export function startPasskeyRegistrationNoticeLoop(
   }, initialDelayMs);
 }
 
-void randomBytes; void decryptToken; void MAX_NOTICE_ATTEMPTS; void NOTICE_LEASE_MS; void PASSKEY_CANCEL_PATH;
