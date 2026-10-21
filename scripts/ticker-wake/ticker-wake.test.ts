@@ -411,17 +411,24 @@ describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
   it('a tick nudge names the exact commands, in order, on one line (pinned text): the coordinator-tick runs the base tick', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     await go();
-    expect(f.sent).toEqual([`Hadron ticker wake (coordinator-tick): ${BASE}; then end your turn. No unfiltered chat catch-up.`]);
+    expect(f.sent).toEqual([`Hadron ticker wake (coordinator-tick): ${BASE}; then continue your in-progress work; end your turn only if you have none. No unfiltered chat catch-up.`]);
     expect(f.sent[0]).not.toContain('\n');
   });
 
   it('#2138: a team-tick nudge keeps today\'s text; a wake carrying both tickers is the coordinator\'s (pinned texts)', () => {
-    expect(nudgeText(['team-tick'], [])).toBe(`Hadron ticker wake (team-tick): ${CHECK}; then end your turn. No unfiltered chat catch-up.`);
+    expect(nudgeText(['team-tick'], [])).toBe(`Hadron ticker wake (team-tick): ${CHECK}; then continue your in-progress work; end your turn only if you have none. No unfiltered chat catch-up.`);
     expect(nudgeText(['coordinator-tick', 'team-tick'], [])).toBe(
-      `Hadron ticker wake (coordinator-tick, team-tick): ${BASE}; then end your turn. No unfiltered chat catch-up.`,
+      `Hadron ticker wake (coordinator-tick, team-tick): ${BASE}; then continue your in-progress work; end your turn only if you have none. No unfiltered chat catch-up.`,
     );
     expect(nudgeText(['team-tick', 'coordinator-tick'], [])).toContain(BASE);
     for (const t of [nudgeText(['team-tick'], []), nudgeText(['coordinator-tick'], [])]) expect(t).not.toContain('\n');
+  });
+
+  it('#2138 (Diego #28498): a tick nudge never tells a worker mid-build to stop; it resumes the work in progress', () => {
+    for (const t of [nudgeText(['team-tick'], []), nudgeText(['coordinator-tick'], []), nudgeText(['coordinator-tick', 'team-tick'], [])]) {
+      expect(t).not.toMatch(/then end your turn\./);
+      expect(t).toContain('; then continue your in-progress work; end your turn only if you have none. ');
+    }
   });
 
   it('a task nudge names the same reads and mark, then the task, on one line (pinned text)', () => {
