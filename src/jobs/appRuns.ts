@@ -704,10 +704,13 @@ export async function executeAppRun(
 ): Promise<RunOutcome> {
   // #1610: a headless run writes as its App's agent, so every node it
   // creates or edits records that agent beside the run's user. A run that
-  // names no agent writes as nobody (both null).
-  const agent = await db.appRun.findUnique({ where: { id: runId }, select: { agentId: true } });
+  // names no agent writes as nobody (both null). #2176: the scope names the
+  // run's user explicitly, because the node stamp reads it from here while the
+  // revision reads it from runAuthContext(run); a worker loop has no
+  // surrounding user to inherit, and the two must agree.
+  const run = await db.appRun.findUnique({ where: { id: runId }, select: { agentId: true, userId: true } });
   const outcome = await runAsActor(
-    { workerId: null, agentId: agent?.agentId ?? null },
+    { workerId: null, agentId: run?.agentId ?? null, userId: run?.userId ?? null },
     () => executeAppRunInner(db, runId, deps),
   );
   if (outcome === 'completed' || outcome === 'failed') {
