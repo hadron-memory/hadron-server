@@ -15,7 +15,7 @@ import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { isEmbeddingConfigured } from '../../lib/embedding/index.js';
 import { embedNode, EMBED_WAKE_SUBJECT, type EmbedPlaintext } from '../../jobs/embedNodes.js';
 import { getBusClient } from '../../lib/bus/index.js';
-import { memoryIsVectorIndexed } from '../../lib/embedding/indexing.js';
+import { memoryIsVectorIndexed, SYSTEM_MEMORY_CLASS } from '../../lib/embedding/indexing.js';
 
 /**
  * Fire-and-forget bus wake-up (spec 039). Never throws — a broker outage
@@ -137,6 +137,13 @@ export async function backfillMemoryEmbeddings(
 }
 
 /**
+ * An abstract with nothing to embed, as the drain judges it (`abstractText.trim() === ''`): empty or only JavaScript
+ * whitespace — tab, newline and the other line terminators, NBSP, the Unicode space separators, the BOM. Postgres
+ * `btrim` strips spaces only, so the SQL side spells the class out; a divergence would re-stamp a node forever.
+ */
+export const BLANK_ABSTRACT_REGEX = '^[\\t\\n\\v\\f\\r \\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]*$';
+
+/**
  * #2199 — one BOUNDED, resumable step of the system-memory summary backfill. Inspects at most `limit` live nodes of
  * `memoryId` after `afterNodeId` (node id order) and stamps the ones that need a summary vector: an abstract that is not
  * blank, no abstract vector yet, not already queued, not failed (a failed embed is re-driven by `retryFailedEmbeddings`,
@@ -154,11 +161,13 @@ export async function stampMemoryEmbeddingsBatch(
   const after = opts.afterNodeId ?? '';
   const rows = await db.$queryRaw<{ id: string; eligible: boolean }[]>`
     SELECT n.id,
-      (n.abstract IS NOT NULL AND btrim(n.abstract) <> ''
+      (n.abstract IS NOT NULL AND n.abstract !~ ${BLANK_ABSTRACT_REGEX}
         AND n.embedding_pending_at IS NULL AND n.embedding_failed_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM node_embeddings e WHERE e.node_id = n.id AND e.kind = 'abstract')) AS eligible
     FROM nodes n
+    JOIN memories m ON m.id = n.memory_id
     WHERE n.memory_id = ${memoryId} AND n.deleted_at IS NULL AND n.id > ${after}
+      AND m.deleted_at IS NULL AND m.class = ${SYSTEM_MEMORY_CLASS}::"MemoryClass"
     ORDER BY n.id
     LIMIT ${limit}`;
   const eligibleIds = rows.filter((r) => r.eligible).map((r) => r.id);
@@ -166,7 +175,12 @@ export async function stampMemoryEmbeddingsBatch(
   if (!opts.dryRun && eligibleIds.length > 0) {
     const res = await db.node.updateMany({
       // Re-asserted in the write: a node queued, failed or deleted since the read is not touched.
-      where: { id: { in: eligibleIds }, memoryId, deletedAt: null, embeddingPendingAt: null, embeddingFailedAt: null },
+      // ...and the PARENT is re-asserted too: a memory soft-deleted (deleteAgent) or no longer system since the read
+      // keeps live node rows, and those must not be queued.
+      where: {
+        id: { in: eligibleIds }, memoryId, deletedAt: null, embeddingPendingAt: null, embeddingFailedAt: null,
+        memory: { deletedAt: null, class: SYSTEM_MEMORY_CLASS },
+      },
       data: { embeddingPendingAt: new Date(), embeddingFailedAt: null, embeddingError: null, embeddingAttempts: 0 },
     });
     stamped = res.count;

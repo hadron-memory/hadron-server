@@ -14,7 +14,7 @@ import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../lib
 import { embedNode, drainEmbeddingQueue } from './embedNodes.js';
 import { enqueueNodeEmbedding, stampMemoryEmbeddingsBatch } from '../services/embedding/enqueue.js';
 import { embeddingKindsWanted, memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
-import { backfillSystemMemoryEmbeddings, parseCursor } from './backfillSystemMemoryEmbeddings.js';
+import { backfillSystemMemoryEmbeddings, parseBackfillArgs, parseCursor } from './backfillSystemMemoryEmbeddings.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -348,5 +348,67 @@ describe('the bounded, resumable backfill', () => {
     expect(await db.node.count({ where: { memoryId: m, embeddingPendingAt: { not: null } } })).toBe(0);
     expect(parseCursor('mem:node')).toEqual({ memoryId: 'mem', nodeId: 'node' });
     expect(parseCursor(null)).toBeNull();
+  });
+
+  it('"blank" is what the drain says it is: SQL eligibility equals JS trim() for tab, newline, NBSP, line separators, BOM', async () => {
+    const m = await memory({ cls: 'system', flag: false });
+    const samples = [' ', '\n', '\t', '\r\n', '\u00a0', '\u2028', '\u2029', '\ufeff', '\u3000', '\u2003', ' \n\t ', 'x', ' x ', '\nx\n', '\u200b', 'a b'];
+    for (const [i, a] of samples.entries()) {
+      await db.node.create({ data: { id: generateId(), memoryId: m, loc: `b${String(i).padStart(2, '0')}`, name: `b${i}`, abstract: a, content: 'c' } });
+    }
+    const dry = await stampMemoryEmbeddingsBatch(db, m, { limit: 100, dryRun: true });
+    expect(dry.eligible).toBe(samples.filter((a) => a.trim() !== '').length);
+    // and the loop the old check allowed cannot happen: stamp, drain, re-run ⇒ nothing left to stamp
+    await stampMemoryEmbeddingsBatch(db, m, { limit: 100 });
+    await drainEmbeddingQueue(db, { client: stub });
+    const again = await stampMemoryEmbeddingsBatch(db, m, { limit: 100 });
+    expect(again).toMatchObject({ eligible: 0, stamped: 0 });
+  });
+
+  it('the parent is revalidated: a memory soft-deleted or no longer system after the inventory is not stamped', async () => {
+    for (const change of [{ deletedAt: new Date() }, { class: 'knowledge', visibility: 'ORGANIZATION', acceptsUploads: true }] as const) {
+      const { m, ids } = await seed(3);
+      const spy = vi.spyOn(db, '$queryRaw');
+      spy.mockImplementationOnce((async () => {
+        await db.memory.update({ where: { id: m }, data: change as never });
+        spy.mockRestore();
+        return ids.map((id) => ({ id, eligible: true }));
+      }) as never);
+      const r = await stampMemoryEmbeddingsBatch(db, m, { limit: 10 });
+      spy.mockRestore();
+      expect(r.eligible).toBe(3);
+      expect(r.stamped).toBe(0);
+      expect(await db.node.count({ where: { memoryId: m, embeddingPendingAt: { not: null } } })).toBe(0);
+    }
+    // and a memory that is already gone is not even inspected
+    const { m } = await seed(2);
+    await db.memory.update({ where: { id: m }, data: { deletedAt: new Date() } });
+    expect(await stampMemoryEmbeddingsBatch(db, m, { limit: 10 })).toMatchObject({ inspected: 0, done: true });
+  });
+
+  it('the command line is strict: unknown flags and non-integers are refused, never silently dropped', () => {
+    expect(parseBackfillArgs(['--apply', '--node-limit', '200', '--batch', '50', '--after', 'm1:n9'])).toEqual({ apply: true, nodeLimit: 200, batch: 50, after: 'm1:n9' });
+    for (const bad of [['--batch', 'abc'], ['--node-limit', '0'], ['--node-limit', '-5'], ['--node-limit', '1e3'], ['--memory-limit'], ['--x=v'], ['--aply'], ['--after', 'nocolon']]) {
+      expect(() => parseBackfillArgs(bad), JSON.stringify(bad)).toThrow();
+    }
+  });
+
+  it('every job query runs under the statement timeout, the first memory listing included; the report counts encrypted system memories', async () => {
+    await seed(1);
+    const seen: string[] = [];
+    const orig = db.$transaction.bind(db) as any;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation(((fn: any, opts: any) =>
+      orig(async (tx: any) => fn(new Proxy(tx, {
+        get(target, key) {
+          if (key === '$executeRawUnsafe') return (q: string, ...a: unknown[]) => { seen.push(q); return target.$executeRawUnsafe(q, ...a); };
+          const v = target[key];
+          return typeof v === 'function' ? v.bind(target) : v;
+        },
+      })), opts)) as any);
+    const r = await backfillSystemMemoryEmbeddings(db, {});
+    spy.mockRestore();
+    expect(r.encryptedSystemMemories).toBe(0);
+    // one SET LOCAL for the memory listing + one per batch
+    expect(seen.filter((q) => /statement_timeout/.test(q)).length).toBeGreaterThanOrEqual(2);
   });
 });

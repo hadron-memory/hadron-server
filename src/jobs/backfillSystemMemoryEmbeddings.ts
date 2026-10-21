@@ -43,11 +43,38 @@ export type SystemEmbeddingBackfillReport = {
   inspected: number;
   eligible: number;
   stamped: number;
+  /** Live encrypted system memories (expected 0: only private memories encrypt). Check it is 0 before an apply. */
+  encryptedSystemMemories: number;
   perMemory: { memoryId: string; urn: string; inspected: number; eligible: number; stamped: number; done: boolean }[];
   /** Pass to `--after` to continue; null when the walk is complete. */
   cursor: string | null;
   complete: boolean;
 };
+
+/**
+ * The command line, strictly: only the known flags, each number a plain positive integer, `--after` a `memoryId:nodeId`
+ * cursor. An unknown or malformed flag throws — a typo must never silently drop a bound the operator thought they set.
+ */
+export function parseBackfillArgs(argv: readonly string[]): SystemEmbeddingBackfillOptions {
+  const out: SystemEmbeddingBackfillOptions = {};
+  const positive = (flag: string, raw: string | undefined): number => {
+    if (raw === undefined || !/^[1-9][0-9]{0,8}$/.test(raw)) throw new Error(`${flag} needs a plain positive integer (got ${JSON.stringify(raw)}).`);
+    return Number(raw);
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const flag = argv[i]!;
+    if (flag === '--apply') out.apply = true;
+    else if (flag === '--node-limit') out.nodeLimit = positive(flag, argv[++i]);
+    else if (flag === '--memory-limit') out.memoryLimit = positive(flag, argv[++i]);
+    else if (flag === '--batch') out.batch = positive(flag, argv[++i]);
+    else if (flag === '--after') {
+      const raw = argv[++i];
+      if (!raw || !/^[0-9A-Za-z]+:[0-9A-Za-z]*$/.test(raw)) throw new Error(`--after needs memoryId:nodeId (got ${JSON.stringify(raw)}).`);
+      out.after = raw;
+    } else throw new Error(`Unknown argument ${JSON.stringify(flag)}.`);
+  }
+  return out;
+}
 
 export function parseCursor(after: string | null | undefined): { memoryId: string; nodeId: string } | null {
   if (!after) return null;
@@ -66,16 +93,24 @@ export async function backfillSystemMemoryEmbeddings(
   const apply = opts.apply === true;
   const start = parseCursor(opts.after);
   const report: SystemEmbeddingBackfillReport = {
-    mode: apply ? 'apply' : 'dry-run', memoriesStarted: 0, inspected: 0, eligible: 0, stamped: 0, perMemory: [],
+    mode: apply ? 'apply' : 'dry-run', memoriesStarted: 0, inspected: 0, eligible: 0, stamped: 0, encryptedSystemMemories: 0, perMemory: [],
     cursor: null, complete: true,
   };
   // Memories in id order, from the cursor's memory on. Only live class=system memories: never a user's.
-  const memories = await db.memory.findMany({
-    where: { class: SYSTEM_MEMORY_CLASS, deletedAt: null, ...(start ? { id: { gte: start.memoryId } } : {}) },
-    orderBy: { id: 'asc' },
-    take: memoryBudget + 1,
-    select: { id: true, urn: true },
-  });
+  // Under the same statement timeout as every other query of the job.
+  const { memories, encrypted } = await db.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${BACKFILL_STATEMENT_TIMEOUT_MS}`);
+    return {
+      memories: await tx.memory.findMany({
+        where: { class: SYSTEM_MEMORY_CLASS, deletedAt: null, ...(start ? { id: { gte: start.memoryId } } : {}) },
+        orderBy: { id: 'asc' },
+        take: memoryBudget + 1,
+        select: { id: true, urn: true },
+      }),
+      encrypted: await tx.memory.count({ where: { class: SYSTEM_MEMORY_CLASS, deletedAt: null, isEncrypted: true } }),
+    };
+  }, { timeout: BACKFILL_STATEMENT_TIMEOUT_MS + 5_000 });
+  report.encryptedSystemMemories = encrypted;
   let remaining = nodeBudget;
   for (const [index, memory] of memories.entries()) {
     if (index >= memoryBudget || remaining <= 0) {
@@ -114,15 +149,16 @@ export async function backfillSystemMemoryEmbeddings(
 // Hand-run entry point.
 if (process.argv[1] && process.argv[1].endsWith('backfillSystemMemoryEmbeddings.ts')) {
   const { db: prisma } = await import('../integrations/db/client.js');
-  const arg = (name: string): string | undefined => {
-    const i = process.argv.indexOf(name);
-    return i >= 0 ? process.argv[i + 1] : undefined;
-  };
-  const num = (name: string): number | undefined => (arg(name) !== undefined ? Number(arg(name)) : undefined);
-  const apply = process.argv.includes('--apply');
-  const report = await backfillSystemMemoryEmbeddings(prisma, {
-    apply, nodeLimit: num('--node-limit'), memoryLimit: num('--memory-limit'), batch: num('--batch'), after: arg('--after'),
-  });
+  let parsed: ReturnType<typeof parseBackfillArgs>;
+  try {
+    parsed = parseBackfillArgs(process.argv.slice(2));
+  } catch (e) {
+    console.error(`${(e as Error).message}\nusage: backfillSystemMemoryEmbeddings.ts [--apply] [--node-limit N] [--memory-limit M] [--batch N] [--after memoryId:nodeId]`);
+    await prisma.$disconnect();
+    process.exit(2);
+  }
+  const apply = parsed.apply === true;
+  const report = await backfillSystemMemoryEmbeddings(prisma, parsed);
   console.log(JSON.stringify(report, null, 2));
   if (!apply) console.log('\nDry run — nothing written. Re-run with --apply (production needs the recorded grant).');
   if (!report.complete) console.log(`\nPartial: continue with --after ${report.cursor}`);
