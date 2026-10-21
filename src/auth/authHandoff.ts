@@ -26,6 +26,8 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { db } from '../integrations/db/client.js';
 import type { HadronJwtPayload } from './jwt.js';
+import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
+import { SignInNotLive, lockLiveSignInRoot } from './signIn.js';
 
 /** Handoff codes are consumed within one redirect hop; a short TTL bounds the
  *  replay window without risking a legitimate slow round-trip. */
@@ -64,6 +66,8 @@ export interface IssueLoginCodeArgs {
    * Takes precedence over `clientState`. Same binding effect at redemption.
    */
   clientStateHash?: string | null;
+  /** #1897: the live factor-protected sign-in this code publishes; redemption mints the JWT with its `sid`. */
+  signInId?: string | null;
 }
 
 /** Mint a `login` handoff code and return the raw opaque value (handed to the
@@ -81,6 +85,7 @@ export async function issueLoginCode(args: IssueLoginCodeArgs): Promise<string> 
       redirect: args.redirect,
       isNew: args.isNew,
       clientStateHash,
+      signInId: args.signInId ?? null,
       expiresAt: new Date(Date.now() + HANDOFF_TTL_MS),
     },
   });
@@ -88,6 +93,8 @@ export async function issueLoginCode(args: IssueLoginCodeArgs): Promise<string> 
 }
 
 export interface RedeemedLogin {
+  /** #1897: the sign-in root the JWT must carry as `sid`; null for identity-provider and legacy logins. */
+  signInId: string | null;
   login?: HadronJwtPayload['login'];
   userId: string;
   redirect: string;
@@ -107,15 +114,35 @@ export async function redeemLoginCode(
 ): Promise<RedeemedLogin | null> {
   const codeHash = sha256(code);
 
-  // Atomic single-use claim. Exactly one concurrent caller sees count=1.
-  const claim = await db.authHandoffCode.updateMany({
-    where: { codeHash, kind: 'login', redeemedAt: null, expiresAt: { gt: new Date() } },
-    data: { redeemedAt: new Date() },
-  });
-  if (claim.count !== 1) return null;
+  // The owner is read unlocked only to know which user authority anchor to take; the claim below
+  // re-checks everything under it.
+  const probe = await db.authHandoffCode.findUnique({ where: { codeHash }, select: { userId: true } });
+  if (!probe) return null;
 
-  const row = await db.authHandoffCode.findUnique({ where: { codeHash } });
-  if (!row) return null; // unreachable after a successful claim, but keeps types honest
+  // Atomic single-use claim, inside the user authority anchor so a first-passkey cancellation
+  // (#1897 / R66) cannot interleave: cancelled first => the root is ended and nothing is published.
+  // Exactly one concurrent caller sees count=1.
+  const row = await db.$transaction(async (tx) => {
+    await lockAuthorityAnchors(tx, [{ kind: 'user', id: probe.userId }], 'shared');
+    // Database clock at the moment the row lock is held, not a JS cutoff bound before a lock wait
+    // (Ruth P2 on the same shape in /oauth/token, #2116).
+    // The row lock is its own earlier statement: an UPDATE that waits on a lock whose holder changed
+    // nothing keeps the qualification it evaluated before waiting.
+    await tx.$queryRaw`SELECT id FROM auth_handoff_codes WHERE code_hash = ${codeHash} FOR UPDATE`;
+    const claimedRows = await tx.$executeRaw`
+      UPDATE auth_handoff_codes SET redeemed_at = (clock_timestamp() AT TIME ZONE 'UTC')
+      WHERE code_hash = ${codeHash} AND kind = 'login' AND redeemed_at IS NULL
+        AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')`;
+    if (claimedRows !== 1) return null;
+    const claimed = await tx.authHandoffCode.findUnique({ where: { codeHash } });
+    if (!claimed) return null; // unreachable after a successful claim, but keeps types honest
+    if (claimed.signInId) {
+      try { await lockLiveSignInRoot(tx, claimed.signInId, claimed.userId); }
+      catch (error) { if (error instanceof SignInNotLive) return null; throw error; }
+    }
+    return claimed;
+  });
+  if (!row) return null;
 
   // Session-fixation binding: if the code was minted with a browser nonce, the
   // redeemer MUST present it. A missing/mismatched nonce means the browser
@@ -126,7 +153,7 @@ export async function redeemLoginCode(
     }
   }
 
-  return { userId: row.userId, redirect: row.redirect ?? '/', isNew: row.isNew,
+  return { userId: row.userId, redirect: row.redirect ?? '/', isNew: row.isNew, signInId: row.signInId,
     login: row.loginEvidence as HadronJwtPayload['login'] ?? undefined };
 }
 

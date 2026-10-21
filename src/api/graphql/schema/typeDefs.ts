@@ -534,6 +534,12 @@ export const typeDefs = `#graphql
     chatRootUrn: String
     "Highest seq the allocator has issued — a watermark, not a count."
     lastSeq: Int!
+    """
+    #2181 — which incarnation of the Channel this is. An opaque, stable integer that rises when a supported recreation
+    reuses the Channel under the same id; seqs and read cursors can survive it, so a pinned read or mark names this
+    value. Compare for equality only.
+    """
+    incarnation: Int!
     lastMessageAt: DateTime
     createdAt: DateTime!
     updatedAt: DateTime
@@ -730,6 +736,14 @@ export const typeDefs = `#graphql
     channelId: ID!
     lastSeenSeq: Int!
     updatedAt: DateTime!
+    "#2181 — the Channel's CURRENT incarnation (the same value as Channel.incarnation)."
+    channelIncarnation: Int!
+    """
+    #2181 — the incarnation the stored cursor was last RAISED under. NULL is a legacy cursor: it is never backfilled and
+    never relabelled. Treat your cursor as current only when this equals both channelIncarnation and the incarnation you
+    read, and lastSeenSeq >= your seq.
+    """
+    cursorIncarnation: Int
   }
 
   "#1353 — compact unread metadata for one Worker/Channel pair. No message body is returned."
@@ -837,6 +851,10 @@ export const typeDefs = `#graphql
     workerId: ID!
     channelId: ID!
     lastSeenSeq: Int!
+    "#2181 — the Channel's CURRENT incarnation (with expectedIncarnation, the value that was fenced)."
+    channelIncarnation: Int!
+    "#2181 — the incarnation the stored cursor was last raised under; NULL is a legacy cursor. See ChannelReadState.cursorIncarnation."
+    cursorIncarnation: Int
   }
 
   "Spec 049 Phase 5 — what an Agent's install-created register row is made with (plan §3.5)."
@@ -1773,16 +1791,21 @@ export const typeDefs = `#graphql
     expiresAt: DateTime!
   }
 
-  "#1956 — resumeSession's optional input. Everything but \`session\` is provenance for a session the redemption starts."
+  "#1956 — resumeSession's optional input. Provenance for a session the redemption starts; on an open session it resumes, only \`llmModel\` and \`family\` are refreshed (#2086)."
   input ResumeSessionInput {
     "Pick one of a CHOOSE answer's candidates by its sessionId."
     session: ID
     "What the next session is about, when the redemption starts one (its plan)."
     description: String
+    "Recorded on a session the redemption starts. Never replaces the tool of a session it resumes."
     tool: String
+    "Recorded on a session the redemption starts only."
     host: String
+    "Recorded on a session the redemption starts, and refreshed on an open session it resumes (#2086). Omitted or null never clears."
     llmModel: String
+    "Recorded on a session the redemption starts, and refreshed on an open session it resumes (#2086). Wins over the family a model implies; an invalid token is refused before any claim is spent."
     family: String
+    "Recorded on a session the redemption starts only."
     transcriptPath: String
   }
 
@@ -4446,6 +4469,10 @@ export const typeDefs = `#graphql
     number of messages in the chat or Channel when a cursor/filter is present.
     """
     total: Int!
+    "#2181 — the Channel this page was read from. NULL only when the App has no team channel yet."
+    channelId: ID
+    "#2181 — that Channel's incarnation at the read; pin the next read or mark with expectedIncarnation."
+    channelIncarnation: Int
   }
 
   """
@@ -8385,6 +8412,17 @@ export const typeDefs = `#graphql
       mentionsRef: ID
       limit: Int
       offset: Int
+      """
+      #2181 — pin the read to the Channel incarnation you read. A different incarnation, before or after the page is
+      read, is CHANNEL_INCARNATION_CHANGED with nothing returned and no cursor, check stamp or session resume applied;
+      the server never retargets. Omitted: the read is UNFENCED, as before.
+      """
+      expectedIncarnation: Int
+      """
+      #2181 — as on teamChatMessages: only false suppresses automatic read-cursor advancement (session attribution, the
+      check stamp and the heartbeat remain), so a pinned page can be acknowledged explicitly after it is delivered.
+      """
+      advanceReadState: Boolean = true
     ): TeamChatMessagesPage!
 
     """
@@ -10895,7 +10933,20 @@ export const typeDefs = `#graphql
     requires that session. Monotonic; a seq beyond the captured Channel
     watermark is refused.
     """
-    markOwnTeamChatRead(appRef: ID!, sessionRef: ID!, channelRef: ID!, seq: Int!): OwnTeamChatReadState!
+    markOwnTeamChatRead(
+      appRef: ID!
+      sessionRef: ID!
+      channelRef: ID!
+      seq: Int!
+      """
+      #2181 — fence the mark to the incarnation you read. It runs in one transaction behind the Channel row lock: a
+      different incarnation is CHANNEL_INCARNATION_CHANGED (never repeat it; read again and pin the new incarnation)
+      and no cursor, check stamp or session resume is applied. A successful fenced response confirms
+      channelIncarnation = the incarnation you pinned and lastSeenSeq >= seq, even when an equal or lower mark left a legacy NULL
+      cursorIncarnation in place. Omitted: the mark is UNFENCED, as before.
+      """
+      expectedIncarnation: Int
+    ): OwnTeamChatReadState!
 
     """
     Explicitly confirm a previously previewed #1353 switchover. The proof is

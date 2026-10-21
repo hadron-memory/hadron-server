@@ -17,6 +17,7 @@ import {
 } from '../../../lib/protectedLoc.js';
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
+import { assertNoGovernedRemoval, governedRemovalError } from '../../../lib/governedRemoval.js';
 import {
   assertGovernedWrite,
   assertRoleDeclaredForWrite,
@@ -3129,6 +3130,10 @@ export const nodeMutations = {
           // #1641 §3.2 — a decision is withdrawn, never deleted, and deleting a
           // log or an ancestor of one would erase decision history.
           await refuseDecisionFamily(tx, affectedIds, 'Deleting this node');
+          // A governed node is removed only after its marker is cleared through
+          // the kind's door: the whole affected set is judged here, on locked
+          // rows, before any write.
+          await assertNoGovernedRemoval(tx, memoryId, affectedIds);
           if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
           else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy, at: now });
 
@@ -4064,6 +4069,13 @@ export const nodeMutations = {
         // content is rendered from its payload, and a fold would rewrite it.
         const mergedDecisions = [lockedSource, lockedTarget].filter((n) => isDecisionFamilyRole(n.role));
         if (mergedDecisions.length > 0) throw decisionContainedError('Merging these nodes', mergedDecisions.map((n) => n.loc));
+        // A hard-deleted source is a removal. The source row was locked FOR
+        // UPDATE and re-read above, so this judges its current state: a governed
+        // node is removed only after its marker is cleared through the kind's door.
+        if (deleteSource) {
+          const kinds = governedKindsOf({ role: lockedSource.role, isRunnable: lockedSource.isRunnable });
+          if (kinds.length > 0) throw governedRemovalError([{ id: lockedSource.id, loc: lockedSource.loc, kinds }]);
+        }
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {

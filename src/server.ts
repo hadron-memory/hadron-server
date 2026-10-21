@@ -18,7 +18,7 @@ import {
   fetchUser,
   checkOrgMembership,
   signJwt,
-  verifyJwt,
+  verifyAuthenticatedJwt,
   sendMagicLink,
   verifyMagicLink,
   buildEmailSendPerIpRateLimit,
@@ -1080,6 +1080,7 @@ export async function createServer(): Promise<Express> {
     // authoritative user row (roles may have changed since the code was issued).
     const jwt = await signJwt({
       login: redeemed.login,
+      ...(redeemed.signInId ? { sid: redeemed.signInId } : {}),
       sub: user.id,
       roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
       ...(user.githubUsername ? { githubUsername: user.githubUsername } : {}),
@@ -1097,7 +1098,7 @@ export async function createServer(): Promise<Express> {
       return;
     }
     try {
-      const payload = await verifyJwt(authHeader.slice(7));
+      const payload = await verifyAuthenticatedJwt(authHeader.slice(7), db);
       // Admin impersonation: this endpoint bypasses resolveAuthContext (and so
       // the session-row re-validation), so an impersonation token is rejected
       // outright rather than echoing the target's profile.

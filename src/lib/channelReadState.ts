@@ -46,24 +46,55 @@ const MESSAGE_NODE_TYPES = ['chat-message', 'record'];
  * Advance an attendee's cursor on a Channel — monotonic, race-safe, and safe
  * inside an interactive transaction (`ON CONFLICT … DO UPDATE`, never a
  * caught P2002). Returns the cursor after the write.
+ *
+ * #2181: the same statement records the Channel incarnation the cursor was RAISED under (`channel_incarnation`). An
+ * insert records it; a conflict records it only when `last_seen_seq` rises, so an equal or lower mark changes neither
+ * and a legacy NULL label is never relabelled as current.
  */
 export async function advanceReadState(db: Db, attendee: RegisterAttendee, channelId: string, seq: number): Promise<number> {
   const target = Math.max(0, Math.floor(seq));
   const rows =
     'workerId' in attendee
       ? await db.$queryRaw<Array<{ last_seen_seq: number }>>`
-          INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, updated_at)
-          VALUES (${generateId()}, ${attendee.workerId}, ${channelId}, ${target}, now())
+          INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, channel_incarnation, updated_at)
+          VALUES (${generateId()}, ${attendee.workerId}, ${channelId}, ${target}, (SELECT incarnation FROM channels WHERE id = ${channelId}), now())
           ON CONFLICT (worker_id, channel_id) WHERE worker_id IS NOT NULL
-            DO UPDATE SET last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq), updated_at = now()
+            DO UPDATE SET
+              channel_incarnation = CASE WHEN EXCLUDED.last_seen_seq > channel_read_states.last_seen_seq
+                THEN EXCLUDED.channel_incarnation ELSE channel_read_states.channel_incarnation END,
+              last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq), updated_at = now()
           RETURNING last_seen_seq`
       : await db.$queryRaw<Array<{ last_seen_seq: number }>>`
-          INSERT INTO channel_read_states (id, agent_id, app_id, channel_id, last_seen_seq, updated_at)
-          VALUES (${generateId()}, ${attendee.agentId}, ${attendee.appId}, ${channelId}, ${target}, now())
+          INSERT INTO channel_read_states (id, agent_id, app_id, channel_id, last_seen_seq, channel_incarnation, updated_at)
+          VALUES (${generateId()}, ${attendee.agentId}, ${attendee.appId}, ${channelId}, ${target}, (SELECT incarnation FROM channels WHERE id = ${channelId}), now())
           ON CONFLICT (agent_id, app_id, channel_id) WHERE agent_id IS NOT NULL
-            DO UPDATE SET last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq), updated_at = now()
+            DO UPDATE SET
+              channel_incarnation = CASE WHEN EXCLUDED.last_seen_seq > channel_read_states.last_seen_seq
+                THEN EXCLUDED.channel_incarnation ELSE channel_read_states.channel_incarnation END,
+              last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq), updated_at = now()
           RETURNING last_seen_seq`;
   return rows[0]?.last_seen_seq ?? target;
+}
+
+/**
+ * #2181 — the two incarnations a read state is described by: the Channel's CURRENT one, and the one the stored cursor was
+ * last raised under (NULL = legacy / never advanced under a known incarnation). They are separate on purpose: a client
+ * may call a cursor current only when both equal its sampled incarnation.
+ */
+export async function readStateIncarnations(
+  db: Db,
+  attendee: RegisterAttendee,
+  channelId: string,
+): Promise<{ channelIncarnation: number; cursorIncarnation: number | null }> {
+  const [channel, state] = await Promise.all([
+    db.channel.findUnique({ where: { id: channelId }, select: { incarnation: true } }),
+    db.$queryRaw<Array<{ channel_incarnation: number | null }>>`
+      SELECT channel_incarnation FROM channel_read_states
+      WHERE channel_id = ${channelId} AND ${'workerId' in attendee
+        ? Prisma.sql`worker_id = ${attendee.workerId}`
+        : Prisma.sql`agent_id = ${attendee.agentId} AND app_id = ${attendee.appId}`}`,
+  ]);
+  return { channelIncarnation: channel?.incarnation ?? 1, cursorIncarnation: state[0]?.channel_incarnation ?? null };
 }
 
 /**

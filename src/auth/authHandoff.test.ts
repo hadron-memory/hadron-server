@@ -37,7 +37,7 @@ describe('login handoff codes', () => {
     expect(code).toMatch(/^[0-9a-f]{64}$/); // 256-bit hex, never the JWT
 
     const redeemed = await redeemLoginCode(code);
-    expect(redeemed).toEqual({ userId, redirect: '/app/setup', isNew: true });
+    expect(redeemed).toEqual({ userId, redirect: '/app/setup', isNew: true, signInId: null });
 
     // Single use: a replay fails.
     expect(await redeemLoginCode(code)).toBeNull();

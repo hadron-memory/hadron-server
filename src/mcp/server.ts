@@ -101,6 +101,7 @@ import { foreignEdgeMemoryIds } from '../lib/foreignEdgeMemories.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
+import { governedRemovalError, lockGovernedRowsIn } from '../lib/governedRemoval.js';
 import { escapePrismaLikePattern } from '../lib/literalLocPrefix.js';
 import {
   moveNodeSubtree,
@@ -3471,7 +3472,7 @@ export function createMcpServerInstance(
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
-    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -4336,7 +4337,7 @@ export function createMcpServerInstance(
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -6900,7 +6901,7 @@ export function createMcpServerInstance(
     userId: auth.userId ?? undefined,
     // #1868: the presented hdr_user_ key, for any gate on the door's path that
     // re-checks it (consistency with the other delegating contexts).
-    apiKeyId: auth.apiKeyId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -7118,7 +7119,7 @@ export function createMcpServerInstance(
         governedCanReplay: () => true,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -7153,7 +7154,7 @@ export function createMcpServerInstance(
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
-    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -7294,7 +7295,7 @@ export function createMcpServerInstance(
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -7543,6 +7544,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'mintedSpec'; message: string }
         | { refused: 'comment'; message: string }
         | { refused: 'decision'; message: string }
+        | { refused: 'governed'; message: string }
         | { ok: true; descendantCount: number };
 
       // #449 — source memories whose pending-edge count a hard delete changed.
@@ -7618,6 +7620,12 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         const decisions = await decisionFamilyAmong(tx, affectedIds);
         if (decisions.length > 0) {
           return { refused: 'decision', message: decisionContainedError('Deleting this node', decisions.map((d) => d.loc)).message };
+        }
+        // A governed node is removed only after its marker is cleared through
+        // the kind's door: the whole affected set is judged on locked rows.
+        const governedHits = await lockGovernedRowsIn(tx, memory.id, affectedIds);
+        if (governedHits.length > 0) {
+          return { refused: 'governed', message: governedRemovalError(governedHits, 'mcp').message };
         }
         if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
         else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy: auth.userId ?? auth.clientId ?? null, at: new Date() });
@@ -7703,6 +7711,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
         if (result.refused === 'decision') {
           return textResult(`[decision_contained] ${result.message}`);
+        }
+        if (result.refused === 'governed') {
+          return textResult(`[role_governed] ${result.message}`);
         }
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';
@@ -8006,6 +8017,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               await assertNoMintedSpecRemoval(tx, toMemory.id, [existingTarget.id], 'overwrite');
               // #1641 §3.2 — evicting a decision would delete it.
               await refuseDecisionFamily(tx, [existingTarget.id], 'Overwriting this node');
+              // Evicting a live occupant is a removal: a governed occupant is
+              // replaced only after its marker is cleared through the kind's
+              // door. Judged on the locked row; the eviction update above already
+              // holds it, so this takes nothing new. A tombstoned occupant is
+              // only re-keyed, which removes nothing.
+              if (!existingTarget.deletedAt) {
+                const governedOccupant = await lockGovernedRowsIn(tx, toMemory.id, [existingTarget.id]);
+                if (governedOccupant.length > 0) throw governedRemovalError(governedOccupant, 'mcp', 'overwrite');
+              }
             }
           }
 
@@ -8058,6 +8078,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
           return textResult(`[spec_minted_permanent] ${e.message}`);
+        }
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === 'ROLE_GOVERNED' && e.extensions?.op === 'overwrite') {
+          return textResult(`[role_governed] ${e.message}`);
         }
         if (e instanceof SubtreeMoveSourceChangedError) {
           return textResult('The node was moved concurrently; re-read it and retry.');
@@ -8716,7 +8739,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -9029,7 +9052,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -9082,7 +9105,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -9108,15 +9131,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     {
       session: z.string().optional().describe('Pick one of a listed answer\'s sessions by its id. Omit on the first call.'),
       description: z.string().optional().describe('What the next session is about, used only when the redemption starts a new one (after a rotation).'),
-      llmModel: z.string().optional().describe('LLM model, recorded only on a session the redemption starts.'),
-      family: z.string().optional().describe('Model family (claude, codex, glm…), recorded only on a session the redemption starts.'),
+      llmModel: z.string().optional().describe('LLM model: recorded on a session the redemption starts, and refreshed on an open session it resumes (never cleared when omitted).'),
+      family: z.string().optional().describe('Model family (claude, codex, glm…): recorded on a session the redemption starts, and refreshed on an open session it resumes. Wins over the family the model implies; an invalid token is refused before a claim is spent.'),
     },
     async ({ session, description, llmModel, family }) => {
       const mcpCtx: Context = {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -9255,7 +9278,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           db,
           clientId: auth.clientId ?? undefined,
           userId: auth.userId ?? undefined,
-          apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+          apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
           appId: auth.appId ?? undefined,
           sessionId: auth.sessionId ?? undefined,
           roles: auth.roles as Context['roles'],
@@ -9598,7 +9621,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           db,
           clientId: auth.clientId ?? undefined,
           userId: auth.userId ?? undefined,
-          apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+          apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
           appId: auth.appId ?? undefined,
           sessionId: auth.sessionId ?? undefined,
           roles: auth.roles as Context['roles'],
@@ -9638,7 +9661,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
-    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -9673,7 +9696,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
   /** Read a Channel by id or address — the team-chat read's Channel-addressed twin. */
   const readChannel = async (
     channelRef: string,
-    args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; limit?: number; offset?: number; session?: string },
+    args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; limit?: number; offset?: number; session?: string; expectedIncarnation?: number },
   ) => {
     try {
       // #1353: capture applies to any user-principal session read — the pilot
@@ -9695,7 +9718,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         : chatCtx();
       const page = await resolvers.Query.channelMessages(
         {},
-        { channelRef, sinceSeq: args.sinceSeq ?? null, beforeSeq: args.beforeSeq ?? null, mentionsRef: args.mentions ?? null, limit: args.limit ?? null, offset: args.offset ?? null },
+        { channelRef, sinceSeq: args.sinceSeq ?? null, beforeSeq: args.beforeSeq ?? null, mentionsRef: args.mentions ?? null, limit: args.limit ?? null, offset: args.offset ?? null, expectedIncarnation: args.expectedIncarnation ?? null },
         resolverCtx,
       );
       if (captured && args.session) {
@@ -9709,22 +9732,27 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             mentionsRef: args.mentions,
             limit: args.limit,
             offset: args.offset,
+            expectedIncarnation: args.expectedIncarnation,
             page,
           });
         } catch (error) {
+          // #2181: a pinned read whose final fence refused returns the typed error, never the page.
+          if (args.expectedIncarnation != null && error instanceof ScopeGraphQLError && ['CHANNEL_INCARNATION_CHANGED', 'CHANNEL_NOT_FOUND'].includes(String(error.extensions?.code))) throw error;
           // The transcript is already authorized and loaded. Cursor ownership
           // is best-effort bookkeeping: never discard a successful read and
           // invite the caller to retry it because the follow-up write failed.
           console.warn('[hadron_channel_read] pilot read-state advance failed:', error);
         }
       }
-      if (page.total === 0) return textResult('The Channel has no matching messages.');
+      // #2181: the envelope line a caller pins its next read or mark to (additive final line).
+      const envelope = page.channelId != null && page.channelIncarnation != null ? `\n\nchannel ${page.channelId} incarnation ${page.channelIncarnation}` : '';
+      if (page.total === 0) return textResult(`The Channel has no matching messages.${envelope}`);
       const lines = page.items.map((m) => {
         const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
         const cross = m.authorAppId ? ' [cross-App]' : '';
         return `#${m.seq} ${chatByline(m)}${cross} ${m.at.toISOString()}${reply}:\n${m.body}`;
       });
-      return textResult(`${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`);
+      return textResult(`${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}${envelope}`);
     } catch (e) {
       if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
       return textResult(`Error: ${e instanceof Error ? e.message : 'channel read failed'}`);
@@ -10100,12 +10128,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
       session: z.string().optional().describe('Your session id — passing it keeps that session alive (#1081).'),
+      expectedIncarnation: z.number().int().optional().describe('#2181: pin the read to the Channel incarnation you read (the "incarnation" on the final line of a read). A different one is [channel_incarnation_changed] with no page and no cursor, check or resume applied; omitted, the read is unfenced.'),
     },
-    async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession }) => {
+    async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession, expectedIncarnation }) => {
       // A blank session is no session, for every consumer below (#1362 review).
       const session = typeof rawSession === 'string' ? rawSession.trim() || undefined : rawSession;
       await heartbeatSession(session);
-      return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session });
+      return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session, expectedIncarnation });
     },
   );
 
@@ -10182,7 +10211,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -10234,6 +10263,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. On an ordinary read, passing it keeps that session alive (#1081). Monitor mode uses it only as an App hint and does not heartbeat or wake the session.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
       channel: z.string().optional().describe('Spec 049: read THIS Channel (its id or address, from hadron_list_channels) instead of the App\'s default team chat.'),
+      expectedIncarnation: z.number().int().optional().describe('#2181: with channel, pin the read to the Channel incarnation you read; see hadron_channel_read.'),
       monitor: z.boolean().optional().describe('Use the register + stored ChannelReadState for your live Worker sessions. Incompatible with sinceSeq, beforeSeq, mentions and offset.'),
       monitorFor: z.string().optional().describe('With monitor:true, narrow to one Worker by name, id or URN. It must be bound to one of your live sessions in this App.'),
       acknowledge: z.array(z.object({
@@ -10243,7 +10273,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         proof: z.string().describe('Opaque server proof from the returned checkpoint; binds Worker + Channel + sequence.'),
       })).max(TEAM_CHAT_MONITOR_MAX_TARGETS).optional().describe('With monitor:true, deliberately advance these server-issued checkpoints after routing/action succeeded.'),
     },
-    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession, app, channel, monitor, monitorFor, acknowledge }) => {
+    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession, app, channel, expectedIncarnation, monitor, monitorFor, acknowledge }) => {
       // A blank session is no session, for every consumer below (#1362 review):
       // otherwise the MCP layer drops the bound session as "explicit" while
       // maybeAdvanceOwnChannelRead's trim falls back to it.
@@ -10264,7 +10294,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // contract: it needs no active App. Monitor mode still needs an App to
       // decide which of this operator's live Worker sessions participate.
       if (!monitor && channel !== undefined) {
-        return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session });
+        return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session, expectedIncarnation });
       }
 
       let appRef = app;
@@ -10331,13 +10361,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             console.warn('[hadron_team_chat_read] pilot read-state advance failed:', error);
           }
         }
-        if (page.total === 0) return textResult('The team chat has no matching messages.');
+        const envelope = page.channelId != null && page.channelIncarnation != null ? `\n\nchannel ${page.channelId} incarnation ${page.channelIncarnation}` : '';
+        if (page.total === 0) return textResult(`The team chat has no matching messages.${envelope}`);
         const lines = page.items.map((m) => {
           const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
           return `#${m.seq} ${chatByline(m)} ${m.at.toISOString()}${reply}:\n${m.body}`;
         });
         return textResult(
-          `${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`,
+          `${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}${envelope}`,
         );
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat read failed'}`);
@@ -10449,8 +10480,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         app: z.string().optional().describe('The App. Omit to recover it from session or the active selection.'),
         channel: z.string().optional().describe('Channel id or address. Omit for the team Channel hadron_team_chat_read serves for the App.'),
         seq: z.number().int().min(0).describe('Read through this exact sequence.'),
+        expectedIncarnation: z.number().int().optional().describe('#2181: fence the mark to the Channel incarnation you read (the "incarnation" on the final line of a read). A different one is [channel_incarnation_changed] — never repeat it; read again and pin the new incarnation. The result names channelIncarnation and cursorIncarnation (null = legacy cursor, never relabelled). Omitted, the mark is unfenced.'),
       },
-      async ({ session, app, channel, seq }) => {
+      async ({ session, app, channel, seq, expectedIncarnation }) => {
         await heartbeatSession(session);
         let appRef = app;
         if (!appRef) {
@@ -10469,7 +10501,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           if (channelRef === undefined) {
             channelRef = (await locateTeamChatChannel(chatCtx(), (await resolveAppRef(db, appRef)).id))?.channelId ?? '';
           }
-          const result = await markOwnTeamChatRead(chatCtx(), { appRef, channelRef, sessionRef: session, seq });
+          const result = await markOwnTeamChatRead(chatCtx(), { appRef, channelRef, sessionRef: session, seq, expectedIncarnation });
           return textResult(JSON.stringify(result, null, 2));
         } catch (error) {
           return scopeErrorText(error);
@@ -10530,7 +10562,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -10758,7 +10790,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -10938,7 +10970,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
     async ({ workerRef, confirmNoExternalAttribution }) => {
       const ctx: Context = {
         db, userId: auth.userId ?? undefined, appId: auth.appId ?? undefined,
-        clientId: auth.clientId ?? undefined, apiKeyId: auth.apiKeyId ?? undefined,
+        clientId: auth.clientId ?? undefined, apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
         sessionId: auth.sessionId ?? undefined, organizationId: auth.organizationId ?? undefined,
         roles: auth.roles as Context['roles'],
       };
@@ -11007,7 +11039,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         sessionBindingRefused: auth.sessionBindingRefused,
@@ -11088,7 +11120,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -11154,7 +11186,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -11268,7 +11300,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],

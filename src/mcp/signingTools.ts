@@ -49,7 +49,7 @@ export function registerSigningTools(server: McpServer, deps: { db: PrismaClient
     appKeyId: auth.appKeyId ?? undefined,
     // Riana #1864 P2-1: the presented hdr_user_ key, so the shared authorized
     // transaction re-checks it is still unrevoked at the write.
-    apiKeyId: auth.apiKeyId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
