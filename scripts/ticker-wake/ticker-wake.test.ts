@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Config, Runner } from '../orca-attention-router/router.js';
 import { buildSchema, parse, validate } from 'graphql';
 import { typeDefs } from '../../src/api/graphql/schema/typeDefs.js';
-import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync } from './ticker-wake.js';
+import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, SUBSCRIBERS, SUBSCRIBERS_PAGE, CURRENT_SESSION, ALARM_EVENT, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync } from './ticker-wake.js';
 import type { RunResult } from '../orca-attention-router/router.js';
 
 const RULE = '─'.repeat(112);
@@ -24,7 +24,8 @@ const MENTION = { kind: 'MENTION', ticker: null };
 const task = (id: string, event = 'ASSIGNED', eventId = `e-${id}`, chainIndex = 0) =>
   ({ kind: 'TASK', ticker: null, task: { id, eventId, chainIndex, event } });
 const taskEntry = (id: string, eventId = `e-${id}`, chainIndex = 0) => ({ eventId, chainIndex });
-const TASK = task('t1', 'ALARM');
+/** A task event this script never delivers (#1704: END_SESSION needs the host poller). */
+const TASK = task('t1', 'END_SESSION');
 const CONFIRMED = { ok: true, result: { send: { accepted: true, prompt: { requestId: 'r1', stages: ['input_accepted', 'turn_started'] } } } };
 const NO_ID_ACCEPTED = { ok: true, result: { send: { accepted: true, prompt: { stages: ['input_accepted'] } } } };
 /** A bare `--enter` reply (Hugo's host check, #26146): the raw input path, no request id, no stages. */
@@ -61,6 +62,20 @@ interface Fake {
   /** Bare `--enter` sends (no --text), by terminal handle (#2138 stranded drafts). */
   enters: string[];
   enterReply: (() => string) | null;
+  /** #2138: the App's live tickers, each with its subscriber pages ([[{id,name}...], ...]). */
+  tickers: Array<{ id: string; pages: Array<Array<{ id: string; name: string }>> }>;
+  subscribersError: string | null;
+  /** Terminals listed besides term_a. */
+  extraTerminals: any[];
+  /** #2161: each worker's sessions as the server lists them, newest first. */
+  sessions: Record<string, Array<{ id: string; workerId: string; appId: string; endedAt: string | null }>>;
+  sessionsError: string | null;
+  sessionQueries: string[];
+  /** #1704: agentTeamEvents(taskId, alarmsOnly) replies, by task id. */
+  alarms: Record<string, unknown[]>;
+  /** When set, the alarm read answers this GraphQL error. */
+  alarmError: string | null;
+  alarmQueries: string[];
 }
 
 let dir: string;
@@ -73,7 +88,12 @@ function fake(): Fake {
     dueQueries: [], pages: 0, alwaysMore: false, ackReply: null, sendReply: null, dueError: null,
     incarnation: 'inc-1', retries: [], retryReply: null, run: undefined as any,
     lastCheckedAt: null, tasks: {}, evidenceQueries: [], checkError: null, enters: [], enterReply: null,
+    tickers: [], subscribersError: null, extraTerminals: [], sessions: {}, sessionsError: null, sessionQueries: [],
+    alarms: {}, alarmError: null, alarmQueries: [],
   };
+  const subPage = (t: { pages: Array<Array<{ id: string; name: string }>> }, i: number) => ({
+    items: (t.pages[i] ?? []).map((w) => ({ worker: w })), hasNextPage: i + 1 < t.pages.length, endCursor: i + 1 < t.pages.length ? `p${i + 1}` : null,
+  });
   const fArg = (argv: string[], k: string): string | undefined => argv.find((a, i) => argv[i - 1] === '-F' && a.startsWith(`${k}=`))?.slice(k.length + 1);
   f.run = (argv) => {
     const out = (o: unknown) => ({ code: 0, stdout: JSON.stringify(o), stderr: '' });
@@ -85,10 +105,34 @@ function fake(): Fake {
         f.acked.push(...proofs);
         return out({ data: { acknowledgeWakes: { acknowledged: proofs.length, unchanged: 0 } } });
       }
+      if (q.includes('tickers(appRef')) {
+        if (f.subscribersError) return out({ errors: [{ message: f.subscribersError, extensions: { code: 'INTERNAL_SERVER_ERROR' } }] });
+        return out({ data: { tickers: f.tickers.map((t) => ({ id: t.id, subscribers: subPage(t, 0) })) } });
+      }
+      if (q.includes('ticker(ref')) {
+        const t = f.tickers.find((x) => x.id === fArg(argv, 't'));
+        return out({ data: { ticker: t ? { subscribers: subPage(t, Number((fArg(argv, 'p') ?? 'p0').slice(1))) } : null } });
+      }
+      if (q.includes('sessions(workerRef')) {
+        const w = fArg(argv, 'w') as string;
+        f.sessionQueries.push(w);
+        if (f.sessionsError) return out({ errors: [{ message: f.sessionsError, extensions: { code: 'INTERNAL_SERVER_ERROR' } }] });
+        return out({ data: { sessions: (f.sessions[w] ?? []).slice(0, 1) } });
+      }
       if (q.includes('checkStatus')) {
         f.evidenceQueries.push(`worker ${fArg(argv, 'w')}`);
         if (f.checkError) return out({ errors: [{ message: f.checkError, extensions: { code: 'INTERNAL_SERVER_ERROR' } }] });
         return out({ data: { worker: { id: fArg(argv, 'w'), checkStatus: { lastCheckedAt: f.lastCheckedAt } } } });
+      }
+      if (q.includes('agentTeamEvents(')) {
+        const t = fArg(argv, 't') as string;
+        f.alarmQueries.push(`${fArg(argv, 'a')} ${t}`);
+        if (f.alarmError) return out({ errors: [{ message: f.alarmError, extensions: { code: 'INTERNAL_SERVER_ERROR' } }] });
+        // Like the server: oldest first, strictly after the given event, at most 200.
+        const all = (f.alarms[t] ?? []) as Array<{ id: string }>;
+        const after = fArg(argv, 'p');
+        const from = after === undefined ? 0 : all.findIndex((e) => e.id === after) + 1;
+        return out({ data: { agentTeamEvents: all.slice(from, from + 200) } });
       }
       if (q.includes('agentTask(')) {
         const t = fArg(argv, 't') as string;
@@ -104,7 +148,7 @@ function fake(): Fake {
     }
     if (argv[0] === 'orca' && argv[1] === 'terminal') {
       if (argv[2] === 'list') {
-        return out({ ok: true, result: { terminals: [{ handle: 'term_a', incarnationId: f.incarnation, worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }] } });
+        return out({ ok: true, result: { terminals: [{ handle: 'term_a', incarnationId: f.incarnation, worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }, ...f.extraTerminals] } });
       }
       if (argv[2] === 'wait') return out({ ok: f.idle, result: { wait: { satisfied: f.idle } }, error: f.idle ? undefined : { code: 'timeout' } });
       if (argv[2] === 'read') return out({ ok: true, result: { terminal: f.screen } });
@@ -228,12 +272,13 @@ describe('selection and delivery', () => {
     expect(f.acked).toEqual([joined]); // its tick coverage is fully covered by the confirmed receipt
   });
 
-  it('a worker not on the roster is skipped without an ack', async () => {
+  it('a worker with no roster row and no binding on this host is held without an ack, and logged unreachable', async () => {
     f.wakes = [wake('w-other', 'Zed', [TICK])];
     await go();
     expect(f.sent).toEqual([]);
     expect(f.acked).toEqual([]);
-    expect(log()).toContain('Zed: not on roster');
+    expect(log()).toContain('Zed: held (no binding on this host)');
+    expect(log()).toContain('unreachable on this host (1): Zed (no binding)');
   });
 
   it('a proof whose tick coverage cannot be decoded is held', async () => {
@@ -416,9 +461,8 @@ describe('#2138 §5.2: the nudge text, task assignments and live-check', () => {
   });
 
   it.each([
-    ['ALARM', task('t1', 'ALARM')],
-    ['CHILD_FINISHED', task('t1', 'CHILD_FINISHED')],
     ['END_SESSION', task('t1', 'END_SESSION')],
+    ['an ALARM whose event id is not a plain id', task('t1', 'ALARM', 'e1; rm -rf ~')],
     ['a TASK reason without its task', { kind: 'TASK', ticker: null, task: null }],
     ['a task id that is not a plain id', task('t1; rm -rf ~', 'ASSIGNED')],
   ])('%s is left alone, alone or beside an assignment: no nudge, no ack, no receipt', async (_label, reason) => {
@@ -999,6 +1043,9 @@ describe('GraphQL contract with the server SDL (#2102 / R63)', () => {
     expect(validate(schema, parse(WORKER_CHECK)).map((e) => e.message)).toEqual([]);
     expect(validate(schema, parse(TASK_STATE)).map((e) => e.message)).toEqual([]);
   });
+  it('the alarm read (#1704) validates', async () => {
+    expect(validate(schema, parse(ALARM_EVENT)).map((e) => e.message)).toEqual([]);
+  });
 });
 
 // George's two P2s on #2070 (LOCAL REQUEST_CHANGES at fd5d2f33).
@@ -1284,7 +1331,7 @@ describe('#2138 experiment: a pass must fit inside one cadence', () => {
     await pass(cfg(), run, { now: c.now, budgetMs: 4_000 }, (l) => lines.push(l));
     expect(f.sent).toHaveLength(1); // Ada, the older one
     expect(f.acked).toHaveLength(1);
-    expect(log()).not.toContain('Bob: not on roster');
+    expect(log()).not.toContain('Bob: held');
     expect(log()).toMatch(/1 due wake\(s\) left for the next pass/);
   });
 
@@ -1902,5 +1949,339 @@ describe('#2138: a pass does not pay the turn-start wait per send (bounded concu
     expect(await main(['once'], { load: cfg, run: f.run, log: (l: string) => lines.push(l), sleep: async () => {} })).toBe(0);
     expect(f.sent).toHaveLength(1);
     expect(f.acked).toHaveLength(1);
+  });
+});
+
+describe('#2138: the roster comes from the ticker\'s subscribers and this host\'s bound terminals (Hugo #26221)', () => {
+  /**
+   * A worktree under `dir` bound (CLI binding file) to `workerId` under `sessionId` (default: that worker's current open
+   * session, registered on the server), with a live agent terminal `handle` listed by Orca.
+   */
+  const bound = (slug: string, workerId: string | null, handle = `term_${slug}`, live = true, sessionId?: string) => {
+    const wt = join(dir, slug);
+    mkdirSync(join(wt, '.git'), { recursive: true });
+    if (workerId) {
+      const sid = sessionId ?? `s-${workerId}`;
+      if (sessionId === undefined) f.sessions[workerId] ??= [{ id: sid, workerId, appId: 'app-1', endedAt: null }];
+      writeFileSync(join(wt, '.git', 'hadron-team-session.json'), JSON.stringify({ workerName: slug, workerId, sessionId: sid, appId: 'app-1' }));
+    }
+    f.extraTerminals.push({ handle, incarnationId: 'inc-1', worktreePath: wt, connected: live, writable: true, agentIdentity: 'claude' });
+    return wt;
+  };
+  const sub = (id: string, name: string) => ({ id, name });
+
+  it('a subscriber missing from the hand-kept roster file is delivered through its bound terminal', async () => {
+    bound('bo', 'w-bo');
+    f.tickers = [{ id: 'T', pages: [[sub('w-ada', 'Ada'), sub('w-bo', 'Bo')]] }];
+    f.wakes = [wake('w-bo', 'Bo', [TICK])];
+    await go();
+    expect(f.sent).toEqual([nudgeText(['coordinator-tick'], [])]);
+    expect(f.acked).toHaveLength(1);
+    expect(log()).not.toContain('unreachable');
+  });
+
+  it('a task wake for a bound worker that subscribes to nothing is still delivered', async () => {
+    bound('cy', 'w-cy');
+    f.wakes = [wake('w-cy', 'Cy', [task('t1')], proof([], 'x', [taskEntry('t1')]))];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toHaveLength(1);
+  });
+
+  it("logs every subscriber it cannot reach, once per pass, with the reason, even with nothing due (today's six)", async () => {
+    bound('pia', 'w-pia', 'term_pia', false); // bound, but its only terminal is disconnected
+    bound('loose', null); // a terminal in an unbound worktree reaches nobody
+    const six = ['Bo', 'Calvin', 'Cody', 'Mira', 'Pia', 'Udo'];
+    f.tickers = [
+      { id: 'T', pages: [[sub('w-ada', 'Ada'), ...six.slice(0, 3).map((n) => sub(`w-${n.toLowerCase()}`, n))]] },
+      // a second page carries Udo alone, and Bo again (listed once)
+      { id: 'U', pages: [six.slice(3, 5).map((n) => sub(`w-${n.toLowerCase()}`, n)), [sub('w-udo', 'Udo'), sub('w-bo', 'Bo')]] },
+    ];
+    await go();
+    const unreachable = lines.filter((l) => l.includes('unreachable on this host'));
+    expect(unreachable).toHaveLength(1);
+    expect(unreachable[0]).toContain('unreachable on this host (6): Bo (no binding), Calvin (no binding), Cody (no binding), Mira (no binding), Pia (no terminal), Udo (no binding)');
+    expect(unreachable[0]).not.toContain('Ada');
+  });
+
+  it('a worker bound in two worktrees under its current session is not guessed at: held, and logged', async () => {
+    bound('d1', 'w-dup');
+    bound('d2', 'w-dup');
+    f.wakes = [wake('w-dup', 'Dup', [TICK])];
+    await go();
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('Dup (no binding (bound in 2 worktrees))');
+  });
+
+  it('the roster file still overrides: its row decides the worktree and pin for that worker', async () => {
+    bound('ada2', 'w-ada'); // two more worktrees bound to Ada would be ambiguous, but the file row names one
+    bound('ada3', 'w-ada');
+    f.wakes = [wake('w-ada', 'Ada', [TICK])];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toHaveLength(1);
+  });
+
+  it('an unreadable subscriber list stops the pass: nothing typed, nothing acked', async () => {
+    f.subscribersError = 'down';
+    bound('bo', 'w-bo');
+    f.wakes = [wake('w-bo', 'Bo', [TICK])];
+    await expect(go()).rejects.toThrow('graphql error INTERNAL_SERVER_ERROR');
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+  });
+
+  describe("a binding counts only while it names the worker's current open session (George's #2161 P2, Ada #26314)", () => {
+    const old = (w: string, endedAt: string | null = '2026-10-20T10:00:00.000Z') => ({ id: `old-${w}`, workerId: w, appId: 'app-1', endedAt });
+
+    it("George's case: Bo's binding from an ended session, in a worktree whose idle agent terminal was reused: held, never nudged", async () => {
+      f.sessions = { 'w-bo': [old('w-bo')] };
+      bound('reused', 'w-bo', 'term_reused', true, 'old-w-bo');
+      f.tickers = [{ id: 'T', pages: [[sub('w-bo', 'Bo')]] }];
+      f.wakes = [wake('w-bo', 'Bo', [TICK])];
+      await go();
+      expect(f.sent).toEqual([]);
+      expect(f.acked).toEqual([]);
+      expect(log()).toContain('Bo: held (stale binding (session ended) on this host)');
+      expect(log()).toContain('Bo (stale binding (session ended))');
+      expect(f.sessionQueries).toEqual(['w-bo']); // once per pass, though asked twice
+    });
+
+    it('a binding whose session was replaced by a newer open one elsewhere is held', async () => {
+      f.sessions = { 'w-bo': [{ id: 'new-w-bo', workerId: 'w-bo', appId: 'app-1', endedAt: null }, old('w-bo')] };
+      bound('reused', 'w-bo', 'term_reused', true, 'old-w-bo');
+      f.wakes = [wake('w-bo', 'Bo', [TICK])];
+      await go();
+      expect(f.sent).toEqual([]);
+      expect(log()).toContain('stale binding (session replaced)');
+    });
+
+    it('the stale worktree is passed over and the current one is nudged, when both are on this host', async () => {
+      f.sessions = { 'w-bo': [{ id: 'new-w-bo', workerId: 'w-bo', appId: 'app-1', endedAt: null }, old('w-bo')] };
+      bound('reused', 'w-bo', 'term_reused', true, 'old-w-bo');
+      bound('bo-now', 'w-bo', 'term_bo_now', true, 'new-w-bo');
+      const sends: string[] = [];
+      const run = f.run;
+      f.run = (argv) => { if (argv[0] === 'orca' && argv[2] === 'send') sends.push(argv[argv.indexOf('--terminal') + 1]); return run(argv); };
+      f.wakes = [wake('w-bo', 'Bo', [TICK])];
+      await go();
+      expect(sends).toEqual(['term_bo_now']);
+      expect(f.acked).toHaveLength(1);
+    });
+
+    it.each([
+      ['an unreadable session read', () => { f.sessionsError = 'down'; }, 'stale binding (session unreadable: graphql error INTERNAL_SERVER_ERROR)'],
+      ['no visible session at all', () => { f.sessions['w-bo'] = []; }, 'stale binding (no session)'],
+      ['a session of another worker', () => { f.sessions['w-bo'] = [{ id: 's-w-bo', workerId: 'w-x', appId: 'app-1', endedAt: null }]; }, 'stale binding (session mismatched)'],
+      ['a session in another App', () => { f.sessions['w-bo'] = [{ id: 's-w-bo', workerId: 'w-bo', appId: 'app-2', endedAt: null }]; }, 'stale binding (app mismatched)'],
+    ])('%s holds, never nudges', async (_label, arrange, why) => {
+      bound('bo', 'w-bo');
+      arrange();
+      f.wakes = [wake('w-bo', 'Bo', [TICK])];
+      await go();
+      expect(f.sent).toEqual([]);
+      expect(f.acked).toEqual([]);
+      expect(log()).toContain(why);
+      expect(log()).not.toContain('down');
+    });
+
+    it('a binding file that records no session holds (a workerId alone proves nothing)', async () => {
+      const wt = join(dir, 'bare');
+      mkdirSync(join(wt, '.git'), { recursive: true });
+      writeFileSync(join(wt, '.git', 'hadron-team-session.json'), JSON.stringify({ workerId: 'w-bo' }));
+      f.extraTerminals.push({ handle: 'term_bare', incarnationId: 'inc-1', worktreePath: wt, connected: true, writable: true, agentIdentity: 'claude' });
+      f.sessions = { 'w-bo': [{ id: 's-w-bo', workerId: 'w-bo', appId: 'app-1', endedAt: null }] };
+      f.wakes = [wake('w-bo', 'Bo', [TICK])];
+      await go();
+      expect(f.sent).toEqual([]);
+      expect(log()).toContain('stale binding (session replaced)');
+    });
+
+    it('a roster-file row is the operator\'s statement and is not session-checked', async () => {
+      f.wakes = [wake('w-ada', 'Ada', [TICK])];
+      await go();
+      expect(f.sent).toHaveLength(1);
+      expect(f.sessionQueries).toEqual([]);
+    });
+  });
+
+  it('the subscriber reads validate against the server SDL', () => {
+    const schema = buildSchema(typeDefs);
+    expect(validate(schema, parse(SUBSCRIBERS)).map((e) => e.message)).toEqual([]);
+    expect(validate(schema, parse(SUBSCRIBERS_PAGE)).map((e) => e.message)).toEqual([]);
+    expect(validate(schema, parse(CURRENT_SESSION)).map((e) => e.message)).toEqual([]);
+  });
+});
+
+describe('#1704: stall ALARM and CHILD_FINISHED task wakes are delivered and named; END_SESSION is left alone', () => {
+  const PROBE = '`hadron team chat read --mentions-me --limit 1` (it prints `cursor #C; channel head #H`)';
+  const FULL = '`hadron team chat read --mentions-me --since C --all`';
+  const MARK = "only if that read succeeded and you saw all of its output (if your tool truncated or saved it, read the rest first; if you can't, don't mark), run `hadron team chat mark-read --through H` with the H that read printed";
+  const CHECK = `run ${PROBE}, then ${FULL} and act on the tagged messages it returns; ${MARK}`;
+  /** An alarm on task `t` as agentTeamEvents returns it. */
+  const alarm = (t: string, id = `e-${t}`, type = 'stall.not-started', acknowledgedAt: string | null = null) => ({ id, type, acknowledgedAt });
+  const receipts = () => (existsSync(receiptsFile()) ? JSON.parse(readFileSync(receiptsFile(), 'utf8')) : {});
+
+  it('an ALARM-only wake is nudged once, naming the task, the rule and the ack command, then acked (pinned text)', async () => {
+    const p = proof([], 'x', [taskEntry('t1', 'a1', 1)]);
+    f.alarms = { t1: [alarm('t1', 'a0', 'stall.no-progress'), alarm('t1', 'a1')] };
+    f.wakes = [wake('w-ada', 'Ada', [task('t1', 'ALARM', 'a1', 1)], p)];
+    await go();
+    expect(f.sent).toEqual([
+      `Hadron task wake (stall alarm stall.not-started on task t1): ${CHECK}; then act on task t1 (\`hadron team task get t1\`), `
+      + 'then acknowledge its alarm with `hadron team alarm ack a1` (this message is not an acknowledgement). No unfiltered chat catch-up.',
+    ]);
+    expect(f.alarmQueries).toEqual(['hrn:app:test:team t1']);
+    expect(f.acked).toEqual([p]);
+    expect(receipts()).toEqual({});
+  });
+
+  it('a CHILD_FINISHED-only wake is nudged once, naming the child task, then acked; no alarm read', async () => {
+    const p = proof([], 'x', [taskEntry('c1')]);
+    f.wakes = [wake('w-ada', 'Ada', [task('c1', 'CHILD_FINISHED')], p)];
+    await go();
+    expect(f.sent).toEqual([
+      `Hadron task wake (child task c1 finished): ${CHECK}; then review the finished child task (\`hadron team task get c1\`). No unfiltered chat catch-up.`,
+    ]);
+    expect(f.alarmQueries).toEqual([]);
+    expect(f.acked).toEqual([p]);
+  });
+
+  it('TICK + assignment + alarm + finished child + MENTION: ONE one-line nudge names them all, and one ack covers them', async () => {
+    const p = proof(['T:1'], 'x', [taskEntry('t1'), taskEntry('t2', 'a2'), taskEntry('c3')]);
+    f.alarms = { t2: [alarm('t2', 'a2', 'stall.owner-unreactive')] };
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1'), task('t2', 'ALARM', 'a2'), task('c3', 'CHILD_FINISHED'), MENTION], p)];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    const t = f.sent[0];
+    expect(t).toMatch(/^Hadron task wake \(assigned t1; stall alarm stall.owner-unreactive on task t2; child task c3 finished; ticker coordinator-tick\): /);
+    for (const c of ['`hadron team task get t1`', '`hadron team alarm ack a2`', '`hadron team task get c3`', 'hadron team chat mark-read --through H']) expect(t).toContain(c);
+    expect(t).not.toContain('\n');
+    expect(f.acked).toEqual([p]);
+  });
+
+  it('nudgeText keeps the assignment-only text unchanged', () => {
+    expect(nudgeText(['coordinator-tick'], [{ id: 't1', event: 'ASSIGNED' }])).toBe(nudgeText(['coordinator-tick'], ['t1']));
+    expect(nudgeText([], ['t1'])).toMatch(/^Hadron task assigned \(t1\): /);
+  });
+
+  it.each([
+    ['the alarm read fails', () => { f.alarmError = 'boom'; }, 'the alarm cannot be read'],
+    ['the alarm is not found on its task', () => { f.alarms = { t1: [alarm('t1', 'other')] }; }, "the alarm's rule cannot be established"],
+    ['the rule is not a plain rule', () => { f.alarms = { t1: [alarm('t1', 'e-t1', 'stall; rm -rf ~')] }; }, "the alarm's rule cannot be established"],
+    ['the alarm was acknowledged meanwhile', () => { f.alarms = { t1: [alarm('t1', 'e-t1', 'stall.not-started', iso(Date.now()))] }; }, 'acknowledged meanwhile'],
+  ])('%s: held, no nudge, no ack, no receipt', async (_label, arrange, why) => {
+    arrange();
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1', 'ALARM')], proof(['T:1'], 'x', [taskEntry('t1')]))];
+    await go();
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain(why);
+    expect(log()).not.toContain('rm -rf');
+    expect(log()).not.toContain('boom');
+    expect(receipts()).toEqual({});
+  });
+
+  it("George's #2160 P2: the due alarm is the 201st, after a full page of acknowledged history; the lookup pages to it", async () => {
+    const old = Array.from({ length: 200 }, (_, i) => alarm('t1', `old${i}`, 'stall.no-progress', iso(Date.now() - 86_400_000)));
+    f.alarms = { t1: [...old, alarm('t1', 'new201')] };
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1', 'ALARM', 'new201')], proof(['T:1'], 'x', [taskEntry('t1', 'new201')]))];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toContain('`hadron team alarm ack new201`');
+    expect(f.alarmQueries).toHaveLength(2);
+    expect(f.acked).toHaveLength(1);
+  });
+
+  it('an alarm absent from a history that ends exactly on a full page is held after the empty next page, never guessed', async () => {
+    f.alarms = { t1: Array.from({ length: 200 }, (_, i) => alarm('t1', `old${i}`)) };
+    f.wakes = [wake('w-ada', 'Ada', [task('t1', 'ALARM', 'gone')], proof([], 'x', [taskEntry('t1', 'gone')]))];
+    await go();
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+    expect(f.alarmQueries).toHaveLength(2);
+    expect(log()).toContain("the alarm's rule cannot be established");
+  });
+
+  it('a failed later page holds the wake rather than reading the alarm as absent', async () => {
+    f.alarms = { t1: [...Array.from({ length: 200 }, (_, i) => alarm('t1', `old${i}`)), alarm('t1', 'new201')] };
+    const run = f.run;
+    let n = 0;
+    f.run = (argv) => (argv[0] === 'hadron' && argv[2]?.includes('agentTeamEvents(') && ++n === 2
+      ? { code: 0, stdout: JSON.stringify({ errors: [{ message: 'x', extensions: { code: 'INTERNAL_SERVER_ERROR' } }] }), stderr: '' } : run(argv));
+    f.wakes = [wake('w-ada', 'Ada', [task('t1', 'ALARM', 'new201')], proof([], 'x', [taskEntry('t1', 'new201')]))];
+    await go();
+    expect(f.sent).toEqual([]);
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('the alarm cannot be read: graphql error INTERNAL_SERVER_ERROR');
+  });
+
+  it('a delivered alarm whose ack was lost is never named again: ack-only recovery, and a re-offer joined with a tick names only the ticker', async () => {
+    f.alarms = { t1: [alarm('t1')] };
+    const p1 = proof([], 'one', [taskEntry('t1')]);
+    f.wakes = [wake('w-ada', 'Ada', [task('t1', 'ALARM')], p1)];
+    f.ackReply = () => ({ errors: [{ message: 'down' }] });
+    await go();
+    expect(f.sent).toHaveLength(1);
+    f.ackReply = null;
+    const p2 = proof(['T:1'], 'two', [taskEntry('t1')]);
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1', 'ALARM')], p2)];
+    await go();
+    expect(f.sent).toHaveLength(2);
+    expect(f.sent[1]).toEqual(nudgeText(['coordinator-tick'], []));
+    expect(f.acked).toEqual([p2]);
+    expect(f.alarmQueries).toHaveLength(1); // a covered alarm is not read again
+  });
+
+  it('delivery is never an alarm acknowledgement: the script only ever acks the wake proof', async () => {
+    f.alarms = { t1: [alarm('t1')] };
+    const calls: string[][] = [];
+    const run = f.run;
+    f.run = (argv) => { calls.push(argv); return run(argv); };
+    f.wakes = [wake('w-ada', 'Ada', [task('t1', 'ALARM')], proof([], 'x', [taskEntry('t1')]))];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(calls.filter((a) => a[0] === 'hadron' && /mutation/.test(a[2] ?? '')).map((a) => a[2])).toEqual([ACK]);
+  });
+
+  describe('an ambiguous alarm or child send resolves on the channel check alone (its receiver need not be the assignee)', () => {
+    const T0 = Date.parse('2026-10-20T07:30:00.000Z');
+    const at = (ms: number) => ({ now: () => ms });
+    const timing = { anchorAt: iso(T0 - 600_000), deliverAfter: iso(T0 - 300_000), busyDeadline: iso(T0 + 3_600_000) };
+
+    it.each([
+      ['ALARM', task('t1', 'ALARM')],
+      ['CHILD_FINISHED', task('t1', 'CHILD_FINISHED')],
+    ])('%s: no task is recorded for task evidence, and a later check resolves it with no task read', async (_label, reason) => {
+      f.alarms = { t1: [alarm('t1')] };
+      f.lastCheckedAt = iso(T0 - 60_000);
+      f.wakes = [wake('w-ada', 'Ada', [reason], proof([], 'x', [taskEntry('t1')]), [], timing)];
+      f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+      await go(at(T0));
+      f.sendReply = null;
+      expect(receipts()['w-ada']).toMatchObject({ state: 'ambiguous', tasks: {}, checkedBefore: iso(T0 - 60_000) });
+      f.evidenceQueries = [];
+      f.lastCheckedAt = iso(T0 + 30_000);
+      await go(at(T0 + 120_000));
+      expect(f.sent).toHaveLength(1);
+      expect(f.evidenceQueries).toEqual(['worker w-ada']);
+      expect(log()).toContain('resolved as delivered on evidence');
+      expect(f.acked).toHaveLength(1);
+    });
+
+    it('an assignment joined with an alarm still needs the assigned task started', async () => {
+      f.alarms = { t2: [alarm('t2')] };
+      f.wakes = [wake('w-ada', 'Ada', [task('t1'), task('t2', 'ALARM')], proof([], 'x', [taskEntry('t1'), taskEntry('t2')]), [], timing)];
+      f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+      await go(at(T0));
+      f.sendReply = null;
+      expect(receipts()['w-ada'].tasks).toEqual({ 'task:e-t1#0': 't1' });
+      f.lastCheckedAt = iso(T0 + 30_000);
+      f.tasks = { t1: { id: 't1', status: 'PENDING', assignee: { kind: 'WORKER', id: 'w-ada' } } };
+      await go(at(T0 + 120_000));
+      expect(f.acked).toEqual([]);
+      expect(log()).toContain('a covered task is not started by this worker');
+    });
   });
 });

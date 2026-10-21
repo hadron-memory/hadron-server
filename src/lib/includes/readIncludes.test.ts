@@ -233,7 +233,7 @@ describe('traversal-safe memoization (Xavier GAPS item 3)', () => {
     expect(again).toBe(`BD${BROKEN_INCLUDE_NOTICE}CD${BROKEN_INCLUDE_NOTICE}`);
   });
 
-  it('two revision settings serve two revisions; signed is ignored until signing ships (D7); approved is the staged notice', async () => {
+  it('two revision settings serve two revisions; signed is ignored until signing ships (D7); approved with no approval is the notice', async () => {
     const t = await mk('t', 'v2');
     await db.nodeRevision.create({
       data: { id: generateId(), nodeId: t.id, memoryId, revNo: 1, loc: 't', name: 't', content: 'v1', tags: [] },

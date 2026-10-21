@@ -1,8 +1,9 @@
 # ticker-wake
 
 Interim ticker-wake deliverer for an Orca host (orca1). It reads `dueWakes`,
-types one short nudge into the idle terminal of each roster worker whose wake
-carries a TICK or a task assignment (alone, or joined with a MENTION), and acks
+types one short nudge into the idle terminal of each worker on this host whose wake
+carries a TICK or a task event it names (an assignment, a stall alarm or a
+finished child; alone, or joined with a MENTION), and acks
 the wake by proof. It reuses the attention
 router's terminal and idle helpers (`../orca-attention-router/router.ts`,
 including the C1 empty-composer rule) and shares no token, ledger or lock with
@@ -21,8 +22,37 @@ tsx scripts/ticker-wake/ticker-wake.ts loop [--interval <seconds>=120] [--budget
 ```
 
 Config: the router's `~/.config/hadron-orca-attention-router/config.json`
-(app, `hadronCli`, `orcaCli`, `stateDir`, roster). A worker not on the roster is
-skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
+(app, `hadronCli`, `orcaCli`, `stateDir`, and an optional roster). State lives
+in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
+
+**Receivers (#2138, Hugo #26221).** The roster is not hand-kept. A hand-kept
+file missed 17 subscribed workers, whose wakes stayed due while every pass
+logged them as not on the roster. Each pass now reads every live ticker of the
+App and its live subscribers (`tickers { subscribers }`, paged), and lists
+Orca's terminals. A worker is reachable on this host when exactly one worktree
+among those terminals carries its CLI binding
+(`<git-dir>/hadron-team-session.json`, written by `hadron team session start`),
+and that binding names the worker's CURRENT session (George's #2161 P2, Ada
+#26314). The script reads the worker's newest session from the server
+(`sessions(workerRef, limit: 1)`, newest first). It must be open, be that
+worker's, and be the binding's `sessionId` in the binding's `appId`. A binding
+left behind after the worker's session ended, or after the worker was rebound
+elsewhere, is stale. That way, a terminal reused later in that worktree is never
+taken for the worker. Among several bindings for one worker, only the current
+one counts. A failed session read holds. The read is made once per worker per
+pass, only for workers it needs.
+`resolveTerminal` still picks the agent terminal in that worktree at delivery.
+A roster row in the config file, if there is one, overrides the binding for
+its worker (worktree and terminal pin). Any due worker is delivered this way,
+including one that subscribes to nothing (an assignee's task wake). Once per
+pass, the script logs every subscriber or due worker it can't reach, with why:
+`no binding` (no worktree on this host is bound to it, or two are bound under
+its current session), `stale binding (...)` (session ended, replaced, of
+another worker or App, absent, or unreadable), or `no terminal` (bound, but no
+connected, writable terminal in its worktree). A roster-file row is the
+operator's statement and is not session-checked. An
+MCP-bound worker leaves no binding file, so it shows as `no binding`. A failed
+subscriber read stops the pass, as a failed `dueWakes` read does.
 
 ## Contract
 
@@ -55,8 +85,20 @@ skipped. State lives in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
   `REASSIGNED`, `MATCHED`), alone or joined with ticks or a mention, is nudged
   once naming the task, then acked; the ack records the task event delivered,
   which the nudge made true. Task events are covered by the receipt like ticks,
-  so a re-offer never names the same task twice to the same receiver. Any other
-  task event (`ALARM`, `CHILD_FINISHED`, `END_SESSION`), a TASK reason without its
+  so a re-offer never names the same task twice to the same receiver. A stall
+  `ALARM` or a `CHILD_FINISHED` (#1704) is delivered the same way. An alarm
+  names its task and its stall rule, which the script reads from the alarm
+  itself with `agentTeamEvents(taskId, alarmsOnly)`, paging by the last event
+  read until the exact id turns up or the history ends (the history is oldest
+  first and keeps acknowledged alarms, George's #2160 P2). If a page fails, the
+  cursor stalls or 50 pages pass, the wake is held. If that read fails, the
+  alarm is not found, its rule is not a plain rule, or someone already
+  acknowledged it, the wake is held for the next pass. The nudge tells the
+  receiver to act and then run `hadron team alarm ack <eventId>`: delivery is
+  never an acknowledgement (cor:agt:050:20), so only the receiver can stop the
+  climb. A finished child names the child task. `END_SESSION` stays left alone,
+  because it needs the host poller, which isn't running. Any other task event,
+  a TASK reason without its
   task or with an id that is not a plain id, or an unknown reason leaves the
   whole wake alone, neither nudged nor acked (its proof would record those
   events delivered unseen). A MENTION-only wake is ignored and never acked:
@@ -142,7 +184,9 @@ only when ALL of these hold:
    that pre-send read fails, nothing is sent and the wake waits for the next
    pass. An older entry with no `checkedBefore` stays held. For each task
    assignment the send newly named, that task must also be `STARTED` (or
-   `FINISHED`) with this worker as assignee. The task ids are recorded on the
+   `FINISHED`) with this worker as assignee. An alarm or a finished child has
+   no such proof, since its receiver need not be the assignee, so for those the
+   channel check is the only evidence, as it is for a tick. The task ids are recorded on the
    receipt at send time (`tasks`), because starting a task removes its
    assignment wake (#2154 P2); an older receipt that covers a task without
    that record stays held.
