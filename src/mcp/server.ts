@@ -167,6 +167,7 @@ import {
   type SearchPrincipal,
 } from '../lib/global-search/index.js';
 import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
+import { lockAgentDefinitionAuthority } from '../lib/auth/managedSystemMemory.js';
 import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
 import { computeContentHash, isAbstractUnverified } from '../lib/contentHash.js';
@@ -4041,6 +4042,8 @@ export function createMcpServerInstance(
       let sectionId: string;
       try {
         sectionId = await db.$transaction(async (tx) => {
+          // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
+          await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           await lockAncestorsForCreate(tx, memoryId, loc);
           // #1323 (@copilot, PR #1339): re-saving an EXISTING live section is
           // an authoring write of name/description/content/tags, so it takes
@@ -6361,6 +6364,8 @@ export function createMcpServerInstance(
       let upserted;
       try {
         upserted = await db.$transaction(async (tx) => {
+          // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
+          await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           if (resolvedEdges !== null) {
             await lockOutgoingEdgeMemories(tx, memoryId, resolvedEdges);
           }
@@ -6799,6 +6804,8 @@ export function createMcpServerInstance(
         // authoritative one (Copilot on PR #1165).
         try {
           await db.$transaction(async (tx) => {
+            // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
+            await lockAgentDefinitionAuthority(tx, auth.userId ?? null, existing.memoryId);
             if (resolvedEdges !== null) {
               await lockOutgoingEdgeMemories(tx, existing.memoryId, resolvedEdges);
             }
@@ -7970,6 +7977,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
       try {
         result = await db.$transaction(async (tx) => {
+          // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
+          await lockAgentDefinitionAuthority(tx, auth.userId ?? null, [fromMemory.id, toMemory.id]);
           // #664/#752: moving a node INTO a subtree is the same orphan vector as
           // creating there — lock the destination's ancestor path first (matching
           // the GraphQL moveNode resolver and hadron_delete_node's own-loc lock),

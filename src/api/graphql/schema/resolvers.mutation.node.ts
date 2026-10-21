@@ -95,6 +95,7 @@ import {
 } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { lockAgentDefinitionAuthority } from '../../../lib/auth/managedSystemMemory.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveEdgeRef } from '../../../lib/entityRef/edgeRef.js';
 import { GraphQLError } from 'graphql';
@@ -2145,6 +2146,8 @@ export const nodeMoveOps = {
         let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
         const moved = await ctx.db.$transaction(
           async (tx) => {
+            // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
+            await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [source.memoryId, destMemoryId]);
             // #1187 — DECLARE the complete key set first, in the one global
             // order: the destination ancestor path AND the source path that
             // `lockSourceForMove` takes further down. Previously those were two

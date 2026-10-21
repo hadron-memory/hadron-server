@@ -2,7 +2,8 @@
  * This is the manager arm only; installed/licensed App reach stays in the
  * existing App fold. Candidate Agent pointers and memory tenants must match.
  */
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
+import { lockAuthorityAnchors } from './authorityAnchors.js';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 import { isRunPrincipal } from './runPrincipal.js';
 
@@ -71,4 +72,45 @@ export async function canManageAgentSystemMemory(
   ]);
   return memory !== null && agent !== null &&
     agent.organizationId === memory.organizationId && agent.ownerUserId === memory.ownerUserId;
+}
+
+/**
+ * #2206 (Gene's BLIND P2 on #2233; Xan's parity ruling): the authority a write to an Agent's own system memory depends
+ * on, taken FIRST in the writer's transaction (before any memory, node or loc lock), the way an install memory's is:
+ * the anchors its revokers hold exclusively (the Agent, its tenant, the actor, whose platform roles `updateUserRoles`
+ * changes under the actor's user anchor), then the rows they change, FOR SHARE. Every transport's deciding recheck
+ * inside that transaction (GraphQL's `assertMemoryWriteStateStable`, MCP's `assertLockedMemoryWriteAccess`, both
+ * through {@link canManageAgentSystemMemory}, which reads live roles and memberships) is therefore ordered after any
+ * demotion, deletion or Agent transfer that committed first. A no-op (false) for any other memory, including a system
+ * row no live Agent points at, which nobody manages.
+ */
+export async function lockAgentDefinitionAuthority(
+  tx: Prisma.TransactionClient,
+  actorUserId: string | null,
+  memoryIds: string | readonly string[],
+): Promise<boolean> {
+  const ids = [...new Set(typeof memoryIds === 'string' ? [memoryIds] : memoryIds)];
+  const agents = await tx.agent.findMany({
+    where: { systemMemoryId: { in: ids }, deletedAt: null },
+    select: { id: true, organizationId: true, ownerUserId: true },
+    orderBy: { id: 'asc' },
+  });
+  if (agents.length === 0) return false;
+  // One acquisition for every end, so a move between two definitions takes its anchors in the one global order.
+  await lockAuthorityAnchors(tx, [
+    ...agents.flatMap((agent) => [
+      { kind: 'agent' as const, id: agent.id },
+      ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+      ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+    ]),
+    ...(actorUserId ? [{ kind: 'user' as const, id: actorUserId }] : []),
+  ], 'shared');
+  for (const agent of agents) await tx.$queryRaw`SELECT id FROM agents WHERE id = ${agent.id} FOR SHARE`;
+  if (actorUserId) {
+    await tx.$queryRaw`SELECT id FROM users WHERE id = ${actorUserId} FOR SHARE`;
+    for (const orgId of [...new Set(agents.map((a) => a.organizationId).filter((o): o is string => o !== null))].sort()) {
+      await tx.$queryRaw`SELECT 1 FROM org_members WHERE organization_id = ${orgId} AND user_id = ${actorUserId} FOR SHARE`;
+    }
+  }
+  return true;
 }

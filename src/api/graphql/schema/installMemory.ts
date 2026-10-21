@@ -25,6 +25,7 @@ import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { NO_INSTALL_AUDIENCE, installMemoryAudience, isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
+import { lockAgentDefinitionAuthority } from '../../../lib/auth/managedSystemMemory.js';
 import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { isWriteBeyondRead } from '../../../mcp/access-control.js';
 import { resolveMemoryRoot, sharedMemoryName } from './chat-scope.js';
@@ -262,37 +263,9 @@ export async function lockInstallAuthorityFirst(tx: Prisma.TransactionClient, ct
     select: { id: true, class: true, appId: true, installOfAgentId: true, isInstallMemory: true, organizationId: true, ownerUserId: true },
   });
   if (row && isInstallMemoryRow(row) && row.appId) await lockInstallAuthority(tx, ctx, row);
-  else if (row?.class === 'system') await lockAgentDefinitionAuthority(tx, ctx, row.id);
+  else if (row?.class === 'system') await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, row.id);
 }
 
-/**
- * #2206 (Gene's BLIND P2 on #2233): the authority a write to an Agent's own system memory depends on, taken the way
- * {@link lockInstallAuthority} takes an install's: the anchors its revokers hold exclusively (the Agent, its tenant,
- * the actor, whose platform roles `updateUserRoles` changes under the actor's user anchor), then the rows they change,
- * FOR SHARE. The deciding recheck inside the transaction (`canManageAgentSystemMemory`, which reads the actor's live
- * roles and memberships) therefore sees any demotion, deletion or Agent transfer that committed first. No-op for a
- * system row no live Agent points at (nobody manages it, so the gate refuses it anyway).
- */
-async function lockAgentDefinitionAuthority(tx: Prisma.TransactionClient, ctx: Context, memoryId: string): Promise<void> {
-  const agent = await tx.agent.findFirst({
-    where: { systemMemoryId: memoryId, deletedAt: null },
-    select: { id: true, organizationId: true, ownerUserId: true },
-  });
-  if (!agent) return;
-  await lockAuthorityAnchors(tx, [
-    { kind: 'agent', id: agent.id },
-    ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
-    ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
-    ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
-  ], 'shared');
-  await tx.$queryRaw`SELECT id FROM agents WHERE id = ${agent.id} FOR SHARE`;
-  if (ctx.userId) {
-    await tx.$queryRaw`SELECT id FROM users WHERE id = ${ctx.userId} FOR SHARE`;
-    if (agent.organizationId) {
-      await tx.$queryRaw`SELECT 1 FROM org_members WHERE organization_id = ${agent.organizationId} AND user_id = ${ctx.userId} FOR SHARE`;
-    }
-  }
-}
 
 /**
  * The RESPONSE of a write is a READ of the node, so it is held to the memory's content read audience wherever a writer
