@@ -5446,9 +5446,25 @@ export const typeDefs = `#graphql
   }
 
   """
-  Input for createNode. 'memoryId', 'loc', and 'name' are required; creating
-  is create-only — a live node at (memoryId, loc) rejects with
-  NodeLocConflictError (spec 039 Phase 0 D1/D4).
+  #2044 (hrn:node:hadronmemory.com:specs:cor:agt:040:06) — names an App's INSTALL MEMORY by the pair that
+  identifies it: the App and the Agent it customises. Both are ID-or-URN refs
+  like every other entity ref (relative URNs are refused, URN_NOT_QUALIFIED).
+  Accepted by createNode / updateNode in place of 'memoryId'. The install memory
+  is created by the App's first customisation: a createNode through this target
+  finds-or-creates it in the same transaction as the write, so a refused write
+  leaves nothing behind. Only whoever manages the App may write through it, and
+  only while the App is live and the Agent installed.
+  """
+  input InstallTargetInput {
+    appRef: String!
+    agentRef: String!
+  }
+
+  """
+  Input for createNode. 'loc' and 'name' are required, plus EITHER 'memoryId'
+  or 'install' (an App's install memory, #2044) — both or neither is an
+  error (BAD_USER_INPUT). Creating is create-only — a live node at (memoryId,
+  loc) rejects with NodeLocConflictError (spec 039 Phase 0 D1/D4).
   """
   input CreateNodeInput {
     "Forced PK (importer/sync use case, e.g. a stable UUIDv7). Only ever a create-id here — never a selector (D2). Omit to mint."
@@ -5459,7 +5475,9 @@ export const typeDefs = `#graphql
     qualified (org:memory) per spec 022 — relative-form URNs are
     rejected as GraphQL errors with extensions.code "URN_NOT_QUALIFIED".
     """
-    memoryId: String!
+    memoryId: String
+    "#2044 — an App's install memory as the target, instead of 'memoryId'. See InstallTargetInput."
+    install: InstallTargetInput
     loc: String!
     name: String!
     nodeType: String
@@ -5505,6 +5523,8 @@ export const typeDefs = `#graphql
     id: String
     "Selector, with 'loc': the target's memory (ID or fully-qualified URN). XOR with 'id'."
     memoryId: String
+    "#2044 — selector, with 'loc', in place of 'memoryId': the App's install memory. Creates nothing (the first createNode does). XOR with 'id'."
+    install: InstallTargetInput
     "Selector, with 'memoryId': the target's current loc. Not writable here — moveNode relocates."
     loc: String
     """
@@ -7685,6 +7705,14 @@ export const typeDefs = `#graphql
     memory(ref: ID!): Memory
 
     """
+    #2044 (hrn:node:hadronmemory.com:specs:cor:agt:040:06) — the App's install memory for an Agent: where the App
+    keeps its customisation of that Agent. Null when the App has not customised it
+    yet (this read creates nothing), and null for anyone the memory's record is not
+    open to: the App's participants, and whoever manages the App.
+    """
+    installMemory(appRef: String!, agentRef: String!): Memory
+
+    """
     Uniform paginated memory list (#473) — replaces myMemories,
     publicMemories, and orgSystemMemories.
 
@@ -8822,6 +8850,17 @@ export const typeDefs = `#graphql
     in, alike), APP_UNINSTALLED, FORBIDDEN (impersonation), BAD_USER_INPUT.
     Every write re-checks the caller's participation and the App's state
     inside its transaction.
+    #2198 (experiment): createAgentTask, assignAgentTask, reassignAgentTask and
+    finishAgentTask may succeed WITH warnings, in the response's
+    \`extensions.warnings\` (not in \`errors\`): a list of
+    { path (the mutation's response key), code, text, register? }. Codes are a
+    closed list per release (task.create.no-source, task.assign.assignee-unavailable,
+    task.assign.assignee-busy, task.assign.assignee-paused,
+    task.finish.open-children); a client must tolerate unknown codes. \`text\` is
+    fixed per code. \`register\` appears only for a caller that has an Agent:
+    { state: mapped (taskLoc, taskUrn) | unmapped | unresolved }. A warning never
+    blocks and never reveals another worker's state to a caller who could not
+    already see it on the roster.
     """
     createAgentTask(input: CreateAgentTaskInput!): AgentTask!
 

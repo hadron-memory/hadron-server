@@ -63,7 +63,9 @@ subscriber read stops the pass, as a failed `dueWakes` read does.
   returns; only if that read succeeded and you saw all of its output (if your
   tool truncated or saved it, read the rest first; if you can't, don't mark),
   `hadron team chat mark-read --through H` with the H that read printed; then
-  end your turn. Never an unfiltered
+  continue your in-progress work; end your turn only if you have none (a tick
+  lands mid-build too, so it never tells a worker to stop; Diego, #28498).
+  Never an unfiltered
   catch-up. A `coordinator-tick` wake (or one carrying it with another ticker)
   asks for the coordinator's base tick instead: "run your base tick
   (coordinator-system:tasks:on-base-tick): first the tagged check: …; then the
