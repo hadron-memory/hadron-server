@@ -5,14 +5,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ESCALATION_TOKENS, FLOOR_TOKENS, FRESHNESS_MS, HYSTERESIS_TOKENS, LOCK_STALE_MS, REMINDER_TEXT, STATE_MAX_FILES, TAIL_BYTES,
-  decide, observe, run, scanTail, thresholdFor,
+  decide, observe, run, scanTail, thresholdFor, withLock,
 } from './worker-shed-reminder.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -525,6 +525,93 @@ describe('no leaks, no side effects, bounded state', () => {
     call(b);
     expect(existsSync(join(b.stateDir, 'reminder.log.1'))).toBe(true);
     expect(statSync(join(b.stateDir, 'reminder.log')).size).toBeLessThan(1024);
+  });
+});
+
+describe('Juliet, Bindi, Rook (#2231 review): stdin, pruning, write failure, takeover, modes', () => {
+  it('stdin that never reaches EOF cannot hold the hook past its watchdog (CLI)', async () => {
+    const b = box();
+    write(b, [asst(occ(200_000), { ts: Date.now() - 1_000 })]);
+    const started = Date.now();
+    const p = spawn('node', [SCRIPT], { env: b.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.stdin.write('{"session_id":"' + SID + '"'); // a partial document, and the pipe stays open
+    const code = await new Promise<number | null>((resolve) => { p.on('close', resolve); setTimeout(() => { p.kill('SIGKILL'); }, 6_000); });
+    const elapsed = Date.now() - started;
+    expect(code).toBe(0);
+    expect(out).toBe('');
+    expect(elapsed).toBeLessThan(3_300);
+  }, 10_000);
+
+  it('state for many below-threshold sessions stays bounded: the directory is pruned when a session first writes', () => {
+    const b = box();
+    const dir = join(b.stateDir, 'reminder');
+    for (let i = 0; i < STATE_MAX_FILES + 5; i++) {
+      const sid = `sess-${String(i).padStart(4, '0')}-aaaa`;
+      const t = join(b.projects, `${sid}.jsonl`);
+      writeFileSync(t, asst(occ(10_000)) + '\n');
+      expect(call(b, { session_id: sid, transcript_path: t })).toBeNull();
+      const m = new Date(NOW + i * 1000);
+      utimesSync(join(dir, `${sid}.json`), m, m);
+    }
+    expect(readdirSync(dir).filter((n) => n.endsWith('.json')).length).toBeLessThanOrEqual(STATE_MAX_FILES);
+  });
+
+  it('removes leftover temp and dead-lock files from a crashed write or takeover', () => {
+    const b = box();
+    const dir = join(b.stateDir, 'reminder');
+    mkdirSync(dir, { recursive: true });
+    const tmp = join(dir, `${SID}.json.4242.tmp`);
+    const dead = join(dir, `${SID}.lock.dead.4242.abc123`);
+    writeFileSync(tmp, 'x'); mkdirSync(dead);
+    const old = new Date(NOW - 2 * 3_600_000);
+    utimesSync(tmp, old, old); utimesSync(dead, old, old);
+    write(b, [asst(occ(10_000))]);
+    call(b);
+    expect(existsSync(tmp)).toBe(false);
+    expect(existsSync(dead)).toBe(false);
+  });
+
+  it('a state write that fails AFTER the directory is writable prints nothing (write-before-output is pinned)', () => {
+    const b = box();
+    write(b, [asst(occ(200_000))]);
+    const target = join(b.stateDir, 'reminder', `${SID}.json`);
+    mkdirSync(join(target, 'blocker'), { recursive: true }); // a non-empty directory where the state file goes: rename fails
+    expect(call(b)).toBeNull();
+    expect(logOf(b)).toContain('skip: error');
+  });
+
+  it('a stale lock is taken over by rename; a live lock that replaced it meanwhile is put back and the body never runs', () => {
+    const b = box();
+    const dir = join(b.stateDir, 'reminder'); mkdirSync(dir, { recursive: true });
+    const lock = join(dir, `${SID}.lock`);
+    mkdirSync(lock);
+    const old = new Date(Date.now() - LOCK_STALE_MS - 5_000);
+    utimesSync(lock, old, old);
+    let ran = 0;
+    let clock = Date.now();
+    const out = withLock(dir, SID, () => { ran++; return 'ran'; }, () => (clock += 400), {
+      // Between our look and our takeover, another process replaces the dead lock with a live one.
+      beforeTakeover: (l) => { rmSync(l, { recursive: true }); mkdirSync(l); },
+    });
+    expect(out).toBeUndefined();
+    expect(ran).toBe(0);
+    expect(existsSync(lock)).toBe(true); // the live lock is still where its holder put it
+    expect(readdirSync(dir).filter((n) => n.includes('.dead.'))).toEqual([]);
+    // With nothing in the way, a stale lock is taken over and the body runs once.
+    rmSync(lock, { recursive: true }); mkdirSync(lock); utimesSync(lock, old, old);
+    expect(withLock(dir, SID, () => { ran++; return 'ran'; })).toBe('ran');
+    expect(ran).toBe(1);
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it('creates the state directory private (0700) and the state file 0600', () => {
+    const b = box();
+    write(b, [asst(occ(10_000))]);
+    call(b);
+    expect(statSync(join(b.stateDir, 'reminder')).mode & 0o777).toBe(0o700);
+    expect(statSync(join(b.stateDir, 'reminder', `${SID}.json`)).mode & 0o777).toBe(0o600);
   });
 });
 

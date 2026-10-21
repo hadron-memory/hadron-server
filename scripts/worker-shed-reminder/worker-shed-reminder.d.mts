@@ -34,3 +34,4 @@ export function decide(state: Partial<Arm> | null, obs: { occupied: number; mode
   { next: Arm; fire: boolean; reclaimable: number; threshold: number };
 export function vetTranscript(path: unknown, env: Record<string, string | undefined>, uid?: number): string | null;
 export function run(stdin: unknown, env: Record<string, string | undefined>, opts?: { now?: number; uid?: number; nowMs?: () => number }): string | null;
+export function withLock<T>(dir: string, sid: string, fn: () => T, nowMs?: () => number, hooks?: { beforeTakeover?: (lock: string) => void }): T | undefined;

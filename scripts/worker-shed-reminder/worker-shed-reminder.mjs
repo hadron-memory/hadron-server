@@ -51,7 +51,7 @@ export const STDIN_MAX_BYTES = 64 * 1024;
 export const STATE_MAX_AGE_MS = 7 * 24 * 3_600_000;
 export const STATE_MAX_FILES = 100;
 export const LOG_MAX_BYTES = 256 * 1024;
-export const LOCK_WAIT_MS = 2_000;
+export const LOCK_WAIT_MS = 1_500;
 export const LOCK_STALE_MS = 10_000;
 const SESSION_ID = /^[A-Za-z0-9-]{8,64}$/;
 const STATE_FILE = /^[A-Za-z0-9-]{8,64}\.json$/;
@@ -150,19 +150,20 @@ export function decide(state, obs, now) {
   return { next, fire, reclaimable, threshold };
 }
 
-function readStdinSync(fd = 0) {
-  const chunks = [];
-  let total = 0;
-  const buf = Buffer.alloc(8192);
-  for (;;) {
-    let n;
-    try { n = readSync(fd, buf, 0, buf.length, null); } catch (e) { if (e && e.code === 'EAGAIN') continue; if (e && e.code === 'EOF') break; throw e; }
-    if (n === 0) break;
-    total += n;
-    if (total > STDIN_MAX_BYTES) return null;
-    chunks.push(Buffer.from(buf.subarray(0, n)));
-  }
-  return Buffer.concat(chunks).toString('utf8');
+/** Read stdin without ever blocking the event loop, so the watchdog can always fire; null when over the size cap. */
+function readStdin(stream = process.stdin) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    let total = 0;
+    stream.on('data', (c) => {
+      total += c.length;
+      if (total > STDIN_MAX_BYTES) { chunks.length = 0; stream.destroy(); resolve(null); return; }
+      chunks.push(c);
+    });
+    stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    stream.on('error', () => resolve(null));
+    stream.on('close', () => resolve(null));
+  });
 }
 
 function readTail(path) {
@@ -196,26 +197,46 @@ export function vetTranscript(transcriptPath, env, uid) {
   return real;
 }
 
-function withLock(dir, sid, fn, nowMs = () => Date.now()) {
+const sleepSync = (ms) => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* best effort */ } };
+
+/**
+ * One mkdir lock per session. A lock older than LOCK_STALE_MS is taken over by an atomic RENAME to a unique name, then
+ * checked: if what we moved turns out to be younger than the stale age, another process had already replaced the dead
+ * lock with a live one, so it is put back and we keep waiting. (A bare rmdir-then-mkdir lets two processes that saw the
+ * same stale lock both end up holding it: Bindi and Rook, #2231.)
+ */
+export function withLock(dir, sid, fn, nowMs = () => Date.now(), hooks = {}) {
   const lock = join(dir, `${sid}.lock`);
   const deadline = nowMs() + LOCK_WAIT_MS;
   for (;;) {
     try { mkdirSync(lock); break; } catch (e) {
       if (!e || e.code !== 'EEXIST') return undefined;
       try {
-        if (nowMs() - statSync(lock).mtimeMs > LOCK_STALE_MS) { rmdirSync(lock); continue; }
-      } catch { /* the holder released it between the two calls */ }
+        if (nowMs() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
+          if (hooks.beforeTakeover) hooks.beforeTakeover(lock);
+          const moved = `${lock}.dead.${process.pid}.${Math.random().toString(36).slice(2, 10)}`;
+          renameSync(lock, moved);
+          if (nowMs() - statSync(moved).mtimeMs > LOCK_STALE_MS) { rmSync(moved, { recursive: true, force: true }); continue; }
+          // We moved a LIVE lock. Put it back if the path is free; either way this attempt is contended.
+          try { renameSync(moved, lock); } catch { rmSync(moved, { recursive: true, force: true }); }
+        }
+      } catch { /* the holder released it, or another process took it over, between the calls */ }
       if (nowMs() >= deadline) return undefined;
-      const until = Date.now() + 20;
-      while (Date.now() < until) { /* short bounded spin: the lock is held for milliseconds */ }
+      sleepSync(20);
     }
   }
   try { return fn(); } finally { try { rmdirSync(lock); } catch { /* already gone */ } }
 }
 
 function prune(dir, now) {
-  let names;
-  try { names = readdirSync(dir).filter((n) => STATE_FILE.test(n)); } catch { return; }
+  let all;
+  try { all = readdirSync(dir); } catch { return; }
+  // Leftovers of a crashed write or takeover: never valid state, removed once they are an hour old.
+  for (const n of all) {
+    if (!/^[A-Za-z0-9-]{8,64}\.(json\.\d+\.tmp|lock\.dead\.\d+\.[a-z0-9]+)$/.test(n)) continue;
+    try { if (now - statSync(join(dir, n)).mtimeMs > 3_600_000) rmSync(join(dir, n), { recursive: true, force: true }); } catch { /* raced */ }
+  }
+  const names = all.filter((n) => STATE_FILE.test(n));
   const rows = [];
   for (const n of names) {
     try { rows.push([n, statSync(join(dir, n)).mtimeMs]); } catch { /* raced */ }
@@ -228,7 +249,7 @@ function prune(dir, now) {
 
 function logLine(stateRoot, name, text, now) {
   try {
-    mkdirSync(stateRoot, { recursive: true });
+    mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
     const file = join(stateRoot, 'reminder.log');
     try { if (statSync(file).size > LOG_MAX_BYTES) renameSync(file, `${file}.1`); } catch { /* none yet */ }
     appendFileSync(file, `${new Date(now).toISOString()} ${name} ${text}\n`);
@@ -260,7 +281,7 @@ export function run(stdinText, env, opts = {}) {
     if (obs.skip) { logLine(stateRoot, name, `skip: ${obs.skip}`, now); return null; }
 
     const dir = join(stateRoot, 'reminder');
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     const out = withLock(dir, sid, () => {
       const file = join(dir, `${sid}.json`);
       let state = null;
@@ -268,10 +289,12 @@ export function run(stdinText, env, opts = {}) {
       if (state && (typeof state !== 'object' || !isCount(state.fires) || state.fires > MAX_FIRES)) state = null;
       const d = decide(state, obs, now);
       const tmp = `${file}.${process.pid}.tmp`;
+      const isNewSession = state === null;
       writeFileSync(tmp, JSON.stringify(d.next), { mode: 0o600 });
       renameSync(tmp, file);
+      // The directory only grows when a session first writes, so that is when it is bounded (not only on a fire).
+      if (isNewSession) prune(dir, now);
       if (!d.fire) return null;
-      prune(dir, now);
       logLine(stateRoot, name, `fire ${d.next.fires} reclaimable=${Math.round(d.reclaimable / 1000)}k`, now);
       return JSON.stringify({
         hookSpecificOutput: {
@@ -288,12 +311,12 @@ export function run(stdinText, env, opts = {}) {
   }
 }
 
-function main() {
-  // A watchdog: whatever happens, the hook ends well inside its own timeout.
+async function main() {
+  // A watchdog on a timer: stdin is read asynchronously and the rest is bounded, so it can always fire.
   const watchdog = setTimeout(() => process.exit(0), 2_500);
   watchdog.unref();
   let text = null;
-  try { text = readStdinSync(); } catch { text = null; }
+  try { text = await readStdin(); } catch { text = null; }
   const out = text === null ? null : run(text, process.env);
   if (out) process.stdout.write(out + '\n');
   process.exit(0);
