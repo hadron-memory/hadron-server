@@ -133,7 +133,7 @@ describe('issuing', () => {
 describe('guard', () => {
   it('the migration and both schema-push paths carry the same guard', () => {
     const guard = readFileSync('prisma/passkey-registration-invariants.sql', 'utf8');
-    expect(readFileSync('prisma/migrations/20261021090000_passkey_registration/migration.sql', 'utf8').endsWith(guard)).toBe(true);
+    expect(readFileSync('prisma/migrations/20261021120000_passkey_revoke/migration.sql', 'utf8').endsWith(guard)).toBe(true);
     expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir passkey-registration-invariants.sql');
     expect(readFileSync('src/test/globalSetup.ts', 'utf8')).toContain('../../prisma/passkey-registration-invariants.sql');
   });
