@@ -181,6 +181,15 @@ describe('guard', () => {
     await expect(db.$executeRaw`UPDATE fresh_sign_ins SET consumed_at = now(), consumed_for = 'revoke' WHERE id = ${email.id}`).rejects.toThrow(/chk_fresh_sign_in_shape/);
   });
 
+  it('refuses a spent row with no purpose (Gene P2: NULL IN (...) is UNKNOWN, which a CHECK lets pass)', async () => {
+    const { legId } = await recordIdpSignIn(db, { userId: alice, method: 'github', browserNonceHash: BROWSER_A });
+    await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A });
+    const { id } = await db.freshSignIn.findFirstOrThrow({ where: { userId: alice } });
+    await expect(db.$executeRaw`UPDATE fresh_sign_ins SET consumed_at = now() WHERE id = ${id}`).rejects.toThrow(/chk_fresh_sign_in_shape/);
+    // The control: the same write with a purpose is accepted.
+    await db.$executeRaw`UPDATE fresh_sign_ins SET consumed_at = now(), consumed_for = 'register' WHERE id = ${id}`;
+  });
+
   it('refuses a row inserted already confirmed', async () => {
     await expect(db.$executeRaw`INSERT INTO fresh_sign_ins (id, user_id, method, browser_nonce_hash, leg_hash, expires_at, signed_in_at, confirmed_at)
       VALUES ('x1', ${alice}, 'github', ${BROWSER_A}, ${h('leg')}, now() + interval '1 hour', now(), now())`).rejects.toThrow(/unconfirmed/);

@@ -47,7 +47,7 @@ ALTER TABLE "fresh_sign_ins" ADD CONSTRAINT "chk_fresh_sign_in_shape" CHECK (
   AND ("confirmed_at" IS NULL OR ("signed_in_at" IS NOT NULL AND "confirmed_at" >= "signed_in_at"))
   AND (("consumed_at" IS NULL AND "consumed_for" IS NULL)
     OR ("consumed_at" IS NOT NULL AND "confirmed_at" IS NOT NULL AND "consumed_at" >= "confirmed_at"
-      AND "consumed_for" IN ('register', 'end-window', 'revoke')))
+      AND "consumed_for" IS NOT NULL AND "consumed_for" IN ('register', 'end-window', 'revoke')))
   -- cor:aut:040:09: a magic link is never fresh enough to revoke.
   AND NOT ("method" = 'email' AND "consumed_for" = 'revoke')
 );
