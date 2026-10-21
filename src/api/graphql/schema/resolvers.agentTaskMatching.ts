@@ -9,7 +9,7 @@
 // exactly like an absent one (APP_NOT_FOUND). Each worker is rendered through
 // the same sanitized party projection as tasks, never the Worker object.
 
-import { type Context } from './resolvers.helpers.js';
+import { type Context, withoutRequestCaches } from './resolvers.helpers.js';
 import { mayReadAppTasks, resolveParticipatedApp } from './resolvers.agentTask.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { loadRosterTaskSummaries, type RosterTaskSummary } from '../../../lib/agentTasks/rosterSummary.js';
@@ -25,7 +25,7 @@ export const agentTaskMatchingQueries = {
   teamRoster: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
     // Admission, status and assignment projections share one read snapshot, including MCP callers.
     return ctx.db.$transaction(async (tx) => {
-      const readCtx: Context = { ...ctx, db: tx as Context['db'] };
+      const readCtx = withoutRequestCaches(ctx, tx);
       const { app } = await resolveParticipatedApp(readCtx, appRef);
       const asOf = new Date();
       const [entries, checks] = await Promise.all([
