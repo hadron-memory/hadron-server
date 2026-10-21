@@ -6,6 +6,7 @@ import { ApolloServer } from '@apollo/server';
 import { typeDefs } from './typeDefs.js';
 import { loadRosterTaskSummaries } from '../../../lib/agentTasks/rosterSummary.js';
 import * as taskReadPolicy from './resolvers.agentTask.js';
+import { setS6NoticesAvailableForTest } from '../../../lib/stopSignals/delivery.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -80,6 +81,25 @@ describe('#2178 safe roster enrichment — red first', () => {
     await db.workerWakeSettings.create({data:{workerId:w.Kit.id,pausedUntil:expired}});
     await db.app.update({where:{id:app.id},data:{teamPausedAt:new Date()}});
     expect((await entry('Kit')).pausedUntil).toEqual(expired);
+  });
+
+  it('keeps own pause history separate from current own, team and S6 stop reasons', async () => {
+    await db.session.create({ data: { id: generateId(), appId: app.id, workerId: w.Kit.id, agentId, userId: mia.id, tool: 'vitest' } });
+    await task({ title: 'open assignment', status: 'pending', assigneeWorkerId: w.Kit.id });
+    const future = new Date(Date.now() + 60_000);
+    await db.workerWakeSettings.create({ data: { workerId: w.Kit.id, pausedUntil: future } });
+    expect(await entry('Kit')).toMatchObject({ pausedUntil: future, checkStatus: { status: 'PENDING', pendingReason: 'PAUSED' } });
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: new Date() } });
+    expect(await entry('Kit')).toMatchObject({ pausedUntil: future, checkStatus: { pendingReason: 'TEAM_PAUSED' } });
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: null } });
+    const expired = ago(1);
+    await db.workerWakeSettings.update({ where: { workerId: w.Kit.id }, data: { pausedUntil: expired } });
+    expect((await entry('Kit')).checkStatus.pendingReason).toBeNull();
+    setS6NoticesAvailableForTest(true);
+    try {
+      await M.setTeamStopSignal({}, { input: { appRef: app.id, level: 'PAUSE', scope: 'WORKER', worker: w.Kit.id } }, ctx(admin.id));
+      expect(await entry('Kit')).toMatchObject({ pausedUntil: expired, checkStatus: { status: 'PENDING', pendingReason: 'STOPPED' } });
+    } finally { setS6NoticesAvailableForTest(false); }
   });
 
   it('selects STARTED ahead of PENDING, oldest assigned first, even without a session', async () => {
