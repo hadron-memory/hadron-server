@@ -6,8 +6,10 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
  *
  * 1. the FIRST side is held at a barrier right after it takes the fence (`heldAtFence` intercepts that lock call on
  *    its own transaction and waits there, so it still holds the fence);
- * 2. the SECOND side is started, and the test proves it is BLOCKED ON AN ADVISORY LOCK in this database (`pg_locks`,
- *    `granted = false`) before releasing the first; a sleep is never the evidence;
+ * 2. the SECOND side is started, and the test proves it is BLOCKED BEHIND THE FIRST ON THIS APP'S STOP FENCE before
+ *    releasing it: some backend waits (`pg_locks`, `granted = false`) on exactly the fence's key, and the first side's
+ *    backend (its pid captured at the barrier) is among `pg_blocking_pids` of that waiter (Xan #2172 LOCAL P2). An
+ *    unrelated advisory waiter never satisfies it (the decoy pin); a sleep is never the evidence;
  * 3. both commit, and the committed task / coverage / end / notice state is asserted.
  *
  * Each schedule runs in both winner orders. A barrier the first side never reaches fails the pin (it is how a writer
@@ -84,9 +86,9 @@ const withTimeout = <T>(p: Promise<T>, ms: number, what: string): Promise<T> =>
  * there, holding it, until `release()`. `reached` resolves at that moment and rejects after 5 s if it never comes.
  */
 function heldAtFence(mode: 'exclusive' | 'shared') {
-  let reach!: () => void;
+  let reach!: (pid: number) => void;
   let release!: () => void;
-  const atBarrier = new Promise<void>((r) => { reach = r; });
+  const atBarrier = new Promise<number>((r) => { reach = r; });
   const go = new Promise<void>((r) => { release = r; });
   let fired = false;
   const wrapTx = (tx: any) => new Proxy(tx, {
@@ -98,7 +100,9 @@ function heldAtFence(mode: 'exclusive' | 'shared') {
           const shared = sql.includes('pg_advisory_xact_lock_shared');
           if (!fired && args[1] === `stop-signals:${app.id}` && (mode === 'shared') === shared) {
             fired = true;
-            reach();
+            // The backend that now holds the fence: what the second side must be shown waiting behind.
+            const [{ pid }] = await target.$queryRaw`SELECT pg_backend_pid() AS pid` as { pid: number }[];
+            reach(pid);
             await go;
           }
           return out;
@@ -118,17 +122,24 @@ function heldAtFence(mode: 'exclusive' | 'shared') {
   return { client, reached: withTimeout(atBarrier, 5000, 'the barrier'), release };
 }
 
-/** Resolves once some connection of THIS database waits on an advisory lock (the second side, blocked by the fence). */
-async function blockedOnAdvisoryLock(): Promise<void> {
-  for (let i = 0; i < 100; i++) {
+/**
+ * Resolves once some backend of THIS database waits on THIS App's stop fence (the single-bigint advisory key
+ * `hashtext('stop-signals:<appId>')`, as `lockStopFence` takes it) and `holderPid` is among the backends blocking it.
+ * Rejects after `ms`. An advisory waiter on any other key, or one not blocked by `holderPid`, never satisfies it.
+ */
+async function blockedBehind(holderPid: number, appId: string, ms = 5000): Promise<void> {
+  for (let t = 0; t < ms; t += 50) {
     const [{ n }] = await db.$queryRaw<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM pg_locks l
-      WHERE l.locktype = 'advisory' AND NOT l.granted
-        AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())`;
+      WITH k AS (SELECT hashtext(${'stop-signals:' + appId})::bigint AS key)
+      SELECT count(*)::int AS n FROM pg_locks l, k
+      WHERE l.locktype = 'advisory' AND NOT l.granted AND l.objsubid = 1
+        AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND l.classid::bigint = ((k.key >> 32) & 4294967295) AND l.objid::bigint = (k.key & 4294967295)
+        AND ${holderPid}::int = ANY (pg_blocking_pids(l.pid))`;
     if (n > 0) return;
     await new Promise((r) => setTimeout(r, 50));
   }
-  throw new Error('the second connection never blocked on the stop fence');
+  throw new Error(`no backend was seen waiting behind pid ${holderPid} on the stop fence of App ${appId}`);
 }
 
 /**
@@ -138,13 +149,18 @@ async function blockedOnAdvisoryLock(): Promise<void> {
 async function race<A, B>(first: (c: typeof db) => Promise<A>, second: () => Promise<B>, firstMode: 'exclusive' | 'shared') {
   const h = heldAtFence(firstMode);
   const one = first(h.client).then((v) => ({ ok: true as const, v }), (e: unknown) => ({ ok: false as const, e }));
-  await h.reached;
-  let secondDone = false;
-  const two = second().then((v) => { secondDone = true; return { ok: true as const, v }; }, (e: unknown) => { secondDone = true; return { ok: false as const, e }; });
-  await blockedOnAdvisoryLock();
-  expect(secondDone, 'the second side finished while the first held the fence').toBe(false);
-  h.release();
-  return { first: await one, second: await two };
+  let two: Promise<{ ok: true; v: B } | { ok: false; e: unknown }> | null = null;
+  try {
+    const holderPid = await h.reached;
+    let secondDone = false;
+    two = second().then((v) => { secondDone = true; return { ok: true as const, v }; }, (e: unknown) => { secondDone = true; return { ok: false as const, e }; });
+    await blockedBehind(holderPid, app.id);
+    expect(secondDone, 'the second side finished while the first held the fence').toBe(false);
+  } finally {
+    // Never leave a held transaction behind a failed assertion: release, and let both sides settle.
+    h.release();
+  }
+  return { first: await one, second: await two! };
 }
 const deadlocked = (r: { ok: boolean; e?: unknown }) => !r.ok && /40P01|deadlock/i.test(String((r as any).e?.message ?? r.e));
 
@@ -304,5 +320,41 @@ describe('6 — two expiry sweeps of one App (the sweep takes the fence exclusiv
     expect([...(r.first as any).v, ...(r.second as any).v]).toEqual([s.id]);
     expect(await ends()).toEqual([{ type: 'stop.expired' }]);
     for (const w of [ada, liam, dan]) expect(await notices(w)).toEqual(['pause:stop', 'pause:resume']);
+  });
+});
+
+// ── The evidence itself ───────────────────────────────────────────────────
+
+describe('the barrier evidence (Xan #2172 LOCAL P2)', () => {
+  it('a decoy: an unrelated advisory waiter, and a waiter not blocked by the holder, never satisfy it', async () => {
+    let releaseHolder!: () => void;
+    const held = new Promise<void>((r) => { releaseHolder = r; });
+    let pidOf!: (n: number) => void;
+    const holderPid = new Promise<number>((r) => { pidOf = r; });
+    // A holder of an UNRELATED advisory key, and a waiter on it.
+    const holder = db.$transaction(async (tx) => {
+      const [{ pid }] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'decoy:' + app.id}))`;
+      pidOf(pid);
+      await held;
+    }, { timeout: 10_000 });
+    const pid = await holderPid;
+    const waiter = db.$transaction(async (tx) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'decoy:' + app.id}))`; }, { timeout: 10_000 });
+    try {
+      await expect(blockedBehind(pid, app.id, 600)).rejects.toThrow(/no backend was seen waiting/);
+      // The stop fence itself, held by another backend: still not "behind `pid`".
+      const fence = heldAtFence('exclusive');
+      const setting = M.setTeamStopSignal({}, { input: { appRef: app.id, level: 'PAUSE', scope: 'WORKER', worker: 'Kit' } }, ctx(max.id, { db: fence.client }));
+      const fencePid = await fence.reached;
+      const second = M.setTeamStopSignal({}, { input: { appRef: app.id, level: 'PAUSE', scope: 'WORKER', worker: 'Kit' } }, ctx(max.id));
+      await expect(blockedBehind(pid, app.id, 600)).rejects.toThrow(/no backend was seen waiting/);
+      await blockedBehind(fencePid, app.id); // the positive control
+      fence.release();
+      await Promise.all([setting, second]);
+    } finally {
+      releaseHolder();
+      await holder;
+      await waiter;
+    }
   });
 });
