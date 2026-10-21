@@ -4094,6 +4094,14 @@ export const typeDefs = `#graphql
     enabled: Boolean
   }
 
+  "#2177 - one page of Agent.extendedBy."
+  type AgentExtensionPage {
+    items: [Agent!]!
+    "Opaque. Null when hasMore is false."
+    endCursor: String
+    hasMore: Boolean!
+  }
+
   """
   The reusable definition a Builder creates and the marketplace can list.
   Agents are installed into runtime Apps through the AppAgent N:M join: an App
@@ -4127,6 +4135,15 @@ export const typeDefs = `#graphql
     or null. Set, change or clear it with setAgentBase.
     """
     extendsAgentId: ID
+    """
+    #2177 - the Agents that DIRECTLY extend this one (not their extenders), in name order, that you may
+    read exactly as you read agent(ref:). Visibility is applied before the page is cut. first: 1-50,
+    default 20. "after" is an opaque token from a previous page's endCursor: it expires after 15 minutes,
+    is bound to this Agent and to you, and a refused token is always the same "invalid cursor" error.
+    An EMPTY page with hasMore true means the scan is incomplete, NOT that nothing readable remains:
+    keep paging. There is deliberately no total.
+    """
+    extendedBy(first: Int = 20, after: String): AgentExtensionPage!
     """
     #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - the id of the index node whose incoming,
     trigger-labelled edges list this Agent's own tasks, or null. Set or clear

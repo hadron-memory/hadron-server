@@ -78,6 +78,7 @@ import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers 
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
 import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
 import { nodeAttributionFieldResolvers } from './resolvers.nodeAttribution.js';
+import { agentExtendedByFieldResolvers } from './resolvers.agentExtendedBy.js';
 import { signingFieldResolvers, signingMutations, signingQueries } from './resolvers.signing.js';
 import { commentFieldResolvers, commentMutations, commentQueries } from './resolvers.comments.js';
 import { decisionFieldResolvers, decisionMutations, decisionQueries } from './resolvers.decisions.js';
@@ -125,7 +126,7 @@ export const resolvers = {
   // `Agent` already has a block in typeResolvers; the register's field joins
   // it rather than replacing it (a bare spread would clobber the AI-config
   // and relation fields).
-  Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent },
+  Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent, ...agentExtendedByFieldResolvers.Agent },
   // Same for Memory: the config field joins the existing type block (#1325).
   Memory: { ...typeResolvers.Memory, ...memoryConfigFieldResolvers.Memory },
   // #1591: approval status joins the existing Node block; #1610 the
