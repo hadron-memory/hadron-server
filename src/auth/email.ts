@@ -366,6 +366,26 @@ export async function sendMagicLink(
   });
 }
 
+/**
+ * #1631 PR1b slice 2: the passkey ceremony's email leg. The link proves the inbox to the ONE browser that started
+ * the leg and signs the person in to nothing, so the text says so rather than "sign in".
+ */
+export async function sendCeremonySignInLink(to: string, verifyUrl: string): Promise<void> {
+  const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
+  const result = await getResend().emails.send({
+    from: fromAddress,
+    to,
+    subject: 'Confirm it is you, to manage your Hadron passkeys',
+    html: `
+      <p>Someone asked to confirm this address to manage passkeys on Hadron.</p>
+      <p><a href="${verifyUrl}">Confirm it is you</a></p>
+      <p>Open it in the same browser you started from. This link expires in ${TOKEN_EXPIRY_MINUTES} minutes and does not sign you in.</p>
+      <p>If you didn't request this, you can safely ignore this email.</p>
+    `,
+  });
+  assertProviderAck(result);
+}
+
 export async function verifyMagicLink(
   token: string,
   db: PrismaClient,

@@ -1,5 +1,7 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { currentActor } from '../../../lib/requestActor.js';
 import { foreignEdgeMemoryIds } from '../../../lib/foreignEdgeMemories.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, assertNoBootPromptRows, isBootPromptRole } from '../../../lib/bootPrompt.js';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
 import { decisionContainedError, isDecisionFamilyRole, refuseDecisionFamily, refuseUnderDecisionLog } from '../../../lib/decisions/index.js';
@@ -539,6 +541,8 @@ async function writeNodeCoreRaw(
       // it). Every caller of the core — createNode/updateNode, the kind doors,
       // updateNodeData/Properties, importNode, cloneNode — passes through here.
       assertNotCommentWrite(existing?.nodeType, input.nodeType, mode === 'update' ? 'update' : 'create');
+      // #2043 — the compiled-node and worker-session boot-prompt guards (cor:agt:040:11).
+      assertBootPromptWriteAllowed(existing, { nodeType: input.nodeType, role: normalizeRole(input.role) }, mode === 'update' ? 'update' : 'create');
       // #1641 — a log's child locs are its decision codes: only the decision
       // doors write there, so a squatter can never block a code.
       if (!existing && opts?.ownsKind !== 'decision') {
@@ -1095,6 +1099,7 @@ async function writeNodeCoreRaw(
         // the same window, and it is the one with teeth.
         // #1606 — the comment gate, re-checked under the lock with the row it guards.
         assertNotCommentWrite(current.nodeType, input.nodeType, 'update');
+        assertBootPromptWriteAllowed(current, { nodeType: input.nodeType, role: normalizeRole(input.role) }, 'update');
         assertGovernedWrite(
           current,
           mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }),
@@ -2636,7 +2641,9 @@ export const nodeMutations = {
       const scannedNodes: NodeRow[] = [];
       for (const row of nodeById.values()) {
         // #1606 — a comment is governed too (cor:dmo:110:04): skipped, reported as governed.
-        if (governedKindsOf({ role: row.role, isRunnable: row.isRunnable }).length > 0 || row.nodeType === COMMENT_NODE_TYPE) {
+        if (governedKindsOf({ role: row.role, isRunnable: row.isRunnable }).length > 0 || row.nodeType === COMMENT_NODE_TYPE
+          // #2043 — compiled boot prompts are written only by a compile; a worker session also skips sources.
+          || row.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE || (isBootPromptRole(row.role) && currentActor().workerId != null)) {
           skipCounts.governed += 1;
           continue;
         }
@@ -3202,6 +3209,7 @@ export const nodeMutations = {
           // #1606 (cor:dmo:110:04/05) — a comment is removed only by the comment
           // path's thread delete; a target takes its threads with it.
           if ((await commentIdsAmong(tx, affectedIds)).length > 0) throw commentGovernedError('delete', 'removes');
+          await assertNoBootPromptRows(tx, affectedIds, 'delete');
           // #1641 §3.2 — a decision is withdrawn, never deleted, and deleting a
           // log or an ancestor of one would erase decision history.
           await refuseDecisionFamily(tx, affectedIds, 'Deleting this node');
@@ -3908,6 +3916,8 @@ export const nodeMutations = {
       if (source.nodeType === COMMENT_NODE_TYPE || target.nodeType === COMMENT_NODE_TYPE) {
         throw commentGovernedError('merge', 'edits');
       }
+      assertBootPromptWriteAllowed(source, { nodeType: undefined, role: undefined }, 'merge');
+      assertBootPromptWriteAllowed(target, { nodeType: undefined, role: undefined }, 'merge');
       // #1664 — moving the source's edges is safe (governed edges never re-home);
       // DELETING a source with live threads refuses, but only under the source
       // lock, after every gate (#1682 review: a pre-lock check raced, and ran
@@ -4499,6 +4509,7 @@ export const nodeMutations = {
       // #1606 — a comment's history is not restorable through the generic
       // surface, and no revision may turn a node into one (cor:dmo:110:04).
       assertNotCommentWrite(node.nodeType, (restoreFields as { nodeType?: string | null }).nodeType, 'restore');
+      assertBootPromptWriteAllowed(node, restoreFields as { nodeType?: string | null; role?: string | null }, 'restore');
       assertGovernedWrite(
         node,
         mergedGovernedState(node, {
@@ -4603,6 +4614,7 @@ export const nodeMutations = {
         // The preflight checks above are useful fast refusals, but they cannot
         // protect a restore that waited behind a concurrent writer.
         assertNotCommentWrite(current.nodeType, (restoreFields as { nodeType?: string | null }).nodeType, 'restore');
+        assertBootPromptWriteAllowed(current, restoreFields as { nodeType?: string | null; role?: string | null }, 'restore');
         assertGovernedWrite(
           current,
           mergedGovernedState(current, {

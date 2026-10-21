@@ -129,6 +129,8 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/passkey-invariants.sql', import.meta.url), 'utf8'));
   // #1897 — sign-in lineage guards (sign_ins depends on passkey_credentials).
   await client.query(readFileSync(new URL('../../prisma/signin-invariants.sql', import.meta.url), 'utf8'));
+  // #1631 PR1b slice 2 — fresh sign-ins bound to the ceremony browser.
+  await client.query(readFileSync(new URL('../../prisma/fresh-sign-in-invariants.sql', import.meta.url), 'utf8'));
   // #1632 — signing requests, append-only signature records, the content-change marker.
   await client.query(readFileSync(new URL('../../prisma/signing-invariants.sql', import.meta.url), 'utf8'));
   await client.query(readFileSync(new URL('../../prisma/automation-invariants.sql', import.meta.url), 'utf8'));
@@ -140,6 +142,8 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/agent-task-matching-invariants.sql', import.meta.url), 'utf8'));
   // #1747 — tickers, subscriptions, wake settings, app grants, App ticker bounds.
   await client.query(readFileSync(new URL('../../prisma/ticker-invariants.sql', import.meta.url), 'utf8'));
+  // #2043 — a compiled boot prompt keeps its role.
+  await client.query(readFileSync(new URL('../../prisma/boot-prompt-invariants.sql', import.meta.url), 'utf8'));
   // #2022 — stop signals, their coverage history, the stop holds of queued tasks.
   await client.query(readFileSync(new URL('../../prisma/stop-signal-invariants.sql', import.meta.url), 'utf8'));
 

@@ -41,12 +41,15 @@ import {
   createPendingLoginState,
   claimPendingLoginState,
   type ClaimResult,
+  type ClaimedLoginState,
   type LoginProvider,
   type PendingLoginState,
 } from './auth/pendingLoginState.js';
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
+import { completeCeremonyLeg, mountFreshSignInRoutes } from './api/freshSignInRoutes.js';
+import { googleReauthenticatedSince } from './auth/google.js';
 import {
   oauthSurfaceRefusal,
   oauthSurfaceRefusalMessage,
@@ -328,7 +331,7 @@ export async function createServer(): Promise<Express> {
     res: express.Response,
     state: string,
     provider: LoginProvider,
-  ): Promise<PendingLoginState | null> => {
+  ): Promise<ClaimedLoginState | null> => {
     let claim: ClaimResult;
     try {
       claim = await claimPendingLoginState(state, provider);
@@ -432,6 +435,16 @@ export async function createServer(): Promise<Express> {
         }
       }
       phase = 'internal_error';
+
+      // #1631 PR1b: a passkey ceremony's sign-in leg. Look up by the GitHub id only: a username can be renamed
+      // and re-registered by someone else, and the leg must never link or create (Ruth §10 condition 3).
+      if (pending.ceremonyNonceHash) {
+        await completeCeremonyLeg(res, {
+          provider: 'github', ceremonyNonceHash: pending.ceremonyNonceHash,
+          lookup: () => db.user.findFirst({ where: { githubId: ghUser.id, deletedAt: null }, select: { id: true } }),
+        });
+        return;
+      }
 
       // Upsert user — first check by githubUsername to handle seed data
       // that may have a placeholder githubId
@@ -642,6 +655,19 @@ export async function createServer(): Promise<Express> {
       const identity = await verifyGoogleIdToken(idToken);
       phase = 'internal_error';
 
+      // #1631 PR1b: a passkey ceremony's sign-in leg. Google was asked to re-authenticate (max_age=0, R154), so an
+      // auth_time older than this leg refuses. Lookup by the Google id only: no email link, no creation.
+      if (pending.ceremonyNonceHash) {
+        const reauthenticated = googleReauthenticatedSince(identity.authTime, pending.startedAt);
+        await completeCeremonyLeg(res, {
+          provider: 'google', ceremonyNonceHash: pending.ceremonyNonceHash,
+          lookup: async () => reauthenticated
+            ? db.user.findFirst({ where: { googleId: identity.sub, deletedAt: null }, select: { id: true } })
+            : null,
+        });
+        return;
+      }
+
       // Match order per #581: by googleId → by verified email (link) → create.
       const user = await resolveGoogleUser(identity);
 
@@ -784,6 +810,16 @@ export async function createServer(): Promise<Express> {
       phase = 'verify_failed';
       const identity = await verifyAppleIdToken(idToken);
       phase = 'internal_error';
+
+      // #1631 PR1b: a passkey ceremony's sign-in leg. Lookup by the Apple id only: no email link, no creation.
+      // Apple offers no re-authentication request, so a silent Apple session is accepted (R154 known limit).
+      if (pending.ceremonyNonceHash) {
+        await completeCeremonyLeg(res, {
+          provider: 'apple', ceremonyNonceHash: pending.ceremonyNonceHash,
+          lookup: () => db.user.findFirst({ where: { appleId: identity.sub, deletedAt: null }, select: { id: true } }),
+        });
+        return;
+      }
 
       // First-authorization-only name capture; null on every later login.
       const name = parseAppleUserField(userField);
@@ -1049,6 +1085,7 @@ export async function createServer(): Promise<Express> {
   // NODE_ENV + localhost Host; otherwise indistinguishable from a 404).
   mountDevLoginRoutes(app, db);
   mountPasskeyCeremonyRoutes(app);
+  mountFreshSignInRoutes(app, { emailSendPerIpRateLimit, emailRecipientRateLimit });
 
   // #477 Sink 1 — login handoff exchange. The portal's server `load` (NOT the
   // browser) POSTs the one-time code from /auth/callback?code=… here and gets

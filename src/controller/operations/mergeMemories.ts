@@ -1,3 +1,4 @@
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptMergeCollisions, assertNoBootPromptRows, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
 import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
@@ -249,7 +250,7 @@ export async function mergeMemoryGraph(
     const committed = progress.relocatedCount + progress.foldedCount + progress.edgesMovedCount + progress.edgesDroppedCount;
     if (committed === 0) throw error;
     const remainingSourceNodes = await db.node
-      .count({ where: { memoryId: args.sourceMemoryId, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE } } })
+      .count({ where: { memoryId: args.sourceMemoryId, deletedAt: null, nodeType: { notIn: [COMMENT_NODE_TYPE, COMPILED_BOOT_PROMPT_NODE_TYPE] } } })
       .catch(() => null);
     throw withPartialMerge(error, {
       applied: true,
@@ -396,6 +397,14 @@ async function runMerge(
   // before the first batch commits.
   await assertMemoryBulkMutable(db, sourceMemoryId, 'merge', { comments: 'carry' });
   await assertMemoryBulkMutable(db, targetMemoryId, 'merge into', { comments: 'carry' });
+  // #2043 (cor:agt:040:11) — a worker session's merge that would write ANY
+  // boot-prompt node (source or compiled) is refused whole, before any batch
+  // commits. For any other caller compiled nodes are excluded below, like
+  // comments: a merge is not a compile and the target recompiles.
+  await assertNoBootPromptRowsForWorkerSession(db, sourceMemoryId, 'merge');
+  // Destination writes too (Ruth P2): a source node folding onto a compiled target, or onto a
+  // boot-prompt target under a worker session, is refused before any batch commits.
+  await assertNoBootPromptMergeCollisions(db, sourceMemoryId, targetMemoryId);
   await preflightMergeComments(db, sourceMemoryId, targetMemoryId);
   // #1468 — every source node leaves the source memory (relocated, or folded
   // and deleted) and the source memory is then deleted: a mint-stamped source
@@ -425,7 +434,7 @@ async function runMerge(
     let count = 0;
     for (let cursor: string | undefined; ; ) {
       const page = await db.node.findMany({
-        where: { memoryId: sourceMemoryId, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE }, ...(cursor ? { id: { gt: cursor } } : {}) },
+        where: { memoryId: sourceMemoryId, deletedAt: null, nodeType: { notIn: [COMMENT_NODE_TYPE, COMPILED_BOOT_PROMPT_NODE_TYPE] }, ...(cursor ? { id: { gt: cursor } } : {}) },
         select: { id: true, loc: true },
         orderBy: { id: 'asc' },
         take: classifyPage,
@@ -477,7 +486,7 @@ async function runMerge(
     const page = await db.node.findMany({
       // #1664 — comments never relocate on their own: each moves in its
       // target's transaction (carryThreadsInTx).
-      where: { memoryId: sourceMemoryId, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE }, ...(cursor ? { id: { gt: cursor } } : {}) },
+      where: { memoryId: sourceMemoryId, deletedAt: null, nodeType: { notIn: [COMMENT_NODE_TYPE, COMPILED_BOOT_PROMPT_NODE_TYPE] }, ...(cursor ? { id: { gt: cursor } } : {}) },
       select: { id: true, loc: true },
       orderBy: { id: 'asc' },
       take: classifyPage,
@@ -575,6 +584,9 @@ async function runMerge(
           // Reentrant memory locks; fresh governed/protected facts for the rows
           // now serialized by their source + destination address locks.
           await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
+          // #2043 — the preflight boot-prompt scan is fail-fast only: a role set or a
+          // compiled node created after it is caught here, on the locked rows.
+          await assertNoBootPromptRows(tx, rows.map((r) => r.id), 'merge');
           if (args.principal) {
             await assertRoleWritersForNodes(tx, args.principal, rows, { from: sourceMemoryId, to: targetMemoryId });
           }
@@ -726,6 +738,9 @@ async function runMerge(
       await lockMergeMemoryRows(tx);
       // #1468 — the folded source rows are deleted below: authoritative here.
       await assertNoMintedSpecRemoval(tx, sourceMemoryId, srcRows.map((r) => r.id), 'merge out of its corpus');
+      // #2043 — boot-prompt guard on the node-locked source+target rows BEFORE reconciliation
+      // mints any revision; the post-read check below covers rows re-read after it.
+      await assertNoBootPromptRows(tx, foldIds, 'merge');
       for (const id of foldIds) {
         const reconciled = await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: foldMemory.get(id)! });
         if (reconciled == null) throw new Error(`merge node ${id} moved or vanished during the fold; retry the merge`);
@@ -750,6 +765,9 @@ async function runMerge(
       // inside this transaction, under the Channel-memory locks. The Phase-1
       // preflight cannot cover a fold that runs transactions later.
       await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], [...srcRows, ...tgtRows], 'merge');
+      // #2043 — authoritative boot-prompt recheck on the locked source AND target rows
+      // (the preflight collision scan cannot see a role or compiled node added since).
+      await assertNoBootPromptRows(tx, [...srcRows, ...tgtRows].map((r) => r.id), 'merge');
       if (args.principal) {
         await assertRoleWritersForNodes(tx, args.principal, srcRows, { from: sourceMemoryId, to: targetMemoryId });
         await assertRoleWritersForNodes(tx, args.principal, tgtRows, { from: targetMemoryId });
