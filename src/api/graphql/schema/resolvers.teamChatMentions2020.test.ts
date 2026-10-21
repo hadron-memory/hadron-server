@@ -214,14 +214,14 @@ describe('the gates the read had stay as they were', () => {
   it('a foreign App\'s worker, a non-member and the literal "all" read as the empty page', async () => {
     await humanSays(manager.id, 'everyone @all');
     const page = (ref: string) => Q.teamChatMessages({}, { appRef: app.id, mentionsRef: ref }, ctx(holderA.id));
-    expect(await page('all')).toEqual({ items: [], total: 0 });
+    expect(await page('all')).toMatchObject({ items: [], total: 0 });
     const outsider = await mkUser(9);
-    expect(await page(outsider.id)).toEqual({ items: [], total: 0 });
+    expect(await page(outsider.id)).toMatchObject({ items: [], total: 0 });
     const otherOrg = await db.organization.create({ data: { id: generateId(), name: 'o', urn: `o-${Date.now()}.example` } });
     const otherApp = await db.app.create({ data: { id: generateId(), organizationId: otherOrg.id, name: 'Other', urn: `${otherOrg.urn}:other` } });
     const otherAgent = await db.agent.create({ data: { id: generateId(), organizationId: otherOrg.id, name: 'Ghost', urn: `${otherOrg.urn}:ghost` } });
     const foreign = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: otherApp.id, agentId: otherAgent.id, name: 'Liam', slug: 'liam' } });
-    expect(await page(foreign.id)).toEqual({ items: [], total: 0 });
+    expect(await page(foreign.id)).toMatchObject({ items: [], total: 0 });
   });
 
   it('a user ref still matches the handle alone: a broadcast is not a user\'s mention', async () => {

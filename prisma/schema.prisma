@@ -5024,6 +5024,11 @@ model ChannelReadState {
   /// inbox read or a mark-read, an empty one included). Stamped only by `stampChannelCheck`; a read by a
   /// person (asMe), by another worker or of another channel never moves it. NULL = never checked.
   lastCheckedAt DateTime? @map("last_checked_at")
+  /// #2181 — the Channel incarnation the stored cursor was last RAISED under. Written by `advanceReadState` in the
+  /// same statement that creates the row or raises `lastSeenSeq` (an equal or lower mark changes neither). NULL =
+  /// legacy or never advanced under a known incarnation; it is never backfilled and never relabelled, so a stale cursor
+  /// is not presented as current.
+  channelIncarnation Int? @map("channel_incarnation")
 
   worker  Worker?  @relation("ReadStateWorker", fields: [workerId], references: [id], onDelete: Cascade)
   agent   Agent?   @relation("ReadStateAgent", fields: [agentId], references: [id], onDelete: Cascade)
