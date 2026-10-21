@@ -162,7 +162,7 @@ export async function insertWorkerStart(
  */
 export async function launchForAssignment(
   db: PrismaClient,
-  a: { appId: string; taskId: string; workerId: string },
+  a: { appId: string; taskId: string; workerId: string; family?: string },
   now = new Date(),
   /** `now`'s monotonic half (`anchorNow`), when `now` came from a pass; by default taken here, beside `now`. */
   anchor: number = anchorNow(),
@@ -193,7 +193,7 @@ export async function launchForAssignment(
         throw e;
       }
       await fenceHostDecision(tx, a.appId);
-      const reg = (await liveRegistrationsFor(tx, a.appId, a.workerId, now)).find((r) => r.worktrees.length > 0);
+      const reg = (await liveRegistrationsFor(tx, a.appId, a.workerId, now)).find((r) => r.worktrees.length > 0 && (!a.family || r.family === normalizeFamily(a.family)));
       if (!reg) return null;
       return insertWorkerStart(tx, {
         appId: a.appId, hostId: reg.hostId, workerId: a.workerId, worktree: reg.worktrees[0]!, family: reg.family,

@@ -287,7 +287,7 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
  * still free for work as `family`? Re-reads every input on the transaction
  * client, so a run that waited on the lock sees what the first run committed.
  */
-async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId: string, family: string, now: Date, req: Requirements): Promise<boolean> {
+async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId: string, family: string, now: Date, req: Requirements, anchor: number): Promise<boolean> {
   // The owning Agent row fences usesTasks against updateAgent, before the
   // Worker row. No session/worker lock upgrades and no inherited setting.
   const [owner] = await tx.$queryRaw<{ id: string; usesTasks: boolean }[]>`
@@ -298,7 +298,7 @@ async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId
     SELECT app_id AS "appId", retired_at AS "retiredAt", role, agent_id AS "agentId" FROM workers WHERE id = ${workerId} FOR SHARE`;
   if (!w || w.appId !== appId || w.retiredAt) return false;
   if (w.agentId !== owner.id || eligibleFamily(req, { id: workerId, role: w.role, freeFamilies: [family] }) === null) return false;
-  // Bind/end/backfill take Worker before Session; retain that order. Holding
+  // Bind/backfill take Worker before Session; end/refresh only need Session. Holding
   // existing session rows prevents a family refresh after the deciding read;
   // a new bind needs the held Worker row first.
   await tx.$queryRaw`SELECT id FROM sessions WHERE worker_id = ${workerId} AND ended_at IS NULL AND deleted_at IS NULL ORDER BY id FOR SHARE`;
@@ -306,15 +306,16 @@ async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId
     where: { assigneeWorkerId: workerId, status: { in: OPEN_STATUSES } },
   });
   if (openTaskCount > 0) return false;
-  const activity = (await loadWorkersActivity({ db: tx } as unknown as Context, [workerId], now)).get(workerId);
+  const decidedAt = afterWaits(now, anchor);
+  const activity = (await loadWorkersActivity({ db: tx } as unknown as Context, [workerId], decidedAt)).get(workerId);
   const bound = activity?.bound ?? false;
   const endingSession = (await loadEndingSession(tx, [workerId])).has(workerId);
   if (!matchable({ bound, live: activity?.hasLiveSession ?? false, endingSession })) return false;
-  const launchable = bound ? [] : (await loadLaunchableFamilies(tx, { workerIds: [workerId] }, now)).get(workerId) ?? [];
+  const launchable = bound ? [] : (await loadLaunchableFamilies(tx, { workerIds: [workerId] }, decidedAt)).get(workerId) ?? [];
   const families = familiesOf({ bound, bindingFamily: activity?.bindingFamily ?? null, launchableFamilies: launchable });
   if (!families.includes(family)) return false;
-  const availability = (await loadAvailabilityByFamily(tx, [{ id: workerId, appId, families: [family] }], now)).get(workerId) as WorkerAvailabilityView;
-  const isolated = s7Available() && (await tx.workerWakeSettings.count({ where: { workerId, isolatedUntil: { gt: now } } })) > 0;
+  const availability = (await loadAvailabilityByFamily(tx, [{ id: workerId, appId, families: [family] }], decidedAt)).get(workerId) as WorkerAvailabilityView;
+  const isolated = s7Available() && (await tx.workerWakeSettings.count({ where: { workerId, isolatedUntil: { gt: decidedAt } } })) > 0;
   return freeFamiliesOf({ retired: false, isolated, openTaskCount, families: [family], availability }).length > 0;
 }
 
@@ -350,7 +351,7 @@ async function tryAssign(
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('agent-task-matcher:worker'), hashtext(${workerId}))`;
     const currentTask = await tx.agentTask.findUnique({ where: { id: task.id }, select: { requirements: true } });
     if (!currentTask) return 'task-gone';
-    if (!(await stillFreeAs(tx, task.appId, workerId, family, now, parseRequirements(currentTask.requirements)))) return 'worker-not-free';
+    if (!(await stillFreeAs(tx, task.appId, workerId, family, now, parseRequirements(currentTask.requirements), anchor))) return 'worker-not-free';
     const creator = task.createdByWorkerId ?? null;
     // Decided at the moment after the waits (Xan #2166 LOCAL-1), not the pass's start.
     const covering = await coveringSignals(tx, task.appId, creator && creator !== workerId ? [workerId, creator] : [workerId], afterWaits(now, anchor));
@@ -360,7 +361,7 @@ async function tryAssign(
     await hooks.afterWorkerCheck?.({ taskId: task.id, workerId });
     const n = await tx.agentTask.updateMany({
       where: { id: task.id, appId: task.appId, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
-        requirements: { equals: currentTask.requirements ?? Prisma.DbNull } },
+        requirements: { equals: currentTask.requirements ?? Prisma.AnyNull } },
       data: {
         assigneeWorkerId: workerId,
         assignedAt: now, assignedBy: null, assignedByWorkerId: null, assignedByAgentId: null,
@@ -428,7 +429,7 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
         if (outcome === 'assigned') {
           out.push({ taskId: task.id, workerId: w.id, family });
           // #1709 (cor:agt:070:08): a matched worker with no live session is started through its host.
-          if (!w.live) await launchForAssignment(db, { appId, taskId: task.id, workerId: w.id }, now, anchor);
+          if (!w.live) await launchForAssignment(db, { appId, taskId: task.id, workerId: w.id, family }, now, anchor);
         }
         if (outcome !== 'worker-not-free') break;
       }

@@ -1,3 +1,4 @@
+import { anchorNow } from '../stopSignals/state.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1707 (Task Management T3) — the matcher (cor:agt:060:05, :06): who is free
@@ -102,6 +103,69 @@ const assigneeOf = async (taskId: string) =>
 const NOT_CLAUDE_REVIEWER = { role: 'reviewer', familyNotIn: ['claude'] };
 
 describe('#2191 matching constraints', () => {
+  it('treats legacy JSON null requirements as unconstrained, like SQL null', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    const task = await queued('11:00');
+    await db.$executeRaw`UPDATE agent_tasks SET requirements = 'null'::jsonb WHERE id = ${task.id}`;
+    expect(await matchQueuedTasks(db, at('11:01'), { appId: app.id })).toEqual([{ taskId: task.id, workerId: baloo.id, family: 'codex' }]);
+  });
+
+  it('uses the post-wait clock for session expiry instead of the pass timestamp', async () => {
+    const session = await bind(baloo, 'codex', at('11:00'));
+    await db.session.update({ where: { id: session.id }, data: { expiresAt: at('11:01') } });
+    const task = await queued('11:00');
+    expect(await __matcherTesting.tryAssign(db, { ...task, appId: app.id, requirements: null, closeSessionWhenDone: false }, baloo.id, 'codex', at('11:00'), {}, anchorNow() - 120000)).toBe('worker-not-free');
+    expect(await assigneeOf(task.id)).toBeNull();
+  });
+
+  it('an unbound assignment launches only through a host offering the selected allowed family', async () => {
+    for (const [hostId, family] of [['aaa', 'claude'], ['zzz', 'codex']]) {
+      await registerHost(db, { appId: app.id, hostId, label: hostId, pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family, worktrees: ['repo/worker'] }] }, at('11:00'));
+    }
+    const task = await queued('11:00', { familyNotIn: ['anthropic'] });
+    expect(await matchQueuedTasks(db, at('11:01'), { appId: app.id })).toEqual([{ taskId: task.id, workerId: baloo.id, family: 'codex' }]);
+    const op = await db.hostOperation.findFirstOrThrow({ where: { workerId: baloo.id, type: 'worker.start' } });
+    expect(op.args).toMatchObject({ family: 'codex' });
+    expect(op.hostId).toBe('zzz');
+  });
+
+  it('compares both aliases, custom identities and exclusions without guessing a missing role', () => {
+    const w = { id: 'worker', role: 'engineer', freeFamilies: ['claude'] };
+    for (const family of ['claude', 'anthropic', ' AnTHropic ']) {
+      expect(eligibleFamily(parseRequirements({ familyIn: [family] }), w)).toBe('claude');
+      expect(eligibleFamily(parseRequirements({ familyNotIn: [family] }), w)).toBeNull();
+    }
+    const custom = { ...w, freeFamilies: [' Private-7 '] };
+    expect(eligibleFamily(parseRequirements({ familyIn: ['PRIVATE-7'] }), custom)).toBe('private-7');
+    expect(eligibleFamily(parseRequirements({ familyIn: ['private-8'] }), custom)).toBeNull();
+    expect(eligibleFamily(parseRequirements({ familyNotIn: ['private-8'] }), custom)).toBe('private-7');
+    expect(eligibleFamily(parseRequirements({ excludeWorkerIds: ['worker'] }), custom)).toBeNull();
+    expect(eligibleFamily(parseRequirements({ role: 'reviewer' }), custom)).toBeNull();
+    for (const raw of [null, {}, { role: null, familyIn: null }, { familyNotIn: [] }]) {
+      expect(eligibleFamily(parseRequirements(raw), w)).toBe('claude');
+    }
+    expect(eligibleFamily(parseRequirements({ familyIn: [] }), w)).toBeNull();
+    for (const raw of [{ familyIn: 'codex' }, { role: 1 }, { familyNotIn: [''] }, { familyNotIn: ['not valid'] }, { excludeWorkerIds: 'worker' }]) {
+      expect(eligibleFamily(parseRequirements(raw), w)).toBeNull();
+    }
+  });
+
+  for (const family of ['Anthropic', 'OpenAI']) {
+    it(`unbound host ${family} follows alias inclusion and exclusion without a real launch`, async () => {
+      await registerHost(db, { appId: app.id, hostId: 'synthetic', label: 'synthetic', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family, worktrees: ['repo/worker'] }] }, at('11:00'));
+      const canonical = family === 'Anthropic' ? 'claude' : 'codex';
+      // Force the existing-row spelling; new registrations are already canonical.
+      await db.hostRegistrationWorker.updateMany({ data: { family: family.toLowerCase() } });
+      const blocked = await queued('11:00', { familyNotIn: [canonical] });
+      const allowed = await queued('11:01', { familyIn: [family] });
+      expect(await matchQueuedTasks(db, at('11:02'), { appId: app.id })).toEqual([{ taskId: allowed.id, workerId: baloo.id, family: canonical }]);
+      expect(await assigneeOf(blocked.id)).toBeNull();
+      const op = await db.hostOperation.findFirstOrThrow({ where: { workerId: baloo.id, type: 'worker.start' } });
+      expect(op.args).toMatchObject({ family: canonical });
+      expect(op.status).toBe('issued'); // synthetic DB row only; no host consumes it.
+    });
+  }
+
   it('excludes legacy Claude bindings by the anthropic alias', async () => {
     await bind(rook, 'claude', at('11:00'));
     const t = await queued('11:00', { familyNotIn: [' AnthropIC '] });
