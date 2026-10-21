@@ -135,12 +135,16 @@ describe('what a revocation does, and only for the owner', () => {
     expect(r.cancelledAt).toBeNull();
   });
 
-  it('ends no sign-in the revoked passkey completed (040:08: the cancel link only)', async () => {
-    const si = await db.$transaction((tx) => createSignIn(tx, { userId: ana, method: 'email', passkeyId: laptopId }));
+  it('ends every sign-in the revoked passkey completed, and nothing else (Holger, 2026-10-21, #29507)', async () => {
+    const mine = await db.$transaction((tx) => createSignIn(tx, { userId: ana, method: 'email', passkeyId: laptopId }));
+    const theirs = await db.$transaction((tx) => createSignIn(tx, { userId: ana, method: 'email', passkeyId: phoneId }));
+    const idp = await db.$transaction((tx) => createSignIn(tx, { userId: ana, method: 'github', passkeyId: null }));
     const id = await ceremony();
     await byPasskey(id, phone);
     await finish(id, laptop);
-    expect((await db.signIn.findUniqueOrThrow({ where: { id: si.id } })).endedAt).toBeNull();
+    expect((await db.signIn.findUniqueOrThrow({ where: { id: mine.id } })).endedAt).not.toBeNull();
+    expect((await db.signIn.findUniqueOrThrow({ where: { id: theirs.id } })).endedAt).toBeNull();
+    expect((await db.signIn.findUniqueOrThrow({ where: { id: idp.id } })).endedAt).toBeNull();
   });
 
   it('never revokes another user\'s passkey, an unknown one, or an already revoked one (S4)', async () => {

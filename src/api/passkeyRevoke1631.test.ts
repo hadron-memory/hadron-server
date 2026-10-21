@@ -161,7 +161,8 @@ describe('the page', () => {
     const r = await realFetch(`${base}/passkeys/revoke`);
     expect(r.status).toBe(200);
     const html = await r.text();
-    expect(html).toContain('Sessions that are already signed in stay signed in');
+    expect(html).toContain('signs out the sessions it signed in');
+    expect(html).not.toContain('stay signed in');
     expect(html).not.toContain('id="email-form"');
     expect(html).toContain('action="/passkeys/sign-in/github/start"');
     expect(html).toContain('name="next" value="revoke"');

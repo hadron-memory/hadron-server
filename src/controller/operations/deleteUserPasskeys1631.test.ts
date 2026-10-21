@@ -38,7 +38,7 @@ describe('account deletion erases a passkey record\'s identifying parts and keep
     await deleteUserAccount(db, { targetUserId: ana, actorUserId: ana });
     for (const [id, b] of [[kept, before.kept], [cancelled, before.cancelled]] as const) {
       const a = await rec(id);
-      expect(a.label).toBe('');
+      expect(a.label).toBe('Erased passkey');
       expect(Buffer.from(a.publicKey).equals(Buffer.from(b.publicKey))).toBe(true);
       expect(Buffer.from(a.credentialId).equals(Buffer.from(b.credentialId))).toBe(true);
       expect(a).toMatchObject({ ownerId: ana, registeredAt: b.registeredAt, revokedAt: b.revokedAt, windowOutcome: b.windowOutcome, windowEndedAt: b.windowEndedAt, cancelledAt: b.cancelledAt, enrollmentRpId: b.enrollmentRpId });
@@ -67,7 +67,7 @@ describe('account deletion erases a passkey record\'s identifying parts and keep
 describe('the erasure commits with the deletion, or not at all (Rook Q2.3)', () => {
   it('a failing erase rolls the whole deletion back: the user stays live and the label stays', async () => {
     await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION test_fail_erase() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN IF NEW.label = '' THEN RAISE EXCEPTION 'injected erase failure'; END IF; RETURN NEW; END $$`);
+      BEGIN IF NEW.label = 'Erased passkey' THEN RAISE EXCEPTION 'injected erase failure'; END IF; RETURN NEW; END $$`);
     await db.$executeRawUnsafe('CREATE TRIGGER test_fail_erase BEFORE UPDATE ON passkey_credentials FOR EACH ROW EXECUTE FUNCTION test_fail_erase()');
     try {
       await expect(deleteUserAccount(db, { targetUserId: ana, actorUserId: ana })).rejects.toThrow(/injected erase failure/);
@@ -80,15 +80,18 @@ describe('the erasure commits with the deletion, or not at all (Rook Q2.3)', () 
   });
 });
 
-describe('a user merge never moves a passkey (Vera; Holger decides refuse versus leave-behind)', () => {
-  it('the source\'s passkeys keep their owner after a merge', async () => {
+describe('a user merge is refused while the source holds a live passkey (Holger, 2026-10-21, #29507)', () => {
+  it('refuses with a typed error and moves nothing; once the source has no live passkey the merge proceeds and leaves the records with the source', async () => {
     const { mergeUsers } = await import('../../test/mergeConsent.js');
     const target = (await db.user.create({ data: { handle: 'erase-target', roles: [] } })).id;
     const admin = (await db.user.create({ data: { handle: 'erase-admin', roles: ['ADMIN'] } })).id;
+    const refused = await mergeUsers(db, { sourceUserId: ana, targetUserId: target, actorUserId: admin } as never).catch((e) => e);
+    expect(refused?.extensions?.code).toBe('MERGE_SOURCE_HAS_PASSKEYS');
+    expect((await db.user.findUniqueOrThrow({ where: { id: ana } })).deletedAt).toBeNull();
+    await db.$executeRaw`UPDATE passkey_credentials SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) WHERE id = ${kept}`;
     await mergeUsers(db, { sourceUserId: ana, targetUserId: target, actorUserId: admin } as never);
     expect((await db.user.findUniqueOrThrow({ where: { id: ana } })).deletedAt).not.toBeNull();
     expect((await rec(kept)).ownerId).toBe(ana);
-    expect((await rec(cancelled)).ownerId).toBe(ana);
     expect(await db.passkeyCredential.count({ where: { ownerId: target } })).toBe(0);
   });
 });
@@ -96,7 +99,7 @@ describe('a user merge never moves a passkey (Vera; Holger decides refuse versus
 describe('the guard allows the erasure and nothing else', () => {
   it('a live owner\'s label and cancel record cannot change, even to the erased values', async () => {
     await expect(db.$executeRaw`UPDATE passkey_credentials SET label = 'Renamed' WHERE id = ${kept}`).rejects.toThrow(/immutable/i);
-    await expect(db.$executeRaw`UPDATE passkey_credentials SET label = '' WHERE id = ${kept}`).rejects.toThrow(/immutable/i);
+    await expect(db.$executeRaw`UPDATE passkey_credentials SET label = 'Erased passkey' WHERE id = ${kept}`).rejects.toThrow(/immutable/i);
     await expect(db.$executeRaw`UPDATE passkey_credentials SET cancel_ip = '' WHERE id = ${cancelled}`).rejects.toThrow(/immutable/i);
   });
 
@@ -104,8 +107,10 @@ describe('the guard allows the erasure and nothing else', () => {
     await db.user.update({ where: { id: ana }, data: { deletedAt: new Date() } });
     await expect(db.$executeRaw`UPDATE passkey_credentials SET label = 'Other' WHERE id = ${kept}`).rejects.toThrow(/immutable/i);
     await expect(db.$executeRaw`UPDATE passkey_credentials SET cancel_ip = '198.51.100.1' WHERE id = ${cancelled}`).rejects.toThrow(/immutable/i);
-    await db.$executeRaw`UPDATE passkey_credentials SET label = '' WHERE id = ${kept}`;
-    await db.$executeRaw`UPDATE passkey_credentials SET label = '', cancel_ip = '', cancel_user_agent = '' WHERE id = ${cancelled}`;
+    // Holger (#29507): an erased label reads as the fixed text 'Erased passkey'; nothing else, '' included.
+    await expect(db.$executeRaw`UPDATE passkey_credentials SET label = '' WHERE id = ${kept}`).rejects.toThrow(/immutable/i);
+    await db.$executeRaw`UPDATE passkey_credentials SET label = 'Erased passkey' WHERE id = ${kept}`;
+    await db.$executeRaw`UPDATE passkey_credentials SET label = 'Erased passkey', cancel_ip = '', cancel_user_agent = '' WHERE id = ${cancelled}`;
     await expect(db.$executeRaw`UPDATE passkey_credentials SET label = 'Back' WHERE id = ${kept}`).rejects.toThrow(/immutable/i);
     await expect(db.$executeRaw`UPDATE passkey_credentials SET cancel_ip = '203.0.113.9' WHERE id = ${cancelled}`).rejects.toThrow(/immutable/i);
   });
