@@ -2013,18 +2013,14 @@ export const typeResolvers = {
     // ADMIN/OWNER of the org. Non-admins get an empty list (silent rather
     // than erroring — same shape as User.appMemberships).
     agentOrgGrants: async (org: { id: string }, _: unknown, ctx: Context) => {
-      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin && ctx.organizationId !== org.id) return [];
-      if (!isPlatformAdmin) {
-        const member = await ctx.db.orgMember.findFirst({
-          where: {
-            organizationId: org.id,
-            userId: ctx.userId ?? '',
-            ...LIVE_ORG_MEMBERSHIP,
-            role: { in: ['ADMIN', 'OWNER'] },
-          },
-        });
-        if (!member) return [];
+      // An org-scoped client (app key / OAuth client) stays pinned to its own
+      // org; a user token carries no organizationId, so the role gate decides.
+      if (ctx.organizationId && ctx.organizationId !== org.id && !isPlatformAdmin(ctx)) return [];
+      try {
+        await requireOrgRole(ctx, org.id, 'ADMIN');
+      } catch (e) {
+        if (e instanceof Error && e.message === 'Forbidden') return [];
+        throw e;
       }
       return ctx.db.agentOrgGrant.findMany({
         where: { orgId: org.id },
