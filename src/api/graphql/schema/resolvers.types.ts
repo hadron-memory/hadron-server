@@ -92,6 +92,7 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isSessionLive, loadLastEventBySession, sessionLapsesAt } from '../../../lib/sessionActivity.js';
 import type { SessionType } from '../../../generated/prisma/index.js';
 import { hasBoundAppSession, strictSessionMemoryFilter } from '../../../lib/auth/sessionPrivacy.js';
+import { appMemoryScopePage } from './resolvers.appMemoryScope.js';
 
 // Request-local only: a session list computes the event memory set once.
 type SessionEventMemorySet = { ids: string[]; delegatedMemoryId: string | null };
@@ -1605,6 +1606,9 @@ export const typeResolvers = {
      * same predicate Query.memory runs), so a caller who may see the App but
      * not its memory gets null; denied and missing are indistinguishable.
      */
+    /** #2190 (cor:dmo:050:17): the memories appNodes reads for this caller, one page. */
+    memoryScope: (a: { id: string }, args: { limit?: number | null; offset?: number | null }, ctx: Context) =>
+      appMemoryScopePage(ctx, a.id, args.limit, args.offset),
     sharedMemory: async (a: { id: string }, _: unknown, ctx: Context) => {
       const teamSpaceIds = await resolveAppTeamSpaceMemoryIds(ctx.db, a.id);
       if (teamSpaceIds.length === 0) return null;

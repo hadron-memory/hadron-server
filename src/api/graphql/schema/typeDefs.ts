@@ -367,6 +367,45 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  "#2190: one page of an App's memory scope."
+  type AppScopedMemoryPage {
+    items: [AppScopedMemory!]!
+    "Size of the caller's whole scope, so a client knows when it has every page."
+    total: Int!
+  }
+
+  "#2190 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): one memory in an App's scope. A leaf: no nested Memory or Agent."
+  type AppScopedMemory {
+    memoryId: ID!
+    memoryUrn: String!
+    name: String!
+    class: MemoryClass!
+    "Every reason this memory is in scope, never empty: AGENT_SYSTEM, AGENT_LINK, INHERITED_BASE, TEAM_SPACE, then by agent install order."
+    sources: [AppMemorySource!]!
+    """
+    Advisory: whether this caller, in this request's context, may create a node
+    in this memory (the createNode gate). Memory-level only: it never makes an
+    inherited node editable, and every write is still decided by the server.
+    Offer as an upload or new-node target only a row with viewerCanWrite AND a
+    source other than INHERITED_BASE.
+    """
+    viewerCanWrite: Boolean!
+  }
+
+  "#2190: one reason a memory is in an App's scope."
+  type AppMemorySource {
+    kind: AppMemorySourceKind!
+    "The installed or base Agent, for AGENT_SYSTEM, AGENT_LINK and INHERITED_BASE; null for TEAM_SPACE. An id only."
+    agentId: ID
+  }
+
+  enum AppMemorySourceKind {
+    AGENT_SYSTEM
+    AGENT_LINK
+    INHERITED_BASE
+    TEAM_SPACE
+  }
+
   type AgentsPage {
     items: [Agent!]!
     total: Int!
@@ -2815,6 +2854,15 @@ export const typeDefs = `#graphql
     record read gate — denied and missing are indistinguishable).
     """
     sharedMemory: Memory
+    """
+    #2190 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): the memories appNodes
+    reads for this caller, one row per memory with every reason it is in scope,
+    ordered by memoryUrn and paged (default 50, cap 200; over the cap returns a
+    page of the cap). Same admission as appNodes: a refused caller gets
+    appNodes' error, and total 0 means no memories (also the case for an App in
+    a soft-deleted organization). Rows are leaves: join agentId to App.agents.
+    """
+    memoryScope(limit: Int, offset: Int): AppScopedMemoryPage!
     appType: AppType!
     role: AppMembershipRole!
     description: String
