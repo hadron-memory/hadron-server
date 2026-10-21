@@ -123,6 +123,7 @@ export interface Context {
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (#562)
+  signInId?: string;       // #1897: the factor-protected sign-in this credential descends from (JWT sid or key root)
   oauthScopes?: string[];  // immutable OAuth grant on the presented hdr_user_ key (#1261)
   // Admin impersonation: set when the request authenticated with an
   // impersonation JWT — userId is the TARGET, roles is [], and reads must be
@@ -617,6 +618,7 @@ function userPrincipalOnly(ctx: Context): Context {
     roles: ctx.roles,
     organizationId: ctx.organizationId,
     apiKeyId: ctx.apiKeyId,
+    signInId: ctx.signInId,
     oauthScopes: ctx.oauthScopes,
     impersonation: ctx.impersonation,
   };

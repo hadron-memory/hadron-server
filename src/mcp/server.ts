@@ -3474,7 +3474,7 @@ export function createMcpServerInstance(
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
-    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -4337,7 +4337,7 @@ export function createMcpServerInstance(
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -4403,7 +4403,12 @@ export function createMcpServerInstance(
       } catch (e) {
         // findNodes throws BAD_USER_INPUT for a malformed boolean query, an
         // invalid regex, etc. The MCP contract surfaces tool errors as text.
-        return textResult(e instanceof Error ? e.message : 'Search failed.');
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === 'BAD_USER_INPUT') return textResult(e.message);
+        // #415: anything else, such as a regex statement the database
+        // cancelled at its budget, goes through the #1695 boundary, so a
+        // Prisma message (driver internals, the SQL shape) never reaches the
+        // caller.
+        return toolErrorResult(e, () => (e instanceof Error ? e.message : 'Search failed.'), 'hadron_find_nodes');
       }
       const memoryUrnOf = memoizedMemoryUrnLookup();
 
@@ -6899,7 +6904,7 @@ export function createMcpServerInstance(
     userId: auth.userId ?? undefined,
     // #1868: the presented hdr_user_ key, for any gate on the door's path that
     // re-checks it (consistency with the other delegating contexts).
-    apiKeyId: auth.apiKeyId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -7117,7 +7122,7 @@ export function createMcpServerInstance(
         governedCanReplay: () => true,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -7152,7 +7157,7 @@ export function createMcpServerInstance(
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
-    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -7293,7 +7298,7 @@ export function createMcpServerInstance(
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -8736,7 +8741,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -9049,7 +9054,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -9102,7 +9107,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -9136,7 +9141,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -9275,7 +9280,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           db,
           clientId: auth.clientId ?? undefined,
           userId: auth.userId ?? undefined,
-          apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+          apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
           appId: auth.appId ?? undefined,
           sessionId: auth.sessionId ?? undefined,
           roles: auth.roles as Context['roles'],
@@ -9618,7 +9623,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           db,
           clientId: auth.clientId ?? undefined,
           userId: auth.userId ?? undefined,
-          apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+          apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
           appId: auth.appId ?? undefined,
           sessionId: auth.sessionId ?? undefined,
           roles: auth.roles as Context['roles'],
@@ -9658,7 +9663,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
-    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -10208,7 +10213,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -10559,7 +10564,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -10787,7 +10792,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -10967,7 +10972,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
     async ({ workerRef, confirmNoExternalAttribution }) => {
       const ctx: Context = {
         db, userId: auth.userId ?? undefined, appId: auth.appId ?? undefined,
-        clientId: auth.clientId ?? undefined, apiKeyId: auth.apiKeyId ?? undefined,
+        clientId: auth.clientId ?? undefined, apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
         sessionId: auth.sessionId ?? undefined, organizationId: auth.organizationId ?? undefined,
         roles: auth.roles as Context['roles'],
       };
@@ -11036,7 +11041,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         sessionBindingRefused: auth.sessionBindingRefused,
@@ -11117,7 +11122,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -11183,7 +11188,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -11297,7 +11302,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],

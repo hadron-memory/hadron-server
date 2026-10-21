@@ -8,6 +8,8 @@ export interface HadronJwtPayload extends JWTPayload {
   githubUsername?: string; // GitHub username (GitHub users)
   githubId?: number;       // GitHub numeric ID (GitHub users)
   email?: string;          // email address (email users)
+  /// #1897: SignIn.id of a factor-protected sign-in. Present => the row must be live (verifyAuthenticatedJwt).
+  sid?: string;
   /// Admin-impersonation claim (read-only support sessions). When present,
   /// `sub` is the TARGET user and `roles` MUST be `[]` (no platform-role
   /// inheritance). The claim only names the session — the ImpersonationSession
