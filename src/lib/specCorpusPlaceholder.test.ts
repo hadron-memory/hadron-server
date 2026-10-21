@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../integrations/db/client.js';
 import { observeTransactionBackend, waitForAdvisoryWaiter } from '../test/advisoryWaiter.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, tombstoneNodes } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { mergeMemoryGraph } from '../controller/operations/mergeMemories.js';
@@ -124,7 +124,7 @@ describe('a placeholder becomes a real spec when its content is written (#1450)'
 
   it('does not let a spec created over a deleted placeholder inherit its flag', async () => {
     const reserved = await reserve(draft.id, 'pas:030:01');
-    await resolvers.Mutation.deleteNode(null, { nodeRef: reserved.id }, as(admin.id));
+    await tombstoneNodes(db, [reserved.id]);
     await resolvers.Mutation.createSpecNode(null, {
       input: { memoryId: draft.id, loc: 'pas:030:01', name: 'Written', role: 'spec', nodeType: 'info', content: 'Body.' },
     } as never, as(admin.id));
@@ -277,7 +277,7 @@ describe('reserving over a deleted spec (@codex P2 on #1452)', () => {
       input: { memoryId: draft.id, loc: 'pas:140:01', name: 'Old', role: 'spec', nodeType: 'info',
         content: 'Deleted spec text.', abstract: 'Deleted abstract.', description: 'Deleted headline.' },
     } as never, as(admin.id));
-    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+    await tombstoneNodes(db, [old.id]);
 
     await reserve(draft.id, 'pas:140:01');
     expect(await row(draft.id, 'pas:140:01')).toMatchObject({
@@ -299,7 +299,7 @@ describe('reserving over a deleted spec (@codex P2 on #1452)', () => {
       memoryId: draft.id, sourceId: child.id, targetId: target.id,
       loc: 'pas:140:01:cites:pas:149', name: 'cites',
     } });
-    await resolvers.Mutation.deleteNode(null, { nodeRef: parent.id, recursive: true }, as(admin.id));
+    await tombstoneNodes(db, [parent.id, child.id]);
 
     const reserved = await reserve(draft.id, 'pas:140');
     const archived = `pas:140__deleted-${parent.id}`;
@@ -403,7 +403,7 @@ describe('reserve authorizes before touching the tombstone (@codex P2 on #1452)'
     const old = await resolvers.Mutation.createSpecNode(null, {
       input: { memoryId: draft.id, loc: 'pas:171:01', name: 'Old', role: 'spec', nodeType: 'info', content: 'Old.' },
     } as never, as(admin.id));
-    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+    await tombstoneNodes(db, [old.id]);
     let release!: () => void;
     let held!: () => void;
     const lockHeld = new Promise<void>((r) => { held = r; });
@@ -465,7 +465,7 @@ describe('reserving over a deleted spec with edges (@codex P2 on #1452)', () => 
         edges: [{ targetId: target.id, name: 'depends-on' }] },
     } as never, as(admin.id));
     expect(await db.edge.count({ where: { sourceId: old.id, deletedAt: null } })).toBe(1);
-    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+    await tombstoneNodes(db, [old.id]);
 
     const reserved = await reserve(draft.id, 'pas:160:01');
     // A FRESH node: the tombstone is archived, not revived.
@@ -483,7 +483,7 @@ describe('reserving over a deleted spec with edges (@codex P2 on #1452)', () => 
       input: { memoryId: draft.id, loc: 'pas:161:01', name: 'Old', role: 'spec', nodeType: 'info', content: 'Old.',
         edges: [{ targetId: target.id, name: 'depends-on' }] },
     } as never, as(admin.id));
-    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+    await tombstoneNodes(db, [old.id]);
 
     const reserved = await reserve(draft.id, 'pas:161:01');
     await updateSpec(draft.id, 'pas:161:01', {
@@ -506,7 +506,7 @@ describe('reserving over a deleted spec with edges (@codex P2 on #1452)', () => 
       input: { memoryId: draft.id, loc: 'pas:162:01', name: 'Old', role: 'spec', nodeType: 'info', content: 'Old.' },
     } as never, as(admin.id));
     await resolvers.Mutation.createEdge(null, { sourceRef: source.id, targetRef: old.id, name: 'cites' }, as(admin.id));
-    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+    await tombstoneNodes(db, [old.id]);
 
     const reserved = await reserve(draft.id, 'pas:162:01');
     const linked = await resolvers.Mutation.createEdge(
@@ -576,7 +576,7 @@ describe('reserve archives an edge that was in flight when the spec was deleted 
     await edgeOpen;
 
     // 2. The target is soft-deleted (a non-key column: it does not wait).
-    await resolvers.Mutation.deleteNode(null, { nodeRef: target.id }, as(admin.id));
+    await tombstoneNodes(db, [target.id]);
 
     // 3. Reserve at the freed citation, and let it reach the archive.
     const reserving = reserve(draft.id, 'pas:163:01');
@@ -639,7 +639,7 @@ describe('a placeholder over a tombstone is indistinguishable from a fresh one (
     } as never, as(admin.id));
     // Git-sync provenance is not an input field, so seed it directly.
     await db.node.update({ where: { id: old.id }, data: { contentHash: 'deadbeef', ownerRepo: 'acme/specs' } });
-    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+    await tombstoneNodes(db, [old.id]);
     const revived = await reserve(draft.id, 'pas:180:02');
     expect(revived.id).not.toBe(old.id); // fresh identity, the tombstone is archived
     // The mutation's own result reports the reset provenance, not the tombstone's.
@@ -679,7 +679,7 @@ describe('a revived placeholder has no vectors (@codex P1 on #1452)', () => {
       nodeId: old.id, memoryId: draft.id, kind: 'chunk', provider: 'local', model: 'test', dim: 768,
       chunkIndex: 0, chunkText: 'Secret deleted text.',
     } as never });
-    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+    await tombstoneNodes(db, [old.id]);
 
     const revived = await reserve(draft.id, 'pas:200:01');
     expect(revived.id).not.toBe(old.id);
@@ -697,7 +697,7 @@ describe('a placeholder over a deleted spec is a fresh node (@codex P2 on #1452)
     await updateSpec(draft.id, 'pas:210:01', { content: 'v2 secret' });
     const oldHistory = await db.nodeRevision.count({ where: { nodeId: old.id } });
     expect(oldHistory).toBeGreaterThan(0);
-    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+    await tombstoneNodes(db, [old.id]);
 
     const reserved = await reserve(draft.id, 'pas:210:01');
     expect(reserved.id).not.toBe(old.id);
@@ -713,7 +713,7 @@ describe('reserve takes the address locks before the tombstone row (@codex P2 on
     const old = await resolvers.Mutation.createSpecNode(null, {
       input: { memoryId: draft.id, loc: 'pas:220:01', name: 'Old', role: 'spec', nodeType: 'info', content: 'x' },
     } as never, as(admin.id));
-    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+    await tombstoneNodes(db, [old.id]);
 
     let release!: () => void;
     let held!: () => void;

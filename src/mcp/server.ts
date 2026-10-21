@@ -100,6 +100,7 @@ import { foreignEdgeMemoryIds } from '../lib/foreignEdgeMemories.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
+import { governedRemovalError, lockGovernedRowsIn } from '../lib/governedRemoval.js';
 import { escapePrismaLikePattern } from '../lib/literalLocPrefix.js';
 import {
   moveNodeSubtree,
@@ -7538,6 +7539,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'mintedSpec'; message: string }
         | { refused: 'comment'; message: string }
         | { refused: 'decision'; message: string }
+        | { refused: 'governed'; message: string }
         | { ok: true; descendantCount: number };
 
       // #449 — source memories whose pending-edge count a hard delete changed.
@@ -7612,6 +7614,12 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         const decisions = await decisionFamilyAmong(tx, affectedIds);
         if (decisions.length > 0) {
           return { refused: 'decision', message: decisionContainedError('Deleting this node', decisions.map((d) => d.loc)).message };
+        }
+        // A governed node is removed only after its marker is cleared through
+        // the kind's door: the whole affected set is judged on locked rows.
+        const governedHits = await lockGovernedRowsIn(tx, memory.id, affectedIds);
+        if (governedHits.length > 0) {
+          return { refused: 'governed', message: governedRemovalError(governedHits, 'mcp').message };
         }
         if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
         else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy: auth.userId ?? auth.clientId ?? null, at: new Date() });
@@ -7697,6 +7705,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
         if (result.refused === 'decision') {
           return textResult(`[decision_contained] ${result.message}`);
+        }
+        if (result.refused === 'governed') {
+          return textResult(`[role_governed] ${result.message}`);
         }
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';
@@ -8000,6 +8011,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               await assertNoMintedSpecRemoval(tx, toMemory.id, [existingTarget.id], 'overwrite');
               // #1641 §3.2 — evicting a decision would delete it.
               await refuseDecisionFamily(tx, [existingTarget.id], 'Overwriting this node');
+              // Evicting a live occupant is a removal: a governed occupant is
+              // replaced only after its marker is cleared through the kind's
+              // door. Judged on the locked row; the eviction update above already
+              // holds it, so this takes nothing new. A tombstoned occupant is
+              // only re-keyed, which removes nothing.
+              if (!existingTarget.deletedAt) {
+                const governedOccupant = await lockGovernedRowsIn(tx, toMemory.id, [existingTarget.id]);
+                if (governedOccupant.length > 0) throw governedRemovalError(governedOccupant, 'mcp', 'overwrite');
+              }
             }
           }
 
@@ -8052,6 +8072,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
           return textResult(`[spec_minted_permanent] ${e.message}`);
+        }
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === 'ROLE_GOVERNED' && e.extensions?.op === 'overwrite') {
+          return textResult(`[role_governed] ${e.message}`);
         }
         if (e instanceof SubtreeMoveSourceChangedError) {
           return textResult('The node was moved concurrently; re-read it and retry.');
