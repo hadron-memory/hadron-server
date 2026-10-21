@@ -466,6 +466,31 @@ export async function writeSessionHandoff(
   }
 }
 
+// ── #2086 / #1931 / #1948: refresh a bound session's model and family ─────────────────────────────────────────
+/** A supplied family must be a valid token; checked before any write (and, on a resume, before the claim is spent). */
+function explicitFamilyOrThrow(family: string | null | undefined): string | null {
+  const explicit = family != null ? normalizeFamily(family) : null;
+  if (family != null && !explicit) {
+    throw new GraphQLError('family must be a valid model-family token.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  return explicit;
+}
+
+/**
+ * What a binding-preserving flow writes back: an explicit family wins, otherwise a supplied model is read against
+ * the session's STORED tool (never a transport's). Null/omitted input never clears, and a model nothing classifies
+ * keeps the existing family rather than guessing one. Shared by updateSession and the resume of an open session,
+ * so the two cannot drift.
+ */
+function modelFamilyRefresh(
+  explicitFamily: string | null,
+  llmModel: string | null | undefined,
+  storedTool: string | null,
+): { llmModel?: string; family?: string } {
+  const family = explicitFamily ?? (llmModel != null ? deriveFamily({ llmModel, tool: storedTool }) : null);
+  return { ...(llmModel != null ? { llmModel } : {}), ...(family != null ? { family } : {}) };
+}
+
 // ── #1956: resume claims ───────────────────────────────────────────────────
 
 /** The optional provenance a redemption passes on when it must start the worker's next session. */
@@ -1484,18 +1509,13 @@ export const sessionMutations = {
       await requireSessionWriteAccess(ctx, session);
       // #1931: refresh a binding without guessing a model family from its host.
       // Null/omitted metadata never clears an existing family during recovery.
-      const explicit = family != null ? normalizeFamily(family) : null;
-      if (family != null && !explicit) {
-        throw new GraphQLError('family must be a valid model-family token.', { extensions: { code: 'BAD_USER_INPUT' } });
-      }
-      const refreshedFamily = explicit ?? (llmModel != null ? deriveFamily({ llmModel, tool: session.tool }) : null);
+      const refresh = modelFamilyRefresh(explicitFamilyOrThrow(family), llmModel, session.tool);
       return ctx.db.session.update({
         where: { id },
         data: {
           ...(prNumber !== undefined ? { prNumber } : {}),
           ...(branch !== undefined ? { branch } : {}),
-          ...(llmModel != null ? { llmModel } : {}),
-          ...(refreshedFamily != null ? { family: refreshedFamily } : {}),
+          ...refresh,
           updatedBy: ctx.userId ?? ctx.clientId ?? null,
           // #1543 — a pr/branch edit must not revive a lapsed session.
           ...(await preserveHeartbeatIfLapsed(ctx.db as never, id)),
@@ -1604,6 +1624,9 @@ export const sessionMutations = {
       const given = input ?? {};
       if (!ctx.userId || ctx.impersonation) throw nothingToResume();
       const userId = ctx.userId;
+      // #2086: a bad family refuses BEFORE any claim is read or spent. It sits after the NOTHING_TO_RESUME line
+      // above, so an App key or an impersonation learns nothing about the value either way.
+      const explicitFamily = explicitFamilyOrThrow(given.family);
       const now = new Date();
       const claims = await liveClaimsOf(ctx.db, userId, now);
 
@@ -1628,6 +1651,12 @@ export const sessionMutations = {
         try {
           verdict = await ctx.db.$transaction(async (tx) => {
             const ok = await resumeOwnLapsedSessionInTx(ctx, tx, sessionId);
+            // #2086: only after the gate permits, inside its transaction, so a refusal or a lost claim writes nothing.
+            if (ok) {
+              const stored = await tx.session.findUniqueOrThrow({ where: { id: sessionId }, select: { tool: true } });
+              const refresh = modelFamilyRefresh(explicitFamily, given.llmModel, stored.tool);
+              if (Object.keys(refresh).length) await tx.session.update({ where: { id: sessionId }, data: { ...refresh, updatedBy: userId } });
+            }
             if (claimId) {
               if (!(await consumeResumeClaim(tx, claimId, userId))) throw lost;
               if (ok) await tx.resumeClaim.update({ where: { id: claimId }, data: { resumedSessionId: sessionId } });
