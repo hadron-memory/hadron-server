@@ -23,7 +23,8 @@ import {
   publishEmbedWake,
   restampFailedEmbeddings,
 } from '../../../services/embedding/enqueue.js';
-import { deleteMemoryVectors } from '../../../services/embedding/vectors.js';
+import { deleteMemoryChunkVectors, deleteMemoryVectors } from '../../../services/embedding/vectors.js';
+import { embeddingKindsWanted, memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
 import {
   createMemoryShare,
   InvalidMemoryClassForShareError,
@@ -1146,6 +1147,19 @@ export const memoryMutations = {
         (chunkOverlap !== undefined && chunkOverlap !== memory.chunkOverlap) ||
         (forceFixedSize !== undefined && forceFixedSize !== memory.forceFixedSize);
       const chunkConfigChanged = chunkDialsChanged && sourceUsesChunks;
+      if (updated.class === 'system') {
+        // #2199 (cor:rag:010:01 r17): a system memory's summary index cannot be switched off, so the setting and the
+        // source only add or drop PASSAGES. Summary vectors survive every change; only chunk rows are managed.
+        const wasChunks = embeddingKindsWanted(memory).chunks;
+        const nowChunks = embeddingKindsWanted(updated).chunks;
+        if (wasChunks && !nowChunks) {
+          await deleteMemoryChunkVectors(ctx.db, id);
+        } else if (nowChunks && (!wasChunks || sourceChanged || chunkConfigChanged)) {
+          if (wasChunks) await deleteMemoryChunkVectors(ctx.db, id); // dials/source moved the boundaries
+          await backfillMemoryEmbeddings(ctx.db, id);
+        }
+        return updated;
+      }
       if (nowEnabled && (!wasEnabled || sourceChanged || chunkConfigChanged)) {
         // When the source itself changes (abstract ↔ contentChunks ↔ both),
         // the previously-stored vectors are now the wrong KIND. vectorSearch
@@ -1213,7 +1227,7 @@ export const memoryMutations = {
         await concealUnreadableDenial(txCtx, memoryId, memoryRef, () =>
           requireMemoryManageAccess(txCtx, current),
         );
-        if (!current.vectorIndexEnabled) return 0;
+        if (!memoryIsVectorIndexed(current)) return 0;
         return restampFailedEmbeddings(tx, memoryId);
       });
       if (count > 0) void publishEmbedWake({});

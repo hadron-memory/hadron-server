@@ -155,6 +155,7 @@ import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
+import { memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
 
 /**
  * #1606 (cor:dmo:110:01/04) — no generic edge write alters or removes a
@@ -1539,11 +1540,11 @@ export async function writeNodeCore(
             if (reviving && authoritative) {
               await tx.nodeEmbedding.deleteMany({ where: { nodeId: authoritative.id } });
               const indexed = await tx.memory.findUniqueOrThrow({
-                where: { id: input.memoryId }, select: { vectorIndexEnabled: true },
+                where: { id: input.memoryId }, select: { vectorIndexEnabled: true, class: true },
               });
               // Invalidate an old embed before post-commit enqueue runs.
               // Unindexed memories keep the normal null pending marker.
-              revivedPendingAt = pendingAtForRevival(authoritative.embeddingPendingAt, indexed.vectorIndexEnabled);
+              revivedPendingAt = pendingAtForRevival(authoritative.embeddingPendingAt, memoryIsVectorIndexed(indexed));
             }
 
             // #1183 — resurrect from the AUTHORITATIVE row, not the stale

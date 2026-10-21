@@ -15,6 +15,7 @@ import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { isEmbeddingConfigured } from '../../lib/embedding/index.js';
 import { embedNode, EMBED_WAKE_SUBJECT, type EmbedPlaintext } from '../../jobs/embedNodes.js';
 import { getBusClient } from '../../lib/bus/index.js';
+import { memoryIsVectorIndexed } from '../../lib/embedding/indexing.js';
 
 /**
  * Fire-and-forget bus wake-up (spec 039). Never throws — a broker outage
@@ -43,8 +44,9 @@ export interface EnqueueArgs {
 }
 
 /** Invalidate an old embed on revival without queuing work for an unindexed memory. */
-export function pendingAtForRevival(previous: Date | null, vectorIndexEnabled: boolean): Date | null {
-  if (!vectorIndexEnabled) return null;
+export function pendingAtForRevival(previous: Date | null, indexed: boolean): Date | null {
+  // `indexed` is memoryIsVectorIndexed(memory): a system memory is always indexed (#2199).
+  if (!indexed) return null;
   const now = Date.now();
   return new Date(now === previous?.getTime() ? now + 1 : now);
 }
@@ -60,9 +62,9 @@ export async function enqueueNodeEmbedding(
   try {
     const memory = await db.memory.findUnique({
       where: { id: args.memoryId },
-      select: { vectorIndexEnabled: true },
+      select: { vectorIndexEnabled: true, class: true },
     });
-    if (!memory?.vectorIndexEnabled) return;
+    if (!memory || !memoryIsVectorIndexed(memory)) return;
 
     // Durable marker (recovery net): fresh attempt resets failure state.
     // updateMany (not update) so a node deleted between the write and this
@@ -132,6 +134,51 @@ export async function backfillMemoryEmbeddings(
   // a large memory. Fire-and-forget; the sweep remains the fallback.
   void publishEmbedWake({});
   return res.count;
+}
+
+/**
+ * #2199 — one BOUNDED, resumable step of the system-memory summary backfill. Inspects at most `limit` live nodes of
+ * `memoryId` after `afterNodeId` (node id order) and stamps the ones that need a summary vector: an abstract that is not
+ * blank, no abstract vector yet, not already queued, not failed (a failed embed is re-driven by `retryFailedEmbeddings`,
+ * and a node with no abstract is never requeued just because it has no vector). The cursor is the last INSPECTED id,
+ * so it advances over rows that were skipped too: a window of nothing-to-do rows still makes progress, and no eligible
+ * row is passed over. Idempotent: the stamp re-checks eligibility in the write, so a node queued, edited or deleted
+ * since the read is left alone, and a re-run stamps only what is still missing.
+ */
+export async function stampMemoryEmbeddingsBatch(
+  db: PrismaClient,
+  memoryId: string,
+  opts: { limit: number; afterNodeId?: string | null; dryRun?: boolean },
+): Promise<{ inspected: number; eligible: number; stamped: number; nextAfterNodeId: string | null; done: boolean }> {
+  const limit = Math.max(1, Math.floor(opts.limit));
+  const after = opts.afterNodeId ?? '';
+  const rows = await db.$queryRaw<{ id: string; eligible: boolean }[]>`
+    SELECT n.id,
+      (n.abstract IS NOT NULL AND btrim(n.abstract) <> ''
+        AND n.embedding_pending_at IS NULL AND n.embedding_failed_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM node_embeddings e WHERE e.node_id = n.id AND e.kind = 'abstract')) AS eligible
+    FROM nodes n
+    WHERE n.memory_id = ${memoryId} AND n.deleted_at IS NULL AND n.id > ${after}
+    ORDER BY n.id
+    LIMIT ${limit}`;
+  const eligibleIds = rows.filter((r) => r.eligible).map((r) => r.id);
+  let stamped = 0;
+  if (!opts.dryRun && eligibleIds.length > 0) {
+    const res = await db.node.updateMany({
+      // Re-asserted in the write: a node queued, failed or deleted since the read is not touched.
+      where: { id: { in: eligibleIds }, memoryId, deletedAt: null, embeddingPendingAt: null, embeddingFailedAt: null },
+      data: { embeddingPendingAt: new Date(), embeddingFailedAt: null, embeddingError: null, embeddingAttempts: 0 },
+    });
+    stamped = res.count;
+    if (stamped > 0) void publishEmbedWake({});
+  }
+  return {
+    inspected: rows.length,
+    eligible: eligibleIds.length,
+    stamped,
+    nextAfterNodeId: rows.length > 0 ? rows[rows.length - 1]!.id : opts.afterNodeId ?? null,
+    done: rows.length < limit,
+  };
 }
 
 /**
