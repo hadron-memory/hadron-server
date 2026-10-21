@@ -21,8 +21,8 @@ let otherPasskeyId: string;
 async function seedPasskey(ownerId: string, tag: string): Promise<string> {
   const id = generateId();
   await db.$executeRaw`INSERT INTO passkey_credentials
-    (id, owner_id, credential_id, public_key, algorithm, user_handle, label, registered_at, counter, transports, backup_eligible, backed_up)
-    VALUES (${id}, ${ownerId}, ${Buffer.from(`cred-${tag}-${id}`)}, ${Buffer.from('pk')}, -7, ${Buffer.alloc(32, 1)}, 'Synthetic',
+    (id, owner_id, credential_id, public_key, algorithm, user_handle, enrollment_rp_id, label, registered_at, counter, transports, backup_eligible, backed_up)
+    VALUES (${id}, ${ownerId}, ${Buffer.from(`cred-${tag}-${id}`)}, ${Buffer.from('pk')}, -7, ${Buffer.alloc(32, 1)}, 'example.test', 'Synthetic',
       (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3), 0, ARRAY['internal'], false, false)`;
   return id;
 }
