@@ -8,6 +8,9 @@
  * not approve. Off that placement the role is plain: a boot-prompt node in a
  * group memory takes ordinary writer approval, directly and in bulk.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
@@ -229,6 +232,67 @@ describe('#2043 S6 — the gate decides on its own, whatever the write gate admi
     expect(await decide(ctxOf(f.appOwner.id), f.agentMem.id)).toEqual({ placed: true, refusal: 'BOOT_PROMPT_APPROVAL_FORBIDDEN' });
     expect(await decide(ctxOf(f.admin.id), f.ownedMem.id)).toEqual({ placed: true, refusal: 'BOOT_PROMPT_APPROVAL_FORBIDDEN' });
     expect(await decide(ctxOf(f.writer.id), f.group.id)).toEqual({ placed: false });
+  });
+});
+
+// §10 Rook P2-1: an approval made outside the gate must not survive the node's
+// ENTRY into the placed boot-prompt state (the approval hash covers neither role
+// nor memory). Ending clears the hash on the node and on its revision records.
+describe('#2043 S6 — an outside approval ends when its node enters the placed state', () => {
+  const ended = async (nodeId: string) => {
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).approvalHash).toBeNull();
+    expect(await db.nodeRevision.count({ where: { nodeId, approvalHash: { not: null } } })).toBe(0);
+  };
+
+  it('the migration carries prisma/boot-prompt-approval-invariants.sql verbatim', () => {
+    const root = fileURLToPath(new URL('../../../../prisma/', import.meta.url));
+    const guard = readFileSync(join(root, 'boot-prompt-approval-invariants.sql'), 'utf8');
+    const migration = readFileSync(join(root, 'migrations/20261022010000_boot_prompt_approval_entry/migration.sql'), 'utf8');
+    expect(migration.endsWith(guard)).toBe(true);
+  });
+
+  it('A: a session-approved plain node, flipped into the boot role by the manager, is no longer approved', async () => {
+    const f = await fixture();
+    const node = await plain(f.agentMem.id);
+    expect(await runAsActor({ workerId: f.worker.id, agentId: null }, () => codeOf(approve(node.id, ctxOf(f.admin.id))))).toBe('NO_ERROR');
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvalHash).not.toBeNull();
+    await M.updateNode(null, { input: { id: node.id, role: 'boot-prompt' } }, ctxOf(f.admin.id));
+    await ended(node.id);
+  });
+
+  it('B: a writer-approved boot-role node in a group memory, moved into the Agent memory, is no longer approved', async () => {
+    const f = await fixture();
+    const node = await bootSource(f.group.id, 'boot:moved');
+    expect(await codeOf(approve(node.id, ctxOf(f.writer.id)))).toBe('NO_ERROR');
+    await db.memoryMember.create({ data: { memoryId: f.group.id, userId: f.admin.id, role: 'owner' } });
+    await M.moveNode(null, { sourceRef: node.id, targetMemoryRef: f.agentMem.id }, ctxOf(f.admin.id));
+    const moved = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(moved.memoryId).toBe(f.agentMem.id);
+    await ended(node.id);
+  });
+
+  it('C: an Agent attaching a memory that holds approved boot-role nodes ends those approvals', async () => {
+    const f = await fixture();
+    const loose = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'loose', urn: 'ba-org:loose', organizationId: orgId } });
+    const node = await bootSource(loose.id);
+    const other = await plain(loose.id);
+    await approve(node.id, ctxOf(f.admin.id));
+    await approve(other.id, ctxOf(f.admin.id));
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvalHash).not.toBeNull();
+    await db.agent.create({ data: { id: generateId(), name: 'Late', urn: 'ba-org:late', organizationId: orgId, systemMemoryId: loose.id } });
+    await ended(node.id);
+    expect((await db.node.findUniqueOrThrow({ where: { id: other.id } })).approvalHash).not.toBeNull();
+  });
+
+  it("the manager's own approval of a node already placed is kept, and so is the plain role's elsewhere", async () => {
+    const f = await fixture();
+    const placed = await bootSource(f.agentMem.id);
+    await approve(placed.id, ctxOf(f.admin.id));
+    await M.updateNode(null, { input: { id: placed.id, name: 'Renamed' } }, ctxOf(f.admin.id));
+    expect((await db.node.findUniqueOrThrow({ where: { id: placed.id } })).approvalHash).not.toBeNull();
+    const group = await bootSource(f.group.id, 'boot:stays');
+    await approve(group.id, ctxOf(f.writer.id));
+    expect((await db.node.findUniqueOrThrow({ where: { id: group.id } })).approvalHash).not.toBeNull();
   });
 });
 

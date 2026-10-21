@@ -146,6 +146,8 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/boot-prompt-invariants.sql', import.meta.url), 'utf8'));
   // #2045 — a boot-prompt pointer's id and URN snapshot are set or cleared together.
   await client.query(readFileSync(new URL('../../prisma/boot-prompt-pointer-invariants.sql', import.meta.url), 'utf8'));
+  // #2043 PR 2 — an outside approval ends when its node enters the placed boot-prompt state.
+  await client.query(readFileSync(new URL('../../prisma/boot-prompt-approval-invariants.sql', import.meta.url), 'utf8'));
   // #2022 — stop signals, their coverage history, the stop holds of queued tasks.
   await client.query(readFileSync(new URL('../../prisma/stop-signal-invariants.sql', import.meta.url), 'utf8'));
 
