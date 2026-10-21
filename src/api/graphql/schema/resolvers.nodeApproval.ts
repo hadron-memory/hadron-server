@@ -32,6 +32,7 @@ import {
   type NodeApprovalRow,
   type NodeIntegrityResult,
 } from '../../../lib/nodeApproval.js';
+import { bootPromptApprovalGate, type BootPromptApprovalGate } from '../../../lib/bootPromptApproval.js';
 
 /**
  * #1591 — the approval policy: may this caller approve nodes of this memory?
@@ -42,6 +43,24 @@ import {
 export async function mayApproveNodes(ctx: Context, memoryId: string): Promise<void> {
   await requireMemoryWriteAccess(ctx, memoryId);
 }
+
+/**
+ * #2043 — the pooled pre-check before an approval's fenced transaction. An
+ * install memory's write decision on the pooled client is honoured only as a
+ * pre-flight for a door that rechecks inside its own fenced transaction (#2064);
+ * both approval doors recheck {@link mayApproveNodes} under
+ * `withAuthorizedMemoryTx`, so they may opt in. Without it no App manager could
+ * approve anything in an install memory.
+ */
+function mayApproveNodesPreflight(ctx: Context, memoryId: string): Promise<void> {
+  return mayApproveNodes({ ...ctx, installWritePreflight: true }, memoryId);
+}
+
+function bootPromptRefusalToGraphQL(error: NodeApprovalRefusal): GraphQLError {
+  return new GraphQLError(error.message, { extensions: { code: error.code, op: 'approve' } });
+}
+
+const BOOT_PROMPT_REFUSALS = new Set<string>(['BOOT_PROMPT_WORKER_SESSION_REFUSED', 'BOOT_PROMPT_APPROVAL_FORBIDDEN']);
 
 /**
  * #1591 — the mint policy: may this caller mint the nodes of this memory?
@@ -191,21 +210,27 @@ export const nodeApprovalMutations = {
     // Authorize before looking at key availability, so a reader of an
     // encrypted memory meets FORBIDDEN whether or not a key is cached
     // (@copilot, PR #1592). Re-checked inside the fenced transaction below.
-    await mayApproveNodes(ctx, memoryId);
+    await mayApproveNodesPreflight(ctx, memoryId);
     await requirePlainApprovalMemory(ctx, memoryId);
     // E1 intentionally never supplies a decryption key to the approval writer.
     const key = null;
+    let bootPromptGate: BootPromptApprovalGate | undefined;
     try {
       const { node } = await withAuthorizedMemoryTx(
         ctx, memoryId, [],
-        async (txCtx) => { await mayApproveNodes(txCtx, memoryId); await requirePlainApprovalMemory(txCtx, memoryId); },
+        async (txCtx) => {
+          await mayApproveNodes(txCtx, memoryId);
+          await requirePlainApprovalMemory(txCtx, memoryId);
+          bootPromptGate = await bootPromptApprovalGate(txCtx, memoryId);
+        },
         (tx) => approveNodeInTransaction(tx, id, {
-          memoryId, approver: editorFromAuth(ctx), key, expectedRevision: revision,
+          memoryId, approver: editorFromAuth(ctx), key, expectedRevision: revision, bootPromptGate,
         }),
       );
       return receiptOf(ctx, node);
     } catch (error) {
       if (error instanceof NodeApprovalRefusal) {
+        if (BOOT_PROMPT_REFUSALS.has(error.code)) throw bootPromptRefusalToGraphQL(error);
         throw error.code === 'NODE_NOT_FOUND' ? nodeNotFound(nodeRef) : refusalToGraphQL(error, nodeRef);
       }
       throw error;
@@ -219,13 +244,18 @@ export const nodeApprovalMutations = {
    */
   approveMemoryNodes: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context) => {
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-    await concealUnreadableDenial(ctx, memoryId, memoryRef, () => mayApproveNodes(ctx, memoryId));
+    await concealUnreadableDenial(ctx, memoryId, memoryRef, () => mayApproveNodesPreflight(ctx, memoryId));
     await requirePlainApprovalMemory(ctx, memoryId);
     // E1 intentionally never supplies a decryption key to the approval writer.
     const key = null;
+    let bootPromptGate: BootPromptApprovalGate | undefined;
     const outcome = await withAuthorizedMemoryTx(
       ctx, memoryId, [],
-      async (txCtx) => { await mayApproveNodes(txCtx, memoryId); await requirePlainApprovalMemory(txCtx, memoryId); },
+      async (txCtx) => {
+        await mayApproveNodes(txCtx, memoryId);
+        await requirePlainApprovalMemory(txCtx, memoryId);
+        bootPromptGate = await bootPromptApprovalGate(txCtx, memoryId);
+      },
       async (tx) => {
         // Lock in id order, so two bulk approvals cannot deadlock each other.
         // #1591: only unminted nodes are approved in bulk; a minted node's
@@ -247,12 +277,14 @@ export const nodeApprovalMutations = {
         })).map((n) => n.loc);
         const approved: NodeApprovalRow[] = [];
         const skippedPlaceholders: string[] = [];
+        // #2043 (R30) — placed boot prompts this caller may not approve are skipped and reported.
+        const skippedBootPrompts: string[] = [];
         let alreadyApprovedCount = 0;
         const now = new Date();
         for (const { id } of ids) {
           try {
             const result = await approveNodeInTransaction(tx, id, {
-              memoryId, approver: editorFromAuth(ctx), key, now,
+              memoryId, approver: editorFromAuth(ctx), key, now, bootPromptGate,
             });
             if (result.approvedNow) approved.push(result.node);
             else alreadyApprovedCount += 1;
@@ -261,6 +293,9 @@ export const nodeApprovalMutations = {
             if (error.code === 'NODE_IS_PLACEHOLDER') {
               const { loc } = await tx.node.findUniqueOrThrow({ where: { id }, select: { loc: true } });
               skippedPlaceholders.push(loc);
+            } else if (BOOT_PROMPT_REFUSALS.has(error.code)) {
+              const { loc } = await tx.node.findUniqueOrThrow({ where: { id }, select: { loc: true } });
+              skippedBootPrompts.push(loc);
             } else {
               throw error;
             }
@@ -270,7 +305,7 @@ export const nodeApprovalMutations = {
         // as a warning. Read under the same lock as the approvals it annotates.
         const scoped = await tx.node.findMany({ where: { id: { in: ids.map((r) => r.id) } }, select: { id: true, loc: true } });
         const unresolvedFeedback = (await unresolvedFeedbackOf(tx, scoped)).map((f) => ({ ...f, memoryId }));
-        return { approved, skippedPlaceholders, alreadyApprovedCount, unresolvedFeedback, skippedDecisionCount, skippedDecisions };
+        return { approved, skippedPlaceholders, skippedBootPrompts, alreadyApprovedCount, unresolvedFeedback, skippedDecisionCount, skippedDecisions };
       },
       { timeout: 120_000 },
     );
@@ -282,6 +317,8 @@ export const nodeApprovalMutations = {
       skippedPlaceholders: outcome.skippedPlaceholders.sort(),
       skippedDecisionCount: outcome.skippedDecisionCount,
       skippedDecisions: outcome.skippedDecisions,
+      skippedBootPromptCount: outcome.skippedBootPrompts.length,
+      skippedBootPrompts: outcome.skippedBootPrompts.sort().slice(0, 50),
       unresolvedFeedback: outcome.unresolvedFeedback,
     };
   },
