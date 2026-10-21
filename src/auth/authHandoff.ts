@@ -72,11 +72,15 @@ export interface IssueLoginCodeArgs {
 
 /** Mint a `login` handoff code and return the raw opaque value (handed to the
  *  browser once, as `?code=`). */
-export async function issueLoginCode(args: IssueLoginCodeArgs): Promise<string> {
+export async function issueLoginCode(
+  args: IssueLoginCodeArgs,
+  /** #1897: the transaction a factor-protected code must commit with its sign-in; defaults to the shared client. */
+  client: Pick<typeof db, 'authHandoffCode'> = db,
+): Promise<string> {
   const rawCode = randomBytes(32).toString('hex'); // 256 bits
   const clientStateHash =
     args.clientStateHash ?? (args.clientState ? sha256(args.clientState) : null);
-  await db.authHandoffCode.create({
+  await client.authHandoffCode.create({
     data: {
       codeHash: sha256(rawCode),
       kind: 'login',
