@@ -57,7 +57,7 @@ import {
   UrnNotQualifiedError,
 } from '../lib/urn.js';
 import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
-import { currentActorAmbiguity, publishActor, publishAmbiguousActor, runInChildActorScope } from '../lib/requestActor.js';
+import { currentActorAmbiguity, publishActor, publishAmbiguousActor, publishUser, runInChildActorScope } from '../lib/requestActor.js';
 import {
   emitEntityUrnV2,
   emitNodeUrnV2,
@@ -2277,6 +2277,9 @@ export function createMcpServerInstance(
       // an unnamed sibling was about to be refused on.
       args[cbIndex] = (input: unknown, extra: unknown) =>
         runInChildActorScope(async () => {
+          // #2176: this tool call's own validated user (auth is the connection's, refreshed per request),
+          // published in the call's own scope like its Worker, so a batch sibling cannot overwrite it.
+          publishUser(auth.userId ?? null);
           const named = (input as Record<string, unknown> | undefined)?.[argumentName];
           const humanArgument = EXPLICIT_HUMAN_ARGUMENT[name];
           const asHuman = humanArgument !== undefined && (input as Record<string, unknown> | undefined)?.[humanArgument] === true;

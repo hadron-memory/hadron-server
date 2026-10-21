@@ -3,7 +3,7 @@
 -- together. The URN is what names a target whose row was hard-deleted (R27),
 -- so a half-set pointer could neither serve nor be reported. The ONE source of
 -- this SQL: included verbatim by prisma/post-push.sql (dev DB, test template,
--- CI) and copied into 20261021090000_boot_prompt_pointers (prod, which does not
+-- CI) and copied into 20261021110000_boot_prompt_pointers (prod, which does not
 -- run post-push.sql). Change it only together with a new migration that carries
 -- the new text. Idempotent.
 --

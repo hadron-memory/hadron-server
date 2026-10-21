@@ -277,7 +277,7 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
       const result = await server.executeOperation(
         { query: `mutation($i:UpdateNodeInput!){updateNode(input:$i){id memoryId loc name revision description abstract tags content data
           memory{id} outgoingEdges{id} incomingEdges{id} asset{id} signingRequests{id} commentSummary{comments openThreads}
-          approvalStatus{state approval{revision}} mintStatus{minted mintedByInfo} authorship{__typename} createdByWorker{id} updatedByAgent{id}
+          approvalStatus{state approval{revision}} mintStatus{minted mintedByInfo} authorship{__typename} createdByWorker{id} updatedByAgent{id} updatedByUser{handle}
           contentValidation{state} signatureStatus{state signatures{id}}}}`, variables: { i: { install: f.install, loc: 'prompts:lane', description: 'only-this' } } },
         { contextValue: ctx },
       );
@@ -291,12 +291,27 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
       // Selecting `revision` on a concealed write must not error (Node.revision reads revSeq): Andi, Charles, Bindi.
       expect(out.revision).toBe((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq);
       expect(out).toMatchObject({ description: null, abstract: null, tags: [], content: null, data: null, memory: null,
-        outgoingEdges: [], incomingEdges: [], asset: null, signingRequests: [], authorship: null, createdByWorker: null, updatedByAgent: null });
+        outgoingEdges: [], incomingEdges: [], asset: null, signingRequests: [], authorship: null, createdByWorker: null, updatedByAgent: null,
+        // Ruth's #2064 merge condition: #2189's updatedByUser re-reads the last editor by node id, so it is concealed too.
+        updatedByUser: null });
       expect(out.commentSummary).toEqual({ comments: 0, openThreads: 0 });
       expect(out.approvalStatus).toEqual({ state: 'NOT_APPLICABLE', approval: null });
       // And it really was applied.
       expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).description).toBe('only-this');
     } finally { await server.stop(); }
+  });
+
+  it('Ruth #2064 merge condition: the merged Node.updatedByUser reads nothing on a concealed parent (#2189 re-reads the editor by node id)', async () => {
+    const f = await fixture();
+    const node = await f.create(f.admin);
+    const editor = await db.user.create({ data: { id: generateId(), handle: 'concealed-editor', roles: ['READER'] } });
+    await db.$executeRaw`UPDATE nodes SET updated_by_user_id = ${editor.id} WHERE id = ${node.id}`;
+    const { INSTALL_CONCEALED } = await import('./installMemory.js');
+    const N = resolvers.Node as any;
+    // Control: an ordinary parent of the same node names the editor.
+    expect(await N.updatedByUser({ id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toMatchObject({ handle: 'concealed-editor' });
+    // A concealed parent carries id and memoryId but must not let the resolver re-read the live row.
+    expect(await N.updatedByUser({ [INSTALL_CONCEALED]: true, id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toBeNull();
   });
 
   it('withInstallConcealment never reaches the original resolver for a concealed parent, and passes others through', async () => {

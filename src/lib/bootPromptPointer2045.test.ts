@@ -402,7 +402,7 @@ describe('#2045 surfaces and code inventory', () => {
   it('the migration carries prisma/boot-prompt-pointer-invariants.sql verbatim', () => {
     const root = fileURLToPath(new URL('../../prisma/', import.meta.url));
     const guard = readFileSync(join(root, 'boot-prompt-pointer-invariants.sql'), 'utf8');
-    const migration = readFileSync(join(root, 'migrations/20261021090000_boot_prompt_pointers/migration.sql'), 'utf8');
+    const migration = readFileSync(join(root, 'migrations/20261021110000_boot_prompt_pointers/migration.sql'), 'utf8');
     expect(migration.endsWith(guard)).toBe(true);
   });
 });
