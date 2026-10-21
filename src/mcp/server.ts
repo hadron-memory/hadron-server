@@ -101,7 +101,7 @@ import { foreignEdgeMemoryIds } from '../lib/foreignEdgeMemories.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
-import { governedRemovalError, lockGovernedRowsIn } from '../lib/governedRemoval.js';
+import { governedAmong, governedRemovalError, lockGovernedRowsIn, lockRemovalRows } from '../lib/governedRemoval.js';
 import { escapePrismaLikePattern } from '../lib/literalLocPrefix.js';
 import {
   moveNodeSubtree,
@@ -7640,6 +7640,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'comment'; message: string }
         | { refused: 'decision'; message: string }
         | { refused: 'governed'; message: string }
+        | { refused: 'writerLevel'; message: string }
         | { ok: true; descendantCount: number };
 
       // #449 — source memories whose pending-edge count a hard delete changed.
@@ -7718,9 +7719,19 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
         // A governed node is removed only after its marker is cleared through
         // the kind's door: the whole affected set is judged on locked rows.
-        const governedHits = await lockGovernedRowsIn(tx, memory.id, affectedIds);
+        const removed = await lockRemovalRows(tx, memory.id, affectedIds, { hard: !!hard });
+        const governedHits = governedAmong(removed);
         if (governedHits.length > 0) {
           return { refused: 'governed', message: governedRemovalError(governedHits, 'mcp').message };
+        }
+        // cor:acl:130:07 — removing a node writes it: each removed row needs its
+        // writer level, judged on the rows locked above.
+        try {
+          await assertRoleWritersForNodes(tx, auth, removed, { from: memory.id });
+        } catch (e) {
+          const text = roleWriterRefusalText(e);
+          if (text) return { refused: 'writerLevel', message: text };
+          throw e;
         }
         if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
         else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy: auth.userId ?? auth.clientId ?? null, at: new Date() });
@@ -7809,6 +7820,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
         if (result.refused === 'governed') {
           return textResult(`[role_governed] ${result.message}`);
+        }
+        if (result.refused === 'writerLevel') {
+          return textResult(result.message);
         }
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';

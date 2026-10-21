@@ -29,7 +29,7 @@ import {
   type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
-import { assertEdgeSourceWritersById, assertRoleWritersForWrite, lockEdgeUnderSourceWriters, roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
+import { assertEdgeSourceWritersById, assertRoleWritersForNodes, assertRoleWritersForWrite, lockEdgeUnderSourceWriters, roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../../lib/specCorpus.js';
 import { carryGovernedSignals } from '../../../lib/governedSignals.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
@@ -3216,7 +3216,11 @@ export const nodeMutations = {
           // A governed node is removed only after its marker is cleared through
           // the kind's door: the whole affected set is judged here, on locked
           // rows, before any write.
-          await assertNoGovernedRemoval(tx, memoryId, affectedIds);
+          const removed = await assertNoGovernedRemoval(tx, memoryId, affectedIds, 'graphql', { hard: !!hard });
+          // cor:acl:130:07 — removing a node writes it: each removed row's role
+          // and runnable state needs its writer level, judged on the rows locked
+          // above, so one row of an ADMIN role refuses the whole removal.
+          await assertRoleWritersForNodes(tx, ctx, removed, { from: memoryId });
           if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
           else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy, at: now });
 
