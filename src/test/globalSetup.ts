@@ -129,6 +129,8 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/passkey-invariants.sql', import.meta.url), 'utf8'));
   // #1897 — sign-in lineage guards (sign_ins depends on passkey_credentials).
   await client.query(readFileSync(new URL('../../prisma/signin-invariants.sql', import.meta.url), 'utf8'));
+  // #1631 PR1b slice 2 — fresh sign-ins bound to the ceremony browser.
+  await client.query(readFileSync(new URL('../../prisma/fresh-sign-in-invariants.sql', import.meta.url), 'utf8'));
   // #1632 — signing requests, append-only signature records, the content-change marker.
   await client.query(readFileSync(new URL('../../prisma/signing-invariants.sql', import.meta.url), 'utf8'));
   await client.query(readFileSync(new URL('../../prisma/automation-invariants.sql', import.meta.url), 'utf8'));
