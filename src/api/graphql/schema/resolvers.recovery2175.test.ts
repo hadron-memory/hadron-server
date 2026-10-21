@@ -44,6 +44,14 @@ beforeEach(async () => {
 });
 
 describe('explicit recovery reads', () => {
+  it('keeps user-owned recovery owner-scoped when both callers share an unrelated organization', async () => {
+    await db.memory.update({ where: { id: memoryId }, data: { organizationId: null, ownerUserId: writerId, urn: 'recovery-writer:corpus' } });
+    const retained = await node('a');
+    expect(await Q.recoveryNode({}, { nodeRef: retained.id }, ctx(readerId))).toBeNull();
+    await expect(Q.recoveryNodes({}, { memoryRef: memoryId }, ctx(readerId))).rejects.toThrow();
+    expect(await Q.recoveryNode({}, { nodeRef: retained.id }, ctx())).toMatchObject({ id: retained.id });
+    expect(await M.restoreNode({}, { nodeRef: retained.id }, ctx())).toMatchObject({ deletedAt: null });
+  });
   it('executes real GraphQL recovery DTO fields, nullable edge names, and restore selection', async () => {
     const retained = await node('a'), live = await node('b', { deletedAt: null });
     await db.edge.create({ data: { memoryId, sourceId: live.id, targetId: retained.id, loc: 'b:related:a' } });
