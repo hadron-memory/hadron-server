@@ -65,6 +65,7 @@ const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: a
   createdByAgent: none,
   updatedByWorker: none,
   updatedByAgent: none,
+  updatedByUser: none,
   asComment: none,
   asset: none,
   signingRequests: empty,

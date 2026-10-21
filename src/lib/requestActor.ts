@@ -22,6 +22,14 @@ export type RequestActor = {
   workerId: string | null;
   agentId: string | null;
   /**
+   * #2176 — the validated User behind the request's writes: the same `auth.userId`
+   * `editorFromAuth` records as a revision's editor, so a node and its revision can
+   * never name different users for one edit. Published once per request / tool call
+   * by {@link publishUser}; null for a key-only principal, an App run, a system job.
+   * Optional so a worker actor built by a binding check need not mention it.
+   */
+  userId?: string | null;
+  /**
    * #1701 — set when the request's MCP connection carries live bindings for
    * MORE THAN ONE Worker / Agent and nothing in the request said which one is
    * calling: the Hadron session ids of those bindings. The actor is then
@@ -78,12 +86,32 @@ export function currentActorAmbiguity(): readonly string[] | null {
 }
 
 /**
+ * #2176 — record the validated User behind this request's (or this tool call's) writes.
+ * Separate from {@link publishActor}: a worker session changes WHO the Worker is, never who the
+ * authenticated human is, so naming (or un-naming) a session leaves the user untouched.
+ * A no-op outside a holder.
+ */
+export function publishUser(userId: string | null | undefined): void {
+  const holder = requestActorStorage.getStore();
+  if (!holder) return;
+  // Absent, not null, when nobody: the holder's shape is unchanged for every request without a user.
+  if (userId) holder.userId = userId;
+  else delete holder.userId;
+}
+
+/**
  * Run `fn` as `actor` — a headless run's scope, and tests. Awaited INSIDE the
  * scope on purpose: a PrismaPromise is lazy, so a query returned unawaited
  * would execute (and read the actor) after the scope had already closed.
  */
 export function runAsActor<T>(actor: RequestActor, fn: () => T | PromiseLike<T>): Promise<T> {
-  return requestActorStorage.run({ ...actor }, async () => await fn());
+  // A scope that does not name a user inherits the surrounding one (a Worker-session scope
+  // inside an authenticated request); a scope with no surrounding request has none.
+  const userId = actor.userId !== undefined ? actor.userId : currentActor().userId ?? null;
+  const scoped: RequestActor = { ...actor };
+  if (userId) scoped.userId = userId;
+  else delete scoped.userId;
+  return requestActorStorage.run(scoped, async () => await fn());
 }
 
 /**
@@ -97,6 +125,7 @@ export function runAsActor<T>(actor: RequestActor, fn: () => T | PromiseLike<T>)
 export function runInChildActorScope<T>(fn: () => T | PromiseLike<T>): Promise<T> {
   const parent = currentActor();
   const child: RequestActor = { workerId: parent.workerId, agentId: parent.agentId };
+  if (parent.userId) child.userId = parent.userId;
   if (parent.ambiguousSessionIds) child.ambiguousSessionIds = [...parent.ambiguousSessionIds];
   return requestActorStorage.run(child, async () => await fn());
 }
@@ -108,5 +137,5 @@ export function runInChildActorScope<T>(fn: () => T | PromiseLike<T>): Promise<T
  * its revision attribute the same edit to the same nobody (#1658 review).
  */
 export function runAsSystem<T>(fn: () => T | PromiseLike<T>): Promise<T> {
-  return runAsActor({ workerId: null, agentId: null }, fn);
+  return runAsActor({ workerId: null, agentId: null, userId: null }, fn);
 }
