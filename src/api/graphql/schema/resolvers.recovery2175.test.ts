@@ -11,11 +11,18 @@ import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
+import { lockMemoryForChannelChange } from '../../../lib/channels.js';
+import { acquireLockSet } from '../../../lib/nodeSubtreeLock.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { buildSchema, defaultFieldResolver, graphql } from 'graphql';
 import { typeDefs } from './typeDefs.js';
+import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../../../lib/events/nodeWritten.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../lib/events/nodeWritten.js')>(),
+  publishNodeWritten: vi.fn().mockResolvedValue(undefined),
+}));
 const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: any, c: Context) => Promise<any>>;
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: any, c: Context) => Promise<any>>;
 let memoryId: string, writerId: string, readerId: string;
@@ -108,6 +115,24 @@ describe('explicit recovery reads', () => {
     const tail = await Q.recoveryNodes({}, { memoryRef: memoryId, offset: 20 }, ctx());
     expect(tail.total).toBe(23); expect(tail.items).toHaveLength(3);
   });
+  it('caps explicit pages at200 and clamps a negative offset', async () => {
+    await db.node.createMany({ data: Array.from({ length: 201 }, (_, index) => ({ id: generateId(), memoryId,
+      loc: `n${String(index).padStart(3, '0')}`, name: 'Retained', deletedAt: new Date() })) });
+    const page = await Q.recoveryNodes({}, { memoryRef: memoryId, limit: 999, offset: -4 }, ctx());
+    expect(page.total).toBe(201); expect(page.items).toHaveLength(200);
+    expect(page.items[0].loc).toBe('n000');
+  });
+  it.each([
+    { userId: undefined },
+    { appKeyId: 'synthetic-app-key' },
+    { impersonation: { orgId: 'synthetic-org' } },
+    { clientId: 'run:synthetic' },
+  ])('does not infer a recovery audience from excluded principal %j', async (principal) => {
+    const retained = await node('a');
+    const excluded = { ...ctx(), ...principal } as Context;
+    expect(await Q.recoveryNode({}, { nodeRef: retained.id }, excluded)).toBeNull();
+    await expect(Q.recoveryNodes({}, { memoryRef: memoryId }, excluded)).rejects.toThrow();
+  });
   it('refuses a reader-only listing rather than exposing its count', async () => {
     await node('a');
     await expect(Q.recoveryNodes({}, { memoryRef: memoryId }, ctx(readerId))).rejects.toThrow();
@@ -120,6 +145,132 @@ describe('explicit recovery reads', () => {
 });
 
 describe('single-node restore', () => {
+  it('keeps a retained destination occupied while an actual destination move waits ahead of restore', async () => {
+    const retained = await node('a'), source = await node('source', { deletedAt: null, content: 'source body' });
+    let held!: () => void, release!: () => void;
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const blocker = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+      held(); await gate;
+    }, { timeout: 15_000 });
+    await holding;
+    const moving = M.moveNode({}, { sourceRef: source.id, targetUrn: 'hrn:node:recovery2175.example:corpus:a' }, ctx()).then(() => null, (error: unknown) => error);
+    let restoration: Promise<any>;
+    try {
+      await waitForLockWaiters(db, 1);
+      restoration = M.restoreNode({}, { nodeRef: retained.id }, ctx()).then(
+        (value: any) => ({ value, error: undefined }), (error: any) => ({ value: undefined, error }));
+      await waitForLockWaiters(db, 2);
+    } finally { release(); }
+    await blocker;
+    expect(await moving).toBeInstanceOf(Error);
+    expect((await restoration!).error).toBeUndefined();
+    expect(await db.node.findUniqueOrThrow({ where: { id: source.id } })).toMatchObject({ loc: 'source', content: 'source body' });
+    expect(await db.node.findUniqueOrThrow({ where: { id: retained.id } })).toMatchObject({ loc: 'a', deletedAt: null, content: retained.content });
+  });
+  it('does not follow an idempotent restore target after the actual move resolver wins its address wait', async () => {
+    const live = await node('a', { deletedAt: null, content: 'live body' });
+    let held!: () => void, release!: () => void;
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const blocker = db.$transaction(async (tx) => {
+      await acquireLockSet(tx, [{ memoryId, loc: 'a' }]); held(); await gate;
+    }, { timeout: 15_000 });
+    await holding;
+    const moving = M.moveNode({}, { sourceRef: live.id, targetUrn: 'hrn:node:recovery2175.example:corpus:moved' }, ctx()).then(
+      (value: any) => ({ value, error: undefined }), (error: any) => ({ value: undefined, error }));
+    let restoration: Promise<any>;
+    try {
+      await waitForLockWaiters(db, 1);
+      restoration = M.restoreNode({}, { nodeRef: live.id }, ctx()).then(() => null, (error: unknown) => error);
+      await waitForLockWaiters(db, 2);
+    } finally { release(); }
+    await blocker;
+    expect((await moving).error).toBeUndefined();
+    expect(await restoration!).toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: live.id } })).toMatchObject({ loc: 'moved', content: 'live body', deletedAt: null });
+  });
+  it('conceals the target when the actual transfer resolver wins an authority-anchor wait', async () => {
+    const retained = await node('a');
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const manager = await db.user.create({ data: { handle: 'recovery-manager' } });
+    const destination = await db.organization.create({ data: { name: 'Destination', urn: 'recovery-destination.example' } });
+    await db.orgMember.createMany({ data: [memory.organizationId!, destination.id].map((organizationId) => ({ organizationId, userId: manager.id, role: 'ADMIN' as const })) });
+    const input = { memoryRef: memoryId, orgRef: destination.id };
+    const preview = await M.transferMemoryOwnership({}, { ...input, dryRun: true }, ctx(manager.id));
+    let held!: () => void, release!: () => void;
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const blocker = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'memory', id: memoryId }], 'exclusive'); held(); await gate;
+    }, { timeout: 15_000 });
+    await holding;
+    const transfer = M.transferMemoryOwnership({}, { ...input, expectedNewUrn: preview.newUrn }, ctx(manager.id)).then(
+      (value: any) => ({ value, error: undefined }), (error: any) => ({ value: undefined, error }));
+    let restoration: Promise<any>;
+    try {
+      await waitForLockWaiters(db, 1);
+      restoration = M.restoreNode({}, { nodeRef: retained.id }, ctx()).then(() => null, (error: unknown) => error);
+      await waitForLockWaiters(db, 2);
+    } finally { release(); }
+    await blocker;
+    expect((await transfer).error).toBeUndefined();
+    expect(await restoration!).toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: retained.id } })).deletedAt).toEqual(retained.deletedAt);
+  });
+  it('refuses stale restore after the actual encryption flip wins a Memory row wait', async () => {
+    await db.memory.update({ where: { id: memoryId }, data: { class: 'private', userId: writerId, vectorIndexEnabled: false } });
+    const retained = await node('a');
+    let held!: () => void, release!: () => void;
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const blocker = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+      held(); await gate;
+    }, { timeout: 15_000 });
+    await holding;
+    const conversion = M.encryptMemory({}, { memoryId, dataKey: Buffer.alloc(32, 37).toString('base64') }, ctx()).then(
+      (value: any) => ({ value, error: undefined }), (error: any) => ({ value: undefined, error }));
+    let restoration: Promise<any>;
+    try {
+      await waitForLockWaiters(db, 1);
+      restoration = M.restoreNode({}, { nodeRef: retained.id }, ctx()).then(() => null, (error: unknown) => error);
+      await waitForLockWaiters(db, 2);
+    } finally { release(); }
+    await blocker;
+    expect((await conversion).error).toBeUndefined();
+    expect(await restoration!).toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
+    const row = await db.node.findUniqueOrThrow({ where: { id: retained.id } });
+    expect(row.deletedAt).toEqual(retained.deletedAt);
+    expect(row.content).not.toBe(retained.content);
+  });
+  it.each(['hard-target', 'soft-ancestor', 'hard-ancestor'])('serializes the actual delete resolver before restore: %s', async (schedule) => {
+    const parent = await node('a', { deletedAt: null }), child = await node('a:b');
+    let held!: () => void, release!: () => void;
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const blocker = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, memoryId);
+      held(); await gate;
+    }, { timeout: 15_000 });
+    await holding;
+    const deletion = M.deleteNode({}, { nodeRef: schedule === 'hard-target' ? child.id : parent.id,
+      hard: schedule !== 'soft-ancestor', recursive: schedule !== 'hard-target' }, ctx()).then(
+        (value: any) => ({ value, error: undefined }), (error: any) => ({ value: undefined, error }));
+    let restoration: Promise<any>;
+    try {
+      await waitForLockWaiters(db, 1);
+      restoration = M.restoreNode({}, { nodeRef: child.id }, ctx()).then(() => null, (error: unknown) => error);
+      await waitForLockWaiters(db, 2);
+    } finally { release(); }
+    await blocker;
+    expect((await deletion).error).toBeUndefined();
+    expect(await restoration!).toBeInstanceOf(Error);
+    const row = await db.node.findUnique({ where: { id: child.id } });
+    if (schedule === 'soft-ancestor') expect(row?.deletedAt).toEqual(child.deletedAt);
+    else expect(row).toBeNull();
+  });
   it('judges an ordinary role against the rulebook committed while restore waits', async () => {
     const retained = await node('a', { role: 'notes' });
     const config = await db.memoryConfig.create({ data: { memoryId } });
@@ -138,6 +289,8 @@ describe('single-node restore', () => {
     await competing;
     expect(await pending).toMatchObject({ extensions: { code: 'ROLE_WRITER_LEVEL_REQUIRED' } });
     expect((await db.node.findUniqueOrThrow({ where: { id: retained.id } })).deletedAt).toEqual(retained.deletedAt);
+    expect(publishNodeWritten).not.toHaveBeenCalled();
+    expect(writeNodeToGit).not.toHaveBeenCalled();
   });
   it('observes an ancestor deletion committed during its row-lock wait', async () => {
     const parent = await node('a', { deletedAt: null }), child = await node('a:b');
@@ -156,7 +309,7 @@ describe('single-node restore', () => {
     expect(await pending).toMatchObject({ extensions: { code: 'NODE_PARENT_DELETED' } });
     expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).deletedAt).toEqual(child.deletedAt);
   });
-  it.each(['rekey', 'hard-delete', 'govern', 'already-restored'])('rechecks a target after a deterministic row-lock wait: %s', async (change) => {
+  it.each(['rekey', 'hard-delete', 'replace', 'govern', 'already-restored'])('rechecks a target after a deterministic row-lock wait: %s', async (change) => {
     const retained = await node('a');
     let held!: () => void, release!: () => void;
     const holding = new Promise<void>((resolve) => { held = resolve; });
@@ -165,7 +318,10 @@ describe('single-node restore', () => {
       await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${retained.id} FOR NO KEY UPDATE`;
       held();
       await gate;
-      if (change === 'hard-delete') await tx.node.delete({ where: { id: retained.id } });
+      if (change === 'hard-delete' || change === 'replace') {
+        await tx.node.delete({ where: { id: retained.id } });
+        if (change === 'replace') await tx.node.create({ data: { memoryId, loc: retained.loc, name: 'Successor', content: 'new successor' } });
+      }
       else await tx.node.update({ where: { id: retained.id }, data:
         change === 'rekey' ? { loc: 'moved' } : change === 'govern' ? { role: 'review' } : { deletedAt: null, deletedBy: null } });
     }, { timeout: 15_000 });
@@ -180,6 +336,7 @@ describe('single-node restore', () => {
       expect(result.error).toBeDefined();
       const row = await db.node.findUnique({ where: { id: retained.id } });
       if (row) expect(row.deletedAt).toEqual(retained.deletedAt);
+      if (change === 'replace') expect(await db.node.findFirst({ where: { memoryId, loc: retained.loc } })).toMatchObject({ name: 'Successor', content: 'new successor', deletedAt: null });
     }
   });
   it('rechecks revoked membership after an authority-anchor wait', async () => {
@@ -255,6 +412,7 @@ describe('single-node restore', () => {
     await M.restoreNode({}, { nodeRef: n.id }, ctx());
     expect(await db.node.findUniqueOrThrow({ where: { id: n.id } })).toEqual(first);
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(before);
+    expect(publishNodeWritten).toHaveBeenCalledTimes(1);
   });
   it('requires the parent to be restored first', async () => {
     const parent = await node('a'), child = await node('a:b');
@@ -266,6 +424,8 @@ describe('single-node restore', () => {
     const n = await node('g', signal);
     await expect(M.restoreNode({}, { nodeRef: n.id }, ctx())).rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED' } });
     expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).deletedAt).toEqual(n.deletedAt);
+    expect(publishNodeWritten).not.toHaveBeenCalled();
+    expect(writeNodeToGit).not.toHaveBeenCalled();
   });
   it('does not grant recovery to a run acting on behalf of a writer', async () => {
     const n = await node('a');

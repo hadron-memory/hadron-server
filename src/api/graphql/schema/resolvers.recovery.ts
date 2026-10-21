@@ -18,7 +18,7 @@ import { assertRoleWritersForNodes } from '../../../lib/nodeRoleWriters.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
 import { deserializeTags } from '../../../integrations/db/provider.js';
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
-import { mapDeadlockToWriteConflict } from '../../../lib/memoryLockConflict.js';
+import { isDeadlockVictim } from '../../../lib/memoryLockConflict.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { liveTxContext } from './authorizedTx.js';
 import { lockInstallAuthorityFirst } from './installMemory.js';
@@ -71,7 +71,7 @@ async function recoveryTarget(ctx: Context, ref: string) {
   let id: string;
   try { ({ id } = await resolveNodeRefForCaller(ctx, ref, undefined, { includeDeleted: true })); }
   catch (error) { if (error instanceof NodeNotFoundError) return null; throw error; }
-  const node = await ctx.db.node.findUnique({ where: { id } });
+  const node = await ctx.db.node.findUnique({ where: { id }, select: { id: true, memoryId: true, loc: true, deletedAt: true } });
   return node && await canRecoverMemory(ctx, node.memoryId) ? node : null;
 }
 
@@ -122,8 +122,10 @@ export const recoveryQueries = {
   },
   /** Explicit raw recovery read. Templates and generic nested Node resolvers never run. */
   recoveryNode: async (_: unknown, args: { nodeRef: string }, ctx: Context) => {
-    const node = await recoveryTarget(ctx, args.nodeRef);
-    return node?.deletedAt ? { ...await summary(ctx, node), description: node.description, _retainedNode: node } : null;
+    const target = await recoveryTarget(ctx, args.nodeRef);
+    if (!target?.deletedAt) return null;
+    const node = await ctx.db.node.findFirst({ where: { id: target.id, memoryId: target.memoryId, loc: target.loc, deletedAt: { not: null } } });
+    return node ? { ...await summary(ctx, node), description: node.description, _retainedNode: node } : null;
   },
   /** Writer-only tombstone listing, authorization before SQL count and pagination. */
   recoveryNodes: async (_: unknown, args: { memoryRef: string; limit?: number | null; offset?: number | null }, ctx: Context) => {
@@ -168,7 +170,7 @@ export const recoveryMutations = {
       ...(memory.userId ? [{ kind: 'user' as const, id: memory.userId }] : []),
       ...[...new Set([memory.appId, ctx.appId].filter((id): id is string => !!id))].map((id) => ({ kind: 'app' as const, id })),
     ];
-    const result = await mapDeadlockToWriteConflict(memory.id, () => ctx.db.$transaction(async (tx) => {
+    const result = await ctx.db.$transaction(async (tx) => {
       await lockInstallAuthorityFirst(tx, ctx, memory.id);
       await lockAuthorityAnchors(tx, anchors, 'shared');
       await lockMemoryForChannelChange(tx, memory.id);
@@ -211,7 +213,10 @@ export const recoveryMutations = {
       if (count.count !== 1) throw changed();
       const node = await tx.node.findUniqueOrThrow({ where: { id: current.id }, include: { outgoingEdges: { include: { target: true } } } });
       return { node, changed: true };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }));
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }).catch((error: unknown) => {
+      if (isDeadlockVictim(error)) throw changed();
+      throw error;
+    });
     if (result.changed) await publishNodeWritten({ nodeId: result.node.id, memoryId: memory.id, ownerRepo: result.node.ownerRepo ?? '', clientId: ctx.clientId });
     const out = { ...result.node };
     decryptNodeFields(out, memory);
