@@ -48,7 +48,7 @@ async function fixture() {
   const install = await db.memory.create({
     data: { id: generateId(), class: 'system', name: 'install', urn: 'bs-org:install', organizationId: orgId, appId: app.id, installOfAgentId: agent.id, isInstallMemory: true },
   });
-  const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+  const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', signature: '', trailer: '' } });
   const agentNode = await compiledIn(agentMem.id);
   const installNode = await compiledIn(install.id);
   return { admin, member, stranger, agent, unused, app, worker, agentNode, installNode };

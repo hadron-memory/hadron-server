@@ -73,7 +73,7 @@ async function fixture() {
   const install1 = await install('install-one', agent.id, app.id);
   const installOther = await install('install-other', other.id, app.id);
   const install2 = await install('install-two', agent.id, app2.id);
-  const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+  const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', signature: '', trailer: '' } });
 
   const foreignMem = await sysMemory(otherOrgId, 'foreign-sys');
 
