@@ -785,7 +785,7 @@ describe('MCP parity and discovery gate', () => {
       { appRef: app.urn, sessionRef: sessionId, channelRef: channel.id, seq: 1 },
       userCtx(),
     );
-    expect(marked).toEqual({ workerId: worker.id, channelId: channel.id, lastSeenSeq: 1 });
+    expect(marked).toEqual({ workerId: worker.id, channelId: channel.id, lastSeenSeq: 1, channelIncarnation: 1, cursorIncarnation: 1 });
 
     await expect(M.markOwnTeamChatRead(
       {},
