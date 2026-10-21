@@ -2323,6 +2323,59 @@ describe('#2138 — fresh ticks after two unreconciled cadences', () => {
     expect(archived()).toHaveLength(1);
     expect(archived()[0]).toMatchObject({coverage: ['T:1'], state: 'ambiguous'});
   });
+  it('requires a new two-cadence wait for a replacement that also remains ambiguous', async () => {
+    await stuck();
+    f.sendReply = () => JSON.stringify({...ACCEPTED_ONLY, result: {send: {accepted:true, prompt:{requestId:'r2', stages:['input_accepted']}}}});
+    await go(at(T0 + 1_200_000));
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:5'], T0 + 2_400_000), [], timing)];
+    await go(at(T0 + 2_399_999));
+    expect(f.sent).toHaveLength(2);
+    await go(at(T0 + 2_400_000));
+    expect(f.sent).toHaveLength(3);
+    expect(archived()).toHaveLength(2);
+    expect(current().coverage).toEqual(['T:5']);
+    expect(f.acked).toEqual([]);
+  });
+  it('rejects malformed needs-person state before any send or ack', async () => {
+    await stuck();
+    writeFileSync(join(dir, 'ticker-wake', 'needs-person.json'), JSON.stringify({x:{...current(), workerId: 7}}));
+    await expect(go(at(T0 + 1_200_000))).rejects.toThrow(/needs-person receipts malformed/);
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toEqual([]);
+  });
+  it('re-checks incarnation after the old request replay, before making a fresh request', async () => {
+    await stuck();
+    f.retryReply = () => { f.incarnation = 'inc-2'; return JSON.stringify(ACCEPTED_ONLY); };
+    await go(at(T0 + 1_200_000));
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toEqual([]);
+    expect(log()).toContain('incarnation changed before the fresh request');
+  });
+  it('does not ack or re-name old task coverage bundled with a newer tick', async () => {
+    const oldTask = taskEntry('t7');
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t7')], proof(['T:1'], T0, [oldTask]), [], timing)];
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+    await go(at(T0));
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t7')], proof(['T:3'], T0 + 1_200_000, [oldTask]), [], timing)];
+    f.sendReply = () => JSON.stringify(CONFIRMED);
+    await go(at(T0 + 1_200_000));
+    expect(f.sent).toHaveLength(2);
+    expect(f.sent[1]).not.toContain('t7');
+    expect(current()).toMatchObject({state: 'sent', coverage: ['T:3']});
+    expect(f.acked).toEqual([]);
+    await go(at(T0 + 1_200_001));
+    expect(f.sent).toHaveLength(2);
+    expect(f.acked).toEqual([]);
+  });
+  it('fails closed if retaining the old ambiguity is not possible', async () => {
+    await stuck();
+    mkdirSync(join(dir, 'ticker-wake', 'needs-person.json.' + process.pid + '.tmp'));
+    await go(at(T0 + 1_200_000));
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toEqual([]);
+    expect(current().coverage).toEqual(['T:1']);
+    expect(log()).toContain('old request could not be retained');
+  });
   for (const guard of ['draft', 'incarnation', 'busy', 'before cadence', 'same tick', 'not accepted', 'missing incarnation', 'server check failed'] as const) {
     it(`holds a replacement with ${guard}`, async () => {
       await stuck();
