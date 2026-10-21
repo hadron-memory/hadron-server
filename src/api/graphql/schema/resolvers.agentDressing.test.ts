@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #928 — persona DRESSING on agents, re-cut by #974 (Worker model,
  * hadron-concept 2026-08-14-agent-persona-scoping).
@@ -167,7 +168,7 @@ describe('createAgent — tombstone URN reclaim (#974)', () => {
     });
     // The casting (agent FK Restrict): its history keeps the URN reserved.
     await db.worker.create({
-      data: { appId: teamApp.id, agentId: cast.id, name: 'Iris', slug: 'iris' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: teamApp.id, agentId: cast.id, name: 'Iris', slug: 'iris' },
     });
     await M.deleteAgent({}, { ref: cast.id }, ctx(adminA.id));
 

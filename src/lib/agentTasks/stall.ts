@@ -117,6 +117,8 @@ async function loadWindows(db: Db, appIds: string[]): Promise<Map<string, StallW
 
 // ── Inputs ────────────────────────────────────────────────────────────────
 
+import { afterWaits, anchorNow, lockStopFence } from '../stopSignals/state.js';
+
 type Db = PrismaClient | Prisma.TransactionClient;
 
 const TASK_SELECT = {
@@ -153,7 +155,43 @@ export type StallInputs = {
    * the pre-#1754 episode start.
    */
   queuedAt: Date | null;
+  /**
+   * #2022 (R68; the Proposed stop-signal exceptions to cor:agt:050:13-:17): when a `pause` or `halt` covered each
+   * worker these rules read (the assignee, and each ended child's owner), from the coverage ledger. Time inside them
+   * doesn't count. Absent ⇒ none.
+   */
+  stopIntervals?: Map<string, StopInterval[]>;
+  /** #2022 (R68, Vera's receipt §5) — when stop signals were what kept this queued task unassigned. Absent ⇒ none. */
+  stopHolds?: StopInterval[];
 };
+
+/** A closed or still-open span of stopped time; `end` null means it hasn't ended. */
+export type StopInterval = { start: Date; end: Date | null };
+
+/**
+ * #2022 — when a rule that started at `start` has counted `windowMs` of time, not counting any of `intervals`
+ * (overlapping ones once: they are merged first). Infinity-dated (a far-future Date) while an open interval holds.
+ * Pure. With no intervals it is `start + windowMs`, the pre-#2022 due time.
+ */
+export function countedDueAt(start: Date, windowMs: number, intervals: readonly StopInterval[] = []): Date {
+  const spans = intervals
+    .map((i) => ({ a: i.start.getTime(), b: i.end ? i.end.getTime() : Infinity }))
+    .filter((i) => i.b > start.getTime() && i.b > i.a)
+    .sort((x, y) => x.a - y.a);
+  let t = start.getTime();
+  let remaining = windowMs;
+  for (const { a, b } of spans) {
+    if (b <= t) continue;
+    if (a > t) {
+      const gap = a - t;
+      if (gap >= remaining) return new Date(t + remaining);
+      remaining -= gap;
+    }
+    if (b === Infinity) return new Date(8.64e15);
+    t = b;
+  }
+  return new Date(t + remaining);
+}
 
 /**
  * Load the rules' inputs for the open tasks of live, installed Apps matching
@@ -203,6 +241,7 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       : Promise.resolve([]),
   ]);
   const userCallAt = new Map(userCalls.map((r) => [`${r.appId}:${r.actorUserId}`, r._max.createdAt]));
+  const { intervals: stopIntervals, holds: stopHoldsBy } = await loadStopIntervals(db, workerIds, ids);
   const progressBy = new Map(progress.map((p) => [p.taskId, p._max.createdAt]));
   const queuedBy = new Map(queued.map((q) => [q.taskId, q._max.createdAt]));
   const childrenBy = new Map<string, typeof children>();
@@ -234,8 +273,34 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       lastProgressAt: progressBy.get(task.id) ?? null,
       assigneeActivityAt: task.assigneeWorkerId ? activity.get(task.assigneeWorkerId)?.lastActiveAt ?? null : null,
       queuedAt: queuedBy.get(task.id) ?? null,
+      stopIntervals,
+      stopHolds: stopHoldsBy.get(task.id) ?? [],
     };
   });
+}
+
+/**
+ * #2022 — the stopped spans the rules subtract: each worker's `pause` / `halt` coverage (an interval ends at the
+ * earliest of leaving the coverage, its signal's end and its signal's until, so a late expiry sweep never lengthens it;
+ * `pause-dispatch` stops no stall time but the couldn't-be-assigned one, R68), and each task's stop holds.
+ */
+async function loadStopIntervals(db: Db, workerIds: string[], taskIds: string[]): Promise<{ intervals: Map<string, StopInterval[]>; holds: Map<string, StopInterval[]> }> {
+  const intervals = new Map<string, StopInterval[]>();
+  const holds = new Map<string, StopInterval[]>();
+  const [cov, held] = await Promise.all([
+    workerIds.length
+      ? db.$queryRaw<{ workerId: string; start: Date; end: Date | null }[]>(Prisma.sql`
+          SELECT c.worker_id AS "workerId", c.entered_at AS start, LEAST(c.left_at, s.ended_at, s.until) AS "end"
+          FROM team_stop_coverage c JOIN team_stop_signals s ON s.id = c.signal_id
+          WHERE c.worker_id IN (${Prisma.join(workerIds)}) AND s.level IN ('pause', 'halt')`)
+      : Promise.resolve([]),
+    taskIds.length
+      ? db.agentTaskStopHold.findMany({ where: { taskId: { in: taskIds } }, select: { taskId: true, startedAt: true, endedAt: true } })
+      : Promise.resolve([]),
+  ]);
+  for (const r of cov) intervals.set(r.workerId, [...(intervals.get(r.workerId) ?? []), { start: r.start, end: r.end }]);
+  for (const h of held) holds.set(h.taskId, [...(holds.get(h.taskId) ?? []), { start: h.startedAt, end: h.endedAt }]);
+  return { intervals, holds };
 }
 
 function latest(...dates: (Date | null | undefined)[]): Date | null {
@@ -267,6 +332,16 @@ function assigneeOf(t: TaskState): TaskParty | null {
 
 const plus = (d: Date, minutes: number): Date => new Date(d.getTime() + minutes * MINUTE);
 
+/** #2022 — does a stopped span hold at `at` (started at or before it, not yet ended)? */
+function heldAt(spans: readonly StopInterval[], at: Date): boolean {
+  const t = at.getTime();
+  return spans.some((i) => i.start.getTime() <= t && (i.end === null || i.end.getTime() > t));
+}
+
+/** #2022 — a worker's stopped spans, or none. */
+const stopOf = (inputs: StallInputs, workerId: string | null | undefined): StopInterval[] =>
+  (workerId ? inputs.stopIntervals?.get(workerId) : undefined) ?? [];
+
 /**
  * The alarms a task's state calls for at `now`, at most one per rule. Pure:
  * every evaluation of the same inputs names the same episodes.
@@ -275,8 +350,11 @@ export function stallCandidates(inputs: StallInputs, windows: StallWindows, now:
   const { task } = inputs;
   const assignee = assigneeOf(task);
   const out: StallCandidate[] = [];
-  const add = (rule: StallRule, episodeStart: Date, dueAt: Date, extra: Partial<StallCandidate> = {}) => {
+  const add = (rule: StallRule, episodeStart: Date, dueAt: Date, extra: Partial<StallCandidate> = {}, stopped: readonly StopInterval[] = []) => {
     if (dueAt.getTime() > now.getTime()) return;
+    // #2022: while the stop exception holds, nothing is raised and nobody up the chain is woken (the Proposed
+    // amendment to cor:agt:050:13); the episode carries on afterwards from the time it had counted.
+    if (heldAt(stopped, now)) return;
     out.push({
       rule, taskId: task.id, appId: task.appId, episodeStart, dueAt,
       windowMinutes: windows[RULE_WINDOW[rule]], assignee, ...extra,
@@ -292,7 +370,7 @@ export function stallCandidates(inputs: StallInputs, windows: StallWindows, now:
   // pre-#1754 start.
   if (task.status === 'pending' && !assignee) {
     const queuedAt = inputs.queuedAt ?? task.createdAt;
-    add('unassignable', queuedAt, plus(queuedAt, windows.assignmentMinutes));
+    add('unassignable', queuedAt, countedDueAt(queuedAt, windows.assignmentMinutes * MINUTE, inputs.stopHolds), {}, inputs.stopHolds);
   }
 
   // cor:agt:050:14 — assigned and still pending. A still-working note does not
@@ -301,7 +379,9 @@ export function stallCandidates(inputs: StallInputs, windows: StallWindows, now:
     const deadline = task.startBy && task.startBy.getTime() > task.assignedAt.getTime()
       ? task.startBy
       : plus(task.assignedAt, windows.notStartedMinutes);
-    add('not-started', task.assignedAt, deadline);
+    // #2022: a `pause` or `halt` on the assignee holds the clock, startBy's included (Vera's receipt §5).
+    const stopped = stopOf(inputs, task.assigneeWorkerId);
+    add('not-started', task.assignedAt, countedDueAt(task.assignedAt, deadline.getTime() - task.assignedAt.getTime(), stopped), {}, stopped);
   }
 
   // cor:agt:050:15 — started, not waiting on children, no assignee activity.
@@ -309,16 +389,18 @@ export function stallCandidates(inputs: StallInputs, windows: StallWindows, now:
     const since = latest(
       task.startedAt, task.assignedAt, inputs.lastChildEndedAt, inputs.lastProgressAt, inputs.assigneeActivityAt,
     ) as Date;
-    add('no-progress', since, plus(since, windows.noProgressMinutes));
+    const stopped = stopOf(inputs, task.assigneeWorkerId);
+    add('no-progress', since, countedDueAt(since, windows.noProgressMinutes * MINUTE, stopped), {}, stopped);
   }
 
   // cor:agt:050:16 r2 — a child finished and the child's owner, this task's
   // assignee, has not moved since. The alarm is about THIS (the parent) task.
   const first = assignee ? unreactedChild(inputs) : null;
   if (first) {
-    add('owner-unreactive', first.endedAt, plus(first.endedAt, windows.ownerReactionMinutes), {
+    const stopped = stopOf(inputs, first.ownerWorkerId);
+    add('owner-unreactive', first.endedAt, countedDueAt(first.endedAt, windows.ownerReactionMinutes * MINUTE, stopped), {
       childTaskId: first.id,
-    });
+    }, stopped);
   }
   return out;
 }
@@ -423,13 +505,21 @@ export async function raiseStallAlarm(
   candidate: StallCandidate,
   now: Date,
   hooks: { afterChain?: () => Promise<void> } = {},
+  /** `now`'s monotonic half (`anchorNow`), from the evaluation pass; by default taken here, beside `now`. */
+  anchor: number = anchorNow(),
 ): Promise<string | null> {
   return db.$transaction(async (tx) => {
+    // #2022: the App's stop fence, shared, so a raise and a stop signal change are ordered; the re-evaluation below
+    // then reads the coverage ledger as the last signal change left it.
+    await lockStopFence(tx, candidate.appId, 'shared');
     await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${candidate.taskId} FOR SHARE`;
-    const [inputs] = await loadStallInputs(tx, { id: candidate.taskId }, now);
+    // #2022 (Xan #2166 LOCAL-1): re-decided at the moment after the waits, so a stop that began or ended while this
+    // raise waited is counted as it is now.
+    const decidedAt = afterWaits(now, anchor);
+    const [inputs] = await loadStallInputs(tx, { id: candidate.taskId }, decidedAt);
     if (!inputs) return null;
     const windows = (await loadWindows(tx, [inputs.task.appId])).get(inputs.task.appId) as StallWindows;
-    const again = stallCandidates(inputs, windows, now).find(
+    const again = stallCandidates(inputs, windows, decidedAt).find(
       (c) => c.rule === candidate.rule && c.episodeStart.getTime() === candidate.episodeStart.getTime(),
     );
     if (!again) return null;
@@ -502,7 +592,7 @@ const EVALUATION_PAGE = 500;
  * the alarms this pass raised (a re-run, or a pass racing another instance,
  * raises none it already raised).
  */
-export async function evaluateStalls(db: PrismaClient, now = new Date()): Promise<string[]> {
+export async function evaluateStalls(db: PrismaClient, now = new Date(), anchor: number = anchorNow()): Promise<string[]> {
   const raised: string[] = [];
   let after: string | null = null;
   for (;;) {
@@ -523,7 +613,7 @@ export async function evaluateStalls(db: PrismaClient, now = new Date()): Promis
     for (const i of inputs) {
       for (const c of stallCandidates(i, windows.get(i.task.appId) as StallWindows, now)) {
         try {
-          const id = await raiseStallAlarm(db, c, now);
+          const id = await raiseStallAlarm(db, c, now, {}, anchor);
           if (id) raised.push(id);
         } catch (err) {
           // Lost a serialization race (a concurrent pass raised the same

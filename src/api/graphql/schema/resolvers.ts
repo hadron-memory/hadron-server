@@ -64,6 +64,8 @@ import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from '.
 import { tickerMutations, tickerQueries, tickerFieldResolvers } from './resolvers.ticker.js';
 import { deliverySettingsQueries, deliverySettingsMutations } from './resolvers.deliverySettings.js';
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
+import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.js';
+import { deliveryBatchMutations, deliveryBatchQueries } from './resolvers.deliveryBatch.js';
 import { appKeyScopeMutations, appKeyScopeFieldResolvers } from './resolvers.appKeyScope.js';
 import { hostOperationMutations, hostOperationQueries, hostOperationFieldResolvers } from './resolvers.hostOperation.js';
 import {
@@ -170,6 +172,8 @@ export const resolvers = {
     ...tickerQueries,
     ...deliverySettingsQueries,
     ...wakeQueries,
+    ...stopSignalQueries,
+    ...deliveryBatchQueries,
     ...hostOperationQueries,
     ...agentTaskAlarmQueries,
     ...agentTaskMatchingQueries,
@@ -220,7 +224,9 @@ export const resolvers = {
     ...agentTaskMutations,
     ...tickerMutations,
     ...deliverySettingsMutations,
+    ...stopSignalMutations,
     ...wakeMutations,
+    ...deliveryBatchMutations,
     ...appKeyScopeMutations,
     ...hostOperationMutations,
     ...agentTaskAlarmMutations,

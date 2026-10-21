@@ -18,7 +18,7 @@ type Db = PrismaClient | Prisma.TransactionClient;
 export type HostKey = { appKeyId: string; appId: string; hostId: string };
 
 /** What a host key did, for the use record (cor:agt:070:07). */
-export type HostKeyAction = 'register' | 'collect' | 'report' | 'availability' | 'read' | 'session' | 'issue';
+export type HostKeyAction = 'register' | 'collect' | 'report' | 'availability' | 'read' | 'session' | 'issue' | 'deliver' | 'stop';
 
 /**
  * The host this key operates as RIGHT NOW: the host id on its live

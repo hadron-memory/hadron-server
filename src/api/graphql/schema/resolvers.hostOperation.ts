@@ -92,7 +92,7 @@ const scopeRequired = (): GraphQLError =>
  * foreign App is "not found"); the key holds host:operate now; it carries no session. Returns the key as its host, and
  * the re-check to run inside the write's transaction under the App's anchor, where the host must still be the same one.
  */
-async function hostKeyEntry(ctx: Context, appRef: string): Promise<{ app: TaskApp; host: HostKey; authorize: (tx: Prisma.TransactionClient) => Promise<void> }> {
+export async function hostKeyEntry(ctx: Context, appRef: string): Promise<{ app: TaskApp; host: HostKey; authorize: (tx: Prisma.TransactionClient) => Promise<void> }> {
   const key = appKeyCaller(ctx);
   if (!key) {
     throw taskError('HOST_KEY_REQUIRED', "Only a host, with its App key's host:operate scope, does this.");
@@ -156,7 +156,7 @@ function refusalCode(e: unknown): string | null {
  * a key that is or was a host key records its use, with the refusal's code, in its own write after the refusal, so
  * rolling the refused call back cannot erase it. An accepted write records inside its own transaction, as before.
  */
-async function recordingRefusal<T>(ctx: Context, action: HostKeyAction, operationId: unknown, fn: () => Promise<T>): Promise<T> {
+export async function recordingRefusal<T>(ctx: Context, action: HostKeyAction, operationId: unknown, fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (e) {

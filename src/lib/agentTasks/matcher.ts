@@ -48,7 +48,11 @@
  *      can never both assign one task — the loser's update matches no row.
  */
 
+import { afterWaits, anchorNow, coveringSignals, liveSql, lockStopFence, timeStoppedWorkers, type StopSignal } from '../stopSignals/state.js';
+import { generateId } from '../id.js';
+import { toNaiveUtc } from '../sessionActivity.js';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+import { s7Available } from '../tickers/s7Availability.js';
 import { type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadAppWorkerActivity, loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
@@ -193,8 +197,10 @@ export function freeFamiliesOf(w: {
   openTaskCount: number;
   families: string[];
   availability: WorkerAvailabilityView;
+  /** S7 (R87): a live isolation. An assignment an isolated worker cannot receive would only stall. */
+  isolated?: boolean;
 }): string[] {
-  if (w.retired || w.openTaskCount > 0 || w.availability.ownInEffect) return [];
+  if (w.retired || w.isolated || w.openTaskCount > 0 || w.availability.ownInEffect) return [];
   return w.families.filter((f) => w.availability.familyAvailable.get(f) === true);
 }
 
@@ -244,11 +250,13 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
       families: familiesOf({ bound, bindingFamily, launchableFamilies }),
     };
   });
+  const isolatedRows = s7Available() ? await db.workerWakeSettings.findMany({ where: { workerId: { in: ids }, isolatedUntil: { gt: now } }, select: { workerId: true } }) : [];
+  const isolatedIds = new Set(isolatedRows.map((r) => r.workerId));
   const avail = await loadAvailabilityByFamily(db, partial.map((w) => ({ id: w.id, appId, families: w.families })), now);
   return partial.map((w) => {
     const availability = avail.get(w.id) as WorkerAvailabilityView;
     const openTaskCount = openBy.get(w.id) ?? 0;
-    const freeFamilies = freeFamiliesOf({ retired: false, openTaskCount, families: w.families, availability });
+    const freeFamilies = freeFamiliesOf({ retired: false, isolated: isolatedIds.has(w.id), openTaskCount, families: w.families, availability });
     return {
       ...w, availability, openTaskCount, freeFamilies, free: freeFamilies.length > 0,
       lastAssignedAt: lastAssigned.get(w.id) ?? null,
@@ -277,12 +285,13 @@ async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId
   const families = familiesOf({ bound, bindingFamily: activity?.bindingFamily ?? null, launchableFamilies: launchable });
   if (!families.includes(family)) return false;
   const availability = (await loadAvailabilityByFamily(tx, [{ id: workerId, appId, families: [family] }], now)).get(workerId) as WorkerAvailabilityView;
-  return freeFamiliesOf({ retired: false, openTaskCount, families: [family], availability }).length > 0;
+  const isolated = s7Available() && (await tx.workerWakeSettings.count({ where: { workerId, isolatedUntil: { gt: now } } })) > 0;
+  return freeFamiliesOf({ retired: false, isolated, openTaskCount, families: [family], availability }).length > 0;
 }
 
 // ── Assigning ─────────────────────────────────────────────────────────────
 
-type QueuedTask = { id: string; appId: string; requirements: Prisma.JsonValue | null; closeSessionWhenDone: boolean };
+type QueuedTask = { id: string; appId: string; requirements: Prisma.JsonValue | null; closeSessionWhenDone: boolean; createdByWorkerId?: string | null };
 
 /** Why one attempt did not assign. */
 type AttemptOutcome = 'assigned' | 'task-gone' | 'worker-not-free';
@@ -297,6 +306,8 @@ async function tryAssign(
   family: string,
   now: Date,
   hooks: MatcherHooks,
+  /** The monotonic half of `now`'s sample (`anchorNow`), from the pass; by default taken here, beside a fresh `now`. */
+  anchor: number = anchorNow(),
 ): Promise<AttemptOutcome> {
   return db.$transaction(async (tx) => {
     await lockAuthorityAnchors(tx, [{ kind: 'app', id: task.appId }], 'shared');
@@ -304,8 +315,17 @@ async function tryAssign(
     if (!app || app.deletedAt || app.uninstalledAt) return 'task-gone';
     // The per-worker lock. $executeRaw: pg_advisory_xact_lock returns void,
     // which $queryRaw cannot deserialize.
+    // #2022: the App's stop fence, shared, then the authoritative stop check: a signal set after the candidates were
+    // loaded is seen here, or waits for this assignment (src/lib/stopSignals/state.ts, the lock order).
+    await lockStopFence(tx, task.appId, 'shared');
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('agent-task-matcher:worker'), hashtext(${workerId}))`;
     if (!(await stillFreeAs(tx, task.appId, workerId, family, now))) return 'worker-not-free';
+    const creator = task.createdByWorkerId ?? null;
+    // Decided at the moment after the waits (Xan #2166 LOCAL-1), not the pass's start.
+    const covering = await coveringSignals(tx, task.appId, creator && creator !== workerId ? [workerId, creator] : [workerId], afterWaits(now, anchor));
+    if (covering.has(workerId)) return 'worker-not-free';
+    // R71: a task its creator made under a pause or halt waits while that still covers the creator.
+    if (creator && timeStoppedWorkers(covering).has(creator)) return 'task-gone';
     await hooks.afterWorkerCheck?.({ taskId: task.id, workerId });
     const n = await tx.agentTask.updateMany({
       where: { id: task.id, appId: task.appId, status: 'pending', assigneeWorkerId: null, assigneeUserId: null },
@@ -335,9 +355,10 @@ export type MatchResult = { taskId: string; workerId: string; family: string };
  * hide a later task someone can. It stops early only when every candidate is
  * spent, and the spent set carries across pages.
  */
-async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: MatcherHooks): Promise<MatchResult[]> {
+async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: MatcherHooks, anchor: number): Promise<MatchResult[]> {
   const out: MatchResult[] = [];
   let candidates: WorkerWorkState[] | null = null;
+  let covering: Map<string, StopSignal[]> | null = null;
   const spent = new Set<string>();
   let after: { createdAt: Date; id: string } | null = null;
   for (;;) {
@@ -348,28 +369,34 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
           ? { OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] }
           : {}),
       },
-      select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true, createdAt: true },
+      select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true, createdAt: true, createdByWorkerId: true },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: QUEUE_PAGE,
     });
     if (page.length === 0) break;
     const last = page[page.length - 1];
     after = { createdAt: last.createdAt, id: last.id };
-    candidates ??= (await loadWorkerWorkStates(db, appId, now)).filter((w) => w.free && matchable(w)).sort(compareRank);
+    if (candidates === null) {
+      // #2022 (cor:agt:090:03): a worker a live stop signal covers is skipped, at every level; tryAssign re-checks.
+      covering = await coveringSignals(db, appId, null, now);
+      candidates = (await loadWorkerWorkStates(db, appId, now)).filter((w) => w.free && matchable(w) && !covering!.has(w.id)).sort(compareRank);
+    }
     for (const task of page) {
       if (spent.size === candidates.length) return out;
+      // R71: not matched while its creator is under a pause or halt.
+      if (task.createdByWorkerId && timeStoppedWorkers(covering!).has(task.createdByWorkerId)) continue;
       const req = parseRequirements(task.requirements);
       for (const w of candidates) {
         if (spent.has(w.id)) continue;
         const family = eligibleFamily(req, w);
         if (!family) continue;
-        const outcome = await tryAssign(db, task, w.id, family, now, hooks);
+        const outcome = await tryAssign(db, task, w.id, family, now, hooks, anchor);
         // Assigned, or no longer free: either way this worker is spent for this run.
         if (outcome !== 'task-gone') spent.add(w.id);
         if (outcome === 'assigned') {
           out.push({ taskId: task.id, workerId: w.id, family });
           // #1709 (cor:agt:070:08): a matched worker with no live session is started through its host.
-          if (!w.live) await launchForAssignment(db, { appId, taskId: task.id, workerId: w.id }, now);
+          if (!w.live) await launchForAssignment(db, { appId, taskId: task.id, workerId: w.id }, now, anchor);
         }
         if (outcome !== 'worker-not-free') break;
       }
@@ -386,8 +413,9 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
 export async function matchQueuedTasks(
   db: PrismaClient,
   now: Date,
-  opts: { appId?: string; hooks?: MatcherHooks } = {},
+  opts: { appId?: string; hooks?: MatcherHooks; /** `now`'s monotonic half (`anchorNow`); default: here. */ anchor?: number } = {},
 ): Promise<MatchResult[]> {
+  const anchor = opts.anchor ?? anchorNow();
   const appIds = opts.appId
     ? [opts.appId]
     : (await db.agentTask.findMany({
@@ -398,15 +426,70 @@ export async function matchQueuedTasks(
         select: { appId: true },
         distinct: ['appId'],
       })).map((r) => r.appId);
+  // #2022: an App with an open stop hold is visited too, so a hold whose task left the queue is closed.
+  const held = opts.appId ? [] : (await db.agentTaskStopHold.findMany({ where: { endedAt: null }, select: { appId: true }, distinct: ['appId'] })).map((r) => r.appId);
   const out: MatchResult[] = [];
-  for (const appId of appIds) {
+  for (const appId of [...new Set([...appIds, ...held])]) {
     try {
-      out.push(...(await matchApp(db, appId, now, opts.hooks ?? {})));
+      out.push(...(await matchApp(db, appId, now, opts.hooks ?? {}, anchor)));
+      await recordStopHolds(db, appId, now);
     } catch (err) {
       console.error(`[task-matcher] matching App ${appId} failed:`, err);
     }
   }
   return out;
+}
+
+/**
+ * #2022 (R68; Vera's receipt §5, the "decisive blocker") — after a matching pass, record for each queued task whether
+ * stop signals are what keep it unassigned: its creator is under a `pause` or `halt` (R71), or at least one worker free
+ * for work could take it and every such worker is covered by a live signal. An open hold is opened for each such task
+ * and closed for every other (or one that left the queue). The couldn't-be-assigned clock (cor:agt:050:17) doesn't count
+ * a hold's time; a task nobody could take for another reason keeps counting. Resolution: one matching pass.
+ */
+export async function recordStopHolds(db: PrismaClient, appId: string, now: Date): Promise<void> {
+  const [{ n }] = await db.$queryRaw<{ n: bigint }[]>(Prisma.sql`
+    SELECT (SELECT count(*) FROM team_stop_signals s WHERE s.app_id = ${appId} AND ${liveSql(now)})
+         + (SELECT count(*) FROM agent_task_stop_holds h WHERE h.app_id = ${appId} AND h.ended_at IS NULL) AS n`);
+  if (Number(n) === 0) return;
+  const covering = await coveringSignals(db, appId, null, now);
+  const timeStopped = timeStoppedWorkers(covering);
+  const free = (await loadWorkerWorkStates(db, appId, now)).filter((w) => w.free && matchable(w));
+  const decisive = new Set<string>();
+  let after: { createdAt: Date; id: string } | null = null;
+  for (;;) {
+    const page: { id: string; createdAt: Date; requirements: Prisma.JsonValue | null; createdByWorkerId: string | null }[] = await db.agentTask.findMany({
+      where: {
+        appId, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
+        ...(after ? { OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
+      },
+      select: { id: true, createdAt: true, requirements: true, createdByWorkerId: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: QUEUE_PAGE,
+    });
+    for (const t of page) {
+      if (t.createdByWorkerId && timeStopped.has(t.createdByWorkerId)) { decisive.add(t.id); continue; }
+      const req = parseRequirements(t.requirements);
+      const eligible = free.filter((w) => eligibleFamily(req, w) !== null);
+      if (eligible.length > 0 && eligible.every((w) => covering.has(w.id))) decisive.add(t.id);
+    }
+    if (page.length < QUEUE_PAGE) break;
+    const last = page[page.length - 1];
+    after = { createdAt: last.createdAt, id: last.id };
+  }
+  const nowNaive = toNaiveUtc(now);
+  const open = await db.agentTaskStopHold.findMany({ where: { appId, endedAt: null }, select: { id: true, taskId: true } });
+  const toClose = open.filter((h) => !decisive.has(h.taskId)).map((h) => h.id);
+  if (toClose.length) {
+    await db.$executeRaw`UPDATE agent_task_stop_holds SET ended_at = ${nowNaive}::timestamp WHERE id IN (${Prisma.join(toClose)}) AND ended_at IS NULL`;
+  }
+  const have = new Set(open.map((h) => h.taskId));
+  for (const taskId of decisive) {
+    if (have.has(taskId)) continue;
+    await db.$executeRaw`
+      INSERT INTO agent_task_stop_holds (id, app_id, task_id, started_at) VALUES (${generateId()}, ${appId}, ${taskId}, ${nowNaive}::timestamp)
+      ON CONFLICT (task_id) WHERE ended_at IS NULL DO NOTHING`;
+  }
 }
 
 /**
@@ -420,7 +503,7 @@ export async function matchQueuedTasks(
 export async function matchAfterChange(db: PrismaClient, appId: string): Promise<void> {
   if (process.env.DISABLE_TASK_MATCHER === 'true') return;
   try {
-    await matchQueuedTasks(db, new Date(), { appId });
+    await matchQueuedTasks(db, new Date(), { appId, anchor: anchorNow() });
   } catch (err) {
     console.error('[task-matcher] triggered run failed:', err);
   }

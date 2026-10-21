@@ -1448,6 +1448,7 @@ export const appMutations = {
             createdBy: txCtx.userId!,
             issuedVia: parent ? parent.issuedVia : 'portal',
             mintedByKeyId: parent?.id,
+            originSignInId: parent ? undefined : txCtx.signInId ?? null,
           });
         },
       );

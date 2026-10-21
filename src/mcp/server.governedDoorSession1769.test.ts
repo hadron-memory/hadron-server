@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1769: the four governed-kind doors take the #1701 `session` argument.
  *
@@ -42,7 +43,7 @@ beforeEach(async () => {
   memoryId = memory.id;
   memoryUrn = memory.urn;
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
   sessionId = generateId();
   await db.session.create({
     data: { id: sessionId, appId: app.id, userId: user.id, workerId: worker.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() },

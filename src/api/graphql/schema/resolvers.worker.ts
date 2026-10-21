@@ -13,7 +13,10 @@
 // (`roles:<role>` nodes, `data.names`), read at CASTING time — and only when
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
+import { lockStopFence } from '../../../lib/stopSignals/state.js';
+import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { GraphQLError } from 'graphql';
+import { WORKER_SIGNATURE_DEFAULTS, normalizeWorkerSignature, withWorkerSignatures } from '../../../lib/workerSignature.js';
 import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -48,6 +51,7 @@ import {
 } from '../../../lib/workerHandoff.js';
 import { resolveMemoryRoot } from './chat-scope.js';
 import { idleCutoffs, toNaiveUtc } from '../../../lib/sessionActivity.js';
+import { loadWorkerCheckStatuses, type WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
@@ -302,6 +306,8 @@ type WorkerRow = {
   slug: string;
   role: string | null;
   promptOverride: string | null;
+  signature: string;
+  trailer: string;
   memoryId: string | null;
   retiredAt: Date | null;
   /** #1050 — the human holding this name, and since when. */
@@ -338,6 +344,8 @@ async function resolveWorkerRefRow(ctx: Context, workerRef: string): Promise<Wor
       slug: true,
       role: true,
       promptOverride: true,
+      signature: true,
+      trailer: true,
       memoryId: true,
       retiredAt: true,
       heldByUserId: true,
@@ -923,7 +931,7 @@ export const workerMutations = {
             await assertWorkerNameNotConfusable(tx, appId, candidate);
             const slug = await nextFreeWorkerSlug(tx, appId, candidate);
             return tx.worker.create({
-              data: {
+              data: { ...WORKER_SIGNATURE_DEFAULTS,
                 appId,
                 agentId: agent.id,
                 name: candidate,
@@ -1017,6 +1025,9 @@ export const workerMutations = {
     const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
     await requireWorkerStaffAccess(ctx, app);
     await ctx.db.$transaction(async (tx) => {
+      // #2022: the stop fence, exclusive, before the graph lock (src/lib/stopSignals/state.ts): a retired worker
+      // leaves every stop signal's coverage, recorded below.
+      await lockStopFence(tx, worker.appId, 'exclusive');
       // #1726: the reportsTo graph lock BEFORE the worker row (the lock
       // protocol in src/lib/workerReportsTo.ts; #1737 review, Diego P2-2).
       await lockAppReportsTo(tx, worker.appId);
@@ -1039,6 +1050,7 @@ export const workerMutations = {
             endedBy: ctx.userId ?? null, endedByWorkerId: actor.workerId, endedByAgentId: actor.agentId,
           },
         });
+        await reconcileStopCoverage(tx, worker.appId, new Date());
       }
     });
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
@@ -1127,9 +1139,12 @@ export const workerMutations = {
               throw forbidden();
             },
           });
+          // #2022 (R95): a stop signal's team coverage follows the reporting lines, from this moment.
+          await reconcileStopCoverage(tx, worker.appId, new Date());
         },
         {
           afterLock: async (tx) => {
+            await lockStopFence(tx, app.id, 'exclusive');
             await lockAppReportsTo(tx, app.id);
             if (ctx.userId) {
               await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId} FOR SHARE`;
@@ -1440,10 +1455,40 @@ export const workerMutations = {
    */
   updateWorker: async (
     _: unknown,
-    args: { workerRef: string; promptOverride?: string | null },
+    args: { workerRef: string; promptOverride?: string | null; signature?: string | null; trailer?: string | null },
     ctx: Context,
   ) => {
     const { worker, app } = await resolveReadableWorkerRef(ctx, args.workerRef);
+    const changesSignature = 'signature' in args || 'trailer' in args;
+    if (changesSignature) {
+      const data: { signature?: string; trailer?: string; promptOverride?: string | null } = {};
+      const anchors: AuthorityAnchor[] = [
+        { kind: 'app', id: app.id },
+        ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+        ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+      ];
+      return withAuthorizedTx(ctx, anchors, async txCtx => {
+        const fresh = await txCtx.db.app.findUniqueOrThrow({ where: { id: app.id } });
+        // H26 PROVISIONAL: bound workers do not exercise their holder's manager right.
+        // Headless agent/run callers and impersonation likewise cannot manage these fields.
+        const actor = currentActor();
+        const bound = txCtx.sessionId ? await txCtx.db.session.findUnique({ where: { id: txCtx.sessionId }, select: { workerId: true } }) : null;
+        if (bound?.workerId || txCtx.sessionBindingRefused || actor.workerId || actor.agentId || txCtx.impersonation || !(await managesApp(txCtx, fresh))) throw forbidden();
+        if ('promptOverride' in args) await requireWorkerStaffAccess(txCtx, fresh);
+        for (const field of ['signature', 'trailer'] as const) {
+          if (field in args) data[field] = normalizeWorkerSignature(args[field]);
+        }
+        if ('promptOverride' in args) data.promptOverride = (args.promptOverride ?? '').trim() === '' ? null : args.promptOverride;
+      }, async tx => {
+        const { count } = await tx.worker.updateMany({ where: { id: worker.id, retiredAt: null }, data });
+        if (!count) {
+          const still = await tx.worker.findUnique({ where: { id: worker.id } });
+          if (!still) throw workerNotFound(args.workerRef);
+          throw new GraphQLError('This worker is retired.', { extensions: { code: 'WORKER_RETIRED' } });
+        }
+        return tx.worker.findUniqueOrThrow({ where: { id: worker.id } });
+      });
+    }
     await requireWorkerStaffAccess(ctx, app);
 
     if (worker.retiredAt) {
@@ -1774,7 +1819,7 @@ export const workerQueries = {
     const template = agent.systemPrompt ?? null;
     const previewRole = workerRole ?? agent.personaRole ?? '';
     // No worker row or session exists yet, so url / model / reports-to have nothing to fill.
-    const values: PlatformVariableValues = {
+    const values = withWorkerSignatures({
       'worker.name': name,
       'worker.role': previewRole,
       'agent.name': agent.name,
@@ -1783,7 +1828,7 @@ export const workerQueries = {
       'worker.trailer': '',
       'worker.url': '',
       'session.llmModel': '',
-    };
+    }, WORKER_SIGNATURE_DEFAULTS);
     const bound = template ? applyPlatformVariables(template, values, { name, role: previewRole }) : null;
     const boundOverride = override ? applyPlatformVariables(override, values) : override;
     const prompt = bound && boundOverride ? `${bound}\n\n${boundOverride}` : (boundOverride ?? bound);
@@ -1990,6 +2035,36 @@ export async function loadAppWorkerActivity(
 }
 
 /**
+ * #2138 §3.4 — every worker's check status in one App, loaded per APP for the
+ * same reason as `loadAppWorkerActivity` (a roster is the calling shape), and
+ * memoized only inside a query, for the same reason too. The team channel is
+ * the one the team chat reads and writes (`locateTeamChatChannel`); only a
+ * check of THAT channel counts.
+ */
+export async function loadAppWorkerCheckStatuses(
+  ctx: Context,
+  appId: string,
+  opts?: { memoize?: boolean; now?: Date },
+): Promise<Map<string, WorkerCheckStatus>> {
+  const now = opts?.now ?? new Date();
+  type Cache = Map<string, Promise<Map<string, WorkerCheckStatus>>>;
+  const holder = ctx as Context & { workerCheckStatusCache?: Cache };
+  const cache = opts?.memoize ? (holder.workerCheckStatusCache ??= new Map()) : null;
+  const cached = cache?.get(appId);
+  if (cached) return cached;
+
+  const pending = (async () => {
+    // Dynamic: resolvers.teamChat imports this module.
+    const { locateTeamChatChannel } = await import('./resolvers.teamChat.js');
+    const channel = await locateTeamChatChannel(ctx, appId);
+    return loadWorkerCheckStatuses(ctx.db, { appId, teamChannelId: channel?.channelId ?? null, now });
+  })();
+
+  cache?.set(appId, pending);
+  return pending;
+}
+
+/**
  * #983 review (Codex + Copilot P1): `Session.worker` made Worker rows
  * reachable by principals the worker queries never admitted —
  * `sessionScopeFilter` admits ANY org member (READER included), and a
@@ -2015,7 +2090,7 @@ export async function loadAppWorkerActivity(
  */
 export async function composeWorkerPrompt(
   ctx: Context,
-  worker: { id: string; appId: string; agentId: string; name: string; slug?: string; role: string | null; promptOverride: string | null; reportsToWorkerId?: string | null },
+  worker: { id: string; appId: string; agentId: string; name: string; slug?: string; role: string | null; promptOverride: string | null; signature: string; trailer: string; reportsToWorkerId?: string | null },
   opts?: { llmModel?: string | null },
 ): Promise<{ text: string | null; renderedAt: Date; roleAgentUpdatedAt: Date | null }> {
   // Working-state path: the composed boot prompt embeds the agent's persona
@@ -2060,13 +2135,13 @@ export async function composeWorkerPrompt(
 
 /**
  * #2042 — the values of the platform variables for a worker bind. Bottom-up: the worker's own value, else the Agent's.
- * `signature` / `trailer` have no storage until S5 (#1602), so they are empty. The reports-to name rides the
+ * Stored signature/trailer templates are pre-rendered without recursive expansion (#1602). The reports-to name rides the
  * worker-visibility gate the caller already passed (same App), and `session.llmModel` is the bind's session model:
  * passed in by the bind that just created the session, else the newest open session's.
  */
 async function workerPlatformValues(
   ctx: Context,
-  worker: { id: string; slug?: string; appId: string; name: string; reportsToWorkerId?: string | null },
+  worker: { id: string; slug?: string; appId: string; name: string; signature: string; trailer: string; reportsToWorkerId?: string | null },
   agent: { name: string; urn: string; personaRole: string | null } | null,
   role: string,
   llmModel: string | null | undefined,
@@ -2082,7 +2157,7 @@ async function workerPlatformValues(
         select: { llmModel: true },
       }))?.llmModel;
   const urn = worker.slug ? await resolveWorkerUrnField({ appId: worker.appId, slug: worker.slug }, ctx) : null;
-  return {
+  return withWorkerSignatures({
     'worker.name': worker.name,
     'worker.role': role,
     'agent.name': agent?.name ?? '',
@@ -2091,7 +2166,7 @@ async function workerPlatformValues(
     'worker.trailer': '',
     'worker.url': (urn ? portalUrlForUrn(urn) : null) ?? '',
     'session.llmModel': model ?? '',
-  };
+  }, worker);
 }
 
 /** The owner of a user-owned Agent, or the person holding the worker cast from it; never under impersonation. */
@@ -2405,6 +2480,10 @@ export const workerFieldResolvers = {
       return affinity.get(worker.role.toLowerCase()) ?? [];
     },
     /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
+    signature: async (worker: { appId: string; signature: string }, _: unknown, ctx: Context) =>
+      (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.signature : null,
+    trailer: async (worker: { appId: string; trailer: string }, _: unknown, ctx: Context) =>
+      (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.trailer : null,
     promptOverride: async (
       worker: { appId: string; promptOverride: string | null },
       _: unknown,
@@ -2569,6 +2648,23 @@ export const workerFieldResolvers = {
       return activity.get(worker.id)?.lastActiveAt ?? null;
     },
     /**
+     * #2138 §3.4 (experimental) — whether this worker is checking its team
+     * channel as expected (`deriveWorkerCheckStatus`). Masked on deny, on the
+     * same gate as hasLiveSession: anyone who may read the App's roster.
+     */
+    checkStatus: async (
+      worker: { id: string; appId: string },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<WorkerCheckStatus | null> => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      const statuses = await loadAppWorkerCheckStatuses(ctx, worker.appId, {
+        memoize: info?.operation?.operation === 'query',
+      });
+      return statuses.get(worker.id) ?? null;
+    },
+    /**
      * The role-agent behind the casting — behind Query.agent's OWN read gate
      * (PUBLIC, else owner / org READER), masked to null on deny. The Worker
      * read gate is WIDER than the Agent's (App participants, App keys), and a
@@ -2615,7 +2711,7 @@ export const workerFieldResolvers = {
      * and the worker no override.
      */
     prompt: async (
-      worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null },
+      worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null; signature: string; trailer: string },
       _: unknown,
       ctx: Context,
     ) => (await composeWorkerPrompt(ctx, worker)).text,

@@ -1,5 +1,9 @@
+import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
+import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // typeResolvers — GraphQL type-level field resolvers extracted from resolvers.ts
@@ -79,7 +83,7 @@ import {
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
   sessionScopeFilter,
-  STORED_NODE_CONTENT,
+  CONTENT_RAW_DEFAULT,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
@@ -593,12 +597,7 @@ async function reconciledNodeForParent(
     if (!current) return null;
     const key = sessionKeyCache.getByMemoryId(current.memoryId);
     if (key) decryptNodeFieldsWithKey(current, key);
-    // Verify against what was STORED: a templated read hands field resolvers
-    // rendered `content`, which would never match the row.
-    const stored = STORED_NODE_CONTENT in n
-      ? { ...n, content: (n as { [STORED_NODE_CONTENT]?: string | null })[STORED_NODE_CONTENT] ?? null }
-      : n;
-    return revisionStateMatchesWithoutAuthorship(stored, current) ? current : null;
+    return revisionStateMatchesWithoutAuthorship(n, current) ? current : null;
   });
   cache.set(n, pending);
   return pending;
@@ -841,6 +840,18 @@ export const typeResolvers = {
     from: (s: { fromAddress: string }) => s.fromAddress,
   },
   Node: {
+    /**
+     * #2041 — the one place a node's include tags resolve for a reader
+     * (cor:dmo:150:03), so every path that reaches `Node.content` is covered
+     * and a new surface can't forget it. The row is never rewritten.
+     */
+    content: async (
+      n: Parameters<typeof resolveNodeContent>[1],
+      args: { raw?: boolean | null },
+      ctx: Context,
+    ) => resolveNodeContent(ctx, n, {
+      raw: args.raw ?? (n as { [CONTENT_RAW_DEFAULT]?: boolean })[CONTENT_RAW_DEFAULT] ?? false,
+    }),
     authorship: async (n: SnapshotSourceNode & { revSeq: number }, _: unknown, ctx: Context) => {
       if (!n.authorshipKind || !n.authoredAt) return null;
       // Start the task lookup before per-node reconciliation so sibling list
@@ -990,6 +1001,10 @@ export const typeResolvers = {
     inheritedFrom: (n: { inheritedFrom?: InheritedFrom }) =>
       n.inheritedFrom ? { agentId: n.inheritedFrom.agentId, agentUrn: emitEntityUrnV2('agent', n.inheritedFrom.agentUrn) } : null,
   },
+  GraphEdge: {
+    // #2124 — same strict projection as Edge.governedKind.
+    governedKind: (e: { governedKind?: unknown }) => projectGovernedKind(e.governedKind),
+  },
   Edge: {
     // `Edge.source` / `Edge.target` are NULLABLE (`Node`) in the schema, for two
     // reasons:
@@ -1016,6 +1031,8 @@ export const typeResolvers = {
     // #481 parity — edges are loc-addressed peers of nodes (spec 037), so
     // they carry their fully-qualified URN the same way. Edge.memoryId is the
     // denormalized SOURCE-side memory, which is exactly the URN's memory.
+    // #2124 — the edge's own stored kind through the one strict projection.
+    governedKind: (e: { governedKind?: unknown }) => projectGovernedKind(e.governedKind),
     urn: async (e: { loc: string; memoryId: string }, _: unknown, ctx: Context) => {
       const memUrn = await loadMemoryUrn(ctx, e.memoryId);
       if (!memUrn) return `hrn:edge:unknown:${e.loc}`;
@@ -1998,18 +2015,18 @@ export const typeResolvers = {
     // ADMIN/OWNER of the org. Non-admins get an empty list (silent rather
     // than erroring — same shape as User.appMemberships).
     agentOrgGrants: async (org: { id: string }, _: unknown, ctx: Context) => {
-      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin && ctx.organizationId !== org.id) return [];
-      if (!isPlatformAdmin) {
-        const member = await ctx.db.orgMember.findFirst({
-          where: {
-            organizationId: org.id,
-            userId: ctx.userId ?? '',
-            ...LIVE_ORG_MEMBERSHIP,
-            role: { in: ['ADMIN', 'OWNER'] },
-          },
-        });
-        if (!member) return [];
+      // A headless run acts for its App, never as the admin it runs on behalf of (Xan's disposition on #2188), even with a platform role.
+      if (isRunPrincipal(ctx)) return [];
+      // An org-scoped client (app key / OAuth client) stays pinned to its own
+      // org; a user token carries no organizationId, so the role gate decides.
+      if (ctx.organizationId && ctx.organizationId !== org.id && !isPlatformAdmin(ctx)) return [];
+      // A worker-bound session acts for its Worker, never as the org admin whose token it rides (as stopSignal's personEntry).
+      if (currentActor().workerId || currentActorAmbiguity()) return [];
+      try {
+        await requireOrgRole(ctx, org.id, 'ADMIN');
+      } catch (e) {
+        if (e instanceof Error && e.message === 'Forbidden') return [];
+        throw e;
       }
       return ctx.db.agentOrgGrant.findMany({
         where: { orgId: org.id },

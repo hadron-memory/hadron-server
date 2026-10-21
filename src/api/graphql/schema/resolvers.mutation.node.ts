@@ -15,6 +15,7 @@ import {
 } from '../../../lib/protectedLoc.js';
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
+import { assertNoGovernedRemoval, governedRemovalError } from '../../../lib/governedRemoval.js';
 import {
   assertGovernedWrite,
   assertRoleDeclaredForWrite,
@@ -153,6 +154,7 @@ import {
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
 import { concealUnreadableInstallWrite, findInstallMemory, lockInstallAuthorityFirst, resolveInstallTarget, withInstallMemory, type InstallTarget } from './installMemory.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
+import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 
@@ -3188,6 +3190,10 @@ export const nodeMutations = {
           // #1641 §3.2 — a decision is withdrawn, never deleted, and deleting a
           // log or an ancestor of one would erase decision history.
           await refuseDecisionFamily(tx, affectedIds, 'Deleting this node');
+          // A governed node is removed only after its marker is cleared through
+          // the kind's door: the whole affected set is judged here, on locked
+          // rows, before any write.
+          await assertNoGovernedRemoval(tx, memoryId, affectedIds);
           if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
           else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy, at: now });
 
@@ -4121,6 +4127,13 @@ export const nodeMutations = {
         // content is rendered from its payload, and a fold would rewrite it.
         const mergedDecisions = [lockedSource, lockedTarget].filter((n) => isDecisionFamilyRole(n.role));
         if (mergedDecisions.length > 0) throw decisionContainedError('Merging these nodes', mergedDecisions.map((n) => n.loc));
+        // A hard-deleted source is a removal. The source row was locked FOR
+        // UPDATE and re-read above, so this judges its current state: a governed
+        // node is removed only after its marker is cleared through the kind's door.
+        if (deleteSource) {
+          const kinds = governedKindsOf({ role: lockedSource.role, isRunnable: lockedSource.isRunnable });
+          if (kinds.length > 0) throw governedRemovalError([{ id: lockedSource.id, loc: lockedSource.loc, kinds }]);
+        }
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
@@ -4834,7 +4847,10 @@ export const nodeMutations = {
         );
       }
       decryptNodeFields(node, memEncInfo);
-      const markdown = node.content && node.content.trim().length > 0 ? node.content : `# ${node.name}`;
+      // A Google Doc is a read for a human: includes resolve with the exporter's
+      // access (cor:dmo:150:03); variables stay as stored, as before.
+      const exported = await resolveNodeContent(ctx, node, { mode: 'includes' });
+      const markdown = exported && exported.trim().length > 0 ? exported : `# ${node.name}`;
 
       const { file } = await runOwnedEmailOperation<{ file: ToolDriveFile }>(ctx, connectionRef, 'create-doc', {
         title: title?.trim() || node.name,

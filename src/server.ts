@@ -18,7 +18,7 @@ import {
   fetchUser,
   checkOrgMembership,
   signJwt,
-  verifyJwt,
+  verifyAuthenticatedJwt,
   sendMagicLink,
   verifyMagicLink,
   buildEmailSendPerIpRateLimit,
@@ -46,6 +46,7 @@ import {
 } from './auth/pendingLoginState.js';
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
+import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
 import {
   oauthSurfaceRefusal,
   oauthSurfaceRefusalMessage,
@@ -1044,6 +1045,7 @@ export async function createServer(): Promise<Express> {
   // #792 — dev-only login (triple-gated: DEV_LOGIN_ENABLED + non-production
   // NODE_ENV + localhost Host; otherwise indistinguishable from a 404).
   mountDevLoginRoutes(app, db);
+  mountPasskeyCeremonyRoutes(app);
 
   // #477 Sink 1 — login handoff exchange. The portal's server `load` (NOT the
   // browser) POSTs the one-time code from /auth/callback?code=… here and gets
@@ -1078,6 +1080,7 @@ export async function createServer(): Promise<Express> {
     // authoritative user row (roles may have changed since the code was issued).
     const jwt = await signJwt({
       login: redeemed.login,
+      ...(redeemed.signInId ? { sid: redeemed.signInId } : {}),
       sub: user.id,
       roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
       ...(user.githubUsername ? { githubUsername: user.githubUsername } : {}),
@@ -1095,7 +1098,7 @@ export async function createServer(): Promise<Express> {
       return;
     }
     try {
-      const payload = await verifyJwt(authHeader.slice(7));
+      const payload = await verifyAuthenticatedJwt(authHeader.slice(7), db);
       // Admin impersonation: this endpoint bypasses resolveAuthContext (and so
       // the session-row re-validation), so an impersonation token is rejected
       // outright rather than echoing the target's profile.

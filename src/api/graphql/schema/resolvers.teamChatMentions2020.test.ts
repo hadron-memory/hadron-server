@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #2020 (S4 of epic #2016) — a worker's mentions read and its mention counts
  * return exactly the messages that REACH it: its own name (replies folded in at
@@ -47,7 +48,7 @@ async function mkUser(n: number) {
   return db.user.create({ data: { id: generateId(), githubId: 98_200 + n, githubUsername: `mr-${n}-${Date.now()}-${Math.floor(Math.random() * 1e5)}`, roles: ['READER'] }, select: { id: true } });
 }
 async function mkWorker(name: string, holder: string): Promise<W> {
-  const w = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: holder, heldAt: new Date() }, select: { id: true, name: true } });
+  const w = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: holder, heldAt: new Date() }, select: { id: true, name: true } });
   await db.registerEntry.create({ data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: w.id, role: 'BOTH' } });
   const session = await db.session.create({ data: { id: generateId(), appId: app.id, userId: holder, workerId: w.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() } });
   return { ...w, holder, session: session.id };
@@ -213,14 +214,14 @@ describe('the gates the read had stay as they were', () => {
   it('a foreign App\'s worker, a non-member and the literal "all" read as the empty page', async () => {
     await humanSays(manager.id, 'everyone @all');
     const page = (ref: string) => Q.teamChatMessages({}, { appRef: app.id, mentionsRef: ref }, ctx(holderA.id));
-    expect(await page('all')).toEqual({ items: [], total: 0 });
+    expect(await page('all')).toMatchObject({ items: [], total: 0 });
     const outsider = await mkUser(9);
-    expect(await page(outsider.id)).toEqual({ items: [], total: 0 });
+    expect(await page(outsider.id)).toMatchObject({ items: [], total: 0 });
     const otherOrg = await db.organization.create({ data: { id: generateId(), name: 'o', urn: `o-${Date.now()}.example` } });
     const otherApp = await db.app.create({ data: { id: generateId(), organizationId: otherOrg.id, name: 'Other', urn: `${otherOrg.urn}:other` } });
     const otherAgent = await db.agent.create({ data: { id: generateId(), organizationId: otherOrg.id, name: 'Ghost', urn: `${otherOrg.urn}:ghost` } });
-    const foreign = await db.worker.create({ data: { appId: otherApp.id, agentId: otherAgent.id, name: 'Liam', slug: 'liam' } });
-    expect(await page(foreign.id)).toEqual({ items: [], total: 0 });
+    const foreign = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: otherApp.id, agentId: otherAgent.id, name: 'Liam', slug: 'liam' } });
+    expect(await page(foreign.id)).toMatchObject({ items: [], total: 0 });
   });
 
   it('a user ref still matches the handle alone: a broadcast is not a user\'s mention', async () => {

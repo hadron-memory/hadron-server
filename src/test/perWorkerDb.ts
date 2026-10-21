@@ -2,7 +2,7 @@
  * vitest setupFile — runs in every worker BEFORE any test file imports the
  * Prisma client, so the client's `new PrismaClient()` (which reads DATABASE_URL
  * at construction) connects to THIS worker's private database
- * (`hadron_test_r<runId>_<VITEST_POOL_ID>`). Files then run in parallel without
+ * (`hadron_test_r<scope>_p<pid>_<VITEST_POOL_ID>`). Files then run in parallel without
  * racing — and since #1091 the name is scoped by RUN as well as by worker, so
  * two SUITES on one machine do not race either.
  *

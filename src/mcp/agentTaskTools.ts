@@ -19,6 +19,7 @@
  * refused here. Reads take an optional `session` for the same purpose: a
  * worker on an App key reads as itself through it.
  */
+import { renderCheckStatusShort } from '../lib/workerCheckStatus.js';
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
@@ -52,7 +53,10 @@ const QA = resolvers.Query as unknown as {
   teamAvailability: Resolver<{ appRef: string }, { workers: AvailabilityRow[]; families: AvailabilityRow[] }>;
   teamRoster: Resolver<{ appRef: string }, { appId: string; asOf: Date; workers: RosterRow[] }>;
 };
-type RosterRow = import('../lib/agentTasks/roster.js').RosterEntry & { appUrn: string };
+type RosterRow = import('../lib/agentTasks/roster.js').RosterEntry & {
+  appUrn: string;
+  checkStatus?: import('../lib/workerCheckStatus.js').WorkerCheckStatus | null;
+};
 const T = agentTaskFieldResolvers.AgentTask;
 const E = agentTaskFieldResolvers.AgentTeamEvent;
 const WA = agentTaskAlarmFieldResolvers.WorkerAvailability;
@@ -110,6 +114,8 @@ export function renderRosterEntry(r: RosterRow): string {
     // #1726: beside last activity, so a stale claim is easy to spot.
     r.reportsTo ? `reports to ${r.reportsTo.name}${r.reportsTo.retired ? ' (retired)' : ''}` : null,
     r.lastActiveAt ? `last active ${r.lastActiveAt.toISOString()}` : null,
+    // #2138 §3.4
+    r.checkStatus ? renderCheckStatusShort(r.checkStatus) : null,
   ].filter(Boolean);
   return `${r.name} — ${r.state}: ${facts.join('; ')}`;
 }
@@ -226,7 +232,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     userId: auth.userId ?? undefined,
     // #1868: the presented hdr_user_ key, so the shared authorized transaction
     // re-checks it is still unrevoked at the write (as #1864's signing tools do).
-    apiKeyId: auth.apiKeyId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     appKeyId: auth.appKeyId ?? undefined,
     // An App key's session state is the current request's; anyone else's is the connection's.

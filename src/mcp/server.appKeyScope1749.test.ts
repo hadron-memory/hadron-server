@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1749 (Riana, #1781 cycle 1) — the App-key wake tools across the REAL returning-request boundary of the MCP HTTP
  * transport (`handleMcpRequest`), which `createTestableMcpServer.callTool` bypasses. A transport belongs to the exact
@@ -53,7 +54,7 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId, userId: holder.id, role: 'member' } });
   const memory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.id}:team-shared`, name: 'shared', class: 'app', appId, sharedMemoryOfAgentId: agent.id } });
   const made = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:team', name: 'team', createdBy: holder.id });
-  const worker = await db.worker.create({ data: { id: generateId(), appId, agentId: agent.id, name: 'Liam', slug: 'liam', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
+  const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: agent.id, name: 'Liam', slug: 'liam', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
   await db.registerEntry.create({ data: { id: generateId(), appId, channelId: made.channel.id, attendeeWorkerId: worker.id, role: 'BOTH' } });
   const enc = await getMemoryEncryptionInfo(db, memory.id);
   await appendChatMessage(db, { id: made.rootId, memoryId: memory.id, loc: 'chats:team' }, enc, async ({ tx, seq, msgNum }) =>
@@ -109,10 +110,11 @@ describe('the exact key: a transport belongs to the key that initialized it', ()
     const proof = /proof: (\S+)/.exec(mine.text)![1]!;
     expect((await call(m, keyB.raw, 'hadron_ack_wakes', { proofs: [proof] })).status).toBe(404);
     expect(await db.appKeyWakeRead.count()).toBe(1);
-    expect(await db.workerDeliveryChannel.count()).toBe(0);
-    // A itself still can, and the delivery names A.
+    expect(await db.workerWakeAck.count()).toBe(0);
+    // A itself still can, and the wake's receipt names A (#2072, R53: it moves no message mark).
     expect((await call(m, keyA.raw, 'hadron_ack_wakes', { proofs: [proof] })).text).toBe('Acknowledged 1.');
-    expect((await db.workerDeliveryChannel.findFirstOrThrow()).ackedByAppKeyId).toBe(keyA.id);
+    expect((await db.workerWakeAck.findFirstOrThrow()).ackedByAppKeyId).toBe(keyA.id);
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
   });
 
   it('B on its own transport is the scopeless key it is; proofs stay separate per key', async () => {
@@ -123,7 +125,7 @@ describe('the exact key: a transport belongs to the key that initialized it', ()
     const ma = await open(keyA.raw);
     const proofA = /proof: (\S+)/.exec((await due(ma, keyA.raw)).text)![1]!;
     expect((await call(mb, keyB.raw, 'hadron_ack_wakes', { proofs: [proofA] })).text).toMatch(/^\[wake_proof_requester_mismatch\]/);
-    expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect(await db.workerWakeAck.count()).toBe(0);
   });
 });
 
@@ -140,7 +142,7 @@ describe('N5 on the returning request: this request\'s session header decides', 
     }
     // Refusals leave nothing behind.
     expect(await db.appKeyWakeRead.count()).toBe(reads);
-    expect(await db.workerDeliveryChannel.count()).toBe(0);
+    expect(await db.workerWakeAck.count()).toBe(0);
     // The header omitted again: the same transport works.
     expect((await due(m, keyA.raw)).text).toContain('1 due');
     expect((await call(m, keyA.raw, 'hadron_ack_wakes', { proofs: [proof] })).text).toBe('Acknowledged 1.');

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1610: the actor reaches node writes over the REAL HTTP surfaces — the
  * per-request holder opened on `/graphql` and `/mcp` and filled from the
@@ -48,7 +49,7 @@ beforeEach(async () => {
     id: generateId(), urn: 'attrhttp.example:team-shared', name: 'team-shared', class: 'app', appId: app.id, organizationId: org.id,
   } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
   sessionId = generateId();
   await db.session.create({
     data: { id: sessionId, appId: app.id, userId: user.id, workerId: worker.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() },
@@ -171,7 +172,7 @@ describe('DAC: hadron_start_session binds the MCP connection (#1610 follow-on)',
     const call = await mcpConnection();
     await call('hadron_start_session', { description: 'dac', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true });
     const app = await db.worker.findUniqueOrThrow({ where: { id: worker.id }, select: { appId: true } });
-    const dara = await db.worker.create({ data: { id: generateId(), appId: app.appId, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+    const dara = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.appId, agentId: agent.id, name: 'Dara', slug: 'dara' } });
     const user = await db.session.findUniqueOrThrow({ where: { id: sessionId }, select: { userId: true } });
     const daraSession = generateId();
     await db.session.create({ data: { id: daraSession, appId: app.appId, userId: user.userId, workerId: dara.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() } });
@@ -239,7 +240,7 @@ describe('#1701: several workers bound on one MCP connection', () => {
   /** One connection with Iris bound (chat session A), then Dara (chat session B). */
   async function sharedConnection() {
     const app = await db.worker.findUniqueOrThrow({ where: { id: worker.id }, select: { appId: true } });
-    const dara = await db.worker.create({ data: { id: generateId(), appId: app.appId, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+    const dara = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.appId, agentId: agent.id, name: 'Dara', slug: 'dara' } });
     const call = await mcpConnection();
     const irisReceipt = await call('hadron_start_session', { description: 'chat A', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true });
     const daraReceipt = await call('hadron_start_session', { description: 'chat B', workerRef: 'hrn:worker:attrhttp.example:team:dara' });
@@ -319,7 +320,7 @@ describe('#1701: several workers bound on one MCP connection', () => {
     // indistinguishable from ONE chat session switching workers, so an unnamed
     // write must be refused either way, never credited to Dara.
     const app = await db.worker.findUniqueOrThrow({ where: { id: worker.id }, select: { appId: true } });
-    const dara = await db.worker.create({ data: { id: generateId(), appId: app.appId, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+    const dara = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.appId, agentId: agent.id, name: 'Dara', slug: 'dara' } });
     const call = await mcpConnection();
     const iris = /Session started: ([0-9a-f]{32})/.exec(await call('hadron_start_session', { description: 'chat A', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true }))![1];
     await call('hadron_end_session', { id: iris });
@@ -347,7 +348,7 @@ describe('#1701: several workers bound on one MCP connection', () => {
     const call = await mcpConnection();
     await call('hadron_start_session', { description: 'one', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true });
     const app = await db.worker.findUniqueOrThrow({ where: { id: worker.id }, select: { appId: true } });
-    const dara = await db.worker.create({ data: { id: generateId(), appId: app.appId, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+    const dara = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.appId, agentId: agent.id, name: 'Dara', slug: 'dara' } });
     const user = await db.session.findUniqueOrThrow({ where: { id: sessionId }, select: { userId: true } });
     const daraSession = generateId();
     await db.session.create({ data: { id: daraSession, appId: app.appId, userId: user.userId, workerId: dara.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() } });
@@ -386,7 +387,7 @@ describe('#1701: several workers bound on one MCP connection', () => {
     const { call } = await sharedConnection();
     const app = await db.worker.findUniqueOrThrow({ where: { id: worker.id }, select: { appId: true } });
     for (let i = 0; i < 33; i++) {
-      await db.worker.create({ data: { id: generateId(), appId: app.appId, agentId: agent.id, name: `Extra${i}`, slug: `extra${i}` } });
+      await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.appId, agentId: agent.id, name: `Extra${i}`, slug: `extra${i}` } });
       await call('hadron_start_session', { description: `chat ${i}`, workerRef: `hrn:worker:attrhttp.example:team:extra${i}` });
     }
     const refused = await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:evict:unsaid`, name: 'unsaid' }, undefined, { allowError: true });

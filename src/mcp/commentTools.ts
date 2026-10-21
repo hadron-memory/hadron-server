@@ -172,7 +172,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
     userId: auth.userId ?? undefined,
     // #1868: the presented hdr_user_ key, so the shared authorized transaction
     // re-checks it is still unrevoked at the write (as #1864's signing tools do).
-    apiKeyId: auth.apiKeyId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],

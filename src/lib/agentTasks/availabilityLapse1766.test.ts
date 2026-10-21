@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1766 — an availability mark that expires records the lapse
  * (cor:agt:060:02: once `until` passes the worker reads as available, and
@@ -43,7 +44,7 @@ beforeEach(async () => {
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `lapse-${n}.example:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
   const worker = (name: string) =>
-    db.worker.create({ data: { appId: app.id, agentId, name, slug: name.toLowerCase(), role: 'reviewer', heldByUserId: mia.id }, select: { id: true } });
+    db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name, slug: name.toLowerCase(), role: 'reviewer', heldByUserId: mia.id }, select: { id: true } });
   baloo = await worker('Baloo');
   rook = await worker('Rook');
 });
@@ -207,7 +208,7 @@ describe('the lapse feeds matching in the same pass (cor:agt:060:06)', () => {
     });
     await outOfTokens(baloo, at('18:00'));
     const t = await db.agentTask.create({ data: { appId: app.id, title: 'Review', ownerUserId: mia.id, createdAt: at('11:00') }, select: { id: true } });
-    expect(await taskMatcherTick(db, at('18:01'))).toEqual({ lost: 0, lapsed: 1, matched: 1 });
+    expect(await taskMatcherTick(db, at('18:01'))).toEqual({ lost: 0, lapsed: 1, expired: 0, matched: 1 });
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).assigneeWorkerId).toBe(baloo.id);
   });
 });
