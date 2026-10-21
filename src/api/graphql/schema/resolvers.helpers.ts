@@ -130,6 +130,8 @@ export interface Context {
   // org-scope chokepoints in this file + src/lib/auth consult it). Mutations
   // are blocked wholesale by the read-only Apollo plugin.
   impersonation?: ImpersonationContext;
+  /** #2198 — task warnings collected during this request (see resolvers.taskWarnings.ts); lazily created. */
+  taskWarnings?: { path: string; warning: import('./resolvers.taskWarnings.js').TaskWarning }[];
   // Request-scoped memo for Edge.source/target lazy loads — avoids an N+1 of
   // identical node.findUnique calls when many edges in one response share an
   // endpoint (lazily created on first use; see loadEdgeEndpointNode). #381.

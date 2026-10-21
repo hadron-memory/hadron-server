@@ -58,6 +58,7 @@ import { assertProductionSigningSecret } from './auth/signingSecret.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
 import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
+import { taskWarningsPlugin } from './api/graphql/taskWarningsPlugin.js';
 import { requireOrgRole, requireSessionWriteAccess } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
 import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
@@ -1140,7 +1141,7 @@ export async function createServer(): Promise<Express> {
     includeStacktraceInErrorResponses: false,
     typeDefs,
     resolvers: deploymentResolvers,
-    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin],
+    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin],
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.
     formatError: formatGraphQLError,

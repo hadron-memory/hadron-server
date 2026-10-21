@@ -26,6 +26,7 @@ import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { agentTaskFieldResolvers, taskError } from '../api/graphql/schema/resolvers.agentTask.js';
+import { renderTaskWarnings } from '../api/graphql/schema/resolvers.taskWarnings.js';
 import { agentTaskAlarmFieldResolvers } from '../api/graphql/schema/resolvers.agentTaskAlarms.js';
 import { type AuthContext, validateSessionBinding } from '../middleware/auth.js';
 import { runAsActor } from '../lib/requestActor.js';
@@ -266,7 +267,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     const ctx = ctxOf();
     try {
       const t = await call(ctx);
-      return textResult(`${verb}.\n\n${await renderTask(t, ctx)}`);
+      return textResult(`${verb}.\n\n${await renderTask(t, ctx)}${renderTaskWarnings(ctx.taskWarnings)}`);
     } catch (e) {
       return refusal(e);
     }
