@@ -4,8 +4,18 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
+import { parseDataKey } from '../../../lib/crypto.js';
+import { requestKeyStorage } from '../../../lib/requestKeys.js';
+import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
+import { buildSchema, defaultFieldResolver, graphql } from 'graphql';
+import { typeDefs } from './typeDefs.js';
 
-vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: any, c: Context) => Promise<any>>;
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: any, c: Context) => Promise<any>>;
 let memoryId: string, writerId: string, readerId: string;
@@ -14,6 +24,7 @@ const node = (loc: string, extra: Record<string, unknown> = {}) => db.node.creat
   id: generateId(), memoryId, loc, name: loc, content: 'raw {{missing}}', deletedAt: new Date('2026-01-01'), ...extra,
 } });
 beforeEach(async () => {
+  vi.clearAllMocks();
   await cleanDb(db);
   const org = await db.organization.create({ data: { name: 'Recovery', urn: 'recovery2175.example' } });
   writerId = (await db.user.create({ data: { handle: 'recovery-writer' } })).id;
@@ -26,6 +37,51 @@ beforeEach(async () => {
 });
 
 describe('explicit recovery reads', () => {
+  it('executes real GraphQL recovery DTO fields, nullable edge names, and restore selection', async () => {
+    const retained = await node('a'), live = await node('b', { deletedAt: null });
+    await db.edge.create({ data: { memoryId, sourceId: live.id, targetId: retained.id, loc: 'b:related:a' } });
+    const schema = buildSchema(typeDefs);
+    const execute = (source: string) => graphql({ schema, source, contextValue: ctx(), fieldResolver: (parent, args, context, info) => {
+      const fields = resolvers[info.parentType.name as keyof typeof resolvers] as Record<string, Function> | undefined;
+      const resolver = fields?.[info.fieldName];
+      return typeof resolver === 'function' ? resolver(parent, args, context, info) : defaultFieldResolver(parent, args, context, info);
+    } });
+    const read = await execute(`{ recoveryNode(nodeRef: "${retained.id}") { id content } recoveryEdges(memoryRef: "${memoryId}") { total items { name target { id } } } }`);
+    expect(read.errors).toBeUndefined();
+    expect(read.data).toMatchObject({ recoveryNode: { id: retained.id, content: retained.content }, recoveryEdges: { total: 1, items: [{ name: null, target: { id: retained.id } }] } });
+    const restored = await execute(`mutation { restoreNode(nodeRef: "${retained.id}") { id deletedAt } }`);
+    expect(restored.errors).toBeUndefined();
+    expect(restored.data).toMatchObject({ restoreNode: { id: retained.id, deletedAt: null } });
+  });
+  it('keeps MCP recovery and restore behind the same reader/writer gates', async () => {
+    const retained = await node('a');
+    const writer = createTestableMcpServer({ userId: writerId, roles: [], clientId: `user:${writerId}` });
+    const reader = createTestableMcpServer({ userId: readerId, roles: [], clientId: `user:${readerId}` });
+    expect(await reader.callToolText('hadron_get_recovery_node', { nodeRef: retained.id })).toBe('Node not found.');
+    expect(await reader.callTool('hadron_restore_node', { nodeRef: retained.id })).toMatchObject({ isError: true });
+    const raw = JSON.parse(await writer.callToolText('hadron_get_recovery_node', { nodeRef: retained.id }));
+    expect(raw.content).toBe('raw {{missing}}');
+    expect(raw).not.toHaveProperty('_retainedNode');
+    const page = JSON.parse(await writer.callToolText('hadron_list_recovery_nodes', { memoryRef: memoryId, limit: null }));
+    expect(page.total).toBe(1);
+    const restored = JSON.parse(await writer.callToolText('hadron_restore_node', { nodeRef: retained.id }));
+    expect(restored).toMatchObject({ id: retained.id, deletedAt: null });
+  });
+  it.each([
+    {},
+    { filter: { where: { path: ['kind'], eq: 'retained' } } },
+    { query: 'recoveryneedle', mode: 'keyword' },
+    { query: 'recoveryneedle', mode: 'regex' },
+  ])('filters legacy deleted inventory before paging for reader and writer: %j', async (args) => {
+    const hidden = await node('a', { name: 'recoveryneedle', properties: { kind: 'retained' } });
+    const live = await node('z', { name: 'recoveryneedle', properties: { kind: 'retained' }, deletedAt: null });
+    const filter = { memoryIds: [memoryId], includeDeleted: true, ...((args as any).filter ?? {}) };
+    const request = { ...args, filter, sort: 'loc', limit: 1 };
+    const reader = await Q.findNodes({}, request, ctx(readerId));
+    expect(reader.hits.map((hit: any) => hit.node.id)).toEqual([live.id]);
+    const writer = await Q.findNodes({}, request, ctx());
+    expect(writer.hits.map((hit: any) => hit.node.id)).toEqual([hidden.id]);
+  });
   it('returns an old retained tombstone without compiling its stored body; normal node read remains null', async () => {
     const n = await node('a');
     expect(await Q.node({}, { ref: n.id }, ctx())).toBeNull();
@@ -64,6 +120,132 @@ describe('explicit recovery reads', () => {
 });
 
 describe('single-node restore', () => {
+  it('judges an ordinary role against the rulebook committed while restore waits', async () => {
+    const retained = await node('a', { role: 'notes' });
+    const config = await db.memoryConfig.create({ data: { memoryId } });
+    const rule = await db.nodeRoleRule.create({ data: { configId: config.id, role: 'notes', writers: 'ALL' } });
+    let held!: () => void, release!: () => void;
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const competing = db.$transaction(async (tx) => {
+      await lockMemoryConfigExclusive(tx, memoryId);
+      await tx.nodeRoleRule.update({ where: { id: rule.id }, data: { writers: 'ADMIN' } });
+      held(); await gate;
+    }, { timeout: 15_000 });
+    await holding;
+    const pending = M.restoreNode({}, { nodeRef: retained.id }, ctx()).then(() => null, (error: any) => error);
+    try { await waitForLockWaiters(db); } finally { release(); }
+    await competing;
+    expect(await pending).toMatchObject({ extensions: { code: 'ROLE_WRITER_LEVEL_REQUIRED' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: retained.id } })).deletedAt).toEqual(retained.deletedAt);
+  });
+  it('observes an ancestor deletion committed during its row-lock wait', async () => {
+    const parent = await node('a', { deletedAt: null }), child = await node('a:b');
+    let held!: () => void, release!: () => void;
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const competing = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${parent.id} FOR NO KEY UPDATE`;
+      held(); await gate;
+      await tx.node.update({ where: { id: parent.id }, data: { deletedAt: new Date() } });
+    }, { timeout: 15_000 });
+    await holding;
+    const pending = M.restoreNode({}, { nodeRef: child.id }, ctx()).then(() => null, (error: any) => error);
+    try { await waitForLockWaiters(db); } finally { release(); }
+    await competing;
+    expect(await pending).toMatchObject({ extensions: { code: 'NODE_PARENT_DELETED' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).deletedAt).toEqual(child.deletedAt);
+  });
+  it.each(['rekey', 'hard-delete', 'govern', 'already-restored'])('rechecks a target after a deterministic row-lock wait: %s', async (change) => {
+    const retained = await node('a');
+    let held!: () => void, release!: () => void;
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const competing = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${retained.id} FOR NO KEY UPDATE`;
+      held();
+      await gate;
+      if (change === 'hard-delete') await tx.node.delete({ where: { id: retained.id } });
+      else await tx.node.update({ where: { id: retained.id }, data:
+        change === 'rekey' ? { loc: 'moved' } : change === 'govern' ? { role: 'review' } : { deletedAt: null, deletedBy: null } });
+    }, { timeout: 15_000 });
+    await holding;
+    const pending = M.restoreNode({}, { nodeRef: retained.id }, ctx()).then(
+      (value: any) => ({ value, error: undefined }), (error: any) => ({ value: undefined, error }));
+    try { await waitForLockWaiters(db); } finally { release(); }
+    await competing;
+    const result = await pending;
+    if (change === 'already-restored') expect(result.value?.deletedAt).toBeNull();
+    else {
+      expect(result.error).toBeDefined();
+      const row = await db.node.findUnique({ where: { id: retained.id } });
+      if (row) expect(row.deletedAt).toEqual(retained.deletedAt);
+    }
+  });
+  it('rechecks revoked membership after an authority-anchor wait', async () => {
+    const retained = await node('a');
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    let held!: () => void, release!: () => void;
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const revoker = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'org', id: memory.organizationId! }], 'exclusive');
+      held(); await gate;
+      await tx.orgMember.updateMany({ where: { organizationId: memory.organizationId!, userId: writerId }, data: { deletedAt: new Date() } });
+    }, { timeout: 15_000 });
+    await holding;
+    const pending = M.restoreNode({}, { nodeRef: retained.id }, ctx()).then(() => null, (error: unknown) => error);
+    try { await waitForLockWaiters(db); } finally { release(); }
+    await revoker;
+    expect(await pending).toBeInstanceOf(Error);
+    expect((await db.node.findUniqueOrThrow({ where: { id: retained.id } })).deletedAt).toEqual(retained.deletedAt);
+  });
+  it('keeps encrypted metadata inspectable but requires the request key before restoring and mirroring plaintext', async () => {
+    const key = parseDataKey(Buffer.alloc(32, 37).toString('base64'));
+    const stored = encryptNodeFieldsWithKey({ content: 'retained secret' }, key);
+    const retained = await node('encrypted', { content: stored.content });
+    await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: true, vectorIndexEnabled: false } });
+    const point = await Q.recoveryNode({}, { nodeRef: retained.id }, ctx());
+    expect(point).toMatchObject({ id: retained.id });
+    await requestKeyStorage.run(new Map(), async () => {
+      await expect(M.restoreNode({}, { nodeRef: retained.id }, ctx())).rejects.toThrow();
+    });
+    expect((await db.node.findUniqueOrThrow({ where: { id: retained.id } })).deletedAt).toEqual(retained.deletedAt);
+    await requestKeyStorage.run(new Map([[memoryId, key]]), async () => {
+      const out = await M.restoreNode({}, { nodeRef: retained.id }, ctx());
+      expect(out.content).toBe('retained secret');
+      expect(vi.mocked(writeNodeToGit)).toHaveBeenCalledWith(expect.objectContaining({ content: 'retained secret', mirrorRevSeq: out.revSeq }), '', undefined, memoryId);
+    });
+    expect((await db.node.findUniqueOrThrow({ where: { id: retained.id } })).content).toBe(stored.content);
+  });
+  it('shows retained endpoints only in recovery DTOs and restores independently live edges without reviving deleted edges', async () => {
+    const retained = await node('a');
+    const live = await node('b', { deletedAt: null });
+    const edge = await db.edge.create({ data: { memoryId, sourceId: live.id, targetId: retained.id, loc: 'b:related:a', name: 'related' } });
+    await db.edge.create({ data: { memoryId, sourceId: live.id, targetId: retained.id, loc: 'b:removed:a', name: 'removed', deletedAt: new Date() } });
+    expect((await Q.memoryEdges({}, { memoryRef: memoryId }, ctx())).total).toBe(0);
+    const E = resolvers.Edge as unknown as Record<string, (...a: any[]) => Promise<unknown>>;
+    expect(await E.target(edge, {}, ctx())).toBeNull();
+    const recovered = await Q.recoveryEdges({}, { memoryRef: memoryId }, ctx());
+    expect(recovered.total).toBe(1);
+    expect(recovered.items[0]).toMatchObject({ id: edge.id, target: { id: retained.id, deletedAt: retained.deletedAt } });
+    expect(recovered.items[0].target).not.toHaveProperty('content');
+    await M.restoreNode({}, { nodeRef: retained.id }, ctx());
+    expect((await Q.memoryEdges({}, { memoryRef: memoryId }, ctx())).total).toBe(1);
+    expect((await Q.recoveryEdges({}, { memoryRef: memoryId }, ctx())).total).toBe(1);
+  });
+  it('removes a foreign denied tombstone from recovery graph count and page', async () => {
+    const live = await node('a', { deletedAt: null });
+    const foreignMemory = await db.memory.create({ data: { class: 'knowledge', name: 'Other', urn: 'other2175.example:corpus',
+      organization: { create: { name: 'Other', urn: 'other2175.example' } } } });
+    const denied = await db.node.create({ data: { memoryId: foreignMemory.id, loc: 'private', name: 'Private', deletedAt: new Date() } });
+    await db.edge.create({ data: { memoryId, sourceId: live.id, targetId: denied.id, loc: 'a:foreign:private' } });
+    const retained = await node('z');
+    const visible = await db.edge.create({ data: { memoryId, sourceId: live.id, targetId: retained.id, loc: 'z:local:z' } });
+    const page = await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 1 }, ctx());
+    expect(page.total).toBe(1);
+    expect(page.items.map((item: any) => item.id)).toEqual([visible.id]);
+  });
   it('clears only deletion state, retains body/history, and repeats without modifying a live node', async () => {
     const n = await node('a');
     const before = await db.nodeRevision.count({ where: { nodeId: n.id } });

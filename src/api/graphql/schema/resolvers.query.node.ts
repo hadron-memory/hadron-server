@@ -1271,6 +1271,7 @@ export const nodeQueries = {
         if (f.where != null) {
           candidates = await provider.filterWhere({
             db: ctx.db, ids, memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
+            tombstoneMemoryIds: recoverableIds,
           });
         }
         const rows = await ctx.db.node.findMany({
@@ -1335,7 +1336,7 @@ export const nodeQueries = {
           const allowed = new Set(
             await provider.filterWhere({
               db: ctx.db, ids: candidateIds, memoryIds: scopeIds,
-              where: f.where, includeDeleted: !!f.includeDeleted,
+              where: f.where, includeDeleted: !!f.includeDeleted, tombstoneMemoryIds: recoverableIds,
             }),
           );
           candidateIds = candidateIds.filter((id) => allowed.has(id));
@@ -1632,6 +1633,7 @@ export const nodeQueries = {
             await provider.filterWhere({
               db: ctx.db, ids: candidateParentIds,
               memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
+              tombstoneMemoryIds: recoverableIds,
             }),
           );
         }
@@ -2391,6 +2393,7 @@ export const nodeQueries = {
         throw badInput('appNodes filter.updatedBefore must be a valid date string.');
       }
 
+      const recoverableAppMemoryIds = f.includeDeleted ? await recoveryMemoryIds(ctx, memoryIds) : [];
       const results = await ctx.db.node.findMany({
         where: {
           memoryId: { in: memoryIds },
@@ -2420,6 +2423,7 @@ export const nodeQueries = {
           // #1607 + #1608 — no comments in status sets; content, comments or
           // both by contentScope (CONTENT by default, cor:dmo:110:08).
           AND: [
+            ...(f.includeDeleted ? [{ OR: [{ deletedAt: null }, { memoryId: { in: recoverableAppMemoryIds } }] }] : []),
             ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
             ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
             ...((sw) => (sw ? [sw] : []))(contentScopeWhere(effectiveContentScope(f))),

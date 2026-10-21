@@ -395,12 +395,12 @@ async function resolveEdgeEndpoint(
   const otherPre = side === 'source' ? e.target : e.source;
 
   // The requested endpoint node — preloaded (even partially), else memoized FK.
-  const pre = wantPre as { memoryId?: string } | null | undefined;
+  const pre = wantPre as { memoryId?: string; deletedAt?: Date | null } | null | undefined;
   const node =
-    pre && typeof pre.memoryId === 'string'
+    pre && typeof pre.memoryId === 'string' && pre.deletedAt !== undefined
       ? pre
-      : ((await loadEdgeEndpointNode(ctx, wantId)) as { memoryId?: string } | null);
-  if (!node || typeof node.memoryId !== 'string') return null;
+      : ((await loadEdgeEndpointNode(ctx, wantId)) as { memoryId?: string; deletedAt?: Date | null } | null);
+  if (!node || node.deletedAt || typeof node.memoryId !== 'string') return null;
   // #1893 — an endpoint stamped inherited was admitted through the child it
   // was read through (resolveInheritedEdges); its own memory is the base's,
   // which a child-only reader can't read, and must not be re-gated here.

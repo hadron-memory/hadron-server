@@ -12,8 +12,12 @@ import { assertLocWritable } from '../../../lib/protectedLoc.js';
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { lockRemovalRows } from '../../../lib/governedRemoval.js';
 import { assertGovernedWrite } from '../../../lib/governedRole.js';
+import { assertNotCommentWrite } from '../../../lib/comments/index.js';
+import { assertBootPromptWriteAllowed } from '../../../lib/bootPrompt.js';
 import { assertRoleWritersForNodes } from '../../../lib/nodeRoleWriters.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
+import { deserializeTags } from '../../../integrations/db/provider.js';
+import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { mapDeadlockToWriteConflict } from '../../../lib/memoryLockConflict.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { liveTxContext } from './authorizedTx.js';
@@ -128,7 +132,7 @@ export const recoveryQueries = {
     const [total, nodes] = await ctx.db.$transaction([
       ctx.db.node.count({ where }),
       ctx.db.node.findMany({ where, orderBy: [{ loc: 'asc' }, { id: 'asc' }], ...page(args) }),
-    ]);
+    ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
     return { items: await Promise.all(nodes.map((node) => summary(ctx, node))), total };
   },
 };
@@ -183,10 +187,12 @@ export const recoveryMutations = {
       const currentMemory = await tx.memory.findUnique({ where: { id: memory.id } });
       if (!currentMemory || !(await canRecoverMemory(txCtx, memory.id))) throw nodeNotFoundError(args.nodeRef);
       if (currentMemory.organizationId !== memory.organizationId || currentMemory.ownerUserId !== memory.ownerUserId ||
-          currentMemory.userId !== memory.userId || currentMemory.isEncrypted !== memory.isEncrypted) throw changed();
+          currentMemory.userId !== memory.userId || currentMemory.isEncrypted !== memory.isEncrypted ||
+          currentMemory.appId !== memory.appId || currentMemory.class !== memory.class ||
+          currentMemory.userMemoryOfAgentId !== memory.userMemoryOfAgentId) throw changed();
       const related = await tx.node.findMany({ where: { memoryId: memory.id, OR: [{ id: candidate.id }, { loc: { in: ancestors } }] } });
       await lockRemovalRows(tx, memory.id, related.map((node) => node.id));
-      const current = await tx.node.findUnique({ where: { id: candidate.id } });
+      const current = await tx.node.findUnique({ where: { id: candidate.id }, include: { outgoingEdges: { include: { target: true } } } });
       if (!current) throw nodeNotFoundError(args.nodeRef);
       if (current.memoryId !== memory.id || current.loc !== candidate.loc) throw changed();
       // The mutation returns content. Validate key custody before any visible state change, not after commit.
@@ -194,22 +200,28 @@ export const recoveryMutations = {
       const parents = await tx.node.findMany({ where: { memoryId: memory.id, loc: { in: ancestors } }, select: { deletedAt: true } });
       if (parents.some((parent) => parent.deletedAt)) throw new GraphQLError('Restore the deleted parent first.', { extensions: { code: 'NODE_PARENT_DELETED' } });
       await assertLocWritable(tx, memory.id, current.loc, 'restore');
+      assertNotCommentWrite(current.nodeType, current.nodeType, 'restore');
+      assertBootPromptWriteAllowed(current, current, 'restore');
       assertGovernedWrite(current, current, 'update');
-      if (['comment', 'decision', 'decision-log', 'system'].includes(current.nodeType)) {
-        throw new GraphQLError('Use the owning operation for this node kind.', { extensions: { code: 'ROLE_GOVERNED' } });
-      }
       // The final rulebook fence must follow every row and address lock.
       await assertRoleWritersForNodes(tx, txCtx, [current], { from: memory.id });
       if (!current.deletedAt) return { node: current, changed: false };
       const count = await tx.node.updateMany({ where: { id: current.id, memoryId: memory.id, loc: current.loc, deletedAt: current.deletedAt },
         data: { deletedAt: null, deletedBy: null } });
       if (count.count !== 1) throw changed();
-      const node = await tx.node.findUniqueOrThrow({ where: { id: current.id } });
+      const node = await tx.node.findUniqueOrThrow({ where: { id: current.id }, include: { outgoingEdges: { include: { target: true } } } });
       return { node, changed: true };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }));
     if (result.changed) await publishNodeWritten({ nodeId: result.node.id, memoryId: memory.id, ownerRepo: result.node.ownerRepo ?? '', clientId: ctx.clientId });
     const out = { ...result.node };
     decryptNodeFields(out, memory);
+    // Encrypted memories are deliberately skipped by the ID-only event subscriber.
+    // Capture the committed revision while this request still holds its plaintext key.
+    if (result.changed && memory.isEncrypted && 'outgoingEdges' in out) {
+      void writeNodeToGit({ ...out, tags: deserializeTags(out.tags) as string[],
+        outgoingEdges: out.outgoingEdges, mirrorRevSeq: out.revSeq }, out.ownerRepo ?? '', ctx.clientId, memory.id)
+        .catch((error) => console.error('[restoreNode] git write error:', error));
+    }
     return out;
   },
 };

@@ -1404,7 +1404,7 @@ export const typeDefs = `#graphql
   }
   type RecoveryNodesPage { items: [RecoveryNodeSummary!]!, total: Int! }
   type RecoveryEndpoint { id: ID!, urn: String!, loc: String!, name: String!, deletedAt: DateTime }
-  type RecoveryGraphEdge { id: ID!, name: String!, source: RecoveryEndpoint!, target: RecoveryEndpoint! }
+  type RecoveryGraphEdge { id: ID!, name: String, source: RecoveryEndpoint!, target: RecoveryEndpoint! }
   type RecoveryEdgesPage { items: [RecoveryGraphEdge!]!, total: Int! }
 
   type Node {

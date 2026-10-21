@@ -2157,6 +2157,7 @@ export function createMcpServerInstance(
     'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_attention',
     'hadron_team_attention_page', 'hadron_list_workers', 'hadron_get_worker', 'hadron_team_work_items',
     'hadron_list_comments', 'hadron_get_comment', 'hadron_team_chat_mark_read',
+    'hadron_list_recovery_nodes', 'hadron_list_recovery_edges', 'hadron_get_recovery_node',
     // #1705 — agent-task reads (each takes its own optional session).
     'hadron_task_get', 'hadron_task_list', 'hadron_team_events',
     // #1706 — availability read (its own optional session).
@@ -3492,29 +3493,42 @@ export function createMcpServerInstance(
   });
 
   // #2175: explicit recovery twins delegate to the same writer-plus-reader resolver gate.
+  const recoveryCtx = (): Context => ({ ...scopeCtx(), appKeyId: auth.appKeyId ?? undefined,
+    impersonation: auth.impersonation ?? undefined });
+  const recoveryCall = async (work: () => Promise<ReturnType<typeof textResult>>) => {
+    try { return await work(); }
+    catch (error) {
+      return { ...toolErrorResult(error, () => {
+        if (error instanceof ScopeGraphQLError) return `[${String(error.extensions.code ?? 'ERROR').toLowerCase()}] ${error.message}`;
+        if (error instanceof MemoryNotFoundError) return '[not_found] Memory not found.';
+        if (error instanceof UrnNotQualifiedError) return `[bad_user_input] ${error.message}`;
+        throw error;
+      }, 'node_recovery'), isError: true as const };
+    }
+  };
   const recoveryPageArgs = {
     memoryRef: z.string().describe('One live memory ID or qualified URN.'),
     limit: z.number().int().nullable().optional().describe('Default20 (also null), cap200; drain pages using total.'),
     offset: z.number().int().nullable().optional().describe('Page offset, default0.'),
   };
   server.tool('hadron_list_recovery_nodes', 'Writer-only retained tombstones in one live memory. Explicit recovery; ordinary reads remain live-only.',
-    recoveryPageArgs, async (args) => textResult(JSON.stringify(await resolvers.Query.recoveryNodes({}, args, scopeCtx()))));
+    recoveryPageArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryNodes({}, args, recoveryCtx())))));
   server.tool('hadron_list_recovery_edges', 'Explicit writer-only source-memory graph inspection; each endpoint is independently authorized before paging/count.',
-    recoveryPageArgs, async (args) => textResult(JSON.stringify(await resolvers.Query.recoveryEdges({}, args, scopeCtx()))));
+    recoveryPageArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryEdges({}, args, recoveryCtx())))));
   server.tool('hadron_get_recovery_node', 'Writer-only raw tombstone content in a live memory; no templates, inheritance or automatic retention expiry.',
-    { nodeRef: z.string().describe('Stable node ID or qualified node URN.') }, async (args) => {
-      const ctx = scopeCtx();
+    { nodeRef: z.string().describe('Stable node ID or qualified node URN.') }, async (args) => recoveryCall(async () => {
+      const ctx = recoveryCtx();
       const retained = await resolvers.Query.recoveryNode({}, args, ctx);
       if (!retained) return textResult('Node not found.');
       const { _retainedNode: _internal, ...dto } = retained;
       const content = await resolvers.RecoveryNode.content(retained as never, {}, ctx);
       return textResult(JSON.stringify({ ...dto, content }));
-    });
+    }));
   server.tool('hadron_restore_node', 'Restore one ordinary retained node, writer-only. Restore deleted parents first; governed/protected nodes refuse. No recursive restore.',
-    { nodeRef: z.string().describe('Stable node ID or qualified node URN.') }, async (args) => {
-      const restored = await resolvers.Mutation.restoreNode({}, args, scopeCtx());
+    { nodeRef: z.string().describe('Stable node ID or qualified node URN.') }, async (args) => recoveryCall(async () => {
+      const restored = await resolvers.Mutation.restoreNode({}, args, recoveryCtx());
       return textResult(JSON.stringify({ id: restored.id, loc: restored.loc, memoryId: restored.memoryId, deletedAt: restored.deletedAt }));
-    });
+    }));
 
   /** A resolver refusal as `[<code>] <message>` text, the app-selection envelope convention. */
   const scopeErrorText = (e: unknown) => {
