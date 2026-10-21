@@ -61,6 +61,13 @@ describe('deriveFamily (Proposed, cor:agt:060:04): llmModel first, then tool, el
     expect(normalizeFamily('not a family')).toBeNull();
     expect(normalizeFamily('-x')).toBeNull();
   });
+
+  it('#2191 canonicalizes provider aliases and preserves custom family identity', () => {
+    expect(normalizeFamily(' AnTHropic ')).toBe('claude');
+    expect(normalizeFamily(' OPENAI ')).toBe('codex');
+    expect(normalizeFamily(' Private.Model-7 ')).toBe('private.model-7');
+    expect(normalizeFamily('claude-opus')).toBe('claude-opus');
+  });
 });
 
 describe('startSession family, and Worker.family following the binding', () => {

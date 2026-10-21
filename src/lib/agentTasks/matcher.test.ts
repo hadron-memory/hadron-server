@@ -101,6 +101,38 @@ const assigneeOf = async (taskId: string) =>
   (await db.agentTask.findUniqueOrThrow({ where: { id: taskId }, select: { assigneeWorkerId: true } })).assigneeWorkerId;
 const NOT_CLAUDE_REVIEWER = { role: 'reviewer', familyNotIn: ['claude'] };
 
+describe('#2191 matching constraints', () => {
+  it('excludes legacy Claude bindings by the anthropic alias', async () => {
+    await bind(rook, 'claude', at('11:00'));
+    const t = await queued('11:00', { familyNotIn: [' AnthropIC '] });
+    expect(await matchQueuedTasks(db, at('11:01'), { appId: app.id })).toEqual([]);
+    expect(await assigneeOf(t.id)).toBeNull();
+  });
+
+  it('includes legacy provider bindings by their canonical family', async () => {
+    await bind(baloo, 'openai', at('11:00'));
+    const t = await queued('11:00', { familyIn: ['codex'] });
+    expect(await matchQueuedTasks(db, at('11:01'), { appId: app.id })).toEqual([
+      { taskId: t.id, workerId: baloo.id, family: 'codex' },
+    ]);
+  });
+
+  it('never automatically assigns to an Agent with usesTasks false', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    await db.agent.update({ where: { id: agentId }, data: { usesTasks: false } });
+    const t = await queued('11:00');
+    expect(await matchQueuedTasks(db, at('11:01'), { appId: app.id })).toEqual([]);
+    expect(await assigneeOf(t.id)).toBeNull();
+  });
+
+  it('does not weaken malformed legacy exclusions or conflicting family lists', () => {
+    const w = { id: 'w', role: 'reviewer', freeFamilies: ['codex'] };
+    for (const raw of [{ familyNotIn: [1] }, { familyIn: ['codex'], familyNotIn: ['codex'] }, { excludeWorkerIds: [false] }]) {
+      expect(eligibleFamily(parseRequirements(raw), w)).toBeNull();
+    }
+  });
+});
+
 // ── cor:agt:060:06 — the rule's scenarios ─────────────────────────────────
 
 describe('cor:agt:060:06 — a queued task goes to the matching worker free for work assigned least recently', () => {
