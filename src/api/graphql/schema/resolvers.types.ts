@@ -2,6 +2,7 @@ import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js'
 import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
@@ -2014,6 +2015,8 @@ export const typeResolvers = {
     // ADMIN/OWNER of the org. Non-admins get an empty list (silent rather
     // than erroring — same shape as User.appMemberships).
     agentOrgGrants: async (org: { id: string }, _: unknown, ctx: Context) => {
+      // A headless run acts for its App, never as the admin it runs on behalf of (Xan's disposition on #2188), even with a platform role.
+      if (isRunPrincipal(ctx)) return [];
       // An org-scoped client (app key / OAuth client) stays pinned to its own
       // org; a user token carries no organizationId, so the role gate decides.
       if (ctx.organizationId && ctx.organizationId !== org.id && !isPlatformAdmin(ctx)) return [];

@@ -138,6 +138,20 @@ describe('#2186 Organization.agentOrgGrants for org OWNER/ADMIN user tokens', ()
     ).toEqual([]);
   });
 
+  it('a headless run (org-matching organizationId, on behalf of an admin, even with a platform role) sees none; a direct person keeps access', async () => {
+    const u = await member('OWNER');
+    const admin = await mkUser(['ADMIN']);
+    const run = (userId: string, roles: Context['roles']): Partial<Context> => ({
+      userId,
+      organizationId: orgId,
+      clientId: 'run:00000000-run',
+      roles,
+    });
+    expect(await grants(run(u.id, ['READER']))).toEqual([]);
+    expect(await grants(run(admin.id, ['ADMIN']))).toEqual([]);
+    expect((await grants({ userId: u.id, organizationId: orgId, clientId: `user:${u.id}`, roles: ['READER'] })).length).toBe(2);
+  });
+
   it('an unexpected DB failure is not swallowed into an empty list', async () => {
     const u = await member('ADMIN');
     const spy = vi.spyOn(db.orgMember, 'findFirst').mockRejectedValue(new Error('boom'));
