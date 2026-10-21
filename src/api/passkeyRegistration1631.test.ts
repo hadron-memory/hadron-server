@@ -231,6 +231,31 @@ describe('the cancel link (040:08 S6-S9)', () => {
   });
 });
 
+describe('end the window early (040:07 S2, S7)', () => {
+  it('a fresh sign-in with a different provider ends the window, then clears the sign-in cookie', async () => {
+    const id = await insertSoftPasskey(db, ana, softPasskey(), { firstWindow: true });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+      await tx.$executeRaw`UPDATE passkey_credentials SET registration_method = 'google' WHERE id = ${id}`;
+    });
+    const browser = await signInLeg();
+    const r = await post('/passkeys/window/end', {}, browser);
+    expect(r.status).toBe(200);
+    expect(r.headers.getSetCookie().some((c) => c.startsWith('hadron_ceremony_browser=;'))).toBe(true);
+    expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id } })).windowOutcome).toBe('ended-early');
+  });
+
+  it('the same method, a bearer alone, or a cross-origin POST ends nothing', async () => {
+    const id = await insertSoftPasskey(db, ana, softPasskey(), { firstWindow: true });
+    const browser = await signInLeg();
+    expect((await post('/passkeys/window/end', {}, browser)).status).toBe(403);
+    const anaJwt = await signJwt({ sub: ana, roles: [] });
+    expect((await post('/passkeys/window/end', {}, undefined, { authorization: `Bearer ${anaJwt}` })).status).toBe(403);
+    expect((await post('/passkeys/window/end', {}, browser, {}, 'https://evil.example')).status).toBe(403);
+    expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id } })).windowOutcome).toBeNull();
+  });
+});
+
 describe('mounting', () => {
   it('a first-passkey window shorter than 72 hours fails at boot (cor:aut:040:07)', async () => {
     vi.stubEnv('PASSKEY_FIRST_WINDOW_HOURS', '48');
@@ -241,7 +266,7 @@ describe('mounting', () => {
     await new Promise<void>((resolve, reject) => server!.close((e) => e ? reject(e) : resolve()));
     vi.stubEnv('PASSKEY_REGISTRATION_ENABLED', 'false');
     await boot();
-    for (const path of ['/passkeys/register/challenge', '/passkeys/register/start', '/passkeys/register/finish', '/passkeys/cancel']) {
+    for (const path of ['/passkeys/register/challenge', '/passkeys/register/start', '/passkeys/register/finish', '/passkeys/cancel', '/passkeys/window/end']) {
       expect((await post(path, {})).status).toBe(404);
     }
     expect((await realFetch(`${base}/passkeys/cancel?token=${'a'.repeat(43)}`)).status).toBe(404);

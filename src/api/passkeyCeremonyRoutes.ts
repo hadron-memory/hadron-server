@@ -10,6 +10,8 @@
  *   out-of-window passkey's assertion (a later one), and returns the creation options naming whose
  *   account it is; `register/finish` verifies the creation response and registers. No bearer
  *   credential, session cookie or request field ever names the user. See `lib/passkeys/registration.ts`.
+ * - `window/end` (cor:aut:040:07): this browser's one fresh sign-in, by a method other than the
+ *   registration's, ends its user's first passkey's cooling-off window early.
  * - The cancel link (cor:aut:040:08, Exceptions): `GET /passkeys/cancel` only renders; the POST
  *   revokes a first passkey in its window, once, with no sign-in, and ends the sign-ins it completed.
  * - `revoke/start` is opened only by an existing passkey's assertion over a server-issued challenge:
@@ -31,6 +33,7 @@ import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
 import { createCeremony, decideCeremonyAssertion, verifyCeremonyAssertion } from '../lib/passkeys/ceremony.js';
 import { bindFirstRegistration, bindLaterRegistration, finishRegistration, firstPasskeyWindowHours, type RegistrationBinding } from '../lib/passkeys/registration.js';
 import { CANCEL_TOKEN, cancelFirstPasskey } from '../lib/passkeys/cancel.js';
+import { endWindowEarly } from '../lib/passkeys/endWindow.js';
 import { CEREMONY_BROWSER_COOKIE, clearCeremonyBrowserCookie } from './freshSignInRoutes.js';
 import { sendPage } from './ceremonyPages.js';
 import { PASSKEY_CANCEL_PATH } from '../jobs/sendPasskeyRegistrationNotices.js';
@@ -60,6 +63,7 @@ function cookieValue(req: Request, name = COOKIE): string | null {
 
 export const PASSKEY_REGISTER_CHALLENGE_PATH = '/passkeys/register/challenge';
 export const PASSKEY_REGISTER_FINISH_PATH = '/passkeys/register/finish';
+export const PASSKEY_END_WINDOW_PATH = '/passkeys/window/end';
 /** Cancel POSTs a minute per client IP. */
 export const PASSKEY_CANCEL_RATE_LIMIT_PER_MINUTE = 10;
 const RP_NAME = 'Hadron';
@@ -183,6 +187,20 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
       res.clearCookie(COOKIE, ceremonyCookie(req));
       clearCeremonyBrowserCookie(req, res);
       res.status(200).set('Cache-Control', 'no-store').json({ ok: true, kind: registered.kind });
+    } catch { refuse(res); }
+  });
+
+  // End a first passkey's window early (cor:aut:040:07): the acting user is this browser's ONE fresh sign-in, whose
+  // method must differ from the registration's. No bearer, session or request field names the user or the passkey.
+  app.post(PASSKEY_END_WINDOW_PATH, limiter, async (req: Request, res: Response) => {
+    try {
+      if (!originAllowed(req)) return void refuse(res);
+      const signInNonce = cookieValue(req, CEREMONY_BROWSER_COOKIE);
+      if (!signInNonce) return void refuse(res);
+      const ended = await endWindowEarly(db, { signInBrowserHash: sha256Hex(signInNonce) });
+      if (!ended) return void refuse(res);
+      clearCeremonyBrowserCookie(req, res);
+      res.status(200).set('Cache-Control', 'no-store').json({ ok: true });
     } catch { refuse(res); }
   });
 
