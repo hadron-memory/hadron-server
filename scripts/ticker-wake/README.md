@@ -197,7 +197,10 @@ when the old input was accepted, the composer is provably empty, and the same
 terminal handle/incarnation still receives it. Busy/deadline, draft, identity,
 server-timing and pre-send server-check guards still apply. The incarnation is
 checked again after reconciliation/evidence reads. No new tick means no new
-request; task events alone cannot unlock it. The fresh text still uses
+request; task events alone cannot unlock it. Newly arrived task events bundled
+with this recovery wait for the ordinary next pass (or the replacement
+request's reconciliation if it also remains ambiguous); the recovery nudge
+only names newer ticks. The fresh text still uses
 `nudgeText`, with a fresh-request timestamp, and uses no old `--retry-request` id.
 
 Before recording the new intent, the original ambiguous entry is retained in

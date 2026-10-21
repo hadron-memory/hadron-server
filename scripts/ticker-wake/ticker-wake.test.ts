@@ -2323,6 +2323,34 @@ describe('#2138 — fresh ticks after two unreconciled cadences', () => {
     expect(archived()).toHaveLength(1);
     expect(archived()[0]).toMatchObject({coverage: ['T:1'], state: 'ambiguous'});
   });
+  it('resolves an id-less accepted request on evidence before considering newer-tick recovery', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], T0), [], timing)];
+    f.sendReply = () => JSON.stringify(NO_ID_ACCEPTED);
+    await go(at(T0));
+    expect(current().requestId).toBeUndefined();
+    f.lastCheckedAt = iso(T0 + 60_000);
+    // New tick is legitimate new work, but the handled old request must not be archived or called unresolved.
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:3'], T0 + 1_200_000), [], timing)];
+    f.sendReply = () => JSON.stringify(CONFIRMED);
+    await go(at(T0 + 1_200_000));
+    expect(f.sent).toHaveLength(2); // old handled request plus the new tick, via normal delivery
+    expect(f.sent[1]).not.toContain('Fresh tick request at');
+    expect(existsSync(join(dir, 'ticker-wake', 'needs-person.json'))).toBe(false);
+    expect(log()).toContain('resolved as delivered on evidence');
+    expect(f.acked).toEqual([f.wakes[0].proof]);
+  });
+  it('acks only, without archiving or typing again, when an id-less old request is handled and its proof is re-offered', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], T0), [], timing)];
+    f.sendReply = () => JSON.stringify(NO_ID_ACCEPTED);
+    await go(at(T0));
+    f.lastCheckedAt = iso(T0 + 60_000);
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], T0 + 1_200_000), [], timing)];
+    await go(at(T0 + 1_200_000));
+    expect(f.sent).toHaveLength(1);
+    expect(f.acked).toEqual([f.wakes[0].proof]);
+    expect(existsSync(join(dir, 'ticker-wake', 'needs-person.json'))).toBe(false);
+    expect(log()).toContain('resolved as delivered on evidence');
+  });
   it('requires a new two-cadence wait for a replacement that also remains ambiguous', async () => {
     await stuck();
     f.sendReply = () => JSON.stringify({...ACCEPTED_ONLY, result: {send: {accepted:true, prompt:{requestId:'r2', stages:['input_accepted']}}}});

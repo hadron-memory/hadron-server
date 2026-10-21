@@ -760,22 +760,23 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
         // An unreconciled earlier request is reconciled with ITS OWN identity. Reissuing it can still perform input, so it
         // needs the same receiver and composer safety. An id-less accepted request may only be displaced by NEW ticks
         // after two cadences; the old request is never replayed without its id.
-        const allowFreshTick = (p: Ambiguous, unsafe: string | null): boolean => {
-          if (dry || unsafe || now - p.at < NEEDS_PERSON_AFTER_MS || !wasAccepted(p.detail)
+        const allowFreshTick = (p: Ambiguous): boolean => {
+          if (dry || now - p.at < NEEDS_PERSON_AFTER_MS || !wasAccepted(p.detail)
             || p.receiver !== receiver || typeof term0?.incarnationId !== 'string' || !term0.incarnationId) return false;
           const old = [...unresolved, ...p.coverage];
           if (!work.some((t) => tickParts(t) && !unresolvedCovers(t, old))) return false;
+          if (safeToType()) return false;
           displaced = p;
           unresolved.push(...p.coverage);
           log(`${ts} ${name}: earlier request needs a person (${Math.floor((now - p.at) / 1000)}s old); newer ticks are a fresh request, not a retype`);
           return true;
         };
         if (prior?.state === 'ambiguous') {
-          if ((!prior.requestId || dry) && !allowFreshTick(prior, safeToType())) { log(`${ts} ${name}: an earlier send is unreconciled (${safeDetail(prior.detail)}); not retyped, not acked`); return; }
+          if (dry) { log(`${ts} ${name}: an earlier send is unreconciled (${safeDetail(prior.detail)}); not retyped, not acked`); return; }
           if (prior.receiver !== receiver) { log(`${ts} ${name}: an earlier send is unreconciled for another receiver (${prior.receiver}); held for a human`); return; }
           // Reissue by its own id first: a confirmation from Orca settles it.
-          const unsafe = safeToType();
-          const r = unsafe || !prior.requestId || displaced ? null : await submit(cfg, runAsync, prior.handle, prior.text, prior.requestId);
+          const unsafe = prior.requestId ? safeToType() : null;
+          const r = unsafe || !prior.requestId ? null : await submit(cfg, runAsync, prior.handle, prior.text, prior.requestId);
           let resolved = r?.kind === 'confirmed' ? 'reconciled as delivered' : '';
           if (!resolved) {
             // Otherwise only evidence resolves it (#26055): accepted, same receiver (checked above), composer provably empty,
@@ -790,7 +791,7 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
               const held = unsafe ? `unreconciled request not reissued (held: ${unsafe})` : `earlier request still unreconciled (${safeDetail(r?.detail ?? prior.detail)})`;
               const person = now - prior.at >= NEEDS_PERSON_AFTER_MS ? 'needs a person' : 'not retyped, not acked';
               log(`${ts} ${name}: ${held}; no delivery evidence yet (${why}); ${person}`);
-              if (!displaced && !allowFreshTick(prior, unsafe)) return;
+              if (!allowFreshTick(prior)) return;
             }
           }
           if (displaced) prior = undefined;
