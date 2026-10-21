@@ -380,14 +380,16 @@ export const typeDefs = `#graphql
     memoryUrn: String!
     name: String!
     class: MemoryClass!
-    "Every reason this memory is in scope, never empty: AGENT_SYSTEM, AGENT_LINK, INHERITED_BASE, TEAM_SPACE, then by agent install order."
+    "Every reason this memory is in scope. Never empty. Ordered by kind (AGENT_SYSTEM, AGENT_LINK, INHERITED_BASE, TEAM_SPACE), then by agent install order."
     sources: [AppMemorySource!]!
     """
     Advisory: whether this caller, in this request's context, may create a node
     in this memory (the createNode gate). Memory-level only: it never makes an
     inherited node editable, and every write is still decided by the server.
-    Offer as an upload or new-node target only a row with viewerCanWrite AND a
-    source other than INHERITED_BASE.
+    Offer a row as an upload or new-node target only when viewerCanWrite is true
+    AND at least one of its sources has a kind other than INHERITED_BASE. A
+    memory present only as an inherited base belongs to the base Agent, and
+    other Apps read it too.
     """
     viewerCanWrite: Boolean!
   }
@@ -395,14 +397,18 @@ export const typeDefs = `#graphql
   "#2190: one reason a memory is in an App's scope."
   type AppMemorySource {
     kind: AppMemorySourceKind!
-    "The installed or base Agent, for AGENT_SYSTEM, AGENT_LINK and INHERITED_BASE; null for TEAM_SPACE. An id only."
+    "The installed or base Agent, for AGENT_SYSTEM, AGENT_LINK and INHERITED_BASE; null for TEAM_SPACE. An id only: when it does not resolve in App.agents (an Agent this caller may not read), show the source kind without a name."
     agentId: ID
   }
 
   enum AppMemorySourceKind {
+    "The system memory of an Agent installed in this App."
     AGENT_SYSTEM
+    "A memory linked to an Agent installed in this App."
     AGENT_LINK
+    "A base Agent's system memory, with nodes inherited by an installed Agent's system memory (cor:dmo:050:14)."
     INHERITED_BASE
+    "The App's own team space, listed for App participants only."
     TEAM_SPACE
   }
 
@@ -2859,8 +2865,10 @@ export const typeDefs = `#graphql
     reads for this caller, one row per memory with every reason it is in scope,
     ordered by memoryUrn and paged (default 50, cap 200; over the cap returns a
     page of the cap). Same admission as appNodes: a refused caller gets
-    appNodes' error, and total 0 means no memories (also the case for an App in
-    a soft-deleted organization). Rows are leaves: join agentId to App.agents.
+    appNodes' error. Every memory in the caller's scope is listed, including
+    empty ones, so nothing is withheld; total 0 means no memories, and is also
+    the answer for an App in a soft-deleted organization. Rows are leaves: join
+    agentId to App.agents.
     """
     memoryScope(limit: Int, offset: Int): AppScopedMemoryPage!
     appType: AppType!
