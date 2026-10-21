@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolvers } from './resolvers.js';
 import type { Context } from './resolvers.helpers.js';
 
@@ -492,8 +493,8 @@ describe('#2044 install memory — list surfaces', () => {
     const reader = await f.user('indexed-reader');
     await db.orgMember.create({ data: { organizationId: orgId, userId: reader.id, role: 'READER' } });
     const search = async (u: { id: string }) => {
-      const out = await Q.findNodes({}, { query: 'zzqx-install-marker', mode: 'keyword', filter: { memoryClasses: ['system'] }, orgId, limit: 20 }, ctxOf(u.id))
-        .catch(() => ({ hits: [] }));
+      // No .catch: an error on a negative case would read as "found nothing" and hide a broken gate (Ruth, Bindi).
+      const out = await Q.findNodes({}, { query: 'zzqx-install-marker', mode: 'keyword', filter: { memoryClasses: ['system'] }, orgId, limit: 20 }, ctxOf(u.id));
       return ((out.hits ?? []) as Array<{ node: { memoryId: string } }>).filter((h) => h.node.memoryId === row!.id);
     };
     const { memoryIsVectorIndexed } = await import('../../../lib/embedding/indexing.js');
@@ -728,9 +729,12 @@ describe('#2044 install memory — lock order and the pooled-only writers (Diego
     const before = await db.node.findUniqueOrThrow({ where: { id: node.id } });
     await expect(M.restoreNodeRevision({}, { revisionId: rev.id }, ctxOf(f.admin.id))).rejects.toThrow();
     await expect(M.deleteNode({}, { nodeRef: node.id }, ctxOf(f.admin.id))).rejects.toThrow();
+    // The title promised "move" and the body never called it (Andi, Xan, Clark): relocate within the install memory.
+    await expect(M.moveNode({}, { sourceRef: node.id, targetUrn: emitNodeUrnV2(row!.urn, 'prompts:moved') }, ctxOf(f.admin.id)))
+      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
-    expect({ content: after.content, deletedAt: after.deletedAt, revSeq: after.revSeq })
-      .toEqual({ content: before.content, deletedAt: before.deletedAt, revSeq: before.revSeq });
+    expect({ content: after.content, deletedAt: after.deletedAt, revSeq: after.revSeq, loc: after.loc, memoryId: after.memoryId })
+      .toEqual({ content: before.content, deletedAt: before.deletedAt, revSeq: before.revSeq, loc: before.loc, memoryId: before.memoryId });
     expect(row).toBeTruthy();
     // The supported doors still write.
     await expect(M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'v3' } }, ctxOf(f.admin.id))).resolves.toBeTruthy();
