@@ -114,7 +114,7 @@ dev DB or `hadron_test`. Use distinct names and ports for concurrent stacks.
 
 ```bash
 # Run the test suite. Files run in PARALLEL, each vitest worker against its own
-# clone (`hadron_test_r<runId>_<poolId>`, created lazily by
+# clone (`hadron_test_r<scope>_p<pid>_<poolId>`, created lazily by
 # src/test/perWorkerDb.ts and dropped at teardown) — ~6-7x faster than the old
 # serial mode. The clones come from `hadron_test_s<fingerprint>`, which
 # globalSetup builds from empty for this checkout's schema (#1922), so no setup
@@ -124,20 +124,24 @@ dev DB or `hadron_test`. Use distinct names and ports for concurrent stacks.
 # opens its OWN raw pg connection must read `process.env.DATABASE_URL` (the
 # per-worker URL), NOT `TEST_DATABASE_URL`, or it splits across two DBs.
 #
-# `<runId>` is the vitest MAIN process pid, stamped into HADRON_TEST_RUN_ID by
-# globalSetup (#1091). It is there because a pool id alone is NOT unique to a
-# run — it restarts at 1 every time — so two suites on this machine used to
-# claim the same databases and delete from each other's tables mid-test. Two
-# concurrent runs are now safe. Orphan clones from a crashed run are collected
-# by the next run whose pid is not alive; nothing is dropped while its run is.
+# #1137: HADRON_TEST_RUN_ID remains the bare vitest-main PID. globalSetup
+# overwrites HADRON_TEST_RUN_SCOPE from Linux boot identity + PID namespace
+# device/inode; workers inherit it unchanged. DBs use
+# `<base>_r<scope>_p<pid>_<pool|tpl>` and graph roots use
+# `<tmpdir>/hadron-test-graph-runs/r<scope>_p<pid>`. Shared loopback or Unix
+# sockets do not prove PID-namespace locality. Native non-Linux uses an explicit
+# platform/machine scope with the existing local-machine assumption. Unverifiable
+# Linux parallel mode refuses; serial mode uses an unknown, non-collectible scope.
 #
-# Graph fixtures (#1951): createNode writes every node to disk under
-# GRAPHS_PATH, which tests point at `<tmpdir>/hadron-test-graph-runs/r<runId>`
-# (src/test/graphRoot.ts). globalSetup creates it, teardown removes it (and
-# fails the run if it can't), and a dead run's root is swept by the next run,
-# on the same pid-liveness rule as the clones. The old shared
-# /tmp/hadron-test-graphs is no longer written by this checkout; it can be
-# deleted once no pre-#1951 checkout runs suites on the host.
+# Automatic cleanup selects only the exact own token, or a provably dead PID
+# in the same verified scope. Prior-boot, foreign, unknown and legacy DBs/roots
+# are preserved: crashed runs can accumulate WITHOUT BOUND in disk/inode use.
+# Legacy graph roots retain the #1951 inode risk. Manual removal requires ALL
+# namespaces sharing that Postgres/tmpdir to be quiescent, not local PID absence.
+# The legacy-prune tool below is not proof of that quiescence and does not
+# collect pid-only r<pid> clones or old graph roots. No automatic boot-mismatch
+# deletion rule exists. Use a private disk-backed TMPDIR for checkouts/fixtures
+# when the host's tmpfs inode cap is tight.
 pnpm test
 
 # Drop pre-#1091 `hadron_test_<n>` clones (from a checkout older than run-scoped

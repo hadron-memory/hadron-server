@@ -1,4 +1,5 @@
 import { sessionEndReason } from '../lib/sessionEndReason.js';
+import { governedKindAnnotation } from '../lib/edgeGovernedKind.js';
 import { GraphQLError } from 'graphql';
 import { writeResumeClaim, type ResumeCandidate } from '../lib/resumeClaims.js';
 import { registerAutomationPinTools } from './automationPinTools.js';
@@ -1455,8 +1456,8 @@ type ReadProjectionNode = {
   abstract: string | null;
   abstractOriginHash: string | null;
   memory: { isEncrypted: boolean };
-  outgoingEdges: Array<{ name: string | null; loc: string; target: { id: string; loc: string; memoryId: string; name: string } }>;
-  incomingEdges: Array<{ name: string | null; loc: string; source: { id: string; loc: string; memoryId: string; name: string } }>;
+  outgoingEdges: Array<{ name: string | null; loc: string; governedKind?: unknown; target: { id: string; loc: string; memoryId: string; name: string } }>;
+  incomingEdges: Array<{ name: string | null; loc: string; governedKind?: unknown; source: { id: string; loc: string; memoryId: string; name: string } }>;
 };
 
 const readProjectionInclude = {
@@ -1744,13 +1745,13 @@ async function renderNodeReadProjection(
       const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId, memoryUrnOf);
       // #322: surface the target's stable PK alongside the URN so callers can
       // reference it by id (immutable across move/rename) instead of the URN.
-      return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}`;
+      return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}${governedKindAnnotation(e.governedKind)}`;
     }),
   );
   const incomingLines = await Promise.all(
     node.incomingEdges.map(async (e) => {
       const sourceUrn = await nodeUrn(e.source.loc, e.source.memoryId, memoryUrnOf);
-      return `  - ${sourceUrn} (id: ${e.source.id}) (${e.source.name}) — ${e.name ?? e.loc}`;
+      return `  - ${sourceUrn} (id: ${e.source.id}) (${e.source.name}) — ${e.name ?? e.loc}${governedKindAnnotation(e.governedKind)}`;
     }),
   );
 
@@ -4593,7 +4594,7 @@ export function createMcpServerInstance(
             const edgeStrs = await Promise.all(
               edges.map(async (e) => {
                 const targetUrn = await nodeUrn(e.target!.loc, e.target!.memoryId, memoryUrnOf);
-                return `→ ${targetUrn} (${e.name ?? e.loc})`;
+                return `→ ${targetUrn} (${e.name ?? e.loc})${governedKindAnnotation((e as { governedKind?: unknown }).governedKind)}`;
               }),
             );
             parts.push(`  Edges: ${edgeStrs.join(', ')}`);
@@ -5449,7 +5450,7 @@ export function createMcpServerInstance(
       const outEdgeLines = await Promise.all(node.outgoingEdges.map(async (e) => {
         const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId, memoryUrnOf);
         // #322: surface the target's stable PK alongside the URN.
-        return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}`;
+        return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}${governedKindAnnotation((e as { governedKind?: unknown }).governedKind)}`;
       }));
       // #186: nodeType in the meta block, mirroring hadron_get_node's format.
       // #881 — parity with hadron_get_node, including the fallback-URN omission.
