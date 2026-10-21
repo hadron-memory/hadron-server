@@ -73,6 +73,15 @@ describe('#2046 S9-1 — the table', () => {
     expect(await db.compiledPromptRevision.count()).toBe(0);
   });
 
+  it('a WORKER row naming a worker that does not exist is refused by the #1162 fence', async () => {
+    const node = await compiledNode('v1');
+    const app = await db.app.create({ data: { id: generateId(), name: 'App', urn: 'cr-org:app', organizationId: (await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).organizationId } });
+    const row = { compiledNodeId: node.id, compiledRevNo: 1, contentHash: sha256Hex('v1'), targetKind: 'WORKER', targetAgentId: agentId, targetAppId: app.id, provenance: provenance('s', 1, 's') as never, occurrenceCount: 1 };
+    expect(await sqlCode(db.compiledPromptRevision.create({ data: { ...row, targetWorkerId: generateId() } }))).not.toBe('NO_ERROR');
+    const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId, name: 'Iris', slug: 'iris', signature: '', trailer: '' } });
+    expect(await sqlCode(db.compiledPromptRevision.create({ data: { ...row, targetWorkerId: worker.id } }))).toBe('NO_ERROR');
+  });
+
   it('a hard delete of the compiled node takes its rows with it', async () => {
     const node = await compiledNode('v1');
     await record(node.id, 1, 'v1');
