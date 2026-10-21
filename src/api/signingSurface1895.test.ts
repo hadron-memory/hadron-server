@@ -75,11 +75,16 @@ it.each([['false', 'true'], ['malformed', 'true'], ['true', undefined], ['true',
       }
     }
   } finally { await client.close(); }
-  // No REST ceremony/request routes have merged. They use Express's ordinary
+  // No REST signing-request routes have merged. Off surfaces use Express's ordinary
   // missing-route behavior; there is no feature-specific refusal middleware.
-  for (const path of ['/signing/requests/opaque', '/passkeys/register', '/nonexistent-control']) {
+  for (const path of ['/signing/requests/opaque', '/nonexistent-control']) {
     const r = await fetch(`${base}${path}`, { headers });
     expect(r.status).toBe(404);
     expect(await r.text()).toContain(`Cannot GET ${path}`);
   }
+  // #1631 PR2: the registration page exists exactly when the registration switch is on, and is an ordinary
+  // missing route otherwise (no switch oracle).
+  const page = await fetch(`${base}/passkeys/register`, { headers });
+  expect(page.status).toBe(registrationOn ? 200 : 404);
+  if (!registrationOn) expect(await page.text()).toContain('Cannot GET /passkeys/register');
 });
