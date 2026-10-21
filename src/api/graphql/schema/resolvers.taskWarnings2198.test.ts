@@ -15,11 +15,19 @@ import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { taskWarningsPlugin } from '../taskWarningsPlugin.js';
 import {
-  emitTaskWarnings, renderTaskWarnings, resolveRegisters, shapeResponseWarnings,
+  boundedRead, emitTaskWarnings, renderTaskWarnings, resolveRegisters, shapeResponseWarnings,
   MAX_WARNINGS_PER_OPERATION, MAX_WARNINGS_PER_RESPONSE, type TaskWarning, type TaskWarningCode,
 } from './resolvers.taskWarnings.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+const hooks: { afterCommit: (() => Promise<void>) | null } = { afterCommit: null };
+vi.mock('../../../lib/hostOperations/launch.js', async (orig) => ({
+  ...(await orig<typeof import('../../../lib/hostOperations/launch.js')>()),
+  launchForAssignment: async (...a: unknown[]) => {
+    await hooks.afterCommit?.();
+    return (await orig<typeof import('../../../lib/hostOperations/launch.js')>()).launchForAssignment(...(a as [never, never]));
+  },
+}));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
 const M = resolvers.Mutation as any;
@@ -152,9 +160,15 @@ describe('assignee warnings (create-with-assignee, assign, reassign)', () => {
   it('a caller the roster would not show the facts to gets none of the three (the others stay)', async () => {
     const c = ctx(outsider.id);
     await emitTaskWarnings(c, undefined, app.id, {
-      codes: ['task.create.no-source', 'task.assign.assignee-busy', 'task.assign.assignee-unavailable'], assigneeWorkerId: anne.id,
+      codes: ['task.create.no-source', 'task.assign.assignee-busy', 'task.assign.assignee-unavailable', 'task.assign.assignee-paused'],
     });
     expect(codes(c)).toEqual(['task.create.no-source']);
+    // a participant passes the same gate and gets all four, in the fixed order
+    const ok = ctx(member.id);
+    await emitTaskWarnings(ok, undefined, app.id, {
+      codes: ['task.assign.assignee-paused', 'task.assign.assignee-busy', 'task.create.no-source', 'task.assign.assignee-unavailable'],
+    });
+    expect(codes(ok)).toEqual(['task.create.no-source', 'task.assign.assignee-unavailable', 'task.assign.assignee-busy', 'task.assign.assignee-paused']);
   });
 });
 
@@ -203,8 +217,13 @@ describe('the register: code → role task, through the right chains', () => {
     const childRow = await db.agent.findUniqueOrThrow({ where: { id: child.id } });
     const childMemUrn = (await db.memory.findUniqueOrThrow({ where: { id: childRow.systemMemoryId as string } })).urn;
     await db.agent.update({ where: { id: child.id }, data: { extendsAgentId: teamAgentId } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: child.id } }); // a cast worker's Agent is installed in its App
     await node(childRow.systemMemoryId as string, 'tasks:finish', { isRunnable: true });
-    const out = await asWorker(anne, child.id, () => resolveRegisters(ctx(member.id), app.id, finishWarning()));
+    // The caller must be able to read the child's definition under the canonical gate: an org admin can; an App
+    // member of a NON-primary installed Agent cannot (see the withheld control below).
+    const out = await asWorker(anne, child.id, () => resolveRegisters(ctx(admin.id), app.id, finishWarning()));
+    const member_ = await asWorker(anne, child.id, () => resolveRegisters(ctx(member.id), app.id, finishWarning()));
+    expect(member_.get('task.finish.open-children')).toEqual({ state: 'unresolved' });
     expect(out.get('task.finish.open-children')).toMatchObject({
       state: 'mapped', taskUrn: `hrn:node:${childMemUrn}:tasks:finish`,
     });
@@ -228,6 +247,17 @@ describe('the register: code → role task, through the right chains', () => {
     expect((await run()).get('task.finish.open-children')).toEqual({ state: 'unresolved' });
     await db.node.update({ where: { id: n.id }, data: { isRunnable: true, deletedAt: new Date() } });
     expect((await run()).get('task.finish.open-children')).toEqual({ state: 'unresolved' });
+  });
+
+  it('the caller must be able to READ both the register entry and the role task: an unreadable one is withheld', async () => {
+    await registerEntry(teamMemoryId, 'task.finish.open-children', 'tasks:finish');
+    await node(teamMemoryId, 'tasks:finish', { isRunnable: true });
+    // outsider has no standing in the org or App: neither node is readable by them
+    const out = await asWorker(anne, teamAgentId, () => resolveRegisters(ctx(outsider.id), app.id, finishWarning()));
+    expect(out.get('task.finish.open-children')).toEqual({ state: 'unmapped' });
+    // positive control: an App participant reads the same
+    const ok = await asWorker(anne, teamAgentId, () => resolveRegisters(ctx(member.id), app.id, finishWarning()));
+    expect(ok.get('task.finish.open-children')?.state).toBe('mapped');
   });
 
   it('no Agent ⇒ no register field: a person, an ambiguous binding (worker without agent)', async () => {
@@ -280,6 +310,82 @@ describe('the register: code → role task, through the right chains', () => {
     await asWorker(anne, teamAgentId, () => resolveRegisters(ctx(member.id), app.id, finishWarning()));
     spy.mockRestore();
     expect(seen.join(' ')).toMatch(/SET LOCAL statement_timeout = 300/);
+  });
+});
+
+describe('decided in the write transaction, bounded after it', () => {
+  it('paused is the deciding snapshot: a pause lifted between the commit and the response still warns', async () => {
+    await db.workerWakeSettings.create({ data: { workerId: liam.id, pausedUntil: new Date(Date.now() + 3_600_000) } });
+    await db.session.create({ data: { id: generateId(), userId: member.id, appId: app.id, workerId: liam.id, agentId: teamAgentId } });
+    hooks.afterCommit = async () => { await db.workerWakeSettings.update({ where: { workerId: liam.id }, data: { pausedUntil: null } }); };
+    try {
+      const c = ctx(member.id);
+      await create(c, { assignee: { worker: liam.id } });
+      expect(codes(c)).toContain('task.assign.assignee-paused');
+    } finally { hooks.afterCommit = null; }
+    // control: not paused at the decision ⇒ no warning even if a pause appears after it
+    const c2 = ctx(member.id);
+    hooks.afterCommit = async () => { await db.workerWakeSettings.update({ where: { workerId: liam.id }, data: { pausedUntil: new Date(Date.now() + 3_600_000) } }); };
+    try {
+      await create(c2, { assignee: { worker: liam.id } });
+      expect(codes(c2)).not.toContain('task.assign.assignee-paused');
+    } finally { hooks.afterCommit = null; }
+  });
+
+  it('a failing enrichment keeps the fixed-text codes and drops the privacy-gated facts (fail closed)', async () => {
+    const spy = vi.spyOn(db, '$transaction').mockRejectedValue(new Error('boom'));
+    const c = ctx(member.id);
+    try {
+      await emitTaskWarnings(c, undefined, app.id, { codes: ['task.create.no-source', 'task.assign.assignee-busy', 'task.finish.open-children'] });
+    } finally { spy.mockRestore(); }
+    expect(codes(c)).toEqual(['task.create.no-source', 'task.finish.open-children']);
+    expect(c.taskWarnings!.every((w) => w.warning.register === undefined)).toBe(true);
+  });
+
+  it('a request that spent its read budget files only fixed text, with no further read', async () => {
+    const c = ctx(member.id);
+    c.taskWarningState = { spentMs: 10_000, gate: new Map(), registers: new Map(), team: new Map() };
+    const spy = vi.spyOn(db, '$transaction');
+    await emitTaskWarnings(c, undefined, app.id, { codes: ['task.create.no-source', 'task.assign.assignee-busy'] });
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+    expect(codes(c)).toEqual(['task.create.no-source']);
+  });
+
+  it('a full response does no more work: nothing is read for a warning that cannot be sent', async () => {
+    const c = ctx(member.id);
+    c.taskWarnings = Array.from({ length: MAX_WARNINGS_PER_RESPONSE }, () => ({ path: 'p', warning: { code: 'task.create.no-source' as const, text: 't' } }));
+    const spy = vi.spyOn(db, '$transaction');
+    await asWorker(anne, teamAgentId, () => emitTaskWarnings(c, undefined, app.id, { codes: ['task.assign.assignee-busy', 'task.finish.open-children'] }));
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+    expect(c.taskWarnings).toHaveLength(MAX_WARNINGS_PER_RESPONSE);
+  });
+
+  it('Postgres really cancels a slow statement, and the connection is reusable', async () => {
+    const t0 = Date.now();
+    await expect(boundedRead(ctx(member.id), (tx) => tx.$queryRaw`SELECT pg_sleep(2)`)).rejects.toThrow();
+    expect(Date.now() - t0).toBeLessThan(1500);
+    expect(await db.$queryRaw`SELECT 1 AS one`).toEqual([{ one: 1 }]);
+  });
+
+  it('21 aliased creates in one worker request: all succeed, 20 warnings, ONE bounded read (shared lookup, no per-alias work)', async () => {
+    await registerEntry(teamMemoryId, 'task.create.no-source', 'tasks:a');
+    await node(teamMemoryId, 'tasks:a', { isRunnable: true });
+    const server = new ApolloServer<Context>({ typeDefs, resolvers, plugins: [taskWarningsPlugin] });
+    const body = Array.from({ length: 21 }, (_, i) => `a${i}: createAgentTask(input: { appRef: "${app.id}", title: "t${i}" }) { id }`).join(' ');
+    const spy = vi.spyOn(db, '$transaction');
+    const before = spy.mock.calls.length;
+    const res = await asWorker(anne, teamAgentId, () => server.executeOperation({ query: `mutation { ${body} }` }, { contextValue: ctx(member.id) }));
+    const bounded = spy.mock.calls.slice(before).filter((c) => (c[1] as { timeout?: number } | undefined)?.timeout === 1500);
+    spy.mockRestore();
+    if (res.body.kind !== 'single') throw new Error('single expected');
+    expect(res.body.singleResult.errors).toBeUndefined();
+    expect(Object.keys(res.body.singleResult.data as object)).toHaveLength(21);
+    const warnings = res.body.singleResult.extensions?.warnings as { path: string; register?: { state: string } }[];
+    expect(warnings).toHaveLength(MAX_WARNINGS_PER_RESPONSE);
+    expect(warnings[0].register?.state).toBe('mapped');
+    expect(bounded).toHaveLength(1);
   });
 });
 

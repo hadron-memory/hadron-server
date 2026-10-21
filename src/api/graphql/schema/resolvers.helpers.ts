@@ -132,6 +132,8 @@ export interface Context {
   impersonation?: ImpersonationContext;
   /** #2198 — task warnings collected during this request (see resolvers.taskWarnings.ts); lazily created. */
   taskWarnings?: { path: string; warning: import('./resolvers.taskWarnings.js').TaskWarning }[];
+  /** #2198 — request-local gate/register answers and the read time spent on them (resolvers.taskWarnings.ts). */
+  taskWarningState?: import('./resolvers.taskWarnings.js').TaskWarningState;
   // Request-scoped memo for Edge.source/target lazy loads — avoids an N+1 of
   // identical node.findUnique calls when many edges in one response share an
   // endpoint (lazily created on first use; see loadEdgeEndpointNode). #381.

@@ -925,7 +925,6 @@ export const agentTaskMutations = {
     const refused = parentId ? () => notFound(parentId) : () => appNotFound(input.appRef as string);
     // #2198: advice decided inside the write transaction, filed after it commits.
     const warn: TaskWarningCode[] = source === null ? ['task.create.no-source'] : [];
-    let warnWorkerId: string | null = null;
     const made = await inTaskWriteTx(ctx, app, actor, refused, async (tx, txCtx, app) => {
       if (parentId) {
         // Lock the parent so its assignee and status can't move under us,
@@ -938,7 +937,7 @@ export const agentTaskMutations = {
         refuseEnded(parent);
       }
       const { requirements, owner, assignee } = await resolveParties(txCtx, app);
-      warnWorkerId = await assigneeAdvice(tx, app.id, assignee, null, warn);
+      await assigneeAdvice(tx, app.id, assignee, null, warn);
       return insertTask(tx, {
         app, parentId, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee, status,
         created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
@@ -950,7 +949,7 @@ export const agentTaskMutations = {
     const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
     // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
     await launchAssignee(ctx.db, created);
-    await emitTaskWarnings(ctx, info, created.appId, { codes: warn, assigneeWorkerId: warnWorkerId });
+    await emitTaskWarnings(ctx, info, created.appId, { codes: warn });
     return created;
   },
 
@@ -969,7 +968,6 @@ export const agentTaskMutations = {
   ) => {
     let party: TaskParty | null = null;
     const warn: TaskWarningCode[] = [];
-    let warnWorkerId: string | null = null;
     const assigned = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, assigns it.", { taskId });
@@ -981,7 +979,7 @@ export const agentTaskMutations = {
       party ??= await resolveParty(txCtx, app, assignee, 'TASK_ASSIGNEE_INVALID');
       // #2022 (cor:agt:090:03): never to a worker a live stop signal covers.
       if (party.workerId) await refuseStoppedAssignee(tx, app.id, party.workerId, new Date(), task.id);
-      warnWorkerId = await assigneeAdvice(tx, app.id, party, task.id, warn);
+      await assigneeAdvice(tx, app.id, party, task.id, warn);
       const close = closeSessionWhenDone ?? task.closeSessionWhenDone;
       // #1754 (cor:agt:050:02): assigning a backlog task makes it ready work.
       // The write is a guarded updateMany on the consumed state (no assignee,
@@ -1016,7 +1014,7 @@ export const agentTaskMutations = {
     });
     // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no live session through its host.
     await launchAssignee(ctx.db, assigned);
-    await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn, assigneeWorkerId: warnWorkerId });
+    await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn });
     return assigned;
   },
 
@@ -1103,7 +1101,6 @@ export const agentTaskMutations = {
   ) => {
     let party: TaskParty | null = null;
     const warn: TaskWarningCode[] = [];
-    let warnWorkerId: string | null = null;
     const reassigned = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, reassigns it.", { taskId });
@@ -1119,7 +1116,7 @@ export const agentTaskMutations = {
       }
       // #2022 (cor:agt:090:03): never to a worker a live stop signal covers; moving it away is not refused.
       if (party.workerId) await refuseStoppedAssignee(tx, app.id, party.workerId, new Date(), task.id);
-      warnWorkerId = await assigneeAdvice(tx, app.id, party, task.id, warn);
+      await assigneeAdvice(tx, app.id, party, task.id, warn);
       const close = closeSessionWhenDone ?? task.closeSessionWhenDone;
       await tx.agentTask.update({
         where: { id: task.id },
@@ -1131,7 +1128,7 @@ export const agentTaskMutations = {
       });
     });
     await launchAssignee(ctx.db, reassigned);
-    await emitTaskWarnings(ctx, info, reassigned.appId, { codes: warn, assigneeWorkerId: warnWorkerId });
+    await emitTaskWarnings(ctx, info, reassigned.appId, { codes: warn });
     return reassigned;
   },
 
@@ -1247,8 +1244,8 @@ export const agentTaskMutations = {
 };
 
 /**
- * #2198: the advice an assignment earns, read in the write transaction. Pushes `unavailable` / `busy` onto `warn` and
- * returns the worker to check for `paused` after commit — or null for a user assignee, no assignee, or the caller
+ * #2198: the advice an assignment earns, read in the write transaction: `unavailable`, `busy` and `paused` are pushed
+ * onto `warn` (the privacy gate is applied after commit). Nothing for a user assignee, no assignee, or the caller
  * itself (a worker taking work for itself is not advised about its own state).
  */
 async function assigneeAdvice(
@@ -1257,13 +1254,13 @@ async function assigneeAdvice(
   assignee: TaskParty | null,
   excludeTaskId: string | null,
   warn: TaskWarningCode[],
-): Promise<string | null> {
+): Promise<void> {
   const workerId = assignee?.workerId ?? null;
-  if (!workerId || workerId === currentActor().workerId) return null;
+  if (!workerId || workerId === currentActor().workerId) return;
   const facts = await readAssigneeFacts(tx, { appId, workerId, excludeTaskId, now: new Date() });
   if (facts.unavailable) warn.push('task.assign.assignee-unavailable');
   if (facts.busy) warn.push('task.assign.assignee-busy');
-  return workerId;
+  if (facts.paused) warn.push('task.assign.assignee-paused');
 }
 
 /**
