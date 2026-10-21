@@ -3336,7 +3336,7 @@ export const typeDefs = `#graphql
     rawKey: String!
   }
 
-  """#1631 (cor:aut:040:05): a passkey record, as its owner sees it. Never a private key."""
+  """#1631: a passkey record, as its owner sees it. Never a private key."""
   type PasskeyCredential {
     id: ID!
     """The owner's name for it; empty once the owner's account is deleted."""
@@ -3347,10 +3347,10 @@ export const typeDefs = `#graphql
     registeredAt: DateTime!
     lastUsedAt: DateTime
     revokedAt: DateTime
-    """A first passkey's cooling-off window (cor:aut:040:07); null for a later passkey."""
+    """A first passkey's cooling-off window; null for a later passkey."""
     window: PasskeyWindow
     """
-    When its cancel link was used (cor:aut:040:08); null if never cancelled. The cancel IP address and user agent,
+    When its cancel link was used; null if never cancelled. The cancel IP address and user agent,
     and the credential id, are shown only on the interactive revocation page after the owner proves who they are,
     never over a bearer credential (#1631 PR3 §10).
     """
@@ -8097,7 +8097,7 @@ export const typeDefs = `#graphql
     myUserApiKeys: [UserApiKey!]!
 
     """
-    #1631 PR3 (cor:aut:040:05): the caller's own passkey records, revoked ones included, newest first. Only the
+    #1631 PR3: the caller's own passkey records, revoked ones included, newest first. Only the
     owner sees them: an App key or an impersonation session is refused. Registering and revoking are interactive
     ceremonies on the server-hosted pages, never GraphQL. Present only while passkey registration is enabled.
     """
