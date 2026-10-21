@@ -60,6 +60,7 @@ import { mountOAuthRoutes } from './auth/oauth.js';
 import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
 import { requireOrgRole, requireSessionWriteAccess } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
+import { querySourceCap, readGraphqlAdmissionConfig } from './api/graphql/admission.js';
 import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
 import {
   formatGraphQLError,
@@ -1136,6 +1137,9 @@ export async function createServer(): Promise<Express> {
   // ---------------------------------------------------------------------------
 
   const { typeDefs, resolvers: deploymentResolvers } = deploymentSchema();
+  // hadron-internal#3 L1-L3: fleet-wide bounds on every client-supplied document,
+  // read here so a malformed value refuses boot.
+  const admission = readGraphqlAdmissionConfig();
   const apollo = new ApolloServer({
     // #2087: concealed errors must not depend on the deployment's NODE_ENV.
     includeStacktraceInErrorResponses: false,
@@ -1145,6 +1149,10 @@ export async function createServer(): Promise<Express> {
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.
     formatError: formatGraphQLError,
+    // L2: graphql-js aborts the lexer at this many tokens (GRAPHQL_PARSE_FAILED, 400).
+    parseOptions: { maxTokens: admission.maxTokens },
+    // L3: Apollo's document-level rule, fragments expanded and memoized (GRAPHQL_VALIDATION_FAILED, 400).
+    maxRecursiveSelections: admission.maxSelections,
   });
   await apollo.start();
 
@@ -1194,6 +1202,8 @@ export async function createServer(): Promise<Express> {
 
   app.use(
     '/graphql',
+    // L1 (hadron-internal#3): the query source bound, before anything else runs.
+    querySourceCap(admission.maxQueryBytes),
     // Spec 041: establish the request-scoped key store BEFORE Apollo so the
     // context builder and every resolver run inside it. Keys staged here are
     // invisible to concurrent requests and vanish with the request's async
