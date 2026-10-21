@@ -333,6 +333,9 @@ describe('the server-hosted pages', () => {
     // Uma P2-4: the end-window preview offers the "I didn't add this" path.
     expect(script).toContain("not-mine-window");
     expect(await (await realFetch(`${base}/passkeys/window/end`)).text()).toContain("I didn't add this passkey");
+    // Andi P3: an email-form error on the end-window page reports into that page's own status line.
+    expect(script).not.toMatch(/catch\(function \(e\) \{ say\('status-first', e\.message\); \}\)/);
+    expect(await (await realFetch(`${base}/passkeys/window/end`)).text()).toContain('<button id="end-window">Continue</button>');
   });
 
   it('the confirm page links back to the page the leg started from', async () => {

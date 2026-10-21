@@ -86,7 +86,7 @@ ${live ? '' : '<p id="add-first-why" class="hint">Available once step 1 is done.
 <h1>End your first passkey's cooling-off window early</h1>
 <p>Confirm who you are with a method you did <strong>not</strong> use to add the passkey. Then anything it signed stops being pending.</p>
 ${signInForms('window')}
-<p><button id="end-window">End the window now</button></p>
+<p><button id="end-window">Continue</button></p>
 <p id="window-passkey" role="alert" tabindex="-1" hidden></p>
 <p><button id="confirm-window" hidden>Yes, I added this passkey: end the window</button> <button id="not-mine-window" hidden>I didn't add this passkey</button></p>
 <p id="status-window" role="status" aria-live="polite"></p>
@@ -125,9 +125,11 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
   if (emailForm) emailForm.addEventListener('submit', function (e) {
     e.preventDefault();
     var f = new FormData(emailForm);
+    // Andi P3: the status line of THIS page, for the result and for an error alike.
+    var out = main.dataset.page === 'window' ? 'status-window' : 'status-first';
     post('/passkeys/sign-in/email', { email: f.get('email'), next: f.get('next') }).then(function () {
-      say(main.dataset.page === 'window' ? 'status-window' : 'status-first', 'If that address belongs to an account, a link is on its way. Open it in this browser.');
-    }).catch(function (e) { say('status-first', e.message); });
+      say(out, 'If that address belongs to an account, a link is on its way. Open it in this browser.');
+    }).catch(function (e) { say(out, e && e.message ? e.message : 'That didn\'t work. Try again.'); });
   });
 
   var challenge = function () {
