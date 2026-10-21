@@ -8,8 +8,13 @@
  * a worker between its CREATE DATABASE and its first connection has none either
  * (#1136 review, Codex P2).
  *
- * So they are collected by hand, once, when the last pre-#1091 checkout on this
- * machine is gone. They cost disk and nothing else: a run-scoped name can never
+ * Manual --apply requires ALL runs/namespaces sharing this endpoint to be
+ * quiescent, not just a PID absent in this process table (#1137). This tool
+ * does not establish that fact and does not collect pid-only r<pid> clones,
+ * prior-boot/foreign tokens, or graph roots. Do not extend it using local PID
+ * absence as ownership evidence.
+ *
+ * So they may be collected by hand once that quiescence is established. They cost disk and nothing else: a run-scoped name can never
  * equal an unscoped one, so no run can adopt one, and nothing creates them any
  * more.
  *
