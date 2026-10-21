@@ -13,6 +13,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -62,7 +63,7 @@ beforeEach(async () => {
   const app = await db.app.create({ data: { id: generateId(), name: 'Boot App', urn: 'boot.example:app', organizationId: org.id } });
   const agent = await db.agent.create({ data: { id: generateId(), name: 'Boot agent', urn: 'boot.example:agent', organizationId: org.id } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-  workerId = (await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } })).id;
+  workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } })).id;
 });
 
 describe('guard A: a generic write never touches a compiled node (#2043)', () => {

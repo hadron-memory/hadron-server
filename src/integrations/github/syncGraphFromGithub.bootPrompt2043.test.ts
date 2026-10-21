@@ -7,6 +7,7 @@ import { cleanDb, createDbOrgAndGraph, makeTmpDir } from '../../test/helpers.js'
 import { generateId } from '../../lib/id.js';
 import { runAsActor } from '../../lib/requestActor.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../lib/bootPrompt.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../lib/workerSignature.js';
 import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
 
 vi.mock('child_process', () => ({ execFile: vi.fn((...args: unknown[]) => {
@@ -58,7 +59,7 @@ describe('git sync and boot prompts (#2043)', () => {
     const app = await db.app.create({ data: { id: generateId(), name: 'App', urn: 'test-org:app', organizationId: graph.organizationId! } });
     const agent = await db.agent.create({ data: { id: generateId(), name: 'Agent', urn: 'test-org:agent', organizationId: graph.organizationId! } });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-    const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
     mirror('source', 'name: Source\nrole: boot-prompt', 'You are a worker.');
     const result = await runAsActor({ workerId: worker.id, agentId: null }, () => syncGraphFromGithub(graph));
     expect(result.error ?? '').toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
@@ -84,7 +85,7 @@ describe('git sync and boot prompts (#2043)', () => {
     const app = await db.app.create({ data: { id: generateId(), name: 'App', urn: 'test-org:app', organizationId: graph.organizationId! } });
     const agent = await db.agent.create({ data: { id: generateId(), name: 'Agent', urn: 'test-org:agent', organizationId: graph.organizationId! } });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-    const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
     const src = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'boot-source', name: 'Src', content: 'x', role: 'boot-prompt', ownerRepo: 'test/repo' } });
     mirror('other', 'name: Other', 'present');
     const refused = await runAsActor({ workerId: worker.id, agentId: null }, () => syncGraphFromGithub(graph));
