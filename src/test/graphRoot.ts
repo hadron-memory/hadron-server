@@ -7,8 +7,8 @@
  * ever removed what landed there: ~100K directories in nine days exhausted
  * /tmp's inodes on the shared host, and every worker's suite failed with ENOSPC.
  *
- * Each run now gets `<tmpdir>/hadron-test-graph-runs/r<runId>`, where the run id
- * is the vitest MAIN process pid (`HADRON_TEST_RUN_ID`, #1091). globalSetup
+ * Each run now gets `<tmpdir>/hadron-test-graph-runs/r<scope>_p<pid>`, where the run id
+ * includes verified boot/PID-namespace scope and the bare main PID (#1137). globalSetup
  * creates it, `graphRootSetup.ts` points every worker at it, and globalSetup's
  * teardown removes it — the same lifecycle as the per-worker DB clones.
  *
@@ -25,7 +25,7 @@
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isRunAlive } from './dbWorkers.js';
+import { isOwnedRunDead, runToken, testRunScope } from './dbWorkers.js';
 
 /** The directory holding every run's root. */
 export function graphRunsParent(): string {
@@ -34,19 +34,19 @@ export function graphRunsParent(): string {
 
 /** This run's graph root. */
 export function runGraphRoot(runId: string, parent = graphRunsParent()): string {
-  return join(parent, `r${runId}`);
+  return join(parent, `r${runToken(runId)}`);
 }
 
 /** The run id a root directory's name belongs to, or null when it is not a run root. */
 export function parseRunGraphRootName(name: string): string | null {
-  const m = /^r([0-9]+)$/.exec(name);
+  const m = /^r([lnu][0-9a-f]{20}_p[1-9][0-9]*)$/.exec(name);
   return m ? m[1] : null;
 }
 
 /**
  * Remove roots whose run is provably dead, then create this run's own.
  *
- * Ownership is decided by {@link isRunAlive} and nothing else — never by age,
+ * Ownership is decided by the full scope and same-scope PID liveness — never by age,
  * since a long suite's root is old and alive. A root this cannot prove dead is
  * left alone; a pid the OS reused leaves one orphan for a later run.
  *
@@ -74,7 +74,9 @@ export function sweepOrphanGraphRoots(runId: string, parent = graphRunsParent())
   const removed: string[] = [];
   for (const name of names) {
     const owner = parseRunGraphRootName(name);
-    if (owner === null || owner === runId || isRunAlive(owner)) continue;
+    if (owner === null || owner === runToken(runId)) continue;
+    const [scope, pid] = owner.split('_p');
+    if (!isOwnedRunDead(scope!, pid!, testRunScope())) continue;
     try {
       rmSync(join(parent, name), { recursive: true, force: true });
       removed.push(name);

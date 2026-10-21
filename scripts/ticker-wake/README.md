@@ -23,7 +23,7 @@ tsx scripts/ticker-wake/ticker-wake.ts loop [--interval <seconds>=120] [--budget
 
 Config: the router's `~/.config/hadron-orca-attention-router/config.json`
 (app, `hadronCli`, `orcaCli`, `stateDir`, and an optional roster). State lives
-in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`).
+in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`, `needs-person.json`).
 
 **Receivers (#2138, Hugo #26221).** The roster is not hand-kept. A hand-kept
 file missed 17 subscribed workers, whose wakes stayed due while every pass
@@ -64,7 +64,11 @@ subscriber read stops the pass, as a failed `dueWakes` read does.
   tool truncated or saved it, read the rest first; if you can't, don't mark),
   `hadron team chat mark-read --through H` with the H that read printed; then
   end your turn. Never an unfiltered
-  catch-up. Why two reads: a read without `--since` returns only the newest
+  catch-up. A `coordinator-tick` wake (or one carrying it with another ticker)
+  asks for the coordinator's base tick instead: "run your base tick
+  (coordinator-system:tasks:on-base-tick): first the tagged check: …; then the
+  sweep of your owned tasks, alarms and ready heads", so the nudge never tells
+  a coordinator to skip its sweep (#2138, Marco #26709). Why two reads: a read without `--since` returns only the newest
   page (George, #2156 P2), so marking through its head could bury older
   tagged messages; `--since C --all` walks every page forward from the read
   mark and fails as a whole if a page fails. Each read samples its head before
@@ -191,9 +195,31 @@ only when ALL of these hold:
    assignment wake (#2154 P2); an older receipt that covers a task without
    that record stays held.
 
-A timeout alone never resolves an entry. After 2 cadences (20 min) without
-this evidence the entry stays held and its log line says `needs a person`;
-classify it by hand as below. Residual: a channel check the worker made on its
+A timeout alone never resolves an entry. After 2 team-tick cadences (20 min),
+Ada's #26811 ruling allows **one fresh request for strictly newer tick work**
+when the old input was accepted, the composer is provably empty, and the same
+terminal handle/incarnation still receives it. Busy/deadline, draft, identity,
+server-timing and pre-send server-check guards still apply. The incarnation is
+checked again after reconciliation/evidence reads. No new tick means no new
+request; task events alone cannot unlock it. Newly arrived task events bundled
+with this recovery wait for the ordinary next pass (or the replacement
+request's reconciliation if it also remains ambiguous); the recovery nudge
+only names newer ticks. The fresh text still uses
+`nudgeText`, with a fresh-request timestamp, and uses no old `--retry-request` id.
+
+Before recording the new intent, the original ambiguous entry is retained in
+`needs-person.json` with its worker, original age, text, identity and evidence.
+It is logged `needs a person` on later passes, including after a confirmed
+replacement is acked. Neither elapsed time nor sending a newer request changes
+that old entry into delivery evidence. An archive write failure stops the send;
+unreadable/malformed archive state stops the pass. Old unresolved task/tick
+coverage is not named again, and a proof containing unresolved work is not
+acked. A confirmed newer tick can ack its own proof without certifying the old
+request. If the replacement is itself ambiguous, it has its own two-cadence
+wait before another strictly newer tick can qualify; re-offering the same tick
+never creates another fresh request.
+
+Classify old entries by hand; a stranded draft is never submitted or cleared. Residual: a channel check the worker made on its
 own, not because of the nudge, also counts; acking the tick is still true then,
 since the check the tick asks for was done.
 
@@ -227,7 +253,14 @@ both: `hrn:node:hadronmemory.com:hadron-server:findings:orca-conditional-submit-
 
 ## Recovering an ambiguous entry (a human decision)
 
-The script never deletes or rewrites an UNRESOLVED ambiguous entry itself (it only removes a delivered receipt after a successful ack, and withdraws its own intent when Orca says a send was refused and nothing was typed). An entry in `receipts.json` with
+The script never certifies or discards an unresolved request automatically.
+The newer-tick path above moves a copy into `needs-person.json` before replacing
+the active `receipts.json` entry. Archived entries are diagnostics for a person,
+not sent receipts: they are never automatically replayed or used to acknowledge
+work. The steps below apply to an **active** entry in `receipts.json`; do not
+replace a newer active request with an older archived one.
+
+An entry in `receipts.json` with
 `state: "ambiguous"` and no request id (for example `detail` "send intent
 recorded before submission; outcome unknown") holds that worker's wake until a
 person classifies it. Look at the worker's terminal (`orca terminal read
@@ -245,7 +278,7 @@ turn history, then choose ONE:
    wake stays due and nothing is lost.
 
 If the user has paused or stopped the worker, leave its entry and its wake alone.
-Never edit the file while a pass is running (one instance per state dir).
+Never edit either state file while a pass is running (one instance per state dir).
 - **One instance** per state dir. Acquisition is an atomic hard link; a dead
   owner's lock is replaced only by a contender holding the exclusive
   `lock.takeover` file, after re-reading the lock, so a replacement owner is

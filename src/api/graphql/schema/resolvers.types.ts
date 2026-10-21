@@ -1,4 +1,5 @@
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
+import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
@@ -998,6 +999,10 @@ export const typeResolvers = {
     inheritedFrom: (n: { inheritedFrom?: InheritedFrom }) =>
       n.inheritedFrom ? { agentId: n.inheritedFrom.agentId, agentUrn: emitEntityUrnV2('agent', n.inheritedFrom.agentUrn) } : null,
   },
+  GraphEdge: {
+    // #2124 — same strict projection as Edge.governedKind.
+    governedKind: (e: { governedKind?: unknown }) => projectGovernedKind(e.governedKind),
+  },
   Edge: {
     // `Edge.source` / `Edge.target` are NULLABLE (`Node`) in the schema, for two
     // reasons:
@@ -1024,6 +1029,8 @@ export const typeResolvers = {
     // #481 parity — edges are loc-addressed peers of nodes (spec 037), so
     // they carry their fully-qualified URN the same way. Edge.memoryId is the
     // denormalized SOURCE-side memory, which is exactly the URN's memory.
+    // #2124 — the edge's own stored kind through the one strict projection.
+    governedKind: (e: { governedKind?: unknown }) => projectGovernedKind(e.governedKind),
     urn: async (e: { loc: string; memoryId: string }, _: unknown, ctx: Context) => {
       const memUrn = await loadMemoryUrn(ctx, e.memoryId);
       if (!memUrn) return `hrn:edge:unknown:${e.loc}`;
