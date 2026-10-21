@@ -5,6 +5,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { insertSoftPasskey, softPasskey } from '../../test/softPasskey.js';
 import { createSignIn } from '../../auth/signIn.js';
+import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { cancelFirstPasskey, issueCancelToken } from './cancel.js';
 
 let ana: string;
@@ -83,6 +84,30 @@ describe('cancel link', () => {
   it('refuses an unknown or malformed token', async () => {
     expect(await cancelFirstPasskey(db, { token: 'A'.repeat(43), ...req })).toBe(false);
     expect(await cancelFirstPasskey(db, { token: 'short', ...req })).toBe(false);
+    expect((await cred()).revokedAt).toBeNull();
+  });
+
+  it('a window that runs out while the cancel waits on the owner\'s anchor refuses (Andi P2-2: decide by the clock after the wait)', async () => {
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+      await tx.$executeRaw`UPDATE passkey_credentials SET registered_at = (now() AT TIME ZONE 'UTC') - interval '72 hours',
+        window_ends_at = (now() AT TIME ZONE 'UTC') + interval '1500 milliseconds' WHERE id = ${first}`;
+    });
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let anchored!: () => void;
+    const anchorTaken = new Promise<void>((r) => { anchored = r; });
+    const holder = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'user', id: ana }], 'exclusive');
+      anchored();
+      await held;
+    }, { timeout: 20_000 });
+    await anchorTaken;
+    const racer = cancelFirstPasskey(db, { token, ...req });
+    await new Promise((r) => setTimeout(r, 2500));
+    release();
+    await holder;
+    expect(await racer).toBe(false);
     expect((await cred()).revokedAt).toBeNull();
   });
 

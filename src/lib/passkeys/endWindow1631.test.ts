@@ -5,7 +5,8 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { insertSoftPasskey, softPasskey } from '../../test/softPasskey.js';
 import { confirmFreshSignIn, recordIdpSignIn, startEmailSignIn } from './freshSignIn.js';
-import { endWindowEarly } from './endWindow.js';
+import { endWindowEarly, previewWindowEnd } from './endWindow.js';
+import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 
 const h = (v: string) => createHash('sha256').update(v).digest('hex');
 const BROWSER = 'end-window-browser';
@@ -87,6 +88,49 @@ describe('end the window early', () => {
     await idp(ana, 'google');
     await idp(bea, 'google');
     expect(await end()).toBeNull();
+  });
+
+  it('a window that runs out while the step waits on the anchor is not ended (Andi P2-2)', async () => {
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+      await tx.$executeRaw`UPDATE passkey_credentials SET registered_at = (now() AT TIME ZONE 'UTC') - interval '72 hours',
+        window_ends_at = (now() AT TIME ZONE 'UTC') + interval '1500 milliseconds' WHERE id = ${first}`;
+    });
+    await idp(ana, 'google');
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let anchored!: () => void;
+    const anchorTaken = new Promise<void>((r) => { anchored = r; });
+    const holder = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'user', id: ana }], 'exclusive');
+      anchored();
+      await held;
+    }, { timeout: 20_000 });
+    await anchorTaken;
+    const racer = end();
+    await new Promise((r) => setTimeout(r, 2500));
+    release();
+    await holder;
+    expect(await racer).toBeNull();
+    expect((await cred()).windowOutcome).toBeNull();
+  });
+
+  it('two qualifying sign-ins on one browser, even for the same user, refuse and spend nothing (Rook P3-1)', async () => {
+    await idp(ana, 'google');
+    await idp(ana, 'google');
+    expect(await end()).toBeNull();
+    expect(await db.freshSignIn.count({ where: { consumedAt: { not: null } } })).toBe(0);
+  });
+
+  it('previews the passkey it would act on, without spending anything (Rook P3-2)', async () => {
+    await idp(ana, 'google');
+    const p = await previewWindowEnd(db, { signInBrowserHash: h(BROWSER) });
+    expect(p).toMatchObject({ label: 'Soft key' });
+    expect(p!.registeredAt).toBeInstanceOf(Date);
+    expect((await db.freshSignIn.findFirstOrThrow({ where: { userId: ana } })).consumedAt).toBeNull();
+    expect((await cred()).windowOutcome).toBeNull();
+    // Nothing to preview with the same method, or for a browser with no sign-in.
+    expect(await previewWindowEnd(db, { signInBrowserHash: h('nobody') })).toBeNull();
   });
 
   it('ends once', async () => {

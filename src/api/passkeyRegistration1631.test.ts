@@ -104,6 +104,8 @@ describe('a first passkey, end to end (040:02 S1)', () => {
     const opts = await start.json() as Options;
     expect(opts.account.handle).toBe('http-ana');
     expect(opts.publicKey).toMatchObject({ challenge: ceremonyId, user: { name: 'http-ana' }, rp: { id: RP }, excludeCredentials: [] });
+    // cor:aut:040:05: every credential is discoverable (Andi P2-1).
+    expect(opts.publicKey).toMatchObject({ authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' }, extensions: { credProps: true } });
     const key = softPasskey();
     const fin = await post('/passkeys/register/finish', { ceremonyId, response: createResponse(key, opts.publicKey.challenge), label: 'Laptop' }, `${ceremony}; ${browser}`);
     expect(fin.status).toBe(200);
@@ -243,6 +245,22 @@ describe('end the window early (040:07 S2, S7)', () => {
     expect(r.status).toBe(200);
     expect(r.headers.getSetCookie().some((c) => c.startsWith('hadron_ceremony_browser=;'))).toBe(true);
     expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id } })).windowOutcome).toBe('ended-early');
+  });
+
+  it('previews which passkey the step would act on, spending nothing (Rook P3-2)', async () => {
+    await insertSoftPasskey(db, ana, softPasskey(), { firstWindow: true, label: 'My laptop' });
+    const browser = await signInLeg();
+    // registered via github in the fixture; a github sign-in can't end it, so nothing to preview
+    expect((await post('/passkeys/window/preview', {}, browser)).status).toBe(403);
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+      await tx.$executeRaw`UPDATE passkey_credentials SET registration_method = 'google' WHERE owner_id = ${ana}`;
+    });
+    const r = await post('/passkeys/window/preview', {}, browser);
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ label: 'My laptop' });
+    // The preview spent nothing: the step itself still succeeds.
+    expect((await post('/passkeys/window/end', {}, browser)).status).toBe(200);
   });
 
   it('the same method, a bearer alone, or a cross-origin POST ends nothing', async () => {

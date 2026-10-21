@@ -103,6 +103,13 @@ describe('first passkey: binding at the options step', () => {
     expect(await db.freshSignIn.count({ where: { consumedAt: { not: null } } })).toBe(0);
   });
 
+  it('two qualifying sign-ins on this browser for the SAME user also refuse (Rook P3-1)', async () => {
+    await freshSignIn(ana);
+    await freshSignIn(ana);
+    expect(await bindFirst(await ceremony())).toBeNull();
+    expect(await db.freshSignIn.count({ where: { consumedAt: { not: null } } })).toBe(0);
+  });
+
   it('refuses a fresh sign-in older than 10 minutes when the step begins', async () => {
     await freshSignIn();
     await db.$transaction(async (tx) => {
@@ -285,6 +292,17 @@ describe('finish', () => {
       ['with an over-long label', { label: 'x'.repeat(LABEL_MAX_LENGTH + 1) }],
     ])('refuses a response %s', async (_c, over) => {
       expect(await finish(id, softPasskey(), over)).toBeNull();
+      await none();
+    });
+
+    it('refuses a credential the client reports as not discoverable (cor:aut:040:05, Andi P2-1)', async () => {
+      const key = softPasskey();
+      const response = key.create({ rawChallenge: Buffer.from(id, 'base64url'), origin: ORIGIN, rpId: RP });
+      response.clientExtensionResults = { credProps: { rk: false } };
+      expect(await finishRegistration(db, {
+        ceremonyId: id, ceremonyNonceHash: h(CEREMONY_COOKIE), signInBrowserHash: h(SIGN_IN_COOKIE),
+        response, label: 'L', rpId: RP, origins, windowHours: 72,
+      })).toBeNull();
       await none();
     });
 

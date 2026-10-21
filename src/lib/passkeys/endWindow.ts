@@ -44,3 +44,8 @@ export async function endWindowEarly(db: PrismaClient, input: { signInBrowserHas
     return { passkeyId: open.id };
   });
 }
+
+/** What the end-window step would act on, for the page to show before the POST (Rook P3-2). Spends nothing. */
+export async function previewWindowEnd(db: PrismaClient, input: { signInBrowserHash: string }): Promise<{ label: string; registeredAt: Date } | null> {
+  throw new Error('not implemented');
+}
