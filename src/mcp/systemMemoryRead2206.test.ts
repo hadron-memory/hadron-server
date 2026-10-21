@@ -92,3 +92,26 @@ describe('#2206 case 3: the App participant read fold', () => {
     expect(await canReadMemory(db, authOf(member.id), second.systemMemoryId)).toBe(false);
   });
 });
+
+describe('#2233 LOCAL P2 (Xan): only an Agent\'s OWN definition enters the participant fold', () => {
+  it('a second Agent whose pointer names another class, another tenant, or an install memory contributes nothing', async () => {
+    const other = await db.organization.create({ data: { id: generateId(), name: 'SR Foreign', urn: `srf-${generateId().toLowerCase()}.example` } });
+    const foreignSys = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'foreign-def', urn: `${other.id.toLowerCase()}:def`, organizationId: other.id } });
+    const knowledge = await db.memory.create({ data: { id: generateId(), class: 'knowledge', name: 'kn', urn: `${org.id.toLowerCase()}:sr-kn`, organizationId: org.id, visibility: 'ORGANIZATION' } });
+    const installRow = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'inst', urn: `${org.id.toLowerCase()}:sr-inst`, organizationId: org.id, appId: app.id, installOfAgentId: second.id, isInstallMemory: true } });
+    for (const [i, target] of [foreignSys, knowledge, installRow].entries()) {
+      const bad = await db.agent.create({ data: { id: generateId(), name: `Bad ${i}`, urn: `${org.id.toLowerCase()}:bad-${i}`, organizationId: org.id, systemMemoryId: target.id } });
+      await createDbAppAgent(db, app.id, bad.id);
+    }
+    // The fold itself (what both the content/list gate and the record gate draw from) never offers a mismatched row.
+    const { participantSystemMemoryFolds } = await import('./access-control.js');
+    const folded = new Set((await participantSystemMemoryFolds(db, authOf(member.id))).flatMap(({ map }) => [...map.keys()]));
+    for (const row of [foreignSys, knowledge, installRow]) expect(folded.has(row.id), row.name).toBe(false);
+    expect(folded.has(second.systemMemoryId)).toBe(true); // the valid second Agent still folds
+    for (const who of [member, contributor]) {
+      expect(await canReadMemory(db, authOf(who.id), foreignSys.id)).toBe(false);
+      expect(await systemMemoryReadGrants(db, { userId: who.id, roles: ['READER'] }, foreignSys.id)).toEqual([]);
+      expect(await canReadMemory(db, authOf(who.id), second.systemMemoryId)).toBe(true);
+    }
+  });
+});

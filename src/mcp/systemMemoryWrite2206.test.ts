@@ -19,6 +19,8 @@ import { createTestableMcpServer } from './server.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { requireMemoryWriteAccess } from '../api/graphql/schema/resolvers.helpers.js';
 import { typeDefs } from '../api/graphql/schema/typeDefs.js';
+import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
+import { waitForLockWaitersOfType } from '../test/lockWait.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -251,5 +253,46 @@ describe('#2206 case 2: a platform admin writes a user-owned Agent\'s system mem
     expect(res).not.toBeNull();
     expect(String(res?.message)).not.toMatch(/SECRET|Secret Title/);
     expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({ name: 'Secret Title', content: SECRET.content });
+  });
+});
+
+describe('#2233 BLIND P2 (Gene): the platform arm is decided on live authority, inside the write\'s own transaction', () => {
+  it('stale request roles grant nothing: a demoted or deleted actor is refused though its request still says ADMIN', async () => {
+    const m = userAgent.systemMemoryId;
+    await db.user.update({ where: { id: u.platform.id }, data: { roles: ['READER'] } });
+    expect(await canWriteToMemory(db, authOf(u.platform), m)).toBe(false);
+    await expect(requireMemoryWriteAccess(ctxOf(u.platform), m)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    await db.user.update({ where: { id: u.platform.id }, data: { roles: ['ADMIN'], deletedAt: new Date() } });
+    expect(await canWriteToMemory(db, authOf(u.platform), m)).toBe(false);
+  });
+
+  it('a demotion racing the write wins: the write waits on the actor anchor, then is refused on the live role; nothing written', async () => {
+    const node = await secretNode(userAgent.systemMemoryId);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    // updateUserRoles' shape: the actor's user anchor exclusive, then the role change, committed after the writer queued.
+    const demotion = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'user', id: u.platform.id }], 'exclusive');
+      await tx.user.update({ where: { id: u.platform.id }, data: { roles: ['READER'] } });
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await isHeld;
+    // The pre-transaction gate saw ADMIN (the demotion is uncommitted); the deciding one runs after it commits.
+    const writing = M.updateNode(null, { input: { id: node.id, name: 'Raced' } }, ctxOf(u.platform)).then(() => 'wrote', (e: any) => e);
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      release();
+      await demotion;
+    }
+    const out = await writing;
+    expect(out).not.toBe('wrote');
+    expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({ name: 'Secret Title' });
+    // Control: the owner's write is unaffected by the platform actor's demotion.
+    await M.updateNode(null, { input: { id: node.id, name: 'Owner Raced' } }, ctxOf(u.agentOwner));
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).name).toBe('Owner Raced');
   });
 });
