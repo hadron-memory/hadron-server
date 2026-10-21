@@ -252,9 +252,9 @@ async function lockInstallAuthority(tx: Prisma.TransactionClient, ctx: Context, 
 }
 
 /**
- * The first statement of any transaction that will write or delete `memoryId`: if it is an
- * install memory, take its authority before any memory, node or loc lock. A plain read of the
- * identity (no lock), so an ordinary memory costs one indexed select.
+ * The first statement of any transaction that will write or delete `memoryId`: if it is an install memory, or (#2206)
+ * a live Agent's own system memory, take its authority before any memory, node or loc lock. A plain read of the
+ * identity (no lock), so an ordinary memory costs one or two indexed selects.
  */
 export async function lockInstallAuthorityFirst(tx: Prisma.TransactionClient, ctx: Context, memoryId: string): Promise<void> {
   const row = await tx.memory.findUnique({
@@ -262,6 +262,36 @@ export async function lockInstallAuthorityFirst(tx: Prisma.TransactionClient, ct
     select: { id: true, class: true, appId: true, installOfAgentId: true, isInstallMemory: true, organizationId: true, ownerUserId: true },
   });
   if (row && isInstallMemoryRow(row) && row.appId) await lockInstallAuthority(tx, ctx, row);
+  else if (row?.class === 'system') await lockAgentDefinitionAuthority(tx, ctx, row.id);
+}
+
+/**
+ * #2206 (Gene's BLIND P2 on #2233): the authority a write to an Agent's own system memory depends on, taken the way
+ * {@link lockInstallAuthority} takes an install's: the anchors its revokers hold exclusively (the Agent, its tenant,
+ * the actor, whose platform roles `updateUserRoles` changes under the actor's user anchor), then the rows they change,
+ * FOR SHARE. The deciding recheck inside the transaction (`canManageAgentSystemMemory`, which reads the actor's live
+ * roles and memberships) therefore sees any demotion, deletion or Agent transfer that committed first. No-op for a
+ * system row no live Agent points at (nobody manages it, so the gate refuses it anyway).
+ */
+async function lockAgentDefinitionAuthority(tx: Prisma.TransactionClient, ctx: Context, memoryId: string): Promise<void> {
+  const agent = await tx.agent.findFirst({
+    where: { systemMemoryId: memoryId, deletedAt: null },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  if (!agent) return;
+  await lockAuthorityAnchors(tx, [
+    { kind: 'agent', id: agent.id },
+    ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+    ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+    ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+  ], 'shared');
+  await tx.$queryRaw`SELECT id FROM agents WHERE id = ${agent.id} FOR SHARE`;
+  if (ctx.userId) {
+    await tx.$queryRaw`SELECT id FROM users WHERE id = ${ctx.userId} FOR SHARE`;
+    if (agent.organizationId) {
+      await tx.$queryRaw`SELECT 1 FROM org_members WHERE organization_id = ${agent.organizationId} AND user_id = ${ctx.userId} FOR SHARE`;
+    }
+  }
 }
 
 /**

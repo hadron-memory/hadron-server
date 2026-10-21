@@ -570,7 +570,7 @@ async function participantTeamSpaceFolds(
  * the system memory of EVERY Agent installed and licensed in it, read-only. {@link getAppMemoryAccess} folds only the
  * first-installed Agent (its items carry roles, and `appNodes` alone widens to every install), so a member driving a
  * worker cast on a second installed Agent could not read that Agent's definition, and an org CONTRIBUTOR who is no
- * member reached none of them.
+ * member reached none of them. Each pointer must name the Agent's own definition (class, not an install, same tenant).
  *
  * System memories only: an Agent's item memories keep their install-role audience, and nothing here writes. Only the
  * user acting as themselves: no user (an App key, a session-isolated principal) and an AppRun (an App acting, with
@@ -596,13 +596,23 @@ export async function participantSystemMemoryFolds(
   const perApp = await Promise.all(apps.map(async (app) => {
     const agents = app.appAgents.map((install) => install.agent).filter((agent) => agent !== null && agent.deletedAt === null);
     const licensed = await activeAgentInstallLicenseIds(db, app, agents);
-    return { appId: app.id, systemIds: agents.filter((a) => licensed.has(a.id) && a.systemMemoryId !== null).map((a) => a.systemMemoryId!) };
+    return { appId: app.id, agents: agents.filter((a) => licensed.has(a.id) && a.systemMemoryId !== null) };
   }));
-  const wanted = [...new Set(perApp.flatMap((p) => p.systemIds))];
+  const wanted = [...new Set(perApp.flatMap((p) => p.agents.map((a) => a.systemMemoryId!)))];
   if (wanted.length === 0) return [];
-  const live = new Set((await db.memory.findMany({ where: { id: { in: wanted }, deletedAt: null }, select: { id: true } })).map((m) => m.id));
+  // The pointer must name the Agent's OWN definition (Xan on #2233): a live, non-install system row of the Agent's
+  // exact tenant, the invariant systemMemoryReadGrants and getManagedSystemMemoryIds keep. A retained mismatched
+  // pointer (another class, another tenant, an install memory) contributes nothing.
+  const rows = new Map((await db.memory.findMany({
+    where: { id: { in: wanted }, deletedAt: null, class: 'system', isInstallMemory: false },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  })).map((m) => [m.id, m]));
+  const isOwnDefinition = (a: { systemMemoryId: string | null; organizationId: string | null; ownerUserId: string | null }) => {
+    const m = rows.get(a.systemMemoryId!);
+    return m !== undefined && m.organizationId === a.organizationId && m.ownerUserId === a.ownerUserId;
+  };
   return perApp
-    .map(({ appId, systemIds }) => ({ appId, map: new Map(systemIds.filter((id) => live.has(id)).map((id) => [id, 'READ_ONLY'] as [string, string])) }))
+    .map(({ appId, agents }) => ({ appId, map: new Map(agents.filter(isOwnDefinition).map((a) => [a.systemMemoryId!, 'READ_ONLY'] as [string, string])) }))
     .filter(({ map }) => map.size > 0);
 }
 

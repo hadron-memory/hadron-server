@@ -46,7 +46,8 @@ export async function getManagedSystemMemoryIds(
  * The one write predicate GraphQL and MCP share for an Agent's own system memory:
  *  - the managers {@link getManagedSystemMemoryIds} already decides (a live org ADMIN/OWNER of an org-owned Agent, the
  *    owner of a user-owned one), with the same live-Agent, pointer and tenant match;
- *  - a platform ADMIN/OWNER, for every Agent, on exactly that row (a live Agent's `systemMemoryId`, tenant matched).
+ *  - a platform ADMIN/OWNER, for every Agent, on exactly that row (a live Agent's `systemMemoryId`, tenant matched),
+ *    decided on the actor's live roles, not only the request's.
  * Never through App participation, and never for a principal that is not the user acting as themselves: an
  * impersonation, an AppRun (it carries its on-behalf-of user's id) or a credential with no user is refused before any
  * arm. An App's install memory is never an Agent's `systemMemoryId`, so it is out of reach here by construction.
@@ -59,6 +60,11 @@ export async function canManageAgentSystemMemory(
   if (!principal.userId || principal.impersonation || isRunPrincipal(principal)) return false;
   if ((await getManagedSystemMemoryIds(db, principal.userId, memoryId)).includes(memoryId)) return true;
   if (!(principal.roles?.includes('ADMIN') || principal.roles?.includes('OWNER'))) return false;
+  // The request's roles are a claim from authentication; the platform arm is decided on the actor's LIVE roles too
+  // (Gene on #2233), so a demotion or deletion committed since then is honoured. Inside a write transaction that holds
+  // the actor's user anchor (lockInstallAuthorityFirst), this read is ordered after any such revoker.
+  const actor = await db.user.findUnique({ where: { id: principal.userId }, select: { roles: true, deletedAt: true } });
+  if (!actor || actor.deletedAt || !(actor.roles.includes('ADMIN') || actor.roles.includes('OWNER'))) return false;
   const [memory, agent] = await Promise.all([
     db.memory.findFirst({ where: { id: memoryId, class: 'system', deletedAt: null }, select: { organizationId: true, ownerUserId: true } }),
     db.agent.findFirst({ where: { systemMemoryId: memoryId, deletedAt: null }, select: { organizationId: true, ownerUserId: true } }),
