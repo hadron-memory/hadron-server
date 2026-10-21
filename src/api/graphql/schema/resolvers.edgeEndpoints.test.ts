@@ -52,14 +52,20 @@ afterEach(() => vi.restoreAllMocks());
 describe('Edge.source / Edge.target resolvers', () => {
   it('returns preloaded endpoints without any DB fetch (both sides preloaded)', async () => {
     const spy = vi.spyOn(db.node, 'findUnique');
-    const source = { id: parent.id, loc: 'parent', memoryId: mem.id };
-    const target = { id: child.id, loc: 'child', memoryId: mem.id };
+    const source = { id: parent.id, loc: 'parent', memoryId: mem.id, deletedAt: null };
+    const target = { id: child.id, loc: 'child', memoryId: mem.id, deletedAt: null };
 
     const out = await edge.source({ ...sameMemEdge(), source, target }, null, ctx);
 
     expect((out as { id: string }).id).toBe(parent.id);
     // Both endpoint memoryIds come from the preloaded relations — no node fetch.
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('checks deletion state when a partial preload omitted it', async () => {
+    await db.node.update({ where: { id: parent.id }, data: { deletedAt: new Date() } });
+    const source = { id: parent.id, loc: 'parent', memoryId: mem.id };
+    expect(await edge.source({ ...sameMemEdge(), source }, null, ctx)).toBeNull();
   });
 
   it('lazily loads source by FK when it was not preloaded (the 500 fix)', async () => {
