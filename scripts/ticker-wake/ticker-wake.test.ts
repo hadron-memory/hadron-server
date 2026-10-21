@@ -2285,3 +2285,58 @@ describe('#1704: stall ALARM and CHILD_FINISHED task wakes are delivered and nam
     });
   });
 });
+
+
+describe('#2138 — fresh ticks after two unreconciled cadences', () => {
+  const T0 = Date.UTC(2026, 9, 21, 0);
+  const timing = {anchorAt: iso(T0 - 600_000), deliverAfter: iso(T0 - 300_000), busyDeadline: iso(T0 + 3_600_000)};
+  const at = (ms: number) => ({now: () => ms});
+  const current = () => JSON.parse(readFileSync(receiptsFile(), 'utf8'))['w-ada'];
+  const archived = () => Object.values(JSON.parse(readFileSync(join(dir, 'ticker-wake', 'needs-person.json'), 'utf8'))) as any[];
+  async function stuck() {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], T0), [], timing)];
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+    await go(at(T0));
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:3'], T0 + 1_200_000), [], timing)];
+  }
+  it('sends one NEW request for a newer tick, keeping the old accepted ambiguity for a person', async () => {
+    await stuck();
+    const old = current();
+    f.sendReply = () => JSON.stringify({...ACCEPTED_ONLY, result: {send: {accepted: true, prompt: {requestId: 'r2', stages: ['input_accepted']}}}});
+    await go(at(T0 + 1_200_000));
+    expect(f.sent).toHaveLength(2);
+    expect(f.sent[1]).not.toBe(old.text);
+    expect(f.retries).toEqual(['r1']);
+    expect(current()).toMatchObject({state: 'ambiguous', requestId: 'r2', coverage: ['T:3'], checkedBefore: null});
+    expect(archived()).toEqual([expect.objectContaining({...old, workerId: 'w-ada'})]);
+    expect(log()).toMatch(/needs a person.*1200s/);
+    expect(f.acked).toEqual([]);
+    await go(at(T0 + 1_200_001));
+    expect(f.sent).toHaveLength(2); // restart/re-offer is not another fresh request
+  });
+  it('a confirmed replacement acks only its newer proof; the old entry survives the ack', async () => {
+    await stuck();
+    f.sendReply = () => JSON.stringify(CONFIRMED);
+    await go(at(T0 + 1_200_000));
+    expect(f.sent).toHaveLength(2);
+    expect(f.acked).toEqual([f.wakes[0].proof]);
+    expect(archived()).toHaveLength(1);
+    expect(archived()[0]).toMatchObject({coverage: ['T:1'], state: 'ambiguous'});
+  });
+  for (const guard of ['draft', 'incarnation', 'busy', 'before cadence', 'same tick', 'not accepted', 'missing incarnation', 'server check failed'] as const) {
+    it(`holds a replacement with ${guard}`, async () => {
+      await stuck();
+      if (guard === 'draft') f.screen = {...f.screen, draft: 'human typing'};
+      if (guard === 'incarnation') f.incarnation = 'inc-2';
+      if (guard === 'missing incarnation') f.incarnation = '';
+      if (guard === 'busy') { f.idle = false; f.screen = {source:'screen', tail:['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)']}; }
+      if (guard === 'same tick') f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], T0 + 1_200_000), [], timing)];
+      if (guard === 'not accepted') { const r = current(); r.detail = 'unrecognized send receipt'; writeFileSync(receiptsFile(), JSON.stringify({'w-ada': r})); f.retryReply = () => JSON.stringify({ok:false,error:{code:'transport'},requestId:'r1'}); }
+      if (guard === 'server check failed') f.checkError = 'unavailable';
+      await go(at(T0 + (guard === 'before cadence' ? 1_199_999 : 1_200_000)));
+      expect(f.sent).toHaveLength(1);
+      expect(f.acked).toEqual([]);
+      expect(current().state).toBe('ambiguous');
+    });
+  }
+});
