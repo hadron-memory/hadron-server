@@ -376,7 +376,8 @@ describe('#2045 surfaces and code inventory', () => {
   });
 
   it('every BOOT_PROMPT_* code the server source can emit is on the agreed lists (6259928375 / 6259930578)', () => {
-    const S6 = ['BOOT_PROMPT_COMPILED_WRITE', 'BOOT_PROMPT_WORKER_SESSION_REFUSED'];
+    // S6's three codes, as agreed in the #2043 attach (6247074854; hadron-cli#916 maps all three).
+    const S6 = ['BOOT_PROMPT_COMPILED_WRITE', 'BOOT_PROMPT_WORKER_SESSION_REFUSED', 'BOOT_PROMPT_APPROVAL_FORBIDDEN'];
     const SERVE = ['BOOT_PROMPT_NOT_SET', 'BOOT_PROMPT_TARGET_DELETED', 'BOOT_PROMPT_NOT_APPROVED', 'BOOT_PROMPT_NOT_SIGNED', 'BOOT_PROMPT_RECORDED_REVISION_DELETED'];
     expect([...BOOT_PROMPT_POINTER_CODES].sort()).toEqual([
       'BOOT_PROMPT_POINTER_NOT_COMPILED', 'BOOT_PROMPT_POINTER_NOT_FOUND', 'BOOT_PROMPT_POINTER_SESSION_REFUSED',
