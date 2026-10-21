@@ -23,7 +23,22 @@ import { validateAiConfigName } from '../../../lib/aiConfig.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 
-const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
+/**
+ * The ORIGINAL error behind each failed operation. `formatGraphQLError` conceals database
+ * errors on the wire (#1688), so a test that only reads the response sees "Unable to
+ * complete this request" and cannot tell a product defect from a harness limit (#2183).
+ */
+const originalErrors: string[] = [];
+const server = new ApolloServer<Context>({
+  typeDefs,
+  resolvers,
+  formatError: formatGraphQLError,
+  plugins: [{
+    async requestDidStart() {
+      return { async didEncounterErrors(rc) { for (const e of rc.errors) originalErrors.push(String((e.originalError ?? e).message)); } };
+    },
+  }],
+});
 
 interface Gql {
   data: Record<string, any> | null;
@@ -35,6 +50,13 @@ async function gql(ctx: Partial<Context>, query: string, variables: Record<strin
   return res.body.singleResult as unknown as Gql;
 }
 const code = (r: Gql) => r.errors?.[0]?.extensions?.code;
+/** A response's data, or a failure that names the GraphQL errors instead of a null dereference (#2183). */
+function dataOf(r: Gql): NonNullable<Gql['data']> {
+  if (r.errors?.length || !r.data) {
+    throw new Error(`GraphQL operation failed: ${JSON.stringify({ errors: r.errors?.map((e) => ({ message: e.message, extensions: e.extensions })), data: r.data, originalErrors })}`);
+  }
+  return r.data;
+}
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const RULE = `role authorTask authorTaskId authorTaskState validationTask validationTaskState descriptionNode descriptionNodeState
@@ -598,7 +620,7 @@ describe('update and delete: wholesale rules, optimistic concurrency, soft delet
     const roles = ['r-a', 'r-b', 'r-c', 'r-d', 'r-e', 'r-f', 'r-g', 'r-h'];
     const out = await Promise.all(roles.map((role) => gql(as(orgAdmin), UPDATE, { r: t.id, i: { rules: [{ role }], description: role } })));
     for (const [i, r] of out.entries()) {
-      const got = r.data!.updateMemoryConfigTemplate.template;
+      const got = dataOf(r).updateMemoryConfigTemplate.template;
       expect(got.description).toBe(roles[i]);
       expect(got.rules.map((x: { role: string }) => x.role)).toEqual([roles[i]]);
     }
@@ -608,7 +630,7 @@ describe('update and delete: wholesale rules, optimistic concurrency, soft delet
     const t = await mkOrgTpl();
     const descs = ['a', 'b', 'c', 'd', 'e', 'f'];
     const out = await Promise.all(descs.map((d) => gql(as(orgAdmin), UPDATE, { r: t.id, i: { description: d } })));
-    const got = out.map((r) => r.data!.updateMemoryConfigTemplate.template);
+    const got = out.map((r) => dataOf(r).updateMemoryConfigTemplate.template);
     expect(got.map((g) => g.description)).toEqual(descs);
     expect(new Set(got.map((g) => g.revision)).size).toBe(descs.length);
   });
