@@ -63,6 +63,8 @@ interface ChangedNode {
   raw: NodeRow;
   changed: { content?: string; abstract?: string | null };
   plaintext: { content: string | null; abstract: string | null };
+  /** #2041 S2b — the content before replacement, read under the apply transaction's row locks. */
+  storedContent: string | null;
   isEncrypted: boolean;
   contentChanged: boolean;
   abstractChanged: boolean;
@@ -274,6 +276,7 @@ export async function searchReplaceInSpecNodes(
         raw: row,
         changed: {},
         plaintext: { content: pt.content, abstract: pt.abstract },
+        storedContent: pt.content,
         isEncrypted: encryption.isEncrypted,
         contentChanged: false,
         abstractChanged: false,
@@ -402,8 +405,9 @@ export async function searchReplaceInSpecNodes(
       if (node.contentChanged) {
         const text = node.plaintext.content;
         readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
-        const tags = await assertIncludesWritable(tx, node.raw, text, readableForIncludes);
-        await syncDerivedIncludesEdges(tx, node.raw, tags, readableForIncludes);
+        const stored = { storedPlaintext: node.storedContent };
+        const tags = await assertIncludesWritable(tx, node.raw, text, readableForIncludes, undefined, stored);
+        await syncDerivedIncludesEdges(tx, node.raw, tags, readableForIncludes, stored);
       }
     }
     return current;

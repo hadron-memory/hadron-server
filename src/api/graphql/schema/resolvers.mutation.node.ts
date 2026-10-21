@@ -934,14 +934,19 @@ async function writeNodeCoreRaw(
       const readableForIncludes = typeof input.content === 'string' && input.content.includes('{{>')
         ? await getAccessibleMemoryIds(ctx)
         : null;
+      // #2041 S2b — `storedPlaintext` is the includer's plaintext from the row
+      // this write locked and revalidated, before its update; null for a create
+      // or a resurrected tombstone, whose old text is not the includer's.
       async function finalizeNodeWrite<T extends { id: string; loc: string; memoryId: string }>(
         tx: Prisma.TransactionClient,
         writtenNode: T,
+        storedPlaintext: string | null,
       ): Promise<T> {
         if (input.content !== undefined) {
-          const tags = await assertIncludesWritable(tx, writtenNode, input.content, readableForIncludes);
+          const stored = { storedPlaintext };
+          const tags = await assertIncludesWritable(tx, writtenNode, input.content, readableForIncludes, undefined, stored);
           const result = await replaceInlineEdges(tx, writtenNode);
-          await syncDerivedIncludesEdges(tx, writtenNode, tags, readableForIncludes);
+          await syncDerivedIncludesEdges(tx, writtenNode, tags, readableForIncludes, stored);
           return result;
         }
         return replaceInlineEdges(tx, writtenNode);
@@ -1329,7 +1334,7 @@ async function writeNodeCoreRaw(
                   deletedAt: null,
                 };
             const updated = await tx.node.update({ where, data, include });
-            return { conflict: false, node: await finalizeNodeWrite(tx, updated) };
+            return { conflict: false, node: await finalizeNodeWrite(tx, updated, currentForDiff.content ?? null) };
           });
           if (result.conflict) {
             throw new GraphQLError(
@@ -1490,6 +1495,7 @@ async function writeNodeCoreRaw(
             // the #976 defect. `upsert` mode reaches here for a live row too,
             // deliberately: that mode is either-way by contract.
             let authoritativeChanges: string[] = [];
+            let storedForIncludes: string | null = null;
             let authoritativeAbstractHash = nextAbstractOriginHash;
             if (authoritative) {
               // Row lock + drift reconciled as its own revision BEFORE this
@@ -1512,6 +1518,8 @@ async function writeNodeCoreRaw(
               const authoritativeForDiff = memEncInfo.isEncrypted
                 ? decryptNodeFields({ ...authoritative }, memEncInfo)
                 : authoritative;
+              // A tombstone's text is not the includer's stored text (#2041 S2b).
+              if (!authoritative.deletedAt) storedForIncludes = authoritativeForDiff.content ?? null;
               authoritativeAbstractHash = hashAgainstLockedContent(authoritative.content);
               authoritativeChanges = diffNodeChanges(authoritativeForDiff, {
                 ...suppliedForDiff, abstractOriginHash: authoritativeAbstractHash,
@@ -1614,7 +1622,7 @@ async function writeNodeCoreRaw(
             // #1606 — restoring a target restores the threads its soft delete
             // took (cause TARGET), never ones an admin deleted.
             if (reviving) await restoreThreadsOfTargets(tx, [upserted.id]);
-            return finalizeNodeWrite(tx, upserted);
+            return finalizeNodeWrite(tx, upserted, storedForIncludes);
           });
         }
       } catch (e) {
@@ -2672,6 +2680,8 @@ export const nodeMutations = {
         isEncrypted: boolean;
         changed: Record<string, unknown>; // plaintext field → new value
         plaintext: { content: string | null; abstract: string | null };
+        /** #2041 S2b — content before the replace; the row lock below revalidates it (revisionStateMatches). */
+        storedContent: string | null;
         fieldResults: Array<{ field: string; matches: number }>;
         total: number;
         abstractChanged: boolean;
@@ -2796,6 +2806,7 @@ export const nodeMutations = {
               content: contentChanged ? (changed.content as string) : pt.content,
               abstract: abstractChanged ? (changed.abstract as string | null) : pt.abstract,
             },
+            storedContent: pt.content ?? null,
             fieldResults,
             total,
             abstractChanged,
@@ -2977,8 +2988,9 @@ export const nodeMutations = {
           if (p.contentChanged) {
             const text = p.plaintext.content;
             readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
-            const tags = await assertIncludesWritable(tx, raw, text, readableForIncludes);
-            await syncDerivedIncludesEdges(tx, raw, tags, readableForIncludes);
+            const stored = { storedPlaintext: p.storedContent };
+            const tags = await assertIncludesWritable(tx, raw, text, readableForIncludes, undefined, stored);
+            await syncDerivedIncludesEdges(tx, raw, tags, readableForIncludes, stored);
           }
         }
       }));
@@ -4203,8 +4215,12 @@ export const nodeMutations = {
           if ('content' in changed) {
             const text = changed.content as string | null;
             const readable = text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
-            const tags = await assertIncludesWritable(tx, target, text, readable);
-            await syncDerivedIncludesEdges(tx, target, tags, readable);
+            // The target's text before the fold: tgtPt, revalidated against the
+            // locked row above (revisionStateMatches), so only the source's tags
+            // and any the fold changes count as added (#2041 S2b).
+            const stored = { storedPlaintext: tgtPt.content ?? null };
+            const tags = await assertIncludesWritable(tx, target, text, readable, undefined, stored);
+            await syncDerivedIncludesEdges(tx, target, tags, readable, stored);
           }
         }
 
@@ -4730,8 +4746,9 @@ export const nodeMutations = {
         {
           const text = plaintextFields.content as string | null;
           const readable = text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
-          const tags = await assertIncludesWritable(tx, current, text, readable);
-          await syncDerivedIncludesEdges(tx, current, tags, readable);
+          const stored = { storedPlaintext: (logicalCurrent.content as string | null) ?? null };
+          const tags = await assertIncludesWritable(tx, current, text, readable, undefined, stored);
+          await syncDerivedIncludesEdges(tx, current, tags, readable, stored);
         }
         return { restored, restoredPlaintext: plaintextFields, destinationEncrypted: selectedDestination.isEncrypted };
       });

@@ -1034,10 +1034,14 @@ async function applyIncludesInTransaction(
   node: { id: string; loc: string; memoryId: string },
   plaintextContent: string | null,
   auth: AuthContext,
+  storedPlaintext: string | null,
 ): Promise<void> {
+  // #2041 S2b — `storedPlaintext` is the node's plaintext from the row this
+  // write locked and revalidated, before its update (null for a create).
   const readable = plaintextContent?.includes('{{>') ? await getAccessibleMemoryIds(db, auth) : null;
-  const tags = await assertIncludesWritable(tx, node, plaintextContent, readable);
-  await syncDerivedIncludesEdges(tx, node, tags, readable);
+  const stored = { storedPlaintext };
+  const tags = await assertIncludesWritable(tx, node, plaintextContent, readable, undefined, stored);
+  await syncDerivedIncludesEdges(tx, node, tags, readable, stored);
 }
 
 async function replaceOutgoingEdgesInTransaction(
@@ -4075,6 +4079,7 @@ export function createMcpServerInstance(
               priorRunnable: lockedSection.isRunnable, nextRunnable: lockedSection.isRunnable,
             });
           }
+          let storedForIncludes: string | null = null;
           if (prior && !prior.deletedAt) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
             await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted, auth);
@@ -4096,6 +4101,7 @@ export function createMcpServerInstance(
             const currentForDiff = parentKey
               ? decryptNodeFieldsWithKey({ ...current }, parentKey)
               : current;
+            storedForIncludes = (currentForDiff.content as string | null) ?? null;
             const changes = diffNodeChanges(currentForDiff, {
               ...upsertArgs.update, content,
             });
@@ -4118,7 +4124,7 @@ export function createMcpServerInstance(
             ...upsertArgs,
             update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
-          await applyIncludesInTransaction(tx, row, content, auth);
+          await applyIncludesInTransaction(tx, row, content, auth, storedForIncludes);
           return row.id;
         });
       } catch (e) {
@@ -6447,7 +6453,7 @@ export function createMcpServerInstance(
             });
             if (edgeError) throw new InlineEdgeEndpointError(edgeError);
           }
-          await applyIncludesInTransaction(tx, written, content ?? null, auth);
+          await applyIncludesInTransaction(tx, written, content ?? null, auth, null);
           return written;
         });
       } catch (e) {
@@ -6896,7 +6902,7 @@ export function createMcpServerInstance(
               });
               if (edgeError) throw new InlineEdgeEndpointError(edgeError);
             }
-            if (content !== undefined) await applyIncludesInTransaction(tx, updated, content, auth);
+            if (content !== undefined) await applyIncludesInTransaction(tx, updated, content, auth, (currentForDiff.content as string | null) ?? null);
           });
         } catch (e) {
           if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);

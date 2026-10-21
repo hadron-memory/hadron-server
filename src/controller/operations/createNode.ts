@@ -124,8 +124,10 @@ const createNodeAsSystem = async (
       },
     });
     // #2040 — this legacy seam runs as the system with no principal, so tags
-    // reach only the node's own memory; a refusal rolls the write back.
-    const tags = await assertIncludesWritable(tx, written, content, [node.memoryId]);
+    // reach only the node's own memory; a refusal rolls the write back. With no
+    // writing person it skips the writer's read check (#2041 S2b). Its only
+    // callers write a new memory's root node, with no caller content.
+    const tags = await assertIncludesWritable(tx, written, content, [node.memoryId], undefined, { includeSystemWrite: true });
     await syncDerivedIncludesEdges(tx, written, tags, [node.memoryId]);
     return written;
   });

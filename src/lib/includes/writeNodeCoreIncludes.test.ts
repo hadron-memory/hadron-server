@@ -125,10 +125,13 @@ describe('include tags through createNode / updateNode (#2040)', () => {
     expect((await includeEdges('w')).map(e => e.target.loc).sort()).toEqual(['x', 'y']);
   });
 
-  it('cycle detection does not depend on tag order (a node already walked on a shallow branch)', async () => {
-    await create('s', 'S');
+  it('cycle detection skips a node already walked on another branch without missing the cycle, in either tag order', async () => {
+    // `d` is reached first through `s` (it doesn't reach `a`), then again on the
+    // hub path, where it is skipped; the hub path still reaches `a`.
+    await create('d', 'D');
+    await create('s', '{{> d}}');
     await create('a', 'A');
-    for (let i = 1; i <= 11; i++) await create(`p${i}`, i === 11 ? '{{> a}}' : `{{> p${i + 1}}}`);
+    for (let i = 11; i >= 1; i--) await create(`p${i}`, i === 11 ? '{{> a}}' : `{{> d}} {{> p${i + 1}}}`);
     await create('hub', '{{> p1}}');
     expect(await code(update('a', '{{> s}} {{> hub}}'))).toBe('INCLUDE_CYCLE');
     expect(await code(update('a', '{{> hub}} {{> s}}'))).toBe('INCLUDE_CYCLE');
@@ -214,7 +217,11 @@ describe('copy paths conceal foreign targets (#2040, §10)', () => {
     const foreign = await db.memory.create({ data: { id: generateId(), name: 'secret', urn: 'foreign.example:secret', class: 'knowledge', organizationId: foreignOrg.id } });
     await db.node.create({ data: { id: generateId(), memoryId: foreign.id, loc: 'hidden', name: 'hidden', content: 'H' } });
     await create('local', 'L');
-    await create('src', '{{> local}} {{> hrn:node:foreign.example:secret:hidden}} {{> hrn:node:foreign.example:secret:absent}}');
+    // Stored directly: a write ADDING these foreign tags is refused (#2041 S2b).
+    // The update below leaves them unchanged, so it saves and derives `local`'s edge.
+    const srcText = '{{> local}} {{> hrn:node:foreign.example:secret:hidden}} {{> hrn:node:foreign.example:secret:absent}}';
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'src', name: 'src', content: srcText } });
+    await update('src', `${srcText} .`);
     expect((await includeEdges('src')).map(e => e.target.loc)).toEqual(['local']);
     const org = await db.organization.findFirstOrThrow({ where: { urn: 'inc.example' } });
     const clone = await M.cloneMemory(null, { ref: memoryId, targetUrn: `hrn:mem:${org.urn}:copy` }, as());
