@@ -55,6 +55,8 @@ const QA = resolvers.Query as unknown as {
 };
 type RosterRow = import('../lib/agentTasks/roster.js').RosterEntry & {
   appUrn: string;
+  currentTask?: import('../lib/agentTasks/rosterSummary.js').RosterTaskSummary | null;
+  pausedUntil?: Date | null;
   checkStatus?: import('../lib/workerCheckStatus.js').WorkerCheckStatus | null;
 };
 const T = agentTaskFieldResolvers.AgentTask;
@@ -107,6 +109,8 @@ export function renderRosterEntry(r: RosterRow): string {
     r.unavailableFamilies.length ? `family unavailable: ${r.unavailableFamilies.join('/')}` : null,
     r.startedTaskIds.length ? `started ${r.startedTaskIds.join(', ')}` : null,
     r.pendingTaskIds.length ? `pending ${r.pendingTaskIds.join(', ')}` : null,
+    r.currentTask ? `current task ${r.currentTask.id} (${r.currentTask.status}): ${JSON.stringify(r.currentTask.title)}` : null,
+    r.pausedUntil ? `own pause timestamp ${r.pausedUntil.toISOString()}` : null,
     r.waitingOnTaskIds.length ? `waiting on ${r.waitingOnTaskIds.join(', ')} since ${r.waitingSince?.toISOString()}` : null,
     r.alarmEventIds.length ? `woken on alarm ${r.alarmEventIds.join(', ')}` : null,
     r.unreactedChildTaskId ? `child ${r.unreactedChildTaskId} ended (finished or cancelled)` : null,

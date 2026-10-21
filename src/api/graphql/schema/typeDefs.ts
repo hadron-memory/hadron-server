@@ -12957,6 +12957,13 @@ export const typeDefs = `#graphql
     lastCheckedAt: DateTime
   }
 
+  "A readable open assignment selected for display, independently of session liveness or execution eligibility."
+  type TeamRosterTaskSummary {
+    id: ID!
+    title: String!
+    status: AgentTaskStatus!
+  }
+
   "#1707 — one worker on the team roster."
   type TeamRosterEntry {
     worker: AgentTaskParty!
@@ -13000,6 +13007,10 @@ export const typeDefs = `#graphql
     reportsToRetired: Boolean!
     "#2138 §3.4 (experimental) — whether it is checking its team channel as expected."
     checkStatus: WorkerCheckStatus
+    "The worker's own stored pause timestamp, including expired history; use checkStatus for current pause state. Separate from team pause and availability."
+    pausedUntil: DateTime
+    "Readable STARTED before PENDING, then oldest assignment (null last), creation time and id. Null when none is readable; ending a session does not clear an assignment. Display only."
+    currentTask: TeamRosterTaskSummary
   }
 
   "#1707 — the team roster of one App."

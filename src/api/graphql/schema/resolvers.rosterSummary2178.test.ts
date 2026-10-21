@@ -1,24 +1,17 @@
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-/**
- * #1707 — the team roster (plan design:agent-tasks §7.4), on GraphQL and MCP:
- * each derived state on its own, the order when several hold, the read
- * audience, and that a worker is rendered as a sanitized party.
- *
- * The roster reads the wall clock, so every timestamp here is relative to the
- * real now.
- */
+/** #2178 — authorized pause and selected-task display, shared by GraphQL and MCP. */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { GraphQLError } from 'graphql';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
+import { loadRosterTaskSummaries } from '../../../lib/agentTasks/rosterSummary.js';
+import * as taskReadPolicy from './resolvers.agentTask.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
-import { taskStallTick } from '../../../jobs/taskStallEvaluator.js';
-import { registerHost } from '../../../lib/agentTasks/hosts.js';
-import { rosterState } from '../../../lib/agentTasks/roster.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -26,7 +19,9 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
 
 const M = resolvers.Mutation as any;
 const Q = resolvers.Query as any;
-const F = resolvers as any;
+const server = new ApolloServer<Context>({ typeDefs, resolvers });
+beforeAll(() => server.start());
+afterAll(() => server.stop());
 const MIN = 60_000;
 const ago = (minutes: number) => new Date(Date.now() - minutes * MIN);
 
@@ -60,12 +55,6 @@ beforeEach(async () => {
     });
   }
 });
-
-/** Bind a worker in a session of `family`, driven `minutesAgo` minutes ago. */
-const bind = (name: string, family: string | null, minutesAgo = 0) =>
-  db.session.create({
-    data: { id: generateId(), appId: app.id, workerId: w[name].id, agentId, family, startedAt: ago(minutesAgo), updatedAt: ago(minutesAgo) },
-  });
 
 const task = (data: Record<string, unknown>) =>
   db.agentTask.create({ data: { appId: app.id, title: 'T', ownerUserId: mia.id, assignedAt: ago(5), ...(data.status === 'started' ? {startedAt: ago(1)} : {}), ...data }, select: { id: true } });
@@ -122,5 +111,112 @@ describe('#2178 safe roster enrichment — red first', () => {
     await task({title:'selected title 2178',status:'started',assigneeWorkerId:w.Kit.id,assignedAt:ago(1)});
     const srv=createTestableMcpServer({userId:mia.id,roles:['READER'],clientId:`user:${mia.id}`} as AuthContext);
     expect(await srv.callToolText('hadron_team_roster',{appRef:app.id})).toContain('selected title 2178');
+  });
+
+  it('projects the nullable leaf and enum through the actual GraphQL schema', async () => {
+    const t = await task({ title: 'GraphQL selected', status: 'pending', assigneeWorkerId: w.Kit.id });
+    const response = await server.executeOperation({
+      query: 'query($app: ID!) { teamRoster(appRef: $app) { workers { worker { name } pausedUntil currentTask { id title status } } } }',
+      variables: { app: app.id },
+    }, { contextValue: ctx(mia.id) });
+    expect(response.body.kind).toBe('single');
+    if (response.body.kind !== 'single') throw new Error('Expected single result');
+    expect(response.body.singleResult.errors).toBeUndefined();
+    const workers = (response.body.singleResult.data as any).teamRoster.workers;
+    expect(workers.find((e: any) => e.worker.name === 'Kit')).toEqual({ worker: { name: 'Kit' }, pausedUntil: null,
+      currentTask: { id: t.id, title: 'GraphQL selected', status: 'PENDING' } });
+  });
+
+  it('conceals the roster after membership revocation and for an outsider', async () => {
+    await task({ title: 'private assignment', status: 'pending', assigneeWorkerId: w.Kit.id });
+    await expect(roster(outsider.id)).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
+    await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: mia.id } } });
+    await expect(roster()).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
+  });
+
+  it('scopes summary candidates to both App and returned worker ids', async () => {
+    const foreign = await db.app.create({ data: { name: 'Foreign', urn: `${appUrn}-foreign`, ownerUserId: outsider.id } });
+    const other = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: foreign.id, agentId,
+      name: 'Other', slug: 'other', role: 'engineer' } });
+    await task({ appId: foreign.id, title: 'foreign title', status: 'started', assigneeWorkerId: other.id });
+    await task({ title: 'excluded worker title', status: 'started', assigneeWorkerId: w.Rook.id });
+    const selected = await task({ title: 'permitted', status: 'pending', assigneeWorkerId: w.Kit.id });
+    const summaries = await loadRosterTaskSummaries(db, app.id, [w.Kit.id, other.id]);
+    expect([...summaries]).toEqual([[w.Kit.id, { id: selected.id, title: 'permitted', status: 'pending' }]]);
+  });
+
+  it('does not query titles when the shared task-read policy denies enrichment', async () => {
+    await task({ title: 'withheld title', status: 'started', assigneeWorkerId: w.Kit.id });
+    // The current policy is App-wide. This pins delegation on a denial, without inventing a per-task ACL.
+    const policy = vi.spyOn(taskReadPolicy, 'mayReadAppTasks').mockResolvedValueOnce(false);
+    let titleQueries = 0;
+    const traced = db.$extends({ query: { $allOperations: async ({ args, operation, query }) => {
+      if (operation === '$queryRaw' && JSON.stringify(args).includes('SELECT DISTINCT ON (assignee_worker_id)')) titleQueries++;
+      return query(args);
+    } } });
+    try {
+      const result = await Q.teamRoster({}, { appRef: app.id }, { ...ctx(mia.id), db: traced });
+      expect(policy).toHaveBeenCalledOnce();
+      expect(result.workers.every((e: any) => e.currentTask === null)).toBe(true);
+      expect(titleQueries).toBe(0);
+    } finally { policy.mockRestore(); }
+  });
+
+  it('selects createdAt before id when assignment time ties', async () => {
+    const assignedAt = ago(20);
+    const expected = await task({ title: 'older creation', status: 'pending', assigneeWorkerId: w.Kit.id,
+      assignedAt, createdAt: ago(30), id: 'z2178created00000000000001' });
+    await task({ title: 'newer creation', status: 'pending', assigneeWorkerId: w.Kit.id,
+      assignedAt, createdAt: ago(25), id: 'a2178created00000000000001' });
+    expect((await entry('Kit')).currentTask.id).toBe(expected.id);
+  });
+
+  it('keeps assignment title and roster state in the same snapshot across a concurrent finish', async () => {
+    const t = await task({ title: 'snapshot title', status: 'started', assigneeWorkerId: w.Kit.id });
+    let reached!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((r) => { reached = r; });
+    const barrier = new Promise<void>((r) => { release = r; });
+    const traced = db.$extends({ query: { $allOperations: async ({ args, query, operation }) => {
+      if (operation === '$queryRaw' && JSON.stringify(args).includes('SELECT DISTINCT ON (assignee_worker_id)')) {
+        reached();
+        await barrier;
+      }
+      return query(args);
+    } } });
+    const pending = Q.teamRoster({}, { appRef: app.id }, { ...ctx(mia.id), db: traced });
+    await ready;
+    try {
+      await db.agentTask.update({ where: { id: t.id }, data: { status: 'cancelled', cancelledAt: new Date() } });
+    } finally { release(); }
+    const result = await pending;
+    const kit = result.workers.find((e: any) => e.workerId === w.Kit.id);
+    expect(kit.state).toBe('WORKING');
+    expect(kit.currentTask).toEqual({ id: t.id, title: 'snapshot title', status: 'started' });
+    expect((await entry('Kit')).currentTask).toBeNull();
+  });
+
+  it('keeps summary and pause reads constant for 1 or 100 workers', async () => {
+    await db.worker.deleteMany({ where: { appId: app.id } });
+    const counts: number[][] = [];
+    for (const size of [1, 100]) {
+      await db.worker.deleteMany({ where: { appId: app.id } });
+      await db.worker.createMany({ data: Array.from({ length: size }, (_, i) => ({ ...WORKER_SIGNATURE_DEFAULTS,
+        id: generateId(), appId: app.id, agentId, name: `Bounded ${i}`, slug: `bounded-${i}`, role: 'engineer' })) });
+      let summaries = 0;
+      let pauses = 0;
+      const traced = db.$extends({ query: { $allOperations: async ({ args, query, operation, model }) => {
+        if (operation === '$queryRaw' && JSON.stringify(args).includes('SELECT DISTINCT ON (assignee_worker_id)')) summaries++;
+        if (model === 'WorkerWakeSettings' && operation === 'findMany' &&
+          JSON.stringify(args).includes('"select":{"workerId":true,"pausedUntil":true}')) pauses++;
+        return query(args);
+      } } });
+      const result = await Q.teamRoster({}, { appRef: app.id }, { ...ctx(mia.id), db: traced });
+      expect(result.workers).toHaveLength(size);
+      expect(result.workers.every((e: any) => e.currentTask === null && e.pausedUntil === null)).toBe(true);
+      counts.push([summaries, pauses]);
+    }
+    // One existing check-status pause read plus the one new enrichment read.
+    expect(counts).toEqual([[1, 2], [1, 2]]);
   });
 });
