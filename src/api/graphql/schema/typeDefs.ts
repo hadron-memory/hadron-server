@@ -8773,6 +8773,8 @@ export const typeDefs = `#graphql
     #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:01, :06) — set a stop signal. Whoever manages the App: any level and
     scope. A host key: a HALT on its own host only. Never replaces another signal. Refusals: APP_MANAGER_REQUIRED,
     HOST_SCOPE_REQUIRED, STOP_SIGNAL_SCOPE_FORBIDDEN, STOP_SIGNAL_NOT_FOUND (the target), BAD_USER_INPUT, APP_NOT_FOUND.
+    #2173 (R95): until the stop-notice lane is in effect, setting ANY signal is refused with STOP_SIGNAL_UNAVAILABLE (a worker
+    would be stopped without being told); lifting and listing are unaffected, and the refusal lifts when the lane is turned on.
     """
     setTeamStopSignal(input: SetTeamStopSignalInput!): StopSignal!
     """
