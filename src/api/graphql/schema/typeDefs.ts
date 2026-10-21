@@ -1551,9 +1551,8 @@ export const typeDefs = `#graphql
     """
     #2193: this node's memory record, exactly as Query.memory answers it to the
     caller, or null when the caller may not read that record (or it is
-    deleted). Being able to see a node does not make its memory's record
-    readable: use urn or memoryId for the address. Always null on an
-    inherited node.
+    deleted). Seeing a node does not grant its memory's record, so use urn or
+    memoryId for the address. Always null on an inherited node.
     """
     memory: Memory
     outgoingEdges: [Edge!]!
