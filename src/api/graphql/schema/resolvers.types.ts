@@ -2,6 +2,7 @@ import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js'
 import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
+import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // typeResolvers — GraphQL type-level field resolvers extracted from resolvers.ts
@@ -2016,6 +2017,8 @@ export const typeResolvers = {
       // An org-scoped client (app key / OAuth client) stays pinned to its own
       // org; a user token carries no organizationId, so the role gate decides.
       if (ctx.organizationId && ctx.organizationId !== org.id && !isPlatformAdmin(ctx)) return [];
+      // A worker-bound session acts for its Worker, never as the org admin whose token it rides (as stopSignal's personEntry).
+      if (currentActor().workerId || currentActorAmbiguity()) return [];
       try {
         await requireOrgRole(ctx, org.id, 'ADMIN');
       } catch (e) {

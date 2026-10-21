@@ -1,6 +1,7 @@
 import { ApolloServer } from '@apollo/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
+import { requestActorStorage } from '../../../lib/requestActor.js';
 import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
@@ -123,6 +124,18 @@ describe('#2186 Organization.agentOrgGrants for org OWNER/ADMIN user tokens', ()
     expect((await grants(same)).length).toBe(2);
     const other = { userId: u.id, roles: [], impersonation: { orgId: otherOrgId } } as unknown as Partial<Context>;
     expect(await grants(other)).toEqual([]);
+  });
+
+  it('a worker-bound session under an org OWNER/ADMIN token sees none (the Worker is not the admin); ambiguous bindings too', async () => {
+    const u = await member('OWNER');
+    const ctx: Partial<Context> = { userId: u.id, roles: ['READER'] };
+    expect((await grants(ctx)).length).toBe(2);
+    expect(await requestActorStorage.run({ workerId: 'w1', agentId: null }, () => grants(ctx))).toEqual([]);
+    expect(
+      await requestActorStorage.run({ workerId: null, agentId: null, ambiguousSessionIds: ['s1', 's2'] }, () =>
+        grants(ctx),
+      ),
+    ).toEqual([]);
   });
 
   it('an unexpected DB failure is not swallowed into an empty list', async () => {
