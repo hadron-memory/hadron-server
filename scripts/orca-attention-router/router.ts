@@ -1043,11 +1043,17 @@ const IDLE_MARKERS: readonly RegExp[] = [
  * glyphs plus the worktree path) or Codex's `permissions:`/path lines, and
  * the collapsed-output indicators (`+ Show details`, `+ N lines (^t to
  * expand)`) that sit between a turn's output and its footer or notice
- * header (#1983 — weak on their own: a weak-only window still holds).
+ * header (#1983 — weak on their own: a weak-only window still holds), and
+ * Codex's background-process status line (`2 background terminals running ·
+ * /ps to view · /stop to close`), drawn between the `Worked for` footer and
+ * the composer for as long as a process the turn started keeps running
+ * (a dev server, a watcher). It says nothing about the turn: live capture,
+ * Greta 2026-10-21, held as unknown on every pass for 7.5 h.
  */
 const isWeakChrome = (s: string): boolean =>
   /^❯ /.test(s) || /^[▐▛█▝▜▀│╭╮╰╯ ]*[~❯]/.test(s) || /^permissions: /.test(s)
-  || /^\+ (Show details|\d+ lines)/.test(s);
+  || /^\+ (Show details|\d+ lines)/.test(s)
+  || /^\d+ background terminals? running · \/ps to view/.test(s);
 
 /**
  * The recap block — a completed turn's OWN summary chrome, positionally NEWER
