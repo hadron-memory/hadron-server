@@ -55,6 +55,8 @@ export async function verifyAuthenticatedJwt(token: string, db: Db): Promise<Had
   const payload = await verifyJwt(token);
   if (payload.sid === undefined) return payload;
   if (typeof payload.sid !== 'string' || !payload.sid) throw new SignInNotLive();
+  // Without an owner the where below would drop its userId predicate (Bindi P3-1, #2116).
+  if (typeof payload.sub !== 'string' || !payload.sub) throw new SignInNotLive();
   const row = await db.signIn.findFirst({
     where: { id: payload.sid, userId: payload.sub, endedAt: null, expiresAt: { gt: new Date() } },
     select: { id: true },
