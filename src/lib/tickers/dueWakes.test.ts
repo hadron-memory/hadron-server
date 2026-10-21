@@ -1320,3 +1320,103 @@ describe('cycle 3 — the stamp holds the Worker row in one mode (Diego P2-3)', 
     expect(await db.node.count({ where: { messageChannelId: { in: [channel.id, other.id] }, nodeType: 'chat-message' } })).toBe(2);
   });
 });
+
+describe('#2138 §3.3 — the live-check reason through the whole loader', () => {
+  const liveTicker = () => mkTicker({ reasons: ['live-check'] });
+  const task = (workerId: string, status = 'started') =>
+    db.agentTask.create({ data: { id: generateId(), appId: app.id, title: 't', ownerUserId: manager.id, assigneeWorkerId: workerId, assignedAt: new Date(), status,
+      ...(status === 'started' ? { startedAt: new Date() } : {}), ...(status === 'finished' ? { startedAt: new Date(), finishedAt: new Date(), resultOutcome: 'done' } : {}),
+      ...(status === 'cancelled' ? { cancelledAt: new Date() } : {}) } });
+  const stampCheck = (workerId: string, agoSec: number) =>
+    db.channelReadState.upsert({
+      where: { id: `chk-${workerId}` },
+      create: { id: `chk-${workerId}`, workerId, channelId: channel.id, lastSeenSeq: 0, lastCheckedAt: new Date(Date.now() - agoSec * 1000) },
+      update: { lastCheckedAt: new Date(Date.now() - agoSec * 1000) },
+    });
+
+  it('a worker with a task and a stale (or missing) check is due, with nothing unread', async () => {
+    const t = await liveTicker();
+    await subscribe(t.id, liam.id);
+    await task(liam.id);
+    expect(ids(await due(ctx(manager.id)))).toEqual([liam.id]);
+    await stampCheck(liam.id, 700);
+    expect(ids(await due(ctx(manager.id)))).toEqual([liam.id]);
+  });
+
+  it('a fresh check (younger than the cadence) is not due', async () => {
+    const t = await liveTicker();
+    await subscribe(t.id, liam.id);
+    await task(liam.id);
+    await stampCheck(liam.id, 30);
+    expect(ids(await due(ctx(manager.id)))).toEqual([]);
+  });
+
+  it('a worker with NO task is PENDING: never due for a live-check; a finished or cancelled task does not count', async () => {
+    const t = await liveTicker();
+    await subscribe(t.id, liam.id);
+    expect(ids(await due(ctx(manager.id)))).toEqual([]);
+    await task(liam.id, 'finished');
+    await task(liam.id, 'cancelled');
+    expect(ids(await due(ctx(manager.id)))).toEqual([]);
+  });
+
+  it('an ASSIGNED-but-not-started (pending) task counts as having a task', async () => {
+    const t = await liveTicker();
+    await subscribe(t.id, liam.id);
+    await task(liam.id, 'pending');
+    expect(ids(await due(ctx(manager.id)))).toEqual([liam.id]);
+  });
+
+  it('an Agent with usesTasks:false counts as having a task', async () => {
+    const t = await liveTicker();
+    await subscribe(t.id, liam.id);
+    await db.agent.update({ where: { id: agent.id }, data: { usesTasks: false } });
+    expect(ids(await due(ctx(manager.id)))).toContain(liam.id);
+  });
+
+  it('paused, isolated-by-pause and a TEAM pause are never due', async () => {
+    const t = await liveTicker();
+    await subscribe(t.id, liam.id);
+    await task(liam.id);
+    await db.workerWakeSettings.create({ data: { workerId: liam.id, pausedUntil: new Date(Date.now() + 3600_000) } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([]);
+    await db.workerWakeSettings.update({ where: { workerId: liam.id }, data: { pausedUntil: null } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([liam.id]);
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: new Date() } });
+    expect(ids(await due(ctx(manager.id)))).toEqual([]);
+  });
+
+  it('#2013: a stamped @all post makes read-team-channel (relevance mentions) due, and a fresh check silences it', async () => {
+    const t = await mkTicker({ relevance: 'MENTIONS', reasons: ['read-team-channel'] });
+    await subscribe(t.id, liam.id);
+    await db.workerWakeSettings.create({ data: { workerId: liam.id, mentions: 'OFF' } });
+    await say(channel, '@all standup moved', { mentions: ['all'], broadcastWakes: true });
+    expect(ids(await due(ctx(manager.id)))).toContain(liam.id);
+    await stampCheck(liam.id, 30);
+    expect(ids(await due(ctx(manager.id)))).not.toContain(liam.id);
+  });
+
+  it('#2138 §3.6: a TEAM pause silences EVERY reason, not only live-check: read-team-channel, every-tick and an immediate mention', async () => {
+    const rtc = await mkTicker({ relevance: 'MENTIONS', reasons: ['read-team-channel'], name: 'R' });
+    const every = await mkTicker({ reasons: ['every-tick'], name: 'E' });
+    await subscribe(rtc.id, liam.id);
+    await subscribe(every.id, liam.id);
+    await say(channel, 'hey @liam', { mentions: ['liam'] }); // immediate mention (mentions IMMEDIATE by default)
+    const reasons = async () => (await due(ctx(manager.id))).wakes.flatMap((w: any) => w.reasons.map((r: any) => r.kind)).sort();
+    expect(await reasons()).toEqual(['MENTION', 'TICK', 'TICK']);
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: new Date() } });
+    expect(await reasons()).toEqual([]);
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: null } });
+    expect(await reasons()).toEqual(['MENTION', 'TICK', 'TICK']);
+  });
+
+  it('read-team-channel with an unread mention: due with a stale check, not with a fresh one', async () => {
+    const t = await mkTicker({ relevance: 'MENTIONS', reasons: ['read-team-channel'] });
+    await subscribe(t.id, liam.id);
+    await db.workerWakeSettings.create({ data: { workerId: liam.id, mentions: 'OFF' } });
+    await say(channel, 'hey @liam', { mentions: ['liam'] });
+    expect(ids(await due(ctx(manager.id)))).toEqual([liam.id]);
+    await stampCheck(liam.id, 30);
+    expect(ids(await due(ctx(manager.id)))).toEqual([]);
+  });
+});

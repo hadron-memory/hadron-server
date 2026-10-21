@@ -29,14 +29,17 @@ import { clearStalledMarks } from '../lib/agentTasks/availability.js';
 import { recordUndeliverableTaskWakes } from '../lib/agentTasks/taskWakes.js';
 import { sweepSessionEndRequests } from '../lib/hostOperations/sessionEnd.js';
 import { sweepUnreportedHostOperations } from '../lib/hostOperations/settle.js';
+import { anchorNow } from '../lib/stopSignals/state.js';
 
 export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number; sessionEnds: number; hostOperationsSettled: number };
 
 /** One pass at `now`. Each step runs even when an earlier one failed. */
 export async function taskStallTick(db: PrismaClient, now = new Date()): Promise<TaskStallTickResult> {
   const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0 };
+  // #2022: the monotonic half of `now`'s sample, so a raise decides at its own moment (stall.ts raiseStallAlarm).
+  const anchor = anchorNow();
   try {
-    result.raised = (await evaluateStalls(db, now)).length;
+    result.raised = (await evaluateStalls(db, now, anchor)).length;
   } catch (err) {
     console.error('[task-stall] evaluation failed:', err);
   }
