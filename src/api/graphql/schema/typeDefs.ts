@@ -397,7 +397,7 @@ export const typeDefs = `#graphql
   "#2190: one reason a memory is in an App's scope."
   type AppMemorySource {
     kind: AppMemorySourceKind!
-    "The installed or base Agent, for AGENT_SYSTEM, AGENT_LINK and INHERITED_BASE; null for TEAM_SPACE. An id only: when it does not resolve in App.agents (an Agent this caller may not read), show the source kind without a name."
+    "The installed or base Agent, for AGENT_SYSTEM, AGENT_LINK and INHERITED_BASE; null for TEAM_SPACE. An id only: when it does not resolve to an Agent this caller may read, show the source kind without a name."
     agentId: ID
   }
 
@@ -2878,17 +2878,6 @@ export const typeDefs = `#graphql
     record read gate — denied and missing are indistinguishable).
     """
     sharedMemory: Memory
-    """
-    #2190 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): the memories appNodes
-    reads for this caller, one row per memory with every reason it is in scope,
-    ordered by memoryUrn and paged (default 50, cap 200; over the cap returns a
-    page of the cap). Same admission as appNodes: a refused caller gets
-    appNodes' error. Every memory in the caller's scope is listed, including
-    empty ones, so nothing is withheld; total 0 means no memories, and is also
-    the answer for an App in a soft-deleted organization. Rows are leaves: join
-    agentId to App.agents.
-    """
-    memoryScope(limit: Int, offset: Int): AppScopedMemoryPage!
     appType: AppType!
     role: AppMembershipRole!
     description: String
@@ -8064,6 +8053,20 @@ export const typeDefs = `#graphql
     nodes are NOT excluded by default.
     """
     appNodes(appRef: ID!, filter: NodeFilter, limit: Int): [Node!]!
+
+    """
+    #2190 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): the memories appNodes
+    reads for this caller, one row per memory with every reason it is in scope,
+    ordered by memoryUrn and paged (default 50, cap 200; over the cap returns a
+    page of the cap). Same entry and admission as appNodes, so an external App
+    participant appNodes admits is answered here too, and a refused caller gets
+    appNodes' error. Every memory in the caller's scope is listed, including
+    empty ones, so nothing is withheld; total 0 means no memories, and is also
+    the answer for an App in a soft-deleted organization. Rows are leaves.
+
+    Accepts the App's ID or URN.
+    """
+    appMemoryScope(appRef: ID!, limit: Int, offset: Int): AppScopedMemoryPage!
 
     """
     Slim, paginated node list for rendering a memory's graph view (issue #466).

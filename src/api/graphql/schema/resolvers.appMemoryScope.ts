@@ -3,9 +3,16 @@
  * reads for a caller, with the reason each one is there.
  *
  * {@link resolveAppNodeScope} is the ONE admission-and-scope computation;
- * `appNodes` and `App.memoryScope` both call it, so the node list and the
+ * `appNodes` and `appMemoryScope` both call it, so the node list and the
  * memory list can never disagree about who is admitted or what is in scope.
  * The body was moved out of `appNodes` unchanged.
+ *
+ * `appMemoryScope` is a top-level query taking `appRef`, as `appNodes` is, and
+ * deliberately NOT a field on `App`: an App object is reachable only through
+ * `Query.app`'s org-member gate, so a field there could never answer the
+ * external App participant (or the soft-deleted org) that `appNodes` admits.
+ * Widening `Query.app` instead would hand those callers every other App field
+ * (#552). (#2196 QA, Clark; Xan's CHECKED amendment.)
  */
 
 import { GraphQLError } from 'graphql';
@@ -212,7 +219,7 @@ export async function resolveAppNodeScope(ctx: Context, appRef: string): Promise
   return { appId: resolvedAppId, inheritance, sources };
 }
 
-/** One row of `App.memoryScope`: a leaf, never a nested Memory or Agent (cor:dmo:050:17). */
+/** One row of `appMemoryScope`: a leaf, never a nested Memory or Agent (cor:dmo:050:17). */
 export type AppScopedMemoryRow = {
   memoryId: string;
   memoryUrn: string;
@@ -223,7 +230,7 @@ export type AppScopedMemoryRow = {
 };
 
 /**
- * `App.memoryScope(limit, offset)`: the caller's App memory scope, one page,
+ * `appMemoryScope(appRef, limit, offset)`: the caller's App memory scope, one page,
  * ordered by memory URN (unique, so pages never drop or repeat a row). Paged
  * per cor:api:120:04 with the shared list clamp. `viewerCanWrite` runs the
  * exact `createNode` gate with this request's own context, for the page's rows
@@ -231,11 +238,11 @@ export type AppScopedMemoryRow = {
  */
 export async function appMemoryScopePage(
   ctx: Context,
-  appId: string,
+  appRef: string,
   limit?: number | null,
   offset?: number | null,
 ): Promise<{ items: AppScopedMemoryRow[]; total: number }> {
-  const scope = await resolveAppNodeScope(ctx, appId);
+  const scope = await resolveAppNodeScope(ctx, appRef);
   if (!scope) return { items: [], total: 0 };
   const rows = await ctx.db.memory.findMany({
     where: { id: { in: [...scope.sources.keys()] } },
@@ -260,8 +267,17 @@ export async function appMemoryScopePage(
   return { items, total: ordered.length };
 }
 
-/** The `createNode` write gate as a boolean: only its FORBIDDEN denial is false. */
+/**
+ * The `createNode` write gate as a boolean: only its FORBIDDEN denial is false.
+ *
+ * An impersonation session is read-only before any resolver runs:
+ * `impersonationReadOnlyPlugin` refuses every mutation but `stopImpersonation`
+ * at the transport, so `createNode` never reaches `requireMemoryWriteAccess`.
+ * That plugin is part of the authority this flag reports, so the answer there
+ * is false for every row (#2196 QA, Clark).
+ */
 async function viewerCanWrite(ctx: Context, memoryId: string): Promise<boolean> {
+  if (ctx.impersonation) return false;
   try {
     await requireMemoryWriteAccess(ctx, memoryId);
     return true;

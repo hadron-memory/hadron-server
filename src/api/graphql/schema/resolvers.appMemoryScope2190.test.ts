@@ -1,5 +1,5 @@
 /**
- * #2190 (cor:dmo:050:17) — App.memoryScope: the memories appNodes reads for a
+ * #2190 (cor:dmo:050:17) — appMemoryScope: the memories appNodes reads for a
  * caller, one row per memory with every reason it is in scope, paged, with an
  * advisory viewerCanWrite from the createNode gate.
  *
@@ -12,14 +12,17 @@
  * whose only node is a boot prompt (never inherited, so never listed).
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { createServer as createHttpServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { createServer } from '../../../server.js';
+import { mintUserApiKey } from '../../../middleware/auth.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 
 const Q = resolvers.Query as any;
-const App = (resolvers as any).App;
 
 type Row = { memoryId: string; memoryUrn: string; name: string; class: string; sources: Array<{ kind: string; agentId: string | null }>; viewerCanWrite: boolean };
 
@@ -65,7 +68,7 @@ const link = (agentKey: string, memKey: string, role: 'read' | 'read-write' = 'r
 async function scopeAll(who: string, pageSize = 2): Promise<Row[]> {
   const rows: Row[] = [];
   for (let offset = 0; ; offset += pageSize) {
-    const page = await App.memoryScope({ id: appId }, { limit: pageSize, offset }, ctx(who));
+    const page = await Q.appMemoryScope({}, { appRef: appId, limit: pageSize, offset }, ctx(who));
     rows.push(...page.items);
     if (page.items.length === 0 || rows.length >= page.total) break;
   }
@@ -226,13 +229,13 @@ describe('#2190 — a write-gate failure is a failure, never a read-only answer'
       get: (target, prop, recv) => (prop === 'findUniqueOrThrow' ? () => Promise.reject(boom) : Reflect.get(target, prop, recv)),
     });
     const failing = new Proxy(db, { get: (target, prop, recv) => (prop === 'memory' ? memory : Reflect.get(target, prop, recv)) });
-    await expect(App.memoryScope({ id: appId }, {}, { ...ctx('member'), db: failing as typeof db })).rejects.toBe(boom);
+    await expect(Q.appMemoryScope({}, { appRef: appId }, { ...ctx('member'), db: failing as typeof db })).rejects.toBe(boom);
   });
 });
 
 describe('#2190 — paging (cor:api:120:04)', () => {
   it('pages in memoryUrn order without dropping or repeating a row', async () => {
-    const full = (await App.memoryScope({ id: appId }, {}, ctx('member'))).items as Row[];
+    const full = (await Q.appMemoryScope({}, { appRef: appId }, ctx('member'))).items as Row[];
     const paged = await scopeAll('member', 3);
     expect(paged.map((r) => r.memoryId)).toEqual(full.map((r) => r.memoryId));
     const urns = full.map((r) => r.memoryUrn);
@@ -241,13 +244,13 @@ describe('#2190 — paging (cor:api:120:04)', () => {
   });
 
   it('reports the whole scope in total, and an offset past the end returns no items', async () => {
-    const page = await App.memoryScope({ id: appId }, { limit: 2, offset: 100 }, ctx('member'));
+    const page = await Q.appMemoryScope({}, { appRef: appId, limit: 2, offset: 100 }, ctx('member'));
     expect(page.items).toEqual([]);
     expect(page.total).toBe(8);
   });
 
   it('a limit over the cap returns a page of the cap, never a refusal', async () => {
-    const page = await App.memoryScope({ id: appId }, { limit: 10_000 }, ctx('member'));
+    const page = await Q.appMemoryScope({}, { appRef: appId, limit: 10_000 }, ctx('member'));
     expect(page.items).toHaveLength(8);
   });
 });
@@ -256,12 +259,88 @@ describe('#2190 — admission is appNodes\' own', () => {
   it('a caller appNodes refuses gets the same refusal', async () => {
     const refusal = await Q.appNodes({}, { appRef: appId }, ctx('stranger')).catch((e: Error) => e);
     expect(refusal).toBeInstanceOf(Error);
-    await expect(App.memoryScope({ id: appId }, {}, ctx('stranger'))).rejects.toThrow(refusal.message);
+    await expect(Q.appMemoryScope({}, { appRef: appId }, ctx('stranger'))).rejects.toThrow(refusal.message);
   });
 
   it('an App in a soft-deleted organization has an empty scope, as appNodes does', async () => {
     await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
     expect(await Q.appNodes({}, { appRef: appId }, ctx('member'))).toEqual([]);
-    expect(await App.memoryScope({ id: appId }, {}, ctx('member'))).toEqual({ items: [], total: 0 });
+    expect(await Q.appMemoryScope({}, { appRef: appId }, ctx('member'))).toEqual({ items: [], total: 0 });
+  });
+});
+
+// #2196 QA (Clark): the composition only the real HTTP boundary has. The
+// outer Query.app gate, and the read-only plugin that refuses an impersonated
+// mutation before any resolver runs, are invisible to direct-resolver calls.
+describe('#2190 — over the real GraphQL HTTP boundary', () => {
+  let server: Server;
+  let baseUrl: string;
+  beforeAll(async () => {
+    server = createHttpServer(await createServer());
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); });
+
+  const keyFor = async (who: string) =>
+    (await mintUserApiKey(db, { userId: user[who]!, label: null, createdBy: user[who]!, issuedVia: 'test' })).rawKey;
+  // `status` is 200 unless named: the read-only plugin refuses at
+  // didResolveOperation, which Apollo answers with a 500 carrying the code.
+  const post = async (bearer: string, query: string, variables: Record<string, unknown> = {}, status = 200) => {
+    const response = await fetch(`${baseUrl}/graphql`, {
+      method: 'POST', headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ query, variables }),
+    });
+    expect(response.status).toBe(status);
+    return response.json() as Promise<{ data?: any; errors?: Array<{ message: string; extensions?: { code?: string } }> }>;
+  };
+  const SCOPE = 'query($a: ID!) { appMemoryScope(appRef: $a, limit: 200) { total items { memoryId viewerCanWrite } } }';
+  const NODES = 'query($a: ID!) { appNodes(appRef: $a) { memoryId } }';
+
+  it('answers an external App participant whom Query.app refuses, with appNodes\' scope', async () => {
+    const key = await keyFor('external');
+    const app = await post(key, 'query($a: ID!) { app(ref: $a) { id } }', { a: appId });
+    expect(app.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+    const scope = await post(key, SCOPE, { a: appId });
+    expect(scope.errors).toBeUndefined();
+    const ids = new Set<string>(scope.data.appMemoryScope.items.map((r: Row) => r.memoryId));
+    expect([...ids].map(keyOf).sort()).toEqual(keysOf(await scopeAll('external')));
+    expect(ids.has(mem.TeamSpace!)).toBe(true);
+    const nodes = await post(key, NODES, { a: appId });
+    for (const { memoryId } of nodes.data.appNodes) expect(ids.has(memoryId)).toBe(true);
+  });
+
+  it('gives total 0 for an App in a soft-deleted organization, as appNodes gives []', async () => {
+    const key = await keyFor('member');
+    await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
+    expect((await post(key, NODES, { a: appId })).data.appNodes).toEqual([]);
+    const scope = await post(key, SCOPE, { a: appId });
+    expect(scope.errors).toBeUndefined();
+    expect(scope.data.appMemoryScope).toEqual({ total: 0, items: [] });
+  });
+
+  it('reads no row as writable in a read-only impersonation session, where createNode is refused', async () => {
+    user.owner = (await db.user.create({ data: { handle: `s2190-owner-${n}`, roles: ['READER'] } })).id;
+    await db.orgMember.create({ data: { organizationId: org.id, userId: user.owner, role: 'OWNER' } });
+    const started = await post(await keyFor('owner'),
+      'mutation($o: String!, $u: String!) { startImpersonation(orgRef: $o, userRef: $u) { token } }', { o: org.id, u: user.admin });
+    expect(started.errors).toBeUndefined();
+    const token: string = started.data.startImpersonation.token;
+
+    // Control: the same admin, signed in as themselves, may write some rows.
+    const own = (await post(await keyFor('admin'), SCOPE, { a: appId })).data.appMemoryScope.items as Row[];
+    const writable = own.filter((r) => r.viewerCanWrite);
+    expect(writable.length).toBeGreaterThan(0);
+
+    const impersonated = await post(token, SCOPE, { a: appId });
+    expect(impersonated.errors).toBeUndefined();
+    const rows = impersonated.data.appMemoryScope.items as Row[];
+    expect(rows.map((r) => r.memoryId)).toEqual(own.map((r) => r.memoryId));
+    expect(rows.filter((r) => r.viewerCanWrite)).toEqual([]);
+
+    const created = await post(token, 'mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }',
+      { i: { memoryId: writable[0]!.memoryId, loc: `probe:imp-${n}`, name: 'probe' } }, 500);
+    expect(created.errors?.[0]?.extensions?.code).toBe('IMPERSONATION_READ_ONLY');
+    expect(await db.node.count({ where: { memoryId: writable[0]!.memoryId, loc: `probe:imp-${n}` } })).toBe(0);
   });
 });

@@ -46,7 +46,7 @@ import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js'
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { resolveAppNodeScope } from './resolvers.appMemoryScope.js';
+import { appMemoryScopePage, resolveAppNodeScope } from './resolvers.appMemoryScope.js';
 // Spec 049 Phase 3 — the search ladder's GraphQL entry + disclosure envelope.
 import { resolveNamedScopeForQuery, scopeInfoOf, mergeDegraded as mergeDegradedCodes, SCOPE_NARROWED } from '../../../lib/scopes.js';
 import { resolveAppRunRef } from '../../../lib/entityRef/appRunRef.js';
@@ -2191,6 +2191,13 @@ export const nodeQueries = {
       return (await decryptReadableRevisions(ctx.db, [revision], node.memoryId))[0]!;
     },
 
+    /** #2190 (cor:dmo:050:17): the memories appNodes reads for this caller, one page. */
+    appMemoryScope: (
+      _: unknown,
+      { appRef, limit, offset }: { appRef: string; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => appMemoryScopePage(ctx, appRef, limit, offset),
+
     appNodes: async (
       _: unknown,
       { appRef, filter, limit }: {
@@ -2220,7 +2227,7 @@ export const nodeQueries = {
       ctx: Context,
     ) => {
       // #2190 (cor:dmo:050:17) — admission and the memory scope are ONE
-      // computation, shared with App.memoryScope: a second copy would drift.
+      // computation, shared with appMemoryScope: a second copy would drift.
       const scope = await resolveAppNodeScope(ctx, appRef);
       if (!scope) return [];
       const { inheritance } = scope;
