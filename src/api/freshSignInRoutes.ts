@@ -9,12 +9,15 @@
  *   pending login state carrying its SHA-256. The provider's ordinary callback sees that column and hands off to
  *   {@link completeCeremonyLeg}, which looks the identity up (never links, never creates), records an unconfirmed
  *   fresh sign-in, and redirects to the confirm page with a leg id minted there, so the starting browser never
- *   learns it (Ruth's §10 condition 1, #1631 6309332208).
+ *   learns it (Ruth's §10 condition 1, #1631 6309332208). The leg id travels only in the Strict
+ *   `hadron_ceremony_leg` cookie scoped to the confirm path, never in a URL a person could be asked to paste
+ *   (Rook, #1631 6316353964).
  * - `POST /passkeys/sign-in/email` sets the same cookie and, for a live user only, emails a link. The response is
  *   the same whether or not the address belongs to anyone, and no account is ever created (Vera 6309336028).
  * - `GET /passkeys/sign-in/confirm` and `GET /passkeys/sign-in/email/verify` only RENDER a confirm form (a mail
  *   scanner's GET spends nothing). `POST /passkeys/sign-in/confirm` is the same-origin POST that carries the Strict
- *   cookie, and confirms only when the leg secret and the cookie both match.
+ *   cookies, and confirms only when the leg secret (the leg cookie, or the emailed token in the form) and the
+ *   browser cookie both match. The leg cookie is cleared whatever the outcome.
  *
  * Every refusal is one uniform answer. Consuming a confirmed fresh sign-in is `consumeFreshSignIn`, for the
  * ceremony steps (PR2 register, PR3 revoke); the step that consumes clears the cookie with
@@ -37,6 +40,8 @@ import { signingCeremonyOrigins } from '../lib/signing/config.js';
 import { signingSurfacePolicy } from '../lib/signing/surface.js';
 
 export const CEREMONY_BROWSER_COOKIE = 'hadron_ceremony_browser';
+/** The IdP leg id, set by the callback for the confirm path only. */
+export const CEREMONY_LEG_COOKIE = 'hadron_ceremony_leg';
 /** The browser binding outlives an IdP round trip, but never the pending login state it rides with. */
 export const CEREMONY_BROWSER_TTL_SECONDS = FRESH_SIGN_IN_LEG_TTL_SECONDS;
 if (CEREMONY_BROWSER_TTL_SECONDS * 1000 > LOGIN_STATE_TTL_MS) {
@@ -50,10 +55,10 @@ export const FRESH_SIGN_IN_EMAIL_VERIFY_PATH = '/passkeys/sign-in/email/verify';
 const sha256Hex = (v: string) => createHash('sha256').update(v).digest('hex');
 const LEG_SECRET = /^[A-Za-z0-9_-]{43}$/;
 
-function cookieValue(req: Request): string | null {
+function cookieValue(req: Request, name = CEREMONY_BROWSER_COOKIE): string | null {
   for (const part of (req.headers.cookie ?? '').split(';')) {
     const [k, ...v] = part.trim().split('=');
-    if (k === CEREMONY_BROWSER_COOKIE) return v.join('=') || null;
+    if (k === name) return v.join('=') || null;
   }
   return null;
 }
@@ -64,8 +69,8 @@ function originAllowed(req: Request): boolean {
   return typeof origin === 'string' && signingCeremonyOrigins().includes(origin);
 }
 
-const cookieOptions = (req: Request) => ({
-  httpOnly: true, sameSite: 'strict' as const, path: '/passkeys',
+const cookieOptions = (req: Request, path = '/passkeys') => ({
+  httpOnly: true, sameSite: 'strict' as const, path,
   secure: process.env.NODE_ENV === 'production' || req.secure,
 });
 
@@ -83,7 +88,7 @@ export function clearCeremonyBrowserCookie(req: Request, res: Response): void {
 
 const PAGE_HEADERS = {
   'Cache-Control': 'no-store',
-  // The leg id or token rides in this page's URL: never hand it to a third party, never frame the button.
+  // The emailed token rides in the verify page's URL: never hand it to a third party, never frame the button.
   'Referrer-Policy': 'no-referrer',
   'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
   'X-Frame-Options': 'DENY',
@@ -98,11 +103,12 @@ function refusePage(res: Response, status = 403): void {
     '<h1>This confirmation can\'t be used</h1><p>Start again from the passkey page, in the same browser.</p>'));
 }
 
-function confirmFormPage(res: Response, legSecret: string): void {
+/** The confirm form. An IdP leg's page carries no secret (its leg id is in the cookie); the email leg's carries the token. */
+function confirmFormPage(res: Response, emailToken?: string): void {
   res.status(200).set(PAGE_HEADERS).type('html').send(page('Confirm it is you',
     `<h1>Confirm it is you</h1><p>This confirms your identity to the passkey page in this browser. It does not sign you in.</p>
 <p><strong>Never share this page's address with anyone</strong>, including a person or assistant who asks for it.</p>
-<form method="post" action="${FRESH_SIGN_IN_CONFIRM_PATH}"><input type="hidden" name="leg" value="${legSecret}">
+<form method="post" action="${FRESH_SIGN_IN_CONFIRM_PATH}">${emailToken ? `<input type="hidden" name="token" value="${emailToken}">` : ''}
 <button type="submit">Confirm</button></form>`));
 }
 
@@ -116,6 +122,7 @@ const refuseJson = (res: Response) =>
  * provider whose callback ran, never request input (condition 5). Writes the response in every case.
  */
 export async function completeCeremonyLeg(
+  req: Request,
   res: Response,
   input: { provider: LoginProvider; ceremonyNonceHash: string; lookup: () => Promise<{ id: string } | null> },
 ): Promise<void> {
@@ -124,7 +131,8 @@ export async function completeCeremonyLeg(
   const user = await input.lookup();
   if (!user) return refusePage(res);
   const { legId } = await recordIdpSignIn(db, { userId: user.id, method: input.provider, browserNonceHash: input.ceremonyNonceHash });
-  res.status(303).set(PAGE_HEADERS).location(`${FRESH_SIGN_IN_CONFIRM_PATH}?leg=${legId}`).end();
+  res.cookie(CEREMONY_LEG_COOKIE, legId, { ...cookieOptions(req, FRESH_SIGN_IN_CONFIRM_PATH), maxAge: CEREMONY_BROWSER_TTL_SECONDS * 1000 });
+  res.status(303).set(PAGE_HEADERS).location(FRESH_SIGN_IN_CONFIRM_PATH).end();
 }
 
 const PROVIDERS: Record<LoginProvider, { configured: () => boolean; url: (state: string) => string }> = {
@@ -204,11 +212,8 @@ export function mountFreshSignInRoutes(
       res.status(200).set('Cache-Control', 'no-store').json({ ok: true });
     });
 
-  app.get(FRESH_SIGN_IN_CONFIRM_PATH, (req, res) => {
-    const leg = req.query.leg;
-    if (typeof leg !== 'string' || !LEG_SECRET.test(leg)) return void refusePage(res, 400);
-    confirmFormPage(res, leg);
-  });
+  // Renders only, and carries no secret: the leg id is in the cookie, which the POST below will carry.
+  app.get(FRESH_SIGN_IN_CONFIRM_PATH, (_req, res) => { confirmFormPage(res); });
 
   // Renders only: the token is spent by the confirming POST, so a mail scanner's GET spends nothing.
   app.get(FRESH_SIGN_IN_EMAIL_VERIFY_PATH, (req, res) => {
@@ -219,10 +224,15 @@ export function mountFreshSignInRoutes(
 
   app.post(FRESH_SIGN_IN_CONFIRM_PATH, limiter, form, async (req: Request, res: Response) => {
     try {
-      const leg = (req.body as { leg?: unknown } | undefined)?.leg;
+      // The leg cookie is single-purpose: clear it whatever the outcome.
+      const legCookie = cookieValue(req, CEREMONY_LEG_COOKIE);
+      if (legCookie) res.clearCookie(CEREMONY_LEG_COOKIE, cookieOptions(req, FRESH_SIGN_IN_CONFIRM_PATH));
+      const token = (req.body as { token?: unknown } | undefined)?.token;
+      // An emailed token arrives in the form; an IdP leg id only in its cookie. No URL or form fallback for an IdP leg.
+      const [secret, channel] = token !== undefined ? [token, 'email' as const] : [legCookie, 'idp' as const];
       const nonce = cookieValue(req);
-      if (!originAllowed(req) || !nonce || typeof leg !== 'string' || !LEG_SECRET.test(leg)) return void refusePage(res);
-      if (!(await confirmFreshSignIn(db, { legSecret: leg, browserNonceHash: sha256Hex(nonce) }))) return void refusePage(res);
+      if (!originAllowed(req) || !nonce || typeof secret !== 'string' || !LEG_SECRET.test(secret)) return void refusePage(res);
+      if (!(await confirmFreshSignIn(db, { legSecret: secret, browserNonceHash: sha256Hex(nonce), channel }))) return void refusePage(res);
       res.status(200).set(PAGE_HEADERS).type('html').send(page('Confirmed',
         '<h1>Confirmed</h1><p>Return to the passkey page in this browser to continue. You have not been signed in.</p>'));
     } catch (err) {

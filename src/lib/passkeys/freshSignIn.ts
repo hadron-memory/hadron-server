@@ -72,19 +72,23 @@ export async function startEmailSignIn(
 
 /**
  * Confirm a leg from the browser that holds both halves. False is the one uniform refusal (unknown leg, other
- * browser, already confirmed, expired, or a user who is no longer live); a refusal changes nothing. For the email
+ * browser, already confirmed, expired, the wrong channel, or a user who is no longer live); a refusal changes nothing. For the email
  * leg this POST is the identity proof, so it also sets `signed_in_at` (Vera, #1631 6309336028).
  */
 export async function confirmFreshSignIn(
   db: PrismaClient,
-  input: { legSecret: string; browserNonceHash: string },
+  input: { legSecret: string; browserNonceHash: string; channel: 'idp' | 'email' },
 ): Promise<boolean> {
   if (!HEX64.test(input.browserNonceHash) || input.legSecret.length === 0) return false;
+  // #1631 PR2 (Rook 6316353964): an IdP leg id arrives only in its cookie and an emailed token only in its form,
+  // so neither secret can stand in for the other's channel.
+  const emailChannel = input.channel === 'email';
   const rows = await db.$queryRaw<Array<{ id: string }>>`UPDATE fresh_sign_ins f
      SET signed_in_at = COALESCE(f.signed_in_at, clock_timestamp() AT TIME ZONE 'UTC'),
          confirmed_at = clock_timestamp() AT TIME ZONE 'UTC'
    WHERE f.leg_hash = ${sha256Hex(input.legSecret)} AND f.browser_nonce_hash = ${input.browserNonceHash}
      AND f.confirmed_at IS NULL AND f.expires_at > (clock_timestamp() AT TIME ZONE 'UTC')
+     AND (f.method = 'email') = ${emailChannel}
      AND EXISTS (SELECT 1 FROM users u WHERE u.id = f.user_id AND u.deleted_at IS NULL)
    RETURNING f.id`;
   return rows.length === 1;
