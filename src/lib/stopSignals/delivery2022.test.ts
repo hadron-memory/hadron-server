@@ -13,7 +13,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { teamChatMutations } from '../../api/graphql/schema/resolvers.teamChat.js';
-import { setS6NoticesAvailableForTest } from './delivery.js';
+import { s6NoticesAvailable, setS6NoticesAvailableForTest } from './delivery.js';
 import { verifyWakeProof } from '../tickers/wakeProof.js';
 import { ensureChannelWithRoot } from '../channels.js';
 import { appendChatMessage } from '../chatRoot.js';
@@ -58,7 +58,17 @@ afterEach(() => {
 
 const due = async () => (await Q.dueWakes({}, { appRef: app.id }, ctx(manager.id))).wakes as any[];
 const kinds = (w: any) => w.reasons.map((r: any) => r.kind);
-const set = (level: string, until?: Date) => M.setTeamStopSignal({}, { input: { appRef: app.id, level, scope: 'WORKER', worker: liam.id, ...(until ? { until } : {}) } }, ctx(manager.id));
+// #2173: setting a signal is refused while the notice lane is off (R95). This file tests what a RECORDED signal offers while the lane is
+// dark, so the helper opens the lane for the one set call and restores whatever it was: the DARK tests then still see a dark lane.
+const set = async (level: string, until?: Date) => {
+  const was = s6NoticesAvailable();
+  setS6NoticesAvailableForTest(true);
+  try {
+    return await M.setTeamStopSignal({}, { input: { appRef: app.id, level, scope: 'WORKER', worker: liam.id, ...(until ? { until } : {}) } }, ctx(manager.id));
+  } finally {
+    setS6NoticesAvailableForTest(was);
+  }
+};
 const lift = (id: string) => M.liftTeamStopSignal({}, { appRef: app.id, id }, ctx(manager.id));
 const ack = (proof: string) => M.acknowledgeWakes({}, { proofs: [proof] }, ctx(manager.id));
 
