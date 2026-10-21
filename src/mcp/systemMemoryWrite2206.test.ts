@@ -239,7 +239,7 @@ describe('#2206 case 2: a platform admin writes a user-owned Agent\'s system mem
     expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({ memoryId: before.memoryId, loc: before.loc, content: SECRET.content, deletedAt: null });
     expect(await db.node.count({ where: { memoryId: scratch.id, loc: { in: ['def', 'stolen'] } } })).toBe(0);
     // Already read-gated carriers stay refused.
-    expect(await errOf(M.createEdge(null, { sourceRef: node.id, targetRef: (await db.node.findFirstOrThrow({ where: { loc: 'def-peer' } })).id, name: 'x' }, ctxOf(u.platform)))).not.toBe('NO_ERROR');
+    expect(await errOf(M.createEdge(null, { sourceRef: node.id, targetRef: (await db.node.findFirstOrThrow({ where: { memoryId: userAgent.systemMemoryId, loc: 'def-peer' } })).id, name: 'x' }, ctxOf(u.platform)))).not.toBe('NO_ERROR');
     // The owner may search their own memory.
     const own = await M.searchReplaceInNodes(null, { input: { oldText: 'SECRET', newText: 'SECRET', memoryIds: [userAgent.systemMemoryId], fields: ['content'], dryRun: true } }, ctxOf(u.agentOwner));
     expect(JSON.stringify(own)).toMatch(/def/);
