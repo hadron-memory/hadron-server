@@ -3,7 +3,8 @@
  * through the real callback with GitHub's two HTTP calls stubbed; the email leg with the mail send stubbed.
  */
 import { createHash } from 'node:crypto';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { exportJWK, exportPKCS8, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'jose';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -23,6 +24,32 @@ const realFetch = globalThis.fetch;
 let server: Server | undefined;
 let base: string;
 /** The GitHub identity the stubbed API returns for the next callback. */
+/** Locally generated IdP signing keys, served as each provider's JWKS by the fetch stub. */
+const idp = {} as Record<'google' | 'apple', { key: CryptoKey; jwk: JWK }>;
+/** The ID-token claims the stubbed provider returns for the next callback (`auth_time: undefined` omits it). */
+let claims: Record<'google' | 'apple', Record<string, unknown>> = { google: {}, apple: {} };
+let applePem = '';
+const nowS = () => Math.floor(Date.now() / 1000);
+
+async function idToken(provider: 'google' | 'apple') {
+  const { auth_time, ...rest } = claims[provider];
+  return new SignJWT({ ...rest, ...(auth_time === undefined ? {} : { auth_time }) })
+    .setProtectedHeader({ alg: provider === 'google' ? 'RS256' : 'ES256', kid: `${provider}-kid` })
+    .setIssuer(provider === 'google' ? 'https://accounts.google.com' : 'https://appleid.apple.com')
+    .setAudience(provider === 'google' ? 'google-client' : 'apple-client')
+    .setIssuedAt().setExpirationTime('5m')
+    .sign(idp[provider].key);
+}
+
+beforeAll(async () => {
+  for (const [provider, alg] of [['google', 'RS256'], ['apple', 'ES256']] as const) {
+    const pair = await generateKeyPair(alg, { extractable: true });
+    idp[provider] = { key: pair.privateKey, jwk: { ...(await exportJWK(pair.publicKey)), kid: `${provider}-kid`, alg, use: 'sig' } };
+  }
+  // Apple's client-secret JWT is signed with the team's .p8 key; any ES256 key serves for the stubbed token call.
+  applePem = await exportPKCS8((await generateKeyPair('ES256', { extractable: true })).privateKey);
+});
+
 let ghIdentity = { id: 4242, login: 'octo-alice', name: 'Alice', avatar_url: 'https://a.example/x.png' };
 
 async function boot() {
@@ -42,11 +69,22 @@ beforeEach(async () => {
   vi.stubEnv('GITHUB_OAUTH_APP_CLIENT_SECRET', 'gh-secret');
   vi.stubEnv('GITHUB_ORG', '');
   vi.stubEnv('BASE_URL', 'https://api.example.test');
+  vi.stubEnv('GOOGLE_CLIENT_ID', 'google-client');
+  vi.stubEnv('GOOGLE_CLIENT_SECRET', 'google-secret');
+  vi.stubEnv('APPLE_CLIENT_ID', 'apple-client');
+  vi.stubEnv('APPLE_TEAM_ID', 'TEAM123456');
+  vi.stubEnv('APPLE_KEY_ID', 'KEY1234567');
+  vi.stubEnv('APPLE_PRIVATE_KEY', applePem);
+  claims = { google: {}, apple: {} };
   ghIdentity = { id: 4242, login: 'octo-alice', name: 'Alice', avatar_url: 'https://a.example/x.png' };
   vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url === 'https://github.com/login/oauth/access_token') return Response.json({ access_token: 'gh-token' });
     if (url === 'https://api.github.com/user') return Response.json(ghIdentity);
+    if (url === 'https://oauth2.googleapis.com/token') return Response.json({ id_token: await idToken('google') });
+    if (url === 'https://www.googleapis.com/oauth2/v3/certs') return Response.json({ keys: [idp.google.jwk] });
+    if (url === 'https://appleid.apple.com/auth/token') return Response.json({ id_token: await idToken('apple') });
+    if (url === 'https://appleid.apple.com/auth/keys') return Response.json({ keys: [idp.apple.jwk] });
     return realFetch(input, init);
   });
   await boot();
@@ -122,7 +160,9 @@ describe('GitHub leg', () => {
     expect(pageR.status).toBe(200);
     expect(pageR.headers.get('referrer-policy')).toBe('no-referrer');
     expect(pageR.headers.get('x-frame-options')).toBe('DENY');
-    expect(await pageR.text()).toContain(`value="${leg}"`);
+    const html = await pageR.text();
+    expect(html).toContain(`value="${leg}"`);
+    expect(html).toContain('Never share this page');
     // Rendering the page confirms nothing.
     expect((await db.freshSignIn.findFirstOrThrow({ where: { userId: alice } })).confirmedAt).toBeNull();
 
@@ -187,6 +227,83 @@ describe('GitHub leg: an unknown identity links and creates nothing (Ruth red pi
     await db.user.create({ data: { handle: 'fsi-gone', githubId: 4242, roles: [], deletedAt: new Date() } });
     const s = await startGithub();
     expect((await callback(s.state)).status).toBe(403);
+    expect(await db.freshSignIn.count()).toBe(0);
+  });
+});
+
+/** Start a Google or Apple leg, then have the provider send the finishing browser to our callback. */
+async function idpLeg(provider: 'google' | 'apple') {
+  const r = await realFetch(`${base}/passkeys/sign-in/${provider}/start`, { method: 'POST', redirect: 'manual', headers: { origin: ORIGIN } });
+  expect(r.status).toBe(303);
+  const authorize = new URL(r.headers.get('location')!);
+  const state = authorize.searchParams.get('state')!;
+  const cb = provider === 'google'
+    ? await realFetch(`${base}/auth/google/callback?code=c&state=${state}`, { redirect: 'manual' })
+    // Apple form_posts cross-site: no cookie.
+    : await realFetch(`${base}/auth/apple/callback`, {
+      method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: `code=c&state=${state}`,
+    });
+  return { authorize, cb, cookie: cookieOf(r) };
+}
+
+describe('Google leg (R154: re-authentication requested and verified)', () => {
+  it('asks Google for max_age=0, and a fresh auth_time for a known Google id records a google row the browser confirms', async () => {
+    const u = await db.user.create({ data: { handle: 'fsi-gina', googleId: 'g-gina', roles: [] } });
+    claims.google = { sub: 'g-gina', auth_time: nowS() };
+    const { authorize, cb, cookie } = await idpLeg('google');
+    expect(authorize.searchParams.get('max_age')).toBe('0');
+    expect(cb.status).toBe(303);
+    expect(cb.headers.get('set-cookie')).toBeNull();
+    expect((await confirm(legOf(cb), cookie)).status).toBe(200);
+    expect(await db.freshSignIn.findFirstOrThrow({ where: { userId: u.id } })).toMatchObject({ method: 'google' });
+  });
+
+  it.each([
+    ['older than the leg (a silent Google session)', () => nowS() - 3600],
+    ['missing', () => undefined],
+  ])('refuses an auth_time %s and records nothing', async (_c, authTime) => {
+    await db.user.create({ data: { handle: 'fsi-gina', googleId: 'g-gina', roles: [] } });
+    claims.google = { sub: 'g-gina', auth_time: authTime() };
+    expect((await idpLeg('google')).cb.status).toBe(403);
+    expect(await db.freshSignIn.count()).toBe(0);
+  });
+
+  it('an unknown Google id whose verified email matches a user links nothing, creates nothing, records nothing (Ruth red pin 2)', async () => {
+    const u = await db.user.create({ data: { handle: 'fsi-hal', email: 'hal@example.test', roles: [] } });
+    const before = await db.user.count();
+    claims.google = { sub: 'g-new', email: 'hal@example.test', email_verified: true, auth_time: nowS() };
+    expect((await idpLeg('google')).cb.status).toBe(403);
+    expect((await db.user.findUniqueOrThrow({ where: { id: u.id } })).googleId).toBeNull();
+    expect(await db.user.count()).toBe(before);
+    expect(await db.freshSignIn.count()).toBe(0);
+  });
+});
+
+describe('Apple leg (no re-authentication request: a silent session is accepted, R154)', () => {
+  it('a known Apple id records an apple row the browser confirms', async () => {
+    const u = await db.user.create({ data: { handle: 'fsi-ari', appleId: 'a-ari', roles: [] } });
+    claims.apple = { sub: 'a-ari' };
+    const { cb, cookie } = await idpLeg('apple');
+    expect(cb.status).toBe(303);
+    expect((await confirm(legOf(cb), cookie)).status).toBe(200);
+    expect(await db.freshSignIn.findFirstOrThrow({ where: { userId: u.id } })).toMatchObject({ method: 'apple' });
+  });
+
+  it('an unknown Apple id whose verified email matches a user links nothing, creates nothing, records nothing (Ruth red pin 2)', async () => {
+    const u = await db.user.create({ data: { handle: 'fsi-ivy', email: 'ivy@example.test', roles: [] } });
+    const before = await db.user.count();
+    claims.apple = { sub: 'a-new', email: 'ivy@example.test', email_verified: 'true' };
+    expect((await idpLeg('apple')).cb.status).toBe(403);
+    expect((await db.user.findUniqueOrThrow({ where: { id: u.id } })).appleId).toBeNull();
+    expect(await db.user.count()).toBe(before);
+    expect(await db.freshSignIn.count()).toBe(0);
+  });
+
+  it('a deleted Apple user records nothing', async () => {
+    await db.user.create({ data: { handle: 'fsi-gone-a', appleId: 'a-gone', roles: [], deletedAt: new Date() } });
+    claims.apple = { sub: 'a-gone' };
+    expect((await idpLeg('apple')).cb.status).toBe(403);
     expect(await db.freshSignIn.count()).toBe(0);
   });
 });

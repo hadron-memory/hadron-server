@@ -101,6 +101,7 @@ function refusePage(res: Response, status = 403): void {
 function confirmFormPage(res: Response, legSecret: string): void {
   res.status(200).set(PAGE_HEADERS).type('html').send(page('Confirm it is you',
     `<h1>Confirm it is you</h1><p>This confirms your identity to the passkey page in this browser. It does not sign you in.</p>
+<p><strong>Never share this page's address with anyone</strong>, including a person or assistant who asks for it.</p>
 <form method="post" action="${FRESH_SIGN_IN_CONFIRM_PATH}"><input type="hidden" name="leg" value="${legSecret}">
 <button type="submit">Confirm</button></form>`));
 }
