@@ -236,6 +236,14 @@ describe('email leg', () => {
     expect(row.confirmedAt).not.toBeNull();
   });
 
+  it('sends nothing to a deleted user\'s address', async () => {
+    await db.user.create({ data: { handle: 'fsi-erin', email: 'erin@example.test', roles: [], deletedAt: new Date() } });
+    const r = await startEmail('erin@example.test');
+    expect(await r.json()).toEqual({ ok: true });
+    expect(sent).toEqual([]);
+    expect(await db.freshSignIn.count()).toBe(0);
+  });
+
   it('refuses an unlisted Origin before sending anything', async () => {
     await db.user.create({ data: { handle: 'fsi-dave', email: 'dave@example.test', roles: [] } });
     expect((await startEmail('dave@example.test', 'https://evil.example')).status).toBe(403);
