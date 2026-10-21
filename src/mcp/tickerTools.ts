@@ -134,7 +134,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     userId: auth.userId ?? undefined,
     // #1868: the presented hdr_user_ key, so the shared authorized transaction
     // re-checks it is still unrevoked at the write (as #1864's signing tools do).
-    apiKeyId: auth.apiKeyId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     appKeyId: auth.appKeyId ?? undefined,
     // An App key's session state is the current request's (the transport refreshes it per request); anyone else's is

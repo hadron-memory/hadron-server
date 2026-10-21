@@ -103,7 +103,7 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
     transport: 'mcp',
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
-    apiKeyId: auth.apiKeyId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     appKeyId: auth.appKeyId ?? undefined,
     sessionId: (auth.requestSession ? auth.requestSession.sessionId : auth.sessionId) ?? undefined,
