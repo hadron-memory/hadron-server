@@ -2177,7 +2177,7 @@ async function mayReadUserOwnedAgentTemplate(ctx: Context, workerId: string, age
   return w?.heldByUserId === ctx.userId;
 }
 
-async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boolean> {
+export async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boolean> {
   type Cache = Map<string, Promise<boolean>>;
   const holder = ctx as Context & { workerInternalsCache?: Cache };
   const cache = (holder.workerInternalsCache ??= new Map());

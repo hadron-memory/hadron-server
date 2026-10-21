@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, tombstoneNodes } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { computeContentHash } from './contentHash.js';
 import { computeApprovalHash } from './approvalHash.js';
@@ -178,7 +178,7 @@ describe('mintSpecCorpus: an edge to a deleted spec is unresolved (@codex P2 on 
       memoryId: draft.id, sourceId: source.id, targetId: doomed.id, loc: 'pas:010:depends-on:pas:030', name: 'depends-on',
     } });
     expect((await mint(true)).blockers).toEqual([]);
-    await resolvers.Mutation.deleteNode(null, { nodeRef: doomed.id }, as());
+    await tombstoneNodes(db, [doomed.id]);
 
     expect((await mint(true)).blockers).toEqual([
       expect.objectContaining({ kind: 'UNRESOLVED_REFERENCE', loc: 'pas:010', rule: 'MISSING', targetLoc: 'pas:030' }),
@@ -217,7 +217,7 @@ describe('mintSpecCorpus: an edge into another memory can point at a placeholder
     })]);
     await db.node.update({ where: { id: gone.id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
     expect((await mint(true)).blockers).toEqual([]);
-    await resolvers.Mutation.deleteNode(null, { nodeRef: gone.id }, as());
+    await tombstoneNodes(db, [gone.id]);
     expect((await mint(true)).blockers).toEqual([expect.objectContaining({
       kind: 'UNRESOLVED_REFERENCE', loc: 'pas:010', rule: 'MISSING', targetLoc: `hrn:node:${other.urn}:cor:010`,
     })]);

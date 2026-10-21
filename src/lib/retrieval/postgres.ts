@@ -26,6 +26,7 @@ import type { VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
 import { vectorSearchNodes, vectorSearchChunks } from '../../services/embedding/vectors.js';
 import { compileBooleanQuery } from './tsquery.js';
 import { compileNodeWhere, compileNodePropertySort } from './nodeWhere.js';
+import { regexSearchTimeoutMs } from './regexTimeout.js';
 
 /** Ordered parameter accumulator — appends a value and returns its `$n` placeholder. */
 function paramBuilder(seed: unknown[] = []) {
@@ -193,7 +194,16 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       ORDER BY ${orderBy}
       LIMIT ${limitPh} OFFSET ${offsetPh}
     `;
-    const rows = await opts.db.$queryRawUnsafe<{ id: string; score: number }[]>(sql, ...params);
+    // #415: the caller picks the pattern, so the caller picks the cost. Bound
+    // the DATABASE work with a transaction-local statement_timeout on the
+    // search's own connection: Postgres cancels the statement itself, and the
+    // setting dies with the transaction on commit, rollback or cancellation,
+    // so it never reaches the pooled connection's session. The budget is a
+    // validated positive integer, so inlining it is safe (SET takes no binds).
+    const [, rows] = await opts.db.$transaction([
+      opts.db.$executeRawUnsafe(`SET LOCAL statement_timeout = ${regexSearchTimeoutMs()}`),
+      opts.db.$queryRawUnsafe<{ id: string; score: number }[]>(sql, ...params),
+    ]);
     return rows.map((r) => ({ nodeId: r.id, score: Number(r.score) }));
   },
 

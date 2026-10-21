@@ -242,6 +242,14 @@ export async function deleteMemoryVectors(db: PrismaClient, memoryId: string): P
 }
 
 /**
+ * #2199 — drop only the CONTENT-CHUNK vectors of a memory, keeping its summary (abstract) vectors. A system memory's
+ * summary index cannot be switched off, so disabling its passages or changing the source manages chunk rows only.
+ */
+export async function deleteMemoryChunkVectors(db: PrismaClient, memoryId: string): Promise<void> {
+  await db.$executeRaw`DELETE FROM node_embeddings WHERE memory_id = ${memoryId} AND kind = 'chunk'`;
+}
+
+/**
  * #1345 review (@codex round 6) — is a vector window PROVABLY complete?
  *
  * Only when it returned every eligible row — measured against an INDEPENDENT

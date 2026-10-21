@@ -854,3 +854,41 @@ describe('POST /oauth/authorize — open-redirect mitigation', () => {
     expect(await db.authCode.count()).toBe(0);
   });
 });
+
+// ── #1897 / R66: the code carries its sign-in root ───────────────────
+
+describe('POST /oauth/authorize — sign-in lineage (#1897)', () => {
+  async function approveWith(cookie: string) {
+    const { csrfToken, csrfCookieValue, grantProof } = await startConsentFlow();
+    return postAuthorize(
+      {
+        _csrf: csrfToken, decision: 'approve', client_id: testClientId, redirect_uri: REGISTERED_REDIRECT,
+        code_challenge: 'a'.repeat(43), code_challenge_method: 'S256', resource: RESOURCE_URL, scope: 'mcp',
+        state: 'opaque-state-value', grant_proof: grantProof,
+      },
+      { csrfCookieValue, cookie },
+    );
+  }
+  async function liveSignIn() {
+    const { createSignIn } = await import('../../auth/signIn.js');
+    return db.$transaction((tx) => createSignIn(tx, { userId: testUser.id, method: 'email', passkeyId: null }));
+  }
+
+  it('a sid-bearing session mints a code rooted at that sign-in', async () => {
+    const si = await liveSignIn();
+    const jwt = await signJwt({ sub: testUser.id, roles: ['CONTRIBUTOR'], sid: si.id });
+    expect((await approveWith(`hadron_token=${jwt}`)).status).toBe(302);
+    expect((await db.authCode.findFirstOrThrow({})).signInId).toBe(si.id);
+  });
+  it('a session without sid mints an unrooted code (identity-provider and legacy sign-ins unchanged)', async () => {
+    expect((await approveWith(testCookieHeader)).status).toBe(302);
+    expect((await db.authCode.findFirstOrThrow({})).signInId).toBeNull();
+  });
+  it('an ended sign-in\'s cookie no longer authenticates the consent POST and mints nothing', async () => {
+    const si = await liveSignIn();
+    const jwt = await signJwt({ sub: testUser.id, roles: ['CONTRIBUTOR'], sid: si.id });
+    await db.signIn.update({ where: { id: si.id }, data: { endedAt: new Date(), endReason: 'passkey-cancelled' } });
+    expect((await approveWith(`hadron_token=${jwt}`)).status).toBe(401);
+    expect(await db.authCode.count()).toBe(0);
+  });
+});

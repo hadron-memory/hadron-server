@@ -8,6 +8,7 @@
 import { createHash, generateKeyPairSync, randomBytes, sign, type KeyObject } from 'node:crypto';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
+import { passkeyRpId } from '../lib/signing/config.js';
 
 const sha256 = (b: Buffer | string) => createHash('sha256').update(b).digest();
 
@@ -48,13 +49,16 @@ export function softPasskey(): SoftPasskey {
   };
 }
 
-/** Register a soft passkey for `ownerId`; `firstWindow` makes it a first passkey with an open 72h window. */
-export async function insertSoftPasskey(db: PrismaClient, ownerId: string, key: SoftPasskey, opts: { firstWindow?: boolean; label?: string } = {}): Promise<string> {
+/**
+ * Register a soft passkey for `ownerId`; `firstWindow` makes it a first passkey with an open 72h window.
+ * `rpId` is its enrollment RP ID, by default the deployment's current one, as a real enrollment records it.
+ */
+export async function insertSoftPasskey(db: PrismaClient, ownerId: string, key: SoftPasskey, opts: { firstWindow?: boolean; label?: string; rpId?: string } = {}): Promise<string> {
   const id = generateId();
   const first = opts.firstWindow ?? false;
   await db.$executeRaw`INSERT INTO passkey_credentials
-    (id, owner_id, credential_id, public_key, algorithm, user_handle, label, registered_at, counter, transports, backup_eligible, backed_up, registration_method, window_ends_at)
-    VALUES (${id}, ${ownerId}, ${key.credentialId}, ${key.cosePublicKey}, -7, ${randomBytes(32)}, ${opts.label ?? 'Soft key'},
+    (id, owner_id, credential_id, public_key, algorithm, user_handle, enrollment_rp_id, label, registered_at, counter, transports, backup_eligible, backed_up, registration_method, window_ends_at)
+    VALUES (${id}, ${ownerId}, ${key.credentialId}, ${key.cosePublicKey}, -7, ${randomBytes(32)}, ${opts.rpId ?? passkeyRpId()}, ${opts.label ?? 'Soft key'},
       (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3), 0, ARRAY['internal'], false, false,
       ${first ? 'github' : null}, CASE WHEN ${first} THEN (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) + interval '72 hours' ELSE NULL END)`;
   return id;

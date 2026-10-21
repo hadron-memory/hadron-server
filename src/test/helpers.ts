@@ -581,3 +581,13 @@ export async function createDbWorkerAttribution(db: PrismaClient, userId: string
   await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: workerId, appId: app.id, agentId: agent.id, name: 'Fixture', slug: 'fixture' } });
   if (sessionId) await db.session.create({ data: { id: sessionId, workerId, userId, appId: app.id } });
 }
+
+/**
+ * Fixture: leave nodes tombstoned the way an earlier soft delete left them,
+ * without going through the delete door. The generic delete refuses a governed
+ * node (a `spec`, `review` or runnable task), so a test that needs "a deleted
+ * spec" as its starting state builds that state directly.
+ */
+export async function tombstoneNodes(db: PrismaClient, ids: readonly string[]): Promise<void> {
+  await db.node.updateMany({ where: { id: { in: [...ids] }, deletedAt: null }, data: { deletedAt: new Date(), deletedBy: null } });
+}

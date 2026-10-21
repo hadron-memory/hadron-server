@@ -197,6 +197,15 @@ export async function liveTxContext(ctx: Context, tx: Prisma.TransactionClient):
       FOR SHARE`;
     if (keys.length !== 1) throw authorizationDenied();
   }
+  // #1897 / R66: a credential descending from a sign-in dies with it. The share lock orders this
+  // against the cancel path's exclusive user anchor, so no decision is taken on an ended root.
+  if (ctx.signInId) {
+    if (!ctx.userId) throw authorizationDenied();
+    const roots = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM sign_ins
+      WHERE id = ${ctx.signInId} AND user_id = ${ctx.userId} AND ended_at IS NULL FOR SHARE`;
+    if (roots.length !== 1) throw authorizationDenied();
+  }
 
   return {
     ...withoutRequestCaches(ctx, tx),

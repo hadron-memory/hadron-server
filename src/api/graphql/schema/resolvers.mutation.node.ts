@@ -1,5 +1,7 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { currentActor } from '../../../lib/requestActor.js';
 import { foreignEdgeMemoryIds } from '../../../lib/foreignEdgeMemories.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, assertNoBootPromptRows, isBootPromptRole } from '../../../lib/bootPrompt.js';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
 import { decisionContainedError, isDecisionFamilyRole, refuseDecisionFamily, refuseUnderDecisionLog } from '../../../lib/decisions/index.js';
@@ -15,6 +17,7 @@ import {
 } from '../../../lib/protectedLoc.js';
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
+import { assertNoGovernedRemoval, governedRemovalError } from '../../../lib/governedRemoval.js';
 import {
   assertGovernedWrite,
   assertRoleDeclaredForWrite,
@@ -26,7 +29,7 @@ import {
   type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
-import { assertRoleWritersForWrite, roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
+import { assertEdgeSourceWritersById, assertRoleWritersForWrite, lockEdgeUnderSourceWriters, roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../../lib/specCorpus.js';
 import { carryGovernedSignals } from '../../../lib/governedSignals.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
@@ -142,6 +145,7 @@ import {
   resolveMemoryRefForWrite,
   isMemoryHiddenForWrite,
   withoutRequestCaches,
+  canReadMemoryRecord,
   type NodeInput,
   type NodeEdgeInput,
   type CreateNodeInput,
@@ -150,10 +154,12 @@ import {
   type MergeNodesInput,
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
+import { concealUnreadableInstallWrite, findInstallMemory, lockInstallAuthorityFirst, resolveInstallTarget, withInstallMemory, type InstallTarget } from './installMemory.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
+import { memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
 
 /**
  * #1606 (cor:dmo:110:01/04) — no generic edge write alters or removes a
@@ -212,7 +218,7 @@ export async function classifyFailedUpdate(
   return { kind: 'moved', memoryId: row.memoryId, loc: row.loc };
 }
 
-export async function writeNodeCore(
+async function writeNodeCoreRaw(
   rawInput: NodeWriteInput,
   ctx: Context,
   mode: NodeWriteMode,
@@ -315,6 +321,11 @@ export async function writeNodeCore(
       // The pre-022 fallback that walked all accessible memories looking
       // for a URN prefix of `input.loc` was the API-boundary loose-lookup
       // path the spec exists to close — removed.
+      // #2044: CreateNodeInput.memoryId is nullable on the wire (the other target is an App's
+      // install memory, handled by createNode before it gets here), so every other door refuses a miss.
+      if (!input.memoryId) {
+        throw new GraphQLError('A node write needs `memoryId`.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
       const rawMemoryRef = input.memoryId;
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, rawMemoryRef);
       input.memoryId = resolvedMemoryId;
@@ -336,7 +347,7 @@ export async function writeNodeCore(
           await concealUnreadableDenial(authCtx, resolvedMemoryId, conceal.ref, gate);
         }
       };
-      await authorizeWrite(ctx);
+      await authorizeWrite({ ...ctx, installWritePreflight: true });
       // Spec 049 S4 / #1180: a protected address is written by its owning
       // operation only. Since #1201 the ONLY source is the Channel table, and
       // only a Channel's own operations pass the bypass; every node-authoring
@@ -530,6 +541,8 @@ export async function writeNodeCore(
       // it). Every caller of the core — createNode/updateNode, the kind doors,
       // updateNodeData/Properties, importNode, cloneNode — passes through here.
       assertNotCommentWrite(existing?.nodeType, input.nodeType, mode === 'update' ? 'update' : 'create');
+      // #2043 — the compiled-node and worker-session boot-prompt guards (cor:agt:040:11).
+      assertBootPromptWriteAllowed(existing, { nodeType: input.nodeType, role: normalizeRole(input.role) }, mode === 'update' ? 'update' : 'create');
       // #1641 — a log's child locs are its decision codes: only the decision
       // doors write there, so a squatter can never block a code.
       if (!existing && opts?.ownsKind !== 'decision') {
@@ -873,7 +886,11 @@ export async function writeNodeCore(
       const inWriteTransaction = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
         opts?.transaction
           ? work(opts.transaction.tx)
-          : mapDeadlockToWriteConflict(input.memoryId, () => ctx.db.$transaction(work));
+          : mapDeadlockToWriteConflict(input.memoryId, () => ctx.db.$transaction(async (tx) => {
+            // #2044: an install memory's authority comes before ANY memory/node/loc lock.
+            await lockInstallAuthorityFirst(tx, ctx, input.memoryId);
+            return work(tx);
+          }));
 
       // encryptMemory and ownership transfer both change what this writer may
       // commit. Hold a shared memory-row lock through the write, then recheck
@@ -1082,6 +1099,7 @@ export async function writeNodeCore(
         // the same window, and it is the one with teeth.
         // #1606 — the comment gate, re-checked under the lock with the row it guards.
         assertNotCommentWrite(current.nodeType, input.nodeType, 'update');
+        assertBootPromptWriteAllowed(current, { nodeType: input.nodeType, role: normalizeRole(input.role) }, 'update');
         assertGovernedWrite(
           current,
           mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }),
@@ -1208,7 +1226,11 @@ export async function writeNodeCore(
             // #1331 — the writer level of the role before AND after, on the locked row.
             await assertRoleWritersForWrite(
               tx, ctx, input.memoryId,
-              { priorRole: current.role, nextRole: input.role === undefined ? current.role : input.role },
+              {
+                priorRole: current.role, nextRole: input.role === undefined ? current.role : input.role,
+                priorRunnable: current.isRunnable,
+                nextRunnable: mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+              },
               { platformWrite: opts?.platformWrite },
             );
 
@@ -1517,7 +1539,11 @@ export async function writeNodeCore(
             // #1331 — the writer level of the role before AND after, on the locked row.
             await assertRoleWritersForWrite(
               tx, ctx, input.memoryId,
-              { priorRole: authoritative?.role ?? null, nextRole: input.role === undefined ? (authoritative?.role ?? null) : input.role },
+              {
+                priorRole: authoritative?.role ?? null, nextRole: input.role === undefined ? (authoritative?.role ?? null) : input.role,
+                priorRunnable: authoritative?.isRunnable ?? null,
+                nextRunnable: mergedGovernedState(authoritative, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+              },
               { platformWrite: opts?.platformWrite },
             );
 
@@ -1530,11 +1556,11 @@ export async function writeNodeCore(
             if (reviving && authoritative) {
               await tx.nodeEmbedding.deleteMany({ where: { nodeId: authoritative.id } });
               const indexed = await tx.memory.findUniqueOrThrow({
-                where: { id: input.memoryId }, select: { vectorIndexEnabled: true },
+                where: { id: input.memoryId }, select: { vectorIndexEnabled: true, class: true },
               });
               // Invalidate an old embed before post-commit enqueue runs.
               // Unindexed memories keep the normal null pending marker.
-              revivedPendingAt = pendingAtForRevival(authoritative.embeddingPendingAt, indexed.vectorIndexEnabled);
+              revivedPendingAt = pendingAtForRevival(authoritative.embeddingPendingAt, memoryIsVectorIndexed(indexed));
             }
 
             // #1183 — resurrect from the AUTHORITATIVE row, not the stale
@@ -2206,16 +2232,60 @@ export const nodeMoveOps = {
   },
 };
 
+/** #2044: `createNode` / `updateNode` take an App's install memory as the target instead of `memoryId`. */
+type CreateNodeArgs = Omit<CreateNodeInput, 'memoryId'> & { memoryId?: string | null; install?: InstallTarget | null };
+type UpdateNodeArgs = Omit<UpdateNodeInput, 'memoryId'> & { memoryId?: string | null; install?: InstallTarget | null };
+
+function assertMemoryTargeted(memoryId: string | null | undefined, op: string): void {
+  if (!memoryId) {
+    throw new GraphQLError(`${op}: supply \`memoryId\` or \`install\` (an App's install memory).`,
+      { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+}
+
+/**
+ * First customisation: finds or creates the App's install memory and writes the
+ * node in the SAME transaction, so a refused write leaves no memory behind.
+ */
+async function createNodeInInstallMemory(input: CreateNodeArgs, ctx: Context) {
+  const { install, memoryId, ...rest } = input;
+  if (memoryId != null) {
+    throw new GraphQLError('createNode: supply `memoryId` OR `install`, not both.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  const effects: Array<() => void> = [];
+  const written = await withInstallMemory(ctx, install!, (tx, txCtx, memory) =>
+    writeNodeCore({ ...rest, memoryId: memory.id } as CreateNodeInput, txCtx, 'create', {
+      governedContext: 'node-write',
+      transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
+    }));
+  for (const effect of effects) effect();
+  return written;
+}
+
+/** The caller's view of an App's install memory, creating nothing: a miss and a refusal read the same. */
+export async function findCallerInstallMemory(ctx: Context, install: InstallTarget): Promise<{ id: string }> {
+  const { appId, agentId } = await resolveInstallTarget(ctx.db, install);
+  const row = await findInstallMemory(ctx.db, appId, agentId);
+  if (!row || !(await canReadMemoryRecord(ctx, row))) {
+    throw new GraphQLError('This App has not customised that Agent yet.', { extensions: { code: 'INSTALL_MEMORY_NOT_FOUND' } });
+  }
+  return row;
+}
+
 export const nodeMutations = {
     // Create a single node (spec 039 Phase 0 D1/D4). Create-only: a live
     // node at (memoryId, loc) rejects with NodeLocConflictError; a
     // soft-deleted one is resurrected. `input.id` is a forced create-PK
     // (importer/sync), never a selector.
-    createNode: async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
-      writeNodeCore(input, ctx, 'create', {
+    createNode: async (_: unknown, { input }: { input: CreateNodeArgs }, ctx: Context) => {
+      // #2044: the target is a memory OR an App's install memory (cor:agt:040:06).
+      if (input.install) return createNodeInInstallMemory(input, ctx);
+      assertMemoryTargeted(input.memoryId, 'createNode');
+      return writeNodeCore(input as CreateNodeInput, ctx, 'create', {
         governedContext: 'node-write',
-        concealUnreadable: { entity: 'memory', ref: input.memoryId },
-      }),
+        concealUnreadable: { entity: 'memory', ref: input.memoryId! },
+      });
+    },
 
     // #1201 — THE KIND-SPECIFIC AUTHORING DOORS. One create + one update per
     // governed kind, generated from the register so a kind cannot ship with a
@@ -2270,8 +2340,21 @@ export const nodeMutations = {
     // Update an existing node (spec 039 Phase 0 D2–D4). Target = `id` (PK or
     // fully-qualified node URN) XOR (`memoryId` + `loc`); never creates,
     // never moves. All content fields preserve-on-omit.
-    updateNode: async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
-      updateNodeCore(input, ctx, 'updateNode', { governedContext: 'node-write' }),
+    updateNode: async (_: unknown, { input }: { input: UpdateNodeArgs }, ctx: Context) => {
+      if (input.install) {
+        // #2044: select the node by the App's install memory + loc. Nothing is created
+        // here; a caller who cannot even open the record gets the not-found a missing
+        // customisation gives.
+        const { install, memoryId, id, ...rest } = input;
+        if (memoryId != null || id != null) {
+          throw new GraphQLError('updateNode: identify the node by `install` + `loc`, not also by `id` or `memoryId`.',
+            { extensions: { code: 'BAD_USER_INPUT' } });
+        }
+        const memory = await findCallerInstallMemory(ctx, install);
+        return updateNodeCore({ ...rest, memoryId: memory.id } as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
+      }
+      return updateNodeCore(input as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
+    },
 
 
     // Shallow-merge a JSON patch into a node's `data` bag (issue #366).
@@ -2558,7 +2641,9 @@ export const nodeMutations = {
       const scannedNodes: NodeRow[] = [];
       for (const row of nodeById.values()) {
         // #1606 — a comment is governed too (cor:dmo:110:04): skipped, reported as governed.
-        if (governedKindsOf({ role: row.role, isRunnable: row.isRunnable }).length > 0 || row.nodeType === COMMENT_NODE_TYPE) {
+        if (governedKindsOf({ role: row.role, isRunnable: row.isRunnable }).length > 0 || row.nodeType === COMMENT_NODE_TYPE
+          // #2043 — compiled boot prompts are written only by a compile; a worker session also skips sources.
+          || row.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE || (isBootPromptRole(row.role) && currentActor().workerId != null)) {
           skipCounts.governed += 1;
           continue;
         }
@@ -2601,8 +2686,10 @@ export const nodeMutations = {
       // Judged again under the lock in the write pass.
       for (let i = scannedNodes.length - 1; i >= 0; i--) {
         const row = scannedNodes[i]!;
-        if (!row.role) continue;
-        if (await roleWritersRefusal(ctx.db, ctx, row.memoryId, { priorRole: row.role, nextRole: row.role })) {
+        if (!row.role && row.isRunnable !== true) continue;
+        if (await roleWritersRefusal(ctx.db, ctx, row.memoryId, {
+          priorRole: row.role, nextRole: row.role, priorRunnable: row.isRunnable, nextRunnable: row.isRunnable,
+        })) {
           skipCounts.governed += 1;
           scannedNodes.splice(i, 1);
         }
@@ -2803,12 +2890,16 @@ export const nodeMutations = {
         // rule tightened, or its role changed, since selection) is dropped.
         for (const memoryId of [...plannedEncryption.keys()].sort()) await lockMemoryConfigShared(tx, memoryId);
         const lockedRoles = new Map((await tx.node.findMany({
-          where: { id: { in: [...planMemory.keys()] } }, select: { id: true, role: true },
-        })).map((r) => [r.id, r.role] as const));
+          where: { id: { in: [...planMemory.keys()] } }, select: { id: true, role: true, isRunnable: true },
+        })).map((r) => [r.id, r] as const));
         for (let i = plans.length - 1; i >= 0; i--) {
           const plan = plans[i]!;
-          const role = lockedRoles.get(plan.raw.id) ?? null;
-          if (role && await roleWritersRefusal(tx, ctx, plan.raw.memoryId, { priorRole: role, nextRole: role })) {
+          const locked = lockedRoles.get(plan.raw.id);
+          const role = locked?.role ?? null;
+          const runnable = locked?.isRunnable ?? null;
+          if ((role || runnable === true) && await roleWritersRefusal(tx, ctx, plan.raw.memoryId, {
+            priorRole: role, nextRole: role, priorRunnable: runnable, nextRunnable: runnable,
+          })) {
             skipCounts.governed += 1;
             planMemory.delete(plan.raw.id);
             plans.splice(i, 1);
@@ -3118,9 +3209,14 @@ export const nodeMutations = {
           // #1606 (cor:dmo:110:04/05) — a comment is removed only by the comment
           // path's thread delete; a target takes its threads with it.
           if ((await commentIdsAmong(tx, affectedIds)).length > 0) throw commentGovernedError('delete', 'removes');
+          await assertNoBootPromptRows(tx, affectedIds, 'delete');
           // #1641 §3.2 — a decision is withdrawn, never deleted, and deleting a
           // log or an ancestor of one would erase decision history.
           await refuseDecisionFamily(tx, affectedIds, 'Deleting this node');
+          // A governed node is removed only after its marker is cleared through
+          // the kind's door: the whole affected set is judged here, on locked
+          // rows, before any write.
+          await assertNoGovernedRemoval(tx, memoryId, affectedIds);
           if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
           else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy, at: now });
 
@@ -3359,6 +3455,8 @@ export const nodeMutations = {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
+        // Writer level of the source node, on the locked source.
+        await assertEdgeSourceWritersById(tx, ctx, locked.source.id);
         return tx.edge.create({
           data: {
             id: generateId(),
@@ -3496,9 +3594,8 @@ export const nodeMutations = {
         // A Channel reuse may archive this edge after resolveEdgeRef's
         // preflight. Serialize with that archive's edge UPDATE and refuse a
         // tombstone instead of letting a stale update reoccupy its old loc.
-        const [current] = await tx.$queryRaw<Array<{ id: string; deleted_at: Date | null }>>`
-          SELECT id, deleted_at FROM edges WHERE id = ${resolvedEdgeId} FOR UPDATE
-        `;
+        // Source node first, then the edge row (the order node writes take); the source is revalidated under the edge lock.
+        const current = await lockEdgeUnderSourceWriters(tx, ctx, resolvedEdgeId);
         if (!current || current.deleted_at) {
           throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
             extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
@@ -3586,6 +3683,11 @@ export const nodeMutations = {
           });
         }
         await requireMemoryWriteAccess(txCtx, edgeMem.memoryId);
+        // Writer level of the edge's current source, locked before the edge.
+        const lockedEdge = await lockEdgeUnderSourceWriters(tx, ctx, resolvedEdgeId);
+        if (!lockedEdge || lockedEdge.deleted_at) {
+          throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
+        }
         await refuseGovernedEdge(tx, resolvedEdgeId);
         await tx.edge.delete({ where: { id: resolvedEdgeId } });
       });
@@ -3814,6 +3916,8 @@ export const nodeMutations = {
       if (source.nodeType === COMMENT_NODE_TYPE || target.nodeType === COMMENT_NODE_TYPE) {
         throw commentGovernedError('merge', 'edits');
       }
+      assertBootPromptWriteAllowed(source, { nodeType: undefined, role: undefined }, 'merge');
+      assertBootPromptWriteAllowed(target, { nodeType: undefined, role: undefined }, 'merge');
       // #1664 — moving the source's edges is safe (governed edges never re-home);
       // DELETING a source with live threads refuses, but only under the source
       // lock, after every gate (#1682 review: a pre-lock check raced, and ran
@@ -4040,9 +4144,13 @@ export const nodeMutations = {
         }
         // #1331 — the target is written, and a source that is deleted or whose edges
         // are re-pointed is written too: each role's writer level, on the locked rows.
-        await assertRoleWritersForWrite(tx, ctx, target.memoryId, { priorRole: lockedTarget.role, nextRole: lockedTarget.role });
+        await assertRoleWritersForWrite(tx, ctx, target.memoryId, {
+          priorRole: lockedTarget.role, nextRole: lockedTarget.role, priorRunnable: lockedTarget.isRunnable, nextRunnable: lockedTarget.isRunnable,
+        });
         if (takesSource) {
-          await assertRoleWritersForWrite(tx, ctx, source.memoryId, { priorRole: lockedSource.role, nextRole: lockedSource.role });
+          await assertRoleWritersForWrite(tx, ctx, source.memoryId, {
+            priorRole: lockedSource.role, nextRole: lockedSource.role, priorRunnable: lockedSource.isRunnable, nextRunnable: lockedSource.isRunnable,
+          });
         }
         // #1682 review (Baloo P2) — the AUTHORITATIVE live-thread refusal, under
         // the source lock and before any write. The pre-lock count above is only
@@ -4054,6 +4162,13 @@ export const nodeMutations = {
         // content is rendered from its payload, and a fold would rewrite it.
         const mergedDecisions = [lockedSource, lockedTarget].filter((n) => isDecisionFamilyRole(n.role));
         if (mergedDecisions.length > 0) throw decisionContainedError('Merging these nodes', mergedDecisions.map((n) => n.loc));
+        // A hard-deleted source is a removal. The source row was locked FOR
+        // UPDATE and re-read above, so this judges its current state: a governed
+        // node is removed only after its marker is cleared through the kind's door.
+        if (deleteSource) {
+          const kinds = governedKindsOf({ role: lockedSource.role, isRunnable: lockedSource.isRunnable });
+          if (kinds.length > 0) throw governedRemovalError([{ id: lockedSource.id, loc: lockedSource.loc, kinds }]);
+        }
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
@@ -4394,6 +4509,7 @@ export const nodeMutations = {
       // #1606 — a comment's history is not restorable through the generic
       // surface, and no revision may turn a node into one (cor:dmo:110:04).
       assertNotCommentWrite(node.nodeType, (restoreFields as { nodeType?: string | null }).nodeType, 'restore');
+      assertBootPromptWriteAllowed(node, restoreFields as { nodeType?: string | null; role?: string | null }, 'restore');
       assertGovernedWrite(
         node,
         mergedGovernedState(node, {
@@ -4408,8 +4524,12 @@ export const nodeMutations = {
       // role before AND after (fast refusal; the authoritative check is under the lock below).
       {
         const restoredRole = (restoreFields as { role?: string | null }).role;
+        const restored = mergedGovernedState(node, {
+          role: restoredRole, isRunnable: (restoreFields as { isRunnable?: boolean | null }).isRunnable,
+        });
         const refusal = await roleWritersRefusal(ctx.db, ctx, node.memoryId, {
           priorRole: node.role, nextRole: restoredRole === undefined ? node.role : restoredRole,
+          priorRunnable: node.isRunnable, nextRunnable: restored.isRunnable,
         });
         if (refusal) throw refusal;
       }
@@ -4494,6 +4614,7 @@ export const nodeMutations = {
         // The preflight checks above are useful fast refusals, but they cannot
         // protect a restore that waited behind a concurrent writer.
         assertNotCommentWrite(current.nodeType, (restoreFields as { nodeType?: string | null }).nodeType, 'restore');
+        assertBootPromptWriteAllowed(current, restoreFields as { nodeType?: string | null; role?: string | null }, 'restore');
         assertGovernedWrite(
           current,
           mergedGovernedState(current, {
@@ -4509,6 +4630,10 @@ export const nodeMutations = {
           const restoredRole = (restoreFields as { role?: string | null }).role;
           await assertRoleWritersForWrite(tx, ctx, current.memoryId, {
             priorRole: current.role, nextRole: restoredRole === undefined ? current.role : restoredRole,
+            priorRunnable: current.isRunnable,
+            nextRunnable: mergedGovernedState(current, {
+              role: restoredRole, isRunnable: (restoreFields as { isRunnable?: boolean | null }).isRunnable,
+            }).isRunnable,
           });
         }
         // #1330 — deliberately NO strict-sub-role check (`assertRoleDeclaredForWrite`):
@@ -4781,3 +4906,17 @@ export const nodeMutations = {
     },
 
 };
+
+/**
+ * THE node writer. The response of a write to an App's install memory is held to the memory's READ
+ * audience here, at the one writer every door shares (createNode/updateNode by address or by
+ * memoryId, the kind doors, merges, importers, MCP), not per door: a door-by-door wrap let an
+ * alternate address return the content a write-only manager cannot read (Andi on #2064).
+ * An ordinary memory costs one indexed select.
+ */
+export async function writeNodeCore(...args: Parameters<typeof writeNodeCoreRaw>): ReturnType<typeof writeNodeCoreRaw> {
+  const written = await writeNodeCoreRaw(...args);
+  const ctx = args[1];
+  if (!written || typeof written !== 'object' || typeof (written as { memoryId?: unknown }).memoryId !== 'string') return written;
+  return concealUnreadableInstallWrite(ctx, written as { memoryId: string }) as unknown as typeof written;
+}

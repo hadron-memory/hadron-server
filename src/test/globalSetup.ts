@@ -127,6 +127,10 @@ async function provision(admin: Client) {
 /** The CHECK constraints `prisma db push` cannot express. Source of truth: prisma/post-push.sql. */
 async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/passkey-invariants.sql', import.meta.url), 'utf8'));
+  // #1897 — sign-in lineage guards (sign_ins depends on passkey_credentials).
+  await client.query(readFileSync(new URL('../../prisma/signin-invariants.sql', import.meta.url), 'utf8'));
+  // #1631 PR1b slice 2 — fresh sign-ins bound to the ceremony browser.
+  await client.query(readFileSync(new URL('../../prisma/fresh-sign-in-invariants.sql', import.meta.url), 'utf8'));
   // #1632 — signing requests, append-only signature records, the content-change marker.
   await client.query(readFileSync(new URL('../../prisma/signing-invariants.sql', import.meta.url), 'utf8'));
   await client.query(readFileSync(new URL('../../prisma/automation-invariants.sql', import.meta.url), 'utf8'));
@@ -138,6 +142,8 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/agent-task-matching-invariants.sql', import.meta.url), 'utf8'));
   // #1747 — tickers, subscriptions, wake settings, app grants, App ticker bounds.
   await client.query(readFileSync(new URL('../../prisma/ticker-invariants.sql', import.meta.url), 'utf8'));
+  // #2043 — a compiled boot prompt keeps its role.
+  await client.query(readFileSync(new URL('../../prisma/boot-prompt-invariants.sql', import.meta.url), 'utf8'));
   // #2022 — stop signals, their coverage history, the stop holds of queued tasks.
   await client.query(readFileSync(new URL('../../prisma/stop-signal-invariants.sql', import.meta.url), 'utf8'));
 
@@ -211,10 +217,14 @@ async function applyTemplateConstraints(client: Client) {
     ALTER TABLE "memories"
       ADD CONSTRAINT "chk_memory_class_app_id"
       CHECK (
-        (class = 'app' AND app_id IS NOT NULL)
-        OR (class = 'system' AND app_id IS NULL)
-        OR (class IN ('knowledge', 'group', 'personal', 'private'))
+(class = 'app' AND app_id IS NOT NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+      OR (class = 'system' AND app_id IS NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+      OR (class = 'system' AND app_id IS NOT NULL AND is_install_memory = true)
+      OR (class IN ('knowledge', 'group', 'personal', 'private') AND install_of_agent_id IS NULL AND is_install_memory = false)
       );
+    CREATE UNIQUE INDEX IF NOT EXISTS memories_install_memory_live_uniq
+      ON memories (app_id, install_of_agent_id)
+      WHERE install_of_agent_id IS NOT NULL AND deleted_at IS NULL;
   `);
 
   // 034-memory-class-access: agent scope required only for an app-scoped

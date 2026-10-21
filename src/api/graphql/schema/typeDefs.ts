@@ -534,6 +534,12 @@ export const typeDefs = `#graphql
     chatRootUrn: String
     "Highest seq the allocator has issued — a watermark, not a count."
     lastSeq: Int!
+    """
+    #2181 — which incarnation of the Channel this is. An opaque, stable integer that rises when a supported recreation
+    reuses the Channel under the same id; seqs and read cursors can survive it, so a pinned read or mark names this
+    value. Compare for equality only.
+    """
+    incarnation: Int!
     lastMessageAt: DateTime
     createdAt: DateTime!
     updatedAt: DateTime
@@ -730,6 +736,14 @@ export const typeDefs = `#graphql
     channelId: ID!
     lastSeenSeq: Int!
     updatedAt: DateTime!
+    "#2181 — the Channel's CURRENT incarnation (the same value as Channel.incarnation)."
+    channelIncarnation: Int!
+    """
+    #2181 — the incarnation the stored cursor was last RAISED under. NULL is a legacy cursor: it is never backfilled and
+    never relabelled. Treat your cursor as current only when this equals both channelIncarnation and the incarnation you
+    read, and lastSeenSeq >= your seq.
+    """
+    cursorIncarnation: Int
   }
 
   "#1353 — compact unread metadata for one Worker/Channel pair. No message body is returned."
@@ -837,6 +851,10 @@ export const typeDefs = `#graphql
     workerId: ID!
     channelId: ID!
     lastSeenSeq: Int!
+    "#2181 — the Channel's CURRENT incarnation (with expectedIncarnation, the value that was fenced)."
+    channelIncarnation: Int!
+    "#2181 — the incarnation the stored cursor was last raised under; NULL is a legacy cursor. See ChannelReadState.cursorIncarnation."
+    cursorIncarnation: Int
   }
 
   "Spec 049 Phase 5 — what an Agent's install-created register row is made with (plan §3.5)."
@@ -4451,6 +4469,10 @@ export const typeDefs = `#graphql
     number of messages in the chat or Channel when a cursor/filter is present.
     """
     total: Int!
+    "#2181 — the Channel this page was read from. NULL only when the App has no team channel yet."
+    channelId: ID
+    "#2181 — that Channel's incarnation at the read; pin the next read or mark with expectedIncarnation."
+    channelIncarnation: Int
   }
 
   """
@@ -5407,9 +5429,25 @@ export const typeDefs = `#graphql
   }
 
   """
-  Input for createNode. 'memoryId', 'loc', and 'name' are required; creating
-  is create-only — a live node at (memoryId, loc) rejects with
-  NodeLocConflictError (spec 039 Phase 0 D1/D4).
+  #2044 (hrn:node:hadronmemory.com:specs:cor:agt:040:06) — names an App's INSTALL MEMORY by the pair that
+  identifies it: the App and the Agent it customises. Both are ID-or-URN refs
+  like every other entity ref (relative URNs are refused, URN_NOT_QUALIFIED).
+  Accepted by createNode / updateNode in place of 'memoryId'. The install memory
+  is created by the App's first customisation: a createNode through this target
+  finds-or-creates it in the same transaction as the write, so a refused write
+  leaves nothing behind. Only whoever manages the App may write through it, and
+  only while the App is live and the Agent installed.
+  """
+  input InstallTargetInput {
+    appRef: String!
+    agentRef: String!
+  }
+
+  """
+  Input for createNode. 'loc' and 'name' are required, plus EITHER 'memoryId'
+  or 'install' (an App's install memory, #2044) — both or neither is an
+  error (BAD_USER_INPUT). Creating is create-only — a live node at (memoryId,
+  loc) rejects with NodeLocConflictError (spec 039 Phase 0 D1/D4).
   """
   input CreateNodeInput {
     "Forced PK (importer/sync use case, e.g. a stable UUIDv7). Only ever a create-id here — never a selector (D2). Omit to mint."
@@ -5420,7 +5458,9 @@ export const typeDefs = `#graphql
     qualified (org:memory) per spec 022 — relative-form URNs are
     rejected as GraphQL errors with extensions.code "URN_NOT_QUALIFIED".
     """
-    memoryId: String!
+    memoryId: String
+    "#2044 — an App's install memory as the target, instead of 'memoryId'. See InstallTargetInput."
+    install: InstallTargetInput
     loc: String!
     name: String!
     nodeType: String
@@ -5466,6 +5506,8 @@ export const typeDefs = `#graphql
     id: String
     "Selector, with 'loc': the target's memory (ID or fully-qualified URN). XOR with 'id'."
     memoryId: String
+    "#2044 — selector, with 'loc', in place of 'memoryId': the App's install memory. Creates nothing (the first createNode does). XOR with 'id'."
+    install: InstallTargetInput
     "Selector, with 'memoryId': the target's current loc. Not writable here — moveNode relocates."
     loc: String
     """
@@ -7646,6 +7688,14 @@ export const typeDefs = `#graphql
     memory(ref: ID!): Memory
 
     """
+    #2044 (hrn:node:hadronmemory.com:specs:cor:agt:040:06) — the App's install memory for an Agent: where the App
+    keeps its customisation of that Agent. Null when the App has not customised it
+    yet (this read creates nothing), and null for anyone the memory's record is not
+    open to: the App's participants, and whoever manages the App.
+    """
+    installMemory(appRef: String!, agentRef: String!): Memory
+
+    """
     Uniform paginated memory list (#473) — replaces myMemories,
     publicMemories, and orgSystemMemories.
 
@@ -8390,6 +8440,17 @@ export const typeDefs = `#graphql
       mentionsRef: ID
       limit: Int
       offset: Int
+      """
+      #2181 — pin the read to the Channel incarnation you read. A different incarnation, before or after the page is
+      read, is CHANNEL_INCARNATION_CHANGED with nothing returned and no cursor, check stamp or session resume applied;
+      the server never retargets. Omitted: the read is UNFENCED, as before.
+      """
+      expectedIncarnation: Int
+      """
+      #2181 — as on teamChatMessages: only false suppresses automatic read-cursor advancement (session attribution, the
+      check stamp and the heartbeat remain), so a pinned page can be acknowledged explicitly after it is delivered.
+      """
+      advanceReadState: Boolean = true
     ): TeamChatMessagesPage!
 
     """
@@ -8772,6 +8833,17 @@ export const typeDefs = `#graphql
     in, alike), APP_UNINSTALLED, FORBIDDEN (impersonation), BAD_USER_INPUT.
     Every write re-checks the caller's participation and the App's state
     inside its transaction.
+    #2198 (experiment): createAgentTask, assignAgentTask, reassignAgentTask and
+    finishAgentTask may succeed WITH warnings, in the response's
+    \`extensions.warnings\` (not in \`errors\`): a list of
+    { path (the mutation's response key), code, text, register? }. Codes are a
+    closed list per release (task.create.no-source, task.assign.assignee-unavailable,
+    task.assign.assignee-busy, task.assign.assignee-paused,
+    task.finish.open-children); a client must tolerate unknown codes. \`text\` is
+    fixed per code. \`register\` appears only for a caller that has an Agent:
+    { state: mapped (taskLoc, taskUrn) | unmapped | unresolved }. A warning never
+    blocks and never reveals another worker's state to a caller who could not
+    already see it on the roster.
     """
     createAgentTask(input: CreateAgentTaskInput!): AgentTask!
 
@@ -10900,7 +10972,20 @@ export const typeDefs = `#graphql
     requires that session. Monotonic; a seq beyond the captured Channel
     watermark is refused.
     """
-    markOwnTeamChatRead(appRef: ID!, sessionRef: ID!, channelRef: ID!, seq: Int!): OwnTeamChatReadState!
+    markOwnTeamChatRead(
+      appRef: ID!
+      sessionRef: ID!
+      channelRef: ID!
+      seq: Int!
+      """
+      #2181 — fence the mark to the incarnation you read. It runs in one transaction behind the Channel row lock: a
+      different incarnation is CHANNEL_INCARNATION_CHANGED (never repeat it; read again and pin the new incarnation)
+      and no cursor, check stamp or session resume is applied. A successful fenced response confirms
+      channelIncarnation = the incarnation you pinned and lastSeenSeq >= seq, even when an equal or lower mark left a legacy NULL
+      cursorIncarnation in place. Omitted: the mark is UNFENCED, as before.
+      """
+      expectedIncarnation: Int
+    ): OwnTeamChatReadState!
 
     """
     Explicitly confirm a previously previewed #1353 switchover. The proof is
