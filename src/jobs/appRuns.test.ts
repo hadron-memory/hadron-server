@@ -819,7 +819,7 @@ describe('a headless run writes as its agent (#1610)', () => {
     const capture = deps({
       llm: vi.fn(async () => {
         const run = await db.appRun.findUniqueOrThrow({ where: { id: runId } });
-        edits.push({ revisionEditor: editorFromAuth(runAuthContext(run)).userId });
+        edits.push({ revisionEditor: editorFromAuth(runAuthContext(run)).userId ?? null });
         await db.node.update({ where: { id: node.id }, data: { content: 'run edit' } });
         return { text: 'done', tokensIn: 1, tokensOut: 1, provider: 'anthropic', model: 'test' };
       }),
