@@ -11,6 +11,7 @@ import { automationPinQueries, automationPinMutations } from './resolvers.automa
 // This file only imports those slices and spreads them into the resolver map.
 // `Context` is re-exported so existing importers (mcp/server.ts + the resolver
 // test suite, ~80 files) keep importing it from './resolvers.js' unchanged.
+import { passkeyQueries } from './resolvers.passkeys.js';
 import { withInheritedNodeProjection } from './resolvers.inheritedNode.js';
 import { type Context } from './resolvers.helpers.js';
 export type { Context };
@@ -148,6 +149,7 @@ export const resolvers = {
   MemoryConfigTemplate: memoryConfigTemplateFieldResolvers.MemoryConfigTemplate,
   MemoryConfigTemplateRule: memoryConfigTemplateFieldResolvers.MemoryConfigTemplateRule,
   Query: {
+    ...passkeyQueries,
     ...nodeQueries,
     ...specCorpusQueries,
     ...nodeApprovalQueries,
