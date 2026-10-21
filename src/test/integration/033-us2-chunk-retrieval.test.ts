@@ -70,9 +70,15 @@ function adminCtx(): GqlContext {
   return { db, roles: ['ADMIN'], userId: adminId };
 }
 
-/** Each test's fixture: an empty database, then one chunk-indexed memory. */
+/**
+ * Each test's fixture: an empty database, then one chunk-indexed memory.
+ * #2201 — the VACUUM drops the dead HNSW entries earlier files leave behind
+ * (`cleanDb` deletes rows, which never shrinks the graph); without it an HNSW
+ * plan can return no passages while live chunks exist.
+ */
 async function setUpSuite(): Promise<void> {
   await cleanDb(db);
+  await db.$executeRawUnsafe('VACUUM node_embeddings');
   process.env.EMBEDDING_API_URL = 'http://stub.local/api/embed';
 
   orgUrn = `us2-org-${generateId().slice(0, 8)}`;
