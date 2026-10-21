@@ -16,6 +16,7 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { bootPromptApprovalGate } from '../../../lib/bootPromptApproval.js';
 import { resolvers } from './resolvers.js';
 import type { Context } from './resolvers.helpers.js';
 
@@ -201,6 +202,33 @@ describe('#2043 S6 — off placement the role is plain', () => {
     const node = await plain(f.agentMem.id);
     const code = await runAsActor({ workerId: f.worker.id, agentId: null }, () => codeOf(approve(node.id, ctxOf(f.admin.id))));
     expect(code).toBe('NO_ERROR');
+  });
+});
+
+// Today no principal but the manager can WRITE a placed memory, so the write
+// gate refuses the others before the manager gate is reached. The manager gate
+// is the authority that holds if that ever changes: pin its own decision.
+describe('#2043 S6 — the gate decides on its own, whatever the write gate admits', () => {
+  it('names the manager as themselves, and refuses every other principal, in both placements', async () => {
+    const f = await fixture();
+    const run = { db, ...runAuthContext({ id: generateId(), appId: f.app.id, userId: f.admin.id, organizationId: orgId }) };
+    const imp = ctxOf(f.admin.id, { impersonation: { sessionId: generateId(), actorUserId: generateId(), organizationId: orgId } });
+    const appKey = { db, appId: f.app.id, roles: [], clientId: `app:${f.appKey.id}` };
+    const decide = async (ctx: object, memoryId: string) => bootPromptApprovalGate(ctx as never, memoryId);
+    expect(await decide(ctxOf(f.admin.id), f.agentMem.id)).toEqual({ placed: true, refusal: null });
+    expect(await decide(ctxOf(f.admin.id), f.install.id)).toEqual({ placed: true, refusal: null });
+    expect(await decide(ctxOf(f.appOwner.id), f.install.id)).toEqual({ placed: true, refusal: null });
+    expect(await decide(ctxOf(f.owner.id), f.ownedMem.id)).toEqual({ placed: true, refusal: null });
+    for (const memoryId of [f.agentMem.id, f.install.id]) {
+      for (const ctx of [run, imp, appKey, ctxOf(f.writer.id)]) {
+        expect(await decide(ctx, memoryId)).toEqual({ placed: true, refusal: 'BOOT_PROMPT_APPROVAL_FORBIDDEN' });
+      }
+      expect(await runAsActor({ workerId: f.worker.id, agentId: null }, () => decide(ctxOf(f.admin.id), memoryId)))
+        .toEqual({ placed: true, refusal: 'BOOT_PROMPT_WORKER_SESSION_REFUSED' });
+    }
+    expect(await decide(ctxOf(f.appOwner.id), f.agentMem.id)).toEqual({ placed: true, refusal: 'BOOT_PROMPT_APPROVAL_FORBIDDEN' });
+    expect(await decide(ctxOf(f.admin.id), f.ownedMem.id)).toEqual({ placed: true, refusal: 'BOOT_PROMPT_APPROVAL_FORBIDDEN' });
+    expect(await decide(ctxOf(f.writer.id), f.group.id)).toEqual({ placed: false });
   });
 });
 
