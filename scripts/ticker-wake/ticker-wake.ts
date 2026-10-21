@@ -68,7 +68,8 @@
  *    input, the receiver is the same, the composer reads provably empty, and the worker's own session checked the team
  *    channel after the send: a later lastCheckedAt than the one read just before the send, both on the server's clock
  *    (Ada #26165; any covered task must also be STARTED by it). A timeout alone never resolves it: after 2
- *    cadences without evidence it stays held and is logged as needing a person.
+ *    cadences without evidence, a strictly newer tick may get ONE fresh request under the same guards; the old entry
+ *    is retained in needs-person.json, never certified by elapsed time, retyped as a fresh request or acked by itself.
  *  - a STRANDED DRAFT (#2138, Ada #26150) is DETECTED, never submitted: Orca accepted our text but the Enter never
  *    submitted it, so the composer holds exactly that text and neither the reissue (an idempotent replay of the stored
  *    receipt, Hugo #26146) nor the evidence path can run. When the draft equals the recorded text, the rest of the
@@ -144,7 +145,6 @@ export const IDLE_PROBE_MS = 500;
 export const DEFAULT_ONCE_BUDGET_S = 300;
 /** A proof older than this is re-fetched before its ack: the server refuses one past 15 minutes (WAKE_PROOF_MAX_AGE_MS). */
 export const PROOF_REFRESH_AFTER_MS = 10 * 60 * 1000;
-/** An ambiguous send with no delivery evidence after this long (2 cadences of the 600 s team-tick) is listed for a person. */
 /**
  * How long a send observes the accepted prompt for a turn start (`--wait-submit`). Orca only observes for this long;
  * a timeout returns the input-accepted receipt and never resends. It almost never confirms in time (#26099: two 15 s
@@ -154,6 +154,7 @@ export const PROOF_REFRESH_AFTER_MS = 10 * 60 * 1000;
 export const SUBMIT_PROBE_S = 2;
 /** Sends in flight at once. Each lane is one terminal; the reads around a send stay serial. */
 export const DELIVERY_POOL = 8;
+/** Two cadences of the 600 s team-tick: list the old request for a person and allow strictly newer ticks. */
 export const NEEDS_PERSON_AFTER_MS = 20 * 60 * 1000;
 /** A draft still in the composer this long after its send counts as stranded, not as a slow submit still in progress. */
 export const STRANDED_AFTER_MS = 60_000;
@@ -199,6 +200,23 @@ interface Delivered { state: 'sent'; coverage: string[]; receiver: string; at: n
 interface Ambiguous { state: 'ambiguous'; coverage: string[]; receiver: string; at: number; detail: string; text: string; handle: string; requestId?: string; tasks?: Record<string, string>; strandedAt?: number; checkedBefore?: string | null }
 type Receipt = Delivered | Ambiguous;
 type Receipts = Record<string, Receipt>; // by worker id
+/** Old requests displaced by NEW tick work, retained for a person; never treated as delivered evidence. */
+type NeedsPerson = Record<string, Ambiguous & { workerId: string }>;
+const NEEDS_PERSON_FILE = 'needs-person.json';
+
+/** A strictly newer tick is new work; an old tick or task in an unresolved request is never named again. */
+function tickParts(key: string): { ticker: string; k: number } | null {
+  if (key.startsWith('task:')) return null;
+  const i = key.lastIndexOf(':');
+  const raw = key.slice(i + 1);
+  const k = Number(raw);
+  return i > 0 && /^\d+$/.test(raw) && Number.isSafeInteger(k) && k > 0 ? { ticker: key.slice(0, i), k } : null;
+}
+function unresolvedCovers(key: string, unresolved: string[]): boolean {
+  if (unresolved.includes(key)) return true;
+  const t = tickParts(key);
+  return !!t && unresolved.some((c) => { const old = tickParts(c); return old?.ticker === t.ticker && old.k >= t.k; });
+}
 
 /** A task event's coverage key ("task:<eventId>#<chainIndex>"), shared by the proof and the wake's reasons. */
 const taskKey = (eventId: unknown, chainIndex: unknown): string => `task:${eventId}#${chainIndex}`;
@@ -217,11 +235,10 @@ export function proofCoverage(proof: string): string[] | null {
   } catch { return null; }
 }
 
-function receiptsPath(dir: string): string { return join(dir, 'receipts.json'); }
 /** Missing file is empty state; anything unreadable or malformed THROWS (fail closed: no send, no ack). */
-function loadReceipts(dir: string): Receipts {
+function loadReceipts(dir: string, file = 'receipts.json'): Receipts {
   let raw: string;
-  try { raw = readFileSync(receiptsPath(dir), 'utf8'); } catch (e) {
+  try { raw = readFileSync(join(dir, file), 'utf8'); } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return {};
     throw new SafeError(`receipts unreadable (${errno(e)}); stopping rather than risk a retype`);
   }
@@ -244,10 +261,11 @@ function loadReceipts(dir: string): Receipts {
   }
   return parsed as Receipts;
 }
-function saveReceipts(dir: string, r: Receipts): void {
-  const tmp = `${receiptsPath(dir)}.${process.pid}.tmp`;
+function saveReceipts(dir: string, r: Receipts, file = 'receipts.json'): void {
+  const path = join(dir, file);
+  const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(r));
-  renameSync(tmp, receiptsPath(dir));
+  renameSync(tmp, path);
 }
 
 /**
@@ -391,6 +409,8 @@ function ackCovered(cfg: Config, run: Runner, workerId: string, proof: string, c
     if (!work.every((t) => covered.includes(t))) return { text: 'the fresh proof carries new work; left for the next pass' };
     return { proof: fresh.proof, text: 'proof refreshed' };
   };
+  const initial = proofCoverage(proof);
+  if (!initial || !initial.every((t) => covered.includes(t))) return { ok: false, text: 'the proof includes unresolved work; not acked' };
   const issued = proofIssuedAt(proof);
   let current = proof;
   if (issued !== null && clock() - issued > PROOF_REFRESH_AFTER_MS) {
@@ -627,6 +647,11 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
   const ts = new Date(now).toISOString();
   if (!dry) mkdirSync(stateDir, { recursive: true });
   const receipts = loadReceipts(stateDir); // throws on unreadable/malformed state
+  const needsPerson = loadReceipts(stateDir, NEEDS_PERSON_FILE) as NeedsPerson;
+  for (const p of Object.values(needsPerson)) {
+    if (p.state !== 'ambiguous' || typeof p.workerId !== 'string' || !p.workerId) throw new SafeError('needs-person receipts malformed; stopping rather than risk a retype');
+    log(`${ts} ${p.workerId}: earlier request needs a person (${Math.max(0, Math.floor((now - p.at) / 1000))}s old); not retyped, not acked`);
+  }
 
   const { wakes, more } = fetchDue(cfg, run);
   if (more) log(`${ts} dueWakes has more than ${MAX_PAGES} pages; the rest wait for a later pass`);
@@ -662,7 +687,8 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
       if (!entry) { log(`${ts} ${name}: held (${receivers.why(id)} on this host)`); return; }
       const work = proofCoverage(w.proof);
       if (!work) { log(`${ts} ${name}: held (the proof's tick coverage cannot be established)`); return; }
-      let prior = receipts[id];
+      let prior: Receipt | undefined = receipts[id];
+      let displaced: Ambiguous | undefined;
 
       // The server owns the timing (R63): anchor, floor and busy deadline come with the wake and are never recomputed or
       // remembered here, so a re-offer, a join or a restart cannot restart them. Missing/unparsable timing holds.
@@ -675,6 +701,7 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
       if (!handle) { log(`${ts} ${name}: held (${detail})`); return; }
       const term0 = terminals.find((t) => t.handle === handle) as any;
       const receiver = `${handle}#${term0?.incarnationId ?? ''}`;
+      const unresolved = Object.values(needsPerson).filter((p) => p.workerId === id && p.receiver === receiver).flatMap((p) => p.coverage);
       // Never two sends in flight to one terminal: a second worker resolving to it is held to a later pass.
       if (inFlight.has(handle)) { log(`${ts} ${name}: held (another send to this terminal is in flight)`); return; }
       inFlight.add(handle);
@@ -731,13 +758,25 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
         };
 
         // An unreconciled earlier request is reconciled with ITS OWN identity. Reissuing it can still perform input, so it
-        // needs the same receiver and the same composer safety as a fresh send; without a request id it stays held for a human.
+        // needs the same receiver and composer safety. An id-less accepted request may only be displaced by NEW ticks
+        // after two cadences; the old request is never replayed without its id.
+        const allowFreshTick = (p: Ambiguous): boolean => {
+          if (dry || now - p.at < NEEDS_PERSON_AFTER_MS || !wasAccepted(p.detail)
+            || p.receiver !== receiver || typeof term0?.incarnationId !== 'string' || !term0.incarnationId) return false;
+          const old = [...unresolved, ...p.coverage];
+          if (!work.some((t) => tickParts(t) && !unresolvedCovers(t, old))) return false;
+          if (safeToType()) return false;
+          displaced = p;
+          unresolved.push(...p.coverage);
+          log(`${ts} ${name}: earlier request needs a person (${Math.floor((now - p.at) / 1000)}s old); newer ticks are a fresh request, not a retype`);
+          return true;
+        };
         if (prior?.state === 'ambiguous') {
-          if (!prior.requestId || dry) { log(`${ts} ${name}: an earlier send is unreconciled (${safeDetail(prior.detail)}); not retyped, not acked`); return; }
+          if (dry) { log(`${ts} ${name}: an earlier send is unreconciled (${safeDetail(prior.detail)}); not retyped, not acked`); return; }
           if (prior.receiver !== receiver) { log(`${ts} ${name}: an earlier send is unreconciled for another receiver (${prior.receiver}); held for a human`); return; }
           // Reissue by its own id first: a confirmation from Orca settles it.
-          const unsafe = safeToType();
-          const r = unsafe ? null : await submit(cfg, runAsync, prior.handle, prior.text, prior.requestId);
+          const unsafe = prior.requestId ? safeToType() : null;
+          const r = unsafe || !prior.requestId ? null : await submit(cfg, runAsync, prior.handle, prior.text, prior.requestId);
           let resolved = r?.kind === 'confirmed' ? 'reconciled as delivered' : '';
           if (!resolved) {
             // Otherwise only evidence resolves it (#26055): accepted, same receiver (checked above), composer provably empty,
@@ -749,20 +788,23 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
             else {
               const s = why === 'composer not provably empty' ? strandedDraft(prior) : null;
               if (s) { log(`${ts} ${name}: ${s}`); return; }
-              const held = unsafe ? `unreconciled request not reissued (held: ${unsafe})` : `earlier request still unreconciled (${safeDetail(r!.detail)})`;
+              const held = unsafe ? `unreconciled request not reissued (held: ${unsafe})` : `earlier request still unreconciled (${safeDetail(r?.detail ?? prior.detail)})`;
               const person = now - prior.at >= NEEDS_PERSON_AFTER_MS ? 'needs a person' : 'not retyped, not acked';
               log(`${ts} ${name}: ${held}; no delivery evidence yet (${why}); ${person}`);
-              return;
+              if (!allowFreshTick(prior)) return;
             }
           }
-          prior = receipts[id] = { state: 'sent', coverage: prior.coverage, receiver: prior.receiver, at: now };
-          saveReceipts(stateDir, receipts);
-          log(`${ts} ${name}: earlier request ${resolved}`);
+          if (displaced) prior = undefined;
+          else {
+            prior = receipts[id] = { state: 'sent', coverage: prior.coverage, receiver: prior.receiver, at: now };
+            saveReceipts(stateDir, receipts);
+            log(`${ts} ${name}: earlier request ${resolved}`);
+          }
         }
 
         const covered = prior?.state === 'sent' && prior.receiver === receiver ? prior.coverage : [];
-        const newWork = work.filter((t) => !covered.includes(t));
-        // Everything in this proof was already delivered to this receiver: only the ack is missing.
+        const newWork = work.filter((t) => !covered.includes(t) && !unresolvedCovers(t, unresolved) && (!displaced || tickParts(t) !== null));
+        // No new work to name: only confirmed coverage can be acked. Archived ambiguity never supplies coverage.
         if (!newWork.length) {
           if (dry) { log(`${ts} ${name}: WOULD ack-only (covered by a confirmed receipt)`); return; }
           const a = ackCovered(cfg, run, id, w.proof, covered, clock);
@@ -804,9 +846,9 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
 
         const unsafe = safeToType();
         if (unsafe) { log(`${ts} ${name}: held (${unsafe})`); return; }
-        const text = nudgeText([...newTickers], newTasks);
+        const text = (displaced ? `Fresh tick request at ${ts}: ` : '') + nudgeText([...newTickers], newTasks);
         if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); return; }
-        const coverage = [...new Set([...covered, ...work])].sort();
+        const coverage = [...new Set([...covered, ...newWork])].sort();
         // The ASSIGNED task identities this send names, kept on the receipt: the assignment wake is gone once the task
         // starts, and a started task is their delivery evidence. An alarm or a finished child has no such proof (its
         // receiver need not be the assignee), so its evidence is the channel check alone, as for a tick.
@@ -826,6 +868,24 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
           log(`${ts} ${name}: held (the worker's check status is unreadable before the send: ${describeError(e)}); nothing sent`);
           return;
         }
+        // Write the old request BEFORE the replacement intent. A crash between writes still leaves the old receipt
+        // holding; no archive write failure can lead to typing. Its original timestamp and evidence stay unchanged.
+        if (displaced) {
+          // Re-check after the same-id replay and evidence reads: a replacement request is not bound to the old id.
+          const latest = listTerminals(cfg, run);
+          const [currentHandle] = resolveTerminal(entry, latest, cfg, run);
+          const incarnation = (latest.find((t) => t.handle === currentHandle) as any)?.incarnationId;
+          if (currentHandle !== handle || !incarnation || `${currentHandle}#${incarnation}` !== displaced.receiver) {
+            log(`${ts} ${name}: held (the terminal incarnation changed before the fresh request); nothing sent`);
+            return;
+          }
+          const key = JSON.stringify([id, displaced.receiver, displaced.at, displaced.requestId ?? null]);
+          needsPerson[key] = { ...displaced, workerId: id };
+          try { saveReceipts(stateDir, needsPerson, NEEDS_PERSON_FILE); } catch (e) {
+            log(`${ts} ${name}: held (the old request could not be retained: ${errno(e)}); nothing sent`);
+            return;
+          }
+        }
         const before = receipts[id];
         const restore = (): void => { if (before) receipts[id] = before; else delete receipts[id]; };
         receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: 'send intent recorded before submission; outcome unknown', text, handle, tasks, checkedBefore };
@@ -844,7 +904,8 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
           return;
         }
         if (r.kind === 'uncertain') {
-          // Never an ack, never a fresh type: recorded with its request identity so it can be reconciled.
+          // Never an ack or replay of this work as new: retain its identity for reconciliation. Only later ticks
+          // after another two cadences may displace it, with this record retained for a person.
           receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: r.detail, text, handle, tasks, checkedBefore, ...(r.requestId ? { requestId: r.requestId } : {}) };
           try { saveReceipts(stateDir, receipts); } catch (e) { log(`${ts} ${name}: could not update the send record (${errno(e)}); the earlier intent stays and holds the wake`); }
           log(`${ts} ${name}: send not confirmed (${safeDetail(r.detail)}); left for reconciliation`);
