@@ -94,8 +94,7 @@ ${signInForms('window')}
   });
 
   // #1631 PR3 (cor:aut:040:08): remove a passkey after proving who you are with ANOTHER passkey or an identity
-  // provider (never an email link). Existing sessions stay signed in (Rook §10; whether a revocation ends them is
-  // Holger's open question), and the page says so.
+  // provider (never an email link). Removing it signs out the sessions it signed in (Holger, 2026-10-21, #29507).
   app.get('/passkeys/revoke', async (req, res) => {
     const live = await liveSignIn(req).catch(() => null);
     const viaProvider = live && live.method !== 'email'
@@ -104,7 +103,7 @@ ${signInForms('window')}
     send(res, 'Remove a passkey', `<main data-page="revoke" data-rp-id="${passkeyRpId()}">
 <h1>Remove a passkey</h1>
 <p>Prove it's you, then choose the passkey to remove. Anything it already signed keeps its state, except a first passkey still in its
-cooling-off window, whose pending signatures then never count. <strong>Sessions that are already signed in stay signed in.</strong></p>
+cooling-off window, whose pending signatures then never count. <strong>Removing a passkey also signs out the sessions it signed in.</strong></p>
 <h2>1. Prove it's you</h2>
 <p><button id="revoke-passkey">Use another of my passkeys</button></p>
 <p>Or confirm with the identity provider linked to your account:</p>
@@ -239,7 +238,7 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
         var b = document.createElement('button');
         b.textContent = 'Remove';
         b.onclick = function () {
-          if (!window.confirm('Remove the passkey "' + p.label + '"? Sessions already signed in stay signed in.')) return;
+          if (!window.confirm('Remove the passkey "' + p.label + '"? This also signs out the sessions it signed in.')) return;
           post('/passkeys/revoke/finish', { ceremonyId: revokeCeremony, credentialId: p.credentialId }).then(function (r) {
             say('status-revoke', r.ok ? 'Removed "' + p.label + '".' + ' Start again to remove another.' : 'Not removed. Start again.');
             if (r.ok) { $('passkey-list').textContent = ''; revokeCeremony = null; }

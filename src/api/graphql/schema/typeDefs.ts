@@ -3339,7 +3339,7 @@ export const typeDefs = `#graphql
   """#1631: a passkey record, as its owner sees it. Never a private key."""
   type PasskeyCredential {
     id: ID!
-    """The owner's name for it; empty once the owner's account is deleted."""
+    """The owner's name for it; the fixed text "Erased passkey" once the owner's account is deleted."""
     label: String!
     transports: [String!]!
     backupEligible: Boolean!

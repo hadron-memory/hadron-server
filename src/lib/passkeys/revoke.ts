@@ -10,7 +10,8 @@
  *   provider proof); the target must be the owner's own, unrevoked, and never the passkey that proved this ceremony;
  *   a passkey prover must still be unrevoked. `revoked_at` is the platform clock the passkey guard requires; a first
  *   passkey still in its window is closed as 'cancelled' (the passkey CHECK forces it), so its pending signatures read
- *   cancelled. A revocation here ends no sign-in: 040:08 rules that for the cancel link only.
+ *   cancelled. It ends every sign-in the passkey completed, with everything descending from them
+ *   (`endSignInsCompletedBy`, as the cancel link does; Holger, 2026-10-21, team chat #29507).
  *
  * Every refusal is null, and the caller answers one uniform 403.
  */
@@ -20,6 +21,7 @@ import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { verifyCeremonyAssertion, type VerifiedAssertion } from './ceremony.js';
 import { consumeFreshSignIn, FRESH_SIGN_IN_MAX_AGE_SECONDS } from './freshSignIn.js';
 import { clientDataType, liveUser, lockOpenCeremony, lockVoucher } from './registration.js';
+import { endSignInsCompletedBy } from '../../auth/signIn.js';
 
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -141,6 +143,9 @@ export async function finishRevoke(
           THEN (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) ELSE window_ended_at END
       WHERE id = ${target.id}
       RETURNING window_outcome`;
+    // Holger, 2026-10-21 (#29507): revoking ends the sign-ins the passkey completed, with everything that descends
+    // from them, as the cancel link does (R66 A), in this same transaction under the owner's anchor.
+    await endSignInsCompletedBy(tx, target.id);
     return { passkeyId: target.id, windowCancelled: done.window_outcome === 'cancelled' };
   });
 }

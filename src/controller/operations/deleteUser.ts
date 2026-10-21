@@ -475,7 +475,8 @@ async function runDeletionTxn(
       // Each record stays as a verification record (public key, credential id, times, window outcome); its
       // identifying parts are erased: the label, and the cancel record's IP address and user agent. The guard
       // admits exactly this, and only now that the user row is soft-deleted (step 4 above).
-      await tx.$executeRaw`UPDATE passkey_credentials SET label = '',
+      // An erased label reads as the fixed text 'Erased passkey' (Holger, 2026-10-21, team chat #29507).
+      await tx.$executeRaw`UPDATE passkey_credentials SET label = 'Erased passkey',
           cancel_ip = CASE WHEN cancelled_at IS NOT NULL THEN '' END,
           cancel_user_agent = CASE WHEN cancelled_at IS NOT NULL THEN '' END
         WHERE owner_id = ${targetUserId}`;
