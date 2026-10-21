@@ -316,3 +316,49 @@ describe('#2233 §10 P3s (Ralion): the tenant match and the orphan narrowing are
     await expect(requireMemoryWriteAccess(ctxOf(u.orgAdmin), orgAgent.systemMemoryId)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
   });
 });
+
+describe('#2233 parity (Xan): MCP\'s deciding write is fenced and rechecked on live authority too', () => {
+  /** Hold `anchor` exclusively while `revoke` runs uncommitted, start `write`, prove it queued, then commit the revocation. */
+  async function raced(anchor: { kind: 'user' | 'org'; id: string }, revoke: (tx: any) => Promise<unknown>, write: () => Promise<string>) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    const revocation = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [anchor], 'exclusive');
+      await revoke(tx);
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await isHeld;
+    const writing = write();
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      release();
+      await revocation;
+    }
+    return writing;
+  }
+
+  it.each(['hadron_update_node', 'hadron_create_node'] as const)('%s: a platform demotion racing the write wins; nothing written', async (tool) => {
+    await secretNode(userAgent.systemMemoryId);
+    const urn = await nodeUrn(userAgent.systemMemoryId, tool === 'hadron_update_node' ? 'def' : 'mcp-raced');
+    const out = await raced({ kind: 'user', id: u.platform.id },
+      (tx) => tx.user.update({ where: { id: u.platform.id }, data: { roles: ['READER'] } }),
+      async () => text(await mcp(authOf(u.platform)).callTool(tool, { urn, name: 'Raced', ...(tool === 'hadron_create_node' ? { content: 'x' } : {}) })));
+    expect(out).not.toMatch(/Node saved|updated:/i);
+    expect(out).not.toMatch(/SECRET/);
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: userAgent.systemMemoryId, loc: 'def' } })).toMatchObject({ name: 'Secret Title' });
+    expect(await db.node.count({ where: { memoryId: userAgent.systemMemoryId, loc: 'mcp-raced' } })).toBe(0);
+  });
+
+  it('hadron_create_node: an org ADMIN\'s membership revoked racing the write wins; nothing written', async () => {
+    const urn = await nodeUrn(orgAgent.systemMemoryId, 'mcp-org-raced');
+    const out = await raced({ kind: 'org', id: org.id },
+      (tx) => tx.orgMember.updateMany({ where: { organizationId: org.id, userId: u.orgAdmin.id }, data: { deletedAt: new Date() } }),
+      async () => text(await mcp(authOf(u.orgAdmin)).callTool('hadron_create_node', { urn, name: 'Raced', content: 'x' })));
+    expect(out).not.toMatch(/Node saved/);
+    expect(await db.node.count({ where: { memoryId: orgAgent.systemMemoryId, loc: 'mcp-org-raced' } })).toBe(0);
+  });
+});
