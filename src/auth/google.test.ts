@@ -26,6 +26,7 @@ import {
   buildGoogleAuthUrl,
   verifyGoogleIdToken,
   resolveGoogleUser,
+  googleReauthenticatedSince,
   type GoogleIdentity,
 } from './google.js';
 
@@ -51,6 +52,11 @@ describe('buildGoogleAuthUrl', () => {
     // scopes (#580 separation — restricted-scope verification).
     expect(url.searchParams.get('access_type')).toBeNull();
     expect(url.searchParams.get('scope')).not.toMatch(/gmail/);
+  });
+
+  it('#1631: asks for re-authentication (max_age=0) only on the ceremony leg', () => {
+    expect(new URL(buildGoogleAuthUrl('s')).searchParams.get('max_age')).toBeNull();
+    expect(new URL(buildGoogleAuthUrl('s', { reauthenticate: true })).searchParams.get('max_age')).toBe('0');
   });
 
   it('derives redirect_uri from BASE_URL, not per-request headers', () => {
@@ -113,7 +119,13 @@ describe('verifyGoogleIdToken', () => {
       emailVerified: true,
       name: 'Ada Lovelace',
       picture: 'https://lh3.googleusercontent.com/a/pic',
+      authTime: null,
     } satisfies GoogleIdentity);
+  });
+
+  it('#1631: reads auth_time, and ignores a non-numeric one', async () => {
+    expect((await verifyGoogleIdToken(await mintIdToken({ sub: '42', auth_time: 1_700_000_000 }), getKey)).authTime).toBe(1_700_000_000);
+    expect((await verifyGoogleIdToken(await mintIdToken({ sub: '42', auth_time: '1700000000' }), getKey)).authTime).toBeNull();
   });
 
   it('accepts the bare accounts.google.com issuer form', async () => {
@@ -177,6 +189,7 @@ describe('resolveGoogleUser', () => {
     emailVerified: true,
     name: 'Ada Lovelace',
     picture: 'https://pic.example/ada',
+    authTime: null,
   };
 
   it('(a) resolves a returning user by googleId', async () => {
@@ -294,5 +307,18 @@ describe('resolveGoogleUser', () => {
     const second = await resolveGoogleUser(identity);
     expect(second.id).toBe(first.id);
     expect(await db.user.count()).toBe(1);
+  });
+});
+
+describe('#1631 googleReauthenticatedSince (R154)', () => {
+  const started = new Date('2026-10-21T08:00:00Z');
+  const at = (iso: string) => Date.parse(iso) / 1000;
+  it('accepts an authentication at or after the leg began, within the skew', () => {
+    expect(googleReauthenticatedSince(at('2026-10-21T08:00:05Z'), started)).toBe(true);
+    expect(googleReauthenticatedSince(at('2026-10-21T07:59:00Z'), started)).toBe(true);
+  });
+  it('refuses an older authentication (a silent session) and a missing auth_time', () => {
+    expect(googleReauthenticatedSince(at('2026-10-21T07:58:59Z'), started)).toBe(false);
+    expect(googleReauthenticatedSince(null, started)).toBe(false);
   });
 });

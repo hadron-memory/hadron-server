@@ -53,6 +53,7 @@
  * shape. `source` MUST be the full live node row (all revisioned fields loaded).
  */
 
+import { assertBootPromptWriteAllowed } from './bootPrompt.js';
 import { resyncDerivedIncludesForNodes } from './includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from './nodeRoleWriters.js';
 import { COMMENT_NODE_TYPE, COMMENTABLE_CLASSES, commentError, commentGovernedError } from './comments/index.js';
@@ -71,6 +72,7 @@ import { isId } from './entityRef/shape.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
 import type { MemorySchema } from './memorySchema.js';
 import { clearNodeAuthorship } from './nodeAuthorship.js';
+import { memoryIsVectorIndexed } from './embedding/indexing.js';
 import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
@@ -446,6 +448,9 @@ export async function moveNodeSubtree(
   // same transaction (cor:dmo:110:02), and is refused when the destination
   // cannot hold comments.
   if (subtree.some((n) => n.nodeType === COMMENT_NODE_TYPE)) throw commentGovernedError('move', 'edits');
+  // #2043 — a compiled boot prompt is placed by its compile, never moved.
+  // and (cor:agt:040:11) a worker session never moves a boot-prompt source either.
+  for (const n of subtree) assertBootPromptWriteAllowed(n, {}, 'move');
   // #1641 §3.2 — a decision's loc IS its code, so neither a decision nor a log
   // (nor an ancestor of one) moves; and nothing moves into a log's code space.
   const decisionsMoved = subtree.filter((n) => isDecisionFamilyRole(n.role));
@@ -485,7 +490,7 @@ export async function moveNodeSubtree(
       tx.memory.findUnique({ where: { id: srcMemoryId }, select: { isEncrypted: true, source: true } }),
       tx.memory.findUnique({
         where: { id: destMemoryId },
-        select: { isEncrypted: true, source: true, vectorIndexEnabled: true, schema: true },
+        select: { isEncrypted: true, source: true, vectorIndexEnabled: true, class: true, schema: true },
       }),
     ]);
     // Encryption: v1 refuses a cross-memory move touching an encrypted memory
@@ -551,7 +556,7 @@ export async function moveNodeSubtree(
           'and a chat is bound to the memory that hosts it. Move it within its memory.',
       );
     }
-    destVectorIndexEnabled = destMem?.vectorIndexEnabled ?? false;
+    destVectorIndexEnabled = destMem ? memoryIsVectorIndexed(destMem) : false;
     // Schema: a schema-governed destination rejects nodes with undeclared
     // objectType / invalid properties — the same enforceNodeSchemaOnWrite gate
     // every normal write applies. Validate every moved node up front.

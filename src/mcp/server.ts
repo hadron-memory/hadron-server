@@ -1,3 +1,4 @@
+import { assertBootPromptWriteAllowed, assertNoBootPromptRows } from '../lib/bootPrompt.js';
 import { sessionEndReason } from '../lib/sessionEndReason.js';
 import { governedKindAnnotation } from '../lib/edgeGovernedKind.js';
 import { GraphQLError } from 'graphql';
@@ -26,7 +27,7 @@ import {
   RoleGovernedError,
   GOVERNED_KINDS,
 } from '../lib/governedRole.js';
-import { assertRoleWritersForNodes, assertRoleWritersForWrite, roleWriterRefusalText } from '../lib/nodeRoleWriters.js';
+import { assertEdgeSourceWritersById, assertRoleWritersForNodes, assertRoleWritersForWrite, roleWriterRefusalText } from '../lib/nodeRoleWriters.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import {
@@ -289,6 +290,7 @@ import {
 } from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
+import { memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -880,6 +882,14 @@ export async function addEdge(args: {
     }
     if (!(await canReadMemory(tx as typeof db, auth, target.memoryId, EXPLICIT_REF))) {
       return `Edge target not found: "${rawTarget}"`;
+    }
+    // Writer level of the source node, on the locked source.
+    try {
+      await assertEdgeSourceWritersById(tx, auth, locked.source.id);
+    } catch (e) {
+      const text = roleWriterRefusalText(e);
+      if (text) return text;
+      throw e;
     }
 
     // ON CONFLICT DO NOTHING is race-safe for simultaneous first creates.
@@ -3984,6 +3994,8 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — a comment is never rewritten as a section.
         assertNotCommentWrite(parentGovernedProbe?.nodeType, undefined, 'update');
+        // #2043 — the same boot-prompt guards the shared writer applies.
+        assertBootPromptWriteAllowed(parentGovernedProbe, {}, 'update');
         assertGovernedWrite(
           parentGovernedProbe,
           mergedGovernedState(parentGovernedProbe, {}),
@@ -4038,13 +4050,30 @@ export function createMcpServerInstance(
           // insert trigger; a tombstone is left as the upsert leaves it.
           const prior = await tx.node.findUnique({
             where: { loc_memoryId: { loc, memoryId } },
-            select: { id: true, deletedAt: true, role: true },
+            select: { id: true, deletedAt: true, role: true, isRunnable: true },
           });
           let sectionChanged = false;
           // #1331 — an existing section keeps its role through this write, so the
           // role's writer level applies to the edit (and to reviving a tombstone).
           if (prior) {
-            await assertRoleWritersForWrite(tx, auth, memoryId, { priorRole: prior.role, nextRole: prior.role });
+            // Lock the section row first (live or tombstone: node before rulebook), then judge its locked state. The
+            // probe above is only a fast refusal; the generic owning-operation refusal is re-applied on the locked row.
+            await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
+            const lockedSection = await tx.node.findUniqueOrThrow({
+              where: { id: prior.id },
+              select: { loc: true, memoryId: true, role: true, isRunnable: true, nodeType: true },
+            });
+            if (lockedSection.loc !== loc || lockedSection.memoryId !== memoryId) {
+              throw new NodeMovedDuringWriteError(
+                `[write_conflict] the section at "${loc}" moved while this write waited — re-read and retry.`,
+              );
+            }
+            assertNotCommentWrite(lockedSection.nodeType, undefined, 'update');
+            assertGovernedWrite(lockedSection, mergedGovernedState(lockedSection, {}), 'update');
+            await assertRoleWritersForWrite(tx, auth, memoryId, {
+              priorRole: lockedSection.role, nextRole: lockedSection.role,
+              priorRunnable: lockedSection.isRunnable, nextRunnable: lockedSection.isRunnable,
+            });
           }
           if (prior && !prior.deletedAt) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
@@ -4097,6 +4126,7 @@ export function createMcpServerInstance(
         if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
         const includeText = includeRefusalText(e);
         if (includeText) return textResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
@@ -5860,6 +5890,38 @@ export function createMcpServerInstance(
     },
   );
 
+  // #2044 (cor:agt:040:06): `install: { app, agent }` on hadron_create_node / hadron_update_node
+  // targets an App's install memory. Both delegate to the GraphQL createNode / updateNode, so the
+  // first-customisation create, the authority anchors and the gates are the ones the portal uses.
+  const writeInstallNodeViaGraphql = async (
+    op: 'create' | 'update',
+    install: { app: string; agent: string },
+    fields: Record<string, unknown>,
+  ) => {
+    const ctx: Context = {
+      db,
+      transport: 'mcp',
+      governedCanReplay: () => true,
+      clientId: auth.clientId ?? undefined,
+      userId: auth.userId ?? undefined,
+      apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
+      appId: auth.appId ?? undefined,
+      sessionId: auth.sessionId ?? undefined,
+      roles: auth.roles as Context['roles'],
+      organizationId: auth.organizationId ?? undefined,
+    };
+    const input = { ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)), install: { appRef: install.app, agentRef: install.agent } };
+    try {
+      const node = op === 'create'
+        ? await resolvers.Mutation.createNode({}, { input: input as never }, ctx)
+        : await resolvers.Mutation.updateNode({}, { input: input as never }, ctx);
+      const urn = await nodeUrn(node.loc, node.memoryId);
+      return textResult(`${op === 'create' ? 'Node created' : 'Node updated'} in the App's install memory: ${urn} (id: ${node.id})`);
+    } catch (e) {
+      return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : `${op} failed`}`, `hadron_${op}_node:install`);
+    }
+  };
+
   // ── hadron_create_node ───────────────────────────────────────────────────────────
 
   server.tool(
@@ -5888,8 +5950,21 @@ export function createMcpServerInstance(
         description: z.string().optional().describe(EDGE_DESCRIPTION_DOC),
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('Outgoing edges (replaces the full set on the source node)'),
+      install: z.object({
+        app: z.string().describe('The App: its ID or fully-qualified URN.'),
+        agent: z.string().describe('The Agent the App customises: its ID or fully-qualified URN.'),
+      }).optional().describe('#2044 — write into an App\'s INSTALL MEMORY (where it keeps its customisation of an installed Agent, cor:agt:040:06) instead of a memory named by `urn`. When set, `urn` is just the node\'s LOC (e.g. "prompts:lane"), not a URN. The first create finds-or-creates the install memory in the same step as the write; later calls reuse it. Only whoever manages the App may write, while the App is live and the Agent installed. Not supported with `edges`, `isRunnable` or `abstractStillAccurate`.'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, install }) => {
+      // #2044: an App's install memory is written through the GraphQL operation (one write path
+      // for the first-customisation create), not this inline parity writer.
+      if (install) {
+        if (edges || isRunnable) return textResult('`install` does not support `edges` or `isRunnable`; write those with a plain memory node.');
+        return writeInstallNodeViaGraphql('create', install, {
+          loc: rawUrn, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
+          properties, data: nodeData, llmModel, aiAgent,
+        });
+      }
       // #1219 — this tool is an inline parity writer, NOT a writeNodeCore
       // delegate (#206), so the core's role normalization does not reach it:
       // normalize here, before the governance probe and the payload build.
@@ -5952,6 +6027,7 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — no generic create makes or resurrects a comment.
         assertNotCommentWrite(governedProbe?.nodeType, nodeType, 'create');
+        assertBootPromptWriteAllowed(governedProbe, { nodeType, role: normalizeRole(role) }, 'create');
         assertGovernedWrite(
           governedProbe,
           mergedGovernedState(governedProbe, { role, isRunnable }),
@@ -6334,6 +6410,8 @@ export function createMcpServerInstance(
           await assertRoleWritersForWrite(tx, auth, memoryId, {
             priorRole: pre?.role ?? null,
             nextRole: role === undefined ? (pre?.role ?? null) : role,
+            priorRunnable: pre?.isRunnable ?? null,
+            nextRunnable: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
           });
           // #1460 — the locked tombstone can retain vectors from its old
           // plaintext. Purge both kinds before the upsert makes it searchable.
@@ -6343,10 +6421,10 @@ export function createMcpServerInstance(
           // Invalidate an old in-flight embed before the asynchronous enqueue
           // restamps the marker after commit.
           const indexed = pre?.deletedAt
-            ? await tx.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { vectorIndexEnabled: true } })
+            ? await tx.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { vectorIndexEnabled: true, class: true } })
             : null;
           const revivedPendingAt = pre?.deletedAt
-            ? pendingAtForRevival(pre.embeddingPendingAt, indexed!.vectorIndexEnabled)
+            ? pendingAtForRevival(pre.embeddingPendingAt, memoryIsVectorIndexed(indexed!))
             : undefined;
           const written = await tx.node.upsert({
             ...upsertArgs,
@@ -6466,8 +6544,19 @@ export function createMcpServerInstance(
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
+      install: z.object({
+        app: z.string().describe('The App: its ID or fully-qualified URN.'),
+        agent: z.string().describe('The Agent the App customises: its ID or fully-qualified URN.'),
+      }).optional().describe('#2044 — write into an App\'s INSTALL MEMORY (where it keeps its customisation of an installed Agent, cor:agt:040:06) instead of a memory named by `urn`. When set, `urn` is just the node\'s LOC (e.g. "prompts:lane"), not a URN. The first create finds-or-creates the install memory in the same step as the write; later calls reuse it. Only whoever manages the App may write, while the App is live and the Agent installed. Creates nothing: the memory exists once the first hadron_create_node with `install` has run. Not supported with `edges`, `isRunnable` or `abstractStillAccurate`.'),
     },
-    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install }) => {
+      if (install) {
+        if (edges || isRunnable || abstractStillAccurate) return textResult('`install` does not support `edges`, `isRunnable` or `abstractStillAccurate`.');
+        return writeInstallNodeViaGraphql('update', install, {
+          loc: rawUrn, expectedRevision, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
+          properties, data: nodeData, llmModel, aiAgent, reason,
+        });
+      }
       // #1219 — inline parity writer, not a writeNodeCore delegate (#206):
       // normalize before mergedGovernedState, the door replay and the payload.
       const role = normalizeRole(rawRole);
@@ -6517,6 +6606,7 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — no generic update edits, makes or unmakes a comment.
         assertNotCommentWrite(existing?.nodeType, nodeType, 'update');
+        assertBootPromptWriteAllowed(existing, { nodeType, role: normalizeRole(role) }, 'update');
         assertGovernedWrite(
           existing,
           mergedGovernedState(existing, { role, isRunnable }),
@@ -6771,6 +6861,8 @@ export function createMcpServerInstance(
             await assertRoleWritersForWrite(tx, auth, memory.id, {
               priorRole: current.role,
               nextRole: role === undefined ? current.role : role,
+              priorRunnable: current.isRunnable,
+              nextRunnable: mergedGovernedState(current, { role, isRunnable }).isRunnable,
             });
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
@@ -7432,7 +7524,7 @@ export function createMcpServerInstance(
           )}`,
         );
       } catch (err) {
-        return textResult(String((err as Error)?.message ?? err));
+        return textResult(roleWriterRefusalText(err) ?? String((err as Error)?.message ?? err));
       }
     },
   );
@@ -7448,7 +7540,7 @@ export function createMcpServerInstance(
         await resolvers.Mutation.deleteEdge({}, { edgeRef }, objectCtx());
         return textResult(`Edge deleted: ${edgeRef}`);
       } catch (err) {
-        return textResult(String((err as Error)?.message ?? err));
+        return textResult(roleWriterRefusalText(err) ?? String((err as Error)?.message ?? err));
       }
     },
   );
@@ -7618,6 +7710,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         if ((await commentIdsAmong(tx, affectedIds)).length > 0) {
           return { refused: 'comment', message: commentGovernedError('delete', 'removes').message };
         }
+        await assertNoBootPromptRows(tx, affectedIds, 'delete');
         // #1641 §3.2 — a decision is withdrawn, never deleted.
         const decisions = await decisionFamilyAmong(tx, affectedIds);
         if (decisions.length > 0) {

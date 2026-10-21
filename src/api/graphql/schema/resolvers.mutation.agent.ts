@@ -17,6 +17,7 @@ class AgentLinkSetChangedError extends Error {
 }
 import {
   assertSystemMemoryOwner,
+  assertNotInstallMemory,
   repairAgentSystemMemoryOwner,
 } from '../../../lib/agentSystemMemory.js';
 import {
@@ -75,6 +76,7 @@ import {
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { backfillMemoryEmbeddings } from '../../../services/embedding/enqueue.js';
 import { assertNoLiveAgentReferences } from '../../../lib/agentLiveReferences.js';
 import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 
@@ -207,6 +209,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
     let resolvedSystemMemoryId: string;
     if (systemMemoryId) {
       const target = await tx.memory.findUniqueOrThrow({ where: { id: systemMemoryId } });
+      assertNotInstallMemory(target);
       // spec 047 / #949: the promoted memory must share the agent's owner —
       // same org (org-owned) OR same user (user-owned). One shared assertion
       // so this path and updateAgent's first-attach can't drift.
@@ -300,6 +303,14 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
     }
     throw e;
   });
+  // #2199 (cor:rag:010:01 r17): a memory promoted to class='system' is always summary-indexed. Its existing nodes were
+  // written while it was an ordinary memory, so stamp them for the drain (post-commit; a fresh auto-provisioned memory
+  // is empty and every later write enqueues itself). Never fails the create.
+  if (systemMemoryId && createdAgent.systemMemoryId) {
+    await backfillMemoryEmbeddings(ctx.db, createdAgent.systemMemoryId).catch((err) => {
+      console.warn('[createAgent] system memory embedding backfill failed:', err);
+    });
+  }
   return createdAgent;
 }
 
@@ -559,6 +570,7 @@ export const agentMutations = {
           // waves through ANOTHER user's memory
           // (findings:org-xor-owner-null-comparison-bypass). The shared
           // assertion branches on the ownership class first.
+          assertNotInstallMemory(target);
           assertSystemMemoryOwner(agent, {
             organizationId: target.organizationId,
             ownerUserId: target.ownerUserId,
@@ -724,8 +736,9 @@ export const agentMutations = {
           }
           const lockedTarget = await tx.memory.findUniqueOrThrow({
             where: { id: promoteSystemMemoryId },
-            select: { organizationId: true, ownerUserId: true, id: true, deletedAt: true },
+            select: { organizationId: true, ownerUserId: true, id: true, deletedAt: true, appId: true, installOfAgentId: true, isInstallMemory: true },
           });
+          assertNotInstallMemory(lockedTarget);
           if (lockedTarget.deletedAt) {
             throw new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
           }
@@ -811,6 +824,14 @@ export const agentMutations = {
         throw err;
       }
       break;
+      }
+
+      // #2199: a memory promoted to class='system' by this update is now always summary-indexed — stamp its existing
+      // nodes post-commit (the provisioning-seam half of the amendment; never fails the update).
+      if (promoteSystemMemoryId && published?.systemMemoryId === promoteSystemMemoryId) {
+        await backfillMemoryEmbeddings(ctx.db, promoteSystemMemoryId).catch((err) => {
+          console.warn('[updateAgent] system memory embedding backfill failed:', err);
+        });
       }
 
       // ── URN sync for an auto-derived system memory.
