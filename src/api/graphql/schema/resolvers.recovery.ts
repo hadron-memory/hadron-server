@@ -13,6 +13,7 @@ import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { lockRemovalRows } from '../../../lib/governedRemoval.js';
 import { assertGovernedWrite } from '../../../lib/governedRole.js';
 import { assertNotCommentWrite } from '../../../lib/comments/index.js';
+import { restoreThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
 import { assertBootPromptWriteAllowed } from '../../../lib/bootPrompt.js';
 import { assertRoleWritersForNodes } from '../../../lib/nodeRoleWriters.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
@@ -193,24 +194,42 @@ export const recoveryMutations = {
           currentMemory.appId !== memory.appId || currentMemory.class !== memory.class ||
           currentMemory.userMemoryOfAgentId !== memory.userMemoryOfAgentId) throw changed();
       const related = await tx.node.findMany({ where: { memoryId: memory.id, OR: [{ id: candidate.id }, { loc: { in: ancestors } }] } });
-      await lockRemovalRows(tx, memory.id, related.map((node) => node.id));
+      const threadMembers = await tx.commentMeta.findMany({ where: { targetNodeId: candidate.id, threadDeletedCause: 'TARGET' }, select: { nodeId: true } });
+      const nodeIds = [...related.map((node) => node.id), ...threadMembers.map((member) => member.nodeId)];
+      const locked = await lockRemovalRows(tx, memory.id, nodeIds);
+      if (locked.length !== new Set(nodeIds).size) throw changed();
+      // Comment metadata is written by the lifecycle helper too. Fence its complete
+      // TARGET set before the final rulebook lock; the target row blocks new comments.
+      const lockedMeta = await tx.$queryRaw<Array<{ node_id: string }>>`
+        SELECT node_id FROM comment_meta WHERE target_node_id = ${candidate.id} AND thread_deleted_cause = 'TARGET'
+        ORDER BY node_id FOR UPDATE`;
+      const lockedNodeIds = new Set(locked.map((node) => node.id));
+      if (lockedMeta.some((member) => !lockedNodeIds.has(member.node_id))) throw changed();
       const current = await tx.node.findUnique({ where: { id: candidate.id }, include: { outgoingEdges: { include: { target: true } } } });
       if (!current) throw nodeNotFoundError(args.nodeRef);
       if (current.memoryId !== memory.id || current.loc !== candidate.loc) throw changed();
       // The mutation returns content. Validate key custody before any visible state change, not after commit.
       decryptNodeFields({ ...current }, currentMemory);
-      const parents = await tx.node.findMany({ where: { memoryId: memory.id, loc: { in: ancestors } }, select: { deletedAt: true } });
-      if (parents.some((parent) => parent.deletedAt)) throw new GraphQLError('Restore the deleted parent first.', { extensions: { code: 'NODE_PARENT_DELETED' } });
+      const parents = await tx.node.findMany({ where: { memoryId: memory.id, loc: { in: ancestors }, deletedAt: { not: null } }, select: { loc: true } });
+      const deletedLocs = new Set(parents.map((parent) => parent.loc));
+      const firstDeleted = ancestors.find((loc) => deletedLocs.has(loc));
+      if (firstDeleted !== undefined) {
+        const ancestorUrn = emitNodeUrnV2(currentMemory.urn, firstDeleted);
+        throw new GraphQLError(`Restore the deleted ancestor ${ancestorUrn} first.`, { extensions: { code: 'NODE_PARENT_DELETED', ancestorUrn } });
+      }
       await assertLocWritable(tx, memory.id, current.loc, 'restore');
       assertNotCommentWrite(current.nodeType, current.nodeType, 'restore');
       assertBootPromptWriteAllowed(current, current, 'restore');
-      assertGovernedWrite(current, current, 'update');
+      assertGovernedWrite(current, current, 'update', undefined, { context: 'node-restore' });
       // The final rulebook fence must follow every row and address lock.
       await assertRoleWritersForNodes(tx, txCtx, [current], { from: memory.id });
       if (!current.deletedAt) return { node: current, changed: false };
       const count = await tx.node.updateMany({ where: { id: current.id, memoryId: memory.id, loc: current.loc, deletedAt: current.deletedAt },
         data: { deletedAt: null, deletedBy: null } });
       if (count.count !== 1) throw changed();
+      // Only threads deleted by this target's deletion return; independently
+      // deleted ADMIN/AUTHOR/MANAGER threads retain their own deletion cause.
+      await restoreThreadsOfTargets(tx, [current.id]);
       const node = await tx.node.findUniqueOrThrow({ where: { id: current.id }, include: { outgoingEdges: { include: { target: true } } } });
       return { node, changed: true };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }).catch((error: unknown) => {

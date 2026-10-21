@@ -3508,23 +3508,23 @@ export function createMcpServerInstance(
   };
   const recoveryPageArgs = {
     memoryRef: z.string().describe('One live memory ID or qualified URN.'),
-    limit: z.number().int().nullable().optional().describe('Default20 (also null), cap200; drain pages using total.'),
-    offset: z.number().int().nullable().optional().describe('Page offset, default0.'),
+    limit: z.number().int().nullable().optional().describe('Default 20 (also null), maximum 200; use total to fetch remaining pages.'),
+    offset: z.number().int().nullable().optional().describe('Page offset, default 0.'),
   };
-  server.tool('hadron_list_recovery_nodes', 'Writer-only retained tombstones in one live memory. Explicit recovery; ordinary reads remain live-only.',
+  server.tool('hadron_list_recovery_nodes', 'List retained deleted nodes in one live memory that you can read and write. Ordinary reads return live nodes only.',
     recoveryPageArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryNodes({}, args, recoveryCtx())))));
-  server.tool('hadron_list_recovery_edges', 'Explicit writer-only source-memory graph inspection; each endpoint is independently authorized before paging/count.',
+  server.tool('hadron_list_recovery_edges', 'Inspect live edges and accessible deleted endpoints in one memory that you can read and write. Unavailable endpoints are excluded from the page and total.',
     recoveryPageArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryEdges({}, args, recoveryCtx())))));
-  server.tool('hadron_get_recovery_node', 'Writer-only raw tombstone content in a live memory; no templates, inheritance or automatic retention expiry.',
+  server.tool('hadron_get_recovery_node', 'Read retained deleted-node content in a live memory that you can read and write. Returns the stored body without expanding templates or includes.',
     { nodeRef: z.string().describe('Stable node ID or qualified node URN.') }, async (args) => recoveryCall(async () => {
       const ctx = recoveryCtx();
       const retained = await resolvers.Query.recoveryNode({}, args, ctx);
-      if (!retained) return textResult('Node not found.');
+      if (!retained) return { ...textResult('[not_found] No deleted node you can recover at that reference.'), isError: true as const };
       const { _retainedNode: _internal, ...dto } = retained;
       const content = await resolvers.RecoveryNode.content(retained as never, {}, ctx);
       return textResult(JSON.stringify({ ...dto, content }));
     }));
-  server.tool('hadron_restore_node', 'Restore one ordinary retained node, writer-only. Restore deleted parents first; governed/protected nodes refuse. No recursive restore.',
+  server.tool('hadron_restore_node', 'Restore one retained deleted node in a live memory that you can read and write. Restore deleted ancestors first. Governed nodes, comments, compiled boot prompts and protected internal addresses refuse. Does not restore descendants or revisions.',
     { nodeRef: z.string().describe('Stable node ID or qualified node URN.') }, async (args) => recoveryCall(async () => {
       const restored = await resolvers.Mutation.restoreNode({}, args, recoveryCtx());
       return textResult(JSON.stringify({ id: restored.id, loc: restored.loc, memoryId: restored.memoryId, deletedAt: restored.deletedAt }));

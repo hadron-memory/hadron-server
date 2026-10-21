@@ -44,6 +44,17 @@ beforeEach(async () => {
 });
 
 describe('explicit recovery reads', () => {
+  it('filters appNodes deleted inventory before its limit for readers while retaining writer recovery', async () => {
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const app = await db.app.create({ data: { name: 'Recovery app', urn: 'recovery2175.example:app', organizationId: memory.organizationId } });
+    const agent = await db.agent.create({ data: { name: 'Recovery agent', urn: 'recovery2175.example:agent', organizationId: memory.organizationId } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId, role: 'read-write' } });
+    const retained = await node('a'), live = await node('z', { deletedAt: null });
+    const request = { appRef: app.id, filter: { includeDeleted: true }, limit: 1 };
+    expect((await Q.appNodes({}, request, ctx(readerId))).map((item: any) => item.id)).toEqual([live.id]);
+    expect((await Q.appNodes({}, request, ctx())).map((item: any) => item.id)).toEqual([retained.id]);
+  });
   it('keeps user-owned recovery owner-scoped when both callers share an unrelated organization', async () => {
     await db.memory.update({ where: { id: memoryId }, data: { organizationId: null, ownerUserId: writerId, urn: 'recovery-writer:corpus' } });
     const retained = await node('a');
@@ -72,7 +83,9 @@ describe('explicit recovery reads', () => {
     const retained = await node('a');
     const writer = createTestableMcpServer({ userId: writerId, roles: [], clientId: `user:${writerId}` });
     const reader = createTestableMcpServer({ userId: readerId, roles: [], clientId: `user:${readerId}` });
-    expect(await reader.callToolText('hadron_get_recovery_node', { nodeRef: retained.id })).toBe('Node not found.');
+    expect(await reader.callTool('hadron_get_recovery_node', { nodeRef: retained.id })).toMatchObject({
+      isError: true, content: [{ type: 'text', text: '[not_found] No deleted node you can recover at that reference.' }],
+    });
     expect(await reader.callTool('hadron_restore_node', { nodeRef: retained.id })).toMatchObject({ isError: true });
     const raw = JSON.parse(await writer.callToolText('hadron_get_recovery_node', { nodeRef: retained.id }));
     expect(raw.content).toBe('raw {{missing}}');
@@ -81,6 +94,11 @@ describe('explicit recovery reads', () => {
     expect(page.total).toBe(1);
     const restored = JSON.parse(await writer.callToolText('hadron_restore_node', { nodeRef: retained.id }));
     expect(restored).toMatchObject({ id: retained.id, deletedAt: null });
+    for (const ref of [retained.id, generateId()]) {
+      expect(await writer.callTool('hadron_get_recovery_node', { nodeRef: ref })).toMatchObject({
+        isError: true, content: [{ type: 'text', text: '[not_found] No deleted node you can recover at that reference.' }],
+      });
+    }
   });
   it.each([
     {},
@@ -153,6 +171,27 @@ describe('explicit recovery reads', () => {
 });
 
 describe('single-node restore', () => {
+  it('restores TARGET-deleted thread members but preserves independent ADMIN and AUTHOR deletions', async () => {
+    await db.orgMember.updateMany({ where: { userId: writerId }, data: { role: 'ADMIN' } });
+    const target = await node('discussion', { deletedAt: null, content: 'body' });
+    const adminDeleted = await M.createComment({}, { targetRef: target.id, body: 'removed by manager' }, ctx());
+    await M.deleteCommentThread({}, { commentRef: adminDeleted.id, reason: 'explicit removal' }, ctx());
+    const authorDeleted = await M.createComment({}, { targetRef: target.id, body: 'removed by author' }, ctx());
+    await M.deleteComment({}, { commentRef: authorDeleted.id, expectedRevision: 1 }, ctx());
+    const kept = await M.createComment({}, { targetRef: target.id, body: 'discussion retained' }, ctx());
+    const reply = await M.replyToComment({}, { commentRef: kept.id, body: 'reply retained' }, ctx());
+    await M.deleteNode({}, { nodeRef: target.id }, ctx());
+    for (const id of [kept.id, reply.id]) expect(await db.commentMeta.findUniqueOrThrow({ where: { nodeId: id } })).toMatchObject({ threadDeletedCause: 'TARGET' });
+    await M.restoreNode({}, { nodeRef: target.id }, ctx());
+    for (const id of [kept.id, reply.id]) {
+      expect(await db.node.findUniqueOrThrow({ where: { id } })).toMatchObject({ deletedAt: null, deletedBy: null });
+      expect(await db.commentMeta.findUniqueOrThrow({ where: { nodeId: id } })).toMatchObject({ threadDeletedCause: null, threadDeletedAt: null });
+    }
+    for (const [id, cause] of [[adminDeleted.id, 'ADMIN'], [authorDeleted.id, 'AUTHOR']]) {
+      expect((await db.node.findUniqueOrThrow({ where: { id } })).deletedAt).not.toBeNull();
+      expect((await db.commentMeta.findUniqueOrThrow({ where: { nodeId: id } })).threadDeletedCause).toBe(cause);
+    }
+  });
   it('keeps a retained destination occupied while an actual destination move waits ahead of restore', async () => {
     const retained = await node('a'), source = await node('source', { deletedAt: null, content: 'source body' });
     let held!: () => void, release!: () => void;
@@ -423,14 +462,24 @@ describe('single-node restore', () => {
     expect(publishNodeWritten).toHaveBeenCalledTimes(1);
   });
   it('requires the parent to be restored first', async () => {
-    const parent = await node('a'), child = await node('a:b');
-    await expect(M.restoreNode({}, { nodeRef: child.id }, ctx())).rejects.toMatchObject({ extensions: { code: 'NODE_PARENT_DELETED' } });
+    const parent = await node('a'), child = await node('a:b'), leaf = await node('a:b:c');
+    await expect(M.restoreNode({}, { nodeRef: child.id }, ctx())).rejects.toMatchObject({
+      message: 'Restore the deleted ancestor hrn:node:recovery2175.example:corpus:a first.',
+      extensions: { code: 'NODE_PARENT_DELETED', ancestorUrn: 'hrn:node:recovery2175.example:corpus:a' },
+    });
+    await expect(M.restoreNode({}, { nodeRef: leaf.id }, ctx())).rejects.toMatchObject({ extensions: { ancestorUrn: 'hrn:node:recovery2175.example:corpus:a' } });
     await M.restoreNode({}, { nodeRef: parent.id }, ctx());
+    await expect(M.restoreNode({}, { nodeRef: leaf.id }, ctx())).rejects.toMatchObject({ extensions: { ancestorUrn: 'hrn:node:recovery2175.example:corpus:a:b' } });
     expect((await M.restoreNode({}, { nodeRef: child.id }, ctx())).deletedAt).toBeNull();
+    expect((await M.restoreNode({}, { nodeRef: leaf.id }, ctx())).deletedAt).toBeNull();
   });
   it.each([{ role: 'review' }, { role: 'spec.rule' }, { isRunnable: true }])('refuses governed tombstone %j without writing', async (signal) => {
     const n = await node('g', signal);
     await expect(M.restoreNode({}, { nodeRef: n.id }, ctx())).rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED' } });
+    const refusal = await M.restoreNode({}, { nodeRef: n.id }, ctx()).catch((error: any) => error);
+    expect(refusal.message).toMatch(/generic restore cannot restore it/);
+    expect(refusal.message).not.toMatch(/update|revision|hadron node/);
+    expect(refusal.extensions).toMatchObject({ code: 'ROLE_GOVERNED', door: null, mcpDoor: null, op: 'restore' });
     expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).deletedAt).toEqual(n.deletedAt);
     expect(publishNodeWritten).not.toHaveBeenCalled();
     expect(writeNodeToGit).not.toHaveBeenCalled();

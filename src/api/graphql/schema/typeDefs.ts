@@ -1612,9 +1612,9 @@ export const typeDefs = `#graphql
 
   type Edge {
     id: ID!
-    "The source node. NULLABLE (#781): null when the caller cannot read the source node's memory — a cross-memory edge (e.g. reached via incomingEdges) must not expose an endpoint in a memory the caller can't read. For a same-memory edge the caller can already see, this is always present."
+    "The live source node, or null when deleted or when its memory is unreadable. Cross-memory edges never grant access to an otherwise unreadable endpoint. Deleted-node inspection uses the explicit recovery graph."
     source: Node
-    "The target node. NULLABLE (#781): null when the caller cannot read the target node's memory (a cross-memory edge's far endpoint). For a same-memory edge, always present."
+    "The live target node, or null when deleted or when its memory is unreadable. Deleted-node inspection uses the explicit recovery graph."
     target: Node
     "Fully-qualified edge URN (hrn:edge:<root>:<memory>:<loc>), composed server-side from the edge's (source-side) memory URN + loc (#481 parity — edges are loc-addressed peers of nodes, spec 037)."
     urn: String!
@@ -7086,11 +7086,11 @@ export const typeDefs = `#graphql
   enum AutomationTriggerKind { SCHEDULE WEBHOOK MANUAL }
 
   type Query {
-    "Raw retained tombstone in a live memory, writer-plus-reader only; no inheritance or template compilation. hrn:node:hadronmemory.com:specs:cor:dmo:010:04"
+    "Read a retained deleted node in a live memory that you can read and write. Returns the stored body without expanding templates or includes. hrn:node:hadronmemory.com:specs:cor:dmo:010:04"
     recoveryNode(nodeRef: ID!): RecoveryNode
-    "Explicit tombstone page, default20 cap200, SQL-authorized total; no timed purge. hrn:node:hadronmemory.com:specs:cor:api:120:04"
+    "Page through retained deleted nodes you can recover. Default 20, maximum 200; total counts all accessible results. No timed purge. hrn:node:hadronmemory.com:specs:cor:api:120:04"
     recoveryNodes(memoryRef: ID!, limit: Int = 20, offset: Int = 0): RecoveryNodesPage!
-    "Explicit source-memory recovery graph, live edges with independently authorized endpoints. Default20 cap200. hrn:node:hadronmemory.com:specs:cor:api:110:02"
+    "Inspect live edges and accessible deleted endpoints in one memory you can read and write. Default 20, maximum 200. hrn:node:hadronmemory.com:specs:cor:api:110:02"
     recoveryEdges(memoryRef: ID!, limit: Int = 20, offset: Int = 0): RecoveryEdgesPage!
     "#1719: review exact automation graph bytes and digest. triggerRef is the trigger row ID; MANUAL uses the origin AppRun ID. Only its run-as user or the manager of an App-only trigger may preview."
     previewAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): JSON!
@@ -8884,7 +8884,7 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
-    "Restore one retained ordinary node inside a live memory. Deleted ancestors and governed kinds refuse; no recursion or revision restore. hrn:node:hadronmemory.com:specs:cor:acl:130:02"
+    "Restore one retained deleted node in a live memory you can read and write. Restore deleted ancestors first; governed nodes, comments, compiled boot prompts and protected internal addresses refuse. Does not restore descendants or revisions. hrn:node:hadronmemory.com:specs:cor:acl:130:02"
     restoreNode(nodeRef: ID!): Node!
     "#1719: rebind a trigger to its reviewed graph. expectedHash must match previewAutomation; edits since preview refuse adoption."
     reAdoptAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!, expectedHash: String!): Boolean!
