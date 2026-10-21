@@ -33,7 +33,7 @@ describe('#2186 Organization.agentOrgGrants for org OWNER/ADMIN user tokens', ()
   // The field resolver directly: organization(ref:) has its own gate that
   // already refuses non-members, so the field's gate is exercised in isolation.
   const grants = async (ctx: Partial<Context>) =>
-    (await resolvers.Organization.agentOrgGrants({ id: orgId }, {}, { db, ...ctx } as Context)) as {
+    (await resolvers.Organization.agentOrgGrants({ id: orgId }, {}, { db, ...ctx } as Context)) as unknown as {
       agentId: string;
       isActive: boolean;
     }[];
