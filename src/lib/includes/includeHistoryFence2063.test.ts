@@ -38,6 +38,8 @@ describe('#2063 include-history prepared transaction boundary', () => {
     });
     expect(events).toEqual([
       expect.stringMatching(/SELECT pg_advisory_xact_lock\(2063, 1772\)/),
+      // #2046 S9-3: the epoch bump is the second statement, before any caller work.
+      expect.stringMatching(/UPDATE include_history_epoch SET n = n \+ 1 WHERE id = 1/),
       'authority/rows/work',
     ]);
     expect(client.$transaction).toHaveBeenCalledWith(expect.any(Function), {

@@ -1,0 +1,172 @@
+{
+ "src/api/graphql/schema/resolvers.helpers.ts :: appAgent.create": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "install/uninstall run in withAuthorizedTx fence:true (whole outer transaction)"
+ },
+ "src/api/graphql/schema/resolvers.helpers.ts :: appAgent.deleteMany": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "install/uninstall run in withAuthorizedTx fence:true (whole outer transaction)"
+ },
+ "src/api/graphql/schema/resolvers.mutation.agent.ts :: agent.create": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "a brand-new Agent has no prior compile source or entitlement; a systemMemoryId of an existing memory is attached in the same create and validated by the shared owner assertion, and no earlier compile can have read the new id"
+ },
+ "src/api/graphql/schema/resolvers.mutation.agent.ts :: agent.delete": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "hard-delete of a SOFT-DELETED tombstone at the reclaimed URN (createAgentCore, ~168); a tombstone holds no entitlement and a Worker's agent FK is Restrict, so a casting's agent cannot be removed here"
+ },
+ "src/api/graphql/schema/resolvers.mutation.agent.ts :: agent.update": {
+  "count": 3,
+  "status": "fenced",
+  "reason": "updateAgent: whole deciding transaction in withIncludeHistoryTransaction (fence first, before memory/agent locks; pinned). deleteAgent fenced via withAuthorizedTx fence:true. setAgentIndexRefs writes only tasksIndexRef/processesIndexRef/updatedBy, which no compile or include-history reader consumes (grep: agentDefinitionLists, agentDefinitionTools, typeDefs only), so it is display-only and needs no fence"
+ },
+ "src/api/graphql/schema/resolvers.mutation.agent.ts :: agentOrgGrant.updateMany": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "revokeAgentOrgGrant fence:true; create goes via ensureAgentOrgGrant inside fenced createAgentOrgGrant/createApp/install/set-base"
+ },
+ "src/api/graphql/schema/resolvers.mutation.agent.ts :: agentSubscription.update": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "revokeAgentSubscription fence:true"
+ },
+ "src/api/graphql/schema/resolvers.mutation.session.ts :: agent.update": {
+  "count": 3,
+  "status": "excluded",
+  "reason": "editor lock acquire/release (editorLockUserId/editorLockExpiresAt) and publishedRevisionLoc (selects the revision node the chat prompt reads, resolvers.helpers.ts:3836, chat.ts:227); none is the boot-prompt pointer (bootPromptNodeId/Urn, fenced via writePointer), retirement, base or entitlement"
+ },
+ "src/api/graphql/schema/resolvers.mutation.session.ts :: agentSubscription.createMany": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "startAgentSession first contact fenced; existing row held FOR SHARE"
+ },
+ "src/api/graphql/schema/resolvers.mutation.session.ts :: worker.updateMany": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "session claim writes heldByUserId/heldAt only; no retirement, pointer or entitlement field and no compile read of them"
+ },
+ "src/api/graphql/schema/resolvers.worker.ts :: worker.create": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "cast creates a new compile target with no prior compile; name reservation is not read by compile (confirm)"
+ },
+ "src/api/graphql/schema/resolvers.worker.ts :: worker.delete": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "deleteWorker: whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
+ },
+ "src/api/graphql/schema/resolvers.worker.ts :: worker.update": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "lazy provisioning of Worker.memoryId (resolvers.worker.ts ~702): the compile's worker read selects only id/agentId (bootPromptPointer.ts), never memoryId"
+ },
+ "src/api/graphql/schema/resolvers.worker.ts :: worker.updateMany": {
+  "count": 4,
+  "status": "fenced",
+  "reason": "retireWorker fenced (retiredAt). The other three write fields no compile reads: release hold (heldByUserId/heldAt/updatedBy), setWorkerSettings (signature/trailer/promptOverride) and the promptOverride amend; promptOverride is resolved live at bind, outside the #2063 compile, and retires at S10 activation"
+ },
+ "src/controller/operations/deleteUser.ts :: agent.deleteMany": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
+ },
+ "src/controller/operations/deleteUser.ts :: agentSubscription.deleteMany": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
+ },
+ "src/controller/operations/deleteUser.ts :: worker.deleteMany": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
+ },
+ "src/controller/operations/deleteUser.ts :: worker.updateMany": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
+ },
+ "src/controller/operations/ensureAgentOrgGrant.ts :: raw INSERT INTO agent_org_grants": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "only called inside fenced transactions (createAgentOrgGrant, createApp, install, set-base)"
+ },
+ "src/controller/operations/ensureAgentSubscription.ts :: raw INSERT INTO agent_subscriptions": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "called inside fenced install/createApp and fenced first-contact startChat"
+ },
+ "src/controller/operations/mergeUsers.ts :: raw DELETE FROM agent_subscriptions": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
+ },
+ "src/controller/operations/mergeUsers.ts :: raw UPDATE agent_subscriptions": {
+  "count": 2,
+  "status": "fenced",
+  "reason": "whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
+ },
+ "src/controller/operations/mergeUsers.ts :: raw UPDATE workers": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
+ },
+ "src/lib/agentBase.ts :: agent.update": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "writeAgentBase runs inside setAgentBase fence"
+ },
+ "src/lib/bootPromptPointer.ts :: agent.update": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "setBootPromptPointer runs inside fenced pointer setters and the compile fence"
+ },
+ "src/lib/bootPromptPointer.ts :: appAgent.update": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "setBootPromptPointer runs inside fenced pointer setters and the compile fence"
+ },
+ "src/lib/bootPromptPointer.ts :: worker.update": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "setBootPromptPointer runs inside fenced pointer setters and the compile fence"
+ },
+ "src/lib/mergeOwnerNamespacedUrns.ts :: agent.deleteMany": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "runs only inside mergeUsers' withAccountFenceTransaction (its only caller); whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
+ },
+ "src/lib/mergeOwnerNamespacedUrns.ts :: agent.update": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "runs only inside mergeUsers' withAccountFenceTransaction (its only caller); whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
+ },
+ "src/lib/mergeOwnerNamespacedUrns.ts :: agent.updateMany": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "runs only inside mergeUsers' withAccountFenceTransaction (its only caller); whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
+ },
+ "src/lib/org/propagateOrgUrnRename.ts :: raw UPDATE agents": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "org rename rewrites the agents.urn text only; entitlement and the compile read agents by id, owner_user_id/organization_id unchanged, and the pointer stores memory-derived node URNs, never an agent URN (bootPromptPointer.ts)"
+ },
+ "src/lib/ownerUrnRename.ts :: raw DELETE FROM agents": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "owner rename reclaims SOFT-DELETED agent tombstones at the new URN only (deleted_at IS NOT NULL), which hold no entitlement; entitlement and the compile read agents by id, owner_user_id/organization_id unchanged, and the pointer stores memory-derived node URNs, never an agent URN (bootPromptPointer.ts)"
+ },
+ "src/lib/ownerUrnRename.ts :: raw UPDATE agents": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "owner rename rewrites the agents.urn text only; entitlement and the compile read agents by id, owner_user_id/organization_id unchanged, and the pointer stores memory-derived node URNs, never an agent URN (bootPromptPointer.ts)"
+ },
+ "src/lib/workerReportsTo.ts :: worker.update": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "reportsTo hierarchy is not read by compile (confirm)"
+ }
+}

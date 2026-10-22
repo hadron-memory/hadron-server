@@ -571,6 +571,7 @@ export const appMutations = {
           }
           return app;
         },
+        { fence: true },
       );
 
       // #951 — provision the App's own class='app' shared memory NOW, the way
@@ -714,6 +715,7 @@ export const appMutations = {
                 },
               });
             },
+            { fence: true },
           );
           // #951: a cascaded dependency App is an App like any other — it gets
           // its shared memory at install time too, not on first chat.

@@ -1,6 +1,7 @@
 import { Prisma } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
+import { includeHistoryClient, withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { type Context, withoutRequestCaches } from './resolvers.helpers.js';
 
 /**
@@ -27,9 +28,19 @@ export async function withAuthorizedTx<T>(
     timeout?: number;
     allowDeletedMemory?: boolean;
     allowDeletedOrg?: boolean;
+    /**
+     * #2046 S9-3: enter the #2063 include-history fence as the transaction's FIRST statement, before
+     * the anchors (the order the boot-prompt compile takes). Writers of compile-relevant authority
+     * (grants, subscriptions, base, retirement, pointers) set this. The fence is READ COMMITTED with
+     * no isolation override, so combining it with `isolationLevel` is refused before any work.
+     */
+    fence?: boolean;
   } = {},
 ): Promise<T> {
-  return ctx.db.$transaction(async (tx) => {
+  if (options.fence && options.isolationLevel !== undefined) {
+    throw new Error('A fenced authorized transaction cannot override the isolation level');
+  }
+  const body = async (tx: Prisma.TransactionClient) => {
     const resolvedAnchors = typeof anchors === 'function' ? anchors() : anchors;
     // All participating revokers take this same advisory anchor before row
     // locks. Ordering it first also leaves one SERIALIZABLE protocol: after a
@@ -109,7 +120,13 @@ export async function withAuthorizedTx<T>(
     const txCtx = await liveTxContext(ctx, tx);
     await authorize(txCtx);
     return write(tx, txCtx);
-  }, {
+  };
+  if (options.fence) {
+    return withIncludeHistoryTransaction(ctx.db, (fence) => body(includeHistoryClient(fence)), {
+      timeoutMs: options.timeout ?? 30_000,
+    });
+  }
+  return ctx.db.$transaction(body, {
     isolationLevel: options.isolationLevel,
     timeout: options.timeout ?? 30_000,
   });
