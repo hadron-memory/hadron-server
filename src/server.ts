@@ -79,7 +79,7 @@ import { generateUniqueHandle, isHandleTaken } from './lib/userHandle.js';
 import { ensureUserPrincipal, RootNameTakenError } from './lib/principal/mintPrincipal.js';
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
-import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
+import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
@@ -1950,6 +1950,12 @@ export async function createServer(): Promise<Express> {
   // nothing else.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_SESSION_REAPER !== 'true') {
     startSessionReaperLoop(db);
+  }
+
+  // #2261 — idle eviction of MCP transports. Its own timer on purpose: DISABLE_SESSION_REAPER must not also
+  // switch off the bound on what the process holds in memory (the #2259 leak).
+  if (process.env.NODE_ENV !== 'test') {
+    startMcpTransportSweepLoop();
   }
 
   // #1706 — agent-task stall evaluator: the four stall rules, owner-chain
