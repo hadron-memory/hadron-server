@@ -106,7 +106,7 @@ import {
   hasSchemePrefix,
 } from '../../../lib/urn.js';
 import { GraphQLError } from 'graphql';
-import { withAuthorizedMemoryTx } from './authorizedTx.js';
+import { withAuthorizedMemoryTx, liveTxContext } from './authorizedTx.js';
 // Spec 049 §8.5 — the memory-level lock Channel creation shares with deleteMemory.
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
@@ -2508,7 +2508,7 @@ export const memoryMutations = {
           // the former owner's key cannot encrypt the receiver's nodes.
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
           const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
-          const txCtx = { ...ctx, db: tx } as Context;
+          const txCtx = await liveTxContext(ctx, tx);
           await concealUnreadableDenial(txCtx, resolvedMemoryId, memoryId, async () => {
             if (current.deletedAt) throw new GraphQLError('Memory not found.', { extensions: { code: 'FORBIDDEN' } });
             if (!isStrictOwner(ctx, current.userId)) {
@@ -2553,8 +2553,9 @@ export const memoryMutations = {
       const lockConversionMemory = async (tx: Prisma.TransactionClient) => {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR SHARE`;
         const current = await tx.memory.findUnique({ where: { id: resolvedMemoryId } });
-        await concealUnreadableDenial({ ...ctx, db: tx } as Context, resolvedMemoryId, memoryId, async () => {
-          if (!current || current.deletedAt || (!isStrictOwner(ctx, current.userId) &&
+        const txCtx = await liveTxContext(ctx, tx);
+        await concealUnreadableDenial(txCtx, resolvedMemoryId, memoryId, async () => {
+          if (!current || current.deletedAt || (!isStrictOwner(txCtx, current.userId) &&
               !(appCompletionOnly && current.appId === ctx.appId && current.userId === memory.userId &&
                 current.class === 'private' && current.isEncrypted))) {
             throw new GraphQLError('Only the memory owner may encrypt it.', { extensions: { code: 'FORBIDDEN' } });

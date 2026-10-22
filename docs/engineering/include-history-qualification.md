@@ -155,3 +155,21 @@ history deletion. Ordinary memory URN updates and graph/edge selection writers
 must be assigned in the overall S9 writer map even if outside this qualification
 slice. Ownership clarification requested from Marco/Basil; none are silently
 excluded as label-only writes.
+
+Owner-handle reclamation is now integrated: a supplied handle runs the original
+profile transaction under F before the user row and raw namespace/cascade
+writers, then refreshes the presented actor/credential. Name-only profile writes
+keep their original transaction path. Both fence orders pass with an actual
+tombstoned memory carrying a source node, and existing profile/rename13 tests
+pass. Encryption flip/conversion refreshes actor/credential after its Memory
+lock; existing encryption104 tests pass and revoked-key-during-F refuses the
+flip without altering plaintext. Qualification controls now31 pass locally.
+
+Evidence-only `a8d69e13` composes qualification48d3aa15 with refreshed held
+heads2263@417253fd and2258@c65e694a. Conflicts retained the same-tx subscription
+cleanup and both opaque RC/account fence modes; a raw client is never blessed.
+The 11-boundary actual compile read/write + inverse and stale-account/inverse
+matrix passes82 tests. The initial combined compile/epoch/writer suites192 pass
+and tsc passes. Owner-handle/encryption follow-up is not in that evidence hash
+yet. Full suite is running from immutable48d3aa15 in a separate validation
+worktree; no full-suite pass is claimed for the delivery head.
