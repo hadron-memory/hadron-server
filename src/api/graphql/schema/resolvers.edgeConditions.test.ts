@@ -21,6 +21,8 @@ const EDGE_ID = 'e'.repeat(32);
 // createEdge / updateEdge resolvers touch.
 function mockDb() {
   const client = {
+    // The deciding write refreshes the presented actor after the outer fence.
+    user: { findUnique: vi.fn().mockResolvedValue({ roles: ['ADMIN'], deletedAt: null }) },
     // Spec 037: createEdge fetches both endpoints to compose/derive the edge
     // loc + denormalize memoryId. #322: resolveNodeRef first does a bare-ID PK
     // lookup (findFirst, `deletedAt: null` filter), then the resolver re-fetches

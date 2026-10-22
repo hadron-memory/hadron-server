@@ -280,7 +280,9 @@ describe('update TOCTOU 3: identity is anchored on the PK, not the address (@cop
 
     onLock.fire = async () => {
       await db.node.update({ where: { id: target.id }, data: { loc: 'doc:moved' } });
-      squatterId = (await seed('doc:target', 'squatter')).id;
+      // Stage the post-move DB state directly: a second real node writer
+      // cannot enter a nested history fence inside this lock hook.
+      squatterId = (await db.node.create({ data: { memoryId, loc: 'doc:target', name: 'squatter' } })).id;
     };
 
     await expectCode(

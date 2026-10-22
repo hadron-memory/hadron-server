@@ -31,7 +31,7 @@ beforeEach(async () => {
 
 afterEach(() => vi.unstubAllEnvs());
 
-it.each(['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'deleteMemory'] as const)(
+it.each(['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'deleteMemory', 'restoreNodeRevision'] as const)(
   '%s takes the history fence before authority and Node locks', async (surface) => {
     const node = await db.node.create({ data: { memoryId, loc: 'source', name: 'Source', content: '# Source' } });
     const revision = await db.nodeRevision.create({ data: { nodeId: node.id, memoryId, loc: node.loc, name: node.name, content: '# Before', revNo: 0 } });
@@ -49,7 +49,8 @@ it.each(['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawS
           : surface === 'withdrawSigningRequest' ? resolvers.Mutation.withdrawSigningRequest(null, { id: request!.id }, ctx())
             : surface === 'deleteNodeRevision' ? resolvers.Mutation.deleteNodeRevision(null, { revisionId: revision.id }, ctx())
               : surface === 'clearNodeHistory' ? resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, ctx())
-                : resolvers.Mutation.deleteMemory(null, { id: memoryId }, ctx());
+                : surface === 'restoreNodeRevision' ? resolvers.Mutation.restoreNodeRevision(null, { revisionId: revision.id }, ctx())
+                  : resolvers.Mutation.deleteMemory(null, { id: memoryId }, ctx());
     const outcome = pending.then((value: unknown) => ({ value }), (error: unknown) => ({ error }));
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1, 750);
@@ -132,11 +133,21 @@ it('snapshot helpers reject a pooled client, raw/manual-lock transaction, and es
   expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
 });
 
-type QualificationSurface = 'encryptMemory' | 'cleanupAnonymousMemories' | 'deleteMemory' | 'approveNode' | 'approveMemoryNodes' | 'requestNodeSignature' | 'withdrawSigningRequest' | 'deleteNodeRevision' | 'clearNodeHistory' | 'cancelFirstPasskey' | 'endWindowEarly' | 'finishRevoke';
+type QualificationSurface = 'restoreNodeRevision' | 'updateTeamRole' | 'deleteTeamRole' | 'encryptMemory' | 'cleanupAnonymousMemories' | 'deleteMemory' | 'approveNode' | 'approveMemoryNodes' | 'requestNodeSignature' | 'withdrawSigningRequest' | 'deleteNodeRevision' | 'clearNodeHistory' | 'cancelFirstPasskey' | 'endWindowEarly' | 'finishRevoke';
 async function qualificationAct(surface: QualificationSurface): Promise<{
   run: (database: typeof db) => Promise<unknown>;
   check: (value: unknown) => void;
 }> {
+  if (surface === 'updateTeamRole' || surface === 'deleteTeamRole') {
+    const memory = await db.memory.update({ where: { id: memoryId }, data: { class: 'system' } });
+    const agent = await db.agent.create({ data: { organizationId: memory.organizationId, systemMemoryId: memory.id, name: 'Team', urn: 'qualification-fence.example:role-agent' } });
+    const app = await db.app.create({ data: { organizationId: memory.organizationId, name: 'Team App', urn: 'qualification-fence.example:role-app' } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    await db.node.create({ data: { memoryId, loc: 'roles:qa', name: 'QA', description: 'Before', data: {} } });
+    return surface === 'updateTeamRole'
+      ? { run: (database) => resolvers.Mutation.updateTeamRole(null, { appRef: app.id, role: 'qa', description: 'After' }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ role: 'qa', description: 'After' }) }
+      : { run: (database) => resolvers.Mutation.deleteTeamRole(null, { appRef: app.id, role: 'qa' }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ role: 'qa', nodesDeleted: 1 }) };
+  }
   if (surface === 'encryptMemory') {
     await db.memory.update({ where: { id: memoryId }, data: { class: 'private', userId } });
     await db.node.create({ data: { memoryId, loc: 'encrypt-source', name: 'Encrypt source', content: '# Plaintext before flip' } });
@@ -187,12 +198,13 @@ async function qualificationAct(surface: QualificationSurface): Promise<{
     return { run: (database) => resolvers.Mutation.withdrawSigningRequest(null, { id: request.id }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ id: request.id, state: 'withdrawn' }) };
   }
   const revision = await db.nodeRevision.create({ data: { nodeId: node.id, memoryId, loc: node.loc, name: node.name, content: '# Before', revNo: 0 } });
+  if (surface === 'restoreNodeRevision') return { run: (database) => resolvers.Mutation.restoreNodeRevision(null, { revisionId: revision.id }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ content: '# Before' }) };
   return surface === 'deleteNodeRevision'
     ? { run: (database) => resolvers.Mutation.deleteNodeRevision(null, { revisionId: revision.id }, { ...ctx(), db: database }), check: (value) => expect(value).toBe(true) }
     : { run: (database) => resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, { ...ctx(), db: database }), check: (value) => expect(value).toBe(1) };
 }
 
-it.each<QualificationSurface>(['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories', 'encryptMemory'])(
+it.each<QualificationSurface>(['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories', 'encryptMemory', 'updateTeamRole', 'deleteTeamRole', 'restoreNodeRevision'])(
   '%s holds the fence through its actual deciding write and commit (inverse order)', async (surface) => {
     const act = await qualificationAct(surface);
     let entered!: () => void;
@@ -234,11 +246,12 @@ it.each<QualificationSurface>(['approveNode', 'approveMemoryNodes', 'requestNode
   },
 );
 
-it.each(['updateNode', 'deleteNode', 'approveNode', 'clearNodeHistory', 'encryptMemory'] as const)(
+it.each(['updateNode', 'deleteNode', 'approveNode', 'clearNodeHistory', 'encryptMemory', 'restoreNodeRevision'] as const)(
   '%s refuses a credential revoked while waiting on the history fence without changing source or history', async (surface) => {
     const node = await db.node.create({ data: { memoryId, loc: 'revoked-writer', name: 'Original', content: '# Original' } });
     if (surface === 'encryptMemory') await db.memory.update({ where: { id: memoryId }, data: { class: 'private', userId } });
     const key = await db.userApiKey.create({ data: { userId, keyHash: `qualification-${surface}`, keyPreview: 'test', oauthScopes: [] } });
+    const snapshot = surface === 'restoreNodeRevision' ? await db.nodeRevision.create({ data: { nodeId: node.id, memoryId, loc: node.loc, name: 'History', content: '# History', revNo: 0 } }) : null;
     const context: Context = { ...ctx(), apiKeyId: key.id };
     let entered!: () => void;
     let release!: () => void;
@@ -250,7 +263,8 @@ it.each(['updateNode', 'deleteNode', 'approveNode', 'clearNodeHistory', 'encrypt
       : surface === 'deleteNode' ? resolvers.Mutation.deleteNode(null, { nodeRef: node.id, hard: true }, context)
         : surface === 'approveNode' ? resolvers.Mutation.approveNode(null, { nodeRef: node.id }, context)
           : surface === 'clearNodeHistory' ? resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, context)
-            : resolvers.Mutation.encryptMemory(null, { memoryId, dataKey: Buffer.alloc(32, 7).toString('base64') }, context);
+            : surface === 'restoreNodeRevision' ? resolvers.Mutation.restoreNodeRevision(null, { revisionId: snapshot!.id }, context)
+              : resolvers.Mutation.encryptMemory(null, { memoryId, dataKey: Buffer.alloc(32, 7).toString('base64') }, context);
     const outcome = pending.then(() => ({ accepted: true }), (error: unknown) => ({ error }));
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1, 750);
@@ -261,7 +275,7 @@ it.each(['updateNode', 'deleteNode', 'approveNode', 'clearNodeHistory', 'encrypt
     }
     expect(await outcome).toHaveProperty('error');
     expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({ content: '# Original', deletedAt: null, approvalHash: null, revSeq: 1 });
-    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(surface === 'restoreNodeRevision' ? 1 : 0);
     if (surface === 'encryptMemory') expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).isEncrypted).toBe(false);
   },
 );
@@ -294,7 +308,7 @@ it('anonymous cleanup waits before taking any cascading memory/node lock', async
 
 // Evidence-only combined tree: these imports and controls require held #2258.
 import { compileBootPrompt } from '../../api/graphql/schema/compileBootPrompt.js';
-const combinedSurfaces: QualificationSurface[] = ['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories', 'encryptMemory'];
+const combinedSurfaces: QualificationSurface[] = ['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories', 'encryptMemory', 'updateTeamRole', 'deleteTeamRole', 'restoreNodeRevision'];
 async function compileCounterparty() {
   const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
   const system = await db.memory.create({ data: { class: 'system', organizationId: memory.organizationId, name: 'Compile system', urn: 'qualification-fence.example:compile-system' } });

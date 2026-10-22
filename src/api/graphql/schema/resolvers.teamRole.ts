@@ -346,8 +346,17 @@ async function writeTeamRole(
   // role writes can each observe a name absent and both persist it, and a
   // register-mode cast can interleave with a removal. castWorker's register
   // mode takes the same lock, so cast-vs-edit serializes too.
-  return withRoleWriteLock(ctx, systemMemoryId, async (_tx, ctx, transaction) => {
+  return withRoleWriteLock(ctx, systemMemoryId, app.id, async (_tx, ctx, transaction) => {
     await requireMemoryWriteAccess(ctx, systemMemoryId);
+    const currentApp = await resolveApp(ctx, app.id);
+    if (currentApp.deletedAt) throw new GraphQLError(`App not found: ${args.appRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+    if (currentApp.uninstalledAt) throw new GraphQLError('Cannot edit team roles of an uninstalled App.', { extensions: { code: 'APP_UNINSTALLED', appId: app.id } });
+    let currentTeam: Awaited<ReturnType<typeof locateTeamAgent>>;
+    try { currentTeam = await locateTeamAgent(ctx, app.id, args.teamAgentRef); }
+    catch (error) { await requireWorkerReadAccess(ctx, currentApp); throw error; }
+    if (currentTeam.id !== teamAgent.id || currentTeam.systemMemoryId !== systemMemoryId) {
+      throw new GraphQLError('Team Agent changed while this role write waited; retry.', { extensions: { code: 'TEAM_AGENT_NOT_FOUND', appId: app.id } });
+    }
     const allNodes = await loadRoleNodes(ctx, systemMemoryId);
     const existing = allNodes.find((n) => n.loc === loc) ?? null;
 
@@ -547,8 +556,17 @@ async function deleteTeamRoleImpl(
   const systemMemoryId = teamAgent.systemMemoryId;
   const loc = `${ROLES_BRANCH_PREFIX}${role}`;
 
-  return withRoleWriteLock(ctx, systemMemoryId, async (_tx, ctx, transaction) => {
+  return withRoleWriteLock(ctx, systemMemoryId, app.id, async (_tx, ctx, transaction) => {
     await requireMemoryWriteAccess(ctx, systemMemoryId);
+    const currentApp = await resolveApp(ctx, app.id);
+    if (currentApp.deletedAt) throw new GraphQLError(`App not found: ${args.appRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+    if (currentApp.uninstalledAt) throw new GraphQLError('Cannot edit team roles of an uninstalled App.', { extensions: { code: 'APP_UNINSTALLED', appId: app.id } });
+    let currentTeam: Awaited<ReturnType<typeof locateTeamAgent>>;
+    try { currentTeam = await locateTeamAgent(ctx, app.id, args.teamAgentRef); }
+    catch (error) { await requireWorkerReadAccess(ctx, currentApp); throw error; }
+    if (currentTeam.id !== teamAgent.id || currentTeam.systemMemoryId !== systemMemoryId) {
+      throw new GraphQLError('Team Agent changed while this role write waited; retry.', { extensions: { code: 'TEAM_AGENT_NOT_FOUND', appId: app.id } });
+    }
     const allNodes = await loadRoleNodes(ctx, systemMemoryId);
     const existing = allNodes.find((n) => n.loc === loc) ?? null;
     if (!existing) {

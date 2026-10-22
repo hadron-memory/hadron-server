@@ -33,6 +33,7 @@ describe('#391 deleteNode soft-by-default / hard opt-in', () => {
   let fx: Fx;
   beforeEach(async () => {
     await cleanDb(db);
+    await db.user.create({ data: { id: ADMIN, roles: ['ADMIN'] } });
     fx = await build();
   });
 
@@ -69,6 +70,7 @@ describe('deleteNode recursive: deletes the whole loc-subtree', () => {
 
   beforeEach(async () => {
     await cleanDb(db);
+    await db.user.create({ data: { id: ADMIN, roles: ['ADMIN'] } });
     const org = await db.organization.create({ data: { id: generateId(), name: 'TreeOrg', urn: 'treeorg' } });
     const memory = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: 'treeorg:kb', name: 'kb', class: 'knowledge', visibility: 'ORGANIZATION' },
@@ -138,6 +140,7 @@ describe('deleteNode: idempotency + hard-delete safeguards (parity with hadron_d
 
   beforeEach(async () => {
     await cleanDb(db);
+    await db.user.create({ data: { id: ADMIN, roles: ['ADMIN'] } });
     const org = await db.organization.create({ data: { id: generateId(), name: 'SafeOrg', urn: 'safeorg' } });
     const memA = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: 'safeorg:a', name: 'a', class: 'knowledge', visibility: 'ORGANIZATION' },

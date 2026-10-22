@@ -34,6 +34,7 @@ function adminCtx(): Context {
 
 beforeEach(async () => {
   await cleanDb(db);
+  await db.user.create({ data: { id: 'admin-263', roles: ['ADMIN'] } });
   const org = await db.organization.create({
     data: { id: generateId(), name: 'EdgeNull', urn: 'edge-null-263' },
   });
