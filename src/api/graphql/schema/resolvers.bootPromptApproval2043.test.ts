@@ -491,6 +491,7 @@ describe('#2043 S6 R178 — the one-time upgrade pass', () => {
       await approve(group.id, ctxOf(f.writer.id));
       await approve(ordinary.id, ctxOf(f.admin.id));
       await approvedRevision(placed.id, f.agentMem.id, f.admin.id);
+      await approvedRevision(installed.id, f.install.id, f.admin.id);
       await approvedRevision(group.id, f.group.id, f.writer.id);
       for (const id of [placed.id, installed.id, group.id, ordinary.id]) {
         expect((await db.node.findUniqueOrThrow({ where: { id } })).approvalHash).not.toBeNull();
@@ -504,7 +505,7 @@ describe('#2043 S6 R178 — the one-time upgrade pass', () => {
         expect(node.approvalHash).toBeNull();
         expect(node.approvedBy).not.toBeNull(); // who/when kept, as ending does
       }
-      expect(await db.nodeRevision.count({ where: { nodeId: placed.id, approvalHash: { not: null } } })).toBe(0);
+      expect(await db.nodeRevision.count({ where: { nodeId: { in: [placed.id, installed.id] }, approvalHash: { not: null } } })).toBe(0);
       expect((await db.node.findUniqueOrThrow({ where: { id: group.id } })).approvalHash).not.toBeNull();
       expect(await db.nodeRevision.count({ where: { nodeId: group.id, approvalHash: { not: null } } })).toBe(1);
       expect((await db.node.findUniqueOrThrow({ where: { id: ordinary.id } })).approvalHash).not.toBeNull();
