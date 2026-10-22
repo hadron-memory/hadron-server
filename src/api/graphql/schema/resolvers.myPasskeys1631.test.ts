@@ -50,12 +50,15 @@ describe('myPasskeys', () => {
     expect((await Q.myPasskeys({}, {}, ctx({ userId: bea }))).map((p: any) => p.label)).toEqual(['Bea key']);
   });
 
+  // Each arm names the refusal that must fire, so a later failure (or a resolver that stopped checking) cannot pass
+  // for the guard. The App key and impersonation arms carry the owner's real id and a real principal (Rook §10 P3-1).
   it.each([
-    ['no user', {}],
-    ['an App key, even one acting for the owner', { userId: ana, appId: 'some-app' }],
-    ['an impersonation session', { userId: ana, impersonation: { adminUserId: bea } }],
-  ])('refuses %s', async (_c, over) => {
-    await expect(Q.myPasskeys({}, {}, ctx(over as Partial<Context>))).rejects.toThrow();
+    ['no user', {}, 'UNAUTHENTICATED'],
+    ['an App key, even one acting for the owner', { userId: () => ana, appId: 'some-app' }, 'UNAUTHENTICATED'],
+    ['an impersonation session', { userId: () => ana, impersonation: () => ({ adminUserId: bea }) }, 'FORBIDDEN'],
+  ])('refuses %s', async (_c, over, code) => {
+    const resolved = Object.fromEntries(Object.entries(over).map(([k, v]) => [k, typeof v === 'function' ? (v as () => unknown)() : v]));
+    await expect(Q.myPasskeys({}, {}, ctx(resolved as Partial<Context>))).rejects.toMatchObject({ extensions: { code } });
   });
 });
 

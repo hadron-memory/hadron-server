@@ -74,6 +74,14 @@ describe('cancel link', () => {
     expect((await db.passkeyCancelToken.findUniqueOrThrow({ where: { passkeyId: first } })).usedAt).toBeNull();
   });
 
+  it('writes nothing once the owner is deleted: no IP or user agent lands on an erased record (#2230 Rook P2-1)', async () => {
+    await db.user.update({ where: { id: ana }, data: { deletedAt: new Date() } });
+    expect(await cancelFirstPasskey(db, { token, ...req })).toBe(false);
+    const c = await cred();
+    expect(c).toMatchObject({ revokedAt: null, cancelIp: null, cancelUserAgent: null });
+    expect((await db.passkeyCancelToken.findUniqueOrThrow({ where: { passkeyId: first } })).usedAt).toBeNull();
+  });
+
   it('does nothing for a passkey already revoked by another route', async () => {
     await db.$executeRaw`UPDATE passkey_credentials SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3),
       window_outcome = 'cancelled', window_ended_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) WHERE id = ${first}`;
