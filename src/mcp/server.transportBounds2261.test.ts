@@ -2,7 +2,8 @@
  * #2261 / #2259 — idle eviction and a per-principal cap on MCP transports.
  * Real Express server + real SDK transport over localhost HTTP/SSE, synthetic principals only.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import { createServer as createHttpServer, request as httpRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
@@ -13,6 +14,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../middleware/auth.js';
 import {
+  reserveMcpSession,
   mcpTransportStateForTests,
   sweepIdleMcpTransportsForTests,
 } from './server.js';
@@ -23,6 +25,19 @@ import {
   mcpPrincipalKey,
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
+
+/** Lets a test hold an initialize suspended inside App resolution (after its reservation, before registration). */
+const gate = vi.hoisted(() => ({ hold: null as Promise<void> | null }));
+vi.mock('../auth/user-app-resolution.js', async (orig) => {
+  const real = await orig<typeof import('../auth/user-app-resolution.js')>();
+  return {
+    ...real,
+    resolveAppForRequest: async (...args: Parameters<typeof real.resolveAppForRequest>) => {
+      if (gate.hold) await gate.hold;
+      return real.resolveAppForRequest(...args);
+    },
+  };
+});
 
 let server: Server;
 let port: number;
@@ -379,5 +394,120 @@ describe('#2261 eviction touches connection-local state only', () => {
     const r = await post(b.token, listTools, id);
     expect(r.status).toBe(404);
     expect(mcpTransportStateForTests().sessionIds).not.toContain(id);
+  });
+});
+
+describe('#2261 terminal reservation state (review P2: a late initialize must not register after its slot was freed)', () => {
+  function fakeRes(): { res: never; end: () => void } {
+    const ee = new EventEmitter() as EventEmitter & { setHeader: () => void; status: () => { json: () => void } };
+    ee.setHeader = () => undefined;
+    ee.status = () => ({ json: () => undefined });
+    return { res: ee as never, end: () => ee.emit('close') };
+  }
+
+  it('convert() succeeds exactly once and frees the slot', () => {
+    const { res } = fakeRes();
+    const r = reserveMcpSession(`user:unit-${generateId()}`, res)!;
+    expect(mcpTransportStateForTests().reservations).toBe(1);
+    expect(r.convert()).toBe(true);
+    expect(mcpTransportStateForTests().reservations).toBe(0);
+    expect(r.convert()).toBe(false);
+  });
+
+  it('a conversion after the response ended is refused and frees nothing twice', () => {
+    const { res, end } = fakeRes();
+    const r = reserveMcpSession(`user:unit-${generateId()}`, res)!;
+    end();
+    expect(mcpTransportStateForTests().reservations).toBe(0);
+    expect(r.convert()).toBe(false);
+    expect(mcpTransportStateForTests().reservations).toBe(0);
+  });
+
+  it('a late response end after conversion does not free a second slot', () => {
+    const key = `user:unit-${generateId()}`;
+    const a = fakeRes();
+    const b = fakeRes();
+    const first = reserveMcpSession(key, a.res)!;
+    reserveMcpSession(key, b.res);
+    expect(mcpTransportStateForTests().reservations).toBe(2);
+    expect(first.convert()).toBe(true);
+    a.end();
+    expect(mcpTransportStateForTests().reservations).toBe(1);
+    b.end();
+    expect(mcpTransportStateForTests().reservations).toBe(0);
+  });
+
+  it('aborted initializes suspended in App resolution register nothing when they resume (Colin cap-1 repro)', async () => {
+    process.env.MCP_MAX_SESSIONS_PER_PRINCIPAL = '1';
+    const a = await makeUser();
+    let resume!: () => void;
+    gate.hold = new Promise<void>((r) => { resume = r; });
+    try {
+      for (let i = 0; i < 2; i++) {
+        const ac = new AbortController();
+        const sent = fetch(`${baseUrl}/mcp`, {
+          method: 'POST',
+          headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', authorization: `Bearer ${a.token}` },
+          body: JSON.stringify(initialize),
+          signal: ac.signal,
+        }).catch(() => undefined);
+        await until(() => mcpTransportStateForTests().reservations === 1); // reserved, suspended in App resolution
+        ac.abort();
+        await sent;
+        await until(() => mcpTransportStateForTests().reservations === 0); // response end freed the slot
+      }
+    } finally {
+      resume();
+      gate.hold = null;
+    }
+    await sleep(300); // let both suspended handlers resume
+    const mine = Object.values(mcpTransportStateForTests().entries).filter((e) => e.principalKey === `user:${a.id}`);
+    expect(mine).toHaveLength(0);
+    expect(mcpTransportStateForTests().reservations).toBe(0);
+    // And the principal can still open a session normally.
+    expect((await post(a.token, initialize)).status).toBe(200);
+  });
+});
+
+describe('#2261 revival pin (review P3): a revoked durable selection is not restored and no alternate App is substituted', () => {
+  it('stored selection of App A, A revoked, user still in B and C → no App is active (multi-App, selection required)', async () => {
+    const { id: userId, token } = await makeUser();
+    const org = await db.organization.create({ data: { id: generateId(), name: 'Rev', urn: `rev-2261-${generateId().slice(-6)}.com` } });
+    const mk = async (n: string) => {
+      const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: n, urn: `${org.urn}:${n}` } });
+      await db.appMember.create({ data: { appId: app.id, userId, role: 'member' } });
+      return app;
+    };
+    const [appA, appB, appC] = [await mk('a'), await mk('b'), await mk('c')];
+    expect([appB.id, appC.id]).toHaveLength(2);
+    const clientKey = `ck-${generateId()}`;
+    const withKey = { 'x-hadron-client-id': clientKey };
+    const init = async (): Promise<string> => {
+      const r = await post(token, initialize, undefined, withKey);
+      expect(r.status).toBe(200);
+      await r.text();
+      return r.headers.get('mcp-session-id')!;
+    };
+    const tool = async (sid: string, name: string, args: Record<string, unknown>): Promise<string> => {
+      const r = await post(token, { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name, arguments: args } }, sid, withKey);
+      const raw = await r.text();
+      const data = raw.split('\n').find((l) => l.startsWith('data:'));
+      const msg = JSON.parse(data ? data.slice(5) : raw) as { result?: { content?: Array<{ text?: string }> } };
+      return (msg.result?.content ?? []).map((c) => c.text ?? '').join('\n');
+    };
+    const first = await init();
+    const setOut = await tool(first, 'hadron_set_active_app', { app: appA.urn });
+    expect(setOut).not.toMatch(/not found|error/i);
+    expect(mcpTransportStateForTests().sideMapKeys.activeApp).toContain(first); // the pin is observable, so its absence below means something
+    await sweepIdleMcpTransportsForTests(FAR_FUTURE());
+    expect(mcpTransportStateForTests().sessionIds).not.toContain(first);
+    // Revoke A entirely (membership; the org grant was never given).
+    await db.appMember.delete({ where: { appId_userId: { appId: appA.id, userId } } });
+
+    const revived = await init();
+    const out = await tool(revived, 'hadron_list_apps', {});
+    expect(out).not.toContain(appA.id);
+    const active = mcpTransportStateForTests().sideMapKeys.activeApp;
+    expect(active).not.toContain(revived); // nothing pinned for the revived session: not A, and not B or C by guess
   });
 });

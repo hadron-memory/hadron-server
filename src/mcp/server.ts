@@ -11151,7 +11151,10 @@ export function sweepIdleMcpTransports(now: number = Date.now()): number {
  * When every live transport of the principal is in flight (or reserved), answers 429 and returns null: no live
  * request is ever evicted. Release the returned function on conversion; it also fires when the response ends.
  */
-function reserveMcpSession(principalKey: string, res: Response): (() => void) | null {
+/** A held new-session slot; see `reserveMcpSession`. */
+export type McpSessionReservation = { convert(): boolean };
+
+export function reserveMcpSession(principalKey: string, res: Response): McpSessionReservation | null {
   const cap = maxSessionsPerPrincipal();
   const live = (): number => {
     let n = mcpSessionReservations.get(principalKey) ?? 0;
@@ -11177,11 +11180,27 @@ function reserveMcpSession(principalKey: string, res: Response): (() => void) | 
     evictMcpTransport(oldest[0], oldest[1], 'cap');
   }
   mcpSessionReservations.set(principalKey, (mcpSessionReservations.get(principalKey) ?? 0) + 1);
-  return releaseOnceOnResponseEnd(res, () => {
+  // Terminal state: `held` ends exactly once, as `converted` (registered) or `cancelled` (the response ended first).
+  // A suspended initialize whose response already ended must NOT register afterwards: its slot was freed.
+  let state: 'held' | 'converted' | 'cancelled' = 'held';
+  const free = (): void => {
     const left = (mcpSessionReservations.get(principalKey) ?? 1) - 1;
     if (left <= 0) mcpSessionReservations.delete(principalKey);
     else mcpSessionReservations.set(principalKey, left);
+  };
+  releaseOnceOnResponseEnd(res, () => {
+    if (state !== 'held') return;
+    state = 'cancelled';
+    free();
   });
+  return {
+    convert(): boolean {
+      if (state !== 'held') return false;
+      state = 'converted';
+      free();
+      return true;
+    },
+  };
 }
 
 let mcpTransportSweepTimer: NodeJS.Timeout | null = null;
@@ -11724,8 +11743,8 @@ async function handleUnknownOrNewMcpSession(
   // #2261: reserve capacity NOW, before the first await below, so concurrent initializes cannot jointly exceed
   // the per-principal cap. The key is read before `auth.appId` is filled in from a default or a restored selection.
   const principalKey = mcpPrincipalKey(auth);
-  const releaseReservation = reserveMcpSession(principalKey, res);
-  if (!releaseReservation) return;
+  const reservation = reserveMcpSession(principalKey, res);
+  if (!reservation) return;
 
   // Spec 025 / 026 — App-identification resolution at the MCP boundary for
   // user-credential callers (userId set, appId not set; JWT or
@@ -11852,10 +11871,18 @@ async function handleUnknownOrNewMcpSession(
 
   const sid = transport.sessionId;
   if (sid) {
-    // Convert the reservation into the registered entry with nothing awaited between the two.
-    transports.set(sid, { transport, auth, requestTail: Promise.resolve(), principalKey, inFlight: 0, lastActivityAt: Date.now() });
+    // Convert the reservation into the registered entry with nothing awaited between the two. If the response
+    // ended while this handler was suspended, the reservation is already cancelled and its slot freed: do not
+    // register, or a burst of aborted initializes would exceed the cap (#2261 review, Dara/Colin P2).
+    if (reservation.convert()) {
+      transports.set(sid, { transport, auth, requestTail: Promise.resolve(), principalKey, inFlight: 0, lastActivityAt: Date.now() });
+    } else {
+      unregisterMcpTransport(sid, transport);
+      await transport.close().catch(() => undefined);
+    }
+  } else {
+    reservation.convert();
   }
-  releaseReservation();
 }
 
 /**
