@@ -824,3 +824,30 @@ describe('deleteTeamRole (#1002, simplified by #1050)', () => {
     expect(await roleLocs()).toContain('roles:frontend-engineer');
   });
 });
+
+// #2063: this surface formerly held its role lock across a pooled core write.
+import { withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
+it.each(['updateTeamRole', 'deleteTeamRole'] as const)('%s rechecks the App after waiting on its outer history fence', async (surface) => {
+  const before = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId: teamAgent.systemMemoryId, loc: 'roles:backend-engineer' } } });
+  let entered!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((r) => { entered = r; });
+  const gate = new Promise<void>((r) => { release = r; });
+  const holder = withIncludeHistoryTransaction(db, async () => { entered(); await gate; });
+  await ready;
+  const pending = M[surface]({}, { appRef: app.id, role: 'backend-engineer', ...(surface === 'updateTeamRole' ? { description: 'After wait' } : {}) }, ctx(admin.id));
+  const outcome = pending.then((value: unknown) => ({ value }), (error: unknown) => ({ error }));
+  try {
+    await waitForLockWaitersOfType(db, 'advisory', 1, 750);
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${before.id} FOR UPDATE NOWAIT`;
+      await tx.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    });
+  } finally {
+    release(); await holder; await outcome;
+  }
+  await expect(pending).rejects.toMatchObject({ extensions: { code: 'APP_UNINSTALLED' } });
+  expect(await db.node.findUniqueOrThrow({ where: { id: before.id } })).toMatchObject({ description: before.description, deletedAt: null, revSeq: before.revSeq });
+  expect(await db.nodeRevision.count({ where: { nodeId: before.id } })).toBe(0);
+});

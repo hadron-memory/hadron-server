@@ -186,7 +186,9 @@ function recordingCtx(): { ctx: Context; keys: LockKey[] } {
             get(t, p, r) {
               if (p !== '$executeRaw') return Reflect.get(t, p, r);
               return (strings: TemplateStringsArray, ...values: unknown[]) => {
-                if (LOCK_RE.test(strings.join(''))) {
+                // This recorder observes the two-hash address namespace.
+                // The dedicated outer history fence is a different key space.
+                if (LOCK_RE.test(strings.join('')) && values.length === 2) {
                   keys.push({ memoryId: String(values[0]), loc: String(values[1]) });
                 }
                 return (t as typeof tx).$executeRaw(strings, ...values);

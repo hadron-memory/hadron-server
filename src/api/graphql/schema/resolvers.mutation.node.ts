@@ -4630,6 +4630,12 @@ export const nodeMutations = {
       // Restore (+ optional truncate) in one transaction (#617) so the portal
       // never sequences restore + N deletes and can't half-apply on a crash.
       const { restored, restoredPlaintext, destinationEncrypted } = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+        await lockInstallAuthorityFirst(tx, ctx, node.memoryId);
+        const txCtx = await liveTxContext(ctx, tx);
+        await requireMemoryWriteAccess(txCtx, node.memoryId);
+        const freshAccessible = await getAccessibleMemoryIds(txCtx);
+        const freshCanRead = (id: string) => freshAccessible === null || freshAccessible.includes(id);
+        if (!freshCanRead(sourceMemoryId)) throw notFound();
         // Spec 049 S4: lock-then-gate — the check above is the fast refusal.
         await lockLocForWrite(tx, node.memoryId, node.loc);
         // Row lock + drift reconciled as its own revision before the restore's
@@ -4663,7 +4669,7 @@ export const nodeMutations = {
         // leave us restoring an obsolete ciphertext/plaintext view.
         await tx.$queryRaw`SELECT id FROM node_revisions WHERE id = ${revisionId} FOR UPDATE`;
         const selected = await tx.nodeRevision.findUnique({ where: { id: revisionId } });
-        if (!selected || !canRead(selected.memoryId ?? current.memoryId)) throw notFound();
+        if (!selected || !freshCanRead(selected.memoryId ?? current.memoryId)) throw notFound();
         const selectedSourceId = selected.memoryId ?? current.memoryId;
         const selectedSource = await tx.memory.findUniqueOrThrow({
           where: { id: selectedSourceId }, select: { isEncrypted: true },
@@ -4711,7 +4717,7 @@ export const nodeMutations = {
         // #1331 — the writer level of the role before AND after, on the locked row.
         {
           const restoredRole = (restoreFields as { role?: string | null }).role;
-          await assertRoleWritersForWrite(tx, ctx, current.memoryId, {
+          await assertRoleWritersForWrite(tx, txCtx, current.memoryId, {
             priorRole: current.role, nextRole: restoredRole === undefined ? current.role : restoredRole,
             priorRunnable: current.isRunnable,
             nextRunnable: mergedGovernedState(current, {

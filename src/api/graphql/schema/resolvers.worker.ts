@@ -1,3 +1,4 @@
+import { lockAgentDefinitionAuthority } from '../../../lib/auth/managedSystemMemory.js';
 import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { liveTxContext } from './authorizedTx.js';
 // Workers — #974 (re-cut): the named casting of an installed Agent into an
@@ -628,12 +629,15 @@ function nameTaken(name: string, appId: string): GraphQLError {
 export async function withRoleWriteLock<T>(
   ctx: Context,
   systemMemoryId: string,
+  appId: string,
   fn: (tx: Prisma.TransactionClient, txCtx: Context, transaction: {
     tx: Prisma.TransactionClient; pooledDb: Context['db']; afterCommit: (effect: () => void) => void;
   }) => Promise<T>,
 ): Promise<T> {
   const effects: Array<() => void> = [];
   const result = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+    await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, systemMemoryId);
+    await tx.$queryRaw`SELECT id FROM apps WHERE id = ${appId} FOR SHARE`;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'role-write:' + systemMemoryId}))`;
     const fresh = await liveTxContext(ctx, tx);
     return fn(tx, fresh, { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) });

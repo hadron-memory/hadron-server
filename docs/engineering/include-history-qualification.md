@@ -111,87 +111,73 @@ classes and cannot stand in for their proof.
   named Sonnet-class stack campaign and teardown coordinated by Marco. No
   production fixture/key use, migration, deployment or activation is granted.
 
-## Local implementation checkpoint (not frozen)
+## Current implementation and scope
 
-The main-based delivery now places F at the explicit outer transactions listed
-above for approval, signing requests, passkey qualification, encryption,
-revision restore/deletion, generic node writes and batches, spec/decision
-writes, controller copy/move/merge and Git/MCP writes. Client-shaped snapshot,
-approval, signing-state and subtree helpers reject raw/manual-lock/escaped
-clients instead of obtaining a late fence. The authority wrapper opts in;
-existing SERIALIZABLE consumers do not change isolation implicitly.
+The tables above describe baseline boundaries and the integration obligations,
+not a claim that their entire matrix is complete. Delivery is draft PR #2273,
+branch `anne/2063-qualification`; tests/evidence remain in progress.
+
+The delivery puts F at explicit outer transactions for approval, signing
+requests, passkey qualification, encryption, restore/delete/clear history,
+generic node writes/batches, spec/decision writes, controller copy/move/merge,
+and Git/MCP writes. Snapshot, approval, signing-state and subtree helpers
+refuse a raw, manually SQL-locked, pooled or escaped client. The authorized
+wrapper opts in; existing SERIALIZABLE consumers keep their own adapter.
 
 Team-role writes formerly held a role lock on one pooled transaction while
-opening the node write on another. They now take F, then the role lock, and
-carry the same prepared client through the core; post-commit effects run after
-the real outer commit. Generic node gates and principal-bearing MCP write
-boundaries refresh actor/credential state after F. Full authority coverage is
-still under audit, particularly encryption and account/entitlement composition.
+opening their node write on another. They now carry the prepared client and
+post-commit effects through the actual outer commit. Their order is F, existing
+Agent-definition authority anchors/rows, App SHARE, role advisory key, live
+context, current App/Team Agent and memory write gates, then the core's existing
+address/row order. App uninstall during the F wait refuses before any node or
+history mutation (two red-before-fix controls). Restore refreshes presented
+credentials and source/destination read/write gates before reconciliation;
+encryption refreshes credentials after its Memory lock. Generic node gates and
+principal-bearing MCP writes also refresh the presented actor/key/root.
 
-The cascade census additionally names expired anonymous-memory cleanup,
-createMemory/clone/extract/App-memory tombstone reclamation, Agent creation's
-reclamation, system-memory repair reclamation, deleteMemory's tombstone and
-owner-namespace reclamation during account merge. The former boundaries are
-locally migrated; account merge remains the #2263 adapter's combined-tree
-obligation. Subscription revocation now qualifies and deletes one empty personal/private
-memory in the same fenced authorized transaction, under Memory FOR UPDATE.
-App reclamation is fenced at both outer cascade transactions. Parent-entity
-cascades and raw owner-handle namespace reclamation still need explicit
-classification/integration. No
-snapshot-only inventory can exclude them on the basis of zero observed nodes.
+Expired anonymous-memory cleanup, explicit tombstone memory/App reclamation,
+memory deletion and subscription revocation's empty-memory cleanup are named
+history-removal boundaries. The subscription cleanup now shares its F-first
+authorized revocation transaction, locks one candidate Memory FOR UPDATE and
+rechecks `nodes: none`. Marco #30990 keeps explicit tombstone memory/App
+reclamation in this pruning cut, without extending it further.
 
-Local evidence so far: 203 affected qualification/approval/Git tests pass;
-105 qualification/minted-corpus/App-memory regression tests pass, including
-memory-delete in both fence orders. These are overlapping runs, not a sum of
-unique controls. An unfrozen full regression run is in progress; it cannot be
-reported as evidence for the eventual final hash. No complete matrix, peer
-seat, combined compile QA or readiness claim follows from this checkpoint.
-
-Raw-address/cascade follow-up: `renameOwnerNamespacedUrns` (updateMyProfile)
-executes raw DELETE of tombstoned Agents/Memories before owner namespace
-rewrites; `mergeOwnerNamespacedUrns` belongs to account merge's adapter.
-`propagateOrgUrnRename` rewrites source addresses/aliases but performs no
-history deletion. Ordinary memory URN updates and graph/edge selection writers
-must be assigned in the overall S9 writer map even if outside this qualification
-slice. Ownership clarification requested from Marco/Basil; none are silently
-excluded as label-only writes.
-
-Owner-handle reclamation is now integrated: a supplied handle runs the original
-profile transaction under F before the user row and raw namespace/cascade
-writers, then refreshes the presented actor/credential. Name-only profile writes
-keep their original transaction path. Both fence orders pass with an actual
-tombstoned memory carrying a source node, and existing profile/rename13 tests
-pass. Encryption flip/conversion refreshes actor/credential after its Memory
-lock; existing encryption104 tests pass and revoked-key-during-F refuses the
-flip without altering plaintext. Qualification controls now31 pass locally.
-
-Evidence-only `a8d69e13` composes qualification48d3aa15 with refreshed held
-heads2263@417253fd and2258@c65e694a. Conflicts retained the same-tx subscription
-cleanup and both opaque RC/account fence modes; a raw client is never blessed.
-The 11-boundary actual compile read/write + inverse and stale-account/inverse
-matrix passes82 tests. The initial combined compile/epoch/writer suites192 pass
-and tsc passes. Owner-handle/encryption follow-up is not in that evidence hash
-yet. Full suite is running from immutable48d3aa15 in a separate validation
-worktree; no full-suite pass is claimed for the delivery head.
-
-
-## Scope ruling #30980 (supersedes owner-handle implementation above)
-
-Marco explicitly excludes owner-handle namespace reclamation and ordinary
-org/memory source/address writers from this PR pending Xylon's ruling. The
-owner-handle implementation and its two controls have therefore been removed
-from delivery; the historical evidence hash above is not the current scope.
-`renameOwnerNamespacedUrns` bypasses snapshot APIs and can raw-delete tombstoned
-memories/Agents; it is NOT covered here. Org/memory address rewrites are also
-NOT covered. Do not claim a complete global source-writer fence or compile
-availability while those gaps remain. No new follow-up contract is inferred;
-Marco will file the follow-up issue on Xylon's word.
+**NOT covered, per Marco #30980:** owner-handle, org and ordinary memory
+source/address renames. `renameOwnerNamespacedUrns` bypasses snapshot APIs and
+can raw-delete tombstoned Memories/Agents before rewriting the namespace.
+`propagateOrgUrnRename` rewrites addresses/aliases without history deletion.
+The briefly integrated owner-handle change was removed when the scope ruling
+arrived; historical owner-inclusive evidence is superseded. Marco will file the
+follow-up on Xylon's ruling. Do not treat this PR as a complete global
+source-writer fence or as authority to activate compile.
 
 Basil #30977 confirms #2263 owns setAgentBase, retireWorker, grant create/revoke,
 subscription revocation (not its old pooled cleanup), deleteAgent's agent/system
 memory tombstone, boot-pointer setters, install/uninstall, createApp and dep
 installs, updateAgent publish, first-contact session, deleteWorker, account
-operations and node-read reconciliation. Our subscription-cleanup overlap is
-resolved in the evidence tree by keeping the cleanup inside that same F-first
-authorized transaction. #2263 owns neither App deletion/reclaim nor address
-writers; the census must not attribute those to its account adapter.
+operations and node-read reconciliation. It owns neither App deletion/reclaim
+nor source/address writers. The subscription-revoker overlap is resolved in
+evidence by retaining the cleanup inside the same F-first authorized transaction.
+
+## Evidence and remaining gates
+
+- Current delivery controls: qualification34, role40 (including two red-first
+  App-wait refusals), restore/provenance38, encryption104 pass locally. Test
+  counts overlap; they are never summed as unique controls.
+- Scoped combined predecessor `3de28cdd` composes exact held heads #2263
+  `417253fd043c7910db73dc138facccde5cd2c73a`, #2258
+  `c65e694a1a192d41078f73215082a1966bab6d79`, and delivery458c3f18. Its
+  qualification/actual-compile/account matrix153 passes. Role/restore follow-up
+  must be merged into and validated on a refreshed evidence tree.
+- A full diagnostic run is executing from immutable predecessor48d3aa15.
+  It found legacy helper transactions, missing live ADMIN actors, old lock-wait
+  assumptions and a nested real-writer test hook. Focused repairs preserve the
+  assertions and adapt fixtures to the actual prepared boundary; they do not
+  weaken production gates. No full or final-head pass is claimed.
+- Full per-boundary controls remain required for every enumerated integration,
+  including encryption subtransactions, retention/prune affected-source
+  semantics, and source/destination authority after waits.
+- Final-head checks, refreshed combined QA, T3 + scoped §10/L independent seats
+  and the named Sonnet stack campaign remain pending with Marco. #2263/#2258
+  stay held. Their epoch old-binary/default-off availability issue remains in
+  its owning lane. No migration, merge, deployment or activation is granted.

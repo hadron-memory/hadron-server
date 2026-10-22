@@ -31,6 +31,7 @@ function adminCtx(): Context {
 
 beforeEach(async () => {
   await cleanDb(db);
+  await db.user.create({ data: { id: 'admin-user', roles: ['ADMIN'] } });
 
   org = await db.organization.create({
     data: { id: generateId(), name: 'nv-org', urn: 'nv-org' },

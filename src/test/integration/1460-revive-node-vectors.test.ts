@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../lib/includes/includeHistoryFence.js';
 /** #1460: reviving a node must not publish vectors from its prior incarnation. */
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -96,7 +97,7 @@ describe('revival clears prior vectors without an embedding endpoint', () => {
   it('invalidates an in-flight old embed before post-commit scheduling', async () => {
     const ctx: Context = { db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}` };
     const effects: Array<() => void> = [];
-    await db.$transaction((tx) => writeNodeCore(
+    await withIncludeHistoryClientTransaction(db, (tx) => writeNodeCore(
       { memoryId: memory.id, loc: 'reused', name: 'New', content: 'replacement only' },
       ctx, 'create', { transaction: { tx, pooledDb: db, afterCommit: (effect) => effects.push(effect) } },
     ));
