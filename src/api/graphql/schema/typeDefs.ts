@@ -1381,7 +1381,35 @@ export const typeDefs = `#graphql
     trigger: String
   }
 
+  "Explicit writer-only tombstone content; no generic entity relations. hrn:node:hadronmemory.com:specs:cor:dmo:010:04"
+  type RecoveryNode {
+    id: ID!
+    urn: String!
+    memoryId: ID!
+    loc: String!
+    name: String!
+    nodeType: String!
+    description: String
+    deletedAt: DateTime!
+    content: String
+  }
+  type RecoveryNodeSummary {
+    id: ID!
+    urn: String!
+    memoryId: ID!
+    loc: String!
+    name: String!
+    nodeType: String!
+    deletedAt: DateTime!
+  }
+  type RecoveryNodesPage { items: [RecoveryNodeSummary!]!, total: Int! }
+  type RecoveryEndpoint { id: ID!, urn: String!, loc: String!, name: String!, deletedAt: DateTime }
+  type RecoveryGraphEdge { id: ID!, name: String, source: RecoveryEndpoint!, target: RecoveryEndpoint! }
+  type RecoveryEdgesPage { items: [RecoveryGraphEdge!]!, total: Int! }
+
   type Node {
+    "Deletion marker. Ordinary reads still omit tombstones; explicit recovery is writer-only."
+    deletedAt: DateTime
     id: ID!
     "#1392 — warnings from a cross-memory move. Null on other Node reads; [] when a move changes no local content links. Raw content is preserved."
     moveLinkWarnings: [NodeMoveLinkWarning!]
@@ -1590,9 +1618,9 @@ export const typeDefs = `#graphql
 
   type Edge {
     id: ID!
-    "The source node. NULLABLE (#781): null when the caller cannot read the source node's memory — a cross-memory edge (e.g. reached via incomingEdges) must not expose an endpoint in a memory the caller can't read. For a same-memory edge the caller can already see, this is always present."
+    "The live source node, or null when deleted or when its memory is unreadable. Cross-memory edges never grant access to an otherwise unreadable endpoint. Deleted-node inspection uses the explicit recovery graph."
     source: Node
-    "The target node. NULLABLE (#781): null when the caller cannot read the target node's memory (a cross-memory edge's far endpoint). For a same-memory edge, always present."
+    "The live target node, or null when deleted or when its memory is unreadable. Deleted-node inspection uses the explicit recovery graph."
     target: Node
     "Fully-qualified edge URN (hrn:edge:<root>:<memory>:<loc>), composed server-side from the edge's (source-side) memory URN + loc (#481 parity — edges are loc-addressed peers of nodes, spec 037)."
     urn: String!
@@ -2180,6 +2208,10 @@ export const typeDefs = `#graphql
     skippedDecisionCount: Int!
     "#1641 — the first 50 of those, by loc."
     skippedDecisions: [String!]!
+    "#2043 — boot prompts in this Agent system or App install memory that this caller may not approve: only the Agent's or App's manager approves them, as themselves, never through a worker session."
+    skippedBootPromptCount: Int!
+    "#2043 — the first 50 of those, by loc."
+    skippedBootPrompts: [String!]!
     "#1607 — unminted nodes of this memory with open discussion: a warning, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Ordered by loc."
     unresolvedFeedback: [UnresolvedFeedback!]!
   }
@@ -3367,6 +3399,40 @@ export const typeDefs = `#graphql
   type AppKeyCreated {
     key: AppKey!
     rawKey: String!
+  }
+
+  """#1631: a passkey record, as its owner sees it. Never a private key."""
+  type PasskeyCredential {
+    id: ID!
+    """The owner's name for it; the fixed text "Erased passkey" once the owner's account is deleted."""
+    label: String!
+    transports: [String!]!
+    backupEligible: Boolean!
+    backedUp: Boolean!
+    registeredAt: DateTime!
+    lastUsedAt: DateTime
+    revokedAt: DateTime
+    """A first passkey's cooling-off window; null for a later passkey."""
+    window: PasskeyWindow
+    """
+    When its cancel link was used; null if never cancelled. The cancel IP address and user agent,
+    and the credential id, are shown only on the interactive revocation page after the owner proves who they are,
+    never over a bearer credential (#1631 PR3 §10).
+    """
+    cancel: PasskeyCancelRecord
+  }
+
+  type PasskeyWindow {
+    endsAt: DateTime!
+    endedAt: DateTime
+    """ran-out | ended-early | cancelled, or null while open (a window that ran out reads by its end time)."""
+    outcome: String
+    """The fresh sign-in method it was registered with."""
+    registrationMethod: String
+  }
+
+  type PasskeyCancelRecord {
+    at: DateTime!
   }
 
   """
@@ -7097,6 +7163,12 @@ export const typeDefs = `#graphql
   enum AutomationTriggerKind { SCHEDULE WEBHOOK MANUAL }
 
   type Query {
+    "Read a retained deleted node in a live memory that you can read and write. Returns the stored body without expanding templates or includes. hrn:node:hadronmemory.com:specs:cor:dmo:010:04"
+    recoveryNode(nodeRef: ID!): RecoveryNode
+    "Page through retained deleted nodes you can recover. Default 20, maximum 200; total counts all accessible results. No timed purge. hrn:node:hadronmemory.com:specs:cor:api:120:04"
+    recoveryNodes(memoryRef: ID!, limit: Int = 20, offset: Int = 0): RecoveryNodesPage!
+    "Inspect live edges and accessible deleted endpoints in one memory you can read and write. Default 20, maximum 200. hrn:node:hadronmemory.com:specs:cor:api:110:02"
+    recoveryEdges(memoryRef: ID!, limit: Int = 20, offset: Int = 0): RecoveryEdgesPage!
     "#1719: review exact automation graph bytes and digest. triggerRef is the trigger row ID; MANUAL uses the origin AppRun ID. Only its run-as user or the manager of an App-only trigger may preview."
     previewAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): JSON!
 
@@ -8163,6 +8235,13 @@ export const typeDefs = `#graphql
     myUserApiKeys: [UserApiKey!]!
 
     """
+    #1631 PR3: the caller's own passkey records, revoked ones included, newest first. Only the
+    owner sees them: an App key or an impersonation session is refused. Registering and revoking are interactive
+    ceremonies on the server-hosted pages, never GraphQL. Present only while passkey registration is enabled.
+    """
+    myPasskeys: [PasskeyCredential!]!
+
+    """
     Agent AI config (org ADMIN) — returns the decrypted API key so the
     portal backend can make LLM calls on behalf of the user.
 
@@ -8889,6 +8968,8 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
+    "Restore one retained deleted node in a live memory you can read and write. Restore deleted ancestors first; governed nodes, comments, compiled boot prompts and protected internal addresses refuse. Does not restore descendants or revisions. hrn:node:hadronmemory.com:specs:cor:acl:130:02"
+    restoreNode(nodeRef: ID!): Node!
     "#1719: rebind a trigger to its reviewed graph. expectedHash must match previewAutomation; edits since preview refuse adoption."
     reAdoptAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!, expectedHash: String!): Boolean!
 
@@ -10264,6 +10345,14 @@ export const typeDefs = `#graphql
     licenses, log entries, assets, and git-sync config (the clone starts
     DB-only).
 
+    Include tags (#2167; hrn:node:hadronmemory.com:specs:cor:dmo:150:04 and
+    hrn:node:hadronmemory.com:specs:cor:dmo:150:06): every tag in every copied node
+    counts as added, checked after the URN rewrite. A tag whose target is
+    missing or that the caller can't read refuses with
+    INCLUDE_TARGET_UNAVAILABLE. A tag that closes a cycle among the copied
+    nodes refuses with INCLUDE_CYCLE, at any chain length. Either refusal names
+    only the authored tag and nothing is created.
+
     Authorization: the SOURCE side mirrors deleteMemory (personal/private →
     owner only; knowledge/group → source-org ADMIN). When \`targetUrn\` names a
     DIFFERENT org, the caller must additionally be a non-reader member of that
@@ -10303,8 +10392,22 @@ export const typeDefs = `#graphql
     source root (that would empty the source — clone + deleteMemory instead).
     Encrypted and system/app-class sources are rejected.
 
-    v1 limitation: node content is copied verbatim — because both the slug and
-    node locs change, URN references among the moved nodes WILL break; and
+    Include tags (#2167; hrn:node:hadronmemory.com:specs:cor:dmo:150:04 and
+    hrn:node:hadronmemory.com:specs:cor:dmo:150:06): every tag in every copied node
+    counts as added and is resolved where it lands in the new memory. First, a
+    tag naming a copied node is rewritten to that node's rebased loc (a URN tag
+    to the source memory becomes the new memory's URN); only the target
+    changes, and a rewritten node loses its contentHash and authorship. A tag
+    naming anything else stays as written, so a relative tag naming a node
+    left behind refuses with INCLUDE_TARGET_UNAVAILABLE (a URN tag to a memory
+    the copier can read passes unchanged). A relative tag outside the subtree
+    whose loc equals a rebased loc also refuses (R188), and is never rewritten. A tag that closes a cycle refuses
+    with INCLUDE_CYCLE. Either refusal names the tag as it stands in the copy,
+    and nothing is created or moved.
+
+    v1 limitation: apart from include tags, node content is copied verbatim —
+    because both the slug and node locs change, other URN references among the
+    moved nodes WILL break; and
     unresolved PendingEdges within the subtree are dropped.
     """
     extractParentNodeToMemory(parentRef: ID!, targetUrn: String!, move: Boolean = false): Memory!

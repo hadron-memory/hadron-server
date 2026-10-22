@@ -11,6 +11,8 @@ import { createTestableMcpServer } from './server.js';
 
 /** Mirror of ACTOR_NEUTRAL_TOOLS in createMcpServerInstance — keep in step on purpose. */
 const ACTOR_NEUTRAL = new Set([
+  // Recovery reads select existing data; restore remains an attributed write.
+  'hadron_list_recovery_nodes', 'hadron_list_recovery_edges', 'hadron_get_recovery_node',
   'hadron_search', 'hadron_list_memories', 'hadron_server_info', 'hadron_list_apps', 'hadron_list_scopes',
   'hadron_scope_explain', 'hadron_list_channels', 'hadron_register_list', 'hadron_find_nodes', 'hadron_get_node',
   'hadron_get_nodes', 'hadron_get_next_node', 'hadron_list_nodes', 'hadron_get_object', 'hadron_find_objects',

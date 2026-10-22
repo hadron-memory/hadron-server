@@ -131,6 +131,8 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/signin-invariants.sql', import.meta.url), 'utf8'));
   // #1631 PR1b slice 2 — fresh sign-ins bound to the ceremony browser.
   await client.query(readFileSync(new URL('../../prisma/fresh-sign-in-invariants.sql', import.meta.url), 'utf8'));
+  // #1631 PR2 — passkey registration lifecycle (cancel tokens).
+  await client.query(readFileSync(new URL('../../prisma/passkey-registration-invariants.sql', import.meta.url), 'utf8'));
   // #1897 slice B1 — pending email sign-ins (depend on sign_ins).
   await client.query(readFileSync(new URL('../../prisma/pending-email-sign-in-invariants.sql', import.meta.url), 'utf8'));
   // #1632 — signing requests, append-only signature records, the content-change marker.
@@ -150,6 +152,8 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/boot-prompt-pointer-invariants.sql', import.meta.url), 'utf8'));
   // #2046 — compiled boot-prompt revision provenance: shape CHECK + immutability trigger.
   await client.query(readFileSync(new URL('../../prisma/compiled-prompt-revision-invariants.sql', import.meta.url), 'utf8'));
+  // #2043 PR 2 — an outside approval ends when its node enters the placed boot-prompt state.
+  await client.query(readFileSync(new URL('../../prisma/boot-prompt-approval-invariants.sql', import.meta.url), 'utf8'));
   // #2022 — stop signals, their coverage history, the stop holds of queued tasks.
   await client.query(readFileSync(new URL('../../prisma/stop-signal-invariants.sql', import.meta.url), 'utf8'));
 

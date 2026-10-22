@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto';
 import { GraphQLError } from 'graphql';
+import { lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
 import { consumeUserMergeConsent, mergeConsentAlreadyApplied } from '../../lib/userMergeConsent.js';
 import { Prisma, type PrismaClient, type User } from '../../generated/prisma/index.js';
 import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js';
@@ -305,6 +306,9 @@ async function runMergeTxn(
     // in the GraphQL layer, but the rows are rechecked after the lock so a
     // concurrent soft-delete cannot be merged through. Parameterized template
     // (not $queryRawUnsafe) so the ids are bound, never interpolated.
+    // #1631 PR3: the source's authority anchor (anchors before row locks, as deleteUserAccount takes them), so a
+    // passkey registration can't race the live-passkey refusal below.
+    await lockAuthorityAnchors(tx, [{ kind: 'user', id: sourceUserId }], 'exclusive');
     await tx.$queryRaw`SELECT id FROM users WHERE id IN (${sourceUserId}, ${targetUserId}, ${actorUserId ?? ''}) ORDER BY id FOR UPDATE`;
     const [source, target] = await Promise.all([
       tx.user.findUnique({ where: { id: sourceUserId } }),
@@ -316,6 +320,13 @@ async function runMergeTxn(
     const actorRow = actorUserId ? await tx.user.findUnique({ where: { id: actorUserId } }) : null;
     if (!actorRow || actorRow.deletedAt || !actorRow.roles.some(r => r === 'ADMIN' || r === 'OWNER'))
       throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+    // A passkey's owner never changes (cor:aut:040:05), so a merge can't carry one. While the source holds a live
+    // (unrevoked) passkey the merge is refused; the user revokes them first (Holger, 2026-10-21, team chat #29507).
+    const livePasskeys = await tx.passkeyCredential.count({ where: { ownerId: sourceUserId, revokedAt: null } });
+    if (livePasskeys > 0) {
+      throw new GraphQLError('The source account still holds a passkey. Revoke its passkeys before merging.',
+        { extensions: { code: 'MERGE_SOURCE_HAS_PASSKEYS', passkeyCount: livePasskeys } });
+    }
     const consent = await consumeUserMergeConsent(tx, consentProof, sourceUserId, targetUserId, actorUserId);
     await refuseUsersInOpenAlarmChains(tx, sourceUserId, targetUserId);
 

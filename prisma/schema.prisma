@@ -396,45 +396,47 @@ model User {
   deletedBy        String?           @map("deleted_by")
 
   memberships                   OrgMember[]
-  sentInvitations               UserInvitation[]           @relation("SentInvitations")
+  sentInvitations               UserInvitation[]            @relation("SentInvitations")
   invitationActivations         UserInvitationActivation[]
-  receivedMemberInvitations     OrgMemberInvitation[]      @relation("ReceivedMemberInvitations")
+  receivedMemberInvitations     OrgMemberInvitation[]       @relation("ReceivedMemberInvitations")
   pendingSetup                  PendingSetup?
   exchangeConnections           ExchangeConnection[]
-  connectionGrantsByUser        ConnectionGrant[]          @relation("ConnectionGrantsByUser")
-  principalGrants               PrincipalGrant[]           @relation("UserPrincipalGrants")
-  externalApp                   App?                       @relation(fields: [externalAppId], references: [id], onDelete: SetNull)
-  sessions                      Session[]                  @relation("SessionUser")
+  connectionGrantsByUser        ConnectionGrant[]           @relation("ConnectionGrantsByUser")
+  principalGrants               PrincipalGrant[]            @relation("UserPrincipalGrants")
+  externalApp                   App?                        @relation(fields: [externalAppId], references: [id], onDelete: SetNull)
+  sessions                      Session[]                   @relation("SessionUser")
   /// #1050 — worker names this person HOLDS. Held until released, never freed
   /// by a session ending; one human may hold many.
-  heldWorkers                   Worker[]                   @relation("WorkerHolder")
+  heldWorkers                   Worker[]                    @relation("WorkerHolder")
   /// #1705 — agent tasks this person owns / is assigned.
-  ownedAgentTasks               AgentTask[]                @relation("AgentTaskOwnerUser")
-  assignedAgentTasks            AgentTask[]                @relation("AgentTaskAssigneeUser")
+  ownedAgentTasks               AgentTask[]                 @relation("AgentTaskOwnerUser")
+  assignedAgentTasks            AgentTask[]                 @relation("AgentTaskAssigneeUser")
   mcpSessionStates              McpSessionState[]
-  ownedMemories                 Memory[]                   @relation("UserMemoriesOwned")
+  ownedMemories                 Memory[]                    @relation("UserMemoriesOwned")
   // spec 047 (Phase 2b): entities this user is the TENANT owner of (user-owned
   // App/Agent/Memory). `ownedMemories` above is the personal/private strict
   // owner (Memory.userId) — a DIFFERENT relation from `tenantMemories` here.
-  ownedApps                     App[]                      @relation("AppOwner")
-  ownedAgents                   Agent[]                    @relation("AgentOwner")
-  tenantMemories                Memory[]                   @relation("MemoryTenantOwner")
-  agentSubscriptions            AgentSubscription[]        @relation("UserAgentSubscriptions")
-  appMemberships                AppMember[]                @relation("UserAppMemberships")
+  ownedApps                     App[]                       @relation("AppOwner")
+  ownedAgents                   Agent[]                     @relation("AgentOwner")
+  tenantMemories                Memory[]                    @relation("MemoryTenantOwner")
+  agentSubscriptions            AgentSubscription[]         @relation("UserAgentSubscriptions")
+  appMemberships                AppMember[]                 @relation("UserAppMemberships")
   // 023-app-shape: per-Memory authorization back-relations.
-  memorySharesGranted           MemoryShare[]              @relation("MemorySharesGranted")
-  memorySharesByGrantor         MemoryShare[]              @relation("MemorySharesByGrantor")
-  memoryMemberships             MemoryMember[]             @relation("MemoryMemberships")
+  memorySharesGranted           MemoryShare[]               @relation("MemorySharesGranted")
+  memorySharesByGrantor         MemoryShare[]               @relation("MemorySharesByGrantor")
+  memoryMemberships             MemoryMember[]              @relation("MemoryMemberships")
   // 025-oauth-for-mcp: user-level credential + OAuth back-relations.
   userApiKeys                   UserApiKey[]
   authCodes                     AuthCode[]
   passkeyCredentials            PasskeyCredential[]
   freshSignIns                  FreshSignIn[]
+  passkeyCeremonies             PasskeyCeremony[]
+  passkeyRegistrationNotices    PasskeyRegistrationNotice[]
   pendingEmailSignIns           PendingEmailSignIn[]
   signIns                       SignIn[]
   authHandoffCodes              AuthHandoffCode[]
   // #620: revisions this user approved (NodeRevision.approvedBy).
-  approvedNodeRevisions         NodeRevision[]             @relation("NodeRevisionApprover")
+  approvedNodeRevisions         NodeRevision[]              @relation("NodeRevisionApprover")
   // 046-usage-metering: billing attribution back-relation.
   usageEvents                   UsageEvent[]
   // #772: the user's placed /app/dashboard widgets (user-scoped layout config).
@@ -443,18 +445,18 @@ model User {
   dashboardWidgetPresets        DashboardWidgetPreset[]
   // Admin impersonation (read-only support sessions): sessions this user
   // started as the admin actor / was the target of.
-  impersonationSessionsAsAdmin  ImpersonationSession[]     @relation("ImpersonationSessionsAsAdmin")
-  impersonationSessionsAsTarget ImpersonationSession[]     @relation("ImpersonationSessionsAsTarget")
+  impersonationSessionsAsAdmin  ImpersonationSession[]      @relation("ImpersonationSessionsAsAdmin")
+  impersonationSessionsAsTarget ImpersonationSession[]      @relation("ImpersonationSessionsAsTarget")
   // #692 — the user's root principal in the unified pool (handle is the
   // denormalized read source-of-truth, kept in sync at mint).
-  principalId                   String?                    @unique @map("principal_id")
-  principal                     Principal?                 @relation("UserPrincipal", fields: [principalId], references: [id], onDelete: SetNull)
+  principalId                   String?                     @unique @map("principal_id")
+  principal                     Principal?                  @relation("UserPrincipal", fields: [principalId], references: [id], onDelete: SetNull)
   /// #1325 — MemoryConfig templates this user owns (user-owned owner branch).
-  memoryConfigTemplates         MemoryConfigTemplate[]     @relation("MemoryConfigTemplateOwnerUser")
+  memoryConfigTemplates         MemoryConfigTemplate[]      @relation("MemoryConfigTemplateOwnerUser")
   /// #1715 — this account's merge into another, if it was merged away.
-  mergedInto                    UserMerge?                 @relation("UserMergeSource")
+  mergedInto                    UserMerge?                  @relation("UserMergeSource")
   /// #1715 — accounts merged into this one.
-  mergedFrom                    UserMerge[]                @relation("UserMergeTarget")
+  mergedFrom                    UserMerge[]                 @relation("UserMergeTarget")
 
   @@unique([externalAppId, externalId])
   @@map("users")
@@ -4186,17 +4188,65 @@ model AuthCode {
 /// #1631 S2a: one browser-bound, purpose-bound, single-use ceremony step.
 /// Expiry and consumption are decided on the database clock.
 model PasskeyCeremony {
-  id               String    @id
-  purpose          String
-  browserNonceHash String    @map("browser_nonce_hash")
+  id                 String             @id
+  purpose            String
+  browserNonceHash   String             @map("browser_nonce_hash")
   /// SHA-256 hex of the challenge issued for this ceremony: every ceremony is bound to one.
-  challengeHash    String    @map("challenge_hash")
-  createdAt        DateTime  @default(dbgenerated("(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)")) @map("created_at")
-  expiresAt        DateTime  @map("expires_at")
-  consumedAt       DateTime? @map("consumed_at")
+  challengeHash      String             @map("challenge_hash")
+  createdAt          DateTime           @default(dbgenerated("(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  expiresAt          DateTime           @map("expires_at")
+  consumedAt         DateTime?          @map("consumed_at")
+  /// #1631 PR2: a REGISTER ceremony's binding, set once at its options step (cor:aut:040:02): who registers,
+  /// 'first' (a fresh sign-in, its method and that browser's hash) or 'later' (the vouching passkey), and the
+  /// fresh random WebAuthn user handle. Null for every other ceremony.
+  userId             String?            @map("user_id")
+  user               User?              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind               String?
+  registrationMethod String?            @map("registration_method")
+  signInBrowserHash  String?            @map("sign_in_browser_hash")
+  vouchPasskeyId     String?            @map("vouch_passkey_id")
+  vouchPasskey       PasskeyCredential? @relation("PasskeyCeremonyVouch", fields: [vouchPasskeyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  userHandle         Bytes?             @map("user_handle")
 
   @@index([expiresAt])
   @@map("passkey_ceremonies")
+}
+
+/// #1631 PR2 (cor:aut:040:02): every registration's email notice, written in the registering transaction and sent
+/// by a loop. A first passkey's carries its cancel token encrypted until sent. seenAt records the in-app notice.
+model PasskeyRegistrationNotice {
+  id             String            @id
+  passkeyId      String            @unique @map("passkey_id")
+  passkey        PasskeyCredential @relation(fields: [passkeyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  userId         String            @map("user_id")
+  user           User              @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  /// 'first' | 'later'
+  kind           String
+  cancelTokenEnc String?           @map("cancel_token_enc")
+  createdAt      DateTime          @default(dbgenerated("(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  attempts       Int               @default(0)
+  leaseUntil     DateTime?         @map("lease_until")
+  claimToken     String?           @map("claim_token")
+  sentAt         DateTime?         @map("sent_at")
+  failedAt       DateTime?         @map("failed_at")
+  seenAt         DateTime?         @map("seen_at")
+
+  @@index([userId])
+  @@index([sentAt])
+  @@map("passkey_registration_notices")
+}
+
+/// #1631 PR2 (cor:aut:040:07-08): a first passkey's cancel link. One per first passkey, stored as SHA-256,
+/// spent once, never deleted; the cancel itself is recorded on the credential. Times come from the guard trigger.
+model PasskeyCancelToken {
+  id        String            @id
+  passkeyId String            @unique @map("passkey_id")
+  passkey   PasskeyCredential @relation(fields: [passkeyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  tokenHash String            @unique @map("token_hash")
+  createdAt DateTime          @default(dbgenerated("(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  usedAt    DateTime?         @map("used_at")
+
+  @@map("passkey_cancel_tokens")
 }
 
 /// #1631 PR1b slice 2 (cor:aut:040:09): a fresh sign-in bound to the ceremony browser. Signs the person in to
@@ -4291,9 +4341,12 @@ model PasskeyCredential {
   cancelIp           String?   @map("cancel_ip")
   cancelUserAgent    String?   @map("cancel_user_agent")
 
-  owner      User            @relation(fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  signatures NodeSignature[]
-  signIns    SignIn[]
+  owner             User                       @relation(fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  signatures        NodeSignature[]
+  signIns           SignIn[]
+  cancelToken       PasskeyCancelToken?
+  notice            PasskeyRegistrationNotice?
+  vouchedCeremonies PasskeyCeremony[]          @relation("PasskeyCeremonyVouch")
 
   @@index([ownerId])
   @@map("passkey_credentials")
@@ -4315,8 +4368,8 @@ model SignIn {
   endedAt              DateTime? @map("ended_at")
   endReason            String?   @map("end_reason")
 
-  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  passkey   PasskeyCredential? @relation(fields: [completedByPasskeyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  passkey   PasskeyCredential?   @relation(fields: [completedByPasskeyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   handoffs  AuthHandoffCode[]
   authCodes AuthCode[]
   keys      UserApiKey[]

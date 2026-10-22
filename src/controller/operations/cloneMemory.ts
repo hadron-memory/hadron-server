@@ -1,5 +1,5 @@
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
-import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
+import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
 import { NOT_DECISION_FAMILY_WHERE } from '../../lib/decisions/index.js';
@@ -124,6 +124,8 @@ export interface CloneMemoryArgs {
   groupOwnerUserId: string | null;
   /** Audit attribution for createdBy columns. */
   actorId: string | null;
+  /** #2167 — memories the copier may read (`getAccessibleMemoryIds`); `null` = unrestricted. */
+  copierReadableMemoryIds: ReadableMemoryIds;
 }
 
 export interface CloneMemoryResult {
@@ -358,8 +360,11 @@ export async function cloneMemoryGraph(
       if (edgeRows.length > 0) {
         await tx.edge.createMany({ data: edgeRows, skipDuplicates: true });
       }
+      // #2167 — every copied tag is an added tag, checked after the URN rewrite.
+      const copiedIds = nodeRows.map((r) => r.id as string);
+      await assertCopiedIncludesWritable(tx, copiedIds, memoryId, args.copierReadableMemoryIds);
       // #2040 — the copies' include edges are re-derived from their content.
-      await resyncDerivedIncludesForNodes(tx, nodeRows.map((r) => r.id as string));
+      await resyncDerivedIncludesForNodes(tx, copiedIds);
 
       // ── PendingEdges ───────────────────────────────────────────────────
       // targetId is a free-form string (not a FK). Loc/URN-keyed references

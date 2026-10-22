@@ -386,6 +386,48 @@ export async function sendCeremonySignInLink(to: string, verifyUrl: string): Pro
   assertProviderAck(result);
 }
 
+/** What a passkey registration notice says (cor:aut:040:02). */
+export interface PasskeyNoticeContent {
+  kind: 'first' | 'later';
+  label: string;
+  registeredAt: Date;
+  /** A first passkey's cancel link (cor:aut:040:07-08); absent for a later one. */
+  cancelUrl?: string;
+  windowEndsAt?: Date;
+}
+
+/**
+ * #1631 PR2: the registration notice's subject and HTML. Pure, so its escaping and its cancel link are pinned without a
+ * mail provider. The label is the user's input and is escaped (Rook, #1631 6316353964).
+ */
+export function passkeyNoticeEmail(n: PasskeyNoticeContent): { subject: string; html: string } {
+  const esc = (v: string) => v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const when = (d: Date) => `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+  const what = `<p>A passkey named <strong>${esc(n.label)}</strong> was added to your Hadron account on ${when(n.registeredAt)}.</p>`;
+  if (n.kind === 'first' && n.cancelUrl) {
+    return {
+      subject: 'A passkey was added to your Hadron account',
+      html: `${what}
+<p>Anything it signs stays pending until ${n.windowEndsAt ? when(n.windowEndsAt) : 'its cooling-off window ends'}.</p>
+<p><strong>If this wasn't you</strong>, remove it now. No sign-in is needed, and it also signs out any sessions it started:</p>
+<p><a href="${esc(n.cancelUrl)}">Remove this passkey</a></p>
+<p>The link works once, and only until the cooling-off window ends.</p>`,
+    };
+  }
+  return {
+    subject: 'A passkey was added to your Hadron account',
+    html: `${what}
+<p>It was vouched for by a passkey you already hold. If this wasn't you, revoke it from your account's passkey page.</p>`,
+  };
+}
+
+/** Send a registration notice. Throws when the provider refuses, so the caller can count a try. */
+export async function sendPasskeyRegisteredNotice(to: string, n: PasskeyNoticeContent): Promise<void> {
+  const { subject, html } = passkeyNoticeEmail(n);
+  const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
+  assertProviderAck(await getResend().emails.send({ from: fromAddress, to, subject, html }));
+}
+
 export async function verifyMagicLink(
   token: string,
   db: PrismaClient,

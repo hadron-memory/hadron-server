@@ -11,6 +11,7 @@ import { automationPinQueries, automationPinMutations } from './resolvers.automa
 // This file only imports those slices and spreads them into the resolver map.
 // `Context` is re-exported so existing importers (mcp/server.ts + the resolver
 // test suite, ~80 files) keep importing it from './resolvers.js' unchanged.
+import { passkeyQueries } from './resolvers.passkeys.js';
 import { withInstallConcealment } from './installMemory.js';
 import { withInheritedNodeProjection } from './resolvers.inheritedNode.js';
 import { type Context } from './resolvers.helpers.js';
@@ -20,6 +21,7 @@ import { dateTimeScalar } from './dateTimeScalar.js';
 import { typeResolvers } from './resolvers.types.js';
 
 import { nodeQueries } from './resolvers.query.node.js';
+import { recoveryQueries, recoveryMutations, recoveryFieldResolvers } from './resolvers.recovery.js';
 import { skillQueries } from './resolvers.query.skill.js';
 import { edgeQueries } from './resolvers.query.edge.js';
 import { assetQueries } from './resolvers.query.asset.js';
@@ -111,6 +113,7 @@ export const resolvers = {
   // property of the schema rather than something each type has to remember.
   DateTime: dateTimeScalar,
   ...typeResolvers,
+  ...recoveryFieldResolvers,
   ...impersonationTypeResolvers,
   ...workerFieldResolvers,
   ...agentTaskFieldResolvers,
@@ -156,6 +159,8 @@ export const resolvers = {
   MemoryConfigTemplate: memoryConfigTemplateFieldResolvers.MemoryConfigTemplate,
   MemoryConfigTemplateRule: memoryConfigTemplateFieldResolvers.MemoryConfigTemplateRule,
   Query: {
+    ...passkeyQueries,
+    ...recoveryQueries,
     ...nodeQueries,
     ...specCorpusQueries,
     ...nodeApprovalQueries,
@@ -207,6 +212,7 @@ export const resolvers = {
     ...impersonationQueries,
   },
   Mutation: {
+    ...recoveryMutations,
     ...nodeMutations,
     ...objectMutations,
     ...dashboardMutations,

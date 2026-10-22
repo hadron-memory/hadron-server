@@ -37,6 +37,7 @@ import {
 } from './auth/index.js';
 import { issueLoginCode, redeemLoginCode } from './auth/authHandoff.js';
 import { startUserDeletionNoticeLoop } from './jobs/sendUserDeletionNotices.js';
+import { startPasskeyRegistrationNoticeLoop } from './jobs/sendPasskeyRegistrationNotices.js';
 import {
   createPendingLoginState,
   claimPendingLoginState,
@@ -441,7 +442,7 @@ export async function createServer(): Promise<Express> {
       // #1631 PR1b: a passkey ceremony's sign-in leg. Look up by the GitHub id only: a username can be renamed
       // and re-registered by someone else, and the leg must never link or create (Ruth §10 condition 3).
       if (pending.ceremonyNonceHash) {
-        await completeCeremonyLeg(res, {
+        await completeCeremonyLeg(req, res, {
           provider: 'github', ceremonyNonceHash: pending.ceremonyNonceHash,
           lookup: () => db.user.findFirst({ where: { githubId: ghUser.id, deletedAt: null }, select: { id: true } }),
         });
@@ -661,7 +662,7 @@ export async function createServer(): Promise<Express> {
       // auth_time older than this leg refuses. Lookup by the Google id only: no email link, no creation.
       if (pending.ceremonyNonceHash) {
         const reauthenticated = googleReauthenticatedSince(identity.authTime, pending.startedAt);
-        await completeCeremonyLeg(res, {
+        await completeCeremonyLeg(req, res, {
           provider: 'google', ceremonyNonceHash: pending.ceremonyNonceHash,
           lookup: async () => reauthenticated
             ? db.user.findFirst({ where: { googleId: identity.sub, deletedAt: null }, select: { id: true } })
@@ -816,7 +817,7 @@ export async function createServer(): Promise<Express> {
       // #1631 PR1b: a passkey ceremony's sign-in leg. Lookup by the Apple id only: no email link, no creation.
       // Apple offers no re-authentication request, so a silent Apple session is accepted (R154 known limit).
       if (pending.ceremonyNonceHash) {
-        await completeCeremonyLeg(res, {
+        await completeCeremonyLeg(req, res, {
           provider: 'apple', ceremonyNonceHash: pending.ceremonyNonceHash,
           lookup: () => db.user.findFirst({ where: { appleId: identity.sub, deletedAt: null }, select: { id: true } }),
         });
@@ -1905,6 +1906,12 @@ export async function createServer(): Promise<Express> {
   // #1647 — resume pending notices of admin-initiated account erasures (restart-safe outbox).
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_USER_DELETION_NOTICES !== 'true') {
     startUserDeletionNoticeLoop(db);
+  }
+
+  // #1631 PR2 — send every passkey registration's email notice (restart-safe outbox). Dark with the
+  // registration switch: nothing registers while it is off, so the loop doesn't run either.
+  if (process.env.NODE_ENV !== 'test' && signingSurfacePolicy().registration) {
+    startPasskeyRegistrationNoticeLoop(db);
   }
 
   // Background job: purge soft-deleted assets past their 24h recovery

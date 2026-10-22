@@ -158,6 +158,7 @@ import {
   filterReadableMemoryIds,
   getAccessibleMemoryIds,
   getMemoryAccess,
+  isWriteBeyondRead,
 } from './access-control.js';
 import { globalSearch } from '../lib/global-search/index.js';
 import {
@@ -166,6 +167,7 @@ import {
   type SearchPrincipal,
 } from '../lib/global-search/index.js';
 import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
+import { lockAgentDefinitionAuthority } from '../lib/auth/managedSystemMemory.js';
 import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
 import { computeContentHash, isAbstractUnverified } from '../lib/contentHash.js';
@@ -2161,6 +2163,7 @@ export function createMcpServerInstance(
     'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_attention',
     'hadron_team_attention_page', 'hadron_list_workers', 'hadron_get_worker', 'hadron_team_work_items',
     'hadron_list_comments', 'hadron_get_comment', 'hadron_team_chat_mark_read',
+    'hadron_list_recovery_nodes', 'hadron_list_recovery_edges', 'hadron_get_recovery_node',
     // #1705 — agent-task reads (each takes its own optional session).
     'hadron_task_get', 'hadron_task_list', 'hadron_team_events',
     // #1706 — availability read (its own optional session).
@@ -3495,6 +3498,44 @@ export function createMcpServerInstance(
     organizationId: auth.organizationId ?? undefined,
   });
 
+  // #2175: explicit recovery twins delegate to the same writer-plus-reader resolver gate.
+  const recoveryCtx = (): Context => ({ ...scopeCtx(), appKeyId: auth.appKeyId ?? undefined,
+    impersonation: auth.impersonation ?? undefined });
+  const recoveryCall = async (work: () => Promise<ReturnType<typeof textResult>>) => {
+    try { return await work(); }
+    catch (error) {
+      return { ...toolErrorResult(error, () => {
+        if (error instanceof ScopeGraphQLError) return `[${String(error.extensions.code ?? 'ERROR').toLowerCase()}] ${error.message}`;
+        if (error instanceof MemoryNotFoundError) return '[not_found] Memory not found.';
+        if (error instanceof UrnNotQualifiedError) return `[bad_user_input] ${error.message}`;
+        throw error;
+      }, 'node_recovery'), isError: true as const };
+    }
+  };
+  const recoveryPageArgs = {
+    memoryRef: z.string().describe('One live memory ID or qualified URN.'),
+    limit: z.number().int().nullable().optional().describe('Default 20 (also null), maximum 200; use total to fetch remaining pages.'),
+    offset: z.number().int().nullable().optional().describe('Page offset, default 0.'),
+  };
+  server.tool('hadron_list_recovery_nodes', 'List retained deleted nodes in one live memory that you can read and write. Ordinary reads return live nodes only.',
+    recoveryPageArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryNodes({}, args, recoveryCtx())))));
+  server.tool('hadron_list_recovery_edges', 'Inspect live edges and accessible deleted endpoints in one memory that you can read and write. Unavailable endpoints are excluded from the page and total.',
+    recoveryPageArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryEdges({}, args, recoveryCtx())))));
+  server.tool('hadron_get_recovery_node', 'Read retained deleted-node content in a live memory that you can read and write. Returns the stored body without expanding templates or includes.',
+    { nodeRef: z.string().describe('Stable node ID or qualified node URN.') }, async (args) => recoveryCall(async () => {
+      const ctx = recoveryCtx();
+      const retained = await resolvers.Query.recoveryNode({}, args, ctx);
+      if (!retained) return { ...textResult('[not_found] No deleted node you can recover at that reference.'), isError: true as const };
+      const { _retainedNode: _internal, ...dto } = retained;
+      const content = await resolvers.RecoveryNode.content(retained as never, {}, ctx);
+      return textResult(JSON.stringify({ ...dto, content }));
+    }));
+  server.tool('hadron_restore_node', 'Restore one retained deleted node in a live memory that you can read and write. Restore deleted ancestors first. Governed nodes, comments, compiled boot prompts and protected internal addresses refuse. Does not restore descendants or revisions.',
+    { nodeRef: z.string().describe('Stable node ID or qualified node URN.') }, async (args) => recoveryCall(async () => {
+      const restored = await resolvers.Mutation.restoreNode({}, args, recoveryCtx());
+      return textResult(JSON.stringify({ id: restored.id, loc: restored.loc, memoryId: restored.memoryId, deletedAt: restored.deletedAt }));
+    }));
+
   /** A resolver refusal as `[<code>] <message>` text, the app-selection envelope convention. */
   const scopeErrorText = (e: unknown) => {
     if (e instanceof ScopeGraphQLError) {
@@ -4044,6 +4085,8 @@ export function createMcpServerInstance(
       let sectionId: string;
       try {
         sectionId = await db.$transaction(async (tx) => {
+          // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
+          await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           await lockAncestorsForCreate(tx, memoryId, loc);
           // #1323 (@copilot, PR #1339): re-saving an EXISTING live section is
           // an authoring write of name/description/content/tags, so it takes
@@ -6366,6 +6409,8 @@ export function createMcpServerInstance(
       let upserted;
       try {
         upserted = await db.$transaction(async (tx) => {
+          // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
+          await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           if (resolvedEdges !== null) {
             await lockOutgoingEdgeMemories(tx, memoryId, resolvedEdges);
           }
@@ -6804,6 +6849,8 @@ export function createMcpServerInstance(
         // authoritative one (Copilot on PR #1165).
         try {
           await db.$transaction(async (tx) => {
+            // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
+            await lockAgentDefinitionAuthority(tx, auth.userId ?? null, existing.memoryId);
             if (resolvedEdges !== null) {
               await lockOutgoingEdgeMemories(tx, existing.memoryId, resolvedEdges);
             }
@@ -7917,7 +7964,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // a later refusal would leak through the loc validation and the source
       // node lookup that run in between.
       const fromMemory = await resolveVisibleMemoryByUrn(auth, fromMemoryUrn, 'write');
-      if (!fromMemory) {
+      // #2206 (B): a move carries the node's content (and its render, below) to the caller, so a source memory the
+      // caller may write but not read answers as one it cannot see.
+      if (!fromMemory || (await isWriteBeyondRead(db, auth, fromMemory.id))) {
         return textResult(`Source memory not found: "${fromMemoryUrn}".`);
       }
       const toMemory = await resolveVisibleMemoryByUrn(auth, toMemoryUrn, 'write');
@@ -7973,6 +8022,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
       try {
         result = await db.$transaction(async (tx) => {
+          // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
+          await lockAgentDefinitionAuthority(tx, auth.userId ?? null, [fromMemory.id, toMemory.id]);
           // #664/#752: moving a node INTO a subtree is the same orphan vector as
           // creating there — lock the destination's ancestor path first (matching
           // the GraphQL moveNode resolver and hadron_delete_node's own-loc lock),

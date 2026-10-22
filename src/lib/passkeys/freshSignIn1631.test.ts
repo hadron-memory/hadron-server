@@ -45,7 +45,7 @@ describe('IdP leg', () => {
     expect(row.signedInAt).not.toBeNull();
     expect(await consume(BROWSER_A, alice)).toBeNull();
 
-    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A })).toBe(true);
+    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A, channel: 'idp' })).toBe(true);
     expect(await consume(BROWSER_A, alice)).toMatchObject({ id: row.id, method: 'github' });
     const spent = await db.freshSignIn.findUniqueOrThrow({ where: { id: row.id } });
     expect(spent.consumedFor).toBe('register');
@@ -55,31 +55,40 @@ describe('IdP leg', () => {
   it('a leg started in browser A and finished in browser B confirms in neither (Ruth red pin 1)', async () => {
     const { legId } = await recordIdpSignIn(db, { userId: alice, method: 'google', browserNonceHash: BROWSER_A });
     // B finished the IdP proof, so B holds the leg id, but not A's cookie.
-    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_B })).toBe(false);
+    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_B, channel: 'idp' })).toBe(false);
     // A holds the cookie but never learns the leg id.
-    expect(await confirmFreshSignIn(db, { legSecret: 'x'.repeat(43), browserNonceHash: BROWSER_A })).toBe(false);
+    expect(await confirmFreshSignIn(db, { legSecret: 'x'.repeat(43), browserNonceHash: BROWSER_A, channel: 'idp' })).toBe(false);
     expect(await consume(BROWSER_A, alice)).toBeNull();
     expect(await consume(BROWSER_B, alice)).toBeNull();
     // A refused attempt does not burn the leg for its rightful browser.
-    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A })).toBe(true);
+    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A, channel: 'idp' })).toBe(true);
+  });
+
+  it('a secret confirms only on its own channel (Rook 6316353964: no IdP leg id in a form, no token in the leg cookie)', async () => {
+    const { legId } = await recordIdpSignIn(db, { userId: alice, method: 'github', browserNonceHash: BROWSER_A });
+    const { token } = await startEmailSignIn(db, { userId: bob, browserNonceHash: BROWSER_A });
+    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A, channel: 'email' })).toBe(false);
+    expect(await confirmFreshSignIn(db, { legSecret: token, browserNonceHash: BROWSER_A, channel: 'idp' })).toBe(false);
+    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A, channel: 'idp' })).toBe(true);
+    expect(await confirmFreshSignIn(db, { legSecret: token, browserNonceHash: BROWSER_A, channel: 'email' })).toBe(true);
   });
 
   it('confirms once', async () => {
     const { legId } = await recordIdpSignIn(db, { userId: alice, method: 'apple', browserNonceHash: BROWSER_A });
-    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A })).toBe(true);
-    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A })).toBe(false);
+    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A, channel: 'idp' })).toBe(true);
+    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A, channel: 'idp' })).toBe(false);
   });
 
   it('refuses a fresh sign-in for user A on user B\'s ceremony (Ruth red pin 3)', async () => {
     const { legId } = await recordIdpSignIn(db, { userId: alice, method: 'github', browserNonceHash: BROWSER_A });
-    await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A });
+    await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A, channel: 'idp' });
     expect(await consume(BROWSER_A, bob)).toBeNull();
     expect(await consume(BROWSER_A, alice)).not.toBeNull();
   });
 
   it('is not fresh 10 minutes after the identity proof', async () => {
     const { legId } = await recordIdpSignIn(db, { userId: alice, method: 'github', browserNonceHash: BROWSER_A });
-    await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A });
+    await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A, channel: 'idp' });
     const { id } = await db.freshSignIn.findFirstOrThrow({ where: { userId: alice } });
     await age(id, 10 * 60 + 1);
     expect(await consume(BROWSER_A, alice)).toBeNull();
@@ -87,7 +96,7 @@ describe('IdP leg', () => {
 
   it('is still fresh just inside 10 minutes', async () => {
     const { legId } = await recordIdpSignIn(db, { userId: alice, method: 'github', browserNonceHash: BROWSER_A });
-    await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A });
+    await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A, channel: 'idp' });
     const { id } = await db.freshSignIn.findFirstOrThrow({ where: { userId: alice } });
     await age(id, 10 * 60 - 30);
     expect(await consume(BROWSER_A, alice)).not.toBeNull();
@@ -100,18 +109,18 @@ describe('IdP leg', () => {
       await tx.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`);
       await tx.$executeRaw`UPDATE fresh_sign_ins SET expires_at = created_at + interval '1 millisecond', signed_in_at = created_at WHERE id = ${id}`;
     });
-    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A })).toBe(false);
+    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A, channel: 'idp' })).toBe(false);
   });
 
   it('a deleted user can neither confirm nor consume', async () => {
     const { legId } = await recordIdpSignIn(db, { userId: alice, method: 'github', browserNonceHash: BROWSER_A });
     await db.user.update({ where: { id: alice }, data: { deletedAt: new Date() } });
-    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A })).toBe(false);
+    expect(await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A, channel: 'idp' })).toBe(false);
   });
 
   it('revoke accepts an IdP sign-in', async () => {
     const { legId } = await recordIdpSignIn(db, { userId: alice, method: 'google', browserNonceHash: BROWSER_A });
-    await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A });
+    await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A, channel: 'idp' });
     expect(await consume(BROWSER_A, alice, 'revoke')).toMatchObject({ method: 'google' });
   });
 });
@@ -121,8 +130,8 @@ describe('email leg', () => {
     const { token } = await startEmailSignIn(db, { userId: alice, browserNonceHash: BROWSER_A });
     const before = await db.freshSignIn.findFirstOrThrow({ where: { userId: alice } });
     expect(before).toMatchObject({ method: 'email', signedInAt: null, confirmedAt: null, legHash: h(token) });
-    expect(await confirmFreshSignIn(db, { legSecret: token, browserNonceHash: BROWSER_B })).toBe(false);
-    expect(await confirmFreshSignIn(db, { legSecret: token, browserNonceHash: BROWSER_A })).toBe(true);
+    expect(await confirmFreshSignIn(db, { legSecret: token, browserNonceHash: BROWSER_B, channel: 'email' })).toBe(false);
+    expect(await confirmFreshSignIn(db, { legSecret: token, browserNonceHash: BROWSER_A, channel: 'email' })).toBe(true);
     const after = await db.freshSignIn.findUniqueOrThrow({ where: { id: before.id } });
     expect(after.signedInAt).not.toBeNull();
     expect(after.confirmedAt?.getTime()).toBe(after.signedInAt?.getTime());
@@ -130,7 +139,7 @@ describe('email leg', () => {
 
   it('never counts for revoke (a magic link is never fresh enough to revoke)', async () => {
     const { token } = await startEmailSignIn(db, { userId: alice, browserNonceHash: BROWSER_A });
-    await confirmFreshSignIn(db, { legSecret: token, browserNonceHash: BROWSER_A });
+    await confirmFreshSignIn(db, { legSecret: token, browserNonceHash: BROWSER_A, channel: 'email' });
     expect(await consume(BROWSER_A, alice, 'revoke')).toBeNull();
     expect(await consume(BROWSER_A, alice, 'end-window')).toMatchObject({ method: 'email' });
   });
@@ -166,7 +175,7 @@ describe('guard', () => {
 
   it('sets confirmed_at once', async () => {
     const { legId } = await recordIdpSignIn(db, { userId: alice, method: 'github', browserNonceHash: BROWSER_A });
-    await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A });
+    await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A, channel: 'idp' });
     const { id } = await db.freshSignIn.findFirstOrThrow({ where: { userId: alice } });
     await expect(db.$executeRaw`UPDATE fresh_sign_ins SET confirmed_at = NULL WHERE id = ${id}`).rejects.toThrow(/set once/);
   });
@@ -176,14 +185,14 @@ describe('guard', () => {
     const { id } = await db.freshSignIn.findFirstOrThrow({ where: { userId: alice } });
     await expect(db.$executeRaw`UPDATE fresh_sign_ins SET consumed_at = now(), consumed_for = 'register' WHERE id = ${id}`).rejects.toThrow(/chk_fresh_sign_in_shape/);
     const { token } = await startEmailSignIn(db, { userId: bob, browserNonceHash: BROWSER_A });
-    await confirmFreshSignIn(db, { legSecret: token, browserNonceHash: BROWSER_A });
+    await confirmFreshSignIn(db, { legSecret: token, browserNonceHash: BROWSER_A, channel: 'email' });
     const email = await db.freshSignIn.findFirstOrThrow({ where: { userId: bob } });
     await expect(db.$executeRaw`UPDATE fresh_sign_ins SET consumed_at = now(), consumed_for = 'revoke' WHERE id = ${email.id}`).rejects.toThrow(/chk_fresh_sign_in_shape/);
   });
 
   it('refuses a spent row with no purpose (Gene P2: NULL IN (...) is UNKNOWN, which a CHECK lets pass)', async () => {
     const { legId } = await recordIdpSignIn(db, { userId: alice, method: 'github', browserNonceHash: BROWSER_A });
-    await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A });
+    await confirmFreshSignIn(db, { legSecret: legId, browserNonceHash: BROWSER_A, channel: 'idp' });
     const { id } = await db.freshSignIn.findFirstOrThrow({ where: { userId: alice } });
     await expect(db.$executeRaw`UPDATE fresh_sign_ins SET consumed_at = now() WHERE id = ${id}`).rejects.toThrow(/chk_fresh_sign_in_shape/);
     // The control: the same write with a purpose is accepted.

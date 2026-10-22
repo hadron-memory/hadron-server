@@ -187,7 +187,7 @@ describe('#2045 gate (R23): the manager as themselves, never a worker session', 
     for (const e of errors) expect(e).toEqual(errors[0]);
   });
 
-  it('a user-owned Agent: its owner manages it; an org admin and a platform admin do not', async () => {
+  it('a user-owned Agent: its owner manages it; a platform admin passes the manager gate but cannot read the compiled prompt (#1734); an org admin does not manage it', async () => {
     const f = await fixture();
     const owner = await user('owner');
     const mem = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'u-sys', urn: 'u:u-sys', ownerUserId: owner.id } });
@@ -196,7 +196,8 @@ describe('#2045 gate (R23): the manager as themselves, never a worker session', 
     const target: BootPromptPointerTarget = { field: 'AGENT', agentId: agent.id };
     expect(await codeOf(write(ctxOf(f.admin.id), target, node.id))).toBe('FORBIDDEN');
     const platform = await db.user.create({ data: { id: generateId(), name: 'platform', roles: ['ADMIN'] } });
-    expect(await codeOf(write(ctxOf(platform.id, { roles: ['ADMIN'] } as Partial<Context>), target, node.id))).toBe('FORBIDDEN');
+    // cor:dmo:050:13: the admin manages it, but the read boundary stands, so the unreadable compiled node answers as missing.
+    expect(await codeOf(write(ctxOf(platform.id, { roles: ['ADMIN'] } as Partial<Context>), target, node.id))).toBe('BOOT_PROMPT_POINTER_NOT_FOUND');
     expect(await write(ctxOf(owner.id), target, node.id)).toMatchObject({ nodeId: node.id });
   });
 
@@ -376,7 +377,8 @@ describe('#2045 surfaces and code inventory', () => {
   });
 
   it('every BOOT_PROMPT_* code the server source can emit is on the agreed lists (6259928375 / 6259930578)', () => {
-    const S6 = ['BOOT_PROMPT_COMPILED_WRITE', 'BOOT_PROMPT_WORKER_SESSION_REFUSED'];
+    // S6's three codes, as agreed in the #2043 attach (6247074854; hadron-cli#916 maps all three).
+    const S6 = ['BOOT_PROMPT_COMPILED_WRITE', 'BOOT_PROMPT_WORKER_SESSION_REFUSED', 'BOOT_PROMPT_APPROVAL_FORBIDDEN'];
     const SERVE = ['BOOT_PROMPT_NOT_SET', 'BOOT_PROMPT_TARGET_DELETED', 'BOOT_PROMPT_NOT_APPROVED', 'BOOT_PROMPT_NOT_SIGNED', 'BOOT_PROMPT_RECORDED_REVISION_DELETED'];
     expect([...BOOT_PROMPT_POINTER_CODES].sort()).toEqual([
       'BOOT_PROMPT_POINTER_NOT_COMPILED', 'BOOT_PROMPT_POINTER_NOT_FOUND', 'BOOT_PROMPT_POINTER_SESSION_REFUSED',

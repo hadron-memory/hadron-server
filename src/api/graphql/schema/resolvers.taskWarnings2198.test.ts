@@ -219,14 +219,57 @@ describe('the register: code → role task, through the right chains', () => {
     await db.agent.update({ where: { id: child.id }, data: { extendsAgentId: teamAgentId } });
     await db.appAgent.create({ data: { appId: app.id, agentId: child.id } }); // a cast worker's Agent is installed in its App
     await node(childRow.systemMemoryId as string, 'tasks:finish', { isRunnable: true });
-    // The caller must be able to read the child's definition under the canonical gate: an org admin can; an App
-    // member of a NON-primary installed Agent cannot (see the withheld control below).
+    // The caller must be able to read the child's definition under the canonical gate: an org admin can, and so can
+    // an App member, because the child is installed and licensed in this App (#2206 case 3, cor:acl:010:01).
     const out = await asWorker(anne, child.id, () => resolveRegisters(ctx(admin.id), app.id, finishWarning()));
     const member_ = await asWorker(anne, child.id, () => resolveRegisters(ctx(member.id), app.id, finishWarning()));
-    expect(member_.get('task.finish.open-children')).toEqual({ state: 'unresolved' });
-    expect(out.get('task.finish.open-children')).toMatchObject({
-      state: 'mapped', taskUrn: `hrn:node:${childMemUrn}:tasks:finish`,
-    });
+    for (const r of [out, member_]) {
+      expect(r.get('task.finish.open-children')).toMatchObject({ state: 'mapped', taskUrn: `hrn:node:${childMemUrn}:tasks:finish` });
+    }
+  });
+
+  /** #2206 case 3: a second installed Agent extending the Team Agent, with its own runnable role task. */
+  async function nonPrimaryChild(opts: { orgId?: string; install?: boolean; name?: string } = {}) {
+    if (!(await db.node.count({ where: { memoryId: teamMemoryId, loc: 'tasks:finish' } }))) {
+      await registerEntry(teamMemoryId, 'task.finish.open-children', 'tasks:finish');
+      await node(teamMemoryId, 'tasks:finish', { isRunnable: true });
+    }
+    const childOrg = opts.orgId ?? org.id;
+    let creator = admin.id;
+    if (childOrg !== org.id) {
+      const foreignAdmin = await db.user.create({ data: { githubId: 218099, githubUsername: 'tw-foreign', handle: 'tw-foreign', roles: ['READER'] } });
+      await db.orgMember.create({ data: { organizationId: childOrg, userId: foreignAdmin.id, role: 'ADMIN' } });
+      creator = foreignAdmin.id;
+    }
+    const child = await M.createAgent({}, { orgId: childOrg, name: opts.name ?? 'Child Role' }, ctx(creator));
+    const childRow = await db.agent.findUniqueOrThrow({ where: { id: child.id } });
+    await db.agent.update({ where: { id: child.id }, data: { extendsAgentId: teamAgentId } });
+    if (opts.install ?? true) await db.appAgent.create({ data: { appId: app.id, agentId: child.id } });
+    await node(childRow.systemMemoryId as string, 'tasks:finish', { isRunnable: true });
+    return { id: child.id, memoryId: childRow.systemMemoryId as string };
+  }
+
+  it('#2206 case 3: an org CONTRIBUTOR who is not an App member maps through the App, for the primary and a second Agent', async () => {
+    const contributor = await db.user.create({ data: { githubId: 218004, githubUsername: 'tw-contrib', handle: 'tw-contrib', roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: contributor.id, role: 'CONTRIBUTOR' } });
+    const child = await nonPrimaryChild();
+    const primary = await asWorker(anne, teamAgentId, () => resolveRegisters(ctx(contributor.id), app.id, finishWarning()));
+    const second = await asWorker(anne, child.id, () => resolveRegisters(ctx(contributor.id), app.id, finishWarning()));
+    expect(primary.get('task.finish.open-children')?.state).toBe('mapped');
+    expect(second.get('task.finish.open-children')?.state).toBe('mapped');
+    // An org READER who is not an App member does not participate: the Team Agent's entry is not readable.
+    const reader = await db.user.create({ data: { githubId: 218005, githubUsername: 'tw-reader', handle: 'tw-reader', roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: reader.id, role: 'READER' } });
+    expect((await asWorker(anne, child.id, () => resolveRegisters(ctx(reader.id), app.id, finishWarning()))).get('task.finish.open-children')).toEqual({ state: 'unmapped' });
+  });
+
+  it('#2206 case 3: no license, no install, or an uninstalled App: the second Agent stays unresolved (fixed text, no loc)', async () => {
+    const other = await db.organization.create({ data: { id: generateId(), name: 'tw-other', urn: `two-${generateId().toLowerCase()}.example` } });
+    const foreign = await nonPrimaryChild({ orgId: other.id }); // installed, but a foreign Agent with no org grant: unlicensed
+    expect((await asWorker(anne, foreign.id, () => resolveRegisters(ctx(member.id), app.id, finishWarning()))).get('task.finish.open-children')).toEqual({ state: 'unresolved' });
+    await db.appAgent.deleteMany({ where: { agentId: foreign.id } });
+    const notInstalled = await nonPrimaryChild({ install: false, name: 'Loose Role' });
+    expect((await asWorker(anne, notInstalled.id, () => resolveRegisters(ctx(member.id), app.id, finishWarning()))).get('task.finish.open-children')).toEqual({ state: 'unresolved' });
   });
 
   it('unmapped: no entry, a malformed entry, or an entry for another code', async () => {

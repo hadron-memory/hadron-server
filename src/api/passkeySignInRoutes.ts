@@ -29,11 +29,13 @@ import { signJwt } from '../auth/jwt.js';
 import { createSignIn } from '../auth/signIn.js';
 import {
   completePending, createPendingEmailSignIn, loadLivePending, setPendingCeremony, sweepPendingEmailSignIns,
-  PENDING_EMAIL_SIGN_IN_TTL_SECONDS, type PendingContinuation,
+  PENDING_EMAIL_SIGN_IN_TTL_SECONDS, PENDING_ENROLLMENT_TTL_SECONDS, type PendingContinuation,
 } from '../auth/pendingEmailSignIn.js';
 
 export const PENDING_SIGN_IN_COOKIE = 'hadron_pending_signin';
 export const PASSKEY_SIGN_IN_PATH = '/auth/passkey/sign-in';
+/** The registration page, carrying `next=sign-in` so it returns the person here (ceremonyClientPages.ts). */
+export const PASSKEY_ENROLL_PATH = '/passkeys/register?next=sign-in';
 const COOKIE_PATH = '/auth/passkey';
 const CEREMONY_TTL_SECONDS = 300;
 /** Requests a minute per client IP, across the sign-in routes. */
@@ -74,20 +76,43 @@ export async function userHasUsablePasskey(userId: string): Promise<boolean> {
   return rows.length > 0;
 }
 
+/** Does this user hold ANY unrevoked passkey, for whatever RP ID? A user with none is the one who may enrol (B2). */
+export async function userHasUnrevokedPasskey(userId: string): Promise<boolean> {
+  const rows = await db.$queryRaw<Array<{ n: number }>>`SELECT 1 AS n FROM passkey_credentials
+    WHERE owner_id = ${userId} AND revoked_at IS NULL LIMIT 1`;
+  return rows.length > 0;
+}
+
+/** The page's three states for a live pending flow (cor:aut:030:02). */
+export type PendingPageState = 'assert' | 'enroll' | 'invalid';
+export async function pendingPageState(userId: string): Promise<PendingPageState> {
+  if (await userHasUsablePasskey(userId)) return 'assert';
+  // Passkeys exist but none can answer here (another RP ID): nothing to offer, and never a second first passkey.
+  return (await userHasUnrevokedPasskey(userId)) ? 'invalid' : 'enroll';
+}
+
 /**
  * Called by `/auth/email/verify` when the registration switch is on and the claimed address belongs to a user.
- * Creates the pending row, sets its cookie and redirects to the page. Publishes nothing. Returns false (and writes
- * nothing) when the user has no usable passkey, so the caller can show the fixed refusal; enrollment is B2.
+ * Creates the pending row, sets its cookie and redirects to the page. Publishes nothing.
+ *
+ * - A user with a usable passkey: a ten-minute flow that ends in an assertion (B1).
+ * - A user with NO unrevoked passkey: a thirty-minute flow (B2). The page sends them to the registration page, which
+ *   asks for its OWN second emailed link bound to that browser (cor:aut:040:09: neither this link nor an OAuth
+ *   unbound link is that proof), and they come back here to sign in with the passkey they added. The first link signs
+ *   nobody in and enrols nobody.
+ * - Passkeys exist but none is usable here: nothing is created and false is returned (the fixed refusal).
  */
 export async function beginPasskeySignIn(
   req: Request, res: Response,
   input: { userId: string; continuation: PendingContinuation },
 ): Promise<boolean> {
-  if (!(await userHasUsablePasskey(input.userId))) return false;
+  const state = await pendingPageState(input.userId);
+  if (state === 'invalid') return false;
+  const ttlSeconds = state === 'enroll' ? PENDING_ENROLLMENT_TTL_SECONDS : PENDING_EMAIL_SIGN_IN_TTL_SECONDS;
   await sweepPendingEmailSignIns(db).catch(() => undefined);
-  const { cookieSecret } = await createPendingEmailSignIn(db, input);
+  const { cookieSecret } = await createPendingEmailSignIn(db, { ...input, ttlSeconds });
   res.cookie(PENDING_SIGN_IN_COOKIE, cookieSecret, {
-    httpOnly: true, sameSite: 'lax', secure: secureCookie(req), path: COOKIE_PATH, maxAge: PENDING_EMAIL_SIGN_IN_TTL_SECONDS * 1000,
+    httpOnly: true, sameSite: 'lax', secure: secureCookie(req), path: COOKIE_PATH, maxAge: ttlSeconds * 1000,
   });
   res.redirect(PASSKEY_SIGN_IN_PATH);
   return true;
@@ -95,12 +120,16 @@ export async function beginPasskeySignIn(
 
 const SECURITY_HEADERS: Record<string, string> = {
   'Cache-Control': 'no-store',
-  'Referrer-Policy': 'no-referrer',
+  // Not no-referrer: the sibling ceremony pages (ceremonyClientPages.ts) use same-origin because a browser sends
+  // Origin: null on a native form POST under no-referrer. This page's fetch POSTs send the real Origin either way
+  // (measured on Chromium 145, #2242), but one policy across the family is the safer default. Still no Referer cross-origin.
+  'Referrer-Policy': 'same-origin',
   'X-Content-Type-Options': 'nosniff',
   'Content-Security-Policy': "default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
 };
 
 const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in</title></head><body><main><h1>Confirm it's you</h1><p>Use your passkey to finish signing in.</p><button id="go" type="button">Use passkey</button><p id="msg" role="status"></p></main><script src="${PASSKEY_SIGN_IN_PATH}.js"></script></body></html>`;
+const ENROLL_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in</title></head><body><main><h1>Add a passkey to finish signing in</h1><p>This account has no passkey yet. Add one, then come back to this page to sign in with it. You will confirm who you are once more, with a second link we email you, in this browser.</p><p><a href="${PASSKEY_ENROLL_PATH}">Add a passkey</a></p></main></body></html>`;
 const INVALID_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in</title></head><body><main><h1>This sign-in link can't be used</h1><p>It may have expired or already been used. Start again from the sign-in page.</p></main></body></html>`;
 
 const SCRIPT = `(()=>{
@@ -140,7 +169,8 @@ export function mountPasskeySignInRoutes(app: Express, env: NodeJS.ProcessEnv = 
     res.set(SECURITY_HEADERS).type('html');
     try {
       const live = await loadLivePending(db, pendingCookie(req));
-      res.status(live ? 200 : 400).send(live ? PAGE : INVALID_PAGE);
+      const state = live ? await pendingPageState(live.userId) : 'invalid';
+      res.status(state === 'invalid' ? 400 : 200).send(state === 'assert' ? PAGE : state === 'enroll' ? ENROLL_PAGE : INVALID_PAGE);
     } catch { res.status(400).send(INVALID_PAGE); }
   });
 

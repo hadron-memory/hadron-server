@@ -113,14 +113,26 @@ async function startGithub(origin: string | null = ORIGIN) {
 const callback = (state: string) =>
   realFetch(`${base}/auth/github/callback?code=gh-code&state=${state}`, { redirect: 'manual' });
 
-const confirm = (leg: string | undefined, cookie: string | undefined, origin: string | null = ORIGIN) =>
+/** The confirm POST: an IdP leg id rides in its cookie (Rook 6316353964), never in the form. */
+const confirm = (leg: string | undefined, cookie: string | undefined, origin: string | null = ORIGIN) => {
+  const cookies = [cookie, leg === undefined ? undefined : `hadron_ceremony_leg=${leg}`].filter(Boolean).join('; ');
+  return realFetch(`${base}/passkeys/sign-in/confirm`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', ...(origin ? { origin } : {}), ...(cookies ? { cookie: cookies } : {}) },
+    body: '',
+  });
+};
+
+/** The email leg's confirm POST: the emailed token rides in the form. */
+const confirmEmail = (token: string, cookie: string | undefined, origin: string | null = ORIGIN) =>
   realFetch(`${base}/passkeys/sign-in/confirm`, {
     method: 'POST', redirect: 'manual',
     headers: { 'content-type': 'application/x-www-form-urlencoded', ...(origin ? { origin } : {}), ...(cookie ? { cookie } : {}) },
-    body: leg === undefined ? '' : `leg=${encodeURIComponent(leg)}`,
+    body: `token=${encodeURIComponent(token)}`,
   });
 
-const legOf = (r: Response) => new URL(r.headers.get('location')!, base).searchParams.get('leg')!;
+/** The leg id from the callback's Set-Cookie (the only place it travels). */
+const legOf = (r: Response) => /hadron_ceremony_leg=([A-Za-z0-9_-]{43})/.exec(r.headers.get('set-cookie') ?? '')![1];
 
 describe('GitHub leg', () => {
   let alice: string;
@@ -150,25 +162,35 @@ describe('GitHub leg', () => {
     const s = await startGithub();
     const cb = await callback(s.state);
     expect(cb.status).toBe(303);
-    expect(cb.headers.get('location')).toMatch(/^\/passkeys\/sign-in\/confirm\?leg=[A-Za-z0-9_-]{43}$/);
-    expect(cb.headers.get('referrer-policy')).toBe('no-referrer');
-    expect(cb.headers.get('set-cookie')).toBeNull();
+    // The leg id never rides a URL: only the Strict cookie scoped to the confirm path carries it.
+    expect(cb.headers.get('location')).toBe('/passkeys/sign-in/confirm');
+    expect(cb.headers.get('referrer-policy')).toBe('same-origin');
+    const legCookie = cb.headers.get('set-cookie')!;
+    expect(legCookie).toMatch(/^hadron_ceremony_leg=[A-Za-z0-9_-]{43};/);
+    expect(legCookie).toMatch(/HttpOnly/i);
+    expect(legCookie).toMatch(/SameSite=Strict/i);
+    expect(legCookie).toMatch(/Path=\/passkeys\/sign-in\/confirm/i);
+    expect(legCookie).toMatch(/Max-Age=900/i);
+    expect(legCookie).not.toMatch(/hadron_token/);
     expect(await db.authHandoffCode.count()).toBe(0);
     const leg = legOf(cb);
 
-    const pageR = await realFetch(`${base}/passkeys/sign-in/confirm?leg=${leg}`);
+    const pageR = await realFetch(`${base}/passkeys/sign-in/confirm`);
     expect(pageR.status).toBe(200);
-    expect(pageR.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(pageR.headers.get('referrer-policy')).toBe('same-origin');
     expect(pageR.headers.get('x-frame-options')).toBe('DENY');
     const html = await pageR.text();
-    expect(html).toContain(`value="${leg}"`);
+    expect(html).not.toContain(leg);
+    expect(html).not.toContain('name="leg"');
     expect(html).toContain('Never share this page');
     // Rendering the page confirms nothing.
     expect((await db.freshSignIn.findFirstOrThrow({ where: { userId: alice } })).confirmedAt).toBeNull();
 
     const ok = await confirm(leg, s.cookie);
     expect(ok.status).toBe(200);
-    expect(ok.headers.get('set-cookie')).toBeNull();
+    // The leg cookie is cleared; nothing else is set (no session).
+    expect(ok.headers.get('set-cookie')).toMatch(/^hadron_ceremony_leg=;/);
+    expect(ok.headers.get('set-cookie')).not.toMatch(/hadron_token/);
     const row = await db.freshSignIn.findFirstOrThrow({ where: { userId: alice } });
     expect(row).toMatchObject({ method: 'github', browserNonceHash: h(s.cookie.split('=')[1]) });
     expect(row.confirmedAt).not.toBeNull();
@@ -184,6 +206,24 @@ describe('GitHub leg', () => {
     expect((await confirm(undefined, a.cookie)).status).toBe(403);
     expect((await confirm('A'.repeat(43), a.cookie)).status).toBe(403);
     expect((await db.freshSignIn.findFirstOrThrow({ where: { userId: alice } })).confirmedAt).toBeNull();
+  });
+
+  it('an IdP leg id offered in the form, not its cookie, confirms nothing (no URL or form fallback)', async () => {
+    const s = await startGithub();
+    const leg = legOf(await callback(s.state));
+    expect((await confirmEmail(leg, s.cookie)).status).toBe(403);
+    // ...nor with some other leg cookie alongside it: the form is only ever the email channel.
+    expect((await confirmEmail(leg, `${s.cookie}; hadron_ceremony_leg=${'B'.repeat(43)}`)).status).toBe(403);
+    expect((await db.freshSignIn.findFirstOrThrow({ where: { userId: alice } })).confirmedAt).toBeNull();
+    expect((await confirm(leg, s.cookie)).status).toBe(200);
+  });
+
+  it('clears the leg cookie even when the confirm is refused', async () => {
+    const s = await startGithub();
+    const leg = legOf(await callback(s.state));
+    const r = await confirm(leg, 'hadron_ceremony_browser=someone-else');
+    expect(r.status).toBe(403);
+    expect(r.headers.get('set-cookie')).toMatch(/^hadron_ceremony_leg=;.*Path=\/passkeys\/sign-in\/confirm/i);
   });
 
   it('confirm refuses a cross-origin or Origin-less POST even with both halves', async () => {
@@ -254,7 +294,7 @@ describe('Google leg (R154: re-authentication requested and verified)', () => {
     const { authorize, cb, cookie } = await idpLeg('google');
     expect(authorize.searchParams.get('max_age')).toBe('0');
     expect(cb.status).toBe(303);
-    expect(cb.headers.get('set-cookie')).toBeNull();
+    expect(cb.headers.get('set-cookie')).not.toMatch(/hadron_token/);
     expect((await confirm(legOf(cb), cookie)).status).toBe(200);
     expect(await db.freshSignIn.findFirstOrThrow({ where: { userId: u.id } })).toMatchObject({ method: 'google' });
   });
@@ -337,7 +377,7 @@ describe('email leg', () => {
 
     const pageR = await realFetch(`${base}/passkeys/sign-in/email/verify?token=${token}`);
     expect(pageR.status).toBe(200);
-    expect(pageR.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(pageR.headers.get('referrer-policy')).toBe('same-origin');
     expect(await db.freshSignIn.findFirstOrThrow({ where: { userId: carol.id } })).toMatchObject({ signedInAt: null, confirmedAt: null });
 
     // The ordinary magic-link route never sees this token, so it can't become a session (Option-C included).
@@ -345,8 +385,10 @@ describe('email leg', () => {
     expect(login.status).toBe(400);
     expect(login.headers.get('set-cookie') ?? '').not.toMatch(/hadron_token/);
 
-    expect((await confirm(token, 'hadron_ceremony_browser=someone-else')).status).toBe(403);
-    expect((await confirm(token, cookie)).status).toBe(200);
+    expect((await confirmEmail(token, 'hadron_ceremony_browser=someone-else')).status).toBe(403);
+    // An emailed token is never accepted in the leg cookie's place.
+    expect((await confirm(token, cookie)).status).toBe(403);
+    expect((await confirmEmail(token, cookie)).status).toBe(200);
     const row = await db.freshSignIn.findFirstOrThrow({ where: { userId: carol.id } });
     expect(row.method).toBe('email');
     expect(row.signedInAt).not.toBeNull();
@@ -374,6 +416,6 @@ describe('switch off', () => {
     vi.stubEnv('PASSKEY_REGISTRATION_ENABLED', 'false');
     await boot();
     expect((await startGithub()).status).toBe(404);
-    expect((await realFetch(`${base}/passkeys/sign-in/confirm?leg=${'a'.repeat(43)}`)).status).toBe(404);
+    expect((await realFetch(`${base}/passkeys/sign-in/confirm`)).status).toBe(404);
   });
 });

@@ -76,8 +76,9 @@ export async function managesApp(
  * Agent-side twin of {@link managesApp}, shared by the boot-prompt pointer
  * writer and S9's Agent compile so the two cannot drift:
  *
- *   - a user-owned Agent: its owner, and nobody else (spec 047 strict
- *     ownership; no platform arm, matching managesApp's user-owned branch);
+ *   - a user-owned Agent: its owner, or a platform ADMIN / OWNER (cor:dmo:050:13,
+ *     "for any Agent, platform admins", #2206 / #1787; unlike an App, a rogue
+ *     personal Agent must be reachable to shut down);
  *   - an org-owned Agent: a live ADMIN / OWNER of its org, or a platform
  *     ADMIN / OWNER (#7790, managesApp's org branch).
  *
@@ -92,9 +93,11 @@ export async function managesAgent(
 ): Promise<boolean> {
   if (!ctx.userId || ctx.impersonation) return false;
   // Branch on the ownership CLASS first (findings:org-xor-owner-null-comparison-bypass).
+  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) {
+    if (agent.ownerUserId !== null || agent.organizationId !== null) return true;
+  }
   if (agent.ownerUserId !== null) return ctx.userId === agent.ownerUserId;
   if (agent.organizationId === null) return false;
-  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
   const admin = await ctx.db.orgMember.findFirst({
     where: {
       organizationId: agent.organizationId,
