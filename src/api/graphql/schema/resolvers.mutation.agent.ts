@@ -1,4 +1,5 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { includeHistoryClient, withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { refuseLegacyBaseUrl, requireEndpointFor, requireKeyFor, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
 import { testAiServiceConfig, type AiConfigTestOverride } from '../../../controller/operations/testAiServiceConfig.js';
@@ -917,7 +918,7 @@ export const agentMutations = {
         // An exclusive authority bracket prevents two deleters from upgrading
         // the same SHARE row locks concurrently. Memory precedes Agent, as in
         // publication/attachment; set-base and install/import writers share Agent.
-        lockMode: 'exclusive', allowDeletedMemory: true,
+        fence: true, lockMode: 'exclusive', allowDeletedMemory: true,
         afterLock: async tx => {
           if (agent.systemMemoryId) {
             await tx.$queryRaw`SELECT id FROM memories WHERE id = ${agent.systemMemoryId} FOR UPDATE`;
@@ -944,8 +945,9 @@ export const agentMutations = {
       const { id } = agent;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const baseId = baseRef ? (await resolveAgentRef(ctx.db, baseRef)).id : null;
-      await ctx.db.$transaction((tx) =>
-        writeAgentBase(tx, {
+      // #2046 S9-3: the include-history fence FIRST, before the base-graph lock (the compile's order).
+      await withIncludeHistoryTransaction(ctx.db, (fence) =>
+        writeAgentBase(includeHistoryClient(fence), {
           childId: id,
           childRef: ref,
           baseId,
@@ -1106,7 +1108,7 @@ export const agentMutations = {
         (tx) => ensureAgentOrgGrant(tx, resolvedOrgId, resolvedAgentId, {
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         }),
-        { afterLock: async (tx) => {
+        { fence: true, afterLock: async (tx) => {
           await tx.$queryRaw`SELECT id FROM agents WHERE id = ${resolvedAgentId} FOR SHARE`;
         } },
       );
@@ -1191,7 +1193,7 @@ export const agentMutations = {
             where: { orgId_agentId: { orgId: resolvedOrgId, agentId: resolvedAgentId } },
           });
         },
-        { lockMode: 'exclusive', afterLock: async (tx) => {
+        { fence: true, lockMode: 'exclusive', afterLock: async (tx) => {
           await tx.$queryRaw`SELECT id FROM agents WHERE id = ${resolvedAgentId} FOR SHARE`;
         } },
       );
@@ -1334,7 +1336,7 @@ export const agentMutations = {
             revokedBy: ctx.userId ?? null,
           },
         }),
-        { lockMode: 'exclusive' },
+        { fence: true, lockMode: 'exclusive' },
       );
 
       // FR-029: empty per-user Memory at revocation time → hard-delete. The

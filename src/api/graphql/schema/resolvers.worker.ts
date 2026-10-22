@@ -13,6 +13,7 @@
 // (`roles:<role>` nodes, `data.names`), read at CASTING time — and only when
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
+import { includeHistoryClient, withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { normalizeFamily } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
@@ -1025,7 +1026,9 @@ export const workerMutations = {
   ) => {
     const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
     await requireWorkerStaffAccess(ctx, app);
-    await ctx.db.$transaction(async (tx) => {
+    // #2046 S9-3: the include-history fence FIRST (the compile's order), then the stop fence and the rest.
+    await withIncludeHistoryTransaction(ctx.db, async (fence) => {
+      const tx = includeHistoryClient(fence);
       // #2022: the stop fence, exclusive, before the graph lock (src/lib/stopSignals/state.ts): a retired worker
       // leaves every stop signal's coverage, recorded below.
       await lockStopFence(tx, worker.appId, 'exclusive');
