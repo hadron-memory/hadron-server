@@ -1,3 +1,4 @@
+import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
 import { assertBootPromptWriteAllowed, assertNoBootPromptRows } from '../lib/bootPrompt.js';
 import { sessionEndReason } from '../lib/sessionEndReason.js';
@@ -1491,11 +1492,17 @@ async function loadCurrentReadProjection(
   auth: AuthContext,
   readViaMemoryId: string = authorizedMemoryId,
 ): Promise<ReadProjectionNode | null> {
-  return withReconciledNodeRead(db, nodeId, authorizedMemoryId, async (tx) => {
-    const user = auth.userId ? await tx.user.findUnique({ where: { id: auth.userId }, select: { roles: true, deletedAt: true } }) : null;
-    if (auth.userId && (!user || user.deletedAt)) return false;
-    const freshAuth = { ...auth, roles: auth.impersonation ? [] : user ? user.roles : auth.roles };
-    return canReadMemory(tx as unknown as typeof db, freshAuth, readViaMemoryId, EXPLICIT_REF);
+  return withReconciledNodeRead(db, nodeId, authorizedMemoryId, async (tx, mayReconcile) => {
+    let fresh: Context;
+    try {
+      fresh = await (mayReconcile ? liveTxContext : liveReadSnapshotContext)({ ...auth, db }, tx);
+    } catch (error) {
+      // Credential/actor refusal is concealed like an unreadable memory. DB
+      // faults and transaction-mode errors remain errors, never "not found".
+      if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return false;
+      throw error;
+    }
+    return canReadMemory(tx as unknown as typeof db, { ...auth, roles: fresh.roles }, readViaMemoryId, EXPLICIT_REF);
   }, async (tx) => {
     return tx.node.findFirst({
       where: { id: nodeId, deletedAt: null },
