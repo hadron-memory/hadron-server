@@ -2752,7 +2752,8 @@ export function memoryWriteForbidden(): GraphQLError {
 }
 
 export const MEMORY_INCLUDE = {
-  subscriptions: { include: { organization: true }, orderBy: { createdAt: 'asc' as const } },
+  // #2238: live rows only, matching ORG_INCLUDE.subscriptions.
+  subscriptions: { where: { deletedAt: null }, include: { organization: true }, orderBy: { createdAt: 'asc' as const } },
 };
 
 export const AGENT_INCLUDE = {
