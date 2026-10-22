@@ -146,6 +146,17 @@ describe('the writer can only add an include it can read (cor:dmo:150:04)', () =
     expect(updated).toContain('[include_target_unavailable]');
     expect(await contentOf('m2')).toBe('plain');
   });
+
+  it('an MCP section re-save that adds an unreadable tag refuses, storing nothing (Ruth, #2226 P3)', async () => {
+    await mcp().callToolText('hadron_create_parent_node', { urn: urn('sec'), description: 'plain section' });
+    const before = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'sec' } });
+    const resaved = await mcp().callToolText('hadron_create_parent_node', { urn: urn('sec'), description: `plain section ${secret()}` });
+    expect(resaved).toContain('[include_target_unavailable]');
+    const after = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'sec' } });
+    expect(after.content).toBe('plain section');
+    expect(after.revSeq).toBe(before.revSeq);
+    expect(await includeTargets('sec')).toEqual([]);
+  });
 });
 
 describe('only added or changed tags are checked (R110)', () => {
