@@ -11,7 +11,7 @@
  * SC-004 (backfill), SC-008 (no vector index).
  */
 
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
@@ -21,7 +21,8 @@ import {
   setEmbeddingClientForTests,
   resetEmbeddingClientForTests,
 } from '../../lib/embedding/index.js';
-import { embedNode, drainEmbeddingQueue } from '../../jobs/embedNodes.js';
+import { embedNode, drainEmbeddingQueue, embeddingDispatcher } from '../../jobs/embedNodes.js';
+import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { enqueueNodeEmbedding, backfillMemoryEmbeddings } from '../../services/embedding/enqueue.js';
 import { vectorSearchNodes } from '../../services/embedding/vectors.js';
 
@@ -71,6 +72,7 @@ async function makeNode(memoryId: string, loc: string, abstract: string): Promis
   const n = await db.node.create({
     data: { id: generateId(), memoryId, loc, name: loc, abstract, content: `body of ${loc}` },
   });
+  await db.$transaction(tx => stampEmbeddingObligation(tx, n.id, memoryId));
   return n.id;
 }
 
@@ -87,6 +89,14 @@ beforeEach(async () => {
 afterAll(() => {
   resetEmbeddingClientForTests();
   delete process.env.EMBEDDING_API_URL;
+});
+
+afterEach(async () => {
+  await vi.waitFor(() => {
+    const state = embeddingDispatcher(db).state();
+    expect(state.active).toBe(0);
+    expect(state.selecting || state.scheduled).toBe(false);
+  });
 });
 
 describe('SC-001 — semantic vector retrieval', () => {
@@ -120,6 +130,7 @@ describe('SC-001 — semantic vector retrieval', () => {
     setEmbeddingClientForTests(stubClient({}));
     const id = await makeNode(memId, 'n1', 'some abstract text');
     await embedNode(db, id);
+    await db.$transaction(tx => stampEmbeddingObligation(tx, id, memId));
     await embedNode(db, id); // re-embed
     const rows = await db.$queryRaw<{ c: bigint }[]>`
       SELECT COUNT(*)::bigint AS c FROM node_embeddings WHERE node_id = ${id} AND kind = 'abstract'`;
@@ -150,11 +161,9 @@ describe('SC-002 — write is non-blocking', () => {
     const started = new Promise<void>((resolve) => {
       markStarted = resolve;
     });
-    // Never settles, deliberately: releasing it would let `embedNode` finish
-    // asynchronously and write into the next test's `cleanDb`. Parked before
-    // any write, it holds no transaction and no connection, so leaving it is
-    // the cheaper end — the drain simply never completes.
-    const parked = new Promise<number[][]>(() => {});
+    // Release and drain in finally: no admitted work may escape this fixture.
+    let release!: () => void;
+    const parked = new Promise<number[][]>(resolve => { release = () => resolve([oneHot(0)]); });
     setEmbeddingClientForTests({
       provider: 'test',
       model: 'stub-model',
@@ -169,14 +178,17 @@ describe('SC-002 — write is non-blocking', () => {
     await enqueueNodeEmbedding(db, {
       nodeId: id,
       memoryId: memId,
+      workToken: (await db.node.findUniqueOrThrow({ where: { id } })).embeddingWorkToken,
       plaintext: { content: 'c', abstract: 'abstract' },
     });
 
     // The drain has entered `embed()` and is stuck there — so the marker cannot
     // have been cleared, whatever the scheduler did.
-    await started;
-    const node = await db.node.findUniqueOrThrow({ where: { id }, select: { embeddingPendingAt: true } });
-    expect(node.embeddingPendingAt).not.toBeNull();
+    try {
+      await started;
+      const node = await db.node.findUniqueOrThrow({ where: { id }, select: { embeddingPendingAt: true } });
+      expect(node.embeddingPendingAt).not.toBeNull();
+    } finally { release(); }
   });
 });
 
@@ -189,15 +201,18 @@ describe('SC-003 — embedding failure is durable and recoverable', () => {
     // First drain fails (stub throws once). retryBaseMs 0 ⇒ the backoff
     // reschedule is immediately due, so the second drain picks it up.
     setEmbeddingClientForTests(stubClient({ [text]: oneHot(5) }, { failTimes: 1 }));
-    await drainEmbeddingQueue(db, { batchSize: 10, retryBaseMs: 0 });
+    await drainEmbeddingQueue(db, { batchSize: 10 });
     let node = await db.node.findUniqueOrThrow({ where: { id } });
     expect(node.embeddingFailedAt).not.toBeNull();
     expect(node.embeddingAttempts).toBe(1);
     expect(node.embeddingPendingAt).not.toBeNull(); // still queued (not lost)
 
+    // Make the backed-off obligation due, then let bounded admission recover it.
+    await db.node.update({ where: { id }, data: { embeddingPendingAt: new Date(0) } });
     // Second drain succeeds → embedded, markers cleared.
     setEmbeddingClientForTests(stubClient({ [text]: oneHot(5) }));
     await drainEmbeddingQueue(db, { batchSize: 10 });
+    await vi.waitFor(async () => expect((await db.node.findUniqueOrThrow({ where: { id } })).embeddingPendingAt).toBeNull());
     node = await db.node.findUniqueOrThrow({ where: { id } });
     expect(node.embeddingPendingAt).toBeNull();
     expect(node.embeddingFailedAt).toBeNull();
@@ -235,14 +250,16 @@ describe('SC-003 — embedding failure is durable and recoverable', () => {
 
     // Still fails once more → attempts keeps counting, node stays queued.
     setEmbeddingClientForTests(stubClient({ [text]: oneHot(9) }, { failTimes: 1 }));
-    await drainEmbeddingQueue(db, { batchSize: 10, retryBaseMs: 0 });
+    await drainEmbeddingQueue(db, { batchSize: 10 });
     let node = await db.node.findUniqueOrThrow({ where: { id } });
     expect(node.embeddingAttempts).toBe(10);
     expect(node.embeddingPendingAt).not.toBeNull(); // NOT dropped from the queue
 
     // Endpoint recovers → the node embeds.
+    await db.node.update({ where: { id }, data: { embeddingPendingAt: new Date(0) } });
     setEmbeddingClientForTests(stubClient({ [text]: oneHot(9) }));
     await drainEmbeddingQueue(db, { batchSize: 10 });
+    await vi.waitFor(async () => expect((await db.node.findUniqueOrThrow({ where: { id } })).embeddingPendingAt).toBeNull());
     node = await db.node.findUniqueOrThrow({ where: { id } });
     expect(node.embeddingPendingAt).toBeNull();
     expect(node.embeddingFailedAt).toBeNull();

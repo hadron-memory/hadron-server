@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /**
  * #719 — the `where` predicate composed with vector / hybrid ranking. Uses the
  * hermetic stub embedder (033 pattern): both seed nodes embed near the query, so
@@ -41,7 +42,7 @@ let memId: string;
 async function seedNode(loc: string, abstract: string, properties: Record<string, unknown>) {
   const id = generateId();
   await db.node.create({
-    data: { id, memoryId: memId, loc, name: loc, abstract, properties, embeddingPendingAt: new Date() } as any,
+    data: { id, memoryId: memId, loc, name: loc, abstract, properties, embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date() } as any,
   });
   expect(await embedNode(db, id, { abstract })).toBe('embedded');
 }

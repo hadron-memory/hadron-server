@@ -1,5 +1,6 @@
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
+import { stampEmbeddingObligation } from '../services/embedding/obligation.js';
 import { assertBootPromptWriteAllowed, assertNoBootPromptRows } from '../lib/bootPrompt.js';
 import { sessionEndReason } from '../lib/sessionEndReason.js';
 import { governedKindAnnotation } from '../lib/edgeGovernedKind.js';
@@ -6323,6 +6324,7 @@ export function createMcpServerInstance(
             if (edgeError) throw new InlineEdgeEndpointError(edgeError);
           }
           await applyIncludesInTransaction(tx, written, content ?? null, auth, null);
+          written.embeddingWorkToken = await stampEmbeddingObligation(tx, written.id, written.memoryId);
           return written;
         });
       } catch (e) {
@@ -6377,6 +6379,7 @@ export function createMcpServerInstance(
       // `content`/`normalizedAbstract` are plaintext here.
       void enqueueNodeEmbedding(db, {
         nodeId: upserted.id,
+        workToken: upserted.embeddingWorkToken,
         memoryId,
         plaintext: { content: content ?? null, abstract: normalizedAbstract },
       });
@@ -6744,6 +6747,10 @@ export function createMcpServerInstance(
               if (edgeError) throw new InlineEdgeEndpointError(edgeError);
             }
             if (content !== undefined) await applyIncludesInTransaction(tx, updated, content, auth, (currentForDiff.content as string | null) ?? null);
+            existing.embeddingWorkToken = await stampEmbeddingObligation(tx, updated.id, updated.memoryId);
+            const embeddedPlaintext = updKey ? decryptNodeFieldsWithKey({ ...updated }, updKey) : updated;
+            existing.content = embeddedPlaintext.content;
+            existing.abstract = embeddedPlaintext.abstract;
           });
         } catch (e) {
           if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
@@ -6786,6 +6793,7 @@ export function createMcpServerInstance(
       if (content !== undefined || normalizedAbstract !== undefined) {
         void enqueueNodeEmbedding(db, {
           nodeId: existing.id,
+          workToken: existing.embeddingWorkToken,
           memoryId: existing.memoryId,
           plaintext: {
             content: content !== undefined ? content : existing.content,

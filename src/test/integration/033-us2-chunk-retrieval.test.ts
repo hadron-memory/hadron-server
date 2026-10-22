@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /**
  * 033-rag-vector-retrieval US2 — content-chunk retrieval (SC-005).
  *
@@ -124,7 +125,7 @@ async function seedNodeWithChunks(loc: string, content: string): Promise<string>
       loc,
       name: loc,
       content,
-      embeddingPendingAt: new Date(),
+      embeddingPendingAt: new Date(), embeddingWorkToken: randomUUID(),
     },
   });
   const outcome = await embedNode(db, nodeId);
@@ -218,7 +219,7 @@ describe('US2 — chunk-level retrieval (SC-005)', () => {
       where: { id: nodeId },
       data: {
         content: '# X\nedited first.\n\n## Y\nedited second.\n\n## Z\nedited third.',
-        embeddingPendingAt: new Date(),
+        embeddingPendingAt: new Date(), embeddingWorkToken: randomUUID(),
       },
     });
     const outcome = await embedNode(db, nodeId);
@@ -247,7 +248,7 @@ describe('US2 — chunk-level retrieval (SC-005)', () => {
         name: 'dual-indexed',
         abstract: 'A short summary.',
         content: '# Section 1\nbody one\n\n## Section 2\nbody two',
-        embeddingPendingAt: new Date(),
+        embeddingPendingAt: new Date(), embeddingWorkToken: randomUUID(),
       },
     });
     await embedNode(db, nodeId);
