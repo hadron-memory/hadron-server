@@ -54,7 +54,8 @@ export function boundWorkerId(): string | null {
   return currentActor().workerId ?? syncCallerScope.getStore()?.workerId ?? null;
 }
 
-function inCompileScope(): boolean {
+/** Whether the caller is inside {@link withCompileWrite}: the compile, and nothing a request can reach. */
+export function inCompileScope(): boolean {
   return compileScope.getStore() === true;
 }
 

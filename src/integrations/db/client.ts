@@ -14,6 +14,8 @@ import { ATTRIBUTED_NODE_FIELDS } from '../../lib/nodeRevisionSnapshot.js';
 // 667-webfetch-polling: WebFetchPollBinding (jobId is the PK).
 // durable-login-state: PendingLoginState (the OAuth `state` is the PK).
 const MODELS_WITHOUT_ID = new Set<string>([
+  // #2046 — keyed by (compiled node, compiled revision).
+  'CompiledPromptRevision',
   'AgentSubscription',
   'WorkerReferenceFence',
   'ManualAutomationPin',

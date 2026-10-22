@@ -1405,6 +1405,8 @@ model Node {
   pendingEdges             PendingEdge[]
   usageEvents              UsageEvent[]
   revisions                NodeRevision[]
+  /// #2046 (S9): the immutable provenance of each compiled revision of this node.
+  compiledPromptRevisions  CompiledPromptRevision[]
   /// #1606 — present iff `nodeType = 'comment'` (deferred DB trigger).
   commentMeta              CommentMeta?                  @relation("CommentMetaNode")
   /// #1606 — the comments (top-level and replies) whose target is this node.
@@ -2547,6 +2549,37 @@ model EmailVerificationToken {
 
   @@index([email])
   @@map("email_verification_tokens")
+}
+
+/// #2046 (S9, R38): the immutable provenance of ONE compiled boot-prompt
+/// revision, written by the compile in the same transaction as that revision.
+/// Keyed by the revision, not the node: a recompile inserts a new row and never
+/// rewrites an older one (an UPDATE is refused at the SQL layer). It records
+/// what the compile selected (the root source and every include or replacing
+/// node, each as {nodeId, revNo, hash} with its effective selection settings and
+/// its place in the expansion), never copied source text, names or titles. The
+/// live compiled-from edge is a derived index of the LATEST compile; this row,
+/// read through readCompiledRevision, is the authority for a given revision.
+/// Operational state: excluded from revisions, approval and content hashes.
+model CompiledPromptRevision {
+  compiledNodeId  String   @map("compiled_node_id")
+  compiledRevNo   Int      @map("compiled_rev_no")
+  /// SHA-256 hex of the compiled text this revision holds.
+  contentHash     String   @map("content_hash")
+  /// AGENT | APP_AGENT | WORKER: the target this revision was compiled for.
+  targetKind      String   @map("target_kind")
+  targetAgentId   String   @map("target_agent_id")
+  targetAppId     String?  @map("target_app_id")
+  targetWorkerId  String?  @map("target_worker_id")
+  /// CompiledProvenance (src/lib/bootCompile/provenance.ts).
+  provenance      Json
+  occurrenceCount Int      @map("occurrence_count")
+  compiledBy      String?  @map("compiled_by")
+  createdAt       DateTime @default(now()) @map("created_at")
+  compiledNode    Node     @relation(fields: [compiledNodeId], references: [id], onDelete: Cascade)
+
+  @@id([compiledNodeId, compiledRevNo])
+  @@map("compiled_prompt_revisions")
 }
 
 /// A versioned snapshot of a Node's content. Written every time a
