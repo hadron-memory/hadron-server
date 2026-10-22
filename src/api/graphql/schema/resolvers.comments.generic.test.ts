@@ -165,6 +165,8 @@ describe('a target\'s lifecycle carries its threads (cor:dmo:110:02/05)', () => 
     const c = await comment(target.id);
     const sys = await resolvers.Mutation.createMemory(null, { orgId, name: 'sys-dest' }, as());
     await db.memory.update({ where: { id: sys.id }, data: { class: 'system', visibility: null } });
+    // #2206: a system memory is written as a live Agent's definition, by whoever manages that Agent.
+    await db.agent.create({ data: { id: generateId(), name: 'Sys Agent', urn: `${sys.urn}-agent`, organizationId: orgId, systemMemoryId: sys.id } });
     await M.moveNode(null, { sourceRef: target.id, targetUrn: nodeUrn(sys, 'mv:sys') }, as());
     expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).memoryId).toBe(sys.id);
   });

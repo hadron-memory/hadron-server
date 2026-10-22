@@ -70,6 +70,7 @@
 // An App the caller does not participate in reads exactly like an absent one:
 // APP_NOT_FOUND (#1713 review, Rook P3-1; the resolvePilotApp posture).
 
+import { normalizeFamily } from '../../../lib/agentTasks/family.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { type Context, isAppParticipant, clampListTake, withoutRequestCaches } from './resolvers.helpers.js';
@@ -552,8 +553,15 @@ async function normalizeRequirements(
     if (out.some((x) => x.length > 64)) throw badInput(`An entry of ${field} is longer than 64 characters.`);
     return out.length ? out : null;
   };
-  const familyIn = list(input.familyIn, 'requirements.familyIn');
-  const familyNotIn = list(input.familyNotIn, 'requirements.familyNotIn');
+  const families = (xs: string[] | null | undefined, field: string) => {
+    const values = list(xs, field);
+    if (!values) return null;
+    const canonical = values.map(normalizeFamily);
+    if (canonical.some((f) => f === null)) throw badInput(`${field} entries must be model family tokens (letters, digits, ".", "_" or "-").`);
+    return [...new Set(canonical as string[])];
+  };
+  const familyIn = families(input.familyIn, 'requirements.familyIn');
+  const familyNotIn = families(input.familyNotIn, 'requirements.familyNotIn');
   if (familyIn && familyNotIn) throw badInput('Name familyIn or familyNotIn, not both.');
   const excludeRefs = list(input.excludeWorkers, 'requirements.excludeWorkers');
   let excludeWorkerIds: string[] | null = null;

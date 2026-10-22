@@ -6,21 +6,25 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { FULL, READ, WRITE, type GrantWithCaps } from '@hadron-memory/access-control';
 import { resolveUserApps } from '../../auth/user-app-resolution.js';
-import { getAppMemoryAccess } from '../../mcp/access-control.js';
+import { getAppMemoryAccess, participantSystemMemoryFolds } from '../../mcp/access-control.js';
 import { getManagedSystemMemoryIds } from './managedSystemMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
+import { installMemoryAudience, isInstallMemoryRow } from './installMemory.js';
 
 export async function systemMemoryReadGrants(
   db: PrismaClient,
-  principal: { userId?: string | null; roles?: readonly string[]; impersonation?: { orgId: string } | null },
+  principal: { userId?: string | null; roles?: readonly string[]; impersonation?: { orgId: string } | null; clientId?: string | null },
   memoryId: string,
 ): Promise<GrantWithCaps[]> {
   if (!principal.userId) return [];
   const memory = await db.memory.findFirst({
     where: { id: memoryId, class: 'system', deletedAt: null },
-    select: { organizationId: true, ownerUserId: true },
+    select: { id: true, class: true, organizationId: true, ownerUserId: true, appId: true, installOfAgentId: true, isInstallMemory: true },
   });
   if (!memory) return [];
+  // #2044: an App's INSTALL MEMORY has no Agent pointing at it; it takes its own
+  // arm (installMemory.ts), and nothing below widens for an Agent's own memory.
+  if (isInstallMemoryRow(memory)) return installMemoryGrants(db, principal, memory);
   const agent = await db.agent.findFirst({
     where: { systemMemoryId: memoryId, deletedAt: null },
     select: { organizationId: true, ownerUserId: true },
@@ -76,6 +80,44 @@ export async function systemMemoryReadGrants(
       db.appMember.findUnique({ where: { appId_userId: { appId: app.id, userId: principal.userId } }, select: { role: true } }),
     ]);
     grants.push({ source: 'APP_MEMBER', role: member?.role ?? 'member', via: row?.urn ?? app.id, caps: READ });
+  }
+  // #2206 case 3: every App the user participates in (a member, an org CONTRIBUTOR+) where this Agent is installed and
+  // licensed, not only through its first-installed Agent; the same fold the content gate reads.
+  const appVia = new Set(grants.filter((g) => g.source === 'APP_MEMBER').map((g) => g.via));
+  for (const { appId } of (await participantSystemMemoryFolds(db, principal)).filter(({ map }) => map.has(memoryId))) {
+    const row = await db.app.findUnique({ where: { id: appId }, select: { urn: true } });
+    if (appVia.has(row?.urn ?? appId)) continue;
+    grants.push({ source: 'APP_MEMBER', role: 'participant', via: row?.urn ?? appId, caps: READ });
+  }
+  return grants;
+}
+
+/**
+ * #2044: the grants on an install memory. Content (`read`) is the live App's
+ * participants; a manager adds the delete (R45) and, while the App is live with
+ * the Agent installed, the write. A manager of a soft-deleted App holds a grant
+ * with NO read cap: the record is findable and deletable, never readable.
+ */
+async function installMemoryGrants(
+  db: PrismaClient,
+  principal: { userId?: string | null; roles?: readonly string[]; impersonation?: { orgId: string } | null },
+  memory: { id: string; class: string; appId: string | null; installOfAgentId: string | null; isInstallMemory: boolean; organizationId: string | null; ownerUserId: string | null },
+): Promise<GrantWithCaps[]> {
+  const audience = await installMemoryAudience(db, principal, memory);
+  if (!audience.record) return [];
+  const [app, member] = await Promise.all([
+    db.app.findUnique({ where: { id: memory.appId! }, select: { urn: true } }),
+    principal.userId
+      ? db.appMember.findUnique({ where: { appId_userId: { appId: memory.appId!, userId: principal.userId } }, select: { role: true } })
+      : null,
+  ]);
+  const grants: GrantWithCaps[] = [];
+  if (audience.read) grants.push({ source: 'APP_MEMBER', role: member?.role ?? 'member', via: app?.urn ?? memory.appId, caps: READ });
+  if (audience.delete) {
+    grants.push({
+      source: 'MEMORY_PRINCIPAL', role: 'app-manager', via: app?.urn ?? memory.appId,
+      caps: { read: false, write: audience.write, manage: false, delete: true },
+    });
   }
   return grants;
 }

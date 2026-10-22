@@ -123,6 +123,6 @@ describe('the guard allows the erasure and nothing else', () => {
 
   it('the newest migration carries the shared guard verbatim', () => {
     const guard = readFileSync('prisma/passkey-invariants.sql', 'utf8');
-    expect(readFileSync('prisma/migrations/20261021110000_passkey_erasure/migration.sql', 'utf8').endsWith(guard)).toBe(true);
+    expect(readFileSync('prisma/migrations/20261022020000_passkey_erasure/migration.sql', 'utf8').endsWith(guard)).toBe(true);
   });
 });

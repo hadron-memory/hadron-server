@@ -164,7 +164,7 @@ describe('GitHub leg', () => {
     expect(cb.status).toBe(303);
     // The leg id never rides a URL: only the Strict cookie scoped to the confirm path carries it.
     expect(cb.headers.get('location')).toBe('/passkeys/sign-in/confirm');
-    expect(cb.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(cb.headers.get('referrer-policy')).toBe('same-origin');
     const legCookie = cb.headers.get('set-cookie')!;
     expect(legCookie).toMatch(/^hadron_ceremony_leg=[A-Za-z0-9_-]{43};/);
     expect(legCookie).toMatch(/HttpOnly/i);
@@ -177,7 +177,7 @@ describe('GitHub leg', () => {
 
     const pageR = await realFetch(`${base}/passkeys/sign-in/confirm`);
     expect(pageR.status).toBe(200);
-    expect(pageR.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(pageR.headers.get('referrer-policy')).toBe('same-origin');
     expect(pageR.headers.get('x-frame-options')).toBe('DENY');
     const html = await pageR.text();
     expect(html).not.toContain(leg);
@@ -377,7 +377,7 @@ describe('email leg', () => {
 
     const pageR = await realFetch(`${base}/passkeys/sign-in/email/verify?token=${token}`);
     expect(pageR.status).toBe(200);
-    expect(pageR.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(pageR.headers.get('referrer-policy')).toBe('same-origin');
     expect(await db.freshSignIn.findFirstOrThrow({ where: { userId: carol.id } })).toMatchObject({ signedInAt: null, confirmedAt: null });
 
     // The ordinary magic-link route never sees this token, so it can't become a session (Option-C included).

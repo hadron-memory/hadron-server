@@ -116,7 +116,7 @@ export type GovernedMerge = 'data' | 'properties';
  * extract is not completed by editing one node. Omitted means "offer no
  * route": the safe default for any caller not listed here.
  */
-export type GovernedContext = 'node-write' | 'restore' | 'bulk';
+export type GovernedContext = 'node-write' | 'restore' | 'node-restore' | 'bulk';
 
 export interface GovernedRefusalOptions {
   merge?: GovernedMerge;
@@ -542,7 +542,9 @@ export class RoleGovernedError extends GraphQLError {
     const onMcp = surface === 'mcp';
     // RESTORE first: whatever kinds the node carries, the reason nothing can
     // do it is that no door restores (@copilot, PR #1305 round 12).
-    const message = context === 'restore'
+    const message = context === 'node-restore'
+      ? `This node is governed (${entry.kind}); generic restore cannot restore it. Its deletion state is unchanged.`
+      : context === 'restore'
       ? // Not `base`: "only updateX may update" is not a route to a RESTORE.
         `${act}, and no door restores a revision: a governed node's history cannot be restored through any surface yet (tracked with deletes in #1204). ${tail}`
       : multi
@@ -567,11 +569,11 @@ export class RoleGovernedError extends GraphQLError {
         code: 'ROLE_GOVERNED',
         kind: entry.kind,
         strength: entry.strength,
-        door,
-        // Only where the message offers it (see `routable`). `door` is the
-        // pre-existing field and keeps its meaning: the kind's GraphQL door.
+        door: context === 'node-restore' ? null : door,
+        // A route only where the operation can replay through it. A deleted-node
+        // restore names no update door, in metadata as well as in prose.
         mcpDoor: routable && onMcp ? mcpDoor : null,
-        op,
+        op: context === 'node-restore' ? 'restore' : op,
         refusal,
         ...(merge ? { merge } : {}),
         ...(multi ? { kinds: multi.map((k) => k.kind) } : {}),

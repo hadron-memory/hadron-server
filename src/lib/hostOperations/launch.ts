@@ -27,6 +27,7 @@
  * carries, stores or returns one: an operation names a worktree and a family.
  */
 
+import { normalizeFamily } from '../agentTasks/family.js';
 import { afterWaits, anchorNow, coveringSignals, lockStopFence } from '../stopSignals/state.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
@@ -60,7 +61,7 @@ export async function liveRegistrationsFor(
   now: Date,
   hostId?: string,
 ): Promise<{ hostId: string; family: string; worktrees: string[] }[]> {
-  return db.$queryRaw<{ hostId: string; family: string; worktrees: string[] }[]>`
+  const rows = await db.$queryRaw<{ hostId: string; family: string; worktrees: string[] }[]>`
     SELECT r.host_id AS "hostId", w.family, w.worktrees
     FROM host_registrations r
     JOIN host_registration_workers w ON w.registration_id = r.id AND w.worker_id = ${workerId}
@@ -69,6 +70,10 @@ export async function liveRegistrationsFor(
       ${hostId ? Prisma.sql`AND r.host_id = ${hostId}` : Prisma.empty}
       AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * COALESCE(s.host_lapse_check_ins, ${HOST_LAPSE_CHECK_INS_DEFAULT})) >= ${toNaiveUtc(now)}::timestamp
     ORDER BY r.host_id`;
+  return rows.flatMap((r) => {
+    const family = normalizeFamily(r.family);
+    return family ? [{ ...r, family }] : [];
+  });
 }
 
 /** Does the worker have a live session now (cor:agt:020:11, the roster's and the bind's one predicate)? */
@@ -157,7 +162,7 @@ export async function insertWorkerStart(
  */
 export async function launchForAssignment(
   db: PrismaClient,
-  a: { appId: string; taskId: string; workerId: string },
+  a: { appId: string; taskId: string; workerId: string; family?: string },
   now = new Date(),
   /** `now`'s monotonic half (`anchorNow`), when `now` came from a pass; by default taken here, beside `now`. */
   anchor: number = anchorNow(),
@@ -188,7 +193,7 @@ export async function launchForAssignment(
         throw e;
       }
       await fenceHostDecision(tx, a.appId);
-      const reg = (await liveRegistrationsFor(tx, a.appId, a.workerId, now)).find((r) => r.worktrees.length > 0);
+      const reg = (await liveRegistrationsFor(tx, a.appId, a.workerId, now)).find((r) => r.worktrees.length > 0 && (!a.family || r.family === normalizeFamily(a.family)));
       if (!reg) return null;
       return insertWorkerStart(tx, {
         appId: a.appId, hostId: reg.hostId, workerId: a.workerId, worktree: reg.worktrees[0]!, family: reg.family,

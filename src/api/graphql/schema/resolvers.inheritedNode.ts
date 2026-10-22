@@ -56,6 +56,8 @@ async function inheritedEdges(parent: { id: string; inheritedFrom?: InheritedFro
 
 /** Field → what an inherited node returns, given the field's normal value. */
 const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: any, ctx: any) => unknown> = {
+  // Ordinary inherited reads admit only live nodes; recovery never inherits.
+  deletedAt: none,
   memory: none,
   outgoingEdges: (_value, parent, ctx) => inheritedEdges(parent, ctx, 'out'),
   incomingEdges: (_value, parent, ctx) => inheritedEdges(parent, ctx, 'in'),
@@ -65,6 +67,7 @@ const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: a
   createdByAgent: none,
   updatedByWorker: none,
   updatedByAgent: none,
+  updatedByUser: none,
   asComment: none,
   asset: none,
   signingRequests: empty,

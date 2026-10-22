@@ -9,6 +9,7 @@ import { GraphQLError } from 'graphql';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
@@ -298,13 +299,9 @@ describe('#2102 proof policy after an actual worker wake-lock wait', () => {
     const pending = M.acknowledgeDeliveryBatches({}, { batchIds: [b.id] }, keyCtx(hostKey, app.id, { db: hooked }));
     try {
       await waiting;
-      // Observe a real blocked PostgreSQL advisory lock, not a timed sleep.
-      let blocked = false;
-      for (let i = 0; i < 100 && !blocked; i++) {
-        const rows = await db.$queryRaw<Array<{ waiting: boolean }>>`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())) AS waiting`;
-        blocked = rows[0]!.waiting;
-      }
-      expect(blocked).toBe(true);
+      // Observe a real blocked PostgreSQL advisory lock, not a timed sleep. A deterministic barrier (#2237): the old
+      // fixed 100-iteration poll gave up under host load before the writer queued, failing about 2 runs in 3.
+      await waitForLockWaitersOfType(db, 'advisory', 1);
       if (kind === 'register') await db.registerEntry.updateMany({ where: { attendeeWorkerId: kit.id }, data: { role: 'POST' } });
       else await db.memory.update({ where: { id: channel.memoryId }, data: { isEncrypted: true } });
     } finally { release(); await blocker; }
@@ -354,13 +351,12 @@ describe('#2102 register policy remains fenced after the deciding read', () => {
         : M.updateRegisterEntry({}, { ref: entry.id, input: { role: 'POST' } }, ctx(manager.id));
     const revoke = write.then(() => { committed = true; });
     try {
-      let blocked = false;
-      for (let i = 0; i < 100 && !blocked && !committed; i++) {
-        const rows = await db.$queryRaw<Array<{ waiting: boolean }>>`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())) AS waiting`;
-        blocked = rows[0]!.waiting;
-      }
+      // #2237: wait deterministically until the revoking write is blocked on the fence; a revoke that commits first
+      // without waiting fails the test outright instead of racing a fixed-length poll.
+      const bypassed = revoke.then(() => { throw new Error('the register write committed without waiting on the fence'); });
+      bypassed.catch(() => {}); // observed by the race below; never an unhandled rejection
+      await Promise.race([waitForLockWaitersOfType(db, 'advisory', 1), bypassed]);
       expect(committed).toBe(false);
-      expect(blocked).toBe(true);
     } finally { release(); await Promise.allSettled([pending, revoke]); }
     expect(await pending).toEqual({ acknowledged: 1, unchanged: 0 });
     expect(committed).toBe(true);

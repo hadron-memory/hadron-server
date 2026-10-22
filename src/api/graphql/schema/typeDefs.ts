@@ -1381,7 +1381,35 @@ export const typeDefs = `#graphql
     trigger: String
   }
 
+  "Explicit writer-only tombstone content; no generic entity relations. hrn:node:hadronmemory.com:specs:cor:dmo:010:04"
+  type RecoveryNode {
+    id: ID!
+    urn: String!
+    memoryId: ID!
+    loc: String!
+    name: String!
+    nodeType: String!
+    description: String
+    deletedAt: DateTime!
+    content: String
+  }
+  type RecoveryNodeSummary {
+    id: ID!
+    urn: String!
+    memoryId: ID!
+    loc: String!
+    name: String!
+    nodeType: String!
+    deletedAt: DateTime!
+  }
+  type RecoveryNodesPage { items: [RecoveryNodeSummary!]!, total: Int! }
+  type RecoveryEndpoint { id: ID!, urn: String!, loc: String!, name: String!, deletedAt: DateTime }
+  type RecoveryGraphEdge { id: ID!, name: String, source: RecoveryEndpoint!, target: RecoveryEndpoint! }
+  type RecoveryEdgesPage { items: [RecoveryGraphEdge!]!, total: Int! }
+
   type Node {
+    "Deletion marker. Ordinary reads still omit tombstones; explicit recovery is writer-only."
+    deletedAt: DateTime
     id: ID!
     "#1392 — warnings from a cross-memory move. Null on other Node reads; [] when a move changes no local content links. Raw content is preserved."
     moveLinkWarnings: [NodeMoveLinkWarning!]
@@ -1407,6 +1435,8 @@ export const typeDefs = `#graphql
     updatedByWorker: ActorRef
     "#1610 — the Agent behind the last authored edit; cleared like updatedByWorker."
     updatedByAgent: ActorRef
+    "#2176 - the User behind the last authored edit, as handle and URN only (the same projection as a revision's editedByUser, and always the user that revision records). Cleared like updatedByWorker: an authored edit with no user behind it (a system job, a git sync, an API key with no account) clears it. Null also for a deleted user and for nodes last edited before #2176, which are not backfilled."
+    updatedByUser: NodeRevisionEditor
     "#1606 — open and resolved discussion on this node (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Batched per request."
     commentSummary: CommentSummary!
     "#1608 — this node AS a comment (author, target, anchor revision, thread) when its nodeType is 'comment'; null for content. Lets a search hit render as feedback, never as content of its target (hrn:node:hadronmemory.com:specs:cor:dmo:110:08)."
@@ -1548,6 +1578,12 @@ export const typeDefs = `#graphql
     aiAgent: String
     createdAt: DateTime!
     updatedAt: DateTime!
+    """
+    #2193: this node's memory record, exactly as Query.memory answers it to the
+    caller, or null when the caller may not read that record (or it is
+    deleted). Seeing a node does not grant its memory's record, so use urn or
+    memoryId for the address. Always null on an inherited node.
+    """
     memory: Memory
     outgoingEdges: [Edge!]!
     incomingEdges: [Edge!]!
@@ -1582,9 +1618,9 @@ export const typeDefs = `#graphql
 
   type Edge {
     id: ID!
-    "The source node. NULLABLE (#781): null when the caller cannot read the source node's memory — a cross-memory edge (e.g. reached via incomingEdges) must not expose an endpoint in a memory the caller can't read. For a same-memory edge the caller can already see, this is always present."
+    "The live source node, or null when deleted or when its memory is unreadable. Cross-memory edges never grant access to an otherwise unreadable endpoint. Deleted-node inspection uses the explicit recovery graph."
     source: Node
-    "The target node. NULLABLE (#781): null when the caller cannot read the target node's memory (a cross-memory edge's far endpoint). For a same-memory edge, always present."
+    "The live target node, or null when deleted or when its memory is unreadable. Deleted-node inspection uses the explicit recovery graph."
     target: Node
     "Fully-qualified edge URN (hrn:edge:<root>:<memory>:<loc>), composed server-side from the edge's (source-side) memory URN + loc (#481 parity — edges are loc-addressed peers of nodes, spec 037)."
     urn: String!
@@ -2725,7 +2761,21 @@ export const typeDefs = `#graphql
     approvedAt: DateTime
   }
 
+  "Only safe identity scalars for a live organization shared with the effective human viewer."
+  type SharedOrganization {
+    id: ID!
+    name: String!
+    urn: String!
+  }
+
+  type SharedOrganizationsPage {
+    items: [SharedOrganization!]!
+    total: Int!
+  }
+
   type User {
+    "Live shared memberships only; null for unsupported viewers or deleted users, empty for no intersection. Default 20, cap 200, nonnegative offset, organization id order. Impersonation stays in its one organization. Pages are live across requests."
+    sharedOrganizations(limit: Int, offset: Int): SharedOrganizationsPage
     id: ID!
     handle: String
     "User-layer action-policy link (cor:acl:040:02, #510) — constrains runs made on the user's behalf. Null = no restriction, or hidden from viewers without personal-field access. Self-authored via updateMyPolicy."
@@ -2892,6 +2942,17 @@ export const typeDefs = `#graphql
     app: App
     "The installed Agent when this caller may read its definition; an installation license alone does not grant that read."
     agent: Agent
+    """
+    #2045 — the canonical URN of the compiled boot prompt the install's pointer names now
+    (a moved node shows its new URN; a hard-deleted one its URN at write time). Null when no pointer is set
+    OR when the caller may not see it (the App's participants only): null is not proof that no pointer exists.
+    """
+    bootPromptRef: String
+    """
+    #2045 — whether the pointer's target is deleted (soft or hard): true / false, and null when no pointer is set
+    or the caller may not see it. Same gate as bootPromptRef. Nothing is served from a deleted target (R27).
+    """
+    bootPromptTargetDeleted: Boolean
     createdAt: DateTime!
     createdBy: String
     updatedAt: DateTime
@@ -4126,6 +4187,14 @@ export const typeDefs = `#graphql
     enabled: Boolean
   }
 
+  "#2177 - one page of Agent.extendedBy."
+  type AgentExtensionPage {
+    items: [Agent!]!
+    "Opaque. Null when hasMore is false."
+    endCursor: String
+    hasMore: Boolean!
+  }
+
   """
   The reusable definition a Builder creates and the marketplace can list.
   Agents are installed into runtime Apps through the AppAgent N:M join: an App
@@ -4140,6 +4209,17 @@ export const typeDefs = `#graphql
     description: String
     "Templated Agent prompt. {{name}}/{{role}} bind to the Agent in chats or the named Worker in briefings."
     systemPrompt: String
+    """
+    #2045 — the canonical URN of the compiled boot prompt this Agent's pointer names now
+    (a moved node shows its new URN; a hard-deleted one its URN at write time). Null when no pointer is set
+    OR when the caller may not see it (only a caller who may read the Agent's system memory): null is not proof that no pointer exists.
+    """
+    bootPromptRef: String
+    """
+    #2045 — whether the pointer's target is deleted (soft or hard): true / false, and null when no pointer is set
+    or the caller may not see it. Same gate as bootPromptRef. Nothing is served from a deleted target (R27).
+    """
+    bootPromptTargetDeleted: Boolean
     systemMemoryId: String
     visibility: AgentVisibility!
     "cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement, not access)."
@@ -4159,6 +4239,15 @@ export const typeDefs = `#graphql
     or null. Set, change or clear it with setAgentBase.
     """
     extendsAgentId: ID
+    """
+    #2177 - the Agents that DIRECTLY extend this one (not their extenders), in name order, that you may
+    read exactly as you read agent(ref:). Visibility is applied before the page is cut. first: 1-50,
+    default 20. "after" is an opaque token from a previous page's endCursor: it expires after 15 minutes,
+    is bound to this Agent and to you, and a refused token is always the same "invalid cursor" error.
+    An EMPTY page with hasMore true means the scan is incomplete, NOT that nothing readable remains:
+    keep paging. There is deliberately no total.
+    """
+    extendedBy(first: Int = 20, after: String): AgentExtensionPage!
     """
     #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - the id of the index node whose incoming,
     trigger-labelled edges list this Agent's own tasks, or null. Set or clear
@@ -4624,6 +4713,17 @@ export const typeDefs = `#graphql
     trailer: String
     "Per-worker individuality layered over the agent's template prompt."
     promptOverride: String
+    """
+    #2045 — the canonical URN of the compiled boot prompt this worker's pointer names now
+    (set for customised workers only). Null when no pointer is set OR when the caller may not see it (WORKING-STATE
+    field, behind the worker read gate): null is not proof that no pointer exists.
+    """
+    bootPromptRef: String
+    """
+    #2045 — whether the pointer's target is deleted (soft or hard): true / false, and null when no pointer is set
+    or the caller may not see it. Same gate as bootPromptRef. Nothing is served from a deleted target (R27).
+    """
+    bootPromptTargetDeleted: Boolean
     "The worker-scoped working memory in the App's container (null until provisioned)."
     memoryId: ID
     """
@@ -5463,9 +5563,25 @@ export const typeDefs = `#graphql
   }
 
   """
-  Input for createNode. 'memoryId', 'loc', and 'name' are required; creating
-  is create-only — a live node at (memoryId, loc) rejects with
-  NodeLocConflictError (spec 039 Phase 0 D1/D4).
+  #2044 (hrn:node:hadronmemory.com:specs:cor:agt:040:06) — names an App's INSTALL MEMORY by the pair that
+  identifies it: the App and the Agent it customises. Both are ID-or-URN refs
+  like every other entity ref (relative URNs are refused, URN_NOT_QUALIFIED).
+  Accepted by createNode / updateNode in place of 'memoryId'. The install memory
+  is created by the App's first customisation: a createNode through this target
+  finds-or-creates it in the same transaction as the write, so a refused write
+  leaves nothing behind. Only whoever manages the App may write through it, and
+  only while the App is live and the Agent installed.
+  """
+  input InstallTargetInput {
+    appRef: String!
+    agentRef: String!
+  }
+
+  """
+  Input for createNode. 'loc' and 'name' are required, plus EITHER 'memoryId'
+  or 'install' (an App's install memory, #2044) — both or neither is an
+  error (BAD_USER_INPUT). Creating is create-only — a live node at (memoryId,
+  loc) rejects with NodeLocConflictError (spec 039 Phase 0 D1/D4).
   """
   input CreateNodeInput {
     "Forced PK (importer/sync use case, e.g. a stable UUIDv7). Only ever a create-id here — never a selector (D2). Omit to mint."
@@ -5476,7 +5592,9 @@ export const typeDefs = `#graphql
     qualified (org:memory) per spec 022 — relative-form URNs are
     rejected as GraphQL errors with extensions.code "URN_NOT_QUALIFIED".
     """
-    memoryId: String!
+    memoryId: String
+    "#2044 — an App's install memory as the target, instead of 'memoryId'. See InstallTargetInput."
+    install: InstallTargetInput
     loc: String!
     name: String!
     nodeType: String
@@ -5522,6 +5640,8 @@ export const typeDefs = `#graphql
     id: String
     "Selector, with 'loc': the target's memory (ID or fully-qualified URN). XOR with 'id'."
     memoryId: String
+    "#2044 — selector, with 'loc', in place of 'memoryId': the App's install memory. Creates nothing (the first createNode does). XOR with 'id'."
+    install: InstallTargetInput
     "Selector, with 'memoryId': the target's current loc. Not writable here — moveNode relocates."
     loc: String
     """
@@ -7039,6 +7159,12 @@ export const typeDefs = `#graphql
   enum AutomationTriggerKind { SCHEDULE WEBHOOK MANUAL }
 
   type Query {
+    "Read a retained deleted node in a live memory that you can read and write. Returns the stored body without expanding templates or includes. hrn:node:hadronmemory.com:specs:cor:dmo:010:04"
+    recoveryNode(nodeRef: ID!): RecoveryNode
+    "Page through retained deleted nodes you can recover. Default 20, maximum 200; total counts all accessible results. No timed purge. hrn:node:hadronmemory.com:specs:cor:api:120:04"
+    recoveryNodes(memoryRef: ID!, limit: Int = 20, offset: Int = 0): RecoveryNodesPage!
+    "Inspect live edges and accessible deleted endpoints in one memory you can read and write. Default 20, maximum 200. hrn:node:hadronmemory.com:specs:cor:api:110:02"
+    recoveryEdges(memoryRef: ID!, limit: Int = 20, offset: Int = 0): RecoveryEdgesPage!
     "#1719: review exact automation graph bytes and digest. triggerRef is the trigger row ID; MANUAL uses the origin AppRun ID. Only its run-as user or the manager of an App-only trigger may preview."
     previewAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): JSON!
 
@@ -7700,6 +7826,14 @@ export const typeDefs = `#graphql
     'ref' accepts the entity's ID or URN.
     """
     memory(ref: ID!): Memory
+
+    """
+    #2044 (hrn:node:hadronmemory.com:specs:cor:agt:040:06) — the App's install memory for an Agent: where the App
+    keeps its customisation of that Agent. Null when the App has not customised it
+    yet (this read creates nothing), and null for anyone the memory's record is not
+    open to: the App's participants, and whoever manages the App.
+    """
+    installMemory(appRef: String!, agentRef: String!): Memory
 
     """
     Uniform paginated memory list (#473) — replaces myMemories,
@@ -8830,6 +8964,8 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
+    "Restore one retained deleted node in a live memory you can read and write. Restore deleted ancestors first; governed nodes, comments, compiled boot prompts and protected internal addresses refuse. Does not restore descendants or revisions. hrn:node:hadronmemory.com:specs:cor:acl:130:02"
+    restoreNode(nodeRef: ID!): Node!
     "#1719: rebind a trigger to its reviewed graph. expectedHash must match previewAutomation; edits since preview refuse adoption."
     reAdoptAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!, expectedHash: String!): Boolean!
 
@@ -9153,10 +9289,13 @@ export const typeDefs = `#graphql
     Phase 0 D1); a soft-deleted node at the target loc is resurrected.
     'name' is required here and only here (D4).
     Include tags (#2040): content may carry {{> target settings}} tags. Writes
-    that make a tag malformed refuse INVALID_INCLUDE, and one that would make
-    the node include itself INCLUDE_CYCLE; nothing is written. A chain deeper
-    than 10 is not refused: it saves, and reads show the broken-include notice
-    past level 10 (#2134). Each tag's target gets a derived edge
+    that make a tag malformed refuse INVALID_INCLUDE; a tag the write adds or
+    changes whose target is missing, deleted or not readable by the writer
+    refuses INCLUDE_TARGET_UNAVAILABLE (one error for all three; tags already
+    stored are not re-checked, #2041); and one that would make the node include
+    itself INCLUDE_CYCLE; nothing is written. A chain deeper than 10 is not
+    refused: it saves, and reads show the broken-include notice past level 10
+    (#2134). Each tag's target gets a derived edge
     (governed kind INCLUDE) that only the content owns: editing or deleting it
     directly refuses INCLUDE_EDGE_DERIVED.
     """
@@ -9316,10 +9455,13 @@ export const typeDefs = `#graphql
     preserved ('name' included, D4; 'abstract' keeps its omit/null/string
     contract; omitted 'tags' are preserved, issue #235).
     Include tags (#2040): content may carry {{> target settings}} tags. Writes
-    that make a tag malformed refuse INVALID_INCLUDE, and one that would make
-    the node include itself INCLUDE_CYCLE; nothing is written. A chain deeper
-    than 10 is not refused: it saves, and reads show the broken-include notice
-    past level 10 (#2134). Each tag's target gets a derived edge
+    that make a tag malformed refuse INVALID_INCLUDE; a tag the write adds or
+    changes whose target is missing, deleted or not readable by the writer
+    refuses INCLUDE_TARGET_UNAVAILABLE (one error for all three; tags already
+    stored are not re-checked, #2041); and one that would make the node include
+    itself INCLUDE_CYCLE; nothing is written. A chain deeper than 10 is not
+    refused: it saves, and reads show the broken-include notice past level 10
+    (#2134). Each tag's target gets a derived edge
     (governed kind INCLUDE) that only the content owns: editing or deleting it
     directly refuses INCLUDE_EDGE_DERIVED.
     """
@@ -10199,6 +10341,14 @@ export const typeDefs = `#graphql
     licenses, log entries, assets, and git-sync config (the clone starts
     DB-only).
 
+    Include tags (#2167; hrn:node:hadronmemory.com:specs:cor:dmo:150:04 and
+    hrn:node:hadronmemory.com:specs:cor:dmo:150:06): every tag in every copied node
+    counts as added, checked after the URN rewrite. A tag whose target is
+    missing or that the caller can't read refuses with
+    INCLUDE_TARGET_UNAVAILABLE. A tag that closes a cycle among the copied
+    nodes refuses with INCLUDE_CYCLE, at any chain length. Either refusal names
+    only the authored tag and nothing is created.
+
     Authorization: the SOURCE side mirrors deleteMemory (personal/private →
     owner only; knowledge/group → source-org ADMIN). When \`targetUrn\` names a
     DIFFERENT org, the caller must additionally be a non-reader member of that
@@ -10237,6 +10387,15 @@ export const typeDefs = `#graphql
     'move' additionally requires source write access, and cannot target the
     source root (that would empty the source — clone + deleteMemory instead).
     Encrypted and system/app-class sources are rejected.
+
+    Include tags (#2167; hrn:node:hadronmemory.com:specs:cor:dmo:150:04 and
+    hrn:node:hadronmemory.com:specs:cor:dmo:150:06): every tag in every copied node
+    counts as added and is resolved where it lands in the new memory. Content
+    is copied verbatim, so a relative tag to a node in the subtree resolves
+    only when the new slug equals the parent's loc. Otherwise, or when the tag
+    names a node left behind, it refuses with INCLUDE_TARGET_UNAVAILABLE. A tag
+    that closes a cycle refuses with INCLUDE_CYCLE. Either refusal names only
+    the authored tag, and nothing is created or moved.
 
     v1 limitation: node content is copied verbatim — because both the slug and
     node locs change, URN references among the moved nodes WILL break; and
@@ -11361,6 +11520,32 @@ export const typeDefs = `#graphql
     promptOverride alone keeps castWorker staffing authorization. workerRef is the worker's id or URN (#991).
     """
     updateWorker(workerRef: ID!, promptOverride: String, signature: String, trailer: String): Worker!
+
+    """
+    #2045 (S8) — set or clear an Agent's boot-prompt pointer. nodeRef (a node id or a
+    fully-qualified node URN) must name a COMPILED boot prompt in this Agent's own system memory; approval is not
+    required here (it is checked when the prompt is served). nodeRef is REQUIRED: an explicit null clears, and an
+    omitted one is refused with BAD_USER_INPUT.
+
+    Only the Agent's manager, acting as themselves (R23): a request bound to a worker session, the manager's own
+    included, is refused BOOT_PROMPT_POINTER_SESSION_REFUSED; a non-manager, an App key, an impersonation or a
+    run is FORBIDDEN. The gate runs before the target is looked at, so a refused caller learns nothing about it.
+    Then: BOOT_PROMPT_POINTER_NOT_FOUND (missing, deleted or unreadable, alike), _NOT_COMPILED, _WRONG_ROLE,
+    _WRONG_MEMORY. No MCP twin (R24).
+    """
+    setAgentBootPrompt(agentRef: String!, nodeRef: String): Agent!
+    """
+    #2045 — set or clear an installed Agent's boot-prompt pointer for one App (AppAgent.bootPromptRef). The node
+    must be compiled and sit in that App's install memory for that Agent. Only the App's manager, as themselves;
+    otherwise as setAgentBootPrompt.
+    """
+    setAppAgentBootPrompt(appRef: String!, agentRef: String!, nodeRef: String): AppAgent!
+    """
+    #2045 — set or clear a worker's boot-prompt pointer (for customised workers). The node must be compiled and
+    sit in the worker's App's install memory for the worker's Agent. Only the App's manager, as themselves;
+    otherwise as setAgentBootPrompt. workerRef is the worker's id or URN.
+    """
+    setWorkerBootPrompt(workerRef: ID!, nodeRef: String): Worker!
 
     """
     #1162 — hard-delete a never-referenced miscast only.
@@ -13055,6 +13240,13 @@ export const typeDefs = `#graphql
     lastCheckedAt: DateTime
   }
 
+  "A readable open assignment selected for display, independently of session liveness or execution eligibility."
+  type TeamRosterTaskSummary {
+    id: ID!
+    title: String!
+    status: AgentTaskStatus!
+  }
+
   "#1707 — one worker on the team roster."
   type TeamRosterEntry {
     worker: AgentTaskParty!
@@ -13098,6 +13290,10 @@ export const typeDefs = `#graphql
     reportsToRetired: Boolean!
     "#2138 §3.4 (experimental) — whether it is checking its team channel as expected."
     checkStatus: WorkerCheckStatus
+    "The worker's own stored pause timestamp, including expired history; use checkStatus for current pause state. Separate from team pause and availability."
+    pausedUntil: DateTime
+    "The worker's top open assignment you can read, for display only. STARTED before PENDING, then oldest assignment (null last), creation time and id. Null when none is readable; ending a session does not clear an assignment."
+    currentTask: TeamRosterTaskSummary
   }
 
   "#1707 — the team roster of one App."

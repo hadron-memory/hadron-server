@@ -29,7 +29,7 @@ import {
   type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
-import { assertEdgeSourceWritersById, assertRoleWritersForWrite, lockEdgeUnderSourceWriters, roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
+import { assertEdgeSourceWritersById, assertRoleWritersForNodes, assertRoleWritersForWrite, lockEdgeUnderSourceWriters, roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../../lib/specCorpus.js';
 import { carryGovernedSignals } from '../../../lib/governedSignals.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
@@ -54,7 +54,7 @@ import {
   type Replacer,
 } from '../../../lib/searchReplace.js';
 import { enqueueNodeEmbedding, pendingAtForRevival } from '../../../services/embedding/enqueue.js';
-import { canReadMemory } from '../../../mcp/access-control.js';
+import { canReadMemory, isWriteBeyondRead } from '../../../mcp/access-control.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { enforceNodeSchemaOnWrite, normalizeObjectType, normalizeRole } from '../../../lib/enforceNodeSchema.js';
 import {
@@ -94,6 +94,8 @@ import {
   EdgeNotFoundError,
 } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { lockAgentDefinitionAuthority } from '../../../lib/auth/managedSystemMemory.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveEdgeRef } from '../../../lib/entityRef/edgeRef.js';
 import { GraphQLError } from 'graphql';
@@ -138,6 +140,7 @@ import {
   throwOnInvalidCondition,
   throwOnReservedExtractionSpec,
   requireMemoryWriteAccess,
+  memoryWriteForbidden,
   isMemoryReadableCached,
   concealUnreadableDenial,
   concealUnreadableNodeDenial,
@@ -145,6 +148,7 @@ import {
   resolveMemoryRefForWrite,
   isMemoryHiddenForWrite,
   withoutRequestCaches,
+  canReadMemoryRecord,
   type NodeInput,
   type NodeEdgeInput,
   type CreateNodeInput,
@@ -153,6 +157,7 @@ import {
   type MergeNodesInput,
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
+import { concealWriteBeyondRead, findInstallMemory, lockInstallAuthorityFirst, resolveInstallTarget, withInstallMemory, type InstallTarget } from './installMemory.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
@@ -216,7 +221,7 @@ export async function classifyFailedUpdate(
   return { kind: 'moved', memoryId: row.memoryId, loc: row.loc };
 }
 
-export async function writeNodeCore(
+async function writeNodeCoreRaw(
   rawInput: NodeWriteInput,
   ctx: Context,
   mode: NodeWriteMode,
@@ -319,6 +324,11 @@ export async function writeNodeCore(
       // The pre-022 fallback that walked all accessible memories looking
       // for a URN prefix of `input.loc` was the API-boundary loose-lookup
       // path the spec exists to close — removed.
+      // #2044: CreateNodeInput.memoryId is nullable on the wire (the other target is an App's
+      // install memory, handled by createNode before it gets here), so every other door refuses a miss.
+      if (!input.memoryId) {
+        throw new GraphQLError('A node write needs `memoryId`.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
       const rawMemoryRef = input.memoryId;
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, rawMemoryRef);
       input.memoryId = resolvedMemoryId;
@@ -340,7 +350,7 @@ export async function writeNodeCore(
           await concealUnreadableDenial(authCtx, resolvedMemoryId, conceal.ref, gate);
         }
       };
-      await authorizeWrite(ctx);
+      await authorizeWrite({ ...ctx, installWritePreflight: true });
       // Spec 049 S4 / #1180: a protected address is written by its owning
       // operation only. Since #1201 the ONLY source is the Channel table, and
       // only a Channel's own operations pass the bypass; every node-authoring
@@ -879,7 +889,11 @@ export async function writeNodeCore(
       const inWriteTransaction = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
         opts?.transaction
           ? work(opts.transaction.tx)
-          : mapDeadlockToWriteConflict(input.memoryId, () => ctx.db.$transaction(work));
+          : mapDeadlockToWriteConflict(input.memoryId, () => ctx.db.$transaction(async (tx) => {
+            // #2044: an install memory's authority comes before ANY memory/node/loc lock.
+            await lockInstallAuthorityFirst(tx, ctx, input.memoryId);
+            return work(tx);
+          }));
 
       // encryptMemory and ownership transfer both change what this writer may
       // commit. Hold a shared memory-row lock through the write, then recheck
@@ -923,14 +937,19 @@ export async function writeNodeCore(
       const readableForIncludes = typeof input.content === 'string' && input.content.includes('{{>')
         ? await getAccessibleMemoryIds(ctx)
         : null;
+      // #2041 S2b — `storedPlaintext` is the includer's plaintext from the row
+      // this write locked and revalidated, before its update; null for a create
+      // or a resurrected tombstone, whose old text is not the includer's.
       async function finalizeNodeWrite<T extends { id: string; loc: string; memoryId: string }>(
         tx: Prisma.TransactionClient,
         writtenNode: T,
+        storedPlaintext: string | null,
       ): Promise<T> {
         if (input.content !== undefined) {
-          const tags = await assertIncludesWritable(tx, writtenNode, input.content, readableForIncludes);
+          const stored = { storedPlaintext };
+          const tags = await assertIncludesWritable(tx, writtenNode, input.content, readableForIncludes, undefined, stored);
           const result = await replaceInlineEdges(tx, writtenNode);
-          await syncDerivedIncludesEdges(tx, writtenNode, tags, readableForIncludes);
+          await syncDerivedIncludesEdges(tx, writtenNode, tags, readableForIncludes, stored);
           return result;
         }
         return replaceInlineEdges(tx, writtenNode);
@@ -1318,7 +1337,7 @@ export async function writeNodeCore(
                   deletedAt: null,
                 };
             const updated = await tx.node.update({ where, data, include });
-            return { conflict: false, node: await finalizeNodeWrite(tx, updated) };
+            return { conflict: false, node: await finalizeNodeWrite(tx, updated, currentForDiff.content ?? null) };
           });
           if (result.conflict) {
             throw new GraphQLError(
@@ -1479,6 +1498,7 @@ export async function writeNodeCore(
             // the #976 defect. `upsert` mode reaches here for a live row too,
             // deliberately: that mode is either-way by contract.
             let authoritativeChanges: string[] = [];
+            let storedForIncludes: string | null = null;
             let authoritativeAbstractHash = nextAbstractOriginHash;
             if (authoritative) {
               // Row lock + drift reconciled as its own revision BEFORE this
@@ -1501,6 +1521,8 @@ export async function writeNodeCore(
               const authoritativeForDiff = memEncInfo.isEncrypted
                 ? decryptNodeFields({ ...authoritative }, memEncInfo)
                 : authoritative;
+              // A tombstone's text is not the includer's stored text (#2041 S2b).
+              if (!authoritative.deletedAt) storedForIncludes = authoritativeForDiff.content ?? null;
               authoritativeAbstractHash = hashAgainstLockedContent(authoritative.content);
               authoritativeChanges = diffNodeChanges(authoritativeForDiff, {
                 ...suppliedForDiff, abstractOriginHash: authoritativeAbstractHash,
@@ -1603,7 +1625,7 @@ export async function writeNodeCore(
             // #1606 — restoring a target restores the threads its soft delete
             // took (cause TARGET), never ones an admin deleted.
             if (reviving) await restoreThreadsOfTargets(tx, [upserted.id]);
-            return finalizeNodeWrite(tx, upserted);
+            return finalizeNodeWrite(tx, upserted, storedForIncludes);
           });
         }
       } catch (e) {
@@ -1732,7 +1754,7 @@ export async function writeNodeCore(
  * genuine miss and a soft-deleted row map to the same not-found (no existence
  * oracle), while a malformed URN propagates as UrnNotQualifiedError (spec 022).
  */
-async function resolveExistingNode(ctx: Context, ref: string, opts?: { forWrite?: boolean }) {
+async function resolveExistingNode(ctx: Context, ref: string, opts?: { forWrite?: boolean; movesContent?: boolean }) {
   let id: string;
   try {
     ({ id } = await resolveNodeRefForCaller(ctx, ref));
@@ -1752,6 +1774,11 @@ async function resolveExistingNode(ctx: Context, ref: string, opts?: { forWrite?
   // read, answers here — at resolution — exactly as a missing one. Refusing at
   // the later write gate leaks through ORDER (see resolveMemoryRefForWrite).
   if (opts?.forWrite && (await isMemoryHiddenForWrite(ctx, node.memoryId, 'node'))) {
+    throw nodeNotFoundError(ref);
+  }
+  // #2206 (B): an operation that carries the node's existing content somewhere the caller sees it (a move) answers a
+  // caller who may write but not read this memory as a missing node, at resolution, before any later gate.
+  if (opts?.movesContent && (await isWriteBeyondRead(ctx.db, ctx, node.memoryId))) {
     throw nodeNotFoundError(ref);
   }
   return node;
@@ -2094,7 +2121,7 @@ export const nodeMoveOps = {
       expectedSource?: { memoryId: string; loc: string };
     },
   ) {
-      const source = await resolveExistingNode(ctx, sourceRef, { forWrite: true });
+      const source = await resolveExistingNode(ctx, sourceRef, { forWrite: true, movesContent: true });
       if (expectedSource && (source.memoryId !== expectedSource.memoryId || source.loc !== expectedSource.loc)) {
         throw new GraphQLError('The node moved since it was read, so nothing was moved. Re-read and retry.', {
           extensions: { code: 'CONFLICT', nodeId: source.id },
@@ -2127,6 +2154,8 @@ export const nodeMoveOps = {
         let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
         const moved = await ctx.db.$transaction(
           async (tx) => {
+            // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
+            await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [source.memoryId, destMemoryId]);
             // #1187 — DECLARE the complete key set first, in the one global
             // order: the destination ancestor path AND the source path that
             // `lockSourceForMove` takes further down. Previously those were two
@@ -2221,16 +2250,60 @@ export const nodeMoveOps = {
   },
 };
 
+/** #2044: `createNode` / `updateNode` take an App's install memory as the target instead of `memoryId`. */
+type CreateNodeArgs = Omit<CreateNodeInput, 'memoryId'> & { memoryId?: string | null; install?: InstallTarget | null };
+type UpdateNodeArgs = Omit<UpdateNodeInput, 'memoryId'> & { memoryId?: string | null; install?: InstallTarget | null };
+
+function assertMemoryTargeted(memoryId: string | null | undefined, op: string): void {
+  if (!memoryId) {
+    throw new GraphQLError(`${op}: supply \`memoryId\` or \`install\` (an App's install memory).`,
+      { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+}
+
+/**
+ * First customisation: finds or creates the App's install memory and writes the
+ * node in the SAME transaction, so a refused write leaves no memory behind.
+ */
+async function createNodeInInstallMemory(input: CreateNodeArgs, ctx: Context) {
+  const { install, memoryId, ...rest } = input;
+  if (memoryId != null) {
+    throw new GraphQLError('createNode: supply `memoryId` OR `install`, not both.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  const effects: Array<() => void> = [];
+  const written = await withInstallMemory(ctx, install!, (tx, txCtx, memory) =>
+    writeNodeCore({ ...rest, memoryId: memory.id } as CreateNodeInput, txCtx, 'create', {
+      governedContext: 'node-write',
+      transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
+    }));
+  for (const effect of effects) effect();
+  return written;
+}
+
+/** The caller's view of an App's install memory, creating nothing: a miss and a refusal read the same. */
+export async function findCallerInstallMemory(ctx: Context, install: InstallTarget): Promise<{ id: string }> {
+  const { appId, agentId } = await resolveInstallTarget(ctx.db, install);
+  const row = await findInstallMemory(ctx.db, appId, agentId);
+  if (!row || !(await canReadMemoryRecord(ctx, row))) {
+    throw new GraphQLError('This App has not customised that Agent yet.', { extensions: { code: 'INSTALL_MEMORY_NOT_FOUND' } });
+  }
+  return row;
+}
+
 export const nodeMutations = {
     // Create a single node (spec 039 Phase 0 D1/D4). Create-only: a live
     // node at (memoryId, loc) rejects with NodeLocConflictError; a
     // soft-deleted one is resurrected. `input.id` is a forced create-PK
     // (importer/sync), never a selector.
-    createNode: async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
-      writeNodeCore(input, ctx, 'create', {
+    createNode: async (_: unknown, { input }: { input: CreateNodeArgs }, ctx: Context) => {
+      // #2044: the target is a memory OR an App's install memory (cor:agt:040:06).
+      if (input.install) return createNodeInInstallMemory(input, ctx);
+      assertMemoryTargeted(input.memoryId, 'createNode');
+      return writeNodeCore(input as CreateNodeInput, ctx, 'create', {
         governedContext: 'node-write',
-        concealUnreadable: { entity: 'memory', ref: input.memoryId },
-      }),
+        concealUnreadable: { entity: 'memory', ref: input.memoryId! },
+      });
+    },
 
     // #1201 — THE KIND-SPECIFIC AUTHORING DOORS. One create + one update per
     // governed kind, generated from the register so a kind cannot ship with a
@@ -2285,8 +2358,21 @@ export const nodeMutations = {
     // Update an existing node (spec 039 Phase 0 D2–D4). Target = `id` (PK or
     // fully-qualified node URN) XOR (`memoryId` + `loc`); never creates,
     // never moves. All content fields preserve-on-omit.
-    updateNode: async (_: unknown, { input }: { input: UpdateNodeInput }, ctx: Context) =>
-      updateNodeCore(input, ctx, 'updateNode', { governedContext: 'node-write' }),
+    updateNode: async (_: unknown, { input }: { input: UpdateNodeArgs }, ctx: Context) => {
+      if (input.install) {
+        // #2044: select the node by the App's install memory + loc. Nothing is created
+        // here; a caller who cannot even open the record gets the not-found a missing
+        // customisation gives.
+        const { install, memoryId, id, ...rest } = input;
+        if (memoryId != null || id != null) {
+          throw new GraphQLError('updateNode: identify the node by `install` + `loc`, not also by `id` or `memoryId`.',
+            { extensions: { code: 'BAD_USER_INPUT' } });
+        }
+        const memory = await findCallerInstallMemory(ctx, install);
+        return updateNodeCore({ ...rest, memoryId: memory.id } as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
+      }
+      return updateNodeCore(input as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
+    },
 
 
     // Shallow-merge a JSON patch into a node's `data` bag (issue #366).
@@ -2505,13 +2591,18 @@ export const nodeMutations = {
       const ensureAuthed = async (memoryId: string) => {
         if (authedMemories.has(memoryId)) return;
         await requireMemoryWriteAccess(ctx, memoryId);
+        // #2206 (B): matches and per-field counts (dry run too) disclose content, so a memory the caller may write but
+        // not read is refused here; the conceal wrappers below then answer it as a memory the caller cannot see.
+        if (await isWriteBeyondRead(ctx.db, ctx, memoryId)) throw memoryWriteForbidden();
         authedMemories.add(memoryId);
       };
 
       if (hasMemoryIds) {
         for (const ref of memoryIds!) {
           const { id: memId } = await resolveMemoryRef(ctx.db, ref);
-          // #1316: an unreadable memory answers as resolveMemoryRef's miss.
+          // #1316: an unreadable memory answers as resolveMemoryRef's miss. #2206 (B): so does one the caller may write
+          // but not read (its record may be visible, so the wrapper below would answer FORBIDDEN instead).
+          if (await isWriteBeyondRead(ctx.db, ctx, memId)) throw new MemoryNotFoundError(ref);
           await concealUnreadableDenial(ctx, memId, ref, () => ensureAuthed(memId));
           const where: Prisma.NodeWhereInput = { memoryId: memId, deletedAt: null };
           if (usePrefix) {
@@ -2604,6 +2695,8 @@ export const nodeMutations = {
         isEncrypted: boolean;
         changed: Record<string, unknown>; // plaintext field → new value
         plaintext: { content: string | null; abstract: string | null };
+        /** #2041 S2b — content before the replace; the row lock below revalidates it (revisionStateMatches). */
+        storedContent: string | null;
         fieldResults: Array<{ field: string; matches: number }>;
         total: number;
         abstractChanged: boolean;
@@ -2728,6 +2821,7 @@ export const nodeMutations = {
               content: contentChanged ? (changed.content as string) : pt.content,
               abstract: abstractChanged ? (changed.abstract as string | null) : pt.abstract,
             },
+            storedContent: pt.content ?? null,
             fieldResults,
             total,
             abstractChanged,
@@ -2909,8 +3003,9 @@ export const nodeMutations = {
           if (p.contentChanged) {
             const text = p.plaintext.content;
             readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
-            const tags = await assertIncludesWritable(tx, raw, text, readableForIncludes);
-            await syncDerivedIncludesEdges(tx, raw, tags, readableForIncludes);
+            const stored = { storedPlaintext: p.storedContent };
+            const tags = await assertIncludesWritable(tx, raw, text, readableForIncludes, undefined, stored);
+            await syncDerivedIncludesEdges(tx, raw, tags, readableForIncludes, stored);
           }
         }
       }));
@@ -3148,7 +3243,11 @@ export const nodeMutations = {
           // A governed node is removed only after its marker is cleared through
           // the kind's door: the whole affected set is judged here, on locked
           // rows, before any write.
-          await assertNoGovernedRemoval(tx, memoryId, affectedIds);
+          const removed = await assertNoGovernedRemoval(tx, memoryId, affectedIds, 'graphql', { hard: !!hard });
+          // cor:acl:130:07 — removing a node writes it: each removed row's role
+          // and runnable state needs its writer level, judged on the rows locked
+          // above, so one row of an ADMIN role refuses the whole removal.
+          await assertRoleWritersForNodes(tx, ctx, removed, { from: memoryId });
           if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
           else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy, at: now });
 
@@ -3833,6 +3932,16 @@ export const nodeMutations = {
         throw new GraphQLError(`Target node not found: "${rawTarget}"`, {
           extensions: { code: 'NODE_NOT_FOUND', ref: rawTarget },
         });
+      // #2206 (B): a merge folds one node's content into the other and returns the result, so a node in a memory the
+      // caller may write but not read answers exactly as a missing one, on either end, before any gate.
+      if (await isWriteBeyondRead(ctx.db, ctx, source.memoryId))
+        throw new GraphQLError(`Source node not found: "${rawSource}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: rawSource },
+        });
+      if (await isWriteBeyondRead(ctx.db, ctx, target.memoryId))
+        throw new GraphQLError(`Target node not found: "${rawTarget}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: rawTarget },
+        });
 
       // Auth. The target is mutated → write access always. The source is
       // read to fold its fields; it's mutated only when we delete it or
@@ -4131,8 +4240,12 @@ export const nodeMutations = {
           if ('content' in changed) {
             const text = changed.content as string | null;
             const readable = text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
-            const tags = await assertIncludesWritable(tx, target, text, readable);
-            await syncDerivedIncludesEdges(tx, target, tags, readable);
+            // The target's text before the fold: tgtPt, revalidated against the
+            // locked row above (revisionStateMatches), so only the source's tags
+            // and any the fold changes count as added (#2041 S2b).
+            const stored = { storedPlaintext: tgtPt.content ?? null };
+            const tags = await assertIncludesWritable(tx, target, text, readable, undefined, stored);
+            await syncDerivedIncludesEdges(tx, target, tags, readable, stored);
           }
         }
 
@@ -4658,8 +4771,9 @@ export const nodeMutations = {
         {
           const text = plaintextFields.content as string | null;
           const readable = text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
-          const tags = await assertIncludesWritable(tx, current, text, readable);
-          await syncDerivedIncludesEdges(tx, current, tags, readable);
+          const stored = { storedPlaintext: (logicalCurrent.content as string | null) ?? null };
+          const tags = await assertIncludesWritable(tx, current, text, readable, undefined, stored);
+          await syncDerivedIncludesEdges(tx, current, tags, readable, stored);
         }
         return { restored, restoredPlaintext: plaintextFields, destinationEncrypted: selectedDestination.isEncrypted };
       });
@@ -4838,3 +4952,18 @@ export const nodeMutations = {
     },
 
 };
+
+/**
+ * THE node writer. The response of a write to a memory whose writer may not read it (an App's install memory;
+ * a user-owned Agent's system memory written by a platform admin, #2206) is held to the memory's READ
+ * audience here, at the one writer every door shares (createNode/updateNode by address or by
+ * memoryId, the kind doors, merges, importers, MCP), not per door: a door-by-door wrap let an
+ * alternate address return the content a write-only manager cannot read (Andi on #2064).
+ * An ordinary memory costs one indexed select.
+ */
+export async function writeNodeCore(...args: Parameters<typeof writeNodeCoreRaw>): ReturnType<typeof writeNodeCoreRaw> {
+  const written = await writeNodeCoreRaw(...args);
+  const ctx = args[1];
+  if (!written || typeof written !== 'object' || typeof (written as { memoryId?: unknown }).memoryId !== 'string') return written;
+  return concealWriteBeyondRead(ctx, written as { memoryId: string }) as unknown as typeof written;
+}

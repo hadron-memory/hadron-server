@@ -142,6 +142,10 @@ dev DB or `hadron_test`. Use distinct names and ports for concurrent stacks.
 # collect pid-only r<pid> clones or old graph roots. No automatic boot-mismatch
 # deletion rule exists. Use a private disk-backed TMPDIR for checkouts/fixtures
 # when the host's tmpfs inode cap is tight.
+#
+# On a shared host, cap the forks (each holds its own Postgres clone) with
+# HADRON_TEST_MAX_WORKERS=<positive int>. Unset keeps vitest's default; an
+# invalid value warns and keeps it too (src/test/dbWorkers.ts testMaxWorkers).
 pnpm test
 
 # Drop pre-#1091 `hadron_test_<n>` clones (from a checkout older than run-scoped

@@ -9,7 +9,7 @@ import { verifyAuthenticatedJwt, lockLiveSignInRoot } from '../auth/signIn.js';
 import type { HadronJwtPayload } from '../auth/jwt.js';
 import { canImpersonate, type ImpersonationContext } from '../lib/auth/impersonation.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
-import { publishActor } from '../lib/requestActor.js';
+import { publishActor, publishUser } from '../lib/requestActor.js';
 
 export interface AuthContext {
   login?: HadronJwtPayload['login'];
@@ -204,6 +204,9 @@ export async function resolveAuthContext(
   }
 
   if (sessionId) await bindSession(db, ctx, sessionId);
+  // #2176: the validated user behind this request's writes, from the SAME resolved context
+  // `editorFromAuth` reads for the revision, never from anything the client asserts.
+  publishUser(ctx.userId ?? null);
   return ctx;
 }
 

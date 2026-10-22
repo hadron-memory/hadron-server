@@ -965,7 +965,8 @@ export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>): 
     ? `run your base tick (${BASE_TICK_TASK}): first the tagged check: ${tagged}; then the sweep of your owned tasks, alarms and ready heads`
     : tagged;
   const rule = 'No unfiltered chat catch-up.';
-  if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): ${check}; then end your turn. ${rule}`;
+  // #2138 (Diego #28498): a tick lands mid-build too, so it never tells the worker to stop; it resumes what was running.
+  if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): ${check}; then continue your in-progress work; end your turn only if you have none. ${rule}`;
   const all = tasks.map((t): NudgeTask => (typeof t === 'string' ? { id: t, event: 'ASSIGNED' } : t));
   const assigned = [...new Set(all.filter((t) => t.event === 'ASSIGNED').map((t) => t.id))];
   const alarms = all.filter((t) => t.event === 'ALARM');

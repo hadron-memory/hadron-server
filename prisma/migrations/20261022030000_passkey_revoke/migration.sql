@@ -1,63 +1,7 @@
--- #1631 PR2 / cor:aut:040:02, 07, 08: passkey registration and its safety lifecycle.
-
-CREATE TABLE "passkey_cancel_tokens" (
-    "id" TEXT NOT NULL,
-    "passkey_id" TEXT NOT NULL,
-    "token_hash" TEXT NOT NULL,
-    "created_at" TIMESTAMP(3) NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
-    "used_at" TIMESTAMP(3),
-
-    CONSTRAINT "passkey_cancel_tokens_pkey" PRIMARY KEY ("id")
-);
-
-CREATE UNIQUE INDEX "passkey_cancel_tokens_passkey_id_key" ON "passkey_cancel_tokens"("passkey_id");
-CREATE UNIQUE INDEX "passkey_cancel_tokens_token_hash_key" ON "passkey_cancel_tokens"("token_hash");
-
-ALTER TABLE "passkey_cancel_tokens" ADD CONSTRAINT "passkey_cancel_tokens_passkey_id_fkey"
-  FOREIGN KEY ("passkey_id") REFERENCES "passkey_credentials"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
-
--- A registration ceremony is bound at its options step to who registers and which kind of passkey (cor:aut:040:02),
--- each column set once; finish consumes it. Other ceremony purposes leave these null.
-ALTER TABLE "passkey_ceremonies" ADD COLUMN IF NOT EXISTS "user_id" TEXT;
-ALTER TABLE "passkey_ceremonies" ADD COLUMN IF NOT EXISTS "kind" TEXT;
-ALTER TABLE "passkey_ceremonies" ADD COLUMN IF NOT EXISTS "registration_method" TEXT;
-ALTER TABLE "passkey_ceremonies" ADD COLUMN IF NOT EXISTS "sign_in_browser_hash" TEXT;
-ALTER TABLE "passkey_ceremonies" ADD COLUMN IF NOT EXISTS "vouch_passkey_id" TEXT;
-ALTER TABLE "passkey_ceremonies" ADD COLUMN IF NOT EXISTS "user_handle" BYTEA;
-ALTER TABLE "passkey_ceremonies" ADD CONSTRAINT "passkey_ceremonies_user_id_fkey"
-  FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-ALTER TABLE "passkey_ceremonies" ADD CONSTRAINT "passkey_ceremonies_vouch_passkey_id_fkey"
-  FOREIGN KEY ("vouch_passkey_id") REFERENCES "passkey_credentials"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
-
--- Every registration is followed by an email notice (cor:aut:040:02). The outbox row is written in the registering
--- transaction, so a passkey never exists without its notice; a first passkey's carries its cancel token encrypted
--- until sent, then cleared. seen_at records the in-app notice.
-CREATE TABLE "passkey_registration_notices" (
-    "id" TEXT NOT NULL,
-    "passkey_id" TEXT NOT NULL,
-    "user_id" TEXT NOT NULL,
-    "kind" TEXT NOT NULL,
-    "cancel_token_enc" TEXT,
-    "created_at" TIMESTAMP(3) NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
-    "attempts" INTEGER NOT NULL DEFAULT 0,
-    "lease_until" TIMESTAMP(3),
-    "claim_token" TEXT,
-    "sent_at" TIMESTAMP(3),
-    "failed_at" TIMESTAMP(3),
-    "seen_at" TIMESTAMP(3),
-
-    CONSTRAINT "passkey_registration_notices_pkey" PRIMARY KEY ("id")
-);
-CREATE UNIQUE INDEX "passkey_registration_notices_passkey_id_key" ON "passkey_registration_notices"("passkey_id");
-CREATE INDEX "passkey_registration_notices_user_id_idx" ON "passkey_registration_notices"("user_id");
-CREATE INDEX "passkey_registration_notices_sent_at_idx" ON "passkey_registration_notices"("sent_at");
-ALTER TABLE "passkey_registration_notices" ADD CONSTRAINT "passkey_registration_notices_passkey_id_fkey"
-  FOREIGN KEY ("passkey_id") REFERENCES "passkey_credentials"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
-ALTER TABLE "passkey_registration_notices" ADD CONSTRAINT "passkey_registration_notices_user_id_fkey"
-  FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
-
+-- #1631 PR3 / cor:aut:040:08: a REVOKE ceremony's binding (owner, proof). Re-applies the shared registration guard
+-- verbatim (the newest migration to carry it).
 -- #1631 PR2 / cor:aut:040:07-08: passkey registration lifecycle invariants. One source, shared verbatim with migration
--- 20261021090000_passkey_registration (pinned by src/lib/passkeys/cancel1631.test.ts).
+-- 20261022030000_passkey_revoke (pinned by src/lib/passkeys/cancel1631.test.ts).
 
 -- A first passkey's cancel link: one token per first passkey, stored as SHA-256, spent once, never deleted (the
 -- cancel itself is recorded on the credential: cancelled_at, cancel_ip, cancel_user_agent).
@@ -92,7 +36,7 @@ DROP TRIGGER IF EXISTS passkey_cancel_token_guard ON passkey_cancel_tokens;
 CREATE TRIGGER passkey_cancel_token_guard BEFORE INSERT OR UPDATE OR DELETE ON passkey_cancel_tokens
 FOR EACH ROW EXECUTE FUNCTION hadron_guard_passkey_cancel_token();
 
--- The registration binding on a ceremony: all or nothing, REGISTER purpose only, consistent with its kind, set once.
+-- The binding on a ceremony: all or nothing, consistent with its purpose and kind, set once.
 ALTER TABLE "passkey_ceremonies" DROP CONSTRAINT IF EXISTS "chk_passkey_ceremony_registration";
 ALTER TABLE "passkey_ceremonies" ADD CONSTRAINT "chk_passkey_ceremony_registration" CHECK (
   ("user_id" IS NULL AND "kind" IS NULL AND "registration_method" IS NULL AND "sign_in_browser_hash" IS NULL
@@ -103,6 +47,13 @@ ALTER TABLE "passkey_ceremonies" ADD CONSTRAINT "chk_passkey_ceremony_registrati
           AND "sign_in_browser_hash" IS NOT NULL AND "sign_in_browser_hash" ~ '^[0-9a-f]{64}$' AND "vouch_passkey_id" IS NULL)
       OR ("kind" IS NOT NULL AND "kind" = 'later' AND "vouch_passkey_id" IS NOT NULL
           AND "registration_method" IS NULL AND "sign_in_browser_hash" IS NULL)))
+  -- #1631 PR3 (cor:aut:040:08): a REVOKE ceremony is bound to its owner by the proof: another passkey's assertion
+  -- (the prover, never revocable by its own ceremony) or this browser's fresh identity-provider sign-in, never a
+  -- magic link. It carries no WebAuthn user handle.
+  OR ("purpose" = 'REVOKE' AND "user_id" IS NOT NULL AND "kind" IS NOT NULL AND "kind" = 'revoke' AND "user_handle" IS NULL
+    AND (("vouch_passkey_id" IS NOT NULL AND "registration_method" IS NULL AND "sign_in_browser_hash" IS NULL)
+      OR ("vouch_passkey_id" IS NULL AND "registration_method" IS NOT NULL AND "registration_method" IN ('github', 'google', 'apple')
+        AND "sign_in_browser_hash" IS NOT NULL AND "sign_in_browser_hash" ~ '^[0-9a-f]{64}$')))
 );
 CREATE OR REPLACE FUNCTION hadron_guard_passkey_ceremony_binding() RETURNS trigger
 LANGUAGE plpgsql AS $$
