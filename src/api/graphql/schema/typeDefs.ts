@@ -2208,6 +2208,10 @@ export const typeDefs = `#graphql
     skippedDecisionCount: Int!
     "#1641 — the first 50 of those, by loc."
     skippedDecisions: [String!]!
+    "#2043 — boot prompts in this Agent system or App install memory that this caller may not approve: only the Agent's or App's manager approves them, as themselves, never through a worker session."
+    skippedBootPromptCount: Int!
+    "#2043 — the first 50 of those, by loc."
+    skippedBootPrompts: [String!]!
     "#1607 — unminted nodes of this memory with open discussion: a warning, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Ordered by loc."
     unresolvedFeedback: [UnresolvedFeedback!]!
   }
