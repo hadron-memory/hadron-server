@@ -1594,7 +1594,7 @@ export const workerMutations = {
       // found reference: a real reference is refused as WORKER_IN_USE by the census on a fresh attempt.
       // Raw statements report 40001/40P01 as P2010; model writes use P2034.
       if (isSerializationConflict(error)) {
-        throw new GraphQLError('Concurrent account activity kept this deletion from completing after retries. No reference to the worker was found; retry, or retire instead.', {
+        throw new GraphQLError('Concurrent activity kept this deletion from completing after retries; the deciding check did not finish, so nothing was deleted and no verdict on references was reached. Retry, or retire instead.', {
           extensions: { code: 'WORKER_DELETE_CONFLICT', workerId: worker.id },
         });
       }
