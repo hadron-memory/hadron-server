@@ -139,8 +139,11 @@ function blockerError(blockers: Awaited<ReturnType<typeof cloneBlockers>>, ref: 
 
 export type CloneAgentInput = { source: string; target: string; name?: string | null; slug?: string | null };
 
+/** Test seam: awaited inside the transaction between the copy and the validation read; production passes none. */
+export type CloneAgentHooks = { afterCopy?: (attempt: number) => Promise<void> };
+
 /** The mutation body; see the module doc. Returns the new Agent (a PERSONAL draft, R146). */
-export async function cloneAgent(ctx: Context, input: CloneAgentInput) {
+export async function cloneAgent(ctx: Context, input: CloneAgentInput, hooks: CloneAgentHooks = {}) {
   const target = await resolveCloneTarget(ctx, input.target);
   // R144: the org gate runs BEFORE the source is resolved, so a non-admin learns nothing about the source.
   await requireOrgRole(ctx, target.orgId, 'ADMIN');
@@ -163,7 +166,7 @@ export async function cloneAgent(ctx: Context, input: CloneAgentInput) {
         ctx,
         anchors,
         (txCtx) => authorizeClone(txCtx, target.orgId, input.source, plan),
-        (tx, txCtx) => writeClone(ctx, txCtx, tx, target, plan, input),
+        (tx, txCtx) => writeClone(ctx, txCtx, tx, target, plan, input, () => hooks.afterCopy?.(attempt)),
         {
           lockMode: 'exclusive',
           timeout: 120_000,
@@ -231,6 +234,7 @@ async function writeClone(
   target: { orgId: string; urn: string },
   plan: Plan,
   input: CloneAgentInput,
+  afterCopy: () => Promise<void> | undefined,
 ) {
   const actor = ctx.userId ?? ctx.clientId ?? null;
   const source = await tx.agent.findUniqueOrThrow({ where: { id: plan.sourceId } });
@@ -302,6 +306,7 @@ async function writeClone(
     await writeAgentBase(tx, { childId: agent.id, childRef: urn, baseId: source.extendsAgentId, baseRef: base.urn, createdBy: actor });
   }
 
+  await afterCopy();
   const read3 = await fingerprint(tx, plan);
   if (JSON.stringify(read1) !== JSON.stringify(read3)) throw new CloneRetry();
 
@@ -319,7 +324,8 @@ async function writeClone(
       linkCount: links.length,
     },
   });
-  return agent;
+  // The base is written after the row, so the caller gets the row as it now stands.
+  return tx.agent.findUniqueOrThrow({ where: { id: agent.id }, include: AGENT_INCLUDE });
 }
 
 /** A tombstoned Agent or system memory holding the derived URN is reclaimed (as createAgent does); a live one refuses. */
