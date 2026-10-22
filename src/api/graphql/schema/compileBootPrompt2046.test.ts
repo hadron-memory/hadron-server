@@ -338,4 +338,13 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     expect(await codeOf(M.createNode!(null, { input: { memoryId: f.agentMem.id, loc: 'boot:other', name: 'x', content: 'y', role: 'boot-prompt', nodeType: 'compiled-boot-prompt' } }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_COMPILED_WRITE');
     expect((await db.node.findUniqueOrThrow({ where: { id: r.nodeId } })).content).toBe('x');
   });
+
+  it('Anne P2-1: an owner probe that stalls past the budget ends in the sanitized CONFLICT, not after it', async () => {
+    const f = await fixture();
+    await f.source(f.agentMem.id, 'boot:source', 'x');
+    const slow = { ...ctxOf(f.admin.id), db: new Proxy(db, { get: (t, k) => (k === 'agent' ? { findUnique: () => new Promise((r) => setTimeout(() => r(null), 1500)) } : (t as never)[k]) }) } as Context;
+    const started = Date.now();
+    expect(await codeOf(compileBootPrompt(slow, agentTarget(f), { budgetMs: 200 }))).toBe('CONFLICT');
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
 });

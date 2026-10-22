@@ -148,6 +148,21 @@ function isBudgetFault(e: unknown): boolean {
   return x?.code === 'P2028' || x?.meta?.code === '55P03' || /lock timeout|lock_timeout|transaction expired|Transaction already closed|Include-history transaction expired/i.test(String(x?.message ?? ''));
 }
 
+/** Race a probe against the operation deadline: an unbounded read must not outlive the budget. */
+async function withinBudget<T>(deadline: number, work: Promise<T>): Promise<T> {
+  const left = deadline - performance.now();
+  if (left < 1) { void work.catch(() => undefined); throw compileConflict(); }
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(compileConflict()), left); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** The compile could not settle inside its budget or the owner kept changing: retry. Says nothing about the target. */
 function compileConflict(): GraphQLError {
   return new GraphQLError('The boot prompt could not be compiled right now; retry.', { extensions: { code: 'CONFLICT' } });
@@ -171,15 +186,16 @@ export async function compileBootPrompt(
     if (deadline - performance.now() < 1) throw compileConflict();
     // The anchors are chosen from the owner as read BEFORE the fence; a transfer that lands first is caught
     // inside and retried with the new ones (the setBootPromptPointer shape).
-    const before = await loadCompileOwner(ctx.db, target);
+    const before = await withinBudget(deadline, loadCompileOwner(ctx.db, target));
     if (!before) throw compileNotPermitted();
     // A lock-free, NON-authoritative gate before anything is held: a caller who may not compile must not queue
     // on the platform-wide fence or take the tenant's anchors, which would be a cheap lock-DoS and an existence
     // oracle (Rook P2-1 on #2258). The in-transaction gate below stays the authoritative one.
     try {
-      await assertMayWriteBootPromptPointer(ctx, before.owner);
+      await withinBudget(deadline, assertMayWriteBootPromptPointer(ctx, before.owner));
     } catch (e) {
-      if (e instanceof GraphQLError) throw compileNotPermitted();
+      if (e instanceof GraphQLError && e.extensions?.code !== 'CONFLICT') throw compileNotPermitted();
+      if (e instanceof GraphQLError) throw e;
       throw e;
     }
     const expected = tenantOf(before.owner);
@@ -223,7 +239,10 @@ async function decide(
   ];
 
   const remaining = Math.floor(deadline - performance.now());
-  if (remaining < 1) throw compileConflict();
+  // Pool wait and transaction time are consecutive, so together they must fit the one budget: the transaction's own
+  // clock starts after the pool hands over a connection (Anne P2-1 on 754fac76).
+  const poolWait = Math.max(1, Math.min(POOL_WAIT_MS, Math.floor(remaining / 2)));
+  if (remaining - poolWait < 1) throw compileConflict();
   const result = await withIncludeHistoryTransaction(ctx.db, async (fence) => {
     const tx = includeHistoryClient(fence);
     await lockAuthorityAnchors(tx, anchors, 'exclusive');
@@ -378,7 +397,7 @@ async function decide(
       nodeId: node.id, memoryId: node.memoryId, loc: node.loc, revNo: node.revSeq,
       contentHash: plan.contentHash, pointerSet: setPointer,
     };
-  }, { timeoutMs: remaining, maxWaitMs: Math.min(POOL_WAIT_MS, remaining) });
+  }, { timeoutMs: remaining - poolWait, maxWaitMs: poolWait });
   for (const effect of effects) effect();
   return result;
 }
