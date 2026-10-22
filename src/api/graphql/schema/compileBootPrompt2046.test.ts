@@ -347,4 +347,60 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     expect(await codeOf(compileBootPrompt(slow, agentTarget(f), { budgetMs: 200 }))).toBe('CONFLICT');
     expect(Date.now() - started).toBeLessThan(1000);
   });
+
+  it('Xylon: the assembler runs on the deciding transaction, after the locks (it sees an uncommitted part written inside the fence)', async () => {
+    const f = await fixture();
+    await f.source(f.agentMem.id, 'boot:source', 'A {{> parts:late}} B');
+    const r = await compileBootPrompt(ctxOf(f.admin.id), agentTarget(f), {
+      seams: {
+        beforeAssemble: async (tx) => {
+          await tx.node.create({ data: { id: generateId(), memoryId: f.agentMem.id, loc: 'parts:late', name: 'l', content: 'late part' } });
+        },
+      },
+    });
+    expect((await db.node.findUniqueOrThrow({ where: { id: r.nodeId } })).content).toBe('A late part B');
+  });
+
+  it('Xylon: an owner that drifts between the pre-read and the fence is retried with the new anchors; the third drift is the sanitized CONFLICT', async () => {
+    const f = await fixture();
+    await f.source(f.agentMem.id, 'boot:source', 'x');
+    const second = (await db.organization.create({ data: { id: generateId(), name: 'cb-two', urn: 'cb-two' } })).id;
+    await db.orgMember.create({ data: { organizationId: second, userId: f.admin.id, role: 'ADMIN' } });
+    let attempts = 0;
+    const orgs = [orgId, second];
+    const drift = async (attempt: number) => {
+      attempts = attempt + 1;
+      await db.agent.update({ where: { id: f.agent.id }, data: { organizationId: orgs[(attempt + 1) % 2]! } });
+    };
+    // Drifts on attempts 0 and 1 only: attempt 2 settles.
+    const r = await compileBootPrompt(ctxOf(f.admin.id), agentTarget(f), { seams: { beforeFence: async (a) => { if (a < 2) await drift(a); } } });
+    expect(attempts).toBe(2);
+    expect(r.revNo).toBe(1);
+    // Drifts every time: exhausted.
+    const before = await snapshot();
+    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), agentTarget(f), { seams: { beforeFence: drift } }))).toBe('CONFLICT');
+    expect((await snapshot()).revisions).toBe(before.revisions);
+  });
+
+  it('Xylon: a caller denied on the FRESH owner is refused at once, never retried or reported as drift', async () => {
+    const f = await fixture();
+    await f.source(f.agentMem.id, 'boot:source', 'x');
+    const foreignOrg = (await db.organization.create({ data: { id: generateId(), name: 'cb-nomember', urn: 'cb-nomember' } })).id;
+    let beforeFenceCalls = 0;
+    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), agentTarget(f), {
+      seams: { beforeFence: async () => { beforeFenceCalls++; await db.agent.update({ where: { id: f.agent.id }, data: { organizationId: foreignOrg } }); } },
+    }))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(beforeFenceCalls).toBe(1);
+  });
+
+  it('Xylon: the budget spans the drift retries (a slow first attempt leaves nothing for the second)', async () => {
+    const f = await fixture();
+    await f.source(f.agentMem.id, 'boot:source', 'x');
+    const second = (await db.organization.create({ data: { id: generateId(), name: 'cb-three', urn: 'cb-three' } })).id;
+    await db.orgMember.create({ data: { organizationId: second, userId: f.admin.id, role: 'ADMIN' } });
+    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), agentTarget(f), {
+      budgetMs: 250,
+      seams: { beforeFence: async (a) => { if (a === 0) { await new Promise((r) => setTimeout(r, 400)); await db.agent.update({ where: { id: f.agent.id }, data: { organizationId: second } }); } } },
+    }))).toBe('CONFLICT');
+  });
 });

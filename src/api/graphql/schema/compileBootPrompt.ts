@@ -56,6 +56,13 @@ export interface CompileBootPromptOptions {
   setPointer?: boolean;
   /** The whole operation's budget in ms across the initial attempt and its owner-drift retries. Default 30s (6258672877). */
   budgetMs?: number;
+  /** Deterministic test seams (barriers at the boundaries); no request path passes these. */
+  seams?: {
+    /** After the lock-free pre-gate of attempt `attempt` (0-based), before the fence is taken. */
+    beforeFence?: (attempt: number) => Promise<void>;
+    /** Inside the fence, after every lock is held, immediately before the source is selected and the assembler runs. */
+    beforeAssemble?: (tx: Tx) => Promise<void>;
+  };
 }
 
 /** One 30-second budget for the whole compile, not per attempt (Xavier 6258672877). */
@@ -199,6 +206,7 @@ export async function compileBootPrompt(
       throw e;
     }
     const expected = tenantOf(before.owner);
+    await options.seams?.beforeFence?.(attempt);
     try {
       return await decide(ctx, target, options, before, expected, deadline);
     } catch (e) {
@@ -299,6 +307,7 @@ async function decide(
     const sourceProbe = await sourceForCompile(tx, sourceTarget, out);
     await lockEdgeEndpointMemories(tx, [out.memoryId, sourceProbe.memoryId]);
     await acquireLockSet(tx, [{ memoryId: out.memoryId, loc: out.loc }, { memoryId: sourceProbe.memoryId, loc: sourceProbe.loc }]);
+    await options.seams?.beforeAssemble?.(tx);
     // Re-select under the locks: the probe above is not trusted past them.
     const source = await sourceForCompile(tx, sourceTarget, out);
 
