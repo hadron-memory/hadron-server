@@ -14,6 +14,7 @@ import { sessionKeyCache } from '../sessionKeyCache.js';
 import { generateDataKey } from '../crypto.js';
 import { encryptNodeFields } from '../nodeCrypto.js';
 import { computeContentHash } from '../contentHash.js';
+import { rebindIncludeTags } from './rebindIncludeTags.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -231,13 +232,15 @@ describe('extract rebinds include tags that name a copied node (R180, cor:api:16
     expect(await exEdges()).toEqual(['ex:a>ex:b']);
   });
 
-  it('a legacy v1 URN spelling naming a copied node is not rewritten to the canonical form (R78)', async () => {
+  it('preserves legacy v1 bytes, but refuses writing them into an extract (#2251, R78)', async () => {
     const v1 = `{{> ${urn('sub:b').replace(/^(hrn:node:[^:]+):([^:]+):/, '$1::$2::')}}}`;
     expect(v1).toContain('::');
+    expect(rebindIncludeTags(v1, new Map([['sub:b', 'ex:b']]), memoryUrn, EX)).toBe(v1);
     await seed('sub:a', v1);
-    expect((await refusal(extract())).code).toBe('NO_ERROR');
-    const rows = await db.node.findMany({ where: { memory: { urn: EX }, loc: 'ex:a' } }); // loc-scope-ok: scoped to the extracted memory by its URN.
-    expect(rows.map(r => r.content)).toEqual([v1]);
+    expect(await refusal(extract())).toEqual({ code: 'INVALID_INCLUDE', tag: v1 });
+    expect(await db.memory.count({ where: { urn: EX } })).toBe(0);
+    expect(await db.node.count({ where: { memory: { urn: EX } } })).toBe(0);
+    expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'sub:a' } })).content).toBe(v1);
   });
 
   it('a URN tag to ANOTHER memory whose loc equals a copied node\'s source loc is never retargeted to the copy (Ruth, #2253 P3-1)', async () => {

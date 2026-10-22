@@ -55,4 +55,10 @@ describe('parseIncludeTags (#2040)', () => {
   it('does not remove global legacy node-URN acceptance (#2251)', () => {
     expect(splitNodeUrn('hrn:node:acme.com::mem::a:b')).toMatchObject({ memoryUrn: 'acme.com:mem', loc: 'a:b' });
   });
+
+  it.each(['urn:node:acme.com::mem::a', 'urn:node:acme.com:mem:a', 'hrn:mem:acme.com:mem', 'hrn:other'])('classifies a non-hrn:node: prefix as a same-memory loc: %s (#2251)', target => {
+    expect(parseIncludeTags(`{{> ${target} signed}}`)).toEqual([
+      { kind: 'loc', target, settings: { signed: true }, raw: `{{> ${target} signed}}` },
+    ]);
+  });
 });
