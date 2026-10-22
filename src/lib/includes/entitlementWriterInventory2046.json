@@ -46,8 +46,8 @@
  },
  "src/api/graphql/schema/resolvers.mutation.session.ts :: worker.updateMany": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "session claim (worker held/bound state); confirm it changes no retirement/pointer/entitlement field"
+  "status": "excluded",
+  "reason": "session claim writes heldByUserId/heldAt only; no retirement, pointer or entitlement field and no compile read of them"
  },
  "src/api/graphql/schema/resolvers.worker.ts :: worker.create": {
   "count": 1,
@@ -57,17 +57,17 @@
  "src/api/graphql/schema/resolvers.worker.ts :: worker.delete": {
   "count": 1,
   "status": "counterparty-pending",
-  "reason": "worker hard-delete of an uncasted/unreferenced worker; removes a compile target, to fence"
+  "reason": "deleteWorker is a SERIALIZABLE whole-transaction with its own reference-fence census: same composition problem as deleteUser/mergeUsers (Xylon #30516), so it waits on the account-operation composition; not fenced by a wrapper"
  },
  "src/api/graphql/schema/resolvers.worker.ts :: worker.update": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "pending field-level classification"
+  "status": "excluded",
+  "reason": "lazy provisioning of Worker.memoryId (resolvers.worker.ts ~702): the compile's worker read selects only id/agentId (bootPromptPointer.ts), never memoryId"
  },
  "src/api/graphql/schema/resolvers.worker.ts :: worker.updateMany": {
   "count": 4,
-  "status": "counterparty-pending",
-  "reason": "retireWorker fenced; hold/release/availability updateMany sites pending field-level classification"
+  "status": "fenced",
+  "reason": "retireWorker fenced (retiredAt). The other three write fields no compile reads: release hold (heldByUserId/heldAt/updatedBy), setWorkerSettings (signature/trailer/promptOverride) and the promptOverride amend; promptOverride is resolved live at bind, outside the #2063 compile, and retires at S10 activation"
  },
  "src/controller/operations/deleteUser.ts :: agent.deleteMany": {
   "count": 1,
