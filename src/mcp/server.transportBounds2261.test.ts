@@ -437,6 +437,32 @@ describe('#2261 terminal reservation state (review P2: a late initialize must no
     expect(mcpTransportStateForTests().reservations).toBe(0);
   });
 
+  it('a response already ended BEFORE reserve attaches its listeners reserves nothing (events do not replay)', () => {
+    for (const flag of ['destroyed', 'writableEnded'] as const) {
+      const { res } = fakeRes();
+      (res as unknown as Record<string, boolean>)[flag] = true;
+      expect(reserveMcpSession(`user:unit-${generateId()}`, res), flag).toBeNull();
+      expect(mcpTransportStateForTests().reservations, flag).toBe(0);
+    }
+  });
+
+  it('a response that ended without a close/finish event still cannot convert', () => {
+    const { res } = fakeRes();
+    const r = reserveMcpSession(`user:unit-${generateId()}`, res)!;
+    (res as unknown as Record<string, boolean>).destroyed = true; // ended, event missed
+    expect(r.convert()).toBe(false);
+    expect(mcpTransportStateForTests().reservations).toBe(0);
+  });
+
+  it('cancel() frees a held slot on a failure path, once, and blocks a later convert', () => {
+    const { res } = fakeRes();
+    const r = reserveMcpSession(`user:unit-${generateId()}`, res)!;
+    r.cancel();
+    r.cancel();
+    expect(mcpTransportStateForTests().reservations).toBe(0);
+    expect(r.convert()).toBe(false);
+  });
+
   it('aborted initializes suspended in App resolution register nothing when they resume (Colin cap-1 repro)', async () => {
     process.env.MCP_MAX_SESSIONS_PER_PRINCIPAL = '1';
     const a = await makeUser();
@@ -466,6 +492,31 @@ describe('#2261 terminal reservation state (review P2: a late initialize must no
     expect(mcpTransportStateForTests().reservations).toBe(0);
     // And the principal can still open a session normally.
     expect((await post(a.token, initialize)).status).toBe(200);
+  });
+});
+
+describe('#2261 failure after reserve (review, Andi P2)', () => {
+  it('a handler that throws after reserving frees the slot at once, not when the hung response finally closes', async () => {
+    process.env.MCP_MAX_SESSIONS_PER_PRINCIPAL = '1';
+    const a = await makeUser();
+    const failing = Promise.reject(new Error('app resolution failed'));
+    failing.catch(() => undefined);
+    gate.hold = failing as Promise<void>;
+    const ac = new AbortController();
+    const sent = fetch(`${baseUrl}/mcp`, {
+      method: 'POST',
+      headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', authorization: `Bearer ${a.token}` },
+      body: JSON.stringify(initialize),
+      signal: ac.signal,
+    }).catch(() => undefined);
+    try {
+      await sleep(300); // the request is still open (Express 4 never answers a rejected async handler)
+      expect(mcpTransportStateForTests().reservations).toBe(0);
+    } finally {
+      gate.hold = null;
+      ac.abort();
+      await sent;
+    }
   });
 });
 
