@@ -8,7 +8,9 @@ import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { ensureCurrentNodeRevisionInTransaction, jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
 import { carryGovernedSignals } from '../../lib/governedSignals.js';
-import { carryNodeAuthorship } from '../../lib/nodeAuthorship.js';
+import { carryNodeAuthorship, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
+import { computeContentHash } from '../../lib/contentHash.js';
+import { rebindIncludeTags } from '../../lib/includes/rebindIncludeTags.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import type { MemoryClass, MemoryVisibility } from '../../generated/prisma/index.js';
 
@@ -310,7 +312,17 @@ export async function extractParentNodeGraph(
       }
       const movedIds = [...idMap.keys()];
 
-      const nodeRows: Prisma.NodeCreateManyInput[] = nodes.map((n) => ({
+      // R180 (#2167) — include tags naming a copied node follow it to its rebased loc.
+      const rebasedLocByLoc = new Map(nodes.map((n) => [n.loc, newLocById.get(n.id)!]));
+      const nodeRows: Prisma.NodeCreateManyInput[] = nodes.map((n) => {
+        const content = rebindIncludeTags(n.content, rebasedLocByLoc, source.urn, args.newUrn);
+        const contentChanged = content !== n.content;
+        // Spec 032, as clone's URN rewrite: a FRESH abstract stays fresh
+        // against the rewritten content; a stale one keeps its stale hash.
+        const abstractOriginHash = contentChanged && n.abstractOriginHash !== null && n.abstractOriginHash === computeContentHash(n.content)
+          ? computeContentHash(content)
+          : n.abstractOriginHash;
+        return {
         id: idMap.get(n.id)!,
         memoryId,
         nodeType: n.nodeType,
@@ -320,12 +332,13 @@ export async function extractParentNodeGraph(
         loc: newLocById.get(n.id)!,
         isLink: n.isLink,
         description: n.description,
-        // Content copied verbatim (v1 — no URN/loc rewrite). contentHash and
-        // abstractOriginHash therefore still describe these exact bytes.
+        // Content is verbatim except for R180's include rebinding. A rebound
+        // node's contentHash (the external-producer domain) would describe
+        // other bytes, so it is nulled, as on clone.
         abstract: n.abstract,
-        content: n.content,
-        contentHash: n.contentHash,
-        abstractOriginHash: n.abstractOriginHash,
+        content,
+        contentHash: contentChanged ? null : n.contentHash,
+        abstractOriginHash,
         tags: n.tags,
         properties: jsonOrDbNull(n.properties),
         data: jsonOrDbNull(n.data),
@@ -348,14 +361,16 @@ export async function extractParentNodeGraph(
         // back to `n` keeps the copy correct if a row vanished from the
         // re-read.
         ...carryGovernedSignals(refreshed.has(n.id) ? n : freshSignals?.get(n.loc) ?? n),
-        // Content and attribution both come from the reconciled source.
-        ...carryNodeAuthorship(n),
+        // Content and attribution both come from the reconciled source; a
+        // rebound node's content is no longer what its author wrote (cor:api:150:01).
+        ...(contentChanged ? clearNodeAuthorship() : carryNodeAuthorship(n)),
         llmModel: n.llmModel,
         aiAgent: n.aiAgent,
         tokens: n.tokens,
         // Embedding markers start clean; the caller backfills if indexed.
         createdBy: args.actorId,
-      }));
+        };
+      });
       if (nodeRows.length > 0) {
         await tx.node.createMany({ data: nodeRows });
       }

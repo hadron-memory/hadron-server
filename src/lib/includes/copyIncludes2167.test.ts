@@ -146,6 +146,7 @@ describe('extract: copied tags resolve where they land (cor:dmo:150:04, :06)', (
     where: { memory: { urn: EX(slug) }, governedKind: 'INCLUDE' }, include: { source: true, target: true },
   })).map(e => `${e.source.loc}>${e.target.loc}`).sort();
   const exContent = async (slug: string, loc: string) =>
+    // loc-scope-ok: scoped to the extracted memory by its URN.
     (await db.node.findFirstOrThrow({ where: { memory: { urn: EX(slug) }, loc } })).content;
   const sourceLive = async () => db.node.count({ where: { memoryId, loc: { startsWith: 'sub' }, deletedAt: null } });
 
@@ -196,6 +197,7 @@ describe('extract rebinds include tags that name a copied node (R180, cor:api:16
     const parent = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'sub' } });
     return M.extractParentNodeToMemory(null, { parentRef: parent.id, targetUrn: `hrn:mem:${EX}`, move }, as());
   };
+  // loc-scope-ok: scoped to the extracted memory by its URN.
   const exNode = (loc: string) => db.node.findFirstOrThrow({ where: { memory: { urn: EX }, loc } });
   const exEdges = async () => (await db.edge.findMany({
     where: { memory: { urn: EX }, governedKind: 'INCLUDE' }, include: { source: true, target: true },

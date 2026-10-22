@@ -10349,15 +10349,18 @@ export const typeDefs = `#graphql
 
     Include tags (#2167; hrn:node:hadronmemory.com:specs:cor:dmo:150:04 and
     hrn:node:hadronmemory.com:specs:cor:dmo:150:06): every tag in every copied node
-    counts as added and is resolved where it lands in the new memory. Content
-    is copied verbatim, so a relative tag to a node in the subtree resolves
-    only when the new slug equals the parent's loc. Otherwise, or when the tag
-    names a node left behind, it refuses with INCLUDE_TARGET_UNAVAILABLE. A tag
-    that closes a cycle refuses with INCLUDE_CYCLE. Either refusal names only
-    the authored tag, and nothing is created or moved.
+    counts as added and is resolved where it lands in the new memory. First, a
+    tag naming a copied node is rewritten to that node's rebased loc (a URN tag
+    to the source memory becomes the new memory's URN); only the target
+    changes, and a rewritten node loses its contentHash and authorship. A tag
+    naming anything else stays as written, so one naming a node left behind
+    refuses with INCLUDE_TARGET_UNAVAILABLE. A tag that closes a cycle refuses
+    with INCLUDE_CYCLE. Either refusal names the tag as it stands in the copy,
+    and nothing is created or moved.
 
-    v1 limitation: node content is copied verbatim — because both the slug and
-    node locs change, URN references among the moved nodes WILL break; and
+    v1 limitation: apart from include tags, node content is copied verbatim —
+    because both the slug and node locs change, other URN references among the
+    moved nodes WILL break; and
     unresolved PendingEdges within the subtree are dropped.
     """
     extractParentNodeToMemory(parentRef: ID!, targetUrn: String!, move: Boolean = false): Memory!
