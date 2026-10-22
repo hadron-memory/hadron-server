@@ -137,6 +137,14 @@ import {
   type AppSelectionErrorEnvelope,
 } from './app-selection-errors.js';
 import { mcpLog } from './mcp-log.js';
+import {
+  CAP_RETRY_AFTER_SECONDS,
+  SWEEP_INTERVAL_MS,
+  idleTtlMs,
+  maxSessionsPerPrincipal,
+  mcpPrincipalKey,
+  releaseOnceOnResponseEnd,
+} from './transportBounds.js';
 import { toolErrorResult, withToolErrorBoundary } from './toolError.js';
 import { textResult } from './textResult.js';
 import { tagsInputSchema } from './tagsInput.js';
@@ -11076,9 +11084,159 @@ type ActiveMcpTransport = {
    * authorization critical section rather than independent operations.
    */
   requestTail: Promise<void>;
+  /** #2261: tagged key of the credential that opened this transport (`mcpPrincipalKey`). */
+  principalKey: string;
+  /**
+   * #2261: requests holding this transport right now, counted off the Node response (arrival to `close`/`finish`),
+   * so a GET/SSE stream, a POST queued behind `requestTail` and a still-open response all pin it.
+   */
+  inFlight: number;
+  /** #2261: arrival or completion time of the latest request (epoch ms). */
+  lastActivityAt: number;
 };
 
 const transports = new Map<string, ActiveMcpTransport>();
+
+/**
+ * #2261: new-session capacity reserved by initializes that have authenticated but not yet registered, per
+ * principal key. A reservation is taken synchronously (no await between the cap check and the increment),
+ * so concurrent initializes cannot jointly exceed the cap, and is released exactly once: on conversion to a
+ * registered entry, on any exit of the handler, or when the response ends, whichever comes first.
+ */
+const mcpSessionReservations = new Map<string, number>();
+
+/** Marks one more request in flight on `active`; the returned function releases it (idempotent). */
+function holdMcpTransport(active: ActiveMcpTransport, res: Response): () => void {
+  active.inFlight += 1;
+  active.lastActivityAt = Date.now();
+  return releaseOnceOnResponseEnd(res, () => {
+    active.inFlight -= 1;
+    active.lastActivityAt = Date.now();
+  });
+}
+
+/**
+ * Drops a transport from the registry synchronously (so its capacity frees at once), then closes it.
+ * Same cleanup as `onclose`/DELETE via `unregisterMcpTransport`; connection-local state only, never the durable
+ * worker Session or its hold.
+ */
+function evictMcpTransport(sessionId: string, active: ActiveMcpTransport, reason: 'idle' | 'cap'): void {
+  if (transports.get(sessionId) !== active) return;
+  unregisterMcpTransport(sessionId, active.transport);
+  mcpLog('info', 'mcp_transport_evicted', { mcpSessionId: sessionId, reason, principalKey: active.principalKey });
+  void active.transport.close().catch(() => undefined);
+}
+
+/**
+ * Idle rule (distinct from the cap rule): a transport is evicted when it has NO request in flight AND has been
+ * quiet longer than the TTL. Re-checked per entry immediately before eviction, synchronously, so a request that
+ * arrives between the scan and the close wins.
+ */
+export function sweepIdleMcpTransports(now: number = Date.now()): number {
+  const ttl = idleTtlMs();
+  let evicted = 0;
+  for (const [sid, active] of [...transports]) {
+    if (active.inFlight === 0 && now - active.lastActivityAt > ttl) {
+      evictMcpTransport(sid, active, 'idle');
+      evicted += 1;
+    }
+  }
+  return evicted;
+}
+
+/**
+ * #2261 cap rule (distinct from the idle rule): reserve one new-session slot for `principalKey`, evicting that
+ * principal's least-recently-active transport WITH NOTHING IN FLIGHT to make room, without waiting for the TTL.
+ * Nothing awaits between the count and the reservation, so concurrent initializes cannot jointly exceed the cap.
+ * When every live transport of the principal is in flight (or reserved), answers 429 and returns null: no live
+ * request is ever evicted. Release the returned function on conversion; it also fires when the response ends.
+ */
+function reserveMcpSession(principalKey: string, res: Response): (() => void) | null {
+  const cap = maxSessionsPerPrincipal();
+  const live = (): number => {
+    let n = mcpSessionReservations.get(principalKey) ?? 0;
+    for (const a of transports.values()) if (a.principalKey === principalKey) n += 1;
+    return n;
+  };
+  while (live() >= cap) {
+    let oldest: [string, ActiveMcpTransport] | null = null;
+    for (const entry of transports) {
+      const [, a] = entry;
+      if (a.principalKey !== principalKey || a.inFlight > 0) continue;
+      if (!oldest || a.lastActivityAt < oldest[1].lastActivityAt) oldest = entry;
+    }
+    if (!oldest) {
+      res.setHeader('Retry-After', String(CAP_RETRY_AFTER_SECONDS));
+      res.status(429).json({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: `Too many open MCP sessions for this credential (limit ${cap}). Close one and retry.` },
+        id: null,
+      });
+      return null;
+    }
+    evictMcpTransport(oldest[0], oldest[1], 'cap');
+  }
+  mcpSessionReservations.set(principalKey, (mcpSessionReservations.get(principalKey) ?? 0) + 1);
+  return releaseOnceOnResponseEnd(res, () => {
+    const left = (mcpSessionReservations.get(principalKey) ?? 1) - 1;
+    if (left <= 0) mcpSessionReservations.delete(principalKey);
+    else mcpSessionReservations.set(principalKey, left);
+  });
+}
+
+let mcpTransportSweepTimer: NodeJS.Timeout | null = null;
+
+/** Starts the idle-transport sweep on its OWN timer (not the session reaper's, so one flag cannot disable both). */
+export function startMcpTransportSweepLoop(): void {
+  if (mcpTransportSweepTimer) return;
+  mcpTransportSweepTimer = setInterval(() => {
+    try {
+      sweepIdleMcpTransports();
+    } catch (err) {
+      mcpLog('error', 'mcp_transport_sweep_failed', { message: err instanceof Error ? err.message : String(err) });
+    }
+  }, SWEEP_INTERVAL_MS);
+  mcpTransportSweepTimer.unref?.();
+}
+
+/** Stops the sweep (server shutdown). */
+export function stopMcpTransportSweepLoop(): void {
+  if (mcpTransportSweepTimer) clearInterval(mcpTransportSweepTimer);
+  mcpTransportSweepTimer = null;
+}
+
+/** Test seam: sweep as of `now`. */
+export async function sweepIdleMcpTransportsForTests(now: number): Promise<number> {
+  const n = sweepIdleMcpTransports(now);
+  await new Promise((r) => setTimeout(r, 25)); // let the closes settle
+  return n;
+}
+
+/** Test seam: a snapshot of the registry and the per-session side maps. */
+export function mcpTransportStateForTests(): {
+  sessionIds: string[];
+  entries: Record<string, { inFlight: number; lastActivityAt: number; principalKey: string }>;
+  reservations: number;
+  sweepTimerRunning: boolean;
+  sideMapKeys: { activeApp: string[]; workerSessions: string[]; sharedConnections: string[]; actorsSeen: string[] };
+} {
+  const entries: Record<string, { inFlight: number; lastActivityAt: number; principalKey: string }> = {};
+  for (const [sid, a] of transports) entries[sid] = { inFlight: a.inFlight, lastActivityAt: a.lastActivityAt, principalKey: a.principalKey };
+  let reservations = 0;
+  for (const n of mcpSessionReservations.values()) reservations += n;
+  return {
+    sessionIds: [...transports.keys()],
+    entries,
+    reservations,
+    sweepTimerRunning: mcpTransportSweepTimer !== null,
+    sideMapKeys: {
+      activeApp: [...activeAppByMcpSession.keys()],
+      workerSessions: [...workerSessionsByMcpSession.keys()],
+      sharedConnections: [...sharedMcpConnections.keys()],
+      actorsSeen: [...actorsSeenByMcpSession.keys()],
+    },
+  };
+}
 
 /**
  * Spec 026 — per-MCP-session active App, used by both regime (b)
@@ -11382,85 +11540,109 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
 
   if (sessionId && transports.has(sessionId)) {
     const active = transports.get(sessionId)!;
-
-    // Streamable HTTP GET opens the transport's long-lived SSE channel. Its
-    // handleRequest promise lasts for the stream lifetime, so putting it in
-    // the POST queue would prevent every later tool call from ever reaching
-    // role refresh or dispatch. GET does not dispatch role-gated tools and
-    // therefore does not mutate the shared authorization snapshot.
-    if (req.method === 'GET') {
-      if (!(await authenticateBoundMcpSession(req, res, sessionId, active))) return;
-      await active.transport.handleRequest(req, res, req.body);
-      return;
-    }
-
-    const previousRequest = active.requestTail;
-    let releaseRequest!: () => void;
-    active.requestTail = new Promise<void>((resolve) => {
-      releaseRequest = resolve;
-    });
-    await previousRequest;
+    // #2261: from ARRIVAL (before any queueing) until the response ends. A handler returning is not the release
+    // signal: an SSE stream outlives it. Only a throw needs the explicit release (no response may ever end then).
+    const releaseHold = holdMcpTransport(active, res);
     try {
-      // A request may have queued before another request invalidated and
-      // closed this transport. It must not dispatch through the stale object.
-      if (transports.get(sessionId) !== active) {
-        respondMcpSessionNotFound(res);
-        return;
-      }
-      let roles: Awaited<ReturnType<typeof getCurrentUserRoles>>;
-      try {
-        roles = await getCurrentUserRoles(db, active.auth);
-      } catch {
-        // Express 4 does not forward a rejected async handler. Fail this request
-        // closed and explicitly rather than either dispatching with cached roles
-        // or leaving the client hanging on a database failure.
-        mcpLog('error', 'mcp_role_refresh_failed', {
-          mcpSessionId: sessionId,
-          userId: active.auth.userId,
-        });
-        res.status(503).json({ error: 'Authentication temporarily unavailable' });
-        return;
-      }
-
-      // DELETE and transport.onclose do not enter this POST queue. Either can
-      // unregister the session while the database lookup above is in flight,
-      // so revalidate the exact transport after that await and immediately
-      // before mutating its captured auth or dispatching through it.
-      if (transports.get(sessionId) !== active) {
-        respondMcpSessionNotFound(res);
-        return;
-      }
-
-      if (roles === null) {
-        // Account deletion revokes self-contained JWTs per request. Apply the
-        // same liveness contract to an already-open MCP transport: zero roles
-        // is a valid ordinary user, while a missing live user is no principal.
-        unregisterMcpTransport(sessionId, active.transport);
-        await active.transport.close();
-        res.status(401).json({ error: 'Authentication required' });
-        return;
-      }
-
-      // Credential validation shares this lock with role refresh and dispatch:
-      // a queued request may never borrow the prior request's bearer.
-      const presented = await authenticateBoundMcpSession(req, res, sessionId, active);
-      if (!presented) return;
-      // Credential resolution re-reads the live user after the liveness check
-      // above. A demotion between those reads must win before tool dispatch.
-      active.auth.roles = presented.roles ?? [];
-      // An App key carries no session of its own across requests: THIS request's header (valid, or named and refused)
-      // is what the wake tools' session-bound refusal reads, not the one the transport opened with (#1749, N5).
-      if (active.auth.appKeyId) {
-        active.auth.requestSession = { sessionId: presented.sessionId, refused: presented.sessionBindingRefused === true };
-      }
-      await publishConnectionActor(sessionId, presented, req.headers['x-hadron-session'] !== undefined);
-      await active.transport.handleRequest(req, res, req.body);
-    } finally {
-      releaseRequest();
+      await handleKnownMcpSession(req, res, sessionId, active);
+    } catch (err) {
+      releaseHold();
+      throw err;
     }
     return;
   }
+  return handleUnknownOrNewMcpSession(req, res, sessionId);
+}
 
+async function handleKnownMcpSession(
+  req: Request,
+  res: Response,
+  sessionId: string,
+  active: ActiveMcpTransport,
+): Promise<void> {
+  // Streamable HTTP GET opens the transport's long-lived SSE channel. Its
+  // handleRequest promise lasts for the stream lifetime, so putting it in
+  // the POST queue would prevent every later tool call from ever reaching
+  // role refresh or dispatch. GET does not dispatch role-gated tools and
+  // therefore does not mutate the shared authorization snapshot.
+  if (req.method === 'GET') {
+    if (!(await authenticateBoundMcpSession(req, res, sessionId, active))) return;
+    await active.transport.handleRequest(req, res, req.body);
+    return;
+  }
+
+  const previousRequest = active.requestTail;
+  let releaseRequest!: () => void;
+  active.requestTail = new Promise<void>((resolve) => {
+    releaseRequest = resolve;
+  });
+  await previousRequest;
+  try {
+    // A request may have queued before another request invalidated and
+    // closed this transport. It must not dispatch through the stale object.
+    if (transports.get(sessionId) !== active) {
+      respondMcpSessionNotFound(res);
+      return;
+    }
+    let roles: Awaited<ReturnType<typeof getCurrentUserRoles>>;
+    try {
+      roles = await getCurrentUserRoles(db, active.auth);
+    } catch {
+      // Express 4 does not forward a rejected async handler. Fail this request
+      // closed and explicitly rather than either dispatching with cached roles
+      // or leaving the client hanging on a database failure.
+      mcpLog('error', 'mcp_role_refresh_failed', {
+        mcpSessionId: sessionId,
+        userId: active.auth.userId,
+      });
+      res.status(503).json({ error: 'Authentication temporarily unavailable' });
+      return;
+    }
+
+    // DELETE and transport.onclose do not enter this POST queue. Either can
+    // unregister the session while the database lookup above is in flight,
+    // so revalidate the exact transport after that await and immediately
+    // before mutating its captured auth or dispatching through it.
+    if (transports.get(sessionId) !== active) {
+      respondMcpSessionNotFound(res);
+      return;
+    }
+
+    if (roles === null) {
+      // Account deletion revokes self-contained JWTs per request. Apply the
+      // same liveness contract to an already-open MCP transport: zero roles
+      // is a valid ordinary user, while a missing live user is no principal.
+      unregisterMcpTransport(sessionId, active.transport);
+      await active.transport.close();
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+
+    // Credential validation shares this lock with role refresh and dispatch:
+    // a queued request may never borrow the prior request's bearer.
+    const presented = await authenticateBoundMcpSession(req, res, sessionId, active);
+    if (!presented) return;
+    // Credential resolution re-reads the live user after the liveness check
+    // above. A demotion between those reads must win before tool dispatch.
+    active.auth.roles = presented.roles ?? [];
+    // An App key carries no session of its own across requests: THIS request's header (valid, or named and refused)
+    // is what the wake tools' session-bound refusal reads, not the one the transport opened with (#1749, N5).
+    if (active.auth.appKeyId) {
+      active.auth.requestSession = { sessionId: presented.sessionId, refused: presented.sessionBindingRefused === true };
+    }
+    await publishConnectionActor(sessionId, presented, req.headers['x-hadron-session'] !== undefined);
+    await active.transport.handleRequest(req, res, req.body);
+  } finally {
+    releaseRequest();
+  }
+}
+
+/** An unknown or absent session id: answer the stale-id 404, or authenticate and open a new session. */
+async function handleUnknownOrNewMcpSession(
+  req: Request,
+  res: Response,
+  sessionId: string | undefined,
+): Promise<void> {
   // Stale session — the client presented a session ID we don't know
   // (typically: the server restarted and the in-memory registry was wiped).
   // Per the MCP streamable-HTTP spec the recoverable signal is HTTP 404
@@ -11538,6 +11720,12 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     respondMcpAuthenticationRequired(req, res);
     return;
   }
+
+  // #2261: reserve capacity NOW, before the first await below, so concurrent initializes cannot jointly exceed
+  // the per-principal cap. The key is read before `auth.appId` is filled in from a default or a restored selection.
+  const principalKey = mcpPrincipalKey(auth);
+  const releaseReservation = reserveMcpSession(principalKey, res);
+  if (!releaseReservation) return;
 
   // Spec 025 / 026 — App-identification resolution at the MCP boundary for
   // user-credential callers (userId set, appId not set; JWT or
@@ -11664,8 +11852,10 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
 
   const sid = transport.sessionId;
   if (sid) {
-    transports.set(sid, { transport, auth, requestTail: Promise.resolve() });
+    // Convert the reservation into the registered entry with nothing awaited between the two.
+    transports.set(sid, { transport, auth, requestTail: Promise.resolve(), principalKey, inFlight: 0, lastActivityAt: Date.now() });
   }
+  releaseReservation();
 }
 
 /**

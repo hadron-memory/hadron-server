@@ -354,7 +354,7 @@ describe('#2261 eviction touches connection-local state only', () => {
     const started = await callTool(token, sid, 'hadron_start_session', { description: 'evict me', workerRef: workerId });
     const sessionId = started.match(/Session started: (\S+)/)?.[1];
     expect(sessionId, started).toBeTruthy();
-    const claim = await callTool(token, sid, 'hadron_create_resume_claim', {});
+    const claim = await callTool(token, sid, 'hadron_create_resume_claim', { session: sessionId });
     expect(claim).toContain(sessionId!);
 
     const beforeSession = await db.session.findUniqueOrThrow({ where: { id: sessionId! } });
