@@ -16,7 +16,8 @@
  *     derived `compiled-from` edge, any missing same-organisation grants and
  *     the pointer are written. A refusal anywhere rolls all of it back.
  *
- * It never approves or signs; the revision it writes is unapproved.
+ * It never approves or signs (the API reports approvalIssued: false); the revision it writes is not one that
+ * has been approved, so serving keeps the last approved one until a manager approves.
  */
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
@@ -40,6 +41,7 @@ import { generateId } from '../../../lib/id.js';
 import { includeHistoryClient, withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { acquireLockSet } from '../../../lib/nodeSubtreeLock.js';
 import { liveTxContext } from './authorizedTx.js';
+import { ensureInstallMemory } from './installMemory.js';
 import { isMemoryReadableFresh, type Context } from './resolvers.helpers.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 
@@ -52,7 +54,13 @@ export type CompileTargetInput =
 export interface CompileBootPromptOptions {
   /** Agent and worker compiles only: false leaves the pointer alone. An App compile always sets it. */
   setPointer?: boolean;
+  /** The whole operation's budget in ms across the initial attempt and its owner-drift retries. Default 30s (6258672877). */
+  budgetMs?: number;
 }
+
+/** One 30-second budget for the whole compile, not per attempt (Xavier 6258672877). */
+export const COMPILE_BUDGET_MS = 30_000;
+const POOL_WAIT_MS = 5_000;
 
 /** The S9-4 refusals this adds to the S9-2 assembler's; the codes cor:agt:040:12 lists (R33). */
 export const BOOT_COMPILE_CODES = ['BOOT_PROMPT_COMPILE_NOT_PERMITTED', 'BOOT_PROMPT_TARGET_RETIRED', 'BOOT_PROMPT_NO_SOURCE'] as const;
@@ -134,6 +142,17 @@ const tenantOf = (o: BootPromptPointerOwner) => (o.field === 'AGENT' ? o.agent :
 
 class OwnerTenantChanged extends Error {}
 
+/** A lock-wait or transaction timeout from the budgeted fence transaction (Postgres 55P03, Prisma P2028 / expired). */
+function isBudgetFault(e: unknown): boolean {
+  const x = e as { code?: string; meta?: { code?: string }; message?: string };
+  return x?.code === 'P2028' || x?.meta?.code === '55P03' || /lock timeout|lock_timeout|transaction expired|Transaction already closed|Include-history transaction expired/i.test(String(x?.message ?? ''));
+}
+
+/** The compile could not settle inside its budget or the owner kept changing: retry. Says nothing about the target. */
+function compileConflict(): GraphQLError {
+  return new GraphQLError('The boot prompt could not be compiled right now; retry.', { extensions: { code: 'CONFLICT' } });
+}
+
 function compileError(code: string, message: string): GraphQLError {
   return new GraphQLError(`${code}: ${message}`, { extensions: { code } });
 }
@@ -147,14 +166,25 @@ export async function compileBootPrompt(
   // An impersonated session is never "a manager as themselves" (the gate below refuses it too); stated here
   // so no owner lookup runs for it.
   if (ctx.impersonation) throw compileNotPermitted();
+  const deadline = performance.now() + (options.budgetMs ?? COMPILE_BUDGET_MS);
   for (let attempt = 0; attempt < 3; attempt++) {
+    if (deadline - performance.now() < 1) throw compileConflict();
     // The anchors are chosen from the owner as read BEFORE the fence; a transfer that lands first is caught
     // inside and retried with the new ones (the setBootPromptPointer shape).
     const before = await loadCompileOwner(ctx.db, target);
     if (!before) throw compileNotPermitted();
+    // A lock-free, NON-authoritative gate before anything is held: a caller who may not compile must not queue
+    // on the platform-wide fence or take the tenant's anchors, which would be a cheap lock-DoS and an existence
+    // oracle (Rook P2-1 on #2258). The in-transaction gate below stays the authoritative one.
+    try {
+      await assertMayWriteBootPromptPointer(ctx, before.owner);
+    } catch (e) {
+      if (e instanceof GraphQLError) throw compileNotPermitted();
+      throw e;
+    }
     const expected = tenantOf(before.owner);
     try {
-      return await decide(ctx, target, options, before, expected);
+      return await decide(ctx, target, options, before, expected, deadline);
     } catch (e) {
       if (e instanceof OwnerTenantChanged) continue;
       if (e instanceof GraphQLError && (e.extensions?.code === 'FORBIDDEN' || e.extensions?.code === 'BOOT_PROMPT_POINTER_SESSION_REFUSED')) {
@@ -166,10 +196,13 @@ export async function compileBootPrompt(
           extensions: { code: e.code, ...(e.position ? { position: e.position } : {}) },
         });
       }
+      // The budget ran out while waiting for the fence or inside the transaction: the same sanitized conflict.
+      if (isBudgetFault(e)) throw compileConflict();
       throw e;
     }
   }
-  throw new Error('The owner of this boot prompt changed repeatedly; retry the operation');
+  // Drift exhausted: the fixed, sanitized conflict. A caller who is denied on the fresh read never reaches here.
+  throw compileConflict();
 }
 
 async function decide(
@@ -178,6 +211,7 @@ async function decide(
   options: CompileBootPromptOptions,
   before: CompileOwner,
   expected: { organizationId: string | null; ownerUserId: string | null },
+  deadline: number,
 ): Promise<CompiledBootPromptResult> {
   const effects: Array<() => void> = [];
   const anchors: AuthorityAnchor[] = [
@@ -188,6 +222,8 @@ async function decide(
     ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
   ];
 
+  const remaining = Math.floor(deadline - performance.now());
+  if (remaining < 1) throw compileConflict();
   const result = await withIncludeHistoryTransaction(ctx.db, async (fence) => {
     const tx = includeHistoryClient(fence);
     await lockAuthorityAnchors(tx, anchors, 'exclusive');
@@ -199,12 +235,13 @@ async function decide(
     // 1. The gate, on the live owner and the live caller. Nothing about the target is said before it passes.
     const live = await loadCompileOwner(tx, target);
     if (!live) throw compileNotPermitted();
+    const txCtx = await liveTxContext(ctx, tx);
+    // The fresh gate comes BEFORE the drift check, so a caller denied on the live owner is refused, never retried.
+    await assertMayWriteBootPromptPointer(txCtx, live.owner);
     const tenant = tenantOf(live.owner);
     if (tenant.organizationId !== expected.organizationId || tenant.ownerUserId !== expected.ownerUserId) {
       throw new OwnerTenantChanged();
     }
-    const txCtx = await liveTxContext(ctx, tx);
-    await assertMayWriteBootPromptPointer(txCtx, live.owner);
 
     // 2. Only now: retired.
     if (live.retired) {
@@ -212,12 +249,18 @@ async function decide(
     }
 
     // 3. Where the source is and where the output goes.
-    const installMemoryId = live.appId
+    let installMemoryId = live.appId
       ? (await tx.memory.findFirst({
         where: { class: 'system', isInstallMemory: true, appId: live.appId, installOfAgentId: live.agent.id, deletedAt: null },
         select: { id: true },
       }))?.id ?? null
       : null;
+    // An App's first compile IS its first customisation: the install memory is made lazily (S7), inside this
+    // transaction, so a later refusal rolls it back. A worker's source lives in that memory, so with none there is
+    // genuinely no source (Dara P2-2).
+    if (target.kind === 'APP_AGENT' && !installMemoryId && live.appId) {
+      installMemoryId = (await ensureInstallMemory(tx, txCtx, live.appId, live.agent.id)).id;
+    }
     const agentMemoryId = live.agent.systemMemoryId;
     const noSource = () => compileError('BOOT_PROMPT_NO_SOURCE', 'the target has no source boot prompt to compile from.');
     if (!agentMemoryId) throw noSource();
@@ -261,7 +304,13 @@ async function decide(
     // Missing same-organisation grants are provisioned here, in the deciding transaction.
     if (recipient.kind === 'org') {
       for (const grant of plan.grants) {
-        if (grant.provision) await ensureAgentOrgGrant(tx, recipient.orgId, grant.agentId, { createdBy: ctx.userId });
+        if (!grant.provision) continue;
+        // The included Agent is not one of the held anchors: lock its row and re-read it, so a retirement or a
+        // transfer that committed since the plan is seen and no grant is minted for it (Rook P3-1).
+        const still = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM agents WHERE id = ${grant.agentId} AND deleted_at IS NULL AND organization_id = ${recipient.orgId} FOR SHARE`;
+        if (still.length !== 1) throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE', null);
+        await ensureAgentOrgGrant(tx, recipient.orgId, grant.agentId, { createdBy: ctx.userId });
       }
     }
 
@@ -329,7 +378,7 @@ async function decide(
       nodeId: node.id, memoryId: node.memoryId, loc: node.loc, revNo: node.revSeq,
       contentHash: plan.contentHash, pointerSet: setPointer,
     };
-  });
+  }, { timeoutMs: remaining, maxWaitMs: Math.min(POOL_WAIT_MS, remaining) });
   for (const effect of effects) effect();
   return result;
 }

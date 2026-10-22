@@ -9,7 +9,7 @@ import { cleanDb, createDbAppAgent, createDbAppMember, createDbAppWithKey } from
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { readCompiledRevision, sha256Hex } from '../../../lib/bootCompile/provenance.js';
-import { compileBootPrompt, workerCompiledLoc, type CompileTargetInput } from './compileBootPrompt.js';
+import { compileBootPrompt, compileNotPermitted, workerCompiledLoc, type CompileTargetInput } from './compileBootPrompt.js';
 import type { Context } from './resolvers.helpers.js';
 import { resolvers } from './resolvers.js';
 
@@ -199,5 +199,142 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     const before = { ...(await snapshot()), grants: await db.agentOrgGrant.count() };
     expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), agentTarget(f)))).toBe('BOOT_PROMPT_GRANT_REQUIRED');
     expect({ ...(await snapshot()), grants: await db.agentOrgGrant.count() }).toEqual(before);
+  });
+
+  it('Rook P2-1: a stranger and an anonymous caller are refused at once while the platform fence is held; a manager waits on the budget and gets the sanitized conflict', async () => {
+    const f = await fixture();
+    await f.source(f.agentMem.id, 'boot:source', 'x');
+    const stranger = (await db.user.create({ data: { id: generateId(), name: 'stranger' } })).id;
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockTaken = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(2063, 1772)`;
+      locked();
+      await held;
+    }, { timeout: 20_000 });
+    await lockTaken;
+    try {
+      const quick = async (c: Context) => Promise.race([
+        codeOf(compileBootPrompt(c, agentTarget(f))),
+        new Promise<string>((r) => setTimeout(() => r('BLOCKED'), 1500)),
+      ]);
+      expect(await quick(ctxOf(stranger))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+      expect(await quick(ctxOf(undefined))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+      expect(await quick(ctxOf(f.member.id))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+      // The manager does queue, but only for the operation budget, then gets one fixed answer.
+      const started = Date.now();
+      expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), agentTarget(f), { budgetMs: 400 }))).toBe('CONFLICT');
+      expect(Date.now() - started).toBeLessThan(3000);
+    } finally {
+      release();
+      await holder;
+    }
+  });
+
+  it('an exhausted budget refuses before any transaction opens', async () => {
+    const f = await fixture();
+    await f.source(f.agentMem.id, 'boot:source', 'x');
+    const before = await snapshot();
+    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), agentTarget(f), { budgetMs: 0 }))).toBe('CONFLICT');
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('Anne P2-2/P2-3: the door tells a retired Agent\'s manager TARGET_RETIRED, everyone else NOT_PERMITTED, and a DB fault is not a denial', async () => {
+    const f = await fixture();
+    await f.source(f.agentMem.id, 'boot:source', 'x');
+    await db.agent.update({ where: { id: f.agent.id }, data: { deletedAt: new Date() } });
+    const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<unknown>>;
+    expect(await codeOf(M.compileAgentBootPrompt!(null, { agentRef: f.agent.id }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_TARGET_RETIRED');
+    expect(await codeOf(M.compileAgentBootPrompt!(null, { agentRef: f.agent.id }, ctxOf(f.member.id)))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await codeOf(M.compileAppAgentBootPrompt!(null, { appRef: f.app.id, agentRef: f.agent.id }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_TARGET_RETIRED');
+    const broken = { ...ctxOf(f.admin.id), db: new Proxy(db, { get: (t, k) => (k === 'agent' ? { findFirst: () => { throw new Error('connection lost'); } } : (t as never)[k]) }) } as Context;
+    expect(await codeOf(M.compileAgentBootPrompt!(null, { agentRef: f.agent.id }, broken))).toBe('connection lost');
+  });
+
+  it('Dara P2-1: the target Agent is qualified even when the source is install-only text', async () => {
+    const f = await fixture();
+    await f.source(f.install.id, 'boot:source', 'literal only');
+    // A same-org Agent with no grant is provisioned, a revoked one is refused and never revived.
+    const app = { kind: 'APP_AGENT', appId: f.app.id, agentId: f.agent.id } as const;
+    await compileBootPrompt(ctxOf(f.admin.id), app);
+    expect(await db.agentOrgGrant.count({ where: { orgId, agentId: f.agent.id, revokedAt: null } })).toBe(1);
+    await db.agentOrgGrant.updateMany({ where: { orgId, agentId: f.agent.id }, data: { revokedAt: new Date() } });
+    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), app))).toBe('BOOT_PROMPT_GRANT_REQUIRED');
+    expect(await db.agentOrgGrant.count({ where: { orgId, agentId: f.agent.id, revokedAt: null } })).toBe(0);
+  });
+
+  it('Dara P2-1: a foreign PUBLIC Agent installed in an App with install-only text, no grant, is refused GRANT_REQUIRED and nothing is written', async () => {
+    const f = await fixture();
+    const other = (await db.organization.create({ data: { id: generateId(), name: 'cb-foreign', urn: 'cb-foreign' } })).id;
+    const fm = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'fa-sys', urn: 'cb-foreign:fa-sys', organizationId: other } });
+    const fa = await db.agent.create({ data: { id: generateId(), name: 'FA', urn: 'cb-foreign:fa', organizationId: other, systemMemoryId: fm.id, visibility: 'PUBLIC' } });
+    await createDbAppAgent(db, f.app.id, fa.id);
+    const inst = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'fa-install', urn: 'cb-org:fa-install', organizationId: orgId, appId: f.app.id, installOfAgentId: fa.id, isInstallMemory: true } });
+    await f.source(inst.id, 'boot:source', 'literal only');
+    const before = await snapshot();
+    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), { kind: 'APP_AGENT', appId: f.app.id, agentId: fa.id }))).toBe('BOOT_PROMPT_GRANT_REQUIRED');
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('Dara P2-2: an App with no install memory yet compiles the Agent source and creates the memory; a refusal leaves none', async () => {
+    const f = await fixture();
+    await db.worker.deleteMany({ where: { appId: f.app.id } });
+    await db.memory.delete({ where: { id: f.install.id } });
+    const app = { kind: 'APP_AGENT', appId: f.app.id, agentId: f.agent.id } as const;
+    const installs = () => db.memory.count({ where: { appId: f.app.id, installOfAgentId: f.agent.id, isInstallMemory: true } });
+    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), app))).toBe('BOOT_PROMPT_NO_SOURCE');
+    expect(await installs()).toBe(0);
+    await f.source(f.agentMem.id, 'boot:source', 'agent text');
+    expect(await codeOf(compileBootPrompt(ctxOf(f.member.id), app))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await installs()).toBe(0);
+    const r = await compileBootPrompt(ctxOf(f.admin.id), app);
+    expect(await installs()).toBe(1);
+    expect((await db.node.findUniqueOrThrow({ where: { id: r.nodeId } })).content).toBe('agent text');
+  });
+
+  it('Anne/Dara P3: a failure at the POINTER stage, after a provisioned grant, rolls back node, revision, row, edge, grant and pointers', async () => {
+    const f = await fixture();
+    const partMem = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'part-sys', urn: 'cb-org:part-sys', organizationId: orgId } });
+    const part = await db.agent.create({ data: { id: generateId(), name: 'Part', urn: 'cb-org:part', organizationId: orgId, systemMemoryId: partMem.id, visibility: 'ORGANIZATION' } });
+    await db.agent.update({ where: { id: f.agent.id }, data: { extendsAgentId: part.id } });
+    await db.node.create({ data: { id: generateId(), memoryId: partMem.id, loc: 'parts:rules', name: 'r', content: 'base rules' } });
+    await f.source(f.agentMem.id, 'boot:source', '{{> parts:rules}}');
+    await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION cb_fail_pointer() RETURNS trigger AS $$ BEGIN
+      IF NEW.boot_prompt_node_id IS DISTINCT FROM OLD.boot_prompt_node_id THEN RAISE EXCEPTION 'pointer stage fault'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql`);
+    await db.$executeRawUnsafe('CREATE TRIGGER cb_fail_pointer BEFORE UPDATE ON agents FOR EACH ROW EXECUTE FUNCTION cb_fail_pointer()');
+    try {
+      const full = async () => ({ ...(await snapshot()), grants: await db.agentOrgGrant.count(), nodeRevisions: await db.nodeRevision.count() });
+      const before = await full();
+      expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), agentTarget(f)))).not.toBe('NO_ERROR');
+      expect(await full()).toEqual(before);
+    } finally {
+      await db.$executeRawUnsafe('DROP TRIGGER IF EXISTS cb_fail_pointer ON agents');
+      await db.$executeRawUnsafe('DROP FUNCTION IF EXISTS cb_fail_pointer()');
+    }
+  });
+
+  it('Rook P3-2: an include in a memory the caller cannot read is UNAVAILABLE, in one they can read but may not include from, DISALLOWED', async () => {
+    const f = await fixture();
+    const readable = await db.memory.create({ data: { id: generateId(), class: 'knowledge', name: 'k', urn: 'cb-org:know', organizationId: orgId, visibility: 'ORGANIZATION' } });
+    await db.node.create({ data: { id: generateId(), memoryId: readable.id, loc: 'parts:k', name: 'k', content: 'k' } });
+    const otherOrg = (await db.organization.create({ data: { id: generateId(), name: 'cb-hidden', urn: 'cb-hidden' } })).id;
+    const hidden = await db.memory.create({ data: { id: generateId(), class: 'knowledge', name: 'h', urn: 'cb-hidden:know', organizationId: otherOrg, visibility: 'ORGANIZATION' } });
+    await db.node.create({ data: { id: generateId(), memoryId: hidden.id, loc: 'parts:k', name: 'k', content: 'k' } });
+    const src = await f.source(f.agentMem.id, 'boot:source', '{{> hrn:node:cb-org:know:parts:k}}');
+    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), agentTarget(f)))).toBe('BOOT_PROMPT_INCLUDE_SOURCE_DISALLOWED');
+    await db.node.update({ where: { id: src.id }, data: { content: '{{> hrn:node:cb-hidden:know:parts:k}}' } });
+    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), agentTarget(f)))).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
+  });
+
+  it('Vera: only a compile writes a compiled node; an ordinary update or create at a compiled address is refused', async () => {
+    const f = await fixture();
+    await f.source(f.agentMem.id, 'boot:source', 'x');
+    const r = await compileBootPrompt(ctxOf(f.admin.id), agentTarget(f));
+    const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<unknown>>;
+    expect(await codeOf(M.updateNode!(null, { input: { id: r.nodeId, content: 'forged' } }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_COMPILED_WRITE');
+    expect(await codeOf(M.createNode!(null, { input: { memoryId: f.agentMem.id, loc: 'boot:other', name: 'x', content: 'y', role: 'boot-prompt', nodeType: 'compiled-boot-prompt' } }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_COMPILED_WRITE');
+    expect((await db.node.findUniqueOrThrow({ where: { id: r.nodeId } })).content).toBe('x');
   });
 });
