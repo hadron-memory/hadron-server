@@ -286,6 +286,21 @@ describe('#2043 S6 — an outside approval ends when its node enters the placed 
     expect((await db.node.findUniqueOrThrow({ where: { id: other.id } })).approvalHash).not.toBeNull();
   });
 
+  it('D: a memory becoming an install memory ends the approvals of the boot prompts already in it (no TS path today: SQL)', async () => {
+    const f = await fixture();
+    const { app: app2 } = await createDbAppWithKey(db, 'ba-app-2', orgId);
+    await createDbAppAgent(db, app2.id, f.agent.id);
+    const later = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'later', urn: 'ba-org:later', organizationId: orgId } });
+    const node = await bootSource(later.id);
+    const other = await plain(later.id);
+    await approve(node.id, ctxOf(f.admin.id));
+    await approve(other.id, ctxOf(f.admin.id));
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvalHash).not.toBeNull();
+    await db.$executeRaw`UPDATE memories SET is_install_memory = true, app_id = ${app2.id}, install_of_agent_id = ${f.agent.id} WHERE id = ${later.id}`;
+    await ended(node.id);
+    expect((await db.node.findUniqueOrThrow({ where: { id: other.id } })).approvalHash).not.toBeNull();
+  });
+
   it("the manager's own approval of a node already placed is kept, and so is the plain role's elsewhere", async () => {
     const f = await fixture();
     const placed = await bootSource(f.agentMem.id);

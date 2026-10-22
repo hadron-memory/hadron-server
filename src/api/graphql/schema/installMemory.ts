@@ -251,11 +251,6 @@ async function lockInstallAuthority(tx: Prisma.TransactionClient, ctx: Context, 
 }
 
 /**
- * The first statement of any transaction that will write or delete `memoryId`: if it is an
- * install memory, take its authority before any memory, node or loc lock. A plain read of the
- * identity (no lock), so an ordinary memory costs one indexed select.
- */
-/**
  * #2043 (Dara's P2-1 on #2235) — the authority anchors {@link lockInstallAuthority} takes for this
  * memory, for a door whose transaction opens with `withAuthorizedMemoryTx`: passed as its
  * `otherAnchors`, they are acquired in the SAME ordered call as the memory/org anchors, so App and
@@ -284,6 +279,11 @@ export async function installAuthorityAnchors(
   ];
 }
 
+/**
+ * The first statement of any transaction that will write or delete `memoryId`: if it is an
+ * install memory, take its authority before any memory, node or loc lock. A plain read of the
+ * identity (no lock), so an ordinary memory costs one indexed select.
+ */
 export async function lockInstallAuthorityFirst(tx: Prisma.TransactionClient, ctx: Context, memoryId: string): Promise<void> {
   const row = await tx.memory.findUnique({
     where: { id: memoryId },
