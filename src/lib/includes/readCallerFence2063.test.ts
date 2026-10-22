@@ -10,6 +10,7 @@ import { reconcileNodeWithIncludeHistory } from '../nodeRevisionSnapshot.js';
 import { withIncludeHistoryTransaction } from './includeHistoryFence.js';
 import { withReconciledNodeRead } from './reconciledNodeRead.js';
 import { liveReadSnapshotContext } from '../../api/graphql/schema/authorizedTx.js';
+import * as liveAuthority from '../../api/graphql/schema/authorizedTx.js';
 import { Prisma } from '../../generated/prisma/index.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -360,7 +361,8 @@ describe('outer-fenced reconciliation read callers', () => {
     ['key', 'node'], ['key', 'batch'], ['key', 'revision'], ['key', 'mcp'], ['key', 'mcp-batch'],
     ['sign-in', 'node'], ['sign-in', 'batch'], ['sign-in', 'revision'], ['sign-in', 'mcp'], ['sign-in', 'mcp-batch'],
   ] as const)('%s credential permits unchanged %s reads and refuses revoked credentials', async (credential, surface) => {
-    const n = await db.node.create({ data: { memoryId, loc: 'credential', name: 'Credential', content: 'unchanged' } });
+    const body = 'UNCHANGED-CREDENTIAL-BODY-2063';
+    const n = await db.node.create({ data: { memoryId, loc: 'credential', name: 'Credential', content: body } });
     const c = ctx();
     let revoke: () => Promise<unknown>;
     if (credential === 'key') {
@@ -380,11 +382,13 @@ describe('outer-fenced reconciliation read callers', () => {
           : surface === 'mcp'
             ? createTestableMcpServer(c).callToolText('hadron_get_node', { urn: 'hrn:node:read-fence.example:mem:credential' })
             : createTestableMcpServer(c).callToolText('hadron_get_nodes', { refs: ['hrn:node:read-fence.example:mem:credential'] });
-    expect(await read()).not.toBeNull();
+    const allowed = await read();
+    if (surface === 'mcp' || surface === 'mcp-batch') expect(allowed).toContain(body);
+    else expect(allowed).not.toBeNull();
     await revoke();
     if (surface === 'mcp' || surface === 'mcp-batch') {
       const denied = await read();
-      expect(denied).not.toContain('unchanged');
+      expect(denied).not.toContain(body);
     } else await expect(read()).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
   });
@@ -421,6 +425,32 @@ describe('outer-fenced reconciliation read callers', () => {
     if (surface === 'node') await expect(result).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     else expect(await result).not.toContain('raw change');
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it.each([
+    ['fast', 'mcp'], ['fast', 'mcp-batch'],
+    ['drift', 'mcp'], ['drift', 'mcp-batch'],
+  ] as const)('%s %s surfaces non-FORBIDDEN authority faults as errors', async (phase, surface) => {
+    const n = phase === 'drift' ? await drifted()
+      : await db.node.create({ data: { memoryId, loc: 'fault', name: 'Fault', content: 'UNCHANGED-FAULT-CONTROL-2063' } });
+    const urn = `hrn:node:read-fence.example:mem:${n.loc}`;
+    const mcp = createTestableMcpServer(ctx());
+    const tool = surface === 'mcp' ? 'hadron_get_node' : 'hadron_get_nodes';
+    const args = surface === 'mcp' ? { urn } : { refs: [urn] };
+    const fault = new Error('synthetic private database fault 2063');
+    const authority = vi.spyOn(liveAuthority, phase === 'fast' ? 'liveReadSnapshotContext' : 'liveTxContext')
+      .mockRejectedValue(fault);
+    try {
+      // The in-process MCP helper exposes unknown handler faults as a
+      // rejection; the transport, not this adapter, owns wire sanitization.
+      await expect(mcp.callTool(tool, args)).rejects.toBe(fault);
+      expect(authority).toHaveBeenCalledOnce();
+      expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+    } finally {
+      authority.mockRestore();
+    }
+    // Control: the same request succeeds once the injected fault is removed.
+    expect(await mcp.callToolText(tool, args)).toContain(phase === 'drift' ? 'raw change' : 'UNCHANGED-FAULT-CONTROL-2063');
   });
 
 });
