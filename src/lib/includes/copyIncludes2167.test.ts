@@ -240,6 +240,15 @@ describe('extract rebinds include tags that name a copied node (R180, cor:api:16
     expect(rows.map(r => r.content)).toEqual([v1]);
   });
 
+  it('a URN tag to ANOTHER memory whose loc equals a copied node\'s source loc is never retargeted to the copy (Ruth, #2253 P3-1)', async () => {
+    const fm = await db.memory.findFirstOrThrow({ where: { urn: foreignUrn } });
+    await seed('sub:b', 'FOREIGN_B', fm.id);
+    const tag = `{{> hrn:node:${foreignUrn}:sub:b}}`;
+    await seed('sub:a', tag);
+    expect(await refusal(extract())).toEqual({ code: 'INCLUDE_TARGET_UNAVAILABLE', tag });
+    expect(await db.memory.count({ where: { urn: EX } })).toBe(0);
+  });
+
   it('a tag outside the subtree stays as written: a URN to a readable source node passes unchanged', async () => {
     await seed('sub:a', `{{> ${urn('other')}}}`);
     expect((await refusal(extract())).code).toBe('NO_ERROR');

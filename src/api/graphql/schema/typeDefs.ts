@@ -10353,8 +10353,10 @@ export const typeDefs = `#graphql
     tag naming a copied node is rewritten to that node's rebased loc (a URN tag
     to the source memory becomes the new memory's URN); only the target
     changes, and a rewritten node loses its contentHash and authorship. A tag
-    naming anything else stays as written, so one naming a node left behind
-    refuses with INCLUDE_TARGET_UNAVAILABLE. A tag that closes a cycle refuses
+    naming anything else stays as written, so a relative tag naming a node
+    left behind refuses with INCLUDE_TARGET_UNAVAILABLE (a URN tag to a memory
+    the copier can read passes unchanged). A relative tag outside the subtree
+    whose loc equals a rebased loc also refuses (R188), and is never rewritten. A tag that closes a cycle refuses
     with INCLUDE_CYCLE. Either refusal names the tag as it stands in the copy,
     and nothing is created or moved.
 
