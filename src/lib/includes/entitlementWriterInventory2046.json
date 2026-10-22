@@ -1,0 +1,172 @@
+{
+ "src/api/graphql/schema/resolvers.helpers.ts :: appAgent.create": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "install/uninstall run in withAuthorizedTx fence:true (whole outer transaction)"
+ },
+ "src/api/graphql/schema/resolvers.helpers.ts :: appAgent.deleteMany": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "install/uninstall run in withAuthorizedTx fence:true (whole outer transaction)"
+ },
+ "src/api/graphql/schema/resolvers.mutation.agent.ts :: agent.create": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "a brand-new Agent has no prior compile source or entitlement; not a counterparty (confirm: create with systemMemoryId of an existing memory)"
+ },
+ "src/api/graphql/schema/resolvers.mutation.agent.ts :: agent.delete": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "create-failure compensation delete of a just-created Agent that no compile can have seen; confirm callgraph before final"
+ },
+ "src/api/graphql/schema/resolvers.mutation.agent.ts :: agent.update": {
+  "count": 3,
+  "status": "counterparty-pending",
+  "reason": "updateAgent (visibility, systemPrompt, systemMemoryId, urn), deleteAgent (fenced) and setAgentIndexRefs: updateAgent changes compile source/entitlement and is NOT yet fenced; index refs pending classification"
+ },
+ "src/api/graphql/schema/resolvers.mutation.agent.ts :: agentOrgGrant.updateMany": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "revokeAgentOrgGrant fence:true; create goes via ensureAgentOrgGrant inside fenced createAgentOrgGrant/createApp/install/set-base"
+ },
+ "src/api/graphql/schema/resolvers.mutation.agent.ts :: agentSubscription.update": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "revokeAgentSubscription fence:true"
+ },
+ "src/api/graphql/schema/resolvers.mutation.session.ts :: agent.update": {
+  "count": 3,
+  "status": "excluded",
+  "reason": "editor lock / revision restore bookkeeping on the Agent row; confirm no compile-relevant field (pending callgraph)"
+ },
+ "src/api/graphql/schema/resolvers.mutation.session.ts :: agentSubscription.createMany": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "startAgentSession first contact fenced; existing row held FOR SHARE"
+ },
+ "src/api/graphql/schema/resolvers.mutation.session.ts :: worker.updateMany": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "session claim (worker held/bound state); confirm it changes no retirement/pointer/entitlement field"
+ },
+ "src/api/graphql/schema/resolvers.worker.ts :: worker.create": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "cast creates a new compile target with no prior compile; name reservation is not read by compile (confirm)"
+ },
+ "src/api/graphql/schema/resolvers.worker.ts :: worker.delete": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "worker hard-delete of an uncasted/unreferenced worker; removes a compile target, to fence"
+ },
+ "src/api/graphql/schema/resolvers.worker.ts :: worker.update": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "pending field-level classification"
+ },
+ "src/api/graphql/schema/resolvers.worker.ts :: worker.updateMany": {
+  "count": 4,
+  "status": "counterparty-pending",
+  "reason": "retireWorker fenced; hold/release/availability updateMany sites pending field-level classification"
+ },
+ "src/controller/operations/deleteUser.ts :: agent.deleteMany": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "SERIALIZABLE whole-transaction; required counterparty, composition awaits Baloo assessment (Xylon #30503)"
+ },
+ "src/controller/operations/deleteUser.ts :: agentSubscription.deleteMany": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "SERIALIZABLE whole-transaction; required counterparty, composition awaits Baloo assessment (Xylon #30503)"
+ },
+ "src/controller/operations/deleteUser.ts :: worker.deleteMany": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "SERIALIZABLE whole-transaction; required counterparty, composition awaits Baloo assessment (Xylon #30503)"
+ },
+ "src/controller/operations/deleteUser.ts :: worker.updateMany": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "SERIALIZABLE whole-transaction; required counterparty, composition awaits Baloo assessment (Xylon #30503)"
+ },
+ "src/controller/operations/ensureAgentOrgGrant.ts :: raw INSERT INTO agent_org_grants": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "only called inside fenced transactions (createAgentOrgGrant, createApp, install, set-base)"
+ },
+ "src/controller/operations/ensureAgentSubscription.ts :: raw INSERT INTO agent_subscriptions": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "called inside fenced install/createApp and fenced first-contact startChat"
+ },
+ "src/controller/operations/mergeUsers.ts :: raw DELETE FROM agent_subscriptions": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "SERIALIZABLE whole-transaction; required counterparty, composition awaits Baloo assessment (Xylon #30503)"
+ },
+ "src/controller/operations/mergeUsers.ts :: raw UPDATE agent_subscriptions": {
+  "count": 2,
+  "status": "counterparty-pending",
+  "reason": "SERIALIZABLE whole-transaction; required counterparty, composition awaits Baloo assessment (Xylon #30503)"
+ },
+ "src/controller/operations/mergeUsers.ts :: raw UPDATE workers": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "SERIALIZABLE whole-transaction; required counterparty, composition awaits Baloo assessment (Xylon #30503)"
+ },
+ "src/lib/agentBase.ts :: agent.update": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "writeAgentBase runs inside setAgentBase fence"
+ },
+ "src/lib/bootPromptPointer.ts :: agent.update": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "setBootPromptPointer runs inside fenced pointer setters and the compile fence"
+ },
+ "src/lib/bootPromptPointer.ts :: appAgent.update": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "setBootPromptPointer runs inside fenced pointer setters and the compile fence"
+ },
+ "src/lib/bootPromptPointer.ts :: worker.update": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "setBootPromptPointer runs inside fenced pointer setters and the compile fence"
+ },
+ "src/lib/mergeOwnerNamespacedUrns.ts :: agent.deleteMany": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "owner URN merge rewrites Agent urn/owner; field-level callgraph pending"
+ },
+ "src/lib/mergeOwnerNamespacedUrns.ts :: agent.update": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "owner URN merge rewrites Agent urn/owner; field-level callgraph pending"
+ },
+ "src/lib/mergeOwnerNamespacedUrns.ts :: agent.updateMany": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "owner URN merge rewrites Agent urn/owner; field-level callgraph pending"
+ },
+ "src/lib/org/propagateOrgUrnRename.ts :: raw UPDATE agents": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "org rename rewrites agents.urn; display-vs-identity classification pending"
+ },
+ "src/lib/ownerUrnRename.ts :: raw DELETE FROM agents": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "owner rename rewrites agents.urn / deletes agent shells; classification pending"
+ },
+ "src/lib/ownerUrnRename.ts :: raw UPDATE agents": {
+  "count": 1,
+  "status": "counterparty-pending",
+  "reason": "owner rename rewrites agents.urn / deletes agent shells; classification pending"
+ },
+ "src/lib/workerReportsTo.ts :: worker.update": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "reportsTo hierarchy is not read by compile (confirm)"
+ }
+}
