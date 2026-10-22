@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from './includes/includeHistoryFence.js';
 /** #1450: reserve a citation in a draft spec corpus as a server-marked placeholder. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
@@ -446,11 +447,11 @@ describe('git sync fills a placeholder too (@codex P2 on #1452)', () => {
   it('clears the flag when a synced file writes real content, and keeps it for a content-less update', async () => {
     const reserved = await reserve(draft.id, 'pas:150:01');
     const current = await db.node.findUniqueOrThrow({ where: { id: reserved.id } });
-    await db.$transaction((tx) => updateNodeFromGitSync(tx, current, { name: 'Renamed in git' }, undefined, draft.id));
+    await withIncludeHistoryClientTransaction(db, (tx) => updateNodeFromGitSync(tx, current, { name: 'Renamed in git' }, undefined, draft.id));
     expect(await row(draft.id, 'pas:150:01')).toMatchObject({ isPlaceholder: true, name: 'Renamed in git' });
 
     const again = await db.node.findUniqueOrThrow({ where: { id: reserved.id } });
-    await db.$transaction((tx) => updateNodeFromGitSync(tx, again, { content: 'Written in the mirror.' }, undefined, draft.id));
+    await withIncludeHistoryClientTransaction(db, (tx) => updateNodeFromGitSync(tx, again, { content: 'Written in the mirror.' }, undefined, draft.id));
     expect(await row(draft.id, 'pas:150:01')).toMatchObject({ isPlaceholder: false, content: 'Written in the mirror.' });
   });
 });
@@ -606,13 +607,13 @@ describe('git sync keeps an unwritten placeholder a spec (@codex P2 on #1452)', 
     const reserved = await reserve(draft.id, 'pas:170:01');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const current = await db.node.findUniqueOrThrow({ where: { id: reserved.id } });
-    await db.$transaction((tx) => updateNodeFromGitSync(tx, current, { role: null, name: 'Renamed in git' }, undefined, draft.id));
+    await withIncludeHistoryClientTransaction(db, (tx) => updateNodeFromGitSync(tx, current, { role: null, name: 'Renamed in git' }, undefined, draft.id));
     expect(await row(draft.id, 'pas:170:01')).toMatchObject({ role: 'spec', isPlaceholder: true, name: 'Renamed in git' });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('pas:170:01'));
     warn.mockRestore();
 
     const again = await db.node.findUniqueOrThrow({ where: { id: reserved.id } });
-    await db.$transaction((tx) => updateNodeFromGitSync(tx, again, { role: null, content: 'Written in the mirror.' }, undefined, draft.id));
+    await withIncludeHistoryClientTransaction(db, (tx) => updateNodeFromGitSync(tx, again, { role: null, content: 'Written in the mirror.' }, undefined, draft.id));
     expect(await row(draft.id, 'pas:170:01')).toMatchObject({ role: null, isPlaceholder: false });
   });
 });
@@ -661,7 +662,7 @@ describe('a kept placeholder role is not a sync change (@codex P2 on #1452)', ()
     const before = await revisions();
     for (let i = 0; i < 2; i++) {
       const current = await db.node.findUniqueOrThrow({ where: { id: reserved.id } });
-      await db.$transaction((tx) => updateNodeFromGitSync(tx, current, { role: null }, undefined, draft.id));
+      await withIncludeHistoryClientTransaction(db, (tx) => updateNodeFromGitSync(tx, current, { role: null }, undefined, draft.id));
     }
     warn.mockRestore();
     expect(await revisions()).toBe(before);
