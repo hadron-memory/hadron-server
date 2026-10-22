@@ -1,4 +1,4 @@
-import { liveTxContext } from './authorizedTx.js';
+import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { contentScopeWhere, effectiveContentScope, type ContentScope } from '../../../lib/comments/scope.js';
@@ -670,8 +670,8 @@ export const nodeQueries = {
         // holding its row lock so Node.revision and every sibling field come
         // from one database state (never old body + new counter).
         const current = await withReconciledNodeRead(ctx.db, selected.id, selected.memoryId,
-          async (tx) => {
-            const fresh = await liveTxContext(ctx, tx);
+          async (tx, mayReconcile) => {
+            const fresh = await (mayReconcile ? liveTxContext : liveReadSnapshotContext)(ctx, tx);
             return isMemoryReadableCached(fresh, inheritedFrom?.via ?? selected.memoryId);
           },
           (tx) => tx.node.findUnique({ where: { id: selected.id }, include }),
@@ -1984,8 +1984,8 @@ export const nodeQueries = {
       const liveIds: string[] = [];
       for (const id of [...selectedById.keys()].sort()) {
         const live = await withReconciledNodeRead(ctx.db, id, selectedById.get(id)!.memoryId,
-          async (tx) => {
-            const fresh = await liveTxContext(ctx, tx);
+          async (tx, mayReconcile) => {
+            const fresh = await (mayReconcile ? liveTxContext : liveReadSnapshotContext)(ctx, tx);
             const via = explicitInherited.get(id)?.via ?? readViaMemoryId ?? selectedById.get(id)!.memoryId;
             return isMemoryReadableCached(fresh, via);
           },

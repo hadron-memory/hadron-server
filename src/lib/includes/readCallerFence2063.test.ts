@@ -9,6 +9,8 @@ import { createTestableMcpServer } from '../../mcp/server.js';
 import { reconcileNodeWithIncludeHistory } from '../nodeRevisionSnapshot.js';
 import { withIncludeHistoryTransaction } from './includeHistoryFence.js';
 import { withReconciledNodeRead } from './reconciledNodeRead.js';
+import { liveReadSnapshotContext } from '../../api/graphql/schema/authorizedTx.js';
+import { Prisma } from '../../generated/prisma/index.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 let userId: string;
@@ -372,6 +374,34 @@ describe('outer-fenced reconciliation read callers', () => {
     expect(await read()).not.toBeNull();
     await revoke();
     await expect(read()).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it.each(['writable', 'read committed'] as const)('snapshot authority helper refuses a %s transaction', async (mode) => {
+    await expect(db.$transaction(async (tx) => {
+      if (mode === 'read committed') await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+      return liveReadSnapshotContext(ctx(), tx);
+    }, { isolationLevel: mode === 'writable' ? Prisma.TransactionIsolationLevel.RepeatableRead : Prisma.TransactionIsolationLevel.ReadCommitted }))
+      .rejects.toThrow('A read-only repeatable-read snapshot is required');
+  });
+
+  it.each(['key', 'sign-in'] as const)('drift read still rechecks %s revocation after the fence wait', async (credential) => {
+    const n = await drifted();
+    const c = ctx();
+    let revoke: () => Promise<unknown>;
+    if (credential === 'key') {
+      const key = await db.userApiKey.create({ data: { userId, keyHash: generateId(), keyPreview: 'test', oauthScopes: [] } });
+      c.apiKeyId = key.id;
+      revoke = () => db.userApiKey.update({ where: { id: key.id }, data: { revokedAt: new Date() } });
+    } else {
+      const root = await db.signIn.create({ data: { userId, method: 'email', expiresAt: new Date(Date.now() + 60_000) } });
+      c.signInId = root.id;
+      revoke = () => db.signIn.update({ where: { id: root.id }, data: { endedAt: new Date(), endReason: 'test' } });
+    }
+    await expect(underHeldFence(
+      () => resolvers.Query.node(null, { ref: n.id, raw: true }, c),
+      async () => { await revoke(); },
+    )).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
   });
 

@@ -1,4 +1,4 @@
-import { liveTxContext } from './authorizedTx.js';
+import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { sharedOrganizations } from './sharedOrganizations.js';
@@ -583,7 +583,7 @@ async function reconciledNodeForParent(
   const existing = cache.get(n);
   if (existing) return existing;
   const pending = withReconciledNodeRead(ctx.db, n.id, n.memoryId, async (tx, mayReconcile) => {
-    const fresh = await liveTxContext(ctx, tx);
+    const fresh = await (mayReconcile ? liveTxContext : liveReadSnapshotContext)(ctx, tx);
     const inherited = (n as typeof n & { inheritedFrom?: InheritedFrom }).inheritedFrom;
     if (!(await isMemoryReadableCached(fresh, inherited?.via ?? n.memoryId))) return false;
     if (mayReconcile) await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${n.id} FOR UPDATE`;

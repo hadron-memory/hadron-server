@@ -16,6 +16,10 @@ All four share `withReconciledNodeRead`. An unchanged row is checked and
 projected in one **read-only REPEATABLE READ** snapshot, without advisory or row
 locks. The fingerprint and projection cannot straddle a concurrent raw writer.
 Missing/moved/deleted rows refuse without entering a mutation transaction.
+The fast GraphQL authority adapter verifies READ ONLY / REPEATABLE READ at
+runtime, then reads live actor/key/sign-in state without credential row locks.
+The write/drift authority adapter retains its credential SHARE locks; those
+locks are forbidden in a read-only transaction and must not leak into this path.
 
 Drift (including a missing fingerprint) closes the read-only transaction before
 opening the exclusive first-statement fence at READ COMMITTED, before node
