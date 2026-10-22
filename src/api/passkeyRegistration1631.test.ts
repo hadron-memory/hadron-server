@@ -356,6 +356,46 @@ describe('the server-hosted pages', () => {
   });
 });
 
+/**
+ * The Origin a browser sends for a non-GET, non-CORS-tainted request (a form POST, or a same-origin fetch), per the
+ * Fetch standard's "append a request `Origin` header": the page's referrer policy can serialize it as "null". This is
+ * the rule a real browser applied in Chip's #2210 QA, so the pins below drive the routes with exactly that Origin.
+ */
+function browserPostOrigin(referrerPolicy: string | null, pageOrigin: string, targetOrigin: string): string {
+  const sameOrigin = pageOrigin === targetOrigin;
+  const downgrade = pageOrigin.startsWith('https:') && targetOrigin.startsWith('http:');
+  switch (referrerPolicy) {
+    case 'no-referrer': return 'null';
+    case 'same-origin': return sameOrigin ? pageOrigin : 'null';
+    case 'no-referrer-when-downgrade': case 'strict-origin': case 'strict-origin-when-cross-origin': case null: case '':
+      return downgrade ? 'null' : pageOrigin;
+    default: return pageOrigin;
+  }
+}
+
+describe('a real browser\'s form POST from the ceremony pages reaches the routes (Chip #2210 P2, Marco #29597)', () => {
+  it('the rule itself: a no-referrer page sends Origin: null, which the allowlist refuses', async () => {
+    expect(browserPostOrigin('no-referrer', ORIGIN, ORIGIN)).toBe('null');
+    const r = await post('/passkeys/register/challenge', {}, undefined, {}, 'null');
+    expect(r.status).toBe(403);
+  });
+
+  it.each([
+    ['/passkeys/register', '/passkeys/sign-in/github/start'],
+    ['/passkeys/window/end', '/passkeys/sign-in/github/start'],
+    ['/passkeys/register', '/passkeys/register/challenge'],
+  ])('a POST from %s to %s carries the real Origin and is admitted', async (pagePath, target) => {
+    const page = await realFetch(`${base}${pagePath}`);
+    const origin = browserPostOrigin(page.headers.get('referrer-policy'), ORIGIN, ORIGIN);
+    expect(origin).toBe(ORIGIN);
+    const r = await realFetch(`${base}${target}`, {
+      method: 'POST', redirect: 'manual',
+      headers: { origin, 'content-type': 'application/x-www-form-urlencoded' }, body: 'next=register',
+    });
+    expect([200, 303]).toContain(r.status);
+  });
+});
+
 describe('Referrer-Policy keeps the real Origin (Chip #2210 browser QA 6329343431)', () => {
   // Under the Fetch spec a non-GET request from a page with Referrer-Policy: no-referrer serializes its Origin as
   // "null", so a real browser's form POSTs and same-origin fetch POSTs from these pages all failed the Origin
