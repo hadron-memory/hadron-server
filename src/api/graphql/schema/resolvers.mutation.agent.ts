@@ -620,7 +620,10 @@ export const agentMutations = {
       let predecessorUrn: string | undefined;
       for (let attempt = 1; ; attempt++) {
       try {
-      published = await ctx.db.$transaction(async (tx) => {
+      // #2046 S9-3: visibility, systemPrompt, systemMemoryId and urn change what the boot-prompt compile reads, so
+      // the whole deciding transaction enters the include-history fence first (before the memory and agent locks).
+      published = await withIncludeHistoryTransaction(ctx.db, async (fence) => {
+        const tx = includeHistoryClient(fence);
         // Lock and RE-READ the urn inside the transaction (PR #1080 review,
         // Codex + Copilot P2). The row above was read before the transaction
         // opened, so two concurrent renames could both record the SAME old urn

@@ -21,8 +21,8 @@
  },
  "src/api/graphql/schema/resolvers.mutation.agent.ts :: agent.update": {
   "count": 3,
-  "status": "counterparty-pending",
-  "reason": "updateAgent (visibility, systemPrompt, systemMemoryId, urn), deleteAgent (fenced) and setAgentIndexRefs: updateAgent changes compile source/entitlement and is NOT yet fenced; index refs pending classification"
+  "status": "fenced",
+  "reason": "updateAgent: whole deciding transaction in withIncludeHistoryTransaction (fence first, before memory/agent locks; pinned). deleteAgent fenced via withAuthorizedTx fence:true. setAgentIndexRefs writes only tasksIndexRef/processesIndexRef/updatedBy, which no compile or include-history reader consumes (grep: agentDefinitionLists, agentDefinitionTools, typeDefs only), so it is display-only and needs no fence"
  },
  "src/api/graphql/schema/resolvers.mutation.agent.ts :: agentOrgGrant.updateMany": {
   "count": 1,

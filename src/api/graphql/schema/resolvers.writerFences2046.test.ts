@@ -224,3 +224,15 @@ describe('#2046 S9-3 install, uninstall, createApp and first-contact subscriptio
     expect(deleted).toBe(true);
   });
 });
+
+describe('#2046 S9-3 updateAgent enters the fence first', () => {
+  it('updateAgent (systemPrompt/visibility change compile source)', async () => {
+    const a = await admin();
+    const agent = await orgAgent('upd');
+    const changed = async () => (await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).systemPrompt === 'fenced prompt';
+    await expectFenceFirst(
+      () => M.updateAgent({}, { ref: agent.id, systemPrompt: 'fenced prompt' }, ctxOf(a.id)),
+      changed,
+    );
+  });
+});
