@@ -90,6 +90,8 @@ export interface ExtractParentNodeArgs {
   actorId: string | null;
   /** #2167 — memories the copier may read (`getAccessibleMemoryIds`); `null` = unrestricted. */
   copierReadableMemoryIds: ReadableMemoryIds;
+  /** Refresh an external caller before copy/reconciliation, on this prepared client. */
+  authorize?: (tx: Prisma.TransactionClient) => Promise<{ readableMemoryIds: ReadableMemoryIds; principal?: RoleWriterPrincipal }>;
 }
 
 export interface ExtractParentNodeResult {
@@ -108,6 +110,9 @@ export async function extractParentNodeGraph(
 ): Promise<ExtractParentNodeResult> {
   return withIncludeHistoryClientTransaction(db,
     async (tx) => {
+      const authority = await args.authorize?.(tx);
+      const principal = authority?.principal ?? args.principal;
+      const copierReadableMemoryIds = authority ? authority.readableMemoryIds : args.copierReadableMemoryIds;
       const source = await tx.memory.findUniqueOrThrow({ where: { id: args.sourceMemoryId } });
 
       // ── Subtree ──────────────────────────────────────────────────────────
@@ -179,8 +184,8 @@ export async function extractParentNodeGraph(
       // #1331 — a MOVE removes the subtree from its source memory: each node's role
       // needs its writer level there. A copy writes into a brand-new memory that has
       // no rulebook yet, so nothing narrows it (and it never changes the source).
-      if (args.move && args.principal) {
-        await assertRoleWritersForNodes(tx, args.principal, selectedNodes, { from: args.sourceMemoryId });
+      if (args.move && principal) {
+        await assertRoleWritersForNodes(tx, principal, selectedNodes, { from: args.sourceMemoryId });
       }
       const freshSignals = await assertBatchMutable(
         tx,
@@ -422,7 +427,7 @@ export async function extractParentNodeGraph(
       // #2167 — every copied tag is an added tag, resolved where it landed: the
       // content is verbatim, so a relative tag resolves against the rebased locs.
       const copiedIds = nodeRows.map((r) => r.id as string);
-      await assertCopiedIncludesWritable(tx, copiedIds, memoryId, args.copierReadableMemoryIds);
+      await assertCopiedIncludesWritable(tx, copiedIds, memoryId, copierReadableMemoryIds);
       // #2040 — the copies' include edges are re-derived from their content.
       await resyncDerivedIncludesForNodes(tx, copiedIds);
 
