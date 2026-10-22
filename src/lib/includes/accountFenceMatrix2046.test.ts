@@ -14,6 +14,7 @@ import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
+import { withReconciledNodeRead } from './reconciledNodeRead.js';
 import { accountFenceClient, isSerializationConflict, withAccountFenceTransaction, withIncludeHistoryTransaction } from './includeHistoryFence.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -188,6 +189,22 @@ classes.push(
     effect: async () => (await db.appAgent.count({ where: { appId: app.id, agentId: agentB.id } })) === 0,
   },
 );
+let driftNode: string;
+classes.push({
+  // The reconcile slow path of the node read: a node with no stored revision fingerprint is drift, so the read opens the
+  // fence and reconciles (the helper behind Query.node and the MCP read, called directly here).
+  name: 'reconcile read slow path (withReconciledNodeRead)',
+  setup: async () => {
+    const mem = await db.memory.create({ data: { id: generateId(), class: 'knowledge', name: 'k', urn: 'mx.org:k', organizationId: org.id } });
+    driftNode = (await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc: 'n', name: 'n', content: 'x' } })).id;
+    await db.$executeRaw`UPDATE nodes SET revision_content_hash = NULL WHERE id = ${driftNode}`;
+  },
+  run: async () => {
+    const memoryId = (await db.node.findUniqueOrThrow({ where: { id: driftNode } })).memoryId;
+    return withReconciledNodeRead(db, driftNode, memoryId, async () => true, async () => 'ok');
+  },
+  effect: async () => (await db.$queryRaw<Array<{ h: string | null }>>`SELECT revision_content_hash AS h FROM nodes WHERE id = ${driftNode}`)[0].h != null,
+});
 
 describe.each(classes)('#2046 S9-3 stale-wait matrix: $name', (c) => {
   it('a committed real holder ahead of the account makes the account fail 40001 with no work; the holder took effect and bumped once', async () => {
