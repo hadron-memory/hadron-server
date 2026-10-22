@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 /**
  * Issue #564 — moveNode / cloneNode on the <object>Ref convention.
  *
@@ -77,7 +78,7 @@ describe('moveNode (#564)', () => {
       await mayRelease;
     }, { timeout: 20_000 });
     await held;
-    const moving = db.$transaction(async (tx) => moveNodeSubtree(tx, {
+    const moving = withIncludeHistoryClientTransaction(db, async (tx) => moveNodeSubtree(tx, {
       source: root, destLoc: 'renamed', editor: { userId: user.id },
     }), { timeout: 20_000 });
     try {
@@ -116,7 +117,7 @@ describe('moveNode (#564)', () => {
     let moved: Promise<unknown> | undefined;
     let flip: Promise<unknown> | undefined;
     try {
-      moved = db.$transaction(async (tx) => {
+      moved = withIncludeHistoryClientTransaction(db, async (tx) => {
         const findNodes = tx.node.findMany.bind(tx.node);
         let held = false;
         vi.spyOn(tx.node, 'findMany').mockImplementation((async (args: Parameters<typeof findNodes>[0]) => {
@@ -162,7 +163,7 @@ describe('moveNode (#564)', () => {
     let moved: Promise<unknown> | undefined;
     let flip: Promise<unknown> | undefined;
     try {
-      moved = db.$transaction(async (tx) => {
+      moved = withIncludeHistoryClientTransaction(db, async (tx) => {
         const findMemory = tx.memory.findUnique.bind(tx.memory);
         let held = false;
         vi.spyOn(tx.memory, 'findUnique').mockImplementation((async (args: Parameters<typeof findMemory>[0]) => {

@@ -6,6 +6,7 @@
  * them (`endSignInsCompletedBy`, R66 A), in the same transaction under the owner's authority anchor. The token is
  * stored only as SHA-256; the cancel is recorded on the credential with its time, IP address and user agent.
  */
+import { withIncludeHistoryTransaction, includeHistoryClient } from '../includes/includeHistoryFence.js';
 import { createHash, randomBytes } from 'node:crypto';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
@@ -44,7 +45,8 @@ export async function cancelFirstPasskey(
     SELECT t.passkey_id, c.owner_id FROM passkey_cancel_tokens t JOIN passkey_credentials c ON c.id = t.passkey_id
      WHERE t.token_hash = ${tokenHash}`;
   if (!probe) return false;
-  return db.$transaction(async (tx) => {
+  return withIncludeHistoryTransaction(db, async (history) => {
+    const tx = includeHistoryClient(history);
     await lockAuthorityAnchors(tx, [{ kind: 'user', id: probe.owner_id }], 'exclusive');
     // Eligibility is decided by the clock NOW, after the anchor wait (findings:db-clock-must-order-after-lock-wait);
     // the times recorded below use the transaction's clock, which the passkey guard requires and which is earlier.

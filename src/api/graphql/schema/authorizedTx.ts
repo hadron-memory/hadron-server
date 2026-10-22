@@ -153,6 +153,8 @@ export async function withAuthorizedMemoryTx<T>(
     timeout?: number;
     allowDeletedMemory?: boolean;
     allowDeletedOrg?: boolean;
+    /** Opt in before authority anchors; same contract as withAuthorizedTx. */
+    fence?: boolean;
   } = {},
 ): Promise<T> {
   for (let attempt = 0; attempt < 3; attempt++) {

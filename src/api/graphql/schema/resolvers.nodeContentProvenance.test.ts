@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -178,9 +179,9 @@ describe('#1326 content provenance reads', () => {
   it('clears a stale stamp from both live and reconciled state after an unrevisioned raw content edit', async () => {
     // A legacy row with no fingerprint first establishes its baseline; only
     // the later raw data edit is detectable drift.
-    await db.$transaction((tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
+    await withIncludeHistoryClientTransaction(db, (tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
     await db.node.update({ where: { id: nodeId }, data: { data: { raw: 'new content' } } });
-    await db.$transaction((tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
+    await withIncludeHistoryClientTransaction(db, (tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
     expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({
       authorshipKind: null, authoredByTask: null, authoredByRevision: null, authoredAt: null,
     });
@@ -188,12 +189,12 @@ describe('#1326 content provenance reads', () => {
     expect(reconciled).toMatchObject({
       data: { raw: 'new content' }, authorshipKind: null, authoredByTask: null, authoredByRevision: null,
     });
-    await db.$transaction((tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
+    await withIncludeHistoryClientTransaction(db, (tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
     expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(1);
   });
 
   it('reconciles a stamped raw edit when authorship is the only selected Node field', async () => {
-    await db.$transaction((tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
+    await withIncludeHistoryClientTransaction(db, (tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
     await db.node.update({ where: { id: nodeId }, data: { data: { raw: 'edited' } } });
     const parent = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     expect(parent.authorshipKind).toBe('TASK'); // the raw writer left a stale stamp
@@ -211,7 +212,7 @@ describe('#1326 content provenance reads', () => {
   });
 
   it('does not return an unverifiable parent stamp after a concurrent authored edit', async () => {
-    await db.$transaction((tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
+    await withIncludeHistoryClientTransaction(db, (tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
     await db.node.update({ where: { id: nodeId }, data: { data: { raw: 'edited' } } });
     const staleParent = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     const memory = await db.memory.findUniqueOrThrow({ where: { id: nodeMemoryId } });
@@ -229,7 +230,7 @@ describe('#1326 content provenance reads', () => {
   });
 
   it('reconciles a raw edited source before its stamp can be carried into a clone', async () => {
-    await db.$transaction((tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
+    await withIncludeHistoryClientTransaction(db, (tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
     await db.node.update({ where: { id: nodeId }, data: { data: { raw: 'edited' } } });
     const memory = await db.memory.findUniqueOrThrow({ where: { id: nodeMemoryId } });
     await db.orgMember.update({
@@ -243,7 +244,7 @@ describe('#1326 content provenance reads', () => {
     expect(cloned).toMatchObject({ data: { raw: 'edited' }, authorshipKind: null, authoredByTask: null });
     const liveClone = await db.node.findUniqueOrThrow({ where: { id: cloned.id } });
     expect(liveClone).toMatchObject({ authorshipKind: null, authoredByTask: null });
-    await db.$transaction((tx) => ensureCurrentNodeRevisionInTransaction(tx, cloned.id, { expectedMemoryId: nodeMemoryId }));
+    await withIncludeHistoryClientTransaction(db, (tx) => ensureCurrentNodeRevisionInTransaction(tx, cloned.id, { expectedMemoryId: nodeMemoryId }));
     expect(await db.nodeRevision.count({ where: { nodeId: cloned.id } })).toBe(0);
   });
 

@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { endApprovalsOnEncryptedEntry } from '../../../lib/nodeApproval.js';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -698,7 +699,7 @@ export const memoryMutations = {
       if (existing) {
         if (existing.deletedAt) {
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await withIncludeHistoryClientTransaction(ctx.db, (tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
           throw new Error(`A memory with URN "${memoryUrn}" already exists`);
         }
@@ -1292,7 +1293,7 @@ export const memoryMutations = {
       if (memory.class === 'system' && !isInstallMemoryRow(memory)) {
         throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
       }
-      await ctx.db.$transaction(async (tx) => {
+      await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
         // #2044: an install memory's authority before the memory row lock below.
         await lockInstallAuthorityFirst(tx, ctx, resolvedId);
         // Spec 049 §8.5: a memory hosting a live Channel is not deleted around
@@ -1478,7 +1479,7 @@ export const memoryMutations = {
       if (existing) {
         if (existing.deletedAt) {
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await withIncludeHistoryClientTransaction(ctx.db, (tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
           throw new Error(`A memory with URN "${newUrn}" already exists`);
         }
@@ -1699,7 +1700,7 @@ export const memoryMutations = {
       if (existing) {
         if (existing.deletedAt) {
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await withIncludeHistoryClientTransaction(ctx.db, (tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
           throw new Error(`A memory with URN "${newUrn}" already exists`);
         }
@@ -2229,7 +2230,7 @@ export const memoryMutations = {
         // end-user gets a RANDOM handle — addressed by (externalAppId,
         // externalId), not by handle.
         const appUserHandle = await generateUniqueHandle(ctx.db);
-        user = await ctx.db.$transaction(async (tx) => {
+        user = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
           const u = await tx.user.create({
             data: {
               externalAppId: ctx.appId,
@@ -2281,7 +2282,7 @@ export const memoryMutations = {
           // encrypted (matches the encryptMemory fix below).
           select: { id: true, content: true, abstract: true, data: true },
         });
-        await ctx.db.$transaction(async (tx) => {
+        await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
           const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
           const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`;
@@ -2359,7 +2360,7 @@ export const memoryMutations = {
 
       // Claim the plaintext rename under the same scope and lock as encrypted
       // promotion. A competing rename/registration must roll the alias back.
-      return ctx.db.$transaction(async (tx) => {
+      return withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
         const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
         const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`;
@@ -2501,7 +2502,7 @@ export const memoryMutations = {
       // otherwise a losing caller could replace the verifier while the winner
       // encrypts rows under its own key (#1346).
       if (!memory.isEncrypted) {
-        await ctx.db.$transaction(async (tx) => {
+        await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
           // A transfer may win after the preflight above. Hold the same row
           // lock as transfer while checking the current owner and class, so
           // the former owner's key cannot encrypt the receiver's nodes.
@@ -2588,7 +2589,7 @@ export const memoryMutations = {
           if (nodes.length === 0) break;
           cursor = nodes[nodes.length - 1].id;
           for (const node of nodes) {
-            const didConvert = await ctx.db.$transaction(async (tx) => {
+            const didConvert = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
               await lockConversionMemory(tx);
               // Lock first, then re-read. A moved row is outside this memory;
               // a deleted row still belongs here and retains restorable
@@ -2703,7 +2704,7 @@ export const memoryMutations = {
           if (revisions.length === 0) break;
           revisionCursor = revisions[revisions.length - 1].id;
           for (const candidate of revisions) {
-            const didConvert = await ctx.db.$transaction(async (tx) => {
+            const didConvert = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
               await lockConversionMemory(tx);
               await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${candidate.nodeId} FOR UPDATE`;
               // A concurrent history prune may delete a page candidate. Lock
@@ -2756,7 +2757,7 @@ export const memoryMutations = {
           extensions: { code: 'ENCRYPTION_INCOMPLETE', memoryId: resolvedMemoryId },
         });
       }
-      return ctx.db.$transaction(async (tx) => {
+      return withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
         const current = await lockConversionMemory(tx);
         // A completion of an earlier encryption ends approvals it predates.
         await endApprovalsOnEncryptedEntry(tx, { memoryId: resolvedMemoryId });

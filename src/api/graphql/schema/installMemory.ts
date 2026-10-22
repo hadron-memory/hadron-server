@@ -117,7 +117,7 @@ export async function withInstallMemory<T>(
       if (!memory) throw installError('INSTALL_MEMORY_NOT_FOUND', 'This App has not customised that Agent yet.');
       return work(tx, txCtx, memory);
     },
-    { timeout: 60_000 },
+    { timeout: 60_000, fence: true },
   );
 }
 

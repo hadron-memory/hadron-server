@@ -15,6 +15,7 @@
  *
  * Every refusal is null, and the caller answers one uniform 403.
  */
+import { withIncludeHistoryTransaction, includeHistoryClient } from '../includes/includeHistoryFence.js';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import type { AssertionParts } from '../signing/verify.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
@@ -115,7 +116,8 @@ export async function finishRevoke(
   if (!bound) return null;
   // An identity-provider proof was spent at the prove step; finishing needs that same browser.
   if (bound.vouch_passkey_id === null && input.signInBrowserHash !== bound.sign_in_browser_hash) return null;
-  return db.$transaction(async (tx) => {
+  return withIncludeHistoryTransaction(db, async (history) => {
+    const tx = includeHistoryClient(history);
     await lockAuthorityAnchors(tx, [{ kind: 'user', id: bound.user_id }], 'exclusive');
     if (!(await liveUser(tx, bound.user_id))) return null;
     if (bound.vouch_passkey_id !== null) {

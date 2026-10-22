@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
 import { liveTxContext } from './authorizedTx.js';
 import { GraphQLError } from 'graphql';
@@ -79,7 +80,7 @@ export const specCorpusMutations = {
     // archive-time error may reveal that a tombstone exists at the loc.
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
     const effects: Array<() => void> = [];
-    const reserved = await ctx.db.$transaction(async (tx) => {
+    const reserved = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
       // (@codex P1/P2s, PR #1452) Never REVIVE a deleted node as a placeholder.
       // A revival keeps everything attached to the row (text, payload, edges,
       // vectors, provenance, revision history), and each of those surfaced a
@@ -1210,7 +1211,7 @@ async function mintMemoryNodes(
   const { id } = await resolveMemoryRef(ctx.db, memoryRef);
   await concealUnreadableDenial(ctx, id, memoryRef, () => mayMintNodes(ctx, id));
 
-  return ctx.db.$transaction(async (tx) => {
+  return withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
     if (dryRun) await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR NO KEY UPDATE`;
     else await fenceCorpusForMint(tx, id);
     const txCtx = withoutRequestCaches(ctx, tx);

@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { includeHistoryClient, withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
@@ -2243,7 +2244,7 @@ export const sessionMutations = {
       // a large snapshot; READ COMMITTED (the default) gives each statement a
       // fresh snapshot after the lock is granted.
       const locToId = new Map<string, string>();
-      await ctx.db.$transaction(
+      await withIncludeHistoryClientTransaction(ctx.db,
         async (tx) => {
           await lockAncestorsForCreateMany(
             tx,

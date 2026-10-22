@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../lib/includes/includeHistoryFence.js';
 /**
  * #1632 (S2b-1) — signing on MCP: the three request tools and the
  * "Signatures:" line on node reads (single and batch). Agents request and read;
@@ -36,7 +37,7 @@ async function signAs(requestId: string, label: string, userId = writer.id) {
   const key = softPasskey();
   await insertSoftPasskey(db, userId, key, { label });
   const payload = signaturePayloadBytes('hadron-signature-v1', req);
-  await db.$transaction((tx) => completeSigningRequestInTransaction(tx, req.id, {
+  await withIncludeHistoryClientTransaction(db, (tx) => completeSigningRequestInTransaction(tx, req.id, {
     memoryId: memory.id, signerId: userId, credentialId: key.credentialId,
     assertion: key.assert({ payload, origin: ORIGIN, rpId: RP }), mayWrite: maySignInMemory(db),
   }));

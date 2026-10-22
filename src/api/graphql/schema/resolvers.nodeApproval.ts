@@ -225,6 +225,7 @@ export const nodeApprovalMutations = {
           memoryId, approver: editorFromAuth(ctx), key, expectedRevision: revision,
           bootPromptGate: await bootPromptApprovalGate(txCtx, memoryId),
         }),
+        { fence: true },
       );
       return receiptOf(ctx, node);
     } catch (error) {
@@ -305,7 +306,7 @@ export const nodeApprovalMutations = {
         const unresolvedFeedback = (await unresolvedFeedbackOf(tx, scoped)).map((f) => ({ ...f, memoryId }));
         return { approved, skippedPlaceholders, skippedBootPrompts, alreadyApprovedCount, unresolvedFeedback, skippedDecisionCount, skippedDecisions };
       },
-      { timeout: 120_000 },
+      { timeout: 120_000, fence: true },
     );
     const byLoc = (a: { loc: string }, b: { loc: string }) => (a.loc < b.loc ? -1 : a.loc > b.loc ? 1 : 0);
     return {

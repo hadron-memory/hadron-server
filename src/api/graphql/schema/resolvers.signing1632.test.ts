@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 /**
  * #1632 (S2b-1) — the GraphQL surface of signing: who may request, withdraw
  * and read (cor:dmo:130:02/:03/:06), the batch-loaded signatureStatus, and the
@@ -46,7 +47,7 @@ async function signAs(req: { id: string; nodeId: string; approvalHash: string },
   const key = softPasskey();
   await insertSoftPasskey(db, userId, key, { label: 'Laptop' });
   const payload = signaturePayloadBytes('hadron-signature-v1', req);
-  return db.$transaction((tx) => completeSigningRequestInTransaction(tx, req.id, {
+  return withIncludeHistoryClientTransaction(db, (tx) => completeSigningRequestInTransaction(tx, req.id, {
     memoryId: memory.id, signerId: userId, credentialId: key.credentialId,
     assertion: key.assert({ payload, origin: ORIGIN, rpId: RP }), mayWrite: maySignInMemory(db),
   }));

@@ -53,6 +53,7 @@
  * shape. `source` MUST be the full live node row (all revisioned fields loaded).
  */
 
+import { assertIncludeHistoryClient } from './includes/includeHistoryFence.js';
 import { assertBootPromptWriteAllowed } from './bootPrompt.js';
 import { resyncDerivedIncludesForNodes } from './includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from './nodeRoleWriters.js';
@@ -307,6 +308,7 @@ export async function moveNodeSubtree(
     principal?: RoleWriterPrincipal;
   },
 ): Promise<MoveNodeSubtreeResult> {
+  assertIncludeHistoryClient(tx);
   const { source, destLoc, editor, renameSourceLeaf } = opts;
   const srcMemoryId = source.memoryId;
   const destMemoryId = opts.destMemoryId ?? srcMemoryId;

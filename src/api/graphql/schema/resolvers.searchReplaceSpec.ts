@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 /**
  * #1294: the spec-only bulk door. Selection is explicit and belongs to one
  * draft corpus. Apply locks that corpus and every selected row, rebuilds the
@@ -360,7 +361,7 @@ export async function searchReplaceInSpecNodes(
   }
 
   let readableForIncludes: string[] | null = null;
-  const applied = await ctx.db.$transaction(async (tx) => {
+  const applied = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
     // Channel creation takes this memory key. Lock every selected Node before
     // the Memory row: ordinary node writers take Node then Memory FOR SHARE.
     // Minting and memory deletion update the Memory row after these locks.

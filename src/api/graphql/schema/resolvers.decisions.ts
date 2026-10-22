@@ -604,7 +604,7 @@ export const decisionMutations = {
       );
       const row = await tx.node.findUniqueOrThrow({ where: { id: (node as { id: string }).id }, select: LOG_ROW_SELECT });
       return { row, data };
-    }, { timeout: 60_000, afterLock: holdAppOwnerRow(ctx, memoryId) });
+    }, { fence: true, timeout: 60_000, afterLock: holdAppOwnerRow(ctx, memoryId) });
     for (const effect of effects) effect();
     return view;
   },
@@ -650,7 +650,7 @@ export const decisionMutations = {
         },
       );
       return { row: await tx.node.findUniqueOrThrow({ where: { id: row.id }, select: LOG_ROW_SELECT }), data };
-    }, { timeout: 60_000, afterLock: holdAppOwnerRow(ctx, log.memoryId) });
+    }, { fence: true, timeout: 60_000, afterLock: holdAppOwnerRow(ctx, log.memoryId) });
     for (const effect of effects) effect();
     return view;
   },
@@ -731,7 +731,7 @@ export const decisionMutations = {
         },
       });
       return (node as { id: string }).id;
-    }, { timeout: 60_000 });
+    }, { fence: true, timeout: 60_000 });
     for (const effect of effects) effect();
     return loadDecisionView(ctx, id);
   },
@@ -828,7 +828,7 @@ export const decisionMutations = {
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
       );
-    }, { timeout: 60_000 });
+    }, { fence: true, timeout: 60_000 });
     for (const effect of effects) effect();
     return loadDecisionView(ctx, target.id);
   },
@@ -875,7 +875,7 @@ export const decisionMutations = {
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
       );
-    }, { timeout: 60_000 });
+    }, { fence: true, timeout: 60_000 });
     for (const effect of effects) effect();
     return loadDecisionView(ctx, target.id);
   },
@@ -932,7 +932,7 @@ export const decisionMutations = {
       await deletePendingEdgesTargetingNodes(tx, [row.id]);
       const res = await tx.node.deleteMany({ where: { id: row.id, memoryId: target.memoryId } });
       if (res.count !== 1) throw decisionMissing(args.ref);
-    }, { timeout: 60_000 });
+    }, { fence: true, timeout: 60_000 });
     for (const effect of effects) effect();
     return true;
   },
