@@ -1,3 +1,4 @@
+import { Prisma } from '../../../generated/prisma/index.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #974 (re-cut) — the Worker model (spec cor:dmo:050:11, cor:agt:020:01/:02).
@@ -817,6 +818,19 @@ describe('deleteWorker — the never-used-miscast escape', () => {
     // A true hard delete — unlike retirement, the name is free again.
     const recast = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
     expect(recast.name).toBe('Zoe');
+  });
+
+  it('#2046 S9-3: exhausted serialization retries answer WORKER_DELETE_CONFLICT (transient, 3 attempts), never WORKER_IN_USE', async () => {
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
+    let attempts = 0;
+    const flaky = new Proxy(db, {
+      get: (t, k, r) => k === '$transaction'
+        ? async () => { attempts++; throw new Prisma.PrismaClientKnownRequestError('serialization', { code: 'P2034', clientVersion: 'test' }); }
+        : Reflect.get(t, k, r),
+    });
+    await expectCode(M.deleteWorker({}, { workerRef: worker.id, confirmNoExternalAttribution: true }, { ...ctx(admin.id), db: flaky }), 'WORKER_DELETE_CONFLICT');
+    expect(attempts).toBe(3);
+    expect(await db.worker.findUnique({ where: { id: worker.id } })).not.toBeNull();
   });
 
   it('an open bound session refuses with WORKER_IN_USE', async () => {

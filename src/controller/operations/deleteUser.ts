@@ -9,7 +9,8 @@ import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { softDeleteOrganizationCore } from './softDeleteOrganization.js';
 import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../lib/auth/revokeOrgInvitations.js';
 import { AuthoritySnapshotStale, lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
-import { retryOnSerializationFailure } from '../../lib/serializableRetry.js';
+import { accountFenceClient, withAccountFenceTransaction } from '../../lib/includes/includeHistoryFence.js';
+import { retryAccountFence } from '../../lib/includes/accountFenceRetry.js';
 import { assertNoMintedCorpusCascade } from '../../lib/mintedSpecPermanence.js';
 import {
   collectAssetKeysForMemories,
@@ -130,13 +131,15 @@ export async function deleteUserAccount(
   // authority anchor precedes its row locks. A fresh cross-connection check
   // after the anchors retries with the complete set if membership changed.
   // The shared retry includes jitter for both P2034 and stale snapshots.
-  const { toolConnections, assetKeys } = await retryOnSerializationFailure(async () => {
+  // Retry budget unchanged (6 attempts for conflicts, 5 re-runs for a stale snapshot); the classifier now also
+  // covers raw P2010/40001|40P01, which the fence and epoch statements raise.
+  const { toolConnections, assetKeys } = await retryAccountFence(async () => {
     const membershipScope = (await db.orgMember.findMany({
       where: { userId: targetUserId, deletedAt: null },
       select: { organizationId: true },
     })).map((m) => m.organizationId).sort();
     return runDeletionTxn(db, targetUserId, actorUserId, membershipScope, reason === undefined ? null : { auditId, reason });
-  });
+  }, { conflictAttempts: 6, semantic: (e) => e instanceof AuthoritySnapshotStale, semanticRetries: 5 });
   // Provider-sidecar teardown AFTER the commit: the tools hold their own
   // copy of the OAuth credential + change subscriptions, so deleting the
   // core ExchangeConnection rows alone would leave those live. Outside
@@ -176,8 +179,11 @@ async function runDeletionTxn(
   /** Object-store keys of the deleted memories' assets — purged post-commit. */
   assetKeys: CollectedAssetKeys;
 }> {
-  return db.$transaction(
-    async (tx) => {
+  return withAccountFenceTransaction(
+    db,
+    async (fence) => {
+      // #2046 S9-3: the fence and the epoch proof come first, on this same SERIALIZABLE backend.
+      const tx = accountFenceClient(fence);
       const now = new Date();
       await lockAuthorityAnchors(tx, [
         ...membershipScope.map((id) => ({ kind: 'org' as const, id })),
@@ -500,10 +506,6 @@ async function runDeletionTxn(
         assetKeys,
       };
     },
-    {
-      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-      timeout: 60_000,
-      maxWait: 15_000,
-    },
+    { timeoutMs: 60_000, maxWaitMs: 15_000 },
   );
 }

@@ -99,6 +99,7 @@ async function writePointer(
           // Gene's #2219 BLIND P2: the AGENT pointer UPDATEs its own anchor row, so two saves holding it shared would
           // each wait for the other to upgrade (40P01). Exclusive serializes them first, the inTaskWriteTx precedent.
           // APP_AGENT and WORKER update child rows of their App anchor, so they keep the shared hold.
+          fence: true,
           lockMode: target.field === 'AGENT' ? 'exclusive' : 'shared',
           afterLock: async (tx) => {
             if (appId && ctx.userId) {

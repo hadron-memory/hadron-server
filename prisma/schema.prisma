@@ -6360,3 +6360,13 @@ model WorkerReferenceFence {
 
   @@map("worker_reference_fences")
 }
+
+/// #2046 S9-3: the include-history authority epoch. Singleton row (id = 1) incremented by every transaction
+/// that takes the include-history fence; the constraints and triggers that keep it monotone live in
+/// prisma/include-history-epoch-invariants.sql. Never written through Prisma models, no public API.
+model IncludeHistoryEpoch {
+  id Int    @id
+  n  BigInt
+
+  @@map("include_history_epoch")
+}

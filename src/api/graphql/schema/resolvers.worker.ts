@@ -13,6 +13,9 @@
 // (`roles:<role>` nodes, `data.names`), read at CASTING time — and only when
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
+import { accountFenceClient, isSerializationConflict, withAccountFenceTransaction } from '../../../lib/includes/includeHistoryFence.js';
+import { retryAccountFence } from '../../../lib/includes/accountFenceRetry.js';
+import { includeHistoryClient, withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
@@ -1025,7 +1028,9 @@ export const workerMutations = {
   ) => {
     const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
     await requireWorkerStaffAccess(ctx, app);
-    await ctx.db.$transaction(async (tx) => {
+    // #2046 S9-3: the include-history fence FIRST (the compile's order), then the stop fence and the rest.
+    await withIncludeHistoryTransaction(ctx.db, async (fence) => {
+      const tx = includeHistoryClient(fence);
       // #2022: the stop fence, exclusive, before the graph lock (src/lib/stopSignals/state.ts): a retired worker
       // leaves every stop signal's coverage, recorded below.
       await lockStopFence(tx, worker.appId, 'exclusive');
@@ -1567,7 +1572,10 @@ export const workerMutations = {
     });
     if (await miscastHasReferences(ctx.db, worker)) throw refuse();
     try {
-      await ctx.db.$transaction(async (tx) => {
+      // #2046 S9-3: removing a compile target is a fence participant. Fence + epoch proof first, same
+      // SERIALIZABLE backend; a conflict re-runs the whole attempt (3 total) before the typed refusal.
+      await retryAccountFence(() => withAccountFenceTransaction(ctx.db, async (fence) => {
+        const tx = accountFenceClient(fence);
         // Re-read after acquiring the identity lock; stale pre-wait eligibility
         // never authorizes destruction. The private MVCC fence
         // and SERIALIZABLE census jointly reject pre-wait snapshots.
@@ -1580,14 +1588,14 @@ export const workerMutations = {
         await tx.session.deleteMany({ where: { workerId: worker.id } });
         await tx.worker.delete({ where: { id: worker.id } });
         if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      }), { conflictAttempts: 3 });
     } catch (error) {
-      // The fence deliberately makes a stale SERIALIZABLE snapshot abort.
+      // The fence deliberately makes a stale SERIALIZABLE snapshot abort. Exhausted retries are TRANSIENT contention, not a
+      // found reference: a real reference is refused as WORKER_IN_USE by the census on a fresh attempt.
       // Raw statements report 40001/40P01 as P2010; model writes use P2034.
-      if (error instanceof Prisma.PrismaClientKnownRequestError &&
-        (error.code === 'P2034' || (error.code === 'P2010' && ['40001', '40P01'].includes(String(error.meta?.code))))) {
-        throw new GraphQLError('Worker references changed concurrently. Retry the verified-unused repair, or retire instead.', {
-          extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
+      if (isSerializationConflict(error)) {
+        throw new GraphQLError('Concurrent activity kept this deletion from completing after retries; the deciding check did not finish, so nothing was deleted and no verdict on references was reached. Retry, or retire instead.', {
+          extensions: { code: 'WORKER_DELETE_CONFLICT', workerId: worker.id },
         });
       }
       throw error;
