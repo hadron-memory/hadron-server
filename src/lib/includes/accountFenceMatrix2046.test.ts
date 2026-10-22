@@ -8,7 +8,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { generateId } from '../id.js';
-import { cleanDb, createDbAgentSubscription } from '../../test/helpers.js';
+import { cleanDb, createDbAgentSubscription, createDbAppAgent, createDbAppMember } from '../../test/helpers.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../bootPrompt.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
@@ -127,14 +128,62 @@ const classes: Array<{ name: string; run: () => Promise<unknown>; effect: () => 
   },
 ];
 
+/** Boot-prompt pointer setters: a compiled node in the agent's system memory (AGENT) or the install memory (APP_AGENT, WORKER). */
+async function pointerFixture(): Promise<{ agentNode: string; installNode: string }> {
+  const agentMem = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'sys', urn: 'mx.org:sys', organizationId: org.id } });
+  await db.agent.update({ where: { id: agentA.id }, data: { systemMemoryId: agentMem.id } });
+  await createDbAppAgent(db, app.id, agentA.id);
+  await createDbAppMember(db, app.id, admin.id, 'member');
+  const install = await db.memory.create({
+    data: { id: generateId(), class: 'system', name: 'install', urn: 'mx.org:install', organizationId: org.id, appId: app.id, installOfAgentId: agentA.id, isInstallMemory: true },
+  });
+  const compiledIn = (memoryId: string) => withCompileWrite(() => db.node.create({
+    data: { id: generateId(), memoryId, loc: 'boot:compiled', name: 'C', content: 'c', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+  }));
+  return { agentNode: (await compiledIn(agentMem.id)).id, installNode: (await compiledIn(install.id)).id };
+}
+let nodes: { agentNode: string; installNode: string };
+classes.push(
+  {
+    name: 'pointer AGENT (setAgentBootPrompt)',
+    setup: async () => { nodes = await pointerFixture(); },
+    run: () => M.setAgentBootPrompt(null, { agentRef: agentA.id, nodeRef: nodes.agentNode }, ctx(admin.id)),
+    effect: async () => (await db.agent.findUniqueOrThrow({ where: { id: agentA.id } })).bootPromptNodeId === nodes.agentNode,
+  },
+  {
+    name: 'pointer APP_AGENT (setAppAgentBootPrompt)',
+    setup: async () => { nodes = await pointerFixture(); },
+    run: () => M.setAppAgentBootPrompt(null, { appRef: app.id, agentRef: agentA.id, nodeRef: nodes.installNode }, ctx(admin.id)),
+    effect: async () => (await db.appAgent.findUniqueOrThrow({ where: { appId_agentId: { appId: app.id, agentId: agentA.id } } })).bootPromptNodeId === nodes.installNode,
+  },
+  {
+    name: 'pointer WORKER (setWorkerBootPrompt)',
+    setup: async () => { nodes = await pointerFixture(); },
+    run: () => M.setWorkerBootPrompt(null, { workerRef: worker.id, nodeRef: nodes.installNode }, ctx(admin.id)),
+    effect: async () => (await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).bootPromptNodeId === nodes.installNode,
+  },
+);
+classes.push(
+  {
+    name: 'grant create (createAgentOrgGrant)',
+    run: () => M.createAgentOrgGrant(null, { agentRef: pub.id, orgRef: other.id }, ctx(otherAdmin.id)),
+    effect: async () => (await db.agentOrgGrant.count({ where: { agentId: pub.id, orgId: other.id, revokedAt: null } })) === 1,
+  },
+  {
+    name: 'delete agent (deleteAgent)',
+    run: () => M.deleteAgent(null, { ref: agentB.id }, ctx(admin.id)),
+    effect: async () => (await db.agent.findUnique({ where: { id: agentB.id } }))?.deletedAt != null || (await db.agent.findUnique({ where: { id: agentB.id } })) === null,
+  },
+);
+
 describe.each(classes)('#2046 S9-3 stale-wait matrix: $name', (c) => {
   it('a committed real holder ahead of the account makes the account fail 40001 with no work; the holder took effect and bumped once', async () => {
     await c.setup?.();
     const before = await epoch();
-    const { pred, acct } = await stage(c.run, accountOp(`stale-${c.name.length}`));
+    const { pred, acct } = await stage(c.run, accountOp(`stale-${c.name.replace(/\W/g, '')}`));
     await pred;
     expect(isSerializationConflict(await acct.then(() => null, (e) => e))).toBe(true);
-    expect(await orgCount(`stale-${c.name.length}`)).toBe(0);
+    expect(await orgCount(`stale-${c.name.replace(/\W/g, '')}`)).toBe(0);
     expect(await c.effect()).toBe(true);
     expect(await epoch()).toBe(before + 1);
   });
@@ -142,8 +191,8 @@ describe.each(classes)('#2046 S9-3 stale-wait matrix: $name', (c) => {
   it('reverse order: the account holds the fence, the real holder waits, then completes', async () => {
     await c.setup?.();
     const before = await epoch();
-    await reverse(c.run, `rev-${c.name.length}`);
-    expect(await orgCount(`rev-${c.name.length}`)).toBe(1);
+    await reverse(c.run, `rev-${c.name.replace(/\W/g, '')}`);
+    expect(await orgCount(`rev-${c.name.replace(/\W/g, '')}`)).toBe(1);
     expect(await c.effect()).toBe(true);
     expect(await epoch()).toBe(before + 2);
   });
