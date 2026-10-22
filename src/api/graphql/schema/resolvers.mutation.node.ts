@@ -54,7 +54,7 @@ import {
   type Replacer,
 } from '../../../lib/searchReplace.js';
 import { enqueueNodeEmbedding, pendingAtForRevival } from '../../../services/embedding/enqueue.js';
-import { canReadMemory } from '../../../mcp/access-control.js';
+import { canReadMemory, isWriteBeyondRead } from '../../../mcp/access-control.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { enforceNodeSchemaOnWrite, normalizeObjectType, normalizeRole } from '../../../lib/enforceNodeSchema.js';
 import {
@@ -94,6 +94,8 @@ import {
   EdgeNotFoundError,
 } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { lockAgentDefinitionAuthority } from '../../../lib/auth/managedSystemMemory.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveEdgeRef } from '../../../lib/entityRef/edgeRef.js';
 import { GraphQLError } from 'graphql';
@@ -138,6 +140,7 @@ import {
   throwOnInvalidCondition,
   throwOnReservedExtractionSpec,
   requireMemoryWriteAccess,
+  memoryWriteForbidden,
   isMemoryReadableCached,
   concealUnreadableDenial,
   concealUnreadableNodeDenial,
@@ -154,7 +157,7 @@ import {
   type MergeNodesInput,
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
-import { concealUnreadableInstallWrite, findInstallMemory, lockInstallAuthorityFirst, resolveInstallTarget, withInstallMemory, type InstallTarget } from './installMemory.js';
+import { concealWriteBeyondRead, findInstallMemory, lockInstallAuthorityFirst, resolveInstallTarget, withInstallMemory, type InstallTarget } from './installMemory.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
@@ -1751,7 +1754,7 @@ async function writeNodeCoreRaw(
  * genuine miss and a soft-deleted row map to the same not-found (no existence
  * oracle), while a malformed URN propagates as UrnNotQualifiedError (spec 022).
  */
-async function resolveExistingNode(ctx: Context, ref: string, opts?: { forWrite?: boolean }) {
+async function resolveExistingNode(ctx: Context, ref: string, opts?: { forWrite?: boolean; movesContent?: boolean }) {
   let id: string;
   try {
     ({ id } = await resolveNodeRefForCaller(ctx, ref));
@@ -1771,6 +1774,11 @@ async function resolveExistingNode(ctx: Context, ref: string, opts?: { forWrite?
   // read, answers here — at resolution — exactly as a missing one. Refusing at
   // the later write gate leaks through ORDER (see resolveMemoryRefForWrite).
   if (opts?.forWrite && (await isMemoryHiddenForWrite(ctx, node.memoryId, 'node'))) {
+    throw nodeNotFoundError(ref);
+  }
+  // #2206 (B): an operation that carries the node's existing content somewhere the caller sees it (a move) answers a
+  // caller who may write but not read this memory as a missing node, at resolution, before any later gate.
+  if (opts?.movesContent && (await isWriteBeyondRead(ctx.db, ctx, node.memoryId))) {
     throw nodeNotFoundError(ref);
   }
   return node;
@@ -2113,7 +2121,7 @@ export const nodeMoveOps = {
       expectedSource?: { memoryId: string; loc: string };
     },
   ) {
-      const source = await resolveExistingNode(ctx, sourceRef, { forWrite: true });
+      const source = await resolveExistingNode(ctx, sourceRef, { forWrite: true, movesContent: true });
       if (expectedSource && (source.memoryId !== expectedSource.memoryId || source.loc !== expectedSource.loc)) {
         throw new GraphQLError('The node moved since it was read, so nothing was moved. Re-read and retry.', {
           extensions: { code: 'CONFLICT', nodeId: source.id },
@@ -2146,6 +2154,8 @@ export const nodeMoveOps = {
         let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
         const moved = await ctx.db.$transaction(
           async (tx) => {
+            // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
+            await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [source.memoryId, destMemoryId]);
             // #1187 — DECLARE the complete key set first, in the one global
             // order: the destination ancestor path AND the source path that
             // `lockSourceForMove` takes further down. Previously those were two
@@ -2581,13 +2591,18 @@ export const nodeMutations = {
       const ensureAuthed = async (memoryId: string) => {
         if (authedMemories.has(memoryId)) return;
         await requireMemoryWriteAccess(ctx, memoryId);
+        // #2206 (B): matches and per-field counts (dry run too) disclose content, so a memory the caller may write but
+        // not read is refused here; the conceal wrappers below then answer it as a memory the caller cannot see.
+        if (await isWriteBeyondRead(ctx.db, ctx, memoryId)) throw memoryWriteForbidden();
         authedMemories.add(memoryId);
       };
 
       if (hasMemoryIds) {
         for (const ref of memoryIds!) {
           const { id: memId } = await resolveMemoryRef(ctx.db, ref);
-          // #1316: an unreadable memory answers as resolveMemoryRef's miss.
+          // #1316: an unreadable memory answers as resolveMemoryRef's miss. #2206 (B): so does one the caller may write
+          // but not read (its record may be visible, so the wrapper below would answer FORBIDDEN instead).
+          if (await isWriteBeyondRead(ctx.db, ctx, memId)) throw new MemoryNotFoundError(ref);
           await concealUnreadableDenial(ctx, memId, ref, () => ensureAuthed(memId));
           const where: Prisma.NodeWhereInput = { memoryId: memId, deletedAt: null };
           if (usePrefix) {
@@ -3917,6 +3932,16 @@ export const nodeMutations = {
         throw new GraphQLError(`Target node not found: "${rawTarget}"`, {
           extensions: { code: 'NODE_NOT_FOUND', ref: rawTarget },
         });
+      // #2206 (B): a merge folds one node's content into the other and returns the result, so a node in a memory the
+      // caller may write but not read answers exactly as a missing one, on either end, before any gate.
+      if (await isWriteBeyondRead(ctx.db, ctx, source.memoryId))
+        throw new GraphQLError(`Source node not found: "${rawSource}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: rawSource },
+        });
+      if (await isWriteBeyondRead(ctx.db, ctx, target.memoryId))
+        throw new GraphQLError(`Target node not found: "${rawTarget}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: rawTarget },
+        });
 
       // Auth. The target is mutated → write access always. The source is
       // read to fold its fields; it's mutated only when we delete it or
@@ -4929,7 +4954,8 @@ export const nodeMutations = {
 };
 
 /**
- * THE node writer. The response of a write to an App's install memory is held to the memory's READ
+ * THE node writer. The response of a write to a memory whose writer may not read it (an App's install memory;
+ * a user-owned Agent's system memory written by a platform admin, #2206) is held to the memory's READ
  * audience here, at the one writer every door shares (createNode/updateNode by address or by
  * memoryId, the kind doors, merges, importers, MCP), not per door: a door-by-door wrap let an
  * alternate address return the content a write-only manager cannot read (Andi on #2064).
@@ -4939,5 +4965,5 @@ export async function writeNodeCore(...args: Parameters<typeof writeNodeCoreRaw>
   const written = await writeNodeCoreRaw(...args);
   const ctx = args[1];
   if (!written || typeof written !== 'object' || typeof (written as { memoryId?: unknown }).memoryId !== 'string') return written;
-  return concealUnreadableInstallWrite(ctx, written as { memoryId: string }) as unknown as typeof written;
+  return concealWriteBeyondRead(ctx, written as { memoryId: string }) as unknown as typeof written;
 }

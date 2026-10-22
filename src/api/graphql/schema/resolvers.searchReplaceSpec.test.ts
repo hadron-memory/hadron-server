@@ -396,4 +396,16 @@ describe('searchReplaceInSpecNodes', () => {
       nodesSelected: 1, nodesScanned: 1, nodesSkipped: 0, nodesChanged: 1,
     });
   });
+
+  it('refuses an apply that adds an include to a missing target, storing nothing (Ruth, #2226 P3)', async () => {
+    const spec = await node('pas:010:02');
+    const before = await db.node.findUniqueOrThrow({ where: { id: spec.id } });
+    const input = request([spec.id], { oldText: 'scatter', newText: '{{> pas:nowhere}}' });
+    const preview = await call(input);
+    await expect(call({ ...input, dryRun: false, expectedPlan: preview.plan }))
+      .rejects.toMatchObject({ extensions: { code: 'INCLUDE_TARGET_UNAVAILABLE', tag: '{{> pas:nowhere}}' } });
+    const after = await db.node.findUniqueOrThrow({ where: { id: spec.id } });
+    expect(after.content).toBe('cat cat scatter');
+    expect(after.revSeq).toBe(before.revSeq);
+  });
 });

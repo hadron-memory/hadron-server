@@ -25,7 +25,9 @@ import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { NO_INSTALL_AUDIENCE, installMemoryAudience, isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
+import { lockAgentDefinitionAuthority } from '../../../lib/auth/managedSystemMemory.js';
 import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
+import { isWriteBeyondRead } from '../../../mcp/access-control.js';
 import { resolveMemoryRoot, sharedMemoryName } from './chat-scope.js';
 import { isAppParticipant, memoryWriteForbidden, type Context } from './resolvers.helpers.js';
 
@@ -255,11 +257,12 @@ async function lockInstallAuthority(tx: Prisma.TransactionClient, ctx: Context, 
  * memory, for a door whose transaction opens with `withAuthorizedMemoryTx`: passed as its
  * `otherAnchors`, they are acquired in the SAME ordered call as the memory/org anchors, so App and
  * Agent come first (anchor kind order) exactly as the revokers take them, and the in-gate
- * `lockInstallAuthority` is then a no-op re-acquire. Empty for any other memory. A plain read of
- * the identity, no lock.
+ * `lockInstallAuthority` is then a no-op re-acquire. For a live Agent's own system memory, the anchors
+ * lockAgentDefinitionAuthority takes (#2206 parity). Empty for any other memory. A plain read of the
+ * identity, no lock.
  */
-export async function installAuthorityAnchors(
-  db: Pick<PrismaClient, 'memory' | 'app'>,
+export async function memoryAuthorityAnchors(
+  db: Pick<PrismaClient, 'memory' | 'app' | 'agent'>,
   ctx: Pick<Context, 'userId'>,
   memoryId: string,
 ): Promise<AuthorityAnchor[]> {
@@ -267,7 +270,26 @@ export async function installAuthorityAnchors(
     where: { id: memoryId },
     select: { class: true, appId: true, installOfAgentId: true, isInstallMemory: true },
   });
-  if (!memory || !isInstallMemoryRow(memory) || !memory.appId) return [];
+  if (!memory) return [];
+  if (!isInstallMemoryRow(memory)) {
+    // #2206 parity: a live Agent's own system memory takes the anchors lockAgentDefinitionAuthority takes (the Agent,
+    // its tenant, the actor), so an approval's deciding gate is ordered after a transfer or demotion that won.
+    if (memory.class !== 'system') return [];
+    const agents = await db.agent.findMany({
+      where: { systemMemoryId: memoryId, deletedAt: null },
+      select: { id: true, organizationId: true, ownerUserId: true },
+    });
+    if (agents.length === 0) return [];
+    return [
+      ...agents.flatMap((agent) => [
+        { kind: 'agent' as const, id: agent.id },
+        ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+        ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+      ]),
+      ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+    ];
+  }
+  if (!memory.appId) return [];
   const app = await db.app.findUnique({ where: { id: memory.appId }, select: { organizationId: true, ownerUserId: true } });
   if (!app) return [];
   return [
@@ -280,9 +302,9 @@ export async function installAuthorityAnchors(
 }
 
 /**
- * The first statement of any transaction that will write or delete `memoryId`: if it is an
- * install memory, take its authority before any memory, node or loc lock. A plain read of the
- * identity (no lock), so an ordinary memory costs one indexed select.
+ * The first statement of any transaction that will write or delete `memoryId`: if it is an install memory, or (#2206)
+ * a live Agent's own system memory, take its authority before any memory, node or loc lock. A plain read of the
+ * identity (no lock), so an ordinary memory costs one or two indexed selects.
  */
 export async function lockInstallAuthorityFirst(tx: Prisma.TransactionClient, ctx: Context, memoryId: string): Promise<void> {
   const row = await tx.memory.findUnique({
@@ -290,23 +312,35 @@ export async function lockInstallAuthorityFirst(tx: Prisma.TransactionClient, ct
     select: { id: true, class: true, appId: true, installOfAgentId: true, isInstallMemory: true, organizationId: true, ownerUserId: true },
   });
   if (row && isInstallMemoryRow(row) && row.appId) await lockInstallAuthority(tx, ctx, row);
+  else if (row?.class === 'system') await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, row.id);
 }
 
+
 /**
- * #2064 §10 (Riana P2-1): the RESPONSE of an install-memory write is a READ of the node. A manager
- * may write without being a participant (record/write/delete are not content access), so what
- * the write hands back is held to the read audience: a caller who cannot read the memory's content
- * gets the identity and attribution of what they wrote, with every content-bearing field and
- * relation blanked. Participants get the node unchanged. Not a new grant: it only withholds.
+ * The RESPONSE of a write is a READ of the node, so it is held to the memory's content read audience wherever a writer
+ * may write without reading. A caller who cannot read the content gets the identity and attribution of what they
+ * wrote, with every content-bearing field and relation blanked; a reader gets the node unchanged. Not a new grant: it
+ * only withholds. Two memories have such writers:
+ *  - an App's install memory (#2064 §10, Riana P2-1): a manager may write it without being a participant (record,
+ *    write and delete are not content access);
+ *  - a user-owned Agent's system memory (#2206 case 2): a platform admin manages the Agent and so writes it
+ *    (cor:dmo:050:13), but reads its content only once #1734 builds that read. Judged by the canonical content gate,
+ *    so the full projection returns by itself when #1734 widens it.
  */
-export async function concealUnreadableInstallWrite<T extends { memoryId: string }>(ctx: Context, node: T): Promise<T> {
+export async function concealWriteBeyondRead<T extends { memoryId: string }>(ctx: Context, node: T): Promise<T> {
   const memory = await ctx.db.memory.findUnique({
     where: { id: node.memoryId },
     select: { id: true, class: true, appId: true, installOfAgentId: true, isInstallMemory: true, organizationId: true, ownerUserId: true },
   });
-  if (!memory || !isInstallMemoryRow(memory)) return node;
-  if ((await installMemoryAudience(ctx.db as never, ctx, memory)).read) return node;
-  return concealedInstallNode(node as unknown as Record<string, any>) as unknown as T;
+  if (!memory) return node;
+  if (isInstallMemoryRow(memory)) {
+    if ((await installMemoryAudience(ctx.db as never, ctx, memory)).read) return node;
+    return concealedInstallNode(node as unknown as Record<string, any>) as unknown as T;
+  }
+  if (await isWriteBeyondRead(ctx.db, ctx, memory.id)) {
+    return concealedInstallNode(node as unknown as Record<string, any>) as unknown as T;
+  }
+  return node;
 }
 
 /** Marks a Node parent whose every content-derived field must read as empty (see {@link withInstallConcealment}). */

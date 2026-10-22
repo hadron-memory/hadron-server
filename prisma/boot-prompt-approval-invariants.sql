@@ -9,7 +9,7 @@
 -- endApprovalsOnEncryptedEntry does), so no byte-identical revision qualifies.
 --
 -- The ONE source of this SQL: included verbatim by prisma/post-push.sql (dev DB,
--- test template, CI) and copied into 20261022010000_boot_prompt_approval_entry
+-- test template, CI) and copied into 20261022010100_boot_prompt_approval_entry
 -- (prod, which does not run post-push.sql). Change it only together with a new
 -- migration that carries the new text. Idempotent.
 

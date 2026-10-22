@@ -87,6 +87,9 @@ async function expectUnapproved(nodeId: string) {
   expect(await db.nodeRevision.count({ where: { nodeId, approvedAt: { not: null } } })).toBe(0);
 }
 const approve = (nodeId: string, ctx: Context) => M.approveNode(null, { nodeRef: nodeId }, ctx);
+/** A complete prior approval, seeded directly: for a memory nobody may approve in today (#2206: an unmanaged system row). */
+const seedApproval = (nodeId: string, by: string) => db.$executeRaw`
+  UPDATE nodes SET approved_rev_no = rev_seq, approved_at = now(), approved_by = ${by}, approval_hash = ${'b'.repeat(64)} WHERE id = ${nodeId}`;
 const bulk = (memoryId: string, ctx: Context) => M.approveMemoryNodes(null, { memoryRef: memoryId }, ctx);
 
 describe('#2043 S6 — the manager approves a placed boot prompt, as themselves', () => {
@@ -249,7 +252,7 @@ describe('#2043 S6 — an outside approval ends when its node enters the placed 
   it('the migration carries prisma/boot-prompt-approval-invariants.sql verbatim', () => {
     const root = fileURLToPath(new URL('../../../../prisma/', import.meta.url));
     const guard = readFileSync(join(root, 'boot-prompt-approval-invariants.sql'), 'utf8');
-    const migration = readFileSync(join(root, 'migrations/20261022010000_boot_prompt_approval_entry/migration.sql'), 'utf8');
+    const migration = readFileSync(join(root, 'migrations/20261022010100_boot_prompt_approval_entry/migration.sql'), 'utf8');
     expect(migration.endsWith(guard)).toBe(true);
   });
 
@@ -287,8 +290,8 @@ describe('#2043 S6 — an outside approval ends when its node enters the placed 
     const loose = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'loose', urn: 'ba-org:loose', organizationId: orgId } });
     const node = await bootSource(loose.id);
     const other = await plain(loose.id);
-    await approve(node.id, ctxOf(f.admin.id));
-    await approve(other.id, ctxOf(f.admin.id));
+    await seedApproval(node.id, f.admin.id);
+    await seedApproval(other.id, f.admin.id);
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvalHash).not.toBeNull();
     await db.agent.create({ data: { id: generateId(), name: 'Late', urn: 'ba-org:late', organizationId: orgId, systemMemoryId: loose.id } });
     await ended(node.id);
@@ -302,8 +305,8 @@ describe('#2043 S6 — an outside approval ends when its node enters the placed 
     const later = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'later', urn: 'ba-org:later', organizationId: orgId } });
     const node = await bootSource(later.id);
     const other = await plain(later.id);
-    await approve(node.id, ctxOf(f.admin.id));
-    await approve(other.id, ctxOf(f.admin.id));
+    await seedApproval(node.id, f.admin.id);
+    await seedApproval(other.id, f.admin.id);
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvalHash).not.toBeNull();
     await db.$executeRaw`UPDATE memories SET is_install_memory = true, app_id = ${app2.id}, install_of_agent_id = ${f.agent.id} WHERE id = ${later.id}`;
     await ended(node.id);
@@ -399,6 +402,34 @@ describe('#2043 S6 — a refusal changes nothing, and the fenced recheck decides
 });
 
 // §10 Rook P3-4 / carried P3-2: the bulk door mirrors the direct door.
+describe('#2043 S6 — an Agent system memory approval takes the Agent-definition authority first (#2206 parity)', () => {
+  it('parks on the Agent anchor a transfer holds, before taking the memory anchor, then completes', async () => {
+    const f = await fixture();
+    const node = await bootSource(f.agentMem.id);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    const holder = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'agent', id: f.agent.id }], 'exclusive');
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await isHeld;
+    const approval = codeOf(approve(node.id, ctxOf(f.admin.id)));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      const free = await db.$transaction(async (tx) => (await tx.$queryRaw<Array<{ ok: boolean }>>`
+        SELECT pg_try_advisory_xact_lock(hashtext('authorization:memory'), hashtext(${f.agentMem.id})) AS ok`)[0]!.ok);
+      expect(free).toBe(true);
+    } finally {
+      release();
+      await holder;
+    }
+    expect(await approval).toBe('NO_ERROR');
+  });
+});
+
 describe('#2043 S6 — the bulk door takes install authority first and rechecks in the transaction', () => {
   it('bulk parks on the Agent anchor before the memory anchor, then completes', async () => {
     const f = await fixture();
@@ -458,7 +489,7 @@ describe('#2043 S6 — the bulk door takes install authority first and rechecks 
 // own one-time pass is executed, read from the migration file itself.
 describe('#2043 S6 R178 — the one-time upgrade pass', () => {
   const migration = () => readFileSync(join(fileURLToPath(new URL('../../../../prisma/', import.meta.url)),
-    'migrations/20261022010000_boot_prompt_approval_entry/migration.sql'), 'utf8');
+    'migrations/20261022010100_boot_prompt_approval_entry/migration.sql'), 'utf8');
   const pass = () => {
     const text = migration();
     const start = text.indexOf('-- BEGIN one-time upgrade pass');

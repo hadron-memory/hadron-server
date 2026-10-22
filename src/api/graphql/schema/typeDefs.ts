@@ -10304,6 +10304,14 @@ export const typeDefs = `#graphql
     licenses, log entries, assets, and git-sync config (the clone starts
     DB-only).
 
+    Include tags (#2167; hrn:node:hadronmemory.com:specs:cor:dmo:150:04 and
+    hrn:node:hadronmemory.com:specs:cor:dmo:150:06): every tag in every copied node
+    counts as added, checked after the URN rewrite. A tag whose target is
+    missing or that the caller can't read refuses with
+    INCLUDE_TARGET_UNAVAILABLE. A tag that closes a cycle among the copied
+    nodes refuses with INCLUDE_CYCLE, at any chain length. Either refusal names
+    only the authored tag and nothing is created.
+
     Authorization: the SOURCE side mirrors deleteMemory (personal/private →
     owner only; knowledge/group → source-org ADMIN). When \`targetUrn\` names a
     DIFFERENT org, the caller must additionally be a non-reader member of that
@@ -10342,6 +10350,15 @@ export const typeDefs = `#graphql
     'move' additionally requires source write access, and cannot target the
     source root (that would empty the source — clone + deleteMemory instead).
     Encrypted and system/app-class sources are rejected.
+
+    Include tags (#2167; hrn:node:hadronmemory.com:specs:cor:dmo:150:04 and
+    hrn:node:hadronmemory.com:specs:cor:dmo:150:06): every tag in every copied node
+    counts as added and is resolved where it lands in the new memory. Content
+    is copied verbatim, so a relative tag to a node in the subtree resolves
+    only when the new slug equals the parent's loc. Otherwise, or when the tag
+    names a node left behind, it refuses with INCLUDE_TARGET_UNAVAILABLE. A tag
+    that closes a cycle refuses with INCLUDE_CYCLE. Either refusal names only
+    the authored tag, and nothing is created or moved.
 
     v1 limitation: node content is copied verbatim — because both the slug and
     node locs change, URN references among the moved nodes WILL break; and
