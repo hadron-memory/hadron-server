@@ -205,6 +205,23 @@ classes.push({
   },
   effect: async () => (await db.$queryRaw<Array<{ h: string | null }>>`SELECT revision_content_hash AS h FROM nodes WHERE id = ${driftNode}`)[0].h != null,
 });
+let endpointNode: string;
+classes.push({
+  // The same slow path through the real endpoint: Query.node on a drifted node (no stored revision fingerprint) opens
+  // the fence and reconciles, so it is a predecessor like any writer (the MCP node read shares the helper).
+  name: 'reconcile read endpoint (Query.node)',
+  setup: async () => {
+    const mem = await db.memory.create({ data: { id: generateId(), class: 'knowledge', name: 'ke', urn: 'mx.org:ke', organizationId: org.id, visibility: 'ORGANIZATION' } });
+    endpointNode = (await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc: 'ne', name: 'ne', content: 'x' } })).id;
+    await db.$executeRaw`UPDATE nodes SET revision_content_hash = NULL WHERE id = ${endpointNode}`;
+  },
+  run: async () => {
+    const n = await (resolvers.Query as any).node(null, { ref: endpointNode }, ctx(admin.id));
+    expect(n?.id).toBe(endpointNode);
+    return n;
+  },
+  effect: async () => (await db.$queryRaw<Array<{ h: string | null }>>`SELECT revision_content_hash AS h FROM nodes WHERE id = ${endpointNode}`)[0].h != null,
+});
 let firstContactApp: string;
 classes.push({
   // First contact: a new end-user with no subscription row, so the license write can create entitlement and the start
