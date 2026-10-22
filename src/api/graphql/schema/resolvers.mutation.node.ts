@@ -1,7 +1,7 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { currentActor } from '../../../lib/requestActor.js';
 import { foreignEdgeMemoryIds } from '../../../lib/foreignEdgeMemories.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, assertNoBootPromptRows, isBootPromptRole } from '../../../lib/bootPrompt.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, assertNoBootPromptRows, inCompileScope, isBootPromptRole } from '../../../lib/bootPrompt.js';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
 import { decisionContainedError, isDecisionFamilyRole, refuseDecisionFamily, refuseUnderDecisionLog } from '../../../lib/decisions/index.js';
@@ -250,6 +250,13 @@ async function writeNodeCoreRaw(
     };
     targetNodeId?: string;
     guardRevSeq?: number;
+    /**
+     * #2046 (S9-4): write a revision even when no field changed. The compile
+     * must leave one revision per compile, and the generic writer skips an
+     * identical-content save. Honoured ONLY inside `withCompileWrite`; outside
+     * it the option is ignored, so no request path can mint empty revisions.
+     */
+    forceRevision?: boolean;
     /**
      * The ADDRESS-protection source this caller owns — `'channel'`, passed by a
      * Channel's own operations. Since #1201 the Channel table is the only
@@ -1259,6 +1266,7 @@ async function writeNodeCoreRaw(
             const needsRevision =
               resolvedEdges !== null ||
               changes.length > 0 ||
+              (opts?.forceRevision === true && inCompileScope()) ||
               (opts?.guardRevSeq !== undefined && changesUnversionedField);
             if (!needsRevision && !changesUnversionedField) {
               // A stale guard is refused even when the write is a no-op: the
