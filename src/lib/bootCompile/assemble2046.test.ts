@@ -172,11 +172,42 @@ describe('#2046 S9-2 — every refusal', () => {
     expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a rev=x}}')))).toBe('BOOT_PROMPT_INCLUDE_MALFORMED');
   });
 
-  it('the occurrence and byte limits refuse', async () => {
+  it('the occurrence limit refuses', async () => {
     await put(agent.child!.mem, 'parts:a', 'x');
     const i = await input(agent.child!.mem, '{{> parts:a}}{{> parts:a}}{{> parts:a}}');
     expect(await refusal(assembleBootPrompt(db, i, { ...DEFAULT_ASSEMBLE_LIMITS, maxOccurrences: 2 }))).toBe('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
-    expect(await refusal(assembleBootPrompt(db, i, { ...DEFAULT_ASSEMBLE_LIMITS, maxBytes: 10 }))).toBe('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
+  });
+
+  // Xavier 6258672877: the byte bound is on the compiled OUTPUT, not on source read (Anne, #2236).
+  it('the byte bound is on the compiled output: exact cap passes, cap+1 refuses, include syntax is not charged', async () => {
+    const limits = { ...DEFAULT_ASSEMBLE_LIMITS, maxBytes: 8 };
+    const compile = async (part: string, root = '{{> parts:a}}') => {
+      await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: { in: ['parts:a', 'boot:source'] } } });
+      await put(agent.child!.mem, 'parts:a', part);
+      return refusal(assembleBootPrompt(db, await input(agent.child!.mem, root), limits));
+    };
+    // The root is 13 bytes of tag for 8 bytes of output: valid, and must pass.
+    expect(await compile('x'.repeat(8))).toBe('NO_REFUSAL');
+    expect(await compile('x'.repeat(9))).toBe('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
+    // Multi-byte: 4 x 2 bytes is the cap, 5 x 2 bytes is over.
+    expect(await compile('é'.repeat(4))).toBe('NO_REFUSAL');
+    expect(await compile('é'.repeat(5))).toBe('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
+    // Repeated: two 4-byte includes fill the cap, three overflow it.
+    expect(await compile('xxxx', '{{> parts:a}}{{> parts:a}}')).toBe('NO_REFUSAL');
+    expect(await compile('xxxx', '{{> parts:a}}{{> parts:a}}{{> parts:a}}')).toBe('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
+    // Surrounding literal text counts, once.
+    expect(await compile('xxxx', 'ab{{> parts:a}}cd')).toBe('NO_REFUSAL');
+    expect(await compile('xxxx', 'abc{{> parts:a}}cd')).toBe('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
+  });
+
+  it('the real 1 MiB boundary: a root that is only an include of a 1 MiB part passes; one byte more refuses', async () => {
+    const cap = DEFAULT_ASSEMBLE_LIMITS.maxBytes;
+    await put(agent.child!.mem, 'parts:a', 'x'.repeat(cap));
+    const ok = await assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a}}'));
+    expect(Buffer.byteLength(ok.text, 'utf8')).toBe(cap);
+    await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: { in: ['parts:a', 'boot:source'] } } });
+    await put(agent.child!.mem, 'parts:a', 'x'.repeat(cap + 1));
+    expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a}}')))).toBe('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
   });
 });
 
@@ -209,5 +240,80 @@ describe('#2046 S9-2 — grants (cor:agt:040:08)', () => {
     await db.agentOrgGrant.create({ data: { orgId, agentId: agent.pub!.id, activatedAt: new Date() } });
     const plan = await assembleBootPrompt(db, await input(agent.child!.mem, `{{> ${await urnOf('pub', 'parts:p')}}}`));
     expect(plan.text).toBe('public part');
+  });
+});
+
+describe('#2046 S9-2 — the grant is qualified before the dependency is inspected (Gene, #2236)', () => {
+  const urnOf = async (key: string, loc: string) => `hrn:node:${(await db.memory.findUniqueOrThrow({ where: { id: agent[key]!.mem } })).urn}:${loc}`;
+  const compile = async (text: string) => refusal(assembleBootPrompt(db, await input(agent.child!.mem, text)));
+
+  it('an unlicensed non-public Agent answers INCLUDE_UNAVAILABLE whatever its content would have said', async () => {
+    await makeAgent('priv', { org: otherOrgId });
+    await put(agent.priv!.mem, 'parts:gone', 'x', { deletedAt: new Date() });
+    await put(agent.priv!.mem, 'parts:bad', 'broken {{> }');
+    await put(agent.priv!.mem, 'parts:ok', 'fine');
+    for (const loc of ['parts:gone', 'parts:bad', 'parts:ok', 'parts:absent']) {
+      expect(await compile(`{{> ${await urnOf('priv', loc)}}}`)).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
+      await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: 'boot:source' } });
+    }
+    expect(await compile(`{{> ${await urnOf('priv', 'parts:ok')} rev=9}}`)).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
+  });
+
+  it('an unsubscribed PUBLIC Agent answers GRANT_REQUIRED before retirement or revision refusals', async () => {
+    await makeAgent('pub', { org: otherOrgId, visibility: 'PUBLIC' });
+    await put(agent.pub!.mem, 'parts:gone', 'x', { deletedAt: new Date() });
+    expect(await compile(`{{> ${await urnOf('pub', 'parts:gone')}}}`)).toBe('BOOT_PROMPT_GRANT_REQUIRED');
+  });
+
+  it('positive controls: with the grant the same content refusals appear, and a same-org Agent is planned for provisioning', async () => {
+    await makeAgent('pub', { org: otherOrgId, visibility: 'PUBLIC' });
+    await put(agent.pub!.mem, 'parts:gone', 'x', { deletedAt: new Date() });
+    await db.agentOrgGrant.create({ data: { orgId, agentId: agent.pub!.id, activatedAt: new Date() } });
+    expect(await compile(`{{> ${await urnOf('pub', 'parts:gone')}}}`)).toBe('BOOT_PROMPT_INCLUDE_RETIRED');
+    await makeAgent('side');
+    await put(agent.side!.mem, 'parts:s', 'side part');
+    await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: 'boot:source' } });
+    const plan = await assembleBootPrompt(db, await input(agent.child!.mem, `{{> ${await urnOf('side', 'parts:s')}}}`));
+    expect(plan.grants.find((g) => g.agentId === agent.side!.id)).toEqual({ agentId: agent.side!.id, provision: true });
+  });
+
+  it('a bare loc found in an unlicensed BASE of the foreign chain is concealed, not reported retired', async () => {
+    await makeAgent('fbase', { org: otherOrgId });
+    await makeAgent('fchild', { org: otherOrgId, base: 'fbase' });
+    await db.agentOrgGrant.create({ data: { orgId, agentId: agent.fchild!.id, activatedAt: new Date() } });
+    await put(agent.fchild!.mem, 'parts:inc', '{{> parts:z}}');
+    await put(agent.fbase!.mem, 'parts:z', 'x', { deletedAt: new Date() });
+    expect(await compile(`{{> ${await urnOf('fchild', 'parts:inc')}}}`)).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
+  });
+});
+
+describe('#2046 S9-2 — R8: a bare loc in a foreign Agent\'s part resolves in THAT Agent\'s chain (Vera FIT, #2236)', () => {
+  const urnOf = async (key: string, loc: string) => `hrn:node:${(await db.memory.findUniqueOrThrow({ where: { id: agent[key]!.mem } })).urn}:${loc}`;
+
+  it('pin 1: the foreign chain wins over a same-loc node in the target', async () => {
+    await makeAgent('side');
+    await put(agent.side!.mem, 'parts:inc', '[{{> parts:z}}]');
+    await put(agent.side!.mem, 'parts:z', 'side');
+    await put(agent.child!.mem, 'parts:z', 'target');
+    const plan = await assembleBootPrompt(db, await input(agent.child!.mem, `{{> ${await urnOf('side', 'parts:inc')}}}`));
+    expect(plan.text).toBe('[side]');
+  });
+
+  it('pin 2: the target\'s install memory cannot override the foreign chain', async () => {
+    await makeAgent('side');
+    await put(agent.side!.mem, 'parts:inc', '[{{> parts:z}}]');
+    await put(agent.side!.mem, 'parts:z', 'side');
+    await put(installId, 'parts:z', 'install');
+    const plan = await assembleBootPrompt(db, await input(agent.child!.mem, `{{> ${await urnOf('side', 'parts:inc')}}}`, true));
+    expect(plan.text).toBe('[side]');
+    expect(plan.occurrences.every((o) => o.kind !== 'replacement')).toBe(true);
+  });
+
+  it('control: the install memory still replaces the node in the Agent being compiled', async () => {
+    await put(agent.child!.mem, 'parts:z', 'child');
+    await put(installId, 'parts:z', 'install');
+    const plan = await assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:z}}', true));
+    expect(plan.text).toBe('install');
+    expect(plan.occurrences.some((o) => o.kind === 'replacement')).toBe(true);
   });
 });

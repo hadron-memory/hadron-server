@@ -126,7 +126,8 @@ export async function assembleBootPrompt(
   const memo = new IncludeReadMemo();
   const kinds = new Map<string, Promise<MemoryKind>>();
   const chains = new Map<string, Promise<string[]>>();
-  const agentsUsed = new Set<string>();
+  /** Each Agent's grant decision, taken the first time its memory is admitted (see admitSource). */
+  const grantPlans = new Map<string, Promise<AssembledGrant>>();
   const occurrences: CompiledOccurrence[] = [];
 
   const kindOf = (memoryId: string): Promise<MemoryKind> => {
@@ -170,7 +171,15 @@ export async function assembleBootPrompt(
     if (kind.kind === 'encrypted') throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE', position);
     if (kind.kind === 'install' && memoryId === input.installMemoryId) return;
     if (kind.kind === 'agent') {
-      agentsUsed.add(kind.agentId);
+      // Qualify the dependency BEFORE anything of it is inspected: node status, revisions and the
+      // text all come after this, so a refusal can never describe content the recipient has no
+      // entitlement to read (cor:agt:040:08, read under the grant alone).
+      let plan = grantPlans.get(kind.agentId);
+      if (!plan) {
+        plan = planGrant(db, kind.agentId, input.recipient, position);
+        grantPlans.set(kind.agentId, plan);
+      }
+      await plan;
       return;
     }
     throw new BootCompileRefusal(
@@ -195,31 +204,40 @@ export async function assembleBootPrompt(
 
   type Found = { node: { id: string; memoryId: string; content: string | null; revSeq: number; role: string | null }; replacesNodeId?: string };
 
-  /** Nearest live node at `loc` along the chain; RETIRED when only tombstones exist there. */
+  /**
+   * Nearest live node at `loc` along the chain; RETIRED when only tombstones exist there.
+   * Each memory is ADMITTED (its Agent's grant qualified) before its rows are read, so a
+   * tombstone or a node in a memory the recipient may not read can never shape the answer.
+   */
   async function findByLoc(includerMemoryId: string, loc: string, position: { line: number; column: number }): Promise<Found> {
     const { memories, installFirst } = await lookupChain(includerMemoryId);
-    const rows = await db.node.findMany({
-      where: { memoryId: { in: memories }, loc },
-      select: { id: true, memoryId: true, content: true, revSeq: true, role: true, deletedAt: true },
-    });
-    const live = (memoryId: string) => rows.find((r) => r.memoryId === memoryId && !r.deletedAt);
     let found: Found | null = null;
+    let sawTombstone = false;
     for (const [i, memoryId] of memories.entries()) {
-      const row = live(memoryId);
+      await admitSource(memoryId, position);
+      const rows = await db.node.findMany({
+        where: { memoryId, loc },
+        select: { id: true, memoryId: true, content: true, revSeq: true, role: true, deletedAt: true },
+      });
+      if (rows.some((r) => r.deletedAt)) sawTombstone = true;
+      const row = rows.find((r) => !r.deletedAt);
       if (!row) continue;
       // A base's boot prompt is never inherited (R8); only the child's own and the install's count.
       const isBase = installFirst ? i >= 2 : i >= 1;
       if (isBase && isBootPromptRole(row.role)) continue;
-      found = { node: row };
-      if (installFirst && i === 0) {
-        const shadowed = memories.slice(1).map(live).find((r) => r && !(isBootPromptRole(r.role)));
-        if (shadowed) found.replacesNodeId = shadowed.id;
+      if (!found) {
+        found = { node: row };
+        // Only an install node can replace; anything else ends the lookup at its first hit.
+        if (!(installFirst && i === 0)) break;
+      } else if (!isBootPromptRole(row.role)) {
+        // The Agent-chain node the install node shadows: the nearest one that is not a boot prompt.
+        found.replacesNodeId = row.id;
+        break;
       }
-      break;
     }
     if (!found) {
       // RETIRED only when a soft-deleted node holds the address; a skipped base boot prompt is just absent.
-      throw new BootCompileRefusal(rows.some((r) => r.deletedAt) ? 'BOOT_PROMPT_INCLUDE_RETIRED' : 'BOOT_PROMPT_INCLUDE_UNAVAILABLE', position);
+      throw new BootCompileRefusal(sawTombstone ? 'BOOT_PROMPT_INCLUDE_RETIRED' : 'BOOT_PROMPT_INCLUDE_UNAVAILABLE', position);
     }
     return found;
   }
@@ -240,16 +258,26 @@ export async function assembleBootPrompt(
     return { node: row };
   }
 
-  let bytes = 0;
-  const budget = (text: string) => {
-    bytes += Buffer.byteLength(text, 'utf8');
-    if (bytes > limits.maxBytes || occurrences.length > limits.maxOccurrences) {
-      throw new BootCompileRefusal('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
-    }
+  /** Occurrences are bounded as they are recorded; the byte bound is on EMITTED output (see emit). */
+  const checkOccurrences = () => {
+    if (occurrences.length > limits.maxOccurrences) throw new BootCompileRefusal('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
+  };
+  /**
+   * The 1 MiB bound is on the compiled OUTPUT (Xavier 6258672877), never on source read: tags
+   * vanish from the result, so charging them would refuse a valid result at the boundary.
+   * Every output byte leaves through here exactly once, as a literal chunk cut at a tag edge
+   * (a character boundary), so the sum of chunk byte lengths IS the final UTF-8 length, and
+   * the compile stops at the first chunk that crosses the bound instead of building past it.
+   */
+  let emitted = 0;
+  const emit = (chunk: string): string => {
+    emitted += Buffer.byteLength(chunk, 'utf8');
+    if (emitted > limits.maxBytes) throw new BootCompileRefusal('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
+    return chunk;
   };
 
   async function expand(text: string, memoryId: string, parent: number, depth: number, trail: ReadonlySet<string>): Promise<string> {
-    if (!text.includes('{{>')) return text;
+    if (!text.includes('{{>')) return emit(text);
     let tags: Array<IncludeTag & { index: number }>;
     try {
       tags = locateIncludeTags(text);
@@ -293,12 +321,12 @@ export async function assembleBootPrompt(
         position,
         selection: { rev: tag.settings.rev ?? null, approved: tag.settings.approved === true, signed: tag.settings.signed === true },
       });
-      budget(selected.text);
-      out += text.slice(cursor, tag.index);
+      checkOccurrences();
+      out += emit(text.slice(cursor, tag.index));
       out += await expand(selected.text, found.node.memoryId, order, level, new Set([...trail, found.node.id]));
       cursor = tag.index + tag.raw.length;
     }
-    return out + text.slice(cursor);
+    return out + emit(text.slice(cursor));
   }
 
   // The root source: its latest revision, as written (variables stay literal).
@@ -313,44 +341,46 @@ export async function assembleBootPrompt(
     order: 0, depth: 0, parent: null, kind: 'source', nodeId: root.id, revNo: root.revSeq,
     hash: sha256Hex(rootText), selection: { ...LATEST },
   });
-  budget(rootText);
   const text = await expand(rootText, root.memoryId, 0, 0, new Set([root.id]));
-  if (Buffer.byteLength(text, 'utf8') > limits.maxBytes) throw new BootCompileRefusal('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
 
-  const grants = await planGrants(db, [...agentsUsed].sort(), input.recipient);
+  const grants = await Promise.all([...grantPlans.keys()].sort().map((id) => grantPlans.get(id)!));
   return { text, contentHash: sha256Hex(text), occurrences, grants };
 }
 
 /**
- * The grant each used Agent needs (cor:agt:040:08), decided like an install's
+ * The grant one used Agent needs (cor:agt:040:08), decided like an install's
  * (planOrgAgentInstallGrant) without its install prerequisite: an active grant
  * passes; a missing same-org grant is provisioned; a revoked or inactive one is
  * never revived; a foreign PUBLIC Agent needs a subscription the compile never
  * makes; a foreign non-public Agent is concealed. A user recipient needs the
- * owner's own active subscription.
+ * owner's own active subscription. Read-only: the provisioning is the plan's,
+ * made by the deciding transaction (S9-4).
  */
-async function planGrants(db: Db, agentIds: string[], recipient: CompileRecipient): Promise<AssembledGrant[]> {
-  const grants: AssembledGrant[] = [];
-  for (const agentId of agentIds) {
-    const agent = await db.agent.findUnique({
-      where: { id: agentId },
-      select: { organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
-    });
-    if (!agent || agent.deletedAt) throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
-    if (recipient.kind === 'user') {
-      if (agent.ownerUserId === recipient.userId) { grants.push({ agentId, provision: false }); continue; }
-      const sub = await db.agentSubscription.findUnique({ where: { userId_agentId: { userId: recipient.userId, agentId } } });
-      if (sub && isLifecycleActive(sub)) { grants.push({ agentId, provision: false }); continue; }
-      throw new BootCompileRefusal(agent.visibility === 'PUBLIC' ? 'BOOT_PROMPT_GRANT_REQUIRED' : 'BOOT_PROMPT_INCLUDE_UNAVAILABLE');
-    }
-    const grant = await db.agentOrgGrant.findUnique({ where: { orgId_agentId: { orgId: recipient.orgId, agentId } } });
-    if (grant && isLifecycleActive(grant)) { grants.push({ agentId, provision: false }); continue; }
-    if (agent.organizationId === recipient.orgId) {
-      if (grant) throw new BootCompileRefusal('BOOT_PROMPT_GRANT_REQUIRED');
-      grants.push({ agentId, provision: true });
-      continue;
-    }
-    throw new BootCompileRefusal(agent.visibility === 'PUBLIC' ? 'BOOT_PROMPT_GRANT_REQUIRED' : 'BOOT_PROMPT_INCLUDE_UNAVAILABLE');
+async function planGrant(
+  db: Db,
+  agentId: string,
+  recipient: CompileRecipient,
+  position: { line: number; column: number } | null,
+): Promise<AssembledGrant> {
+  const refuse = (code: BootCompileRefusalCode): never => { throw new BootCompileRefusal(code, position); };
+  const agent = await db.agent.findUnique({
+    where: { id: agentId },
+    select: { organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
+  });
+  if (!agent || agent.deletedAt) return refuse('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
+  const foreign = (): never =>
+    refuse(agent.visibility === 'PUBLIC' ? 'BOOT_PROMPT_GRANT_REQUIRED' : 'BOOT_PROMPT_INCLUDE_UNAVAILABLE');
+  if (recipient.kind === 'user') {
+    if (agent.ownerUserId === recipient.userId) return { agentId, provision: false };
+    const sub = await db.agentSubscription.findUnique({ where: { userId_agentId: { userId: recipient.userId, agentId } } });
+    if (sub && isLifecycleActive(sub)) return { agentId, provision: false };
+    return foreign();
   }
-  return grants;
+  const grant = await db.agentOrgGrant.findUnique({ where: { orgId_agentId: { orgId: recipient.orgId, agentId } } });
+  if (grant && isLifecycleActive(grant)) return { agentId, provision: false };
+  if (agent.organizationId === recipient.orgId) {
+    if (grant) return refuse('BOOT_PROMPT_GRANT_REQUIRED');
+    return { agentId, provision: true };
+  }
+  return foreign();
 }
