@@ -10435,7 +10435,7 @@ export const typeDefs = `#graphql
     """
     createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean): Agent!
     """
-    Clone an Agent into an organization you administer (#2245, cor:dmo:050:18): a new PERSONAL-draft Agent
+    Clone an Agent into an organization you administer: a new PERSONAL-draft Agent
     with its own copy of the source's system memory, its links and imports, and a recorded origin. Needs a
     PUBLIC source, or one you manage in its own organization. Refusals are typed (AGENT_NOT_PUBLIC,
     CLONE_*); a source that keeps changing answers CONFLICT with reason AGENT_CLONE_SOURCE_CHANGED
