@@ -210,6 +210,18 @@ describe('#2252 tierOf (R189: one server-owned mapping)', () => {
     ['claude-haiku-5-5', 'low'], ['claude-3-5-haiku-latest', 'low'],
   ])('%s is %s', (model, tier) => expect(tierOf(model)).toBe(tier));
 
+  it.each([
+    ['claude-opus-5-5[1m]', 'high'], ['us.anthropic.claude-sonnet-5-5-v1:0', 'mid'], ['anthropic.claude-3-haiku-20240307-v1:0', 'low'],
+    ['claude-3-opus-20240229', 'high'], ['claude-3-7-sonnet-latest', 'mid'],
+  ])('deliberate id shapes: %s is %s', (model, tier) => expect(tierOf(model)).toBe(tier));
+
+  // A tier is a deliberate model-id entry, never a substring: an embedded word, another vendor's name, or a prefix
+  // that merely contains a tier word is null (gate 6345905367: unknown mapping returns null).
+  it.each([
+    'octopus-v1', 'claude-octopus-1', 'my-sonnet-finetune', 'claude-fable-5-1', 'claude-sonnetx-5', 'claude-opus', 'claude-opus-',
+    'opus', 'sonnet', 'haiku', 'notclaude-opus-5-5', 'glm-sonnet-1', 'gpt-opus-5', 'claude-haikus-1',
+  ])('embedded or partial %j is null', (model) => expect(tierOf(model)).toBeNull());
+
   it.each(['gpt-5.1-codex', 'glm-4.6', 'gemini-2.5-pro', 'claude-fable-5-1', 'opus-like-glm-5', '', '  ', null, undefined])(
     'unmapped or unknown %j is null: no guessed tier for another family or an unlisted model', (model) => {
       expect(tierOf(model as string | null | undefined)).toBeNull();
