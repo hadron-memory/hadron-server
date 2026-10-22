@@ -329,6 +329,10 @@ describe('the server-hosted pages', () => {
     const script = await js.text();
     // The served script must at least parse: no test executes it, and a stray quote would break every page.
     expect(() => new Function(script)).not.toThrow();
+    // Dorian P3s (#2210 LOCAL 6323189143): a non-OK email response isn't reported as sent, and a failed stop still
+    // settles with a visible result.
+    expect(script).toMatch(/sign-in\/email[\s\S]{0,200}if \(!r\.ok\) throw/);
+    expect(script).toMatch(/register\/stop'\)\.then\(function \(r\) \{[\s\S]{0,400}\}, function \(e\) \{/);
     expect(script).toContain('navigator.credentials.create');
     // Uma P2-4: the end-window preview offers the "I didn't add this" path.
     expect(script).toContain("not-mine-window");

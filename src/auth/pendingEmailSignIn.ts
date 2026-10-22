@@ -13,6 +13,8 @@ import { generateId } from '../lib/id.js';
 type Db = Pick<PrismaClient, '$queryRaw' | '$executeRaw'> | Prisma.TransactionClient;
 
 export const PENDING_EMAIL_SIGN_IN_TTL_SECONDS = 10 * 60;
+/** A flow that must first add a passkey (a second emailed link, then the registration) needs more room. */
+export const PENDING_ENROLLMENT_TTL_SECONDS = 30 * 60;
 /** Rows are disposable after this; swept lazily from the verify route. */
 export const PENDING_EMAIL_SIGN_IN_RETENTION_HOURS = 24;
 
@@ -38,11 +40,13 @@ export interface PendingRow {
 /** Create a pending flow; returns the RAW cookie secret, the only copy that exists. */
 export async function createPendingEmailSignIn(
   db: Db,
-  input: { userId: string; continuation: PendingContinuation },
+  input: { userId: string; continuation: PendingContinuation; ttlSeconds?: number },
 ): Promise<{ id: string; cookieSecret: string }> {
   const id = generateId();
   const cookieSecret = randomBytes(32).toString('base64url');
   const c = input.continuation;
+  const ttl = input.ttlSeconds ?? PENDING_EMAIL_SIGN_IN_TTL_SECONDS;
+  if (!Number.isInteger(ttl) || ttl < 1 || ttl > PENDING_ENROLLMENT_TTL_SECONDS) throw new Error('ttlSeconds must be a positive integer within the enrollment limit');
   if (c.kind === 'PORTAL' && c.clientStateHash !== null && !HEX64.test(c.clientStateHash)) throw new Error('client state hash must be 64 lowercase hex');
   await db.$executeRaw`INSERT INTO pending_email_sign_ins
       (id, user_id, continuation, client_state_hash, redirect, is_new, return_to, browser_hash, expires_at)
@@ -50,7 +54,7 @@ export async function createPendingEmailSignIn(
       ${c.kind === 'PORTAL' ? c.clientStateHash : null}, ${c.kind === 'PORTAL' ? c.redirect : null},
       ${c.kind === 'PORTAL' ? c.isNew : null}, ${c.kind === 'OAUTH' ? c.returnTo : null},
       ${sha256Hex(cookieSecret)},
-      (clock_timestamp() AT TIME ZONE 'UTC') + make_interval(secs => ${PENDING_EMAIL_SIGN_IN_TTL_SECONDS}))`;
+      (clock_timestamp() AT TIME ZONE 'UTC') + make_interval(secs => ${ttl}))`;
   return { id, cookieSecret };
 }
 

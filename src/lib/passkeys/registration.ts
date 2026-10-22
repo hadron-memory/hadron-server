@@ -209,7 +209,7 @@ class RegistrationRefused extends Error {}
 const refusedAsNull = (err: unknown) => { if (err instanceof RegistrationRefused) return null; throw err; };
 
 /** The live user's handle, or null. */
-async function liveUser(tx: Prisma.TransactionClient, userId: string): Promise<{ handle: string } | null> {
+export async function liveUser(tx: Prisma.TransactionClient, userId: string): Promise<{ handle: string } | null> {
   return tx.user.findFirst({ where: { id: userId, deletedAt: null }, select: { handle: true } });
 }
 
@@ -220,9 +220,11 @@ async function unrevokedCredentialIds(tx: Prisma.TransactionClient, userId: stri
 }
 
 /** Lock an open, unbound REGISTER ceremony of this browser, or report it absent. */
-async function lockOpenCeremony(tx: Prisma.TransactionClient, ceremonyId: string, ceremonyNonceHash: string): Promise<boolean> {
+export async function lockOpenCeremony(
+  tx: Prisma.TransactionClient, ceremonyId: string, ceremonyNonceHash: string, purpose: 'REGISTER' | 'REVOKE' = 'REGISTER',
+): Promise<boolean> {
   const rows = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM passkey_ceremonies
-    WHERE id = ${ceremonyId} AND purpose = 'REGISTER' AND browser_nonce_hash = ${ceremonyNonceHash}
+    WHERE id = ${ceremonyId} AND purpose = ${purpose} AND browser_nonce_hash = ${ceremonyNonceHash}
       AND consumed_at IS NULL AND user_id IS NULL AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')
     FOR UPDATE`;
   return rows.length === 1;
@@ -235,11 +237,15 @@ async function lockOpenCeremony(tx: Prisma.TransactionClient, ceremonyId: string
 const outOfWindow = Prisma.sql`(window_ends_at IS NULL OR window_outcome IN ('ran-out', 'ended-early')
   OR (window_outcome IS NULL AND window_ends_at <= (clock_timestamp() AT TIME ZONE 'UTC')))`;
 
-/** Lock the voucher and revalidate it against what the assertion verified (as decideCeremonyAssertion does). */
-async function lockVoucher(tx: Prisma.TransactionClient, v: VerifiedAssertion): Promise<boolean> {
+/**
+ * Lock the voucher and revalidate it against what the assertion verified (as decideCeremonyAssertion does).
+ * A registration voucher must be out of its window (cor:aut:040:02 S4); a revocation prover need not (040:08).
+ */
+export async function lockVoucher(tx: Prisma.TransactionClient, v: VerifiedAssertion, opts: { requireOutOfWindow?: boolean } = {}): Promise<boolean> {
+  const windowRule = opts.requireOutOfWindow === false ? Prisma.sql`TRUE` : outOfWindow;
   const [row] = await tx.$queryRaw<Array<{ id: string; owner_id: string; public_key: Buffer; counter: bigint }>>`
     SELECT id, owner_id, public_key, counter FROM passkey_credentials
-     WHERE credential_id = ${v.credentialId} AND revoked_at IS NULL AND ${outOfWindow} FOR UPDATE`;
+     WHERE credential_id = ${v.credentialId} AND revoked_at IS NULL AND ${windowRule} FOR UPDATE`;
   if (!row || row.id !== v.passkeyId || row.owner_id !== v.ownerId) return false;
   if (sha256Hex(row.public_key) !== v.publicKeyFingerprint || Number(row.counter) !== v.priorCounter) return false;
   // WebAuthn: a zero counter on both sides means the authenticator keeps none; otherwise it must advance.
@@ -247,7 +253,7 @@ async function lockVoucher(tx: Prisma.TransactionClient, v: VerifiedAssertion): 
 }
 
 /** The clientDataJSON `type`, checked explicitly so a creation and an assertion never stand in for each other. */
-function clientDataType(clientDataJson: Uint8Array): string | null {
+export function clientDataType(clientDataJson: Uint8Array): string | null {
   try {
     const t = (JSON.parse(Buffer.from(clientDataJson).toString('utf8')) as { type?: unknown }).type;
     return typeof t === 'string' ? t : null;

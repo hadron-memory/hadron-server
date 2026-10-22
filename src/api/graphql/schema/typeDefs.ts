@@ -2208,6 +2208,10 @@ export const typeDefs = `#graphql
     skippedDecisionCount: Int!
     "#1641 — the first 50 of those, by loc."
     skippedDecisions: [String!]!
+    "#2043 — boot prompts in this Agent system or App install memory that this caller may not approve: only the Agent's or App's manager approves them, as themselves, never through a worker session."
+    skippedBootPromptCount: Int!
+    "#2043 — the first 50 of those, by loc."
+    skippedBootPrompts: [String!]!
     "#1607 — unminted nodes of this memory with open discussion: a warning, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Ordered by loc."
     unresolvedFeedback: [UnresolvedFeedback!]!
   }
@@ -3395,6 +3399,40 @@ export const typeDefs = `#graphql
   type AppKeyCreated {
     key: AppKey!
     rawKey: String!
+  }
+
+  """#1631: a passkey record, as its owner sees it. Never a private key."""
+  type PasskeyCredential {
+    id: ID!
+    """The owner's name for it; the fixed text "Erased passkey" once the owner's account is deleted."""
+    label: String!
+    transports: [String!]!
+    backupEligible: Boolean!
+    backedUp: Boolean!
+    registeredAt: DateTime!
+    lastUsedAt: DateTime
+    revokedAt: DateTime
+    """A first passkey's cooling-off window; null for a later passkey."""
+    window: PasskeyWindow
+    """
+    When its cancel link was used; null if never cancelled. The cancel IP address and user agent,
+    and the credential id, are shown only on the interactive revocation page after the owner proves who they are,
+    never over a bearer credential (#1631 PR3 §10).
+    """
+    cancel: PasskeyCancelRecord
+  }
+
+  type PasskeyWindow {
+    endsAt: DateTime!
+    endedAt: DateTime
+    """ran-out | ended-early | cancelled, or null while open (a window that ran out reads by its end time)."""
+    outcome: String
+    """The fresh sign-in method it was registered with."""
+    registrationMethod: String
+  }
+
+  type PasskeyCancelRecord {
+    at: DateTime!
   }
 
   """
@@ -8197,6 +8235,13 @@ export const typeDefs = `#graphql
     myUserApiKeys: [UserApiKey!]!
 
     """
+    #1631 PR3: the caller's own passkey records, revoked ones included, newest first. Only the
+    owner sees them: an App key or an impersonation session is refused. Registering and revoking are interactive
+    ceremonies on the server-hosted pages, never GraphQL. Present only while passkey registration is enabled.
+    """
+    myPasskeys: [PasskeyCredential!]!
+
+    """
     Agent AI config (org ADMIN) — returns the decrypted API key so the
     portal backend can make LLM calls on behalf of the user.
 
@@ -10349,15 +10394,20 @@ export const typeDefs = `#graphql
 
     Include tags (#2167; hrn:node:hadronmemory.com:specs:cor:dmo:150:04 and
     hrn:node:hadronmemory.com:specs:cor:dmo:150:06): every tag in every copied node
-    counts as added and is resolved where it lands in the new memory. Content
-    is copied verbatim, so a relative tag to a node in the subtree resolves
-    only when the new slug equals the parent's loc. Otherwise, or when the tag
-    names a node left behind, it refuses with INCLUDE_TARGET_UNAVAILABLE. A tag
-    that closes a cycle refuses with INCLUDE_CYCLE. Either refusal names only
-    the authored tag, and nothing is created or moved.
+    counts as added and is resolved where it lands in the new memory. First, a
+    tag naming a copied node is rewritten to that node's rebased loc (a URN tag
+    to the source memory becomes the new memory's URN); only the target
+    changes, and a rewritten node loses its contentHash and authorship. A tag
+    naming anything else stays as written, so a relative tag naming a node
+    left behind refuses with INCLUDE_TARGET_UNAVAILABLE (a URN tag to a memory
+    the copier can read passes unchanged). A relative tag outside the subtree
+    whose loc equals a rebased loc also refuses (R188), and is never rewritten. A tag that closes a cycle refuses
+    with INCLUDE_CYCLE. Either refusal names the tag as it stands in the copy,
+    and nothing is created or moved.
 
-    v1 limitation: node content is copied verbatim — because both the slug and
-    node locs change, URN references among the moved nodes WILL break; and
+    v1 limitation: apart from include tags, node content is copied verbatim —
+    because both the slug and node locs change, other URN references among the
+    moved nodes WILL break; and
     unresolved PendingEdges within the subtree are dropped.
     """
     extractParentNodeToMemory(parentRef: ID!, targetUrn: String!, move: Boolean = false): Memory!
