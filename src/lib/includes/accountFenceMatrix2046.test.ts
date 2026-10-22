@@ -205,6 +205,30 @@ classes.push({
   },
   effect: async () => (await db.$queryRaw<Array<{ h: string | null }>>`SELECT revision_content_hash AS h FROM nodes WHERE id = ${driftNode}`)[0].h != null,
 });
+classes.push(
+  {
+    // A new App with an install of an org agent: the licence + App + AppAgent commit in the fence.
+    name: 'createApp',
+    run: () => M.createApp(null, { orgRef: org.id, agentRef: agentB.id, name: 'Fenced App' }, ctx(admin.id)),
+    effect: async () => (await db.app.count({ where: { organizationId: org.id, name: 'Fenced App' } })) === 1,
+  },
+  {
+    // updateAgent publish variants: each field the compile reads is its own class of change.
+    name: 'updateAgent systemPrompt',
+    run: () => M.updateAgent({}, { ref: agentA.id, systemPrompt: 'new prompt' }, ctx(admin.id)),
+    effect: async () => (await db.agent.findUniqueOrThrow({ where: { id: agentA.id } })).systemPrompt === 'new prompt',
+  },
+  {
+    name: 'updateAgent visibility',
+    run: () => M.updateAgent({}, { ref: agentA.id, visibility: 'PUBLIC' }, ctx(admin.id)),
+    effect: async () => (await db.agent.findUniqueOrThrow({ where: { id: agentA.id } })).visibility === 'PUBLIC',
+  },
+  {
+    name: 'updateAgent urn rename',
+    run: () => M.updateAgent({}, { ref: agentA.id, urn: 'renamed' }, ctx(admin.id)),
+    effect: async () => (await db.agent.findUniqueOrThrow({ where: { id: agentA.id } })).urn === 'mx.org:renamed',
+  },
+);
 let endpointNode: string;
 classes.push({
   // The same slow path through the real endpoint: Query.node on a drifted node (no stored revision fingerprint) opens
