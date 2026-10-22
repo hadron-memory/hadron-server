@@ -1,6 +1,6 @@
 /**
  * vitest setupFile — points this worker's `GRAPHS_PATH` at the run's own
- * graph-fixture root (#1951) before any test file imports `config.ts`.
+ * graph-fixture root (#1951/#1137; inherited scope plus bare main PID) before any test file imports `config.ts`.
  *
  * Set here rather than in `vitest.config.ts`'s `env`, which is evaluated once
  * with no run id, and unconditionally so a `GRAPHS_PATH` from a developer's

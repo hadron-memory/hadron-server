@@ -17,6 +17,7 @@ import {
   baseDbName,
   maintenanceUrl,
   testRunId,
+  testRunScope,
   runTemplateDbName,
   parseWorkerDbName,
   isRunAlive,
@@ -27,6 +28,7 @@ import {
   runTemplateUrl,
   PARALLEL_DBS,
   WORKER_CONNECTION_LIMIT,
+  testMaxWorkers,
 } from './dbWorkers.js';
 
 const ORIGINAL = process.env.TEST_DATABASE_URL;
@@ -47,7 +49,7 @@ describe('workerDbUrl', () => {
     process.env.TEST_DATABASE_URL = 'postgresql://holger@localhost:5432/hadron_test';
     process.env.HADRON_TEST_RUN_ID = '4242';
     const u = new URL(workerDbUrl(3));
-    expect(u.pathname).toBe('/hadron_test_r4242_3');
+    expect(u.pathname).toBe(`/hadron_test_r${testRunScope()}_p4242_3`);
     // Asserted against the imported constant, NOT a hard-coded 5 (PR #1125
     // review, Codex P2). Hard-coding it would make `HADRON_TEST_CONNECTION_LIMIT=9
     // pnpm test` fail this test — so the override this PR advertises could not
@@ -93,7 +95,7 @@ describe('workerDbUrl', () => {
   it('derives the clone name from the base DB', () => {
     process.env.TEST_DATABASE_URL = 'postgresql://holger@localhost:5432/hadron_test';
     expect(baseDbName()).toBe('hadron_test');
-    expect(workerDbName(7, 'hadron_test', '99')).toBe('hadron_test_r99_7');
+    expect(workerDbName(7, 'hadron_test', '99')).toBe(`hadron_test_r${testRunScope()}_p99_7`);
   });
 });
 
@@ -122,7 +124,7 @@ describe('run scoping', () => {
     // another checkout could rewrite the constraints between our DDL and our
     // first worker clone — and the bad outcome is not a crash, it is passing
     // against a schema this branch never wrote (#1136 review, Codex P1).
-    expect(runTemplateDbName('100', 'hadron_test')).toBe('hadron_test_r100_tpl');
+    expect(runTemplateDbName('100', 'hadron_test')).toBe(`hadron_test_r${testRunScope()}_p100_tpl`);
     expect(runTemplateDbName('100', 'hadron_test')).not.toBe(
       runTemplateDbName('200', 'hadron_test'),
     );
@@ -142,7 +144,7 @@ describe('run scoping', () => {
     // after truncation; both are silent, so both are guarded.
     expect(() => workerDbName('tpl', 'hadron_test', '100')).toThrow(/must be numeric/);
     expect(() => workerDbName('1a', 'hadron_test', '100')).toThrow(/must be numeric/);
-    expect(workerDbName('2', 'hadron_test', '100')).toBe('hadron_test_r100_2');
+    expect(workerDbName('2', 'hadron_test', '100')).toBe(`hadron_test_r${testRunScope()}_p100_2`);
   });
 
   it('refuses a name Postgres would silently TRUNCATE', () => {
@@ -168,7 +170,7 @@ describe('run scoping', () => {
   it('accepts a name that exactly fits', () => {
     // 63 bytes is legal; the guard must not be off by one and reject a working
     // configuration.
-    const base = 'b'.repeat(63 - '_r7_1'.length);
+    const base = 'b'.repeat(63 - `_r${testRunScope()}_p7_1`.length);
     expect(workerDbName(1, base, '7')).toHaveLength(63);
   });
 
@@ -191,6 +193,7 @@ describe('parseWorkerDbName', () => {
       datname: 'hadron_test_r512_3',
       runId: '512',
       poolId: '3',
+      scope: null, runToken: null,
     });
   });
 
@@ -202,6 +205,7 @@ describe('parseWorkerDbName', () => {
       datname: 'hadron_test_r512_tpl',
       runId: '512',
       poolId: 'tpl',
+      scope: null, runToken: null,
     });
   });
 
@@ -212,6 +216,7 @@ describe('parseWorkerDbName', () => {
       datname: 'hadron_test_3',
       runId: null,
       poolId: '3',
+      scope: null, runToken: null,
     });
   });
 
@@ -291,7 +296,7 @@ describe('runTemplateUrl', () => {
     process.env.TEST_DATABASE_URL =
       'postgresql://holger@localhost:5432/hadron_test?connection_limit=17';
     const u = new URL(runTemplateUrl('77'));
-    expect(u.pathname).toBe('/hadron_test_r77_tpl');
+    expect(u.pathname).toBe(`/hadron_test_r${testRunScope()}_p77_tpl`);
     expect(u.searchParams.has('connection_limit')).toBe(false);
   });
 });
@@ -451,3 +456,17 @@ function withDbNameForTest(url: string, dbName: string): string {
   u.pathname = `/${dbName}`;
   return u.toString();
 }
+
+describe('testMaxWorkers (HADRON_TEST_MAX_WORKERS)', () => {
+  it('a positive integer caps the forks; unset, empty or invalid keeps vitest\'s default', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(testMaxWorkers('4')).toBe(4);
+    expect(testMaxWorkers(' 12 ')).toBe(12);
+    expect(testMaxWorkers(undefined)).toBeUndefined();
+    expect(testMaxWorkers('')).toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
+    for (const bad of ['0', '-2', '2.5', 'four', '50%']) expect(testMaxWorkers(bad)).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(5);
+    warn.mockRestore();
+  });
+});

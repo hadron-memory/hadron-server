@@ -70,6 +70,7 @@
 // An App the caller does not participate in reads exactly like an absent one:
 // APP_NOT_FOUND (#1713 review, Rook P3-1; the resolvePilotApp posture).
 
+import { normalizeFamily } from '../../../lib/agentTasks/family.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { type Context, isAppParticipant, clampListTake, withoutRequestCaches } from './resolvers.helpers.js';
@@ -80,6 +81,8 @@ import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../
 import { resolveWorkerIdByName } from './resolvers.worker.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
+import { lockStopFence } from '../../../lib/stopSignals/state.js';
+import { refuseStoppedAssignee } from '../../../lib/stopSignals/enforce.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
 import { withAuthorizedTx } from './authorizedTx.js';
@@ -96,6 +99,8 @@ import {
   type TaskParty,
 } from '../../../lib/agentTasks/events.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import { emitTaskWarnings, readAssigneeFacts, type TaskWarningCode } from './resolvers.taskWarnings.js';
+import type { GraphQLResolveInfo } from 'graphql';
 
 // ── Limits ────────────────────────────────────────────────────────────────
 
@@ -548,8 +553,15 @@ async function normalizeRequirements(
     if (out.some((x) => x.length > 64)) throw badInput(`An entry of ${field} is longer than 64 characters.`);
     return out.length ? out : null;
   };
-  const familyIn = list(input.familyIn, 'requirements.familyIn');
-  const familyNotIn = list(input.familyNotIn, 'requirements.familyNotIn');
+  const families = (xs: string[] | null | undefined, field: string) => {
+    const values = list(xs, field);
+    if (!values) return null;
+    const canonical = values.map(normalizeFamily);
+    if (canonical.some((f) => f === null)) throw badInput(`${field} entries must be model family tokens (letters, digits, ".", "_" or "-").`);
+    return [...new Set(canonical as string[])];
+  };
+  const familyIn = families(input.familyIn, 'requirements.familyIn');
+  const familyNotIn = families(input.familyNotIn, 'requirements.familyNotIn');
   if (familyIn && familyNotIn) throw badInput('Name familyIn or familyNotIn, not both.');
   const excludeRefs = list(input.excludeWorkers, 'requirements.excludeWorkers');
   let excludeWorkerIds: string[] | null = null;
@@ -624,8 +636,13 @@ export async function inTaskWriteTx<T>(
   actor: TaskActor | RunCreator,
   refused: () => GraphQLError,
   write: (tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp) => Promise<T>,
-  /** `exclusive` for a writer that UPDATEs the anchored App row itself: it cannot upgrade a shared hold without deadlocking its peers. */
-  options: { lockMode?: 'shared' | 'exclusive' } = {},
+  /**
+   * `lockMode: 'exclusive'` for a writer that UPDATEs the anchored App row itself: it cannot upgrade a shared hold
+   * without deadlocking its peers. `stopFence` (#2022): the App's stop fence, taken after the anchors and BEFORE the
+   * reportsTo graph lock (src/lib/stopSignals/state.ts, the lock order). Every task write holds it shared, so an
+   * assignment decision and a stop signal change are ordered; a stop signal writer asks for it exclusive.
+   */
+  options: { lockMode?: 'shared' | 'exclusive'; stopFence?: 'shared' | 'exclusive' } = {},
 ): Promise<T> {
   const anchors: AuthorityAnchor[] = [
     { kind: 'app', id: app.id },
@@ -653,6 +670,7 @@ export async function inTaskWriteTx<T>(
       {
         lockMode: options.lockMode,
         afterLock: async (tx) => {
+          await lockStopFence(tx, app.id, options.stopFence ?? 'shared');
           // #1726: the reportsTo graph, SHARED, before any membership or worker
           // row (src/lib/workerReportsTo.ts, the lock protocol). The chain arm
           // of cor:agt:050:09 then reads a graph no writer can change before
@@ -740,6 +758,8 @@ async function insertTask(
     status?: 'backlog' | 'pending';
   },
 ): Promise<{ id: string; queued: boolean }> {
+  // #2022 (cor:agt:090:03): a stop signal refuses making a covered worker the assignee, at creation too.
+  if (a.assignee?.workerId) await refuseStoppedAssignee(tx, a.app.id, a.assignee.workerId, new Date());
   const created = await tx.agentTask.create({
     data: {
       appId: a.app.id,
@@ -837,7 +857,7 @@ export const agentTaskMutations = {
    * not under an ended parent (TASK_ENDED, 050:07 open question; #1705
    * interim).
    */
-  createAgentTask: async (_: unknown, { input }: { input: CreateInput }, ctx: Context) => {
+  createAgentTask: async (_: unknown, { input }: { input: CreateInput }, ctx: Context, info?: GraphQLResolveInfo) => {
     if (!input) throw badInput('input is required.');
     const parentId = input.parentTaskId?.trim() || null;
     let app: TaskApp;
@@ -911,6 +931,8 @@ export const agentTaskMutations = {
     };
 
     const refused = parentId ? () => notFound(parentId) : () => appNotFound(input.appRef as string);
+    // #2198: advice decided inside the write transaction, filed after it commits.
+    const warn: TaskWarningCode[] = source === null ? ['task.create.no-source'] : [];
     const made = await inTaskWriteTx(ctx, app, actor, refused, async (tx, txCtx, app) => {
       if (parentId) {
         // Lock the parent so its assignee and status can't move under us,
@@ -923,6 +945,7 @@ export const agentTaskMutations = {
         refuseEnded(parent);
       }
       const { requirements, owner, assignee } = await resolveParties(txCtx, app);
+      await assigneeAdvice(tx, app.id, assignee, null, warn);
       return insertTask(tx, {
         app, parentId, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee, status,
         created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
@@ -934,6 +957,7 @@ export const agentTaskMutations = {
     const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
     // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
     await launchAssignee(ctx.db, created);
+    await emitTaskWarnings(ctx, info, created.appId, { codes: warn });
     return created;
   },
 
@@ -948,8 +972,10 @@ export const agentTaskMutations = {
     _: unknown,
     { taskId, assignee, closeSessionWhenDone }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null },
     ctx: Context,
+    info?: GraphQLResolveInfo,
   ) => {
     let party: TaskParty | null = null;
+    const warn: TaskWarningCode[] = [];
     const assigned = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, assigns it.", { taskId });
@@ -959,6 +985,9 @@ export const agentTaskMutations = {
         throw taskError('TASK_INVALID_TRANSITION', 'This task already has an assignee; reassign it instead.', { taskId });
       }
       party ??= await resolveParty(txCtx, app, assignee, 'TASK_ASSIGNEE_INVALID');
+      // #2022 (cor:agt:090:03): never to a worker a live stop signal covers.
+      if (party.workerId) await refuseStoppedAssignee(tx, app.id, party.workerId, new Date(), task.id);
+      await assigneeAdvice(tx, app.id, party, task.id, warn);
       const close = closeSessionWhenDone ?? task.closeSessionWhenDone;
       // #1754 (cor:agt:050:02): assigning a backlog task makes it ready work.
       // The write is a guarded updateMany on the consumed state (no assignee,
@@ -993,6 +1022,7 @@ export const agentTaskMutations = {
     });
     // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no live session through its host.
     await launchAssignee(ctx.db, assigned);
+    await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn });
     return assigned;
   },
 
@@ -1075,8 +1105,10 @@ export const agentTaskMutations = {
     _: unknown,
     { taskId, assignee, closeSessionWhenDone }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null },
     ctx: Context,
+    info?: GraphQLResolveInfo,
   ) => {
     let party: TaskParty | null = null;
+    const warn: TaskWarningCode[] = [];
     const reassigned = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, reassigns it.", { taskId });
@@ -1090,6 +1122,9 @@ export const agentTaskMutations = {
       if (sameParty(from, party)) {
         throw taskError('TASK_INVALID_TRANSITION', 'The task is already assigned there.', { taskId });
       }
+      // #2022 (cor:agt:090:03): never to a worker a live stop signal covers; moving it away is not refused.
+      if (party.workerId) await refuseStoppedAssignee(tx, app.id, party.workerId, new Date(), task.id);
+      await assigneeAdvice(tx, app.id, party, task.id, warn);
       const close = closeSessionWhenDone ?? task.closeSessionWhenDone;
       await tx.agentTask.update({
         where: { id: task.id },
@@ -1101,6 +1136,7 @@ export const agentTaskMutations = {
       });
     });
     await launchAssignee(ctx.db, reassigned);
+    await emitTaskWarnings(ctx, info, reassigned.appId, { codes: warn });
     return reassigned;
   },
 
@@ -1148,6 +1184,7 @@ export const agentTaskMutations = {
     _: unknown,
     { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null } },
     ctx: Context,
+    info?: GraphQLResolveInfo,
   ) => {
     const outcome = (result?.outcome ?? '').trim();
     if (!TASK_OUTCOME_PATTERN.test(outcome)) {
@@ -1155,6 +1192,7 @@ export const agentTaskMutations = {
     }
     const summary = optionalText(result?.summary, TASK_SUMMARY_MAX, 'summary');
     const evidence = optionalText(result?.evidence, TASK_EVIDENCE_MAX, 'evidence');
+    const warn: TaskWarningCode[] = [];
     const finished = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
         throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee finishes it and sets its result.", { taskId });
@@ -1163,6 +1201,8 @@ export const agentTaskMutations = {
       if (task.status !== 'started') {
         throw taskError('TASK_INVALID_TRANSITION', 'Start the task before finishing it.', { taskId, status: task.status });
       }
+      // #2198: finishing with open children still succeeds (as it always has); the response says so.
+      if ((await tx.agentTask.count({ where: { parentTaskId: task.id, status: { in: OPEN } } })) > 0) warn.push('task.finish.open-children');
       await tx.agentTask.update({
         where: { id: task.id },
         data: {
@@ -1179,6 +1219,7 @@ export const agentTaskMutations = {
     });
     // #1707: a worker may have freed up (cor:agt:060:06).
     await matchAfterChange(ctx.db, finished.appId);
+    await emitTaskWarnings(ctx, info, finished.appId, { codes: warn });
     return finished;
   },
 
@@ -1209,6 +1250,26 @@ export const agentTaskMutations = {
     return cancelled;
   },
 };
+
+/**
+ * #2198: the advice an assignment earns, read in the write transaction: `unavailable`, `busy` and `paused` are pushed
+ * onto `warn` (the privacy gate is applied after commit). Nothing for a user assignee, no assignee, or the caller
+ * itself (a worker taking work for itself is not advised about its own state).
+ */
+async function assigneeAdvice(
+  tx: Prisma.TransactionClient,
+  appId: string,
+  assignee: TaskParty | null,
+  excludeTaskId: string | null,
+  warn: TaskWarningCode[],
+): Promise<void> {
+  const workerId = assignee?.workerId ?? null;
+  if (!workerId || workerId === currentActor().workerId) return;
+  const facts = await readAssigneeFacts(tx, { appId, workerId, excludeTaskId, now: new Date() });
+  if (facts.unavailable) warn.push('task.assign.assignee-unavailable');
+  if (facts.busy) warn.push('task.assign.assignee-busy');
+  if (facts.paused) warn.push('task.assign.assignee-paused');
+}
 
 /**
  * #1709 (cor:agt:070:08; Holger via Vera #10773 (6): assignment by hand launches too, not only matching). After the

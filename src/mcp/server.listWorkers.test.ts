@@ -114,7 +114,7 @@ describe('#997 — hadron_list_workers', () => {
     expect(lineFor('Iris')).toContain('no live session');
   });
 
-  it('renders HOW LONG AGO an idle worker was last driven', async () => {
+  it('renders HOW LONG AGO an idle worker had recorded activity', async () => {
     // Ada's worker: two brief sessions weeks ago. Without the age it reads
     // exactly like one driven an hour ago, which is the whole complaint —
     // and the timestamp was already computed (PR #1086 review, Codex P2).
@@ -126,7 +126,7 @@ describe('#997 — hadron_list_workers', () => {
     });
     const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_list_workers', {});
     const line = out.split('\n').find((l) => l.trimStart().startsWith('- Iris ')) ?? '';
-    expect(line).toContain('last driven 3d ago');
+    expect(line).toContain('last recorded activity 3d ago');
   });
 
   it('does NOT print an age beside a LIVE session', async () => {
@@ -139,7 +139,7 @@ describe('#997 — hadron_list_workers', () => {
     const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_list_workers', {});
     const line = out.split('\n').find((l) => l.trimStart().startsWith('- Iris ')) ?? '';
     expect(line).toContain('session live');
-    expect(line).not.toContain('last driven');
+    expect(line).not.toContain('last recorded activity');
   });
 
   it('does not name the driver — that stays behind the takeover refusal', async () => {

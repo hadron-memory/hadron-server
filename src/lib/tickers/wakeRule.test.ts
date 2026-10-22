@@ -16,8 +16,8 @@ const ticker = (over: Record<string, unknown> = {}): SubscriptionInput => ({
   } as SubscriptionInput['ticker'],
   lastAckedTick: 0,
 });
-const run = (channels: ChannelInput[], subs: SubscriptionInput[] = [], extra: { mentionsImmediate?: boolean; now?: Date } = {}) =>
-  workerWake({ workerId: W, workerTokens: tokens, mentionsImmediate: extra.mentionsImmediate ?? true, channels, subscriptions: subs, now: extra.now ?? NOW });
+const run = (channels: ChannelInput[], subs: SubscriptionInput[] = [], extra: { mentionsImmediate?: boolean; now?: Date; checkPending?: boolean } = {}) =>
+  workerWake({ workerId: W, workerTokens: tokens, mentionsImmediate: extra.mentionsImmediate ?? true, channels, subscriptions: subs, checkPending: extra.checkPending, now: extra.now ?? NOW });
 
 describe('the due rule — cor:agt:080:08–:12', () => {
   it('nothing unread: nothing due, even on a current tick (S2 of :10)', () => {
@@ -158,5 +158,48 @@ describe('the due rule — cor:agt:080:08–:12', () => {
   it('counts mentions of a worker that may not be woken (dormant workers are counted, B2)', () => {
     expect(relevantMentionCount([channel('c1', [msg(3, { mentions: ['liam'] }), msg(4, { mentions: ['all'] }), msg(5)])], W, tokens)).toBe(2);
     expect(relevantMentionCount([channel('c1', [msg(3, { mentions: ['liam'] })], true)], W, ['nobody'])).toBe(0);
+  });
+});
+
+describe('#2138 §3.3 — channel checks and the ticker', () => {
+  const checkedAgo = (sec: number) => NOW.getTime() - sec * 1000;
+  const checked = (sec: number | null, msgs: RoutedMessage[] = []) => ({ ...channel('c1', msgs), lastCheckedAtMs: sec === null ? null : checkedAgo(sec) });
+
+  it('read-team-channel: due with an unread message and a stale or missing check; not due with a fresh check', () => {
+    const unread = [msg(3, { mentions: ['liam'] })];
+    const rtc = [ticker({ relevance: 'MENTIONS', reasons: ['read-team-channel'] })];
+    // mentionsImmediate off so only the ticker can wake it
+    const go = (ch: ChannelInput) => run([ch], rtc, { mentionsImmediate: false });
+    expect(go(checked(null, unread))?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(go(checked(700, unread))?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]); // older than the 600 s cadence
+    expect(go(checked(599, unread))).toBeNull(); // younger than the cadence: waits for the next tick
+    expect(go(checked(10, unread))).toBeNull();
+  });
+
+  it('live-check: due for a stale check with NOTHING unread; not for a fresh check, nor a pending worker', () => {
+    const lc = [ticker({ reasons: ['live-check'] })];
+    expect(run([checked(null)], lc)?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([checked(700)], lc)?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([checked(599)], lc)).toBeNull();
+    expect(run([checked(null)], lc, { checkPending: true })).toBeNull();
+    expect(run([checked(700)], lc, { checkPending: true })).toBeNull();
+  });
+
+  it('live-check lists no channel when nothing is unread, and still obeys the tick schedule and the acknowledged tick', () => {
+    const lc = [ticker({ reasons: ['live-check'] })];
+    expect(run([checked(null)], lc)?.channels).toEqual([]);
+    expect(run([checked(null)], [{ ...ticker({ reasons: ['live-check'] }), lastAckedTick: 1 }])).toBeNull();
+    expect(run([checked(null)], lc, { now: new Date('2026-10-05T09:09:59Z') })).toBeNull();
+  });
+
+  it('a check on a channel the ticker does not cover does not make it fresh', () => {
+    const lc = [ticker({ reasons: ['live-check'], channelIds: ['c1'] })];
+    const other = { ...channel('c2', []), lastCheckedAtMs: checkedAgo(5) };
+    expect(run([checked(null), other], lc)?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([checked(5), other], lc)).toBeNull();
+  });
+
+  it('every-tick ignores freshness (its meaning is unconditional)', () => {
+    expect(run([checked(5)], [ticker({ reasons: ['every-tick'] })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
   });
 });

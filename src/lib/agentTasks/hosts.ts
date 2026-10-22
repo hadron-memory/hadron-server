@@ -16,6 +16,8 @@
  * that one lapsed (`host.lost`, once, stamping `lostAt`).
  */
 
+import { afterWaits, anchorNow, lockStopFence } from '../stopSignals/state.js';
+import { reconcileStopCoverage } from '../stopSignals/lifecycle.js';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
@@ -143,9 +145,14 @@ export async function registerHost(
     workers.set(w.workerId, { family, worktrees });
   }
 
+  // `now` is the caller's sample, taken just before this call (it defaults to one here): its monotonic half.
+  const anchor = anchorNow();
   return db.$transaction(async (tx) => {
     await lockAuthorityAnchors(tx, [{ kind: 'app', id: input.appId }], 'shared');
     if (hooks.authorize) await hooks.authorize(tx);
+    // #2022: the stop fence, exclusive, before the lapse lock (src/lib/stopSignals/state.ts): a host signal covers the
+    // workers this registration lists (R84), so a change of the list is a change of coverage, recorded below.
+    await lockStopFence(tx, input.appId, 'exclusive');
     // #1863: the App's lapse count, stable for this transaction, taken BEFORE
     // the registration row (the lock order of recordHostLost).
     const checkIns = await lockAppLapseCheckIns(tx, input.appId);
@@ -191,6 +198,8 @@ export async function registerHost(
       });
     }
     if (hooks.afterWrite) await hooks.afterWrite(tx, { registrationId: cur.id, workerCount: workers.size });
+    // The coverage history at the moment after this registration's waits (Xan #2166 LOCAL-1).
+    await reconcileStopCoverage(tx, input.appId, afterWaits(now, anchor));
     const registered = isNew || wasLapsed;
     if (registered) {
       await appendHostEvent(tx, {
@@ -230,8 +239,10 @@ export async function loadLaunchableFamilies(
     ORDER BY 1, 2`;
   const out = new Map<string, string[]>();
   for (const r of rows) {
+    const family = normalizeFamily(r.family);
+    if (!family) continue;
     const list = out.get(r.workerId) ?? [];
-    list.push(r.family);
+    if (!list.includes(family)) list.push(family);
     out.set(r.workerId, list);
   }
   return out;

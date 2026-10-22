@@ -35,6 +35,7 @@ import { mentionTokenOf } from './mentionToken.js';
 import { mentionReachSql } from './mentionReach.js';
 import { parseRunRegisterSnapshot, type RegisterAttendee } from './resolveRegister.js';
 import { escapePrismaLikePattern } from './literalLocPrefix.js';
+import { TEAM_CHAT_LOC } from './teamChatLoc.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -45,24 +46,171 @@ const MESSAGE_NODE_TYPES = ['chat-message', 'record'];
  * Advance an attendee's cursor on a Channel — monotonic, race-safe, and safe
  * inside an interactive transaction (`ON CONFLICT … DO UPDATE`, never a
  * caught P2002). Returns the cursor after the write.
+ *
+ * #2181: the same statement records the Channel incarnation the cursor was RAISED under (`channel_incarnation`). An
+ * insert records it; a conflict records it only when `last_seen_seq` rises, so an equal or lower mark changes neither
+ * and a legacy NULL label is never relabelled as current.
  */
 export async function advanceReadState(db: Db, attendee: RegisterAttendee, channelId: string, seq: number): Promise<number> {
   const target = Math.max(0, Math.floor(seq));
   const rows =
     'workerId' in attendee
       ? await db.$queryRaw<Array<{ last_seen_seq: number }>>`
-          INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, updated_at)
-          VALUES (${generateId()}, ${attendee.workerId}, ${channelId}, ${target}, now())
+          INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, channel_incarnation, updated_at)
+          VALUES (${generateId()}, ${attendee.workerId}, ${channelId}, ${target}, (SELECT incarnation FROM channels WHERE id = ${channelId}), now())
           ON CONFLICT (worker_id, channel_id) WHERE worker_id IS NOT NULL
-            DO UPDATE SET last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq), updated_at = now()
+            DO UPDATE SET
+              channel_incarnation = CASE WHEN EXCLUDED.last_seen_seq > channel_read_states.last_seen_seq
+                THEN EXCLUDED.channel_incarnation ELSE channel_read_states.channel_incarnation END,
+              last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq), updated_at = now()
           RETURNING last_seen_seq`
       : await db.$queryRaw<Array<{ last_seen_seq: number }>>`
-          INSERT INTO channel_read_states (id, agent_id, app_id, channel_id, last_seen_seq, updated_at)
-          VALUES (${generateId()}, ${attendee.agentId}, ${attendee.appId}, ${channelId}, ${target}, now())
+          INSERT INTO channel_read_states (id, agent_id, app_id, channel_id, last_seen_seq, channel_incarnation, updated_at)
+          VALUES (${generateId()}, ${attendee.agentId}, ${attendee.appId}, ${channelId}, ${target}, (SELECT incarnation FROM channels WHERE id = ${channelId}), now())
           ON CONFLICT (agent_id, app_id, channel_id) WHERE agent_id IS NOT NULL
-            DO UPDATE SET last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq), updated_at = now()
+            DO UPDATE SET
+              channel_incarnation = CASE WHEN EXCLUDED.last_seen_seq > channel_read_states.last_seen_seq
+                THEN EXCLUDED.channel_incarnation ELSE channel_read_states.channel_incarnation END,
+              last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq), updated_at = now()
           RETURNING last_seen_seq`;
   return rows[0]?.last_seen_seq ?? target;
+}
+
+/**
+ * #2181 — the two incarnations a read state is described by: the Channel's CURRENT one, and the one the stored cursor was
+ * last raised under (NULL = legacy / never advanced under a known incarnation). They are separate on purpose: a client
+ * may call a cursor current only when both equal its sampled incarnation.
+ */
+export async function readStateIncarnations(
+  db: Db,
+  attendee: RegisterAttendee,
+  channelId: string,
+): Promise<{ channelIncarnation: number; cursorIncarnation: number | null }> {
+  const [channel, state] = await Promise.all([
+    db.channel.findUnique({ where: { id: channelId }, select: { incarnation: true } }),
+    db.$queryRaw<Array<{ channel_incarnation: number | null }>>`
+      SELECT channel_incarnation FROM channel_read_states
+      WHERE channel_id = ${channelId} AND ${'workerId' in attendee
+        ? Prisma.sql`worker_id = ${attendee.workerId}`
+        : Prisma.sql`agent_id = ${attendee.agentId} AND app_id = ${attendee.appId}`}`,
+  ]);
+  return { channelIncarnation: channel?.incarnation ?? 1, cursorIncarnation: state[0]?.channel_incarnation ?? null };
+}
+
+/**
+ * #2138 §3.1 — record that a worker CHECKED its App's team channel: `last_checked_at = now()` on its own read-state row,
+ * created at seq 0 when it has none. A check is any read of that channel through the worker's OWN bound session (a page
+ * read, an inbox read, a mark-read, an empty one included); it moves no read position and no delivery mark.
+ *
+ * Only the App's TEAM channel counts: a channel whose root is `chats:team` in a memory of the worker's own App. Anything
+ * else, or a worker of another App, stamps nothing. Callers must have established that the actor IS the worker's own
+ * live session; this function cannot tell a person's `asMe` read from the worker's, so it is never called for those.
+ * Returns whether a row was stamped.
+ */
+export async function stampChannelCheck(db: Db, workerId: string, channelId: string): Promise<boolean> {
+  const rows = await db.$queryRaw<Array<{ ok: number }>>`
+    INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, last_checked_at, updated_at)
+    SELECT ${generateId()}, w.id, c.id, 0, now(), now()
+    FROM workers w
+    JOIN channels c ON c.id = ${channelId} AND c.deleted_at IS NULL AND c.loc = ${TEAM_CHAT_LOC}
+    JOIN memories m ON m.id = c.memory_id AND m.app_id = w.app_id
+    WHERE w.id = ${workerId} AND w.retired_at IS NULL
+    ON CONFLICT (worker_id, channel_id) WHERE worker_id IS NOT NULL
+      DO UPDATE SET last_checked_at = now()
+    RETURNING 1 AS ok`;
+  return rows.length > 0;
+}
+
+/**
+ * #2138 §3.1 — the inbox read: a worker's own session read of its pending batches checks the team channel(s) of its App
+ * (the inbox is not addressed to one channel). Same rules as {@link stampChannelCheck}; returns the channels stamped.
+ */
+export async function stampTeamChannelChecks(db: Db, workerId: string): Promise<number> {
+  const rows = await db.$queryRaw<Array<{ ok: number }>>`
+    INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, last_checked_at, updated_at)
+    SELECT gen_random_uuid()::text, w.id, c.id, 0, now(), now()
+    FROM workers w
+    JOIN memories m ON m.app_id = w.app_id
+    JOIN channels c ON c.memory_id = m.id AND c.deleted_at IS NULL AND c.loc = ${TEAM_CHAT_LOC}
+    WHERE w.id = ${workerId} AND w.retired_at IS NULL
+    ON CONFLICT (worker_id, channel_id) WHERE worker_id IS NOT NULL
+      DO UPDATE SET last_checked_at = now()
+    RETURNING 1 AS ok`;
+  return rows.length;
+}
+
+/**
+ * #2138 follow-up — WHY a read that arrived with a session did not count as a check. Log-only diagnostics (the
+ * `channel.check.miss` AppLog entry); no behaviour hangs on it.
+ *  - BINDING_REFUSED: the request NAMED a session (X-Hadron-Session) but the server refused the binding, so it was served as a
+ *    session-less read (the caller is not told).
+ *  - SESSION_NOT_OWN_LIVE: the session is not the caller's own live Worker session.
+ *  - SESSION_REVIVE_REFUSED: the session had lapsed and could not be resumed.
+ *  - CROSS_APP: the channel is another App's team channel (the worker's own App does not host it).
+ *  - WORKER_RETIRED / CHANNEL_GONE: the worker or the channel is gone.
+ *  - NO_TEAM_CHANNEL: the inbox read found no team channel of the worker's App.
+ */
+export type CheckMissReason =
+  | 'BINDING_REFUSED' | 'SESSION_NOT_OWN_LIVE' | 'SESSION_REVIVE_REFUSED'
+  | 'CROSS_APP' | 'WORKER_RETIRED' | 'CHANNEL_GONE' | 'NO_TEAM_CHANNEL';
+
+/** Why `stampChannelCheck` stamped nothing, or null when the channel is simply not a team channel (not a miss). */
+export async function diagnoseNoStamp(db: Db, workerId: string, channelId: string): Promise<CheckMissReason | null> {
+  const [w, c] = await Promise.all([
+    db.worker.findUnique({ where: { id: workerId }, select: { appId: true, retiredAt: true } }),
+    db.channel.findUnique({ where: { id: channelId }, select: { loc: true, deletedAt: true, memory: { select: { appId: true } } } }),
+  ]);
+  if (!c || c.deletedAt) return c && c.loc === TEAM_CHAT_LOC ? 'CHANNEL_GONE' : null;
+  if (c.loc !== TEAM_CHAT_LOC) return null;
+  if (!w || w.retiredAt) return 'WORKER_RETIRED';
+  if (c.memory.appId !== w.appId) return 'CROSS_APP';
+  return null;
+}
+
+/**
+ * Log one `channel.check.miss` AppLog entry. Log-only and never throws: it records the reason code and the way the read
+ * arrived, plus the session id the AppLog row already carries, and nothing about the worker, the channel or the message
+ * content. A channel that is not a team channel logs nothing (an ordinary read of another channel is not a miss).
+ */
+export async function recordCheckMiss(
+  db: Db,
+  args: { channelId: string; sessionId?: string | null; reason: CheckMissReason; via: 'read' | 'mark' | 'inbox' },
+): Promise<void> {
+  try {
+    const ch = await db.channel.findUnique({ where: { id: args.channelId }, select: { loc: true, memory: { select: { appId: true } } } });
+    if (!ch || ch.loc !== TEAM_CHAT_LOC) return;
+    const session = args.sessionId ? await db.session.findUnique({ where: { id: args.sessionId }, select: { appId: true } }) : null;
+    const appId = session?.appId ?? ch.memory.appId;
+    if (!appId) return;
+    await db.appLogEntry.create({
+      data: {
+        appId,
+        level: 'WARN',
+        sessionId: args.sessionId ?? null,
+        message: 'channel.check.miss',
+        detail: { reason: args.reason, via: args.via },
+      },
+    });
+  } catch {
+    // diagnostics only: a failed log write must never affect the read
+  }
+}
+
+/**
+ * The inbox read stamped no team channel: log NO_TEAM_CHANNEL when the App truly has none (none provisioned, or deleted).
+ * Called AFTER the read's transaction, best-effort and log-only: it never throws and cannot abort or alter the read.
+ */
+export async function recordNoTeamChannelMiss(db: Db, args: { appId: string; sessionId: string }): Promise<void> {
+  try {
+    // loc-scope-ok: scoped to this App's own memories (memory.appId), not a bare loc
+    const own = await db.channel.findFirst({ where: { loc: TEAM_CHAT_LOC, deletedAt: null, memory: { appId: args.appId } }, select: { id: true } });
+    if (own) return;
+    await db.appLogEntry.create({
+      data: { appId: args.appId, level: 'WARN', sessionId: args.sessionId, message: 'channel.check.miss', detail: { reason: 'NO_TEAM_CHANNEL', via: 'inbox' } },
+    });
+  } catch {
+    // diagnostics only
+  }
 }
 
 /** The attendee's cursors on a set of Channels; a Channel with no row reads 0. */

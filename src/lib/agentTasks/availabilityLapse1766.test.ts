@@ -208,7 +208,7 @@ describe('the lapse feeds matching in the same pass (cor:agt:060:06)', () => {
     });
     await outOfTokens(baloo, at('18:00'));
     const t = await db.agentTask.create({ data: { appId: app.id, title: 'Review', ownerUserId: mia.id, createdAt: at('11:00') }, select: { id: true } });
-    expect(await taskMatcherTick(db, at('18:01'))).toEqual({ lost: 0, lapsed: 1, matched: 1 });
+    expect(await taskMatcherTick(db, at('18:01'))).toEqual({ lost: 0, lapsed: 1, expired: 0, matched: 1 });
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).assigneeWorkerId).toBe(baloo.id);
   });
 });

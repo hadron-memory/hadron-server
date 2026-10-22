@@ -31,9 +31,10 @@ ALTER TABLE memories
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_class_app_id
   CHECK (
-    (class = 'app' AND app_id IS NOT NULL)
-    OR (class = 'system' AND app_id IS NULL)
-    OR (class IN ('knowledge', 'group', 'personal', 'private'))
+    (class = 'app' AND app_id IS NOT NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+    OR (class = 'system' AND app_id IS NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+    OR (class = 'system' AND app_id IS NOT NULL AND is_install_memory = true)
+    OR (class IN ('knowledge', 'group', 'personal', 'private') AND install_of_agent_id IS NULL AND is_install_memory = false)
   );
 
 -- #723: shared_memory_of_agent_id IDENTIFIES an App's runtime `shared`
@@ -46,6 +47,15 @@ ALTER TABLE memories
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_shared_agent_scope
   CHECK (shared_memory_of_agent_id IS NULL OR (class = 'app' AND app_id IS NOT NULL));
+
+-- #2044 (S7): an App's INSTALL MEMORY is a class='system' row with BOTH app_id
+-- and install_of_agent_id set (cor:agt:040:06); the CHECK above carries the
+-- all-or-nothing pair. ONE live install memory per (App, Agent); a soft-deleted
+-- one never blocks its replacement (Prisma cannot model the WHERE). Synced with
+-- the 20261019090000 migration and src/test/globalSetup.ts.
+CREATE UNIQUE INDEX IF NOT EXISTS memories_install_memory_live_uniq
+  ON memories (app_id, install_of_agent_id)
+  WHERE install_of_agent_id IS NOT NULL AND deleted_at IS NULL;
 
 -- 023-app-shape FR-024: bidirectional invariant — class='group' ⇔
 -- visibility='GROUP'.
@@ -638,6 +648,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1606 / #1607 — comment-node invariants. One source, shared verbatim with
 -- migration 20261005200000_comment_nodes (pinned by src/lib/comments/invariantsSql.test.ts).
 \ir comment-invariants.sql
+\ir boot-prompt-invariants.sql
+\ir boot-prompt-pointer-invariants.sql
+\ir compiled-prompt-revision-invariants.sql
+\ir boot-prompt-approval-invariants.sql
 
 -- #1655: compiled automation versions.
 \ir automation-invariants.sql
@@ -662,6 +676,11 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- 20261011020000_tickers (pinned by src/lib/tickers/invariants.test.ts).
 \ir ticker-invariants.sql
 \ir delivery-settings-invariants.sql
+\ir channel-checks-invariants.sql
+
+-- #2022: stop signals, their coverage history and the stop holds of queued tasks. One source, shared verbatim with
+-- migration 20261020030000_stop_signals (pinned by src/lib/stopSignals/invariants.test.ts).
+\ir stop-signal-invariants.sql
 
 -- #1749: App key scopes (cor:aut:010:03). One source, shared verbatim with migration
 -- 20261011190000_app_key_scopes (pinned by src/lib/appKeyScopes/appKeyScopes.test.ts).
@@ -680,6 +699,21 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 
 -- #1631: shared passkey registry invariant guards.
 \ir passkey-invariants.sql
+
+-- #1897: sign-in lineage guards. One source, shared verbatim with migration
+-- 20261019120000_sign_in_lineage.
+\ir signin-invariants.sql
+
+-- #1631 PR1b slice 2: fresh sign-ins bound to the ceremony browser. One source, shared verbatim with migration
+-- 20261021080000_fresh_sign_ins (pinned by src/lib/passkeys/freshSignIn1631.test.ts).
+\ir fresh-sign-in-invariants.sql
+
+-- #1631 PR2: passkey registration lifecycle (cancel tokens). One source, shared verbatim with migration
+-- 20261022030000_passkey_revoke (pinned by src/lib/passkeys/cancel1631.test.ts).
+\ir passkey-registration-invariants.sql
+-- #1897 slice B1: pending email sign-ins. One source, shared verbatim with migration
+-- 20261021120000_pending_email_sign_ins (pinned by src/auth/pendingEmailSignIn1897.test.ts).
+\ir pending-email-sign-in-invariants.sql
 
 -- #1632: signing requests, append-only signature records, the content-change
 -- marker. One source, shared verbatim with migration 20261013160000_signing_requests.

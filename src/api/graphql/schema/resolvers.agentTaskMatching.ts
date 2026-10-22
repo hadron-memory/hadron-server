@@ -9,26 +9,53 @@
 // exactly like an absent one (APP_NOT_FOUND). Each worker is rendered through
 // the same sanitized party projection as tasks, never the Worker object.
 
-import { type Context } from './resolvers.helpers.js';
-import { resolveParticipatedApp } from './resolvers.agentTask.js';
+import { type Context, withoutRequestCaches } from './resolvers.helpers.js';
+import { mayReadAppTasks, resolveParticipatedApp } from './resolvers.agentTask.js';
+import { Prisma } from '../../../generated/prisma/index.js';
+import { loadRosterTaskSummaries, type RosterTaskSummary } from '../../../lib/agentTasks/rosterSummary.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import { loadTeamRoster, type RosterEntry } from '../../../lib/agentTasks/roster.js';
+import type { WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
+import { loadAppWorkerCheckStatuses } from './resolvers.worker.js';
 
 const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
 
 export const agentTaskMatchingQueries = {
   /** #1707 — every worker's derived state in an App (plan §7.4), for its task audience. */
   teamRoster: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
-    const { app } = await resolveParticipatedApp(ctx, appRef);
-    const asOf = new Date();
-    const entries = await loadTeamRoster(ctx.db, app.id, asOf);
-    return { appId: app.id, asOf, workers: entries.map((e) => ({ ...e, appUrn: app.urn })) };
+    // Admission, status and assignment projections share one read snapshot, including MCP callers.
+    return ctx.db.$transaction(async (tx) => {
+      const readCtx = withoutRequestCaches(ctx, tx);
+      const { app } = await resolveParticipatedApp(readCtx, appRef);
+      const asOf = new Date();
+      const [entries, checks] = await Promise.all([
+        loadTeamRoster(tx, app.id, asOf),
+        // #2138 §3.4 — the same derivation as Worker.checkStatus, at the roster's instant.
+        loadAppWorkerCheckStatuses(readCtx, app.id, { now: asOf }),
+      ]);
+      const workerIds = entries.map((e) => e.workerId);
+      const canReadTasks = await mayReadAppTasks(readCtx, app.id);
+      const [settings, tasks] = await Promise.all([
+        tx.workerWakeSettings.findMany({ where: { workerId: { in: workerIds } }, select: { workerId: true, pausedUntil: true } }),
+        canReadTasks ? loadRosterTaskSummaries(tx, app.id, workerIds) : new Map<string, RosterTaskSummary>(),
+      ]);
+      const pauses = new Map(settings.map((s) => [s.workerId, s.pausedUntil]));
+      return {
+        appId: app.id,
+        asOf,
+        workers: entries.map((e) => ({ ...e, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
+          pausedUntil: pauses.get(e.workerId) ?? null, currentTask: tasks.get(e.workerId) ?? null })),
+      };
+    // An explicit, bounded read budget avoids imposing Prisma's implicit 5s interactive-transaction default
+    // on the now-serialized bulk roster loaders. This does not change query/lock or test timeouts.
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 20_000 });
   },
 };
 
-type RosterRow = RosterEntry & { appUrn: string };
+type RosterRow = RosterEntry & { appUrn: string; checkStatus: WorkerCheckStatus | null; pausedUntil: Date | null; currentTask: RosterTaskSummary | null };
 
 export const agentTaskMatchingFieldResolvers = {
+  TeamRosterTaskSummary: { status: (r: RosterTaskSummary) => toGqlWord(r.status) },
   TeamRosterEntry: {
     worker: (r: RosterRow) => ({ kind: 'WORKER', id: r.workerId, name: r.name, urn: composeWorkerUrn(r.appUrn, r.slug) }),
     freeForWork: (r: RosterRow) => r.free,
@@ -43,5 +70,6 @@ export const agentTaskMatchingFieldResolvers = {
       ? { kind: 'WORKER', id: r.reportsTo.workerId, name: r.reportsTo.name, urn: composeWorkerUrn(r.appUrn, r.reportsTo.slug) }
       : null),
     reportsToRetired: (r: RosterRow) => r.reportsTo?.retired ?? false,
+    checkStatus: (r: RosterRow) => r.checkStatus,
   },
 };

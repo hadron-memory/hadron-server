@@ -114,7 +114,7 @@ dev DB or `hadron_test`. Use distinct names and ports for concurrent stacks.
 
 ```bash
 # Run the test suite. Files run in PARALLEL, each vitest worker against its own
-# clone (`hadron_test_r<runId>_<poolId>`, created lazily by
+# clone (`hadron_test_r<scope>_p<pid>_<poolId>`, created lazily by
 # src/test/perWorkerDb.ts and dropped at teardown) — ~6-7x faster than the old
 # serial mode. The clones come from `hadron_test_s<fingerprint>`, which
 # globalSetup builds from empty for this checkout's schema (#1922), so no setup
@@ -124,20 +124,28 @@ dev DB or `hadron_test`. Use distinct names and ports for concurrent stacks.
 # opens its OWN raw pg connection must read `process.env.DATABASE_URL` (the
 # per-worker URL), NOT `TEST_DATABASE_URL`, or it splits across two DBs.
 #
-# `<runId>` is the vitest MAIN process pid, stamped into HADRON_TEST_RUN_ID by
-# globalSetup (#1091). It is there because a pool id alone is NOT unique to a
-# run — it restarts at 1 every time — so two suites on this machine used to
-# claim the same databases and delete from each other's tables mid-test. Two
-# concurrent runs are now safe. Orphan clones from a crashed run are collected
-# by the next run whose pid is not alive; nothing is dropped while its run is.
+# #1137: HADRON_TEST_RUN_ID remains the bare vitest-main PID. globalSetup
+# overwrites HADRON_TEST_RUN_SCOPE from Linux boot identity + PID namespace
+# device/inode; workers inherit it unchanged. DBs use
+# `<base>_r<scope>_p<pid>_<pool|tpl>` and graph roots use
+# `<tmpdir>/hadron-test-graph-runs/r<scope>_p<pid>`. Shared loopback or Unix
+# sockets do not prove PID-namespace locality. Native non-Linux uses an explicit
+# platform/machine scope with the existing local-machine assumption. Unverifiable
+# Linux parallel mode refuses; serial mode uses an unknown, non-collectible scope.
 #
-# Graph fixtures (#1951): createNode writes every node to disk under
-# GRAPHS_PATH, which tests point at `<tmpdir>/hadron-test-graph-runs/r<runId>`
-# (src/test/graphRoot.ts). globalSetup creates it, teardown removes it (and
-# fails the run if it can't), and a dead run's root is swept by the next run,
-# on the same pid-liveness rule as the clones. The old shared
-# /tmp/hadron-test-graphs is no longer written by this checkout; it can be
-# deleted once no pre-#1951 checkout runs suites on the host.
+# Automatic cleanup selects only the exact own token, or a provably dead PID
+# in the same verified scope. Prior-boot, foreign, unknown and legacy DBs/roots
+# are preserved: crashed runs can accumulate WITHOUT BOUND in disk/inode use.
+# Legacy graph roots retain the #1951 inode risk. Manual removal requires ALL
+# namespaces sharing that Postgres/tmpdir to be quiescent, not local PID absence.
+# The legacy-prune tool below is not proof of that quiescence and does not
+# collect pid-only r<pid> clones or old graph roots. No automatic boot-mismatch
+# deletion rule exists. Use a private disk-backed TMPDIR for checkouts/fixtures
+# when the host's tmpfs inode cap is tight.
+#
+# On a shared host, cap the forks (each holds its own Postgres clone) with
+# HADRON_TEST_MAX_WORKERS=<positive int>. Unset keeps vitest's default; an
+# invalid value warns and keeps it too (src/test/dbWorkers.ts testMaxWorkers).
 pnpm test
 
 # Drop pre-#1091 `hadron_test_<n>` clones (from a checkout older than run-scoped
@@ -208,6 +216,7 @@ pnpm admin:mint-token --email you@example.com
 | `RUN_DEFAULT_TOKEN_BUDGET` / `RUN_DEFAULT_ACTION_BUDGET` / `RUN_DEFAULT_TIMEOUT_MS` / `QUOTA_RUNS_PER_DAY_APP` / `QUOTA_RUNS_PER_DAY_ORG` / `QUOTA_TOKENS_PER_DAY_APP` / `QUOTA_TOKENS_PER_DAY_ORG` / `QUOTA_SMS_PER_DAY_APP` / `QUOTA_SMS_PER_DAY_ORG` / `WEBHOOK_TOKEN_TTL` / `DISABLE_RUN_WORKER` / `DISABLE_SCHEDULER` | spec 040 — headless runs (`src/jobs/appRuns.ts`, `src/jobs/scheduler.ts`, `src/api/webhooks.ts`) | budgets 100k tokens / 50 actions / 120s; quotas 200 & 1k runs/day, 2M & 10M tokens/day, 50 & 200 SMS/day; hpt TTL `90d`; workers ON | Per-run budgets are seeds; per-App/org quota LIMITS live on the QuotaCounter rows (the env values only seed first touch — operators tune the rows). The SMS counters are deliberately small (internal/staff notifications, not campaigns — the `hadron_send_sms` mass-messaging brake). `DISABLE_RUN_WORKER` also disables the scheduler; `DISABLE_SCHEDULER` disables only the cron loop. |
 | `BILLING_DEBIT_ENABLED` / `CREDIT_MARKUP_PERCENT` | spec 046 — usage metering / AI-credit billing Phase 0 (`src/lib/metering/index.ts`) | Debits OFF; markup `0` | `BILLING_DEBIT_ENABLED=true` turns on automatic credit-ledger debits for PLATFORM-KEY LLM spend (`keyOwnerType='HADRON_SERVER'` — BYOK never debits); the pilot stays free while unset even though costs are being recorded. Markup precedence: `AiModelPrice.markupBasisPoints` (per-tier, effective-dated; 2500 = 25%) wins; `CREDIT_MARKUP_PERCENT` (e.g. `25`, fractions OK) is only the fleet-wide fallback for rows without one. Rates live in the `AiModelPrice` table (`setAiModelPrice`, platform admin; micro-cents per MTok, keyed `provider+model+tier+effectiveAt` — tier 1-3 is schema headroom, everything resolves tier 1 today); an unpriced triple yields cost NULL, never a blocked call. Credits are minted with `grantCredits` (platform admin only). |
 | `NATS_URL` / `NATS_TOKEN` | spec 039 Phase 1 — platform message bus (`src/lib/bus/index.ts`) | Both unset (bus OFF) | **Optional by design** (D-2026-06-17-004): unset ⇒ `getBusClient()` resolves `null` and features fall back to their DB-backed sweep loops — a missing broker never breaks boot or the API. Dev: `nats://localhost:4222` (compose `nats` service). Alpha: the Docker bridge gateway (NATS runs bare-metal on the host) + the static token once the §9 ops step lands. Test gate: `BUS_TEST_NATS_URL` enables the broker integration tests in `src/lib/bus/bus.test.ts` (CI leaves it unset). |
+| `REGEX_SEARCH_TIMEOUT_MS` | #415 Slice 1: regex search database budget (`src/lib/retrieval/regexTimeout.ts`, applied in `postgresRetrievalProvider.regexSearch`) | `5000` | Budget in milliseconds for ONE `findNodes(mode: regex)` statement (GraphQL and the delegated MCP `hadron_find_nodes`). Applied as `SET LOCAL statement_timeout` in a batch transaction on the search's own connection, so Postgres cancels the real statement, and the setting dies with the transaction on commit, rollback or cancellation; it never reaches a pooled connection's session, so no later request inherits it. Read per call. Only a positive integer counts: 0 means "no timeout" to Postgres, so `0`, negatives and junk fall back to the default instead of widening the bound. A cancelled search surfaces through the existing redacted paths (GraphQL `INTERNAL_SERVER_ERROR` with the generic DB message; MCP `[internal_server_error]` via the #1695 boundary), never echoing the pattern; there is no new refusal code. Pattern caps, backreference rejection and throttling are Slice 2, waiting on Holger. |
 | `EMBEDDING_BACKEND` | spec 033 — RAG vector retrieval (`src/lib/embedding/index.ts`) | `http` | Selects the embedding-client implementation. `http` (default) uses `EMBEDDING_API_URL` + the HTTP client; `sagemaker` uses the SageMaker Runtime SDK + `EMBEDDING_SAGEMAKER_*` vars. Case-insensitive; an unknown value throws at first call. |
 | `EMBEDDING_API_URL` / `EMBEDDING_MODEL` / `EMBEDDING_DIM` / `EMBEDDING_API_KEY` | spec 033 — RAG vector retrieval (`src/lib/embedding/client.ts`) | URL: none (required when `EMBEDDING_BACKEND=http` AND any memory has `vectorIndexEnabled`). MODEL: `nomic-embed-text` (the Ollama tag; serves nomic-embed-text-v1.5). DIM: `768`. KEY: none (optional). | HTTP-backend env vars. Dev: Ollama (`ollama pull nomic-embed-text`, batch endpoint `…/api/embed` → `{embeddings: number[][]}`). The client also accepts the OpenAI `{data:[{embedding}]}` shape and the TEI raw 2D-array shape. `EMBEDDING_MODEL` is sent verbatim to the endpoint (must match the served tag). `EMBEDDING_DIM` MUST equal the pgvector `vector(N)` column dimension (768) or embeds are rejected. No node plaintext leaves Hadron infra (privacy posture, FR-026). |
 | `EMBEDDING_MAX_BATCH` | #882 — upstream embed-batch ceiling (`src/lib/embedding/index.ts`, `withMaxBatch`) | `32` | Largest number of inputs any single upstream embed request may carry — a property of the SERVED endpoint (TEI `max_client_batch_size`; 32 on the production SageMaker endpoint). The client factory wraps both backends so an over-long node sub-batches (order-preserving concat) instead of 413ing on every retry — pre-#882 a node chunking past the ceiling could NEVER embed. Positive integer; invalid values throw at first client construction. |

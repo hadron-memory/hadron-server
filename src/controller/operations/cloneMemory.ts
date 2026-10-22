@@ -1,4 +1,5 @@
-import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
+import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
 import { NOT_DECISION_FAMILY_WHERE } from '../../lib/decisions/index.js';
@@ -123,6 +124,8 @@ export interface CloneMemoryArgs {
   groupOwnerUserId: string | null;
   /** Audit attribution for createdBy columns. */
   actorId: string | null;
+  /** #2167 — memories the copier may read (`getAccessibleMemoryIds`); `null` = unrestricted. */
+  copierReadableMemoryIds: ReadableMemoryIds;
 }
 
 export interface CloneMemoryResult {
@@ -198,8 +201,10 @@ export async function cloneMemoryGraph(
       const selectedNodes = await tx.node.findMany({
         // #1641 §3.2 — nor decisions or their logs: a copy would mint decisions
         // no decision operation wrote, under codes that belong to the source log.
-        where: { memoryId: source.id, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE }, AND: [NOT_DECISION_FAMILY_WHERE] },
+        where: { memoryId: source.id, deletedAt: null, nodeType: { notIn: [COMMENT_NODE_TYPE, COMPILED_BOOT_PROMPT_NODE_TYPE] }, AND: [NOT_DECISION_FAMILY_WHERE] },
       });
+      // #2043 (cor:agt:040:11) — a worker session's copy never writes a boot prompt.
+      await assertNoBootPromptRowsForWorkerSession(tx, source.id, 'clone');
       // A raw writer may have changed a stamped source without advancing its
       // revision. Reconcile and refetch stamped rows before the destination
       // insert can certify a stale claim against freshly copied content.
@@ -355,8 +360,11 @@ export async function cloneMemoryGraph(
       if (edgeRows.length > 0) {
         await tx.edge.createMany({ data: edgeRows, skipDuplicates: true });
       }
+      // #2167 — every copied tag is an added tag, checked after the URN rewrite.
+      const copiedIds = nodeRows.map((r) => r.id as string);
+      await assertCopiedIncludesWritable(tx, copiedIds, memoryId, args.copierReadableMemoryIds);
       // #2040 — the copies' include edges are re-derived from their content.
-      await resyncDerivedIncludesForNodes(tx, nodeRows.map((r) => r.id as string));
+      await resyncDerivedIncludesForNodes(tx, copiedIds);
 
       // ── PendingEdges ───────────────────────────────────────────────────
       // targetId is a free-form string (not a FK). Loc/URN-keyed references

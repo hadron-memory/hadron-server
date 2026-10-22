@@ -1,0 +1,199 @@
+#!/bin/bash
+# worker-auto-shed — PreCompact(auto) hook: turn an imminent auto-compaction into
+# a SHED (fresh session via worker-supervise) instead of a lossy compression.
+# Context: Ada's 2026-10-10 compression-induced routing mistakes; Holger's ask
+# "if we can catch it, could we do a shed instead?"; pilot on Dan (dan-t1).
+#
+# Why kill-and-relaunch, not block-and-instruct: a PreCompact hook can BLOCK
+# compaction (exit 2 / decision:block) but its output NEVER reaches the agent
+# (stderr is user-facing only; no additionalContext on this event) — so the
+# agent cannot be told to write its handoff. It CAN, however, snapshot the
+# transcript and stop the process; worker-supervise then relaunches within
+# seconds with the prompt file below, and the fresh agent rebuilds from
+# durable state (boot briefing, chat watermark, handoff/shed nodes) instead
+# of a compressed transcript. The snapshot preserves everything for mining.
+#
+# Rails: fires on trigger=auto ONLY (manual /compact stays the human's/agent's
+# own call); a 10-minute cooldown per worktree prevents restart loops; every
+# action logs to auto-shed.log.
+set -u
+STATE_DIR="$HOME/.local/state/hadron-worker-shed"
+LOG="$STATE_DIR/auto-shed.log"
+# The recovery prompt worker-supervise delivers as the first message. A function
+# so it can be printed (--print-prompt) without any of the hook's side effects,
+# and so the emitted text and the QA'd text are the same code path.
+# Ladder (#1958): bound-open -> whoami --check and carry on; unbound only ->
+# `session start` with NO --as (MCP: hadron_resume_session()); CHOOSE asks the
+# HUMAN; exit 5 is still-bound OR RESUME_REFUSED; a transport error is not
+# NOTHING_TO_RESUME; never --as, never a post as the human.
+emit_prompt() {
+  cat <<EOF
+You just went through an AUTOMATIC SHED: your context was about to be
+auto-compacted, and instead of a lossy compression your predecessor process
+was stopped and you were relaunched fresh. The wrapper wrote a single-use
+resume claim for your session just before the kill (60s window — it lapses
+unused if this prompt finds the binding intact, which is the normal case).
+
+Rebuild your state from the durable record, then continue your assigned work:
+1. \`hadron team session whoami --check\`. Bound and open: your worktree's
+   binding survived the relaunch — carry on; the waiting claim lapses unused;
+   do NOT start or rebind a session.
+   No binding (a fresh or lost worktree), and ONLY then: run
+   \`hadron team session start\` with NO --as (CLI v0.24.0+); MCP: call
+   \`hadron_resume_session()\` with no arguments. By exit code:
+   - 0 RESUMED/STARTED: adopt the returned briefing; a shed should RESUME the
+     same session id — report an unexpected STARTED.
+   - 2 CHOOSE: several candidates. STOP and ask the human which one, then retry
+     with --session <their chosen id>. Never select automatically.
+   - 4 NOTHING_TO_RESUME: continue with whoami plus the durable handoff below;
+     if no usable binding is found, ask the human — never bind with --as.
+   - 5: two meanings — still bound (go back to whoami; the claim is unspent) or
+     RESUME_REFUSED (the claim is spent; resolve the refusal, no force).
+   A transport or server error is NOT an absent claim: report it and retry; do
+   not treat it as NOTHING_TO_RESUME. A shed recovery never mints a session with
+   --as and never posts or records anything as the human.
+2. \`hadron team worker get <YourName>\` — re-read your boot briefing.
+3. Read the newest handoff or shed node in your working memory (sheds: and
+   handoffs: branches), and the team chat from your watermark
+   (\`hadron team chat read\` newest page; mark read).
+4. \`git status\` in your worktree — your predecessor may have been stopped
+   mid-operation; verify or clean up before continuing.
+5. Your predecessor's full transcript snapshot is in
+   $STATE_DIR/ (${name}-transcript-*.jsonl, newest) if you need a specific detail.
+6. Post one line to the team chat that you auto-shed and recovered, then carry on.
+EOF
+}
+
+# --print-prompt <name>: print the recovery prompt this hook would write for a
+# worktree called <name>, then exit. SIDE-EFFECT-FREE by construction: it runs
+# before the state dir is created, before any log line, before stdin is read, and
+# before any claim, snapshot, prompt file, signal or hadron call.
+if [ "${1:-}" = "--print-prompt" ]; then
+  name=${2:-}
+  [ -n "$name" ] || { echo "usage: worker-auto-shed --print-prompt <worktree-name>" >&2; exit 2; }
+  emit_prompt
+  exit 0
+fi
+
+mkdir -p "$STATE_DIR"
+
+# Wedge guard (Marco incident 2026-10-13: a PreCompact invocation left this
+# read hanging forever — frozen TUI, no log line, worker silent 5h). A read
+# that never completes must time out and let the hook exit (hook failure is
+# benign next to wedging the agent's UI thread indefinitely).
+input=$(timeout 10 cat)
+trigger=$(printf '%s' "$input" | jq -r '.trigger // empty' 2>/dev/null)
+cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
+transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
+ts() { date -u +%FT%TZ; }
+log() { printf '%s %s\n' "$(ts)" "$1" >>"$LOG"; }
+
+if [ "$trigger" != "auto" ]; then
+  log "skip: trigger=$trigger (manual /compact untouched)"
+  exit 0
+fi
+[ -n "$cwd" ] || { log "skip: no cwd in hook input"; exit 0; }
+name=$(basename "$cwd")
+
+# Cooldown: never shed the same worktree twice within 10 minutes.
+stamp="$STATE_DIR/${name}.last-auto-shed"
+if [ -f "$stamp" ] && [ $(( $(date +%s) - $(stat -c %Y "$stamp") )) -lt 600 ]; then
+  log "skip: $name shed within the last 10 minutes (loop guard)"
+  exit 0
+fi
+touch "$stamp"
+
+# Safety net: the full transcript survives, timestamped, for mining/audit.
+if [ -n "$transcript" ] && [ -f "$transcript" ]; then
+  cp "$transcript" "$STATE_DIR/${name}-transcript-$(date -u +%Y%m%dT%H%M%SZ).jsonl" 2>>"$LOG"
+  log "$name: transcript snapshot taken ($transcript)"
+fi
+
+# Resume claim (#1958, Holger's ruling — the standalone form is FOR a shed:
+# "a deliberate context reset that keeps the session open"). Written BEFORE
+# the kill so a fresh context that somehow lost the worktree binding can
+# still resume via `session start` with no --as within 60s. In the normal
+# same-worktree relaunch the binding already carries the worker and the
+# claim lapses on its own — pure insurance, no downside. A failed write
+# never blocks the shed: binding recovery still works.
+claim_out=$(cd "$cwd" && hadron team session resume-claim 2>&1)
+if [ $? -eq 0 ]; then
+  log "$name: resume claim written (60s window; lapses unused)"
+else
+  log "$name: resume claim write FAILED (continuing — binding recovery stands): $claim_out"
+fi
+
+# Mechanical handoff (hadron-server#2131): a PreCompact hook cannot ask the
+# agent for a handoff, so write one FROM the transcript before the kill.
+# Skipped in DRY mode; any failure is logged and never blocks the shed.
+if [ "${WORKER_AUTO_SHED_DRY:-0}" != "1" ] && [ -x "$HOME/.local/bin/worker-auto-shed-handoff" ]; then
+  ho_out=$("$HOME/.local/bin/worker-auto-shed-handoff" "$cwd" "$transcript" 2>&1 | tail -3)
+  log "$name: auto handoff attempted: $ho_out"
+fi
+
+
+emit_prompt > "$STATE_DIR/${name}.prompt"
+log "$name: recovery prompt written"
+
+if [ "${WORKER_AUTO_SHED_DRY:-0}" = "1" ]; then
+  rm -f "$STATE_DIR/${name}.prompt"
+  log "$name: DRY RUN — would now stop the claude process (prompt removed: no kill happens)"
+  exit 0
+fi
+
+# Find and stop the claude process that owns this hook. Primary signal:
+# CLAUDE_PID — exported by Claude Code itself, the same mechanism as the
+# working self-serve /shed path. Fallback: walk /proc ancestry matching
+# CMDLINE, never exe — claude is a native ELF at a versioned path
+# (.../claude/versions/<ver>) that an exe glob can never match, which is why
+# the original walk killed nothing on 20/20 fires (DEFECT record, 2026-10-12,
+# in hadron-dev-team-shared:tasks:trim-context-clear-and-recover). Both paths
+# verify the target's argv0 so a recycled pid or a neighbouring process
+# (router node, shells) can never be killed by mistake.
+is_claude_pid() {
+  tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null | head -1 \
+    | grep -qE '(^|/)claude(-worker|-glm)?$'
+}
+stop_pid() {
+  # Supervision guard (Jonas 2026-10-12, Charles 2026-10-13: killing an agent
+  # whose terminal has NO worker-supervise wrapper strands the worker in the
+  # dark — nothing relaunches it. In that case the correct action is to let
+  # the lossy compaction proceed: compaction is recoverable, a dark worker is
+  # not. The prompt file is removed too (the booby-trap rule: no kill, no
+  # prompt).
+  local q=$1
+  for _ in $(seq 1 8); do
+    q=$(awk '{print $4}' /proc/$q/stat 2>/dev/null) || break
+    [ -z "$q" ] || [ "$q" = "0" ] && break
+    if tr '\0' ' ' < /proc/$q/cmdline 2>/dev/null | grep -q 'worker-supervise'; then
+      log "$name: stopping claude pid $1 (cmdline-verified, supervised)"
+      kill "$1" 2>>"$LOG"
+      return 0
+    fi
+  done
+  rm -f "$STATE_DIR/${name}.prompt"
+  log "$name: skip kill — no worker-supervise wrapper in ancestry (would strand the worker; Jonas/Charles class); prompt removed, letting compaction proceed"
+  exit 0
+}
+if [ -n "${CLAUDE_PID:-}" ] && [ "$CLAUDE_PID" -gt 0 ] 2>/dev/null \
+   && [ "$CLAUDE_PID" != "$$" ] && kill -0 "$CLAUDE_PID" 2>/dev/null \
+   && is_claude_pid "$CLAUDE_PID"; then
+  stop_pid "$CLAUDE_PID"
+  exit 0
+fi
+p=$$
+for _ in $(seq 1 6); do
+  p=$(awk '{print $4}' /proc/$p/stat 2>/dev/null) || break
+  [ -z "$p" ] || [ "$p" = "0" ] && break
+  if [ "$p" -gt 1 ] 2>/dev/null && kill -0 "$p" 2>/dev/null && is_claude_pid "$p"; then
+    stop_pid "$p"
+    exit 0
+  fi
+done
+# Booby-trap fix (Hugo finding, 2026-10-13): the prompt above was written
+# optimistically. No confirmed kill means NO shed happened — a live wrapper
+# must never feed this file as a false auto-shed recovery at the next agent
+# exit, so remove it before leaving.
+rm -f "$STATE_DIR/${name}.prompt"
+log "$name: ERROR — no claude process found (CLAUDE_PID unset/unverified, ancestry miss); no kill, stale prompt removed"
+exit 0

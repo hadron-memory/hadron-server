@@ -25,9 +25,13 @@
  * one call (ADMIN -> ALL-role, -> ordinary, -> cleared) and edit or delete it
  * as an ordinary node afterwards; checking only the prior role lets a member
  * promote a node into a governed role. A same-role edit is both at once, so a
- * member cannot rewrite an ADMIN node's body either. The runnable signal needs
- * no special case: flipping `isRunnable` on a node that carries the role is an
- * edit of that node.
+ * member cannot rewrite an ADMIN node's body either.
+ *
+ * ## State, not only role
+ *
+ * The rule keys a node is judged under come from its full state before and after the write: its role, and the `task`
+ * key when it is runnable (`governedKindsOf`). Writes of a node's outgoing edges are judged on the source node's state
+ * ({@link assertEdgeSourceWriters}).
  *
  * ## Callers
  *
@@ -55,7 +59,22 @@ export type RoleWriterChange = {
   priorRole: string | null | undefined;
   /** The node's role after the write (the merged result). */
   nextRole: string | null | undefined;
+  /** Whether the node was runnable before the write. */
+  priorRunnable?: boolean | null;
+  /** Whether the node is runnable after the write (the merged result). */
+  nextRunnable?: boolean | null;
 };
+
+/** The rule key a runnable node is judged under. */
+const RUNNABLE_RULE_KEY = 'task';
+
+/** The rule keys a node state is judged under. */
+function ruleKeysOf(role: string | null | undefined, runnable: boolean | null | undefined): string[] {
+  const keys: string[] = [];
+  if (role) keys.push(role);
+  if (runnable === true && role !== RUNNABLE_RULE_KEY) keys.push(RUNNABLE_RULE_KEY);
+  return keys;
+}
 
 /** The writer level needs an audience the caller is not in. */
 export class RoleWriterLevelError extends GraphQLError {
@@ -113,8 +132,11 @@ export async function roleWritersRefusal(
   change: RoleWriterChange,
 ): Promise<RoleWriterLevelError | RoleWritersUnsupportedError | null> {
   const sides: Array<['before' | 'after', string]> = [];
-  if (change.priorRole) sides.push(['before', change.priorRole]);
-  if (change.nextRole && change.nextRole !== change.priorRole) sides.push(['after', change.nextRole]);
+  const before = ruleKeysOf(change.priorRole, change.priorRunnable);
+  for (const key of before) sides.push(['before', key]);
+  for (const key of ruleKeysOf(change.nextRole, change.nextRunnable)) {
+    if (!before.includes(key)) sides.push(['after', key]);
+  }
   if (sides.length === 0) return null;
 
   const config = await db.memoryConfig.findUnique({ where: { memoryId }, include: { rules: true } });
@@ -156,18 +178,45 @@ export function roleWriterRefusalText(e: unknown): string | null {
 export async function assertRoleWritersForNodes(
   tx: Prisma.TransactionClient,
   principal: RoleWriterPrincipal,
-  nodes: ReadonlyArray<{ role: string | null | undefined }>,
+  nodes: ReadonlyArray<{ role: string | null | undefined; isRunnable?: boolean | null }>,
   memoryIds: { from: string; to?: string },
   opts: { platformWrite?: boolean } = {},
 ): Promise<void> {
   if (opts.platformWrite === true) return;
-  const roles = [...new Set(nodes.map((n) => n.role).filter((r): r is string => !!r))].sort();
-  for (const role of roles) {
-    await assertRoleWritersForWrite(tx, principal, memoryIds.from, { priorRole: role, nextRole: role });
+  // Judged as distinct (role, runnable) states so one rulebook read serves the batch.
+  const states = new Map<string, { role: string | null; runnable: boolean }>();
+  for (const n of nodes) {
+    const role = n.role || null;
+    const runnable = n.isRunnable === true;
+    if (!role && !runnable) continue;
+    states.set(`${role ?? ''}\u0000${runnable}`, { role, runnable });
+  }
+  for (const key of [...states.keys()].sort()) {
+    const { role, runnable } = states.get(key)!;
+    await assertRoleWritersForWrite(tx, principal, memoryIds.from, {
+      priorRole: role, nextRole: role, priorRunnable: runnable, nextRunnable: runnable,
+    });
     if (memoryIds.to && memoryIds.to !== memoryIds.from) {
-      await assertRoleWritersForWrite(tx, principal, memoryIds.to, { priorRole: null, nextRole: role });
+      await assertRoleWritersForWrite(tx, principal, memoryIds.to, {
+        priorRole: null, nextRole: role, priorRunnable: false, nextRunnable: runnable,
+      });
     }
   }
+}
+
+/**
+ * Writer level for an edge write, judged under the rulebook lock. No edge writer moves an edge's source, so the
+ * source's state is the same on both sides.
+ */
+async function assertEdgeSourceWriters(
+  tx: Prisma.TransactionClient,
+  principal: RoleWriterPrincipal,
+  memoryId: string,
+  opts: { platformWrite?: boolean } = {},
+): Promise<void> {
+  await assertRoleWritersForWrite(tx, principal, memoryId, {
+    priorRole: null, nextRole: null, priorRunnable: true, nextRunnable: true,
+  }, opts);
 }
 
 /**
@@ -182,9 +231,54 @@ export async function assertRoleWritersForWrite(
   opts: { platformWrite?: boolean } = {},
 ): Promise<void> {
   if (opts.platformWrite === true) return;
-  // A write with no role on either side never loads a rulebook.
-  if (!change.priorRole && !change.nextRole) return;
+  // A write with no role and no runnable signal on either side never loads a rulebook.
+  if (!change.priorRole && !change.nextRole && change.priorRunnable !== true && change.nextRunnable !== true) return;
   await lockMemoryConfigShared(tx, memoryId);
   const refusal = await roleWritersRefusal(tx, principal, memoryId, change);
   if (refusal) throw refusal;
+}
+
+/**
+ * The same check, taking the source node by id. Locks the source row `FOR SHARE` (a concurrent change of its state
+ * takes the row `FOR UPDATE`, so it commits first and is seen, or waits for this write) and judges its state as
+ * committed. A source that needs no rule never loads a rulebook. Node-row locks come before the rulebook lock.
+ */
+export async function assertEdgeSourceWritersById(
+  tx: Prisma.TransactionClient,
+  principal: RoleWriterPrincipal,
+  sourceNodeId: string,
+  opts: { platformWrite?: boolean } = {},
+): Promise<void> {
+  if (opts.platformWrite === true) return;
+  const [row] = await tx.$queryRaw<Array<{ memory_id: string; is_runnable: boolean | null }>>`
+    SELECT memory_id, is_runnable FROM nodes WHERE id = ${sourceNodeId} FOR SHARE`;
+  if (!row || row.is_runnable !== true) return;
+  await assertEdgeSourceWriters(tx, principal, row.memory_id, opts);
+}
+
+/**
+ * Lock an edge for update or delete under its source's writer level, in the node-then-edge order. The source id is read
+ * without a lock, the source node is locked `FOR SHARE` and judged ({@link assertEdgeSourceWritersById}), then the edge
+ * row is locked and its source re-read. A source that changed meanwhile is refused with `NODE_WRITE_CONFLICT` (judging
+ * a new node while holding the edge row would reverse the lock order) and the caller re-runs. Returns null when the
+ * edge does not exist.
+ */
+export async function lockEdgeUnderSourceWriters(
+  tx: Prisma.TransactionClient,
+  principal: RoleWriterPrincipal,
+  edgeId: string,
+  opts: { platformWrite?: boolean } = {},
+): Promise<{ id: string; source_id: string; deleted_at: Date | null } | null> {
+  const [pre] = await tx.$queryRaw<Array<{ source_id: string }>>`SELECT source_id FROM edges WHERE id = ${edgeId}`;
+  if (!pre) return null;
+  await assertEdgeSourceWritersById(tx, principal, pre.source_id, opts);
+  const [locked] = await tx.$queryRaw<Array<{ id: string; source_id: string; deleted_at: Date | null }>>`
+    SELECT id, source_id, deleted_at FROM edges WHERE id = ${edgeId} FOR UPDATE`;
+  if (!locked) return null;
+  if (locked.source_id !== pre.source_id) {
+    throw new GraphQLError('The edge changed source while the write was running; re-run it.', {
+      extensions: { code: 'NODE_WRITE_CONFLICT' },
+    });
+  }
+  return locked;
 }

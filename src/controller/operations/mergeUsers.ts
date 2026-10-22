@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto';
 import { GraphQLError } from 'graphql';
+import { lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
 import { consumeUserMergeConsent, mergeConsentAlreadyApplied } from '../../lib/userMergeConsent.js';
 import { Prisma, type PrismaClient, type User } from '../../generated/prisma/index.js';
 import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js';
@@ -305,6 +306,9 @@ async function runMergeTxn(
     // in the GraphQL layer, but the rows are rechecked after the lock so a
     // concurrent soft-delete cannot be merged through. Parameterized template
     // (not $queryRawUnsafe) so the ids are bound, never interpolated.
+    // #1631 PR3: the source's authority anchor (anchors before row locks, as deleteUserAccount takes them), so a
+    // passkey registration can't race the live-passkey refusal below.
+    await lockAuthorityAnchors(tx, [{ kind: 'user', id: sourceUserId }], 'exclusive');
     await tx.$queryRaw`SELECT id FROM users WHERE id IN (${sourceUserId}, ${targetUserId}, ${actorUserId ?? ''}) ORDER BY id FOR UPDATE`;
     const [source, target] = await Promise.all([
       tx.user.findUnique({ where: { id: sourceUserId } }),
@@ -316,6 +320,13 @@ async function runMergeTxn(
     const actorRow = actorUserId ? await tx.user.findUnique({ where: { id: actorUserId } }) : null;
     if (!actorRow || actorRow.deletedAt || !actorRow.roles.some(r => r === 'ADMIN' || r === 'OWNER'))
       throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+    // A passkey's owner never changes (cor:aut:040:05), so a merge can't carry one. While the source holds a live
+    // (unrevoked) passkey the merge is refused; the user revokes them first (Holger, 2026-10-21, team chat #29507).
+    const livePasskeys = await tx.passkeyCredential.count({ where: { ownerId: sourceUserId, revokedAt: null } });
+    if (livePasskeys > 0) {
+      throw new GraphQLError('The source account still holds a passkey. Revoke its passkeys before merging.',
+        { extensions: { code: 'MERGE_SOURCE_HAS_PASSKEYS', passkeyCount: livePasskeys } });
+    }
     const consent = await consumeUserMergeConsent(tx, consentProof, sourceUserId, targetUserId, actorUserId);
     await refuseUsersInOpenAlarmChains(tx, sourceUserId, targetUserId);
 
@@ -537,8 +548,23 @@ async function runMergeTxn(
     // source), not interpolated. See #665.
     const runWithIds = (sql: string) => tx.$executeRawUnsafe(sql, targetUserId, sourceUserId);
 
+    // #1897 (Bindi P2-1, #2116): what descends from a sign-in is bound to the
+    // sign-in's own user by composite FKs, and a sign-in's owner never changes,
+    // so a lineage key or code cannot follow the merge. They stay on the
+    // soft-deleted source, dead: the source's sign-ins end, its lineage keys
+    // are revoked and its unspent lineage codes are dropped. Rows with no
+    // lineage (legacy, direct issuance) are retargeted below as before.
+    await tx.$executeRaw`UPDATE sign_ins SET ended_at = CURRENT_TIMESTAMP, end_reason = 'user-merged'
+      WHERE user_id = ${sourceUserId} AND ended_at IS NULL`;
+    await tx.$executeRaw`UPDATE user_api_keys SET revoked_at = CURRENT_TIMESTAMP
+      WHERE user_id = ${sourceUserId} AND origin_sign_in_id IS NOT NULL AND revoked_at IS NULL`;
+    await tx.$executeRaw`DELETE FROM auth_codes WHERE user_id = ${sourceUserId} AND sign_in_id IS NOT NULL`;
+    await tx.$executeRaw`DELETE FROM auth_handoff_codes WHERE user_id = ${sourceUserId} AND sign_in_id IS NOT NULL`;
+
     // Non-conflicting ownership, attribution, credential, and history links.
-    const directReferences: ReadonlyArray<readonly [string, string]> = [
+    // An optional third element names a lineage column: rows that carry one stay
+    // put (see the #1897 note above).
+    const directReferences: ReadonlyArray<readonly [string, string] | readonly [string, string, string]> = [
       ['memories', 'user_id'],
       ['sessions', 'user_id'],
       ['usage_events', 'user_id'],
@@ -547,9 +573,9 @@ async function runMergeTxn(
       ['exchange_connections', 'user_id'],
       ['connection_grants', 'granted_by_user_id'],
       ['principal_grants', 'principal_id'],
-      ['user_api_keys', 'user_id'],
-      ['auth_codes', 'user_id'],
-      ['auth_handoff_codes', 'user_id'],
+      ['user_api_keys', 'user_id', 'origin_sign_in_id'],
+      ['auth_codes', 'user_id', 'sign_in_id'],
+      ['auth_handoff_codes', 'user_id', 'sign_in_id'],
       ['app_runs', 'user_id'],
       ['agent_schedules', 'user_id'],
       ['agent_webhooks', 'user_id'],
@@ -574,8 +600,9 @@ async function runMergeTxn(
       ['worker_availability', 'set_by_user_id'],
       ['model_family_availability', 'set_by_user_id'],
     ];
-    for (const [table, column] of directReferences) {
-      await runWithIds(`UPDATE "${table}" SET "${column}" = $1 WHERE "${column}" = $2`);
+    for (const [table, column, lineage] of directReferences) {
+      const unlineaged = lineage ? ` AND "${lineage}" IS NULL` : '';
+      await runWithIds(`UPDATE "${table}" SET "${column}" = $1 WHERE "${column}" = $2${unlineaged}`);
     }
 
     // Audit actor ids are identity references in several authorization and

@@ -15,11 +15,34 @@ these reads yet. No include-retention/coverage/maintenance state is activated.
 | Skill / selected-skill per-node plan transaction (dependent cut 2) | fresh authority; selected row lock before JSON size/properties; prepared reconcile | 60s / 15s |
 | Spec renumber standalone prereconcile (dependent cut 2) | fresh write gate; prepared reconcile before later independent CAS rewrite | 5s / 2s |
 
-All four use the exclusive first-statement fence at READ COMMITTED, before
-node locks. Authority is re-read after the fence wait on the same transaction client,
+The first four entries share `withReconciledNodeRead`. The two standalone
+entries still always take the exclusive fence before their prune-capable work. An unchanged row is checked and
+projected in one **read-only REPEATABLE READ** snapshot, without advisory or row
+locks. The fingerprint and projection cannot straddle a concurrent raw writer.
+Missing/moved/deleted rows refuse without entering a mutation transaction.
+The fast GraphQL/MCP authority adapter verifies READ ONLY / REPEATABLE READ at
+runtime, then reads live actor/key/sign-in state without credential row locks.
+MCP shares the same actor/key/root checks, concealing only typed authority
+refusals and preserving DB/transaction faults as errors.
+The write/drift authority adapter retains its credential SHARE locks; those
+locks are forbidden in a read-only transaction and must not leak into this path.
+
+Drift (including a missing fingerprint) closes the read-only transaction before
+opening the exclusive first-statement fence at READ COMMITTED, before node
+locks. Authority is re-read after the fence wait on the same transaction client,
 including current user roles and the child memory used for inherited reads.
-Existing memory/address/liveness gates and final projection logic stay in place. The prepared read entry rejects forged/raw/escaped contexts;
-legacy snapshot entry points are not its fallback.
+Revision state is rechecked under the fence; another reader may already have
+reconciled it. Parent-version checks precede reconciliation, with the existing
+Node row lock on this slow path only. Existing memory/address/liveness gates
+and final projection logic stay in place. The prepared entry rejects
+forged/raw/escaped contexts; legacy snapshot entry points are not its fallback.
+The batch's final access-filtered refetch remains outside its per-row transaction;
+this does not provide a whole-batch snapshot.
+
+The budgets above apply per transaction, not to both phases combined. Drift
+readers still serialize globally and can hold the fence during a Node row-lock
+wait; unchanged readers no longer queue behind them. This is not a production
+throughput guarantee or a reduction of the T3/§10 caller-integration scope.
 
 ## Remaining participants
 
@@ -52,6 +75,10 @@ can outlive the transaction. Callers do no external work under this fence.
 This records source call sites (including internal bridge calls), not a claim
 of independently reviewed complete migration. The accompanying static pin
 requires every API use to remain classified when later code adds or moves one.
+The four migrated sites now call `withReconciledNodeRead` (two query sites,
+one parent, one MCP); its single slow-path call to
+`reconcileNodeWithIncludeHistory` is also counted. The historical listing below
+records the remaining base sites; the JSON census is the current exact map.
 
 ```text
 src/api/graphql/schema/resolvers.decisions.ts :: ensureCurrentNodeRevisionInTransaction (2 call sites)
@@ -63,11 +90,11 @@ src/api/graphql/schema/resolvers.mutation.node.ts :: ensureCurrentNodeRevisionIn
 src/api/graphql/schema/resolvers.mutation.node.ts :: tx.nodeRevision.deleteMany (1 call sites)
 src/api/graphql/schema/resolvers.mutation.session.ts :: createNodeRevision (1 call sites)
 src/api/graphql/schema/resolvers.mutation.session.ts :: ensureCurrentNodeRevisionInTransaction (1 call sites)
-src/api/graphql/schema/resolvers.query.node.ts :: reconcileNodeWithIncludeHistory (2 call sites)
+src/api/graphql/schema/resolvers.query.node.ts :: withReconciledNodeRead (2 call sites)
 src/api/graphql/schema/resolvers.query.skill.ts :: reconcileNodeWithIncludeHistory (1 call sites)
 src/api/graphql/schema/resolvers.searchReplaceSpec.ts :: createNodeRevision (1 call sites)
 src/api/graphql/schema/resolvers.specCorpus.ts :: reconcileNodeWithIncludeHistory (1 call sites)
-src/api/graphql/schema/resolvers.types.ts :: reconcileNodeWithIncludeHistory (1 call sites)
+src/api/graphql/schema/resolvers.types.ts :: withReconciledNodeRead (1 call sites)
 src/controller/operations/cloneMemory.ts :: ensureCurrentNodeRevisionInTransaction (1 call sites)
 src/controller/operations/createNode.ts :: createNodeRevision (1 call sites)
 src/controller/operations/createNode.ts :: ensureCurrentNodeRevisionInTransaction (1 call sites)
@@ -76,6 +103,7 @@ src/controller/operations/mergeMemories.ts :: createNodeRevision (2 call sites)
 src/controller/operations/mergeMemories.ts :: ensureCurrentNodeRevisionInTransaction (2 call sites)
 src/integrations/github/syncGraphFromGithub.ts :: createNodeRevision (1 call sites)
 src/integrations/github/syncGraphFromGithub.ts :: ensureCurrentNodeRevisionInTransaction (2 call sites)
+src/lib/includes/reconciledNodeRead.ts :: reconcileNodeWithIncludeHistory (1 call sites)
 src/lib/nodeApproval.ts :: ensureCurrentNodeRevisionInTransaction (1 call sites)
 src/lib/nodeRevisionSnapshot.ts :: createNodeRevision (1 call sites)
 src/lib/nodeRevisionSnapshot.ts :: db.nodeRevision.deleteMany (1 call sites)
@@ -85,5 +113,5 @@ src/lib/nodeSubtreeMove.ts :: ensureCurrentNodeRevisionInTransaction (1 call sit
 src/lib/signing/requests.ts :: ensureCurrentNodeRevisionInTransaction (1 call sites)
 src/mcp/server.ts :: createNodeRevision (4 call sites)
 src/mcp/server.ts :: ensureCurrentNodeRevisionInTransaction (4 call sites)
-src/mcp/server.ts :: reconcileNodeWithIncludeHistory (1 call sites)
+src/mcp/server.ts :: withReconciledNodeRead (1 call sites)
 ```

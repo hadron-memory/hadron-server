@@ -18,7 +18,7 @@ import {
   fetchUser,
   checkOrgMembership,
   signJwt,
-  verifyJwt,
+  verifyAuthenticatedJwt,
   sendMagicLink,
   verifyMagicLink,
   buildEmailSendPerIpRateLimit,
@@ -37,16 +37,22 @@ import {
 } from './auth/index.js';
 import { issueLoginCode, redeemLoginCode } from './auth/authHandoff.js';
 import { startUserDeletionNoticeLoop } from './jobs/sendUserDeletionNotices.js';
+import { startPasskeyRegistrationNoticeLoop } from './jobs/sendPasskeyRegistrationNotices.js';
 import {
   createPendingLoginState,
   claimPendingLoginState,
   type ClaimResult,
+  type ClaimedLoginState,
   type LoginProvider,
   type PendingLoginState,
 } from './auth/pendingLoginState.js';
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
+import { beginPasskeySignIn, mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
+import { signingSurfacePolicy } from './lib/signing/surface.js';
+import { completeCeremonyLeg, mountFreshSignInRoutes } from './api/freshSignInRoutes.js';
+import { googleReauthenticatedSince } from './auth/google.js';
 import {
   oauthSurfaceRefusal,
   oauthSurfaceRefusalMessage,
@@ -58,8 +64,10 @@ import { assertProductionSigningSecret } from './auth/signingSecret.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
 import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
+import { taskWarningsPlugin } from './api/graphql/taskWarningsPlugin.js';
 import { requireOrgRole, requireSessionWriteAccess } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
+import { querySourceCap, readGraphqlAdmissionConfig } from './api/graphql/admission.js';
 import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
 import {
   formatGraphQLError,
@@ -119,6 +127,7 @@ import {
 } from './integrations/googleDrive/auth.js';
 import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
 import { preserveHeartbeatIfLapsed } from './lib/sessionActivity.js';
+import { INDEXED_MEMORY_WHERE } from './lib/embedding/indexing.js';
 
 /**
  * #557: named once, because the raw-body capture in the body parser and the
@@ -325,7 +334,7 @@ export async function createServer(): Promise<Express> {
     res: express.Response,
     state: string,
     provider: LoginProvider,
-  ): Promise<PendingLoginState | null> => {
+  ): Promise<ClaimedLoginState | null> => {
     let claim: ClaimResult;
     try {
       claim = await claimPendingLoginState(state, provider);
@@ -429,6 +438,16 @@ export async function createServer(): Promise<Express> {
         }
       }
       phase = 'internal_error';
+
+      // #1631 PR1b: a passkey ceremony's sign-in leg. Look up by the GitHub id only: a username can be renamed
+      // and re-registered by someone else, and the leg must never link or create (Ruth §10 condition 3).
+      if (pending.ceremonyNonceHash) {
+        await completeCeremonyLeg(req, res, {
+          provider: 'github', ceremonyNonceHash: pending.ceremonyNonceHash,
+          lookup: () => db.user.findFirst({ where: { githubId: ghUser.id, deletedAt: null }, select: { id: true } }),
+        });
+        return;
+      }
 
       // Upsert user — first check by githubUsername to handle seed data
       // that may have a placeholder githubId
@@ -639,6 +658,19 @@ export async function createServer(): Promise<Express> {
       const identity = await verifyGoogleIdToken(idToken);
       phase = 'internal_error';
 
+      // #1631 PR1b: a passkey ceremony's sign-in leg. Google was asked to re-authenticate (max_age=0, R154), so an
+      // auth_time older than this leg refuses. Lookup by the Google id only: no email link, no creation.
+      if (pending.ceremonyNonceHash) {
+        const reauthenticated = googleReauthenticatedSince(identity.authTime, pending.startedAt);
+        await completeCeremonyLeg(req, res, {
+          provider: 'google', ceremonyNonceHash: pending.ceremonyNonceHash,
+          lookup: async () => reauthenticated
+            ? db.user.findFirst({ where: { googleId: identity.sub, deletedAt: null }, select: { id: true } })
+            : null,
+        });
+        return;
+      }
+
       // Match order per #581: by googleId → by verified email (link) → create.
       const user = await resolveGoogleUser(identity);
 
@@ -782,6 +814,16 @@ export async function createServer(): Promise<Express> {
       const identity = await verifyAppleIdToken(idToken);
       phase = 'internal_error';
 
+      // #1631 PR1b: a passkey ceremony's sign-in leg. Lookup by the Apple id only: no email link, no creation.
+      // Apple offers no re-authentication request, so a silent Apple session is accepted (R154 known limit).
+      if (pending.ceremonyNonceHash) {
+        await completeCeremonyLeg(req, res, {
+          provider: 'apple', ceremonyNonceHash: pending.ceremonyNonceHash,
+          lookup: () => db.user.findFirst({ where: { appleId: identity.sub, deletedAt: null }, select: { id: true } }),
+        });
+        return;
+      }
+
       // First-authorization-only name capture; null on every later login.
       const name = parseAppleUserField(userField);
 
@@ -901,6 +943,9 @@ export async function createServer(): Promise<Express> {
     },
   );
 
+  // #1897 B1: read once, at mount, with the routes it pairs with (restart semantics are #1895's).
+  const passkeySignInOn = signingSurfacePolicy().registration;
+
   app.get('/auth/email/verify', async (req, res) => {
     const { token, redirect: redirectParam, return_to: returnToRaw } = req.query as {
       token?: string;
@@ -980,6 +1025,23 @@ export async function createServer(): Promise<Express> {
       // onboarding hint only.
       const isNew = user.createdAt.getTime() >= startedAt;
 
+      // #1897 slice B1 (cor:aut:030:02): with the registration switch on, a magic link alone signs nobody in.
+      // The account exists as above (R82), but no handoff code, JWT, cookie or key is published until the
+      // person's passkey completes the server-hosted step. The portal continuation carries the ORIGINAL
+      // clientStateHash through unchanged. A user with no usable passkey gets the same fixed refusal as a bad
+      // token: enrollment is B2, and signing in without the factor is never the fallback.
+      if (passkeySignInOn) {
+        const dest = redirectParam && isServerLocalPath(redirectParam) ? redirectParam : '/';
+        const begun = await beginPasskeySignIn(req, res, {
+          userId: user.id,
+          continuation: isOptionC
+            ? { kind: 'OAUTH', returnTo: returnTo! }
+            : { kind: 'PORTAL', clientStateHash: result.clientStateHash, redirect: dest, isNew },
+        });
+        if (!begun) res.status(400).json({ error: 'Invalid or expired token' });
+        return;
+      }
+
       // #804 Option-C: same contract as the github/google/apple callbacks —
       // set the JWT as an HttpOnly `hadron_token` cookie on THIS server's
       // origin and 302 to the validated server-local return_to (the original
@@ -1046,6 +1108,8 @@ export async function createServer(): Promise<Express> {
   // NODE_ENV + localhost Host; otherwise indistinguishable from a 404).
   mountDevLoginRoutes(app, db);
   mountPasskeyCeremonyRoutes(app);
+  mountPasskeySignInRoutes(app);
+  mountFreshSignInRoutes(app, { emailSendPerIpRateLimit, emailRecipientRateLimit });
 
   // #477 Sink 1 — login handoff exchange. The portal's server `load` (NOT the
   // browser) POSTs the one-time code from /auth/callback?code=… here and gets
@@ -1080,6 +1144,7 @@ export async function createServer(): Promise<Express> {
     // authoritative user row (roles may have changed since the code was issued).
     const jwt = await signJwt({
       login: redeemed.login,
+      ...(redeemed.signInId ? { sid: redeemed.signInId } : {}),
       sub: user.id,
       roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
       ...(user.githubUsername ? { githubUsername: user.githubUsername } : {}),
@@ -1097,7 +1162,7 @@ export async function createServer(): Promise<Express> {
       return;
     }
     try {
-      const payload = await verifyJwt(authHeader.slice(7));
+      const payload = await verifyAuthenticatedJwt(authHeader.slice(7), db);
       // Admin impersonation: this endpoint bypasses resolveAuthContext (and so
       // the session-row re-validation), so an impersonation token is rejected
       // outright rather than echoing the target's profile.
@@ -1135,15 +1200,22 @@ export async function createServer(): Promise<Express> {
   // ---------------------------------------------------------------------------
 
   const { typeDefs, resolvers: deploymentResolvers } = deploymentSchema();
+  // hadron-internal#3 L1-L3: fleet-wide bounds on every client-supplied document,
+  // read here so a malformed value refuses boot.
+  const admission = readGraphqlAdmissionConfig();
   const apollo = new ApolloServer({
     // #2087: concealed errors must not depend on the deployment's NODE_ENV.
     includeStacktraceInErrorResponses: false,
     typeDefs,
     resolvers: deploymentResolvers,
-    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin],
+    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin],
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.
     formatError: formatGraphQLError,
+    // L2: graphql-js aborts the lexer at this many tokens (GRAPHQL_PARSE_FAILED, 400).
+    parseOptions: { maxTokens: admission.maxTokens },
+    // L3: Apollo's document-level rule, fragments expanded and memoized (GRAPHQL_VALIDATION_FAILED, 400).
+    maxRecursiveSelections: admission.maxSelections,
   });
   await apollo.start();
 
@@ -1193,6 +1265,8 @@ export async function createServer(): Promise<Express> {
 
   app.use(
     '/graphql',
+    // L1 (hadron-internal#3): the query source bound, before anything else runs.
+    querySourceCap(admission.maxQueryBytes),
     // Spec 041: establish the request-scoped key store BEFORE Apollo so the
     // context builder and every resolver run inside it. Keys staged here are
     // invisible to concurrent requests and vanish with the request's async
@@ -1834,6 +1908,12 @@ export async function createServer(): Promise<Express> {
     startUserDeletionNoticeLoop(db);
   }
 
+  // #1631 PR2 — send every passkey registration's email notice (restart-safe outbox). Dark with the
+  // registration switch: nothing registers while it is off, so the loop doesn't run either.
+  if (process.env.NODE_ENV !== 'test' && signingSurfacePolicy().registration) {
+    startPasskeyRegistrationNoticeLoop(db);
+  }
+
   // Background job: purge soft-deleted assets past their 24h recovery
   // window (object first, then the row). Before this the janitor had no
   // schedule at all — it only ran when someone invoked the file by hand,
@@ -1920,7 +2000,7 @@ export async function createServer(): Promise<Express> {
       console.error('[embed-worker] failed to start bus listener (sweep continues):', err);
     });
     void db.memory
-      .count({ where: { vectorIndexEnabled: true, deletedAt: null } })
+      .count({ where: { ...INDEXED_MEMORY_WHERE, deletedAt: null } })
       .then((n) => {
         if (n > 0 && !isEmbeddingConfigured()) {
           console.warn(

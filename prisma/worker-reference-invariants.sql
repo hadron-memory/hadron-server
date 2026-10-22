@@ -174,3 +174,15 @@ DROP FUNCTION IF EXISTS worker_reference_fence_cleanup_1162();
 DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "worker_wake_acks";
 CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "worker_wake_acks"
   FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id', 'w:$.acked_by_worker_id');
+
+-- #2022: the stop signals' target worker and the coverage ledger's worker join the closed #1162 fence inventory.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "team_stop_signals";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "team_stop_signals"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.target_worker_id');
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "team_stop_coverage";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "team_stop_coverage"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id');
+-- #2046: a compiled boot-prompt revision's target worker joins the closed #1162 fence inventory.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "compiled_prompt_revisions";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "compiled_prompt_revisions"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.target_worker_id');

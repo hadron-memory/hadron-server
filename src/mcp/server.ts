@@ -1,5 +1,8 @@
-import { withIncludeHistoryTransaction, includeHistoryClient } from '../lib/includes/includeHistoryFence.js';
+import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
+import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
+import { assertBootPromptWriteAllowed, assertNoBootPromptRows } from '../lib/bootPrompt.js';
 import { sessionEndReason } from '../lib/sessionEndReason.js';
+import { governedKindAnnotation } from '../lib/edgeGovernedKind.js';
 import { GraphQLError } from 'graphql';
 import { writeResumeClaim, type ResumeCandidate } from '../lib/resumeClaims.js';
 import { registerAutomationPinTools } from './automationPinTools.js';
@@ -26,7 +29,7 @@ import {
   RoleGovernedError,
   GOVERNED_KINDS,
 } from '../lib/governedRole.js';
-import { assertRoleWritersForNodes, assertRoleWritersForWrite, roleWriterRefusalText } from '../lib/nodeRoleWriters.js';
+import { assertEdgeSourceWritersById, assertRoleWritersForNodes, assertRoleWritersForWrite, roleWriterRefusalText } from '../lib/nodeRoleWriters.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { generateId } from '../lib/id.js';
 import {
@@ -41,7 +44,6 @@ import {
   buildNodeRevisionSnapshot,
   revisionStateHashRefreshMarker,
   ensureCurrentNodeRevisionInTransaction,
-  reconcileNodeWithIncludeHistory,
   createNodeRevision,
   editorFromAuth,
   diffNodeChanges,
@@ -57,7 +59,7 @@ import {
   UrnNotQualifiedError,
 } from '../lib/urn.js';
 import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
-import { currentActorAmbiguity, publishActor, publishAmbiguousActor, runInChildActorScope } from '../lib/requestActor.js';
+import { currentActorAmbiguity, publishActor, publishAmbiguousActor, publishUser, runInChildActorScope } from '../lib/requestActor.js';
 import {
   emitEntityUrnV2,
   emitNodeUrnV2,
@@ -74,6 +76,7 @@ import { signingSurfacePolicy, switchCapabilities } from '../lib/signing/surface
 import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
 import { registerTickerTools } from './tickerTools.js';
+import { registerStopSignalTools } from './stopSignalTools.js';
 import { openThreadCounts, type CommentCounts } from '../lib/comments/summary.js';
 import { loadSignatureStatuses, type NodeSignatureStatusView } from '../lib/signing/status.js';
 import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
@@ -100,6 +103,7 @@ import { foreignEdgeMemoryIds } from '../lib/foreignEdgeMemories.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
+import { governedAmong, governedRemovalError, lockGovernedRowsIn, lockRemovalRows } from '../lib/governedRemoval.js';
 import { escapePrismaLikePattern } from '../lib/literalLocPrefix.js';
 import {
   moveNodeSubtree,
@@ -156,6 +160,7 @@ import {
   filterReadableMemoryIds,
   getAccessibleMemoryIds,
   getMemoryAccess,
+  isWriteBeyondRead,
 } from './access-control.js';
 import { globalSearch } from '../lib/global-search/index.js';
 import {
@@ -164,6 +169,7 @@ import {
   type SearchPrincipal,
 } from '../lib/global-search/index.js';
 import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
+import { lockAgentDefinitionAuthority } from '../lib/auth/managedSystemMemory.js';
 import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
 import { computeContentHash, isAbstractUnverified } from '../lib/contentHash.js';
@@ -223,7 +229,8 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 import { resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
-import { composeWorkerPrompt, loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
+import { composeWorkerPrompt, loadAppWorkerActivity, loadAppWorkerCheckStatuses } from '../api/graphql/schema/resolvers.worker.js';
+import { renderCheckStatusLong, renderCheckStatusShort, type WorkerCheckStatus } from '../lib/workerCheckStatus.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 import { safeEqual } from '../lib/constantTime.js';
 
@@ -287,6 +294,7 @@ import {
 } from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
+import { memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -879,6 +887,14 @@ export async function addEdge(args: {
     if (!(await canReadMemory(tx as typeof db, auth, target.memoryId, EXPLICIT_REF))) {
       return `Edge target not found: "${rawTarget}"`;
     }
+    // Writer level of the source node, on the locked source.
+    try {
+      await assertEdgeSourceWritersById(tx, auth, locked.source.id);
+    } catch (e) {
+      const text = roleWriterRefusalText(e);
+      if (text) return text;
+      throw e;
+    }
 
     // ON CONFLICT DO NOTHING is race-safe for simultaneous first creates.
     // A skipped insert proves only that the ADDRESS exists, not that the
@@ -1022,10 +1038,14 @@ async function applyIncludesInTransaction(
   node: { id: string; loc: string; memoryId: string },
   plaintextContent: string | null,
   auth: AuthContext,
+  storedPlaintext: string | null,
 ): Promise<void> {
+  // #2041 S2b — `storedPlaintext` is the node's plaintext from the row this
+  // write locked and revalidated, before its update (null for a create).
   const readable = plaintextContent?.includes('{{>') ? await getAccessibleMemoryIds(db, auth) : null;
-  const tags = await assertIncludesWritable(tx, node, plaintextContent, readable);
-  await syncDerivedIncludesEdges(tx, node, tags, readable);
+  const stored = { storedPlaintext };
+  const tags = await assertIncludesWritable(tx, node, plaintextContent, readable, undefined, stored);
+  await syncDerivedIncludesEdges(tx, node, tags, readable, stored);
 }
 
 async function replaceOutgoingEdgesInTransaction(
@@ -1455,8 +1475,8 @@ type ReadProjectionNode = {
   abstract: string | null;
   abstractOriginHash: string | null;
   memory: { isEncrypted: boolean };
-  outgoingEdges: Array<{ name: string | null; loc: string; target: { id: string; loc: string; memoryId: string; name: string } }>;
-  incomingEdges: Array<{ name: string | null; loc: string; source: { id: string; loc: string; memoryId: string; name: string } }>;
+  outgoingEdges: Array<{ name: string | null; loc: string; governedKind?: unknown; target: { id: string; loc: string; memoryId: string; name: string } }>;
+  incomingEdges: Array<{ name: string | null; loc: string; governedKind?: unknown; source: { id: string; loc: string; memoryId: string; name: string } }>;
 };
 
 const readProjectionInclude = {
@@ -1472,15 +1492,18 @@ async function loadCurrentReadProjection(
   auth: AuthContext,
   readViaMemoryId: string = authorizedMemoryId,
 ): Promise<ReadProjectionNode | null> {
-  return withIncludeHistoryTransaction(db, async (history) => {
-    const tx = includeHistoryClient(history);
-    const user = auth.userId ? await tx.user.findUnique({ where: { id: auth.userId }, select: { roles: true, deletedAt: true } }) : null;
-    if (auth.userId && (!user || user.deletedAt)) return null;
-    const freshAuth = { ...auth, roles: auth.impersonation ? [] : user ? user.roles : auth.roles };
-    if (!(await canReadMemory(tx as unknown as typeof db, freshAuth, readViaMemoryId, EXPLICIT_REF))) return null;
-    // Reconcile only while the row is still in the memory the caller
-    // authorized (@codex P1, PR #1339); a relocated row reads as not found.
-    if ((await reconcileNodeWithIncludeHistory(history, nodeId, { expectedMemoryId: authorizedMemoryId })) == null) return null;
+  return withReconciledNodeRead(db, nodeId, authorizedMemoryId, async (tx, mayReconcile) => {
+    let fresh: Context;
+    try {
+      fresh = await (mayReconcile ? liveTxContext : liveReadSnapshotContext)({ ...auth, db }, tx);
+    } catch (error) {
+      // Credential/actor refusal is concealed like an unreadable memory. DB
+      // faults and transaction-mode errors remain errors, never "not found".
+      if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return false;
+      throw error;
+    }
+    return canReadMemory(tx as unknown as typeof db, { ...auth, roles: fresh.roles }, readViaMemoryId, EXPLICIT_REF);
+  }, async (tx) => {
     return tx.node.findFirst({
       where: { id: nodeId, deletedAt: null },
       include: readProjectionInclude,
@@ -1751,13 +1774,13 @@ async function renderNodeReadProjection(
       const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId, memoryUrnOf);
       // #322: surface the target's stable PK alongside the URN so callers can
       // reference it by id (immutable across move/rename) instead of the URN.
-      return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}`;
+      return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}${governedKindAnnotation(e.governedKind)}`;
     }),
   );
   const incomingLines = await Promise.all(
     node.incomingEdges.map(async (e) => {
       const sourceUrn = await nodeUrn(e.source.loc, e.source.memoryId, memoryUrnOf);
-      return `  - ${sourceUrn} (id: ${e.source.id}) (${e.source.name}) — ${e.name ?? e.loc}`;
+      return `  - ${sourceUrn} (id: ${e.source.id}) (${e.source.name}) — ${e.name ?? e.loc}${governedKindAnnotation(e.governedKind)}`;
     }),
   );
 
@@ -2152,6 +2175,7 @@ export function createMcpServerInstance(
     'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_attention',
     'hadron_team_attention_page', 'hadron_list_workers', 'hadron_get_worker', 'hadron_team_work_items',
     'hadron_list_comments', 'hadron_get_comment', 'hadron_team_chat_mark_read',
+    'hadron_list_recovery_nodes', 'hadron_list_recovery_edges', 'hadron_get_recovery_node',
     // #1705 — agent-task reads (each takes its own optional session).
     'hadron_task_get', 'hadron_task_list', 'hadron_team_events',
     // #1706 — availability read (its own optional session).
@@ -2160,6 +2184,8 @@ export function createMcpServerInstance(
     'hadron_team_roster',
     // #1747 — ticker reads (each takes its own optional session; wake settings enforces the write rule itself).
     'hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get',
+    // #2022 — the stop-signal list (its own optional session).
+    'hadron_stop_signal_list',
     // Per-connection selections and key handling: nothing authored.
     'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
     'hadron_unlock_memory', 'hadron_lock_memory',
@@ -2270,6 +2296,9 @@ export function createMcpServerInstance(
       // an unnamed sibling was about to be refused on.
       args[cbIndex] = (input: unknown, extra: unknown) =>
         runInChildActorScope(async () => {
+          // #2176: this tool call's own validated user (auth is the connection's, refreshed per request),
+          // published in the call's own scope like its Worker, so a batch sibling cannot overwrite it.
+          publishUser(auth.userId ?? null);
           const named = (input as Record<string, unknown> | undefined)?.[argumentName];
           const humanArgument = EXPLICIT_HUMAN_ARGUMENT[name];
           const asHuman = humanArgument !== undefined && (input as Record<string, unknown> | undefined)?.[humanArgument] === true;
@@ -3458,6 +3487,7 @@ export function createMcpServerInstance(
   // ── #1705 — agent tasks (cor:agt:050): thin over the GraphQL agent-task resolvers ──
   registerAgentTaskTools(server, { db, auth });
   registerTickerTools(server, { db, auth });
+  registerStopSignalTools(server, { db, auth });
   registerAutomationPinTools(server, { db, auth });
   // #1892 — an Agent's task and process lists (cor:dmo:050:15, :16).
   registerAgentDefinitionTools(server, { db, auth });
@@ -3473,12 +3503,50 @@ export function createMcpServerInstance(
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
-    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
   });
+
+  // #2175: explicit recovery twins delegate to the same writer-plus-reader resolver gate.
+  const recoveryCtx = (): Context => ({ ...scopeCtx(), appKeyId: auth.appKeyId ?? undefined,
+    impersonation: auth.impersonation ?? undefined });
+  const recoveryCall = async (work: () => Promise<ReturnType<typeof textResult>>) => {
+    try { return await work(); }
+    catch (error) {
+      return { ...toolErrorResult(error, () => {
+        if (error instanceof ScopeGraphQLError) return `[${String(error.extensions.code ?? 'ERROR').toLowerCase()}] ${error.message}`;
+        if (error instanceof MemoryNotFoundError) return '[not_found] Memory not found.';
+        if (error instanceof UrnNotQualifiedError) return `[bad_user_input] ${error.message}`;
+        throw error;
+      }, 'node_recovery'), isError: true as const };
+    }
+  };
+  const recoveryPageArgs = {
+    memoryRef: z.string().describe('One live memory ID or qualified URN.'),
+    limit: z.number().int().nullable().optional().describe('Default 20 (also null), maximum 200; use total to fetch remaining pages.'),
+    offset: z.number().int().nullable().optional().describe('Page offset, default 0.'),
+  };
+  server.tool('hadron_list_recovery_nodes', 'List retained deleted nodes in one live memory that you can read and write. Ordinary reads return live nodes only.',
+    recoveryPageArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryNodes({}, args, recoveryCtx())))));
+  server.tool('hadron_list_recovery_edges', 'Inspect live edges and accessible deleted endpoints in one memory that you can read and write. Unavailable endpoints are excluded from the page and total.',
+    recoveryPageArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryEdges({}, args, recoveryCtx())))));
+  server.tool('hadron_get_recovery_node', 'Read retained deleted-node content in a live memory that you can read and write. Returns the stored body without expanding templates or includes.',
+    { nodeRef: z.string().describe('Stable node ID or qualified node URN.') }, async (args) => recoveryCall(async () => {
+      const ctx = recoveryCtx();
+      const retained = await resolvers.Query.recoveryNode({}, args, ctx);
+      if (!retained) return { ...textResult('[not_found] No deleted node you can recover at that reference.'), isError: true as const };
+      const { _retainedNode: _internal, ...dto } = retained;
+      const content = await resolvers.RecoveryNode.content(retained as never, {}, ctx);
+      return textResult(JSON.stringify({ ...dto, content }));
+    }));
+  server.tool('hadron_restore_node', 'Restore one retained deleted node in a live memory that you can read and write. Restore deleted ancestors first. Governed nodes, comments, compiled boot prompts and protected internal addresses refuse. Does not restore descendants or revisions.',
+    { nodeRef: z.string().describe('Stable node ID or qualified node URN.') }, async (args) => recoveryCall(async () => {
+      const restored = await resolvers.Mutation.restoreNode({}, args, recoveryCtx());
+      return textResult(JSON.stringify({ id: restored.id, loc: restored.loc, memoryId: restored.memoryId, deletedAt: restored.deletedAt }));
+    }));
 
   /** A resolver refusal as `[<code>] <message>` text, the app-selection envelope convention. */
   const scopeErrorText = (e: unknown) => {
@@ -3983,6 +4051,8 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — a comment is never rewritten as a section.
         assertNotCommentWrite(parentGovernedProbe?.nodeType, undefined, 'update');
+        // #2043 — the same boot-prompt guards the shared writer applies.
+        assertBootPromptWriteAllowed(parentGovernedProbe, {}, 'update');
         assertGovernedWrite(
           parentGovernedProbe,
           mergedGovernedState(parentGovernedProbe, {}),
@@ -4027,6 +4097,8 @@ export function createMcpServerInstance(
       let sectionId: string;
       try {
         sectionId = await db.$transaction(async (tx) => {
+          // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
+          await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           await lockAncestorsForCreate(tx, memoryId, loc);
           // #1323 (@copilot, PR #1339): re-saving an EXISTING live section is
           // an authoring write of name/description/content/tags, so it takes
@@ -4037,14 +4109,32 @@ export function createMcpServerInstance(
           // insert trigger; a tombstone is left as the upsert leaves it.
           const prior = await tx.node.findUnique({
             where: { loc_memoryId: { loc, memoryId } },
-            select: { id: true, deletedAt: true, role: true },
+            select: { id: true, deletedAt: true, role: true, isRunnable: true },
           });
           let sectionChanged = false;
           // #1331 — an existing section keeps its role through this write, so the
           // role's writer level applies to the edit (and to reviving a tombstone).
           if (prior) {
-            await assertRoleWritersForWrite(tx, auth, memoryId, { priorRole: prior.role, nextRole: prior.role });
+            // Lock the section row first (live or tombstone: node before rulebook), then judge its locked state. The
+            // probe above is only a fast refusal; the generic owning-operation refusal is re-applied on the locked row.
+            await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
+            const lockedSection = await tx.node.findUniqueOrThrow({
+              where: { id: prior.id },
+              select: { loc: true, memoryId: true, role: true, isRunnable: true, nodeType: true },
+            });
+            if (lockedSection.loc !== loc || lockedSection.memoryId !== memoryId) {
+              throw new NodeMovedDuringWriteError(
+                `[write_conflict] the section at "${loc}" moved while this write waited — re-read and retry.`,
+              );
+            }
+            assertNotCommentWrite(lockedSection.nodeType, undefined, 'update');
+            assertGovernedWrite(lockedSection, mergedGovernedState(lockedSection, {}), 'update');
+            await assertRoleWritersForWrite(tx, auth, memoryId, {
+              priorRole: lockedSection.role, nextRole: lockedSection.role,
+              priorRunnable: lockedSection.isRunnable, nextRunnable: lockedSection.isRunnable,
+            });
           }
+          let storedForIncludes: string | null = null;
           if (prior && !prior.deletedAt) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
             await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted, auth);
@@ -4066,6 +4156,7 @@ export function createMcpServerInstance(
             const currentForDiff = parentKey
               ? decryptNodeFieldsWithKey({ ...current }, parentKey)
               : current;
+            storedForIncludes = (currentForDiff.content as string | null) ?? null;
             const changes = diffNodeChanges(currentForDiff, {
               ...upsertArgs.update, content,
             });
@@ -4088,7 +4179,7 @@ export function createMcpServerInstance(
             ...upsertArgs,
             update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
-          await applyIncludesInTransaction(tx, row, content, auth);
+          await applyIncludesInTransaction(tx, row, content, auth, storedForIncludes);
           return row.id;
         });
       } catch (e) {
@@ -4096,6 +4187,7 @@ export function createMcpServerInstance(
         if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
         const includeText = includeRefusalText(e);
         if (includeText) return textResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
@@ -4336,7 +4428,7 @@ export function createMcpServerInstance(
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -4402,7 +4494,12 @@ export function createMcpServerInstance(
       } catch (e) {
         // findNodes throws BAD_USER_INPUT for a malformed boolean query, an
         // invalid regex, etc. The MCP contract surfaces tool errors as text.
-        return textResult(e instanceof Error ? e.message : 'Search failed.');
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === 'BAD_USER_INPUT') return textResult(e.message);
+        // #415: anything else, such as a regex statement the database
+        // cancelled at its budget, goes through the #1695 boundary, so a
+        // Prisma message (driver internals, the SQL shape) never reaches the
+        // caller.
+        return toolErrorResult(e, () => (e instanceof Error ? e.message : 'Search failed.'), 'hadron_find_nodes');
       }
       const memoryUrnOf = memoizedMemoryUrnLookup();
 
@@ -4592,7 +4689,7 @@ export function createMcpServerInstance(
             const edgeStrs = await Promise.all(
               edges.map(async (e) => {
                 const targetUrn = await nodeUrn(e.target!.loc, e.target!.memoryId, memoryUrnOf);
-                return `→ ${targetUrn} (${e.name ?? e.loc})`;
+                return `→ ${targetUrn} (${e.name ?? e.loc})${governedKindAnnotation((e as { governedKind?: unknown }).governedKind)}`;
               }),
             );
             parts.push(`  Edges: ${edgeStrs.join(', ')}`);
@@ -5450,7 +5547,7 @@ export function createMcpServerInstance(
       const outEdgeLines = await Promise.all(node.outgoingEdges.map(async (e) => {
         const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId, memoryUrnOf);
         // #322: surface the target's stable PK alongside the URN.
-        return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}`;
+        return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}${governedKindAnnotation((e as { governedKind?: unknown }).governedKind)}`;
       }));
       // #186: nodeType in the meta block, mirroring hadron_get_node's format.
       // #881 — parity with hadron_get_node, including the fallback-URN omission.
@@ -5856,6 +5953,38 @@ export function createMcpServerInstance(
     },
   );
 
+  // #2044 (cor:agt:040:06): `install: { app, agent }` on hadron_create_node / hadron_update_node
+  // targets an App's install memory. Both delegate to the GraphQL createNode / updateNode, so the
+  // first-customisation create, the authority anchors and the gates are the ones the portal uses.
+  const writeInstallNodeViaGraphql = async (
+    op: 'create' | 'update',
+    install: { app: string; agent: string },
+    fields: Record<string, unknown>,
+  ) => {
+    const ctx: Context = {
+      db,
+      transport: 'mcp',
+      governedCanReplay: () => true,
+      clientId: auth.clientId ?? undefined,
+      userId: auth.userId ?? undefined,
+      apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
+      appId: auth.appId ?? undefined,
+      sessionId: auth.sessionId ?? undefined,
+      roles: auth.roles as Context['roles'],
+      organizationId: auth.organizationId ?? undefined,
+    };
+    const input = { ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)), install: { appRef: install.app, agentRef: install.agent } };
+    try {
+      const node = op === 'create'
+        ? await resolvers.Mutation.createNode({}, { input: input as never }, ctx)
+        : await resolvers.Mutation.updateNode({}, { input: input as never }, ctx);
+      const urn = await nodeUrn(node.loc, node.memoryId);
+      return textResult(`${op === 'create' ? 'Node created' : 'Node updated'} in the App's install memory: ${urn} (id: ${node.id})`);
+    } catch (e) {
+      return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : `${op} failed`}`, `hadron_${op}_node:install`);
+    }
+  };
+
   // ── hadron_create_node ───────────────────────────────────────────────────────────
 
   server.tool(
@@ -5884,8 +6013,21 @@ export function createMcpServerInstance(
         description: z.string().optional().describe(EDGE_DESCRIPTION_DOC),
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('Outgoing edges (replaces the full set on the source node)'),
+      install: z.object({
+        app: z.string().describe('The App: its ID or fully-qualified URN.'),
+        agent: z.string().describe('The Agent the App customises: its ID or fully-qualified URN.'),
+      }).optional().describe('#2044 — write into an App\'s INSTALL MEMORY (where it keeps its customisation of an installed Agent, cor:agt:040:06) instead of a memory named by `urn`. When set, `urn` is just the node\'s LOC (e.g. "prompts:lane"), not a URN. The first create finds-or-creates the install memory in the same step as the write; later calls reuse it. Only whoever manages the App may write, while the App is live and the Agent installed. Not supported with `edges`, `isRunnable` or `abstractStillAccurate`.'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, install }) => {
+      // #2044: an App's install memory is written through the GraphQL operation (one write path
+      // for the first-customisation create), not this inline parity writer.
+      if (install) {
+        if (edges || isRunnable) return textResult('`install` does not support `edges` or `isRunnable`; write those with a plain memory node.');
+        return writeInstallNodeViaGraphql('create', install, {
+          loc: rawUrn, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
+          properties, data: nodeData, llmModel, aiAgent,
+        });
+      }
       // #1219 — this tool is an inline parity writer, NOT a writeNodeCore
       // delegate (#206), so the core's role normalization does not reach it:
       // normalize here, before the governance probe and the payload build.
@@ -5948,6 +6090,7 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — no generic create makes or resurrects a comment.
         assertNotCommentWrite(governedProbe?.nodeType, nodeType, 'create');
+        assertBootPromptWriteAllowed(governedProbe, { nodeType, role: normalizeRole(role) }, 'create');
         assertGovernedWrite(
           governedProbe,
           mergedGovernedState(governedProbe, { role, isRunnable }),
@@ -6280,6 +6423,8 @@ export function createMcpServerInstance(
       let upserted;
       try {
         upserted = await db.$transaction(async (tx) => {
+          // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
+          await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           if (resolvedEdges !== null) {
             await lockOutgoingEdgeMemories(tx, memoryId, resolvedEdges);
           }
@@ -6330,6 +6475,8 @@ export function createMcpServerInstance(
           await assertRoleWritersForWrite(tx, auth, memoryId, {
             priorRole: pre?.role ?? null,
             nextRole: role === undefined ? (pre?.role ?? null) : role,
+            priorRunnable: pre?.isRunnable ?? null,
+            nextRunnable: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
           });
           // #1460 — the locked tombstone can retain vectors from its old
           // plaintext. Purge both kinds before the upsert makes it searchable.
@@ -6339,10 +6486,10 @@ export function createMcpServerInstance(
           // Invalidate an old in-flight embed before the asynchronous enqueue
           // restamps the marker after commit.
           const indexed = pre?.deletedAt
-            ? await tx.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { vectorIndexEnabled: true } })
+            ? await tx.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { vectorIndexEnabled: true, class: true } })
             : null;
           const revivedPendingAt = pre?.deletedAt
-            ? pendingAtForRevival(pre.embeddingPendingAt, indexed!.vectorIndexEnabled)
+            ? pendingAtForRevival(pre.embeddingPendingAt, memoryIsVectorIndexed(indexed!))
             : undefined;
           const written = await tx.node.upsert({
             ...upsertArgs,
@@ -6365,7 +6512,7 @@ export function createMcpServerInstance(
             });
             if (edgeError) throw new InlineEdgeEndpointError(edgeError);
           }
-          await applyIncludesInTransaction(tx, written, content ?? null, auth);
+          await applyIncludesInTransaction(tx, written, content ?? null, auth, null);
           return written;
         });
       } catch (e) {
@@ -6462,8 +6609,19 @@ export function createMcpServerInstance(
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
+      install: z.object({
+        app: z.string().describe('The App: its ID or fully-qualified URN.'),
+        agent: z.string().describe('The Agent the App customises: its ID or fully-qualified URN.'),
+      }).optional().describe('#2044 — write into an App\'s INSTALL MEMORY (where it keeps its customisation of an installed Agent, cor:agt:040:06) instead of a memory named by `urn`. When set, `urn` is just the node\'s LOC (e.g. "prompts:lane"), not a URN. The first create finds-or-creates the install memory in the same step as the write; later calls reuse it. Only whoever manages the App may write, while the App is live and the Agent installed. Creates nothing: the memory exists once the first hadron_create_node with `install` has run. Not supported with `edges`, `isRunnable` or `abstractStillAccurate`.'),
     },
-    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install }) => {
+      if (install) {
+        if (edges || isRunnable || abstractStillAccurate) return textResult('`install` does not support `edges`, `isRunnable` or `abstractStillAccurate`.');
+        return writeInstallNodeViaGraphql('update', install, {
+          loc: rawUrn, expectedRevision, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
+          properties, data: nodeData, llmModel, aiAgent, reason,
+        });
+      }
       // #1219 — inline parity writer, not a writeNodeCore delegate (#206):
       // normalize before mergedGovernedState, the door replay and the payload.
       const role = normalizeRole(rawRole);
@@ -6513,6 +6671,7 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — no generic update edits, makes or unmakes a comment.
         assertNotCommentWrite(existing?.nodeType, nodeType, 'update');
+        assertBootPromptWriteAllowed(existing, { nodeType, role: normalizeRole(role) }, 'update');
         assertGovernedWrite(
           existing,
           mergedGovernedState(existing, { role, isRunnable }),
@@ -6704,6 +6863,8 @@ export function createMcpServerInstance(
         // authoritative one (Copilot on PR #1165).
         try {
           await db.$transaction(async (tx) => {
+            // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
+            await lockAgentDefinitionAuthority(tx, auth.userId ?? null, existing.memoryId);
             if (resolvedEdges !== null) {
               await lockOutgoingEdgeMemories(tx, existing.memoryId, resolvedEdges);
             }
@@ -6767,6 +6928,8 @@ export function createMcpServerInstance(
             await assertRoleWritersForWrite(tx, auth, memory.id, {
               priorRole: current.role,
               nextRole: role === undefined ? current.role : role,
+              priorRunnable: current.isRunnable,
+              nextRunnable: mergedGovernedState(current, { role, isRunnable }).isRunnable,
             });
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
@@ -6800,7 +6963,7 @@ export function createMcpServerInstance(
               });
               if (edgeError) throw new InlineEdgeEndpointError(edgeError);
             }
-            if (content !== undefined) await applyIncludesInTransaction(tx, updated, content, auth);
+            if (content !== undefined) await applyIncludesInTransaction(tx, updated, content, auth, (currentForDiff.content as string | null) ?? null);
           });
         } catch (e) {
           if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
@@ -6900,7 +7063,7 @@ export function createMcpServerInstance(
     userId: auth.userId ?? undefined,
     // #1868: the presented hdr_user_ key, for any gate on the door's path that
     // re-checks it (consistency with the other delegating contexts).
-    apiKeyId: auth.apiKeyId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -7118,7 +7281,7 @@ export function createMcpServerInstance(
         governedCanReplay: () => true,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -7153,7 +7316,7 @@ export function createMcpServerInstance(
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
-    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -7294,7 +7457,7 @@ export function createMcpServerInstance(
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -7428,7 +7591,7 @@ export function createMcpServerInstance(
           )}`,
         );
       } catch (err) {
-        return textResult(String((err as Error)?.message ?? err));
+        return textResult(roleWriterRefusalText(err) ?? String((err as Error)?.message ?? err));
       }
     },
   );
@@ -7444,7 +7607,7 @@ export function createMcpServerInstance(
         await resolvers.Mutation.deleteEdge({}, { edgeRef }, objectCtx());
         return textResult(`Edge deleted: ${edgeRef}`);
       } catch (err) {
-        return textResult(String((err as Error)?.message ?? err));
+        return textResult(roleWriterRefusalText(err) ?? String((err as Error)?.message ?? err));
       }
     },
   );
@@ -7543,6 +7706,8 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'mintedSpec'; message: string }
         | { refused: 'comment'; message: string }
         | { refused: 'decision'; message: string }
+        | { refused: 'governed'; message: string }
+        | { refused: 'writerLevel'; message: string }
         | { ok: true; descendantCount: number };
 
       // #449 — source memories whose pending-edge count a hard delete changed.
@@ -7613,10 +7778,27 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         if ((await commentIdsAmong(tx, affectedIds)).length > 0) {
           return { refused: 'comment', message: commentGovernedError('delete', 'removes').message };
         }
+        await assertNoBootPromptRows(tx, affectedIds, 'delete');
         // #1641 §3.2 — a decision is withdrawn, never deleted.
         const decisions = await decisionFamilyAmong(tx, affectedIds);
         if (decisions.length > 0) {
           return { refused: 'decision', message: decisionContainedError('Deleting this node', decisions.map((d) => d.loc)).message };
+        }
+        // A governed node is removed only after its marker is cleared through
+        // the kind's door: the whole affected set is judged on locked rows.
+        const removed = await lockRemovalRows(tx, memory.id, affectedIds, { hard: !!hard });
+        const governedHits = governedAmong(removed);
+        if (governedHits.length > 0) {
+          return { refused: 'governed', message: governedRemovalError(governedHits, 'mcp').message };
+        }
+        // cor:acl:130:07 — removing a node writes it: each removed row needs its
+        // writer level, judged on the rows locked above.
+        try {
+          await assertRoleWritersForNodes(tx, auth, removed, { from: memory.id });
+        } catch (e) {
+          const text = roleWriterRefusalText(e);
+          if (text) return { refused: 'writerLevel', message: text };
+          throw e;
         }
         if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
         else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy: auth.userId ?? auth.clientId ?? null, at: new Date() });
@@ -7702,6 +7884,12 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
         if (result.refused === 'decision') {
           return textResult(`[decision_contained] ${result.message}`);
+        }
+        if (result.refused === 'governed') {
+          return textResult(`[role_governed] ${result.message}`);
+        }
+        if (result.refused === 'writerLevel') {
+          return textResult(result.message);
         }
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';
@@ -7790,7 +7978,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // a later refusal would leak through the loc validation and the source
       // node lookup that run in between.
       const fromMemory = await resolveVisibleMemoryByUrn(auth, fromMemoryUrn, 'write');
-      if (!fromMemory) {
+      // #2206 (B): a move carries the node's content (and its render, below) to the caller, so a source memory the
+      // caller may write but not read answers as one it cannot see.
+      if (!fromMemory || (await isWriteBeyondRead(db, auth, fromMemory.id))) {
         return textResult(`Source memory not found: "${fromMemoryUrn}".`);
       }
       const toMemory = await resolveVisibleMemoryByUrn(auth, toMemoryUrn, 'write');
@@ -7846,6 +8036,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
       try {
         result = await db.$transaction(async (tx) => {
+          // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
+          await lockAgentDefinitionAuthority(tx, auth.userId ?? null, [fromMemory.id, toMemory.id]);
           // #664/#752: moving a node INTO a subtree is the same orphan vector as
           // creating there — lock the destination's ancestor path first (matching
           // the GraphQL moveNode resolver and hadron_delete_node's own-loc lock),
@@ -8005,6 +8197,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               await assertNoMintedSpecRemoval(tx, toMemory.id, [existingTarget.id], 'overwrite');
               // #1641 §3.2 — evicting a decision would delete it.
               await refuseDecisionFamily(tx, [existingTarget.id], 'Overwriting this node');
+              // Evicting a live occupant is a removal: a governed occupant is
+              // replaced only after its marker is cleared through the kind's
+              // door. Judged on the locked row; the eviction update above already
+              // holds it, so this takes nothing new. A tombstoned occupant is
+              // only re-keyed, which removes nothing.
+              if (!existingTarget.deletedAt) {
+                const governedOccupant = await lockGovernedRowsIn(tx, toMemory.id, [existingTarget.id]);
+                if (governedOccupant.length > 0) throw governedRemovalError(governedOccupant, 'mcp', 'overwrite');
+              }
             }
           }
 
@@ -8057,6 +8258,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
           return textResult(`[spec_minted_permanent] ${e.message}`);
+        }
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === 'ROLE_GOVERNED' && e.extensions?.op === 'overwrite') {
+          return textResult(`[role_governed] ${e.message}`);
         }
         if (e instanceof SubtreeMoveSourceChangedError) {
           return textResult('The node was moved concurrently; re-read it and retry.');
@@ -8715,7 +8919,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -9028,7 +9232,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -9081,7 +9285,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -9107,15 +9311,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     {
       session: z.string().optional().describe('Pick one of a listed answer\'s sessions by its id. Omit on the first call.'),
       description: z.string().optional().describe('What the next session is about, used only when the redemption starts a new one (after a rotation).'),
-      llmModel: z.string().optional().describe('LLM model, recorded only on a session the redemption starts.'),
-      family: z.string().optional().describe('Model family (claude, codex, glm…), recorded only on a session the redemption starts.'),
+      llmModel: z.string().optional().describe('LLM model: recorded on a session the redemption starts, and refreshed on an open session it resumes (never cleared when omitted).'),
+      family: z.string().optional().describe('Model family (claude, codex, glm…): recorded on a session the redemption starts, and refreshed on an open session it resumes. Wins over the family the model implies; an invalid token is refused before a claim is spent.'),
     },
     async ({ session, description, llmModel, family }) => {
       const mcpCtx: Context = {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -9254,7 +9458,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           db,
           clientId: auth.clientId ?? undefined,
           userId: auth.userId ?? undefined,
-          apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+          apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
           appId: auth.appId ?? undefined,
           sessionId: auth.sessionId ?? undefined,
           roles: auth.roles as Context['roles'],
@@ -9597,7 +9801,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           db,
           clientId: auth.clientId ?? undefined,
           userId: auth.userId ?? undefined,
-          apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+          apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
           appId: auth.appId ?? undefined,
           sessionId: auth.sessionId ?? undefined,
           roles: auth.roles as Context['roles'],
@@ -9637,7 +9841,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     db,
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
-    apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -9672,7 +9876,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
   /** Read a Channel by id or address — the team-chat read's Channel-addressed twin. */
   const readChannel = async (
     channelRef: string,
-    args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; limit?: number; offset?: number; session?: string },
+    args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; limit?: number; offset?: number; session?: string; expectedIncarnation?: number },
   ) => {
     try {
       // #1353: capture applies to any user-principal session read — the pilot
@@ -9694,7 +9898,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         : chatCtx();
       const page = await resolvers.Query.channelMessages(
         {},
-        { channelRef, sinceSeq: args.sinceSeq ?? null, beforeSeq: args.beforeSeq ?? null, mentionsRef: args.mentions ?? null, limit: args.limit ?? null, offset: args.offset ?? null },
+        { channelRef, sinceSeq: args.sinceSeq ?? null, beforeSeq: args.beforeSeq ?? null, mentionsRef: args.mentions ?? null, limit: args.limit ?? null, offset: args.offset ?? null, expectedIncarnation: args.expectedIncarnation ?? null },
         resolverCtx,
       );
       if (captured && args.session) {
@@ -9708,22 +9912,27 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             mentionsRef: args.mentions,
             limit: args.limit,
             offset: args.offset,
+            expectedIncarnation: args.expectedIncarnation,
             page,
           });
         } catch (error) {
+          // #2181: a pinned read whose final fence refused returns the typed error, never the page.
+          if (args.expectedIncarnation != null && error instanceof ScopeGraphQLError && ['CHANNEL_INCARNATION_CHANGED', 'CHANNEL_NOT_FOUND'].includes(String(error.extensions?.code))) throw error;
           // The transcript is already authorized and loaded. Cursor ownership
           // is best-effort bookkeeping: never discard a successful read and
           // invite the caller to retry it because the follow-up write failed.
           console.warn('[hadron_channel_read] pilot read-state advance failed:', error);
         }
       }
-      if (page.total === 0) return textResult('The Channel has no matching messages.');
+      // #2181: the envelope line a caller pins its next read or mark to (additive final line).
+      const envelope = page.channelId != null && page.channelIncarnation != null ? `\n\nchannel ${page.channelId} incarnation ${page.channelIncarnation}` : '';
+      if (page.total === 0) return textResult(`The Channel has no matching messages.${envelope}`);
       const lines = page.items.map((m) => {
         const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
         const cross = m.authorAppId ? ' [cross-App]' : '';
         return `#${m.seq} ${chatByline(m)}${cross} ${m.at.toISOString()}${reply}:\n${m.body}`;
       });
-      return textResult(`${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`);
+      return textResult(`${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}${envelope}`);
     } catch (e) {
       if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
       return textResult(`Error: ${e instanceof Error ? e.message : 'channel read failed'}`);
@@ -10099,12 +10308,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
       offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
       session: z.string().optional().describe('Your session id — passing it keeps that session alive (#1081).'),
+      expectedIncarnation: z.number().int().optional().describe('#2181: pin the read to the Channel incarnation you read (the "incarnation" on the final line of a read). A different one is [channel_incarnation_changed] with no page and no cursor, check or resume applied; omitted, the read is unfenced.'),
     },
-    async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession }) => {
+    async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession, expectedIncarnation }) => {
       // A blank session is no session, for every consumer below (#1362 review).
       const session = typeof rawSession === 'string' ? rawSession.trim() || undefined : rawSession;
       await heartbeatSession(session);
-      return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session });
+      return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session, expectedIncarnation });
     },
   );
 
@@ -10181,7 +10391,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -10233,6 +10443,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. On an ordinary read, passing it keeps that session alive (#1081). Monitor mode uses it only as an App hint and does not heartbeat or wake the session.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
       channel: z.string().optional().describe('Spec 049: read THIS Channel (its id or address, from hadron_list_channels) instead of the App\'s default team chat.'),
+      expectedIncarnation: z.number().int().optional().describe('#2181: with channel, pin the read to the Channel incarnation you read; see hadron_channel_read.'),
       monitor: z.boolean().optional().describe('Use the register + stored ChannelReadState for your live Worker sessions. Incompatible with sinceSeq, beforeSeq, mentions and offset.'),
       monitorFor: z.string().optional().describe('With monitor:true, narrow to one Worker by name, id or URN. It must be bound to one of your live sessions in this App.'),
       acknowledge: z.array(z.object({
@@ -10242,7 +10453,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         proof: z.string().describe('Opaque server proof from the returned checkpoint; binds Worker + Channel + sequence.'),
       })).max(TEAM_CHAT_MONITOR_MAX_TARGETS).optional().describe('With monitor:true, deliberately advance these server-issued checkpoints after routing/action succeeded.'),
     },
-    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession, app, channel, monitor, monitorFor, acknowledge }) => {
+    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession, app, channel, expectedIncarnation, monitor, monitorFor, acknowledge }) => {
       // A blank session is no session, for every consumer below (#1362 review):
       // otherwise the MCP layer drops the bound session as "explicit" while
       // maybeAdvanceOwnChannelRead's trim falls back to it.
@@ -10263,7 +10474,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // contract: it needs no active App. Monitor mode still needs an App to
       // decide which of this operator's live Worker sessions participate.
       if (!monitor && channel !== undefined) {
-        return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session });
+        return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session, expectedIncarnation });
       }
 
       let appRef = app;
@@ -10330,13 +10541,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             console.warn('[hadron_team_chat_read] pilot read-state advance failed:', error);
           }
         }
-        if (page.total === 0) return textResult('The team chat has no matching messages.');
+        const envelope = page.channelId != null && page.channelIncarnation != null ? `\n\nchannel ${page.channelId} incarnation ${page.channelIncarnation}` : '';
+        if (page.total === 0) return textResult(`The team chat has no matching messages.${envelope}`);
         const lines = page.items.map((m) => {
           const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
           return `#${m.seq} ${chatByline(m)} ${m.at.toISOString()}${reply}:\n${m.body}`;
         });
         return textResult(
-          `${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`,
+          `${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}${envelope}`,
         );
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat read failed'}`);
@@ -10448,8 +10660,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         app: z.string().optional().describe('The App. Omit to recover it from session or the active selection.'),
         channel: z.string().optional().describe('Channel id or address. Omit for the team Channel hadron_team_chat_read serves for the App.'),
         seq: z.number().int().min(0).describe('Read through this exact sequence.'),
+        expectedIncarnation: z.number().int().optional().describe('#2181: fence the mark to the Channel incarnation you read (the "incarnation" on the final line of a read). A different one is [channel_incarnation_changed] — never repeat it; read again and pin the new incarnation. The result names channelIncarnation and cursorIncarnation (null = legacy cursor, never relabelled). Omitted, the mark is unfenced.'),
       },
-      async ({ session, app, channel, seq }) => {
+      async ({ session, app, channel, seq, expectedIncarnation }) => {
         await heartbeatSession(session);
         let appRef = app;
         if (!appRef) {
@@ -10468,7 +10681,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           if (channelRef === undefined) {
             channelRef = (await locateTeamChatChannel(chatCtx(), (await resolveAppRef(db, appRef)).id))?.channelId ?? '';
           }
-          const result = await markOwnTeamChatRead(chatCtx(), { appRef, channelRef, sessionRef: session, seq });
+          const result = await markOwnTeamChatRead(chatCtx(), { appRef, channelRef, sessionRef: session, seq, expectedIncarnation });
           return textResult(JSON.stringify(result, null, 2));
         } catch (error) {
           return scopeErrorText(error);
@@ -10529,7 +10742,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -10575,6 +10788,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // same fact must not be able to disagree about it, and the MCP roster
         // and the GraphQL one are read by the same coordinator minutes apart.
         const activity = await loadAppWorkerActivity(ctx, page.items[0].appId);
+        // #2138 §3.4 — the same per-App derivation as Worker.checkStatus and the roster.
+        const checks = await loadAppWorkerCheckStatuses(ctx, page.items[0].appId);
         // The App's URN once for the PAGE, not once per worker (PR #1000
         // review, Copilot): every worker here belongs to the SAME App, so
         // calling the `Worker.urn` field resolver per item repeated one
@@ -10681,7 +10896,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // is the answer and an age beside it invites reading the age as
             // presence, which is #1034's confusion in a new place.
             if (!act?.lastActiveAt) flags.push('never driven');
-            else if (!act.hasLiveSession) flags.push(`last driven ${ageOf(act.lastActiveAt)}`);
+            else if (!act.hasLiveSession) flags.push(`last recorded activity ${ageOf(act.lastActiveAt)}`);
+            // #2138 §3.4 — after the activity facts, which it is read beside.
+            const check = checks.get(w.id);
+            if (check) flags.push(renderCheckStatusShort(check));
             // #1026 — built from the SAME page-shared URN above, so the roster
             // costs no extra lookup per worker (the PR #1000 rule that pulled
             // the App URN out of the per-item path in the first place).
@@ -10752,7 +10970,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -10778,7 +10996,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // template changes, which is why the contract forbids caching it.
         // #1090: one composition supplies the text AND its freshness facts —
         // the stamps below describe exactly this rendering.
-        const [briefing, workerUrn, agent, override, continuity, signature, trailer] = await Promise.all([
+        const [briefing, workerUrn, agent, override, continuity, signature, trailer, checkStatus] = await Promise.all([
           composeWorkerPrompt(ctx, worker),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
@@ -10797,6 +11015,15 @@ function ageOf(at: Date, now: Date = new Date()): string {
           resolvers.Worker.continuity(worker, {}, ctx),
           resolvers.Worker.signature(worker, {}, ctx),
           resolvers.Worker.trailer(worker, {}, ctx),
+          // #2138 §3.4 — gated like hasLiveSession; null on deny.
+          resolvers.Worker.checkStatus(worker, {}, ctx) as Promise<WorkerCheckStatus | null>,
+        ]);
+        // #2045: the boot-prompt pointer, through the SAME gated field resolvers
+        // GraphQL serves (null on deny, and null when unset). A read only: R24
+        // keeps every pointer WRITE off MCP.
+        const [bootPromptRef, bootPromptTargetDeleted] = await Promise.all([
+          resolvers.Worker.bootPromptRef(worker, {}, ctx),
+          resolvers.Worker.bootPromptTargetDeleted(worker, {}, ctx),
         ]);
         const prompt = briefing.text;
         const agentName = (agent as { name?: string } | null)?.name ?? null;
@@ -10890,9 +11117,13 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // than being assembled from it.
             (readUrl ? `URL: ${readUrl}\n` : '') +
             (agentName ? `Role agent: ${agentName}\n` : '') +
+            (checkStatus ? `${renderCheckStatusLong(checkStatus)}\n` : '') +
             // Only the caller's OWN driving session is named. Whose session it
             // is otherwise stays behind the takeover refusal, which is a
             // deliberate act rather than a listing (hadron_list_workers' rule).
+            (bootPromptRef
+              ? `Boot prompt pointer: ${bootPromptRef}${bootPromptTargetDeleted ? ' (TARGET DELETED: nothing can be served from it; clear or repoint it)' : ''}\n`
+              : '') +
             (mine
               ? `Your active session: ${mine.id} (worker session id; pass as \`session\` to team tools; since ${mine.startedAt.toISOString()})\n`
               : '') +
@@ -10929,7 +11160,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
     async ({ workerRef, confirmNoExternalAttribution }) => {
       const ctx: Context = {
         db, userId: auth.userId ?? undefined, appId: auth.appId ?? undefined,
-        clientId: auth.clientId ?? undefined, apiKeyId: auth.apiKeyId ?? undefined,
+        clientId: auth.clientId ?? undefined, apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
         sessionId: auth.sessionId ?? undefined, organizationId: auth.organizationId ?? undefined,
         roles: auth.roles as Context['roles'],
       };
@@ -10998,7 +11229,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         sessionBindingRefused: auth.sessionBindingRefused,
@@ -11079,7 +11310,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
-        apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
@@ -11145,7 +11376,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
@@ -11259,7 +11490,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
-            apiKeyId: auth.apiKeyId ?? undefined, // #1868: the shared authorized tx re-checks the presented key
+            apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],

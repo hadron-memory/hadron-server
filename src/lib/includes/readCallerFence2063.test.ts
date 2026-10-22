@@ -8,6 +8,10 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from '../../mcp/server.js';
 import { reconcileNodeWithIncludeHistory } from '../nodeRevisionSnapshot.js';
 import { withIncludeHistoryTransaction } from './includeHistoryFence.js';
+import { withReconciledNodeRead } from './reconciledNodeRead.js';
+import { liveReadSnapshotContext } from '../../api/graphql/schema/authorizedTx.js';
+import * as liveAuthority from '../../api/graphql/schema/authorizedTx.js';
+import { Prisma } from '../../generated/prisma/index.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 let userId: string;
@@ -50,6 +54,38 @@ async function drifted() {
 }
 
 describe('outer-fenced reconciliation read callers', () => {
+  it.each(['node', 'revision', 'batch', 'mcp', 'mcp-batch'] as const)('%s unchanged read finishes while an unrelated fence is held', async (surface) => {
+    const n = await db.node.create({ data: { memoryId, loc: 'steady', name: 'Steady', content: 'unchanged' } });
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const holder = withIncludeHistoryTransaction(db, async () => { entered(); await gate; });
+    await ready;
+    const pending = (async () => {
+      if (surface === 'node') return resolvers.Query.node(null, { ref: n.id, raw: true }, ctx());
+      if (surface === 'revision') return resolvers.Node.revision(n as never, {}, ctx());
+      if (surface === 'batch') return resolvers.Query.nodeBatch(null, { refs: [n.id] }, ctx());
+      const mcp = createTestableMcpServer({ userId, roles: ['ADMIN'], clientId: `user:${userId}` });
+      return surface === 'mcp'
+        ? mcp.callToolText('hadron_get_node', { urn: 'hrn:node:read-fence.example:mem:steady' })
+        : mcp.callToolText('hadron_get_nodes', { refs: ['hrn:node:read-fence.example:mem:steady'] });
+    })();
+    const settled = pending.then((value) => ({ value }), (error: unknown) => ({ error }));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const outcome = await Promise.race([settled, new Promise<'blocked'>((r) => { timer = setTimeout(() => r('blocked'), 750); })]);
+      expect(outcome, 'unchanged reads must not queue behind the global history fence').not.toBe('blocked');
+      expect(outcome).toHaveProperty('value');
+    } finally {
+      clearTimeout(timer);
+      release();
+      await holder;
+      await settled;
+    }
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
   it.each(['node', 'revision', 'batch', 'mcp', 'mcp-batch'] as const)('%s waits before touching revision state, then reconciles', async (surface) => {
     const n = await drifted();
     const parent = await db.node.findUniqueOrThrow({ where: { id: n.id } });
@@ -177,6 +213,244 @@ describe('outer-fenced reconciliation read callers', () => {
     }
     expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).revSeq).toBe(1);
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it('parent revision rechecks readability after its fence wait', async () => {
+    const n = await drifted();
+    const parent = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+    const result = await underHeldFence(
+      () => resolvers.Node.revision(parent as never, {}, ctx()),
+      async () => {
+        await db.user.update({ where: { id: userId }, data: { roles: [] } });
+        await db.orgMember.deleteMany({ where: { userId } });
+      },
+    );
+    expect(result).toBe(parent.revSeq); // revision's existing unavailable fallback
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it('MCP impersonation never imports target platform roles after waiting', async () => {
+    const n = await drifted();
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const auth = { userId, roles: [], clientId: `user:${userId}`, impersonation: {
+      sessionId: generateId(), actorUserId: generateId(), orgId: memory.organizationId!, expiresAt: new Date(Date.now() + 60_000),
+    } };
+    const result = await underHeldFence(
+      () => createTestableMcpServer(auth).callToolText('hadron_get_node', { urn: 'hrn:node:read-fence.example:mem:drift' }),
+      async () => { await db.orgMember.deleteMany({ where: { userId } }); },
+    );
+    expect(result).not.toContain('raw change');
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it.each(['node', 'explicit', 'prefix', 'mcp-explicit', 'mcp-prefix'] as const)('%s rechecks child authority, not the readable base', async (selection) => {
+    await db.user.update({ where: { id: userId }, data: { roles: [] } });
+    const childMemory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const org = await db.organization.create({ data: { name: 'Public base', urn: 'base-fence.example' } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'READER' } });
+    const base = await db.memory.create({ data: { class: 'system', organizationId: org.id, urn: 'base-fence.example:system', name: 'Base' } });
+    const agent = await db.agent.create({ data: { name: 'Base', urn: 'base-fence.example:agent', organizationId: org.id, systemMemoryId: base.id, visibility: 'PUBLIC' } });
+    await db.memory.update({ where: { id: memoryId }, data: { class: 'system' } });
+    const child = await db.agent.create({ data: { name: 'Child', urn: 'read-fence.example:child', organizationId: childMemory.organizationId!, systemMemoryId: memoryId, extendsAgentId: agent.id, visibility: 'ORGANIZATION' } });
+    for (const [label, agentId, organizationId] of [['base', agent.id, org.id], ['child', child.id, childMemory.organizationId!]]) {
+      const app = await db.app.create({ data: { name: label!, urn: `read-fence.example:${label}-app`, organizationId: organizationId! } });
+      await db.appAgent.create({ data: { appId: app.id, agentId: agentId! } });
+      await db.appMember.create({ data: { appId: app.id, userId, role: 'member' } });
+    }
+    const n = await db.node.create({ data: { memoryId: base.id, loc: 'inherited', name: 'Inherited', content: 'before' } });
+    // Base remains readable after the child's org membership disappears.
+    expect(await resolvers.Query.node(null, { ref: n.id, raw: true }, { db, userId, roles: [] })).not.toBeNull();
+    await db.node.update({ where: { id: n.id }, data: { content: 'raw inherited' } });
+    const args = selection === 'explicit' ? { refs: ['hrn:node:read-fence.example:mem:inherited'] } : { memory: memoryId, locPrefix: 'inherited' };
+    const result = await underHeldFence(
+      async () => {
+        if (selection === 'node') return resolvers.Query.node(null, { ref: 'hrn:node:read-fence.example:mem:inherited', raw: true }, { db, userId, roles: [] });
+        if (selection.startsWith('mcp-')) return createTestableMcpServer({ userId, roles: [], clientId: `user:${userId}` }).callToolText('hadron_get_nodes', selection === 'mcp-explicit' ? { refs: ['hrn:node:read-fence.example:mem:inherited'] } : { memoryUrn: 'hrn:mem:read-fence.example:mem', locPrefix: 'inherited' });
+        return resolvers.Query.nodeBatch(null, args, { db, userId, roles: [] });
+      },
+      async () => {
+        await db.orgMember.deleteMany({ where: { userId, organizationId: childMemory.organizationId! } });
+        await db.appMember.deleteMany({ where: { userId, app: { organizationId: childMemory.organizationId! } } });
+      },
+    );
+    if (selection === 'node') expect(result).toBeNull();
+    else if (typeof result === 'string') expect(result).not.toContain('raw inherited');
+    else expect((result as { nodes: unknown[] }).nodes).toEqual([]);
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+    expect(await resolvers.Query.node(null, { ref: n.id, raw: true }, { db, userId, roles: [] })).not.toBeNull();
+  });
+
+  it('unchanged other-tenant read finishes while a drift reader holds the fence waiting for a row', async () => {
+    const a = await drifted();
+    const otherUser = await db.user.create({ data: { handle: 'other-tenant', roles: [] } });
+    const other = await db.memory.create({ data: { class: 'personal', ownerUserId: otherUser.id, userId: otherUser.id, urn: 'other-fence.example:private', name: 'Other tenant' } });
+    const b = await db.node.create({ data: { memoryId: other.id, loc: 'steady', name: 'Other', content: 'other tenant body' } });
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${a.id} FOR UPDATE`;
+      entered(); await gate;
+    });
+    await ready;
+    const aRead = resolvers.Query.node(null, { ref: a.id, raw: true }, ctx());
+    const aSettled = aRead.then((value) => ({ value }), (error: unknown) => ({ error }));
+    let bSettled: Promise<unknown> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await waitForLockWaitersOfType(db, 'transactionid', 1, 750);
+      const start = performance.now();
+      const bRead = resolvers.Query.node(null, { ref: b.id, raw: true }, { db, userId: otherUser.id, roles: [] });
+      bSettled = bRead.then((value) => ({ value }), (error: unknown) => ({ error }));
+      const result = await Promise.race([bSettled, new Promise<'blocked'>((r) => { timer = setTimeout(() => r('blocked'), 750); })]);
+      process.stdout.write(`S3b row-contention other-tenant ms ${performance.now() - start}\n`);
+      expect(result, 'other tenant must not wait for the drift reader or its blocked row').not.toBe('blocked');
+      expect(result).toMatchObject({ value: { id: b.id, content: 'other tenant body' } });
+    } finally {
+      clearTimeout(timer); release(); await holder; await aSettled; await bSettled;
+    }
+    expect((await aRead)?.revSeq).toBe(2);
+  });
+
+  it('reports synthetic canonical-read throughput and other-tenant latency under 200 reads', async () => {
+    const a = await db.node.create({ data: { memoryId, loc: 'steady', name: 'Steady', content: 'unchanged' } });
+    const userB = await db.user.create({ data: { handle: 'throughput-other', roles: [] } });
+    const other = await db.memory.create({ data: { class: 'personal', ownerUserId: userB.id, userId: userB.id, urn: 'throughput.example:private', name: 'Other' } });
+    const b = await db.node.create({ data: { memoryId: other.id, loc: 'steady', name: 'Other', content: 'other' } });
+    const singleStart = performance.now();
+    await resolvers.Query.node(null, { ref: b.id, raw: true }, { db, userId: userB.id, roles: [] });
+    const baselineMs = performance.now() - singleStart;
+    const start = performance.now();
+    const load = Array.from({ length: 200 }, () => resolvers.Query.node(null, { ref: a.id, raw: true }, ctx()));
+    const bStart = performance.now();
+    const otherRead = resolvers.Query.node(null, { ref: b.id, raw: true }, { db, userId: userB.id, roles: [] });
+    let otherTenantMs = 0;
+    const measuredOther = otherRead.then(() => { otherTenantMs = performance.now() - bStart; });
+    const results = await Promise.allSettled(load);
+    await measuredOther;
+    const elapsedMs = performance.now() - start;
+    process.stdout.write(`S3b throughput ${JSON.stringify({ baselineMs, elapsedMs, readsPerSecond: 201_000 / elapsedMs, failures: results.filter((r) => r.status === 'rejected').length, otherTenantMs })}\n`);
+    expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+    expect(await db.nodeRevision.count()).toBe(0);
+  }, 15_000);
+
+  it('fast read fingerprint and projection share one read-only snapshot across a raw writer', async () => {
+    const n = await db.node.create({ data: { memoryId, loc: 'snapshot', name: 'Snapshot', content: 'before' } });
+    const current = await withReconciledNodeRead(db, n.id, memoryId,
+      async () => {
+        await db.node.update({ where: { id: n.id }, data: { content: 'after' } });
+        return true;
+      },
+      (tx) => tx.node.findUniqueOrThrow({ where: { id: n.id } }),
+    );
+    expect(current).toMatchObject({ content: 'before', revSeq: 1 });
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).content).toBe('after');
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it('fast path refuses a projection that attempts a write', async () => {
+    const n = await db.node.create({ data: { memoryId, loc: 'readonly', name: 'Readonly', content: 'before' } });
+    await expect(withReconciledNodeRead(db, n.id, memoryId, async () => true,
+      (tx) => tx.node.update({ where: { id: n.id }, data: { content: 'must not write' } }),
+    )).rejects.toThrow(/read.only/i);
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).content).toBe('before');
+  });
+
+  it.each([
+    ['key', 'node'], ['key', 'batch'], ['key', 'revision'], ['key', 'mcp'], ['key', 'mcp-batch'],
+    ['sign-in', 'node'], ['sign-in', 'batch'], ['sign-in', 'revision'], ['sign-in', 'mcp'], ['sign-in', 'mcp-batch'],
+  ] as const)('%s credential permits unchanged %s reads and refuses revoked credentials', async (credential, surface) => {
+    const body = 'UNCHANGED-CREDENTIAL-BODY-2063';
+    const n = await db.node.create({ data: { memoryId, loc: 'credential', name: 'Credential', content: body } });
+    const c = ctx();
+    let revoke: () => Promise<unknown>;
+    if (credential === 'key') {
+      const key = await db.userApiKey.create({ data: { userId, keyHash: generateId(), keyPreview: 'test', oauthScopes: [] } });
+      c.apiKeyId = key.id;
+      revoke = () => db.userApiKey.update({ where: { id: key.id }, data: { revokedAt: new Date() } });
+    } else {
+      const root = await db.signIn.create({ data: { userId, method: 'email', expiresAt: new Date(Date.now() + 60_000) } });
+      c.signInId = root.id;
+      revoke = () => db.signIn.update({ where: { id: root.id }, data: { endedAt: new Date(), endReason: 'test' } });
+    }
+    const read = () => surface === 'node'
+      ? resolvers.Query.node(null, { ref: n.id, raw: true }, { ...c })
+      : surface === 'batch'
+        ? resolvers.Query.nodeBatch(null, { refs: [n.id] }, { ...c })
+        : surface === 'revision' ? resolvers.Node.revision(n as never, {}, { ...c })
+          : surface === 'mcp'
+            ? createTestableMcpServer(c).callToolText('hadron_get_node', { urn: 'hrn:node:read-fence.example:mem:credential' })
+            : createTestableMcpServer(c).callToolText('hadron_get_nodes', { refs: ['hrn:node:read-fence.example:mem:credential'] });
+    const allowed = await read();
+    if (surface === 'mcp' || surface === 'mcp-batch') expect(allowed).toContain(body);
+    else expect(allowed).not.toBeNull();
+    await revoke();
+    if (surface === 'mcp' || surface === 'mcp-batch') {
+      const denied = await read();
+      expect(denied).not.toContain(body);
+    } else await expect(read()).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it.each(['writable', 'read committed'] as const)('snapshot authority helper refuses a %s transaction', async (mode) => {
+    await expect(db.$transaction(async (tx) => {
+      if (mode === 'read committed') await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+      return liveReadSnapshotContext(ctx(), tx);
+    }, { isolationLevel: mode === 'writable' ? Prisma.TransactionIsolationLevel.RepeatableRead : Prisma.TransactionIsolationLevel.ReadCommitted }))
+      .rejects.toThrow('A read-only repeatable-read snapshot is required');
+  });
+
+  it.each([
+    ['key', 'node'], ['key', 'mcp'], ['key', 'mcp-batch'],
+    ['sign-in', 'node'], ['sign-in', 'mcp'], ['sign-in', 'mcp-batch'],
+  ] as const)('drift %s %s read rechecks revocation after the fence wait', async (credential, surface) => {
+    const n = await drifted();
+    const c = ctx();
+    let revoke: () => Promise<unknown>;
+    if (credential === 'key') {
+      const key = await db.userApiKey.create({ data: { userId, keyHash: generateId(), keyPreview: 'test', oauthScopes: [] } });
+      c.apiKeyId = key.id;
+      revoke = () => db.userApiKey.update({ where: { id: key.id }, data: { revokedAt: new Date() } });
+    } else {
+      const root = await db.signIn.create({ data: { userId, method: 'email', expiresAt: new Date(Date.now() + 60_000) } });
+      c.signInId = root.id;
+      revoke = () => db.signIn.update({ where: { id: root.id }, data: { endedAt: new Date(), endReason: 'test' } });
+    }
+    const result = underHeldFence<unknown>(
+      () => surface === 'node' ? resolvers.Query.node(null, { ref: n.id, raw: true }, c)
+        : createTestableMcpServer(c).callToolText(surface === 'mcp' ? 'hadron_get_node' : 'hadron_get_nodes', surface === 'mcp' ? { urn: 'hrn:node:read-fence.example:mem:drift' } : { refs: ['hrn:node:read-fence.example:mem:drift'] }),
+      async () => { await revoke(); },
+    );
+    if (surface === 'node') await expect(result).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    else expect(await result).not.toContain('raw change');
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it.each([
+    ['fast', 'mcp'], ['fast', 'mcp-batch'],
+    ['drift', 'mcp'], ['drift', 'mcp-batch'],
+  ] as const)('%s %s surfaces non-FORBIDDEN authority faults as errors', async (phase, surface) => {
+    const n = phase === 'drift' ? await drifted()
+      : await db.node.create({ data: { memoryId, loc: 'fault', name: 'Fault', content: 'UNCHANGED-FAULT-CONTROL-2063' } });
+    const urn = `hrn:node:read-fence.example:mem:${n.loc}`;
+    const mcp = createTestableMcpServer(ctx());
+    const tool = surface === 'mcp' ? 'hadron_get_node' : 'hadron_get_nodes';
+    const args = surface === 'mcp' ? { urn } : { refs: [urn] };
+    const fault = new Error('synthetic private database fault 2063');
+    const authority = vi.spyOn(liveAuthority, phase === 'fast' ? 'liveReadSnapshotContext' : 'liveTxContext')
+      .mockRejectedValue(fault);
+    try {
+      // The in-process MCP helper exposes unknown handler faults as a
+      // rejection; the transport, not this adapter, owns wire sanitization.
+      await expect(mcp.callTool(tool, args)).rejects.toBe(fault);
+      expect(authority).toHaveBeenCalledOnce();
+      expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+    } finally {
+      authority.mockRestore();
+    }
+    // Control: the same request succeeds once the injected fault is removed.
+    expect(await mcp.callToolText(tool, args)).toContain(phase === 'drift' ? 'raw change' : 'UNCHANGED-FAULT-CONTROL-2063');
   });
 
 });

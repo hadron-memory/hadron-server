@@ -3,13 +3,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { BROKEN_INCLUDE_NOTICE } from './resolveNodeContent.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
 }));
 
 let memoryId: string;
+let memoryUrn: string;
 let admin: { id: string };
 const as = (): Context => ({ db, userId: admin.id, roles: [] });
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
@@ -20,6 +24,15 @@ const update = (loc: string, content: string, extra: Record<string, unknown> = {
 const code = async (p: Promise<unknown>) => {
   try { await p; return 'NO_ERROR'; } catch (e: any) { return String(e.extensions?.code ?? e.message); }
 };
+const server = new ApolloServer<Context>({ typeDefs, resolvers });
+const read = async (loc: string) => {
+  const res = await server.executeOperation(
+    { query: 'query($ref: ID!) { node(ref: $ref) { content } }', variables: { ref: `hrn:node:${memoryUrn}:${loc}` } },
+    { contextValue: as() },
+  );
+  if (res.body.kind !== 'single') throw new Error('unexpected incremental result');
+  return (res.body.singleResult.data as { node: { content: string } }).node.content;
+};
 const includeEdges = (sourceLoc: string) => db.edge.findMany({
   where: { source: { memoryId, loc: sourceLoc }, governedKind: 'INCLUDE' }, include: { target: true },
 });
@@ -29,7 +42,8 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'Inc Org', urn: 'inc.example' } });
   admin = await db.user.create({ data: { githubId: 204002, githubUsername: 'inc-admin2', handle: 'inc-admin2', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  memoryId = (await M.createMemory(null, { orgId: org.id, name: 'inc' }, as())).id;
+  const m = await M.createMemory(null, { orgId: org.id, name: 'inc' }, as());
+  memoryId = m.id; memoryUrn = m.urn;
 });
 
 describe('include tags through createNode / updateNode (#2040)', () => {
@@ -71,18 +85,56 @@ describe('include tags through createNode / updateNode (#2040)', () => {
     expect(await db.node.count({ where: { memoryId, loc: 'n' } })).toBe(0);
   });
 
-  it('refuses a chain deeper than the cap', async () => {
-    await create('n0', 'leaf');
-    for (let i = 1; i <= 10; i++) await create(`n${i}`, `{{> n${i - 1}}}`);
-    expect(await code(create('top', '{{> n10}}'))).toBe('INCLUDE_TOO_DEEP');
+  // #2134 — cor:dmo:150:06: over-depth is a broken include at read, never a
+  // write refusal. Depth counts from the includer: its own tags are level 1.
+  it('saves a chain deeper than the cap, on create and on update; the read shows the notice past level 10 only', async () => {
+    await create('n0', 'L0');
+    for (let i = 1; i <= 10; i++) await create(`n${i}`, `L${i}{{> n${i - 1}}}`);
+    // top -> n9 .. n0 is 10 levels: every level resolves.
+    expect(await code(create('ten', '{{> n9}}'))).toBe('NO_ERROR');
+    expect(await read('ten')).toBe('L9L8L7L6L5L4L3L2L1L0');
+    // top -> n10 .. n0 is 11 levels: it saves, and only the 11th is the notice.
+    expect(await code(create('eleven', '{{> n10}}'))).toBe('NO_ERROR');
+    expect(await read('eleven')).toBe(`L10L9L8L7L6L5L4L3L2L1${BROKEN_INCLUDE_NOTICE}`);
+    await create('later', 'plain');
+    expect(await code(update('later', '{{> n0}} {{> n10}}'))).toBe('NO_ERROR');
+    expect((await includeEdges('later')).map(e => e.target.loc).sort()).toEqual(['n0', 'n10']);
   });
 
-  it('the depth cap does not depend on tag order (shallow reach first, deep second)', async () => {
-    await create('n0', 'leaf');
-    for (let i = 1; i <= 10; i++) await create(`n${i}`, `{{> n${i - 1}}}`);
-    expect(await code(create('t1', '{{> n10}}'))).toBe('INCLUDE_TOO_DEEP');
-    expect(await code(create('t2', '{{> n0}} {{> n10}}'))).toBe('INCLUDE_TOO_DEEP');
-    expect(await code(create('t3', '{{> n9}}'))).toBe('NO_ERROR');
+  it('refuses a cycle longer than the depth cap, naming the authored tag, with no residue', async () => {
+    // a -> c1 -> ... -> c12; closing c12 -> a makes a 13-node loop.
+    await create('c12', 'end');
+    for (let i = 11; i >= 1; i--) await create(`c${i}`, `{{> c${i + 1}}}`);
+    await create('a', '{{> c1}}');
+    const before = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'c12' } });
+    let err: any;
+    try { await update('c12', 'end {{> a}}'); } catch (e) { err = e; }
+    expect(err?.extensions?.code).toBe('INCLUDE_CYCLE');
+    expect(err?.extensions?.tag).toBe('{{> a}}');
+    const after = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'c12' } });
+    expect(after.content).toBe('end');
+    expect(after.revSeq).toBe(before.revSeq);
+    expect(await includeEdges('c12')).toEqual([]);
+  });
+
+  it('terminates on a stored cycle that does not pass through the writer, and saves', async () => {
+    // x <-> y made directly (a write would refuse it): the walk must not loop.
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'x', name: 'x', content: 'X{{> y}}' } });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'y', name: 'y', content: 'Y{{> x}}' } });
+    expect(await code(create('w', '{{> x}} {{> y}}'))).toBe('NO_ERROR');
+    expect((await includeEdges('w')).map(e => e.target.loc).sort()).toEqual(['x', 'y']);
+  });
+
+  it('cycle detection skips a node already walked on another branch without missing the cycle, in either tag order', async () => {
+    // `d` is reached first through `s` (it doesn't reach `a`), then again on the
+    // hub path, where it is skipped; the hub path still reaches `a`.
+    await create('d', 'D');
+    await create('s', '{{> d}}');
+    await create('a', 'A');
+    for (let i = 11; i >= 1; i--) await create(`p${i}`, i === 11 ? '{{> a}}' : `{{> d}} {{> p${i + 1}}}`);
+    await create('hub', '{{> p1}}');
+    expect(await code(update('a', '{{> s}} {{> hub}}'))).toBe('INCLUDE_CYCLE');
+    expect(await code(update('a', '{{> hub}} {{> s}}'))).toBe('INCLUDE_CYCLE');
   });
 
   it('accepts a diamond', async () => {
@@ -160,17 +212,26 @@ describe('run prompt assembly (#2040)', () => {
 });
 
 describe('copy paths conceal foreign targets (#2040, §10)', () => {
-  it('clone re-derives same-memory tags only: an unreadable foreign target gets no edge, exactly like a missing one', async () => {
+  it('clone refuses a copied tag to an unreadable foreign target, exactly like a missing one (#2167)', async () => {
     const foreignOrg = await db.organization.create({ data: { id: generateId(), name: 'Foreign', urn: 'foreign.example' } });
     const foreign = await db.memory.create({ data: { id: generateId(), name: 'secret', urn: 'foreign.example:secret', class: 'knowledge', organizationId: foreignOrg.id } });
     await db.node.create({ data: { id: generateId(), memoryId: foreign.id, loc: 'hidden', name: 'hidden', content: 'H' } });
     await create('local', 'L');
-    await create('src', '{{> local}} {{> hrn:node:foreign.example:secret:hidden}} {{> hrn:node:foreign.example:secret:absent}}');
+    // Stored directly: a write ADDING these foreign tags is refused (#2041 S2b).
+    // The update below leaves them unchanged, so it saves and derives `local`'s edge.
+    const srcText = '{{> local}} {{> hrn:node:foreign.example:secret:hidden}} {{> hrn:node:foreign.example:secret:absent}}';
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'src', name: 'src', content: srcText } });
+    await update('src', `${srcText} .`);
     expect((await includeEdges('src')).map(e => e.target.loc)).toEqual(['local']);
     const org = await db.organization.findFirstOrThrow({ where: { urn: 'inc.example' } });
-    const clone = await M.cloneMemory(null, { ref: memoryId, targetUrn: `hrn:mem:${org.urn}:copy` }, as());
-    const edges = await db.edge.findMany({ where: { memoryId: clone.id, governedKind: 'INCLUDE' }, include: { source: true, target: true } });
-    expect(edges.map(e => `${e.source.loc}>${e.target.loc}`)).toEqual(['src>local']);
-    expect(edges.every(e => e.targetId !== undefined && !e.loc.includes(foreign.id))).toBe(true);
+    // A copy is an includer write: every copied tag counts as added, so the
+    // unreadable and the missing foreign tag refuse alike, naming only the tag.
+    const refused = await M.cloneMemory(null, { ref: memoryId, targetUrn: `hrn:mem:${org.urn}:copy` }, as())
+      .then(() => null, (e: any) => e);
+    expect(refused?.extensions?.code).toBe('INCLUDE_TARGET_UNAVAILABLE');
+    expect(refused.extensions.tag).toBe('{{> hrn:node:foreign.example:secret:hidden}}');
+    expect(await db.memory.count({ where: { urn: `${org.urn}:copy` } })).toBe(0);
+    // loc-scope-ok: deliberately global — no include edge anywhere may name the foreign target.
+    expect(await db.edge.count({ where: { governedKind: 'INCLUDE', loc: { contains: foreign.id } } })).toBe(0);
   });
 });
