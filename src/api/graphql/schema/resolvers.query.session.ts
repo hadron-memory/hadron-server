@@ -21,7 +21,7 @@ import {
 import {
   type Context,
   requireRole,
-  requireOrgRole,
+  listOrgExchangeConnections,
   getAccessibleMemoryIds,
   sessionScopeFilter,
   SESSION_INCLUDE,
@@ -248,11 +248,7 @@ export const sessionQueries = {
     exchangeConnections: async (_: unknown, { orgId }: { orgId: string }, ctx: Context) => {
       // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
-      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
-      return ctx.db.exchangeConnection.findMany({
-        where: { organizationId: resolvedOrgId, deletedAt: null },
-        orderBy: { createdAt: 'asc' },
-      });
+      return listOrgExchangeConnections(ctx, resolvedOrgId);
     },
 
     exchangeMessages: async (
