@@ -86,7 +86,7 @@ async function bind(w: { id: string }, family: string | null, t?: Date) {
 /** A queued task, created at `t`, owned by Mia. */
 function queued(t: string, requirements: Prisma.InputJsonObject | null = null, extra: Record<string, unknown> = {}) {
   return db.agentTask.create({
-    data: { appId: app.id, title: 'Review', ownerUserId: mia.id, createdAt: at(t), ...(requirements ? { requirements } : {}), ...extra },
+    data: { appId: app.id, title: 'Review', ownerUserId: mia.id, createdAt: at(t), closeSessionWhenDone: true, ...(requirements ? { requirements } : {}), ...extra },
     select: { id: true },
   });
 }
@@ -241,6 +241,16 @@ describe('cor:agt:060:06 — a queued task goes to the matching worker free for 
       payload: { assignee: { workerId: baloo.id }, family: 'codex', closeSessionWhenDone: true },
       createdAt: at('11:01'),
     });
+  });
+
+  it.each([true, false])('#2249: assignment.matched carries the task\'s stored closeSessionWhenDone (%s) unchanged', async (flag) => {
+    await bind(baloo, 'codex', at('11:00'));
+    const t = await queued('11:00', null, { closeSessionWhenDone: flag });
+    expect((await taskMatcherTick(db, at('11:01'))).matched).toBe(1);
+    expect(await assigneeOf(t.id)).toBe(baloo.id);
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).closeSessionWhenDone).toBe(flag);
+    const [ev] = await db.agentTeamEvent.findMany({ where: { taskId: t.id } });
+    expect(ev!.payload).toMatchObject({ closeSessionWhenDone: flag });
   });
 
   it('S2: no eligible worker is free → the task stays queued', async () => {

@@ -65,10 +65,10 @@ describe('create: an omitted closeSessionWhenDone is false (R182)', () => {
   });
 
   it('a worker caller, and the child task it creates', async () => {
-    const root = await asWorker(anne, () => create({ assignee: { worker: 'Anne' } }));
+    const root: any = await asWorker(anne, () => create({ assignee: { worker: 'Anne' } }));
     expect(root.closeSessionWhenDone).toBe(false);
     await asWorker(anne, () => M.startAgentTask({}, { taskId: root.id }, ctx(member.id)));
-    const child = await asWorker(anne, () =>
+    const child: any = await asWorker(anne, () =>
       M.createAgentTask({}, { input: { parentTaskId: root.id, title: 'Review', assignee: { worker: 'Liam' } } }, ctx(member.id)));
     expect(child.closeSessionWhenDone).toBe(false);
     expect(await stored(child.id)).toBe(false);

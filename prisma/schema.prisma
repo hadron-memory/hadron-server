@@ -5498,8 +5498,8 @@ model AgentTask {
   resultSummary        String?   @map("result_summary")
   resultEvidence       String?   @map("result_evidence")
   tags                 String[]  @default([])
-  /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). Stored only in T1.
-  closeSessionWhenDone Boolean   @default(true) @map("close_session_when_done")
+  /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). Defaults to false (#2249, R182): the session ends only when the assigner asks.
+  closeSessionWhenDone Boolean   @default(false) @map("close_session_when_done")
   /// The latest assignment, by hand or by the matcher, in the #1610 actor shape.
   assignedAt           DateTime? @map("assigned_at")
   assignedBy           String?   @map("assigned_by")

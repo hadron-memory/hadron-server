@@ -543,16 +543,16 @@ const SHAPE_HADRON_TASK_CREATE = {
   }).optional().describe('For the platform\'s matcher.'),
   startBy: z.string().optional().describe('ISO date-time by which it should have started.'),
   tags: z.array(z.string()).optional(),
-  closeSessionWhenDone: z.boolean().optional().describe('Default true (cor:agt:050:10).'),
+  closeSessionWhenDone: z.boolean().optional().describe('Default false: the assignee\'s session ends only when you ask (cor:agt:050:10).'),
   status: z.enum(['PENDING', 'BACKLOG']).optional().describe(
     '#1754 (cor:agt:050:02): PENDING (default) or BACKLOG — parked, unassigned, never queued. A BACKLOG task takes no assignee.',
   ),
   session: SESSION_WRITE,
 };
 
-const SHAPE_HADRON_TASK_ASSIGN = { taskId, assignee: party, closeSessionWhenDone: z.boolean().optional(), session: SESSION_WRITE };
+const SHAPE_HADRON_TASK_ASSIGN = { taskId, assignee: party, closeSessionWhenDone: z.boolean().optional().describe('Omitted keeps the task\'s stored value (cor:agt:050:10).'), session: SESSION_WRITE };
 
-const SHAPE_HADRON_TASK_REASSIGN = { taskId, assignee: party, closeSessionWhenDone: z.boolean().optional(), session: SESSION_WRITE };
+const SHAPE_HADRON_TASK_REASSIGN = { taskId, assignee: party, closeSessionWhenDone: z.boolean().optional().describe('Omitted keeps the task\'s stored value (cor:agt:050:10).'), session: SESSION_WRITE };
 
 const SHAPE_HADRON_TASK_START = { taskId, session: SESSION_WRITE };
 

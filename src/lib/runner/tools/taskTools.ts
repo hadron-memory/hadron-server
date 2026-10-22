@@ -32,7 +32,7 @@ export const hadronTaskCreate: RunToolDef = {
       assignee: PARTY,
       tags: { type: 'array', items: { type: 'string' } },
       startBy: { type: 'string', description: 'ISO date-time.' },
-      closeSessionWhenDone: { type: 'boolean' },
+      closeSessionWhenDone: { type: 'boolean', description: 'Default false: the assignee\'s session ends only when you ask (cor:agt:050:10).' },
     },
     required: ['title'],
   },
