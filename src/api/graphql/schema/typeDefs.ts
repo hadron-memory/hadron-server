@@ -9124,7 +9124,7 @@ export const typeDefs = `#graphql
     #1705 — assign a task with no assignee — a queued task (pending) or a BACKLOG task: the
     task's owner, a worker the owner reports to, or whoever manages the App
     (hrn:node:hadronmemory.com:specs:cor:agt:050:09). closeSessionWhenDone, when
-    given, replaces the task's value. Assigning a BACKLOG task moves it to
+    given, replaces the task's value; omitted, the stored value is kept. Assigning a BACKLOG task moves it to
     pending (hrn:node:hadronmemory.com:specs:cor:agt:050:02, #1754). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (already assigned: use
     reassignAgentTask), TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND, APP_UNINSTALLED.
@@ -13397,7 +13397,7 @@ export const typeDefs = `#graphql
     requirements: AgentTaskRequirementsInput
     startBy: DateTime
     tags: [String!]
-    "Defaults to true (hrn:node:hadronmemory.com:specs:cor:agt:050:10)."
+    "Defaults to false: the assignee's session ends only when whoever assigns the task asks (hrn:node:hadronmemory.com:specs:cor:agt:050:10)."
     closeSessionWhenDone: Boolean
     """
     #1754 — PENDING (the default) or BACKLOG

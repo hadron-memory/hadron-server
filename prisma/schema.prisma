@@ -5498,8 +5498,9 @@ model AgentTask {
   resultSummary        String?   @map("result_summary")
   resultEvidence       String?   @map("result_evidence")
   tags                 String[]  @default([])
-  /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). Stored only in T1.
-  closeSessionWhenDone Boolean   @default(true) @map("close_session_when_done")
+  /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). False unless the assigner asks (R182, #2249): the
+  /// default only reaches a raw insert, since every create path writes the resolved value.
+  closeSessionWhenDone Boolean   @default(false) @map("close_session_when_done")
   /// The latest assignment, by hand or by the matcher, in the #1610 actor shape.
   assignedAt           DateTime? @map("assigned_at")
   assignedBy           String?   @map("assigned_by")

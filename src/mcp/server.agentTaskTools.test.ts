@@ -108,7 +108,7 @@ describe('agent-task tools: who acts', () => {
     const asAnne = await session({ userId: member.id, appId: app.id, workerId: anne.id });
     const asRook = await session({ userId: member.id, appId: app.id, workerId: rook.id });
     const created = text(await s.callTool('hadron_task_create', {
-      appRef: app.id, title: 'Fix it', assignee: { worker: 'Anne' }, tags: ['t1'], session: plain.id,
+      appRef: app.id, title: 'Fix it', assignee: { worker: 'Anne' }, tags: ['t1'], closeSessionWhenDone: true, session: plain.id,
     }));
     expect(created).toMatch(/assignee: worker Anne/);
     const id = idOf(created);
@@ -127,7 +127,7 @@ describe('agent-task tools: who acts', () => {
     expect(done).toMatch(/result: succeeded/);
     expect(code(text(await s.callTool('hadron_task_cancel', { taskId: id, session: plain.id })))).toBe('TASK_ENDED');
     const ev = text(await s.callTool('hadron_team_events', { appRef: app.id, taskId: id }));
-    // #1709: the task closes its session when done (the default), so finishing asks Anne to end it (cor:agt:050:10).
+    // #1709: the assigner asked for the session to close when done (explicit since #2249: the default is false), so finishing asks Anne to end it (cor:agt:050:10).
     expect(ev.split('\n').map((l) => /Z (task\.[a-z-]+)/.exec(l)?.[1])).toEqual([
       'task.created', 'task.assigned', 'task.started', 'task.finished', 'task.session-end-requested',
     ]);

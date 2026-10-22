@@ -11,6 +11,8 @@
  * `vm.runInNewContext('gc')`), so no runner flag is required. Run alone with:
  *   pnpm vitest run src/mcp/server.sharedToolShapes2260.test.ts
  * Regenerate the golden (only when a tool's wire surface is meant to change) with UPDATE_TOOL_GOLDEN=1.
+ * Pinned from 92ff99df; #2249 amended exactly three entries (hadron_task_create / _assign / _reassign), whose text states the
+ * closeSessionWhenDone default.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -63,7 +65,7 @@ async function surface(auth: Record<string, unknown>) {
 }
 
 describe('#2260 wire surface is unchanged', () => {
-  it('lists the same tools, descriptions, annotations and JSON Schema as the pinned baseline (92ff99df) for every principal kind', async () => {
+  it('lists the same tools, descriptions, annotations and JSON Schema as the pinned golden for every principal kind', async () => {
     // One sha256 per tool over its complete advertised definition: byte-identical or it names the tool that moved.
     const hashes = async (auth: Record<string, unknown>) =>
       (await surface(auth)).map((t) => [t.name, crypto.createHash('sha256').update(JSON.stringify(t)).digest('hex')] as const);
