@@ -13,7 +13,7 @@ import { generateId } from '../../../lib/id.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { cleanDb, createDbAppAgent, createDbAppWithKey } from '../../../test/helpers.js';
-import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
+import { waitForLockWaiters, waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { resolvers } from './resolvers.js';
 import type { Context } from './resolvers.helpers.js';
 
@@ -190,5 +190,37 @@ describe('#2046 S9-3 install, uninstall, createApp and first-contact subscriptio
       release();
       await holder;
     }
+  });
+
+  it('unchanged-row control: a returning end-user holds the subscription row to commit, so a concurrent delete waits', async () => {
+    const agent = await orgAgent('ctl');
+    const { app } = await createDbAppWithKey(db, 'ctl-app', orgId);
+    await createDbAppAgent(db, app.id, agent.id);
+    await db.app.update({ where: { id: app.id }, data: { createUserPermission: 'IMPLICIT' } });
+    const appCtx = { db, appId: app.id, roles: [] } as unknown as Context;
+    await M.startAgentSession({}, { agentId: agent.id, externalUserId: 'ext-ctl' }, appCtx); // first contact creates the row
+    expect(await db.agentSubscription.count({ where: { agentId: agent.id } })).toBe(1);
+    // Stall the returning start AFTER its subscription check: it must insert a session row, and we hold the table.
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; });
+    const stall = db.$transaction(async (tx) => {
+      await tx.$executeRaw`LOCK TABLE sessions IN SHARE ROW EXCLUSIVE MODE`;
+      locked();
+      await held;
+    });
+    await lockedP;
+    const start = M.startAgentSession({}, { agentId: agent.id, externalUserId: 'ext-ctl' }, appCtx);
+    await waitForLockWaiters(db, 1, 5_000);
+    let deleted = false;
+    const del = db.$executeRaw`DELETE FROM agent_subscriptions WHERE agent_id = ${agent.id}`.then(() => { deleted = true; });
+    await waitForLockWaiters(db, 2, 5_000); // the start waits on sessions; the delete waits on the row the start holds
+    expect(deleted).toBe(false);
+    release();
+    await stall;
+    await start;
+    await del;
+    expect(deleted).toBe(true);
   });
 });

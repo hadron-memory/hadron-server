@@ -190,6 +190,9 @@ async function lockSessionAppActive(tx: Prisma.TransactionClient, appId: string)
 
 type LaunchCtx = { grant: LoadedGrant; issuedBy: 'platform' | 'manager'; hold: { holdUserId: string | null; holdAt: Date | null } };
 
+/** #2046 S9-3: no subscription row exists, so the unfenced start rolls back and is rerun fenced. */
+class FirstContactNeedsFence extends Error {}
+
 const launchGrantInvalid = () =>
   new GraphQLError('This launch grant is not valid: unknown, expired, already used, or not yours.', { extensions: { code: 'LAUNCH_GRANT_INVALID' } });
 
@@ -1820,18 +1823,16 @@ export const sessionMutations = {
       // Lock the App before provisioning any dependent row. The lock and all
       // writes commit together, so uninstall cannot pass the check mid-flight.
       // #2046 S9-3: the license write is ON CONFLICT DO NOTHING, so it changes compile entitlement only when no
-      // subscription row exists (a new end-user, or a user without one). Only that first contact enters the
-      // include-history fence, from the transaction's first statement; a returning end-user stays unfenced.
-      const knownUser = externalUserId
-        ? await ctx.db.user.findFirst({ where: { externalAppId: appId, externalId: externalUserId, deletedAt: null }, select: { id: true } })
-        : null;
-      const mayCreateSubscription = !!externalUserId && !(knownUser && await ctx.db.agentSubscription.findUnique({
-        where: { userId_agentId: { userId: knownUser.id, agentId } }, select: { userId: true },
-      }));
-      const startTx = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> => mayCreateSubscription
+      // subscription row exists. A returning end-user runs UNFENCED but holds the row FOR SHARE to commit, so no
+      // delete or revoke can land between the check and the commit and the path can never create entitlement.
+      // With no row it rolls back and is rerun as a fresh transaction that enters the include-history fence
+      // first and revalidates everything. The request's one-shot operation key is claimed once, carried over.
+      let fenced = false;
+      let keyClaim: { value: ReturnType<typeof getRequestOperationKey> } | null = null;
+      const startTx = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> => fenced
         ? withIncludeHistoryTransaction(ctx.db, (fence) => work(includeHistoryClient(fence)))
         : ctx.db.$transaction(work);
-      const { session, memoryId, parsedKey } = await startTx(async (tx) => {
+      const transaction = async (tx: Prisma.TransactionClient) => {
         await lockSessionAppActive(tx, appId);
         const app = await tx.app.findUniqueOrThrow({ where: { id: appId } });
 
@@ -1862,7 +1863,7 @@ export const sessionMutations = {
         }
 
         // #1796: consume request-only supply before any provisioning writes.
-        const parsedKey = getRequestOperationKey();
+        const parsedKey = keyClaim ? keyClaim.value : (keyClaim = { value: getRequestOperationKey() }).value;
 
         // Resolve user (optional — null means anonymous session)
         let userId: string | null = null;
@@ -1897,6 +1898,11 @@ export const sessionMutations = {
         // on the first user-attributed contact for (user, agent). Ignore a
         // duplicate without aborting this PostgreSQL transaction.
         if (userId) {
+          if (!fenced) {
+            const held = await tx.$queryRaw<Array<{ one: number }>>`
+              SELECT 1 AS one FROM agent_subscriptions WHERE user_id = ${userId} AND agent_id = ${agentId} FOR SHARE`;
+            if (held.length === 0) throw new FirstContactNeedsFence();
+          }
           await tx.agentSubscription.createMany({
             data: { userId, agentId, activatedAt: new Date() },
             skipDuplicates: true,
@@ -2047,7 +2053,18 @@ export const sessionMutations = {
         });
 
         return { session, memoryId, parsedKey };
-      });
+      };
+      let started: Awaited<ReturnType<typeof transaction>>;
+      for (;;) {
+        try {
+          started = await startTx(transaction);
+          break;
+        } catch (e) {
+          if (e instanceof FirstContactNeedsFence && !fenced) { fenced = true; continue; }
+          throw e;
+        }
+      }
+      const { session, memoryId, parsedKey } = started;
 
       // The cache must only observe a committed session.
       if (parsedKey) sessionKeyCache.set(session.id, memoryId, parsedKey);

@@ -81,6 +81,8 @@ const MODEL_HISTORY_LIMIT = 50;
 
 /** A carrier App appeared after the anchors were chosen (#1585, Chip); retry with fresh anchors. */
 class ChatAuthorityScopeChanged extends Error {}
+/** #2046 S9-3: no subscription row exists, so the unfenced attempt wrote nothing and must be retried fenced. */
+class FirstContactNeedsFence extends Error {}
 
 /**
  * #1717 (Diego on #1725): the transaction every chat-by-loc write runs in. The
@@ -623,18 +625,17 @@ export const chatMutations = {
       // every carrier App (and its owner) must already be anchored; if not, the
       // attempt aborts before any write and retries with fresh anchors.
       let chatStarted = false;
-      for (let attempt = 0; attempt < 3 && !chatStarted; attempt++) {
+      // #2046 S9-3: the license write is ON CONFLICT DO NOTHING, so it changes compile entitlement only when NO
+      // subscription row exists. The common path (a row exists) runs UNFENCED but holds that row FOR SHARE to
+      // commit, so no delete or revoke can land between the check and the commit and the path can never create
+      // entitlement. When no row exists it writes nothing, ends, and is retried as a fresh transaction that
+      // enters the include-history fence first and revalidates everything (the gate re-runs on the new tx).
+      let fenced = false;
+      for (let attempt = 0; attempt < 4 && !chatStarted; attempt++) {
         const chatAnchors = await chatAuthorityAnchors(
           ctx, gateRow, effectiveUserId !== 'anonymous' ? effectiveUserId : null,
         );
         const anchored = new Set(chatAnchors.map((a) => `${a.kind}:${a.id}`));
-        // #2046 S9-3: the license write is ON CONFLICT DO NOTHING, so it changes compile entitlement only when
-        // NO subscription row exists. Only that first contact enters the include-history fence (a global,
-        // exclusive lock); a chat for an existing row, revoked or not, writes no entitlement and stays unfenced.
-        const mayCreateSubscription = effectiveUserId !== 'anonymous' && !isTestRun
-          && !(await ctx.db.agentSubscription.findUnique({
-            where: { userId_agentId: { userId: effectiveUserId, agentId: resolvedAgentId } }, select: { userId: true },
-          }));
         try {
           await withAuthorizedTx(ctx, chatAnchors, async (txCtx) => {
             const current = await txCtx.db.agent.findUnique({
@@ -682,6 +683,12 @@ export const chatMutations = {
             // #1581: provisioned in the SAME transaction that creates the chat,
             // after the Agent gate above, so a chat that fails leaves no license.
             if (effectiveUserId !== 'anonymous' && !isTestRun) {
+              if (!fenced) {
+                const held = await tx.$queryRaw<Array<{ one: number }>>`
+                  SELECT 1 AS one FROM agent_subscriptions
+                  WHERE user_id = ${effectiveUserId} AND agent_id = ${resolvedAgentId} FOR SHARE`;
+                if (held.length === 0) throw new FirstContactNeedsFence();
+              }
               await ensureAgentSubscription(tx, effectiveUserId, resolvedAgentId);
             }
             await lockAncestorsForCreateMany(tx, targetMemoryId, [chatLoc, `${chatLoc}:messages`]);
@@ -713,9 +720,10 @@ export const chatMutations = {
                 createdBy: ctx.userId ?? null,
               },
             });
-          }, { fence: mayCreateSubscription });
+          }, { fence: fenced });
           chatStarted = true;
         } catch (error) {
+          if (error instanceof FirstContactNeedsFence) { fenced = true; continue; }
           if (error instanceof ChatAuthorityScopeChanged) continue;
           throw error;
         }
