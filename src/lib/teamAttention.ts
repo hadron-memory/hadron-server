@@ -26,7 +26,7 @@ import { resolveChannelRefId } from './entityRef/channelRef.js';
 import { composeWorkerUrn } from './entityRef/workerRef.js';
 import { normalizeUrnForLookup } from './urn.js';
 import { resolveRegister } from './resolveRegister.js';
-import { advanceReadState } from './channelReadState.js';
+import { advanceReadState, diagnoseNoStamp, readStateIncarnations, recordCheckMiss, stampChannelCheck } from './channelReadState.js';
 import { raiseDeliveryMark, raiseReadIfMentionOnly } from './workerMarks.js';
 import { mentionsWorkerOf } from './mentionsReadResolution.js';
 import { mentionTokenOf } from './mentionToken.js';
@@ -186,6 +186,34 @@ export type TeamAttentionSwitchoverPreview = {
 
 function fail(message: string, code: string, extra: Record<string, unknown> = {}): never {
   throw new GraphQLError(message, { extensions: { code, ...extra } });
+}
+
+/**
+ * #2181 — the typed refusal for a guarded read or mark whose Channel is no longer the incarnation the caller read.
+ * The server never retargets: the caller reads the current incarnation and pages again.
+ */
+export function channelIncarnationChanged(channelId: string, currentIncarnation: number | null, expected?: number): GraphQLError {
+  const pinned = expected != null ? `, you pinned ${expected}` : '';
+  return new GraphQLError(
+    `Channel ${channelId} was recreated since you read it (it is now incarnation ${currentIncarnation ?? 'unknown'}${pinned}). ` +
+      'Read it again and pin the new incarnation; do not repeat this call.',
+    { extensions: { code: 'CHANNEL_INCARNATION_CHANGED', channelId, currentIncarnation } },
+  );
+}
+
+/**
+ * #2181 — the deciding fence. Takes the Channel row `FOR SHARE` as the FIRST statement of the caller's transaction and
+ * compares its live incarnation with the expected one (after any authorization anchors the caller's transaction
+ * already took; no row lock of the read/ack protocols precedes it). Every supported delete / recreate / restore writer ends in an
+ * `UPDATE channels` on this row, so it serializes with the guarded effects in both orders; read-state rows are only
+ * ever locked after it (channel row, then read-state row). A mismatch throws and the caller's transaction writes nothing.
+ */
+export async function fenceChannelIncarnation(tx: Prisma.TransactionClient, channelId: string, expected: number): Promise<void> {
+  const rows = await tx.$queryRaw<Array<{ incarnation: number; deleted_at: Date | null }>>`
+    SELECT incarnation, deleted_at FROM channels WHERE id = ${channelId} FOR SHARE`;
+  const row = rows[0];
+  if (!row || row.deleted_at) fail('No readable registered Channel matches.', 'CHANNEL_NOT_FOUND');
+  if (row.incarnation !== expected) throw channelIncarnationChanged(channelId, row.incarnation, expected);
 }
 
 function tokenSigningKey(): Buffer {
@@ -1690,6 +1718,8 @@ export async function maybeAdvanceOwnChannelRead(
     mentionsRef?: string | null;
     limit?: number | null;
     offset?: number | null;
+    /** #2181: the incarnation the page was pinned to; when set, every effect below runs in ONE fenced transaction. */
+    expectedIncarnation?: number | null;
     page: { items: Array<{ seq: number }>; total: number };
   },
 ): Promise<number | null> {
@@ -1701,12 +1731,27 @@ export async function maybeAdvanceOwnChannelRead(
   // in `ownLiveSessionWorker` before the eligibility returns, so a driver that
   // reads only newest pages, mention filters or backward windows stays live.
   const session = await ownLiveSessionWorker(ctx, sessionRef);
-  if (!session) return null;
+  if (!session) {
+    await recordCheckMiss(ctx.db, { channelId: args.channelId, sessionId: sessionRef, reason: 'SESSION_NOT_OWN_LIVE', via: 'read' });
+    return null;
+  }
+  // #2181: a pinned read decides revive, check stamp and cursor/mentions advance in one transaction behind the
+  // incarnation fence. The live-session heartbeat above is the one effect that stays independent of it.
+  if (args.expectedIncarnation != null) return advanceOwnChannelReadFenced(ctx, session, args, args.expectedIncarnation);
   // #1617 B — the page has been served, so the read (the act) succeeded:
   // resume now. A refusal under the lock leaves the cursor where it was.
   // Placed BEFORE the #1628 opt-out: a read that declines the cursor advance
   // is still driving the session, so it still resumes it.
-  if (session.lapsed && !(await reviveOwnLapsedSession(ctx, session.sessionId))) return null;
+  if (session.lapsed && !(await reviveOwnLapsedSession(ctx, session.sessionId))) {
+    await recordCheckMiss(ctx.db, { channelId: args.channelId, sessionId: session.sessionId, reason: 'SESSION_REVIVE_REFUSED', via: 'read' });
+    return null;
+  }
+  // #2138 §3.1: a read of the team channel through the worker's OWN session is a check, whatever it returned and
+  // whether or not it moves the cursor; another channel's read stamps nothing (stampChannelCheck).
+  if (!(await stampChannelCheck(ctx.db, session.workerId, args.channelId))) {
+    const why = await diagnoseNoStamp(ctx.db, session.workerId, args.channelId);
+    if (why) await recordCheckMiss(ctx.db, { channelId: args.channelId, sessionId: session.sessionId, reason: why, via: 'read' });
+  }
   // #1628: attribution is activity even when the caller will acknowledge only
   // after validating and delivering the page. Never skip the heartbeat above.
   if (args.advanceReadState === false) return null;
@@ -1716,8 +1761,20 @@ export async function maybeAdvanceOwnChannelRead(
   // total says it is complete, count and fetch are separate queries: a post
   // between them could make the fetched tail skip earlier unseen messages.
   if (args.sinceSeq == null && args.offset == null) return null;
-  const { workerId } = session;
-  const view = await resolveRegister(ctx.db, { attendee: { workerId }, actor: ctx });
+  return advanceUnfilteredRead(ctx, ctx.db, session.workerId, args);
+}
+
+/** The unfiltered-page cursor advance; `db` is the fenced transaction for a pinned read. */
+async function advanceUnfilteredRead(
+  ctx: Context,
+  db: Context['db'],
+  workerId: string,
+  args: {
+    channelId: string; capturedHead: number; sinceSeq?: number | null; offset?: number | null;
+    page: { items: Array<{ seq: number }>; total: number };
+  },
+): Promise<number | null> {
+  const view = await resolveRegister(db, { attendee: { workerId }, actor: ctx });
   const row = view?.rows.find((r) => r.channel.id === args.channelId);
   if (!row || row.entry.role === 'POST' || !row.canRead || row.channel.deleted) return null;
   const seen = row.readState?.lastSeenSeq ?? 0;
@@ -1731,7 +1788,7 @@ export async function maybeAdvanceOwnChannelRead(
   // has more rows at the edge seq than this page returned.
   if (!exhausted && visible > seen && row.channel.hostMemoryId) {
     const returnedAtEdge = args.page.items.filter((item) => item.seq === visible).length;
-    const atEdge = await ctx.db.node.count({
+    const atEdge = await db.node.count({
       where: {
         memoryId: row.channel.hostMemoryId,
         loc: { startsWith: escapePrismaLikePattern(`${row.channel.loc}:messages:`) },
@@ -1744,7 +1801,86 @@ export async function maybeAdvanceOwnChannelRead(
   }
   through = Math.min(args.capturedHead, through);
   if (through <= seen) return seen;
-  return advanceReadState(ctx.db, { workerId }, args.channelId, through);
+  return advanceReadState(db as never, { workerId }, args.channelId, through);
+}
+
+/**
+ * #2181 — a PINNED read's effects, decided in one transaction behind {@link fenceChannelIncarnation}: the lapsed-session
+ * revive, the check stamp and the cursor / mentions advance commit together or not at all, so a refused read changes no
+ * cursor, mark, stamp or revive. The live-session heartbeat already ran and stays independent.
+ */
+async function advanceOwnChannelReadFenced(
+  ctx: Context,
+  session: { workerId: string; appId: string; sessionId: string; lapsed?: boolean },
+  args: Parameters<typeof maybeAdvanceOwnChannelRead>[1],
+  expected: number,
+): Promise<number | null> {
+  if (args.advanceReadState !== false && args.mentionsRef) {
+    return advanceOwnMentionsRead(ctx, session, args, { expected });
+  }
+  const out = await ctx.db.$transaction(async (tx) => {
+    const effects = await fencedCheckEffects(ctx, tx, session, args.channelId, expected);
+    if (effects.refused || args.advanceReadState === false) return { effects, advanced: null as number | null };
+    const advanced = args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0 || (args.sinceSeq == null && args.offset == null)
+      ? null
+      : await advanceUnfilteredRead(ctx, tx as never, session.workerId, args);
+    return { effects, advanced };
+  });
+  await recordFencedMisses(ctx, session, args.channelId, out.effects);
+  return out.advanced;
+}
+
+type FencedEffects = { refused: boolean; stamped: boolean };
+
+/**
+ * #2181 — the deciding session check, inside the fenced transaction: a session that was live when the request arrived may
+ * have ended while the transaction waited for the Channel row, so it is revalidated here (worker, then session rows
+ * FOR SHARE, the lifecycle order the mentions mark uses) before any effect; a lapsed one is resumed here instead.
+ */
+async function sessionEligibleInTx(
+  ctx: Context,
+  tx: Prisma.TransactionClient,
+  session: { workerId: string; appId: string; sessionId: string; lapsed?: boolean },
+): Promise<boolean> {
+  if (session.lapsed) return resumeOwnLapsedSessionInTx(ctx, tx, session.sessionId);
+  await tx.$queryRaw`SELECT id FROM workers WHERE id = ${session.workerId} FOR SHARE`;
+  await tx.$queryRaw`SELECT id FROM sessions WHERE id = ${session.sessionId} FOR SHARE`;
+  const live = await ownLiveSessionWorker({ ...ctx, db: tx as never }, session.sessionId, session.appId, { readOnly: true });
+  return !!live && !live.lapsed && live.workerId === session.workerId;
+}
+
+/**
+ * Fence, then check (or revive) the session and, unless the caller stamps later, stamp the check, all inside the caller's
+ * transaction. `stamp: false` is for a transaction that must take other locks first (the mentions mark takes the worker's
+ * wake lock before it touches the read-state row, as every other writer does).
+ */
+async function fencedCheckEffects(
+  ctx: Context,
+  tx: Prisma.TransactionClient,
+  session: { workerId: string; appId: string; sessionId: string; lapsed?: boolean },
+  channelId: string,
+  expected: number,
+  opts: { stamp?: boolean } = {},
+): Promise<FencedEffects> {
+  await fenceChannelIncarnation(tx, channelId, expected);
+  if (!(await sessionEligibleInTx(ctx, tx, session))) return { refused: true, stamped: false };
+  if (opts.stamp === false) return { refused: false, stamped: false };
+  return { refused: false, stamped: await stampChannelCheck(tx as never, session.workerId, channelId) };
+}
+
+/** The log-only diagnostics for a fenced read, after it committed (never inside the fenced transaction). */
+async function recordFencedMisses(
+  ctx: Context,
+  session: { workerId: string; sessionId: string },
+  channelId: string,
+  effects: FencedEffects,
+): Promise<void> {
+  if (effects.refused) {
+    await recordCheckMiss(ctx.db, { channelId, sessionId: session.sessionId, reason: 'SESSION_REVIVE_REFUSED', via: 'read' });
+  } else if (!effects.stamped) {
+    const why = await diagnoseNoStamp(ctx.db, session.workerId, channelId);
+    if (why) await recordCheckMiss(ctx.db, { channelId, sessionId: session.sessionId, reason: why, via: 'read' });
+  }
 }
 
 /**
@@ -1770,21 +1906,32 @@ export async function maybeAdvanceOwnChannelRead(
  */
 async function advanceOwnMentionsRead(
   ctx: Context,
-  session: { workerId: string; appId: string; sessionId: string },
+  session: { workerId: string; appId: string; sessionId: string; lapsed?: boolean },
   args: {
     channelId: string; capturedHead: number; sinceSeq?: number | null; beforeSeq?: number | null;
     limit?: number | null; offset?: number | null; page: { items: Array<{ seq: number }>; total: number };
   },
+  /**
+   * #2181: a PINNED read. The fence, the lapsed-session revive and the check stamp then run in this method's own
+   * transaction (or, when the page does not qualify, in a plain fenced one), so a refused read changes nothing.
+   */
+  fence?: { expected: number },
 ): Promise<number | null> {
   const { workerId, appId } = session;
-  if (mentionsWorkerOf(args.page) !== workerId) return null;
-  if (args.sinceSeq == null || args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return null;
+  const bail = async (): Promise<null> => {
+    if (!fence) return null;
+    const effects = await ctx.db.$transaction((tx) => fencedCheckEffects(ctx, tx, session, args.channelId, fence.expected));
+    await recordFencedMisses(ctx, session, args.channelId, effects);
+    return null;
+  };
+  if (mentionsWorkerOf(args.page) !== workerId) return bail();
+  if (args.sinceSeq == null || args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return bail();
   const read = await ctx.db.channel.findFirst({
     where: { id: args.channelId, deletedAt: null },
     select: { incarnation: true, memoryId: true, loc: true },
   });
   const app = await ctx.db.app.findUnique({ where: { id: appId }, select: { organizationId: true, ownerUserId: true } });
-  if (!read || !app) return null;
+  if (!read || !app) return bail();
   const exhausted = args.page.total <= args.page.items.length;
   const visible = args.page.items.reduce((max, item) => Math.max(max, item.seq), 0);
   let through = exhausted ? args.capturedHead : visible;
@@ -1810,8 +1957,13 @@ async function advanceOwnMentionsRead(
     { kind: 'memory', id: read.memoryId },
   ];
 
+  let fencedEffects: FencedEffects | null = null;
   try {
-    return await withAuthorizedTx(ctx, anchors, async () => undefined, async (tx, txCtx) => {
+    const advanced = await withAuthorizedTx(ctx, anchors, async () => undefined, async (tx, txCtx) => {
+      if (fence) {
+        fencedEffects = await fencedCheckEffects(ctx, tx, session, args.channelId, fence.expected, { stamp: false });
+        if (fencedEffects.refused) return null;
+      }
       if (ctx.userId) {
         await tx.$queryRaw`SELECT user_id FROM app_members WHERE app_id = ${appId} AND user_id = ${ctx.userId} FOR SHARE`;
         if (app.organizationId) {
@@ -1823,6 +1975,9 @@ async function advanceOwnMentionsRead(
       await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtextextended(${`tickers:${appId}`}, 0))`;
       await tx.$queryRaw`SELECT id FROM tickers WHERE app_id = ${appId} AND deleted_at IS NULL FOR SHARE`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + workerId}, 0))`;
+      // #2181: the check stamp locks the read-state row, so it comes only after the wake lock (wake lock, then read-state
+      // row, as acknowledgeDeliveryBatches and the unpinned mentions mark take them).
+      if (fence && fencedEffects) fencedEffects = { refused: false, stamped: await stampChannelCheck(tx as never, workerId, args.channelId) };
 
       // Read-only: the heartbeat already ran outside (maybeAdvanceOwnChannelRead); an UPDATE of the session row here
       // would wait on another reader's FOR SHARE while that reader waits on this wake lock (George P2 on 8ed33339).
@@ -1858,6 +2013,8 @@ async function advanceOwnMentionsRead(
       await raiseReadIfMentionOnly(tx, { workerId, channelId: args.channelId, through });
       return (await tx.channelReadState.findFirst({ where: { workerId, channelId: args.channelId }, select: { lastSeenSeq: true } }))?.lastSeenSeq ?? seen;
     });
+    if (fencedEffects) await recordFencedMisses(ctx, session, args.channelId, fencedEffects);
+    return advanced;
   } catch (e) {
     // Authority gone under the anchors (an App, org, memory or user deleted): the page stands, no mark moves.
     if (e instanceof Error && e.message === 'Forbidden') return null;
@@ -1867,8 +2024,8 @@ async function advanceOwnMentionsRead(
 
 export async function markOwnTeamChatRead(
   ctx: Context,
-  args: { appRef: string; channelRef?: string | null; sessionRef: string; seq: number },
-): Promise<{ workerId: string; channelId: string; lastSeenSeq: number }> {
+  args: { appRef: string; channelRef?: string | null; sessionRef: string; seq: number; expectedIncarnation?: number | null },
+): Promise<{ workerId: string; channelId: string; lastSeenSeq: number; channelIncarnation: number; cursorIncarnation: number | null }> {
   const app = await resolvePilotApp(ctx, args.appRef);
   const session = await ownLiveSessionWorker(ctx, args.sessionRef, app.id);
   if (!session) {
@@ -1897,8 +2054,40 @@ export async function markOwnTeamChatRead(
     fail('No readable registered Channel matches.', 'CHANNEL_NOT_FOUND');
   }
   if (!Number.isInteger(args.seq) || args.seq < 0) fail('seq must be a non-negative integer.', 'BAD_USER_INPUT');
-  if (args.seq > row.channel.lastSeq) {
+  // A pinned mark decides the watermark under the Channel lock (below), after the incarnation compare, so a recreated
+  // Channel's lower watermark cannot turn a stale mark into SEQ_BEYOND_WATERMARK.
+  if (args.expectedIncarnation == null && args.seq > row.channel.lastSeq) {
     fail(`seq ${args.seq} is beyond the Channel watermark (${row.channel.lastSeq}).`, 'SEQ_BEYOND_WATERMARK', { lastSeq: row.channel.lastSeq });
+  }
+  // #2181: a PINNED mark decides everything in one transaction behind the Channel-row fence: the register right and the
+  // watermark are re-read under the lock, the lapsed session resumes, the cursor moves and the check is stamped, or
+  // nothing happens. An OMITTED expectedIncarnation keeps the unfenced path below (documented, not a safe mode).
+  if (args.expectedIncarnation != null) {
+    const expected = args.expectedIncarnation;
+    const done = await ctx.db.$transaction(async (tx) => {
+      await fenceChannelIncarnation(tx, row.channel.id, expected);
+      const locked = await resolveRegister(tx as never, { attendee: { workerId }, actor: ctx });
+      const lockedRow = locked?.rows.find((r) => r.channel.id === channelId);
+      if (!lockedRow || lockedRow.entry.role === 'POST' || !lockedRow.canRead || lockedRow.channel.deleted) {
+        fail('No readable registered Channel matches.', 'CHANNEL_NOT_FOUND');
+      }
+      if (args.seq > lockedRow.channel.lastSeq) {
+        fail(`seq ${args.seq} is beyond the Channel watermark (${lockedRow.channel.lastSeq}).`, 'SEQ_BEYOND_WATERMARK', { lastSeq: lockedRow.channel.lastSeq });
+      }
+      if (!(await sessionEligibleInTx(ctx, tx, session))) {
+        fail('That session is not one of your live Worker sessions in this App.', 'SESSION_NOT_LIVE');
+      }
+      const lastSeenSeq = await advanceReadState(tx as never, { workerId }, row.channel.id, args.seq);
+      const stamped = await stampChannelCheck(tx as never, workerId, row.channel.id);
+      const label = await tx.$queryRaw<Array<{ channel_incarnation: number | null }>>`
+        SELECT channel_incarnation FROM channel_read_states WHERE worker_id = ${workerId} AND channel_id = ${row.channel.id}`;
+      return { lastSeenSeq, stamped, cursorIncarnation: label[0]?.channel_incarnation ?? null };
+    });
+    if (!done.stamped) {
+      const why = await diagnoseNoStamp(ctx.db, workerId, row.channel.id);
+      if (why) await recordCheckMiss(ctx.db, { channelId: row.channel.id, sessionId: session.sessionId, reason: why, via: 'mark' });
+    }
+    return { workerId, channelId: row.channel.id, lastSeenSeq: done.lastSeenSeq, channelIncarnation: expected, cursorIncarnation: done.cursorIncarnation };
   }
   // #1617 B — a lapsed session resumes in the SAME transaction as the cursor
   // write (#1625 review, Baloo P2-1): both commit, or neither does.
@@ -1910,5 +2099,12 @@ export async function markOwnTeamChatRead(
         return advanceReadState(tx as never, { workerId }, row.channel.id, args.seq);
       })
     : await advanceReadState(ctx.db, { workerId }, row.channel.id, args.seq);
-  return { workerId, channelId: row.channel.id, lastSeenSeq };
+  // #2138 §3.1: a mark-read through the worker's own session is a check (even one that moves nothing). Stamped last, so a
+  // refused call above, or a resume refused inside its transaction, is not one.
+  if (!(await stampChannelCheck(ctx.db, workerId, row.channel.id))) {
+    const why = await diagnoseNoStamp(ctx.db, workerId, row.channel.id);
+    if (why) await recordCheckMiss(ctx.db, { channelId: row.channel.id, sessionId: session.sessionId, reason: why, via: 'mark' });
+  }
+  const state = await readStateIncarnations(ctx.db, { workerId }, row.channel.id);
+  return { workerId, channelId: row.channel.id, lastSeenSeq, ...state };
 }

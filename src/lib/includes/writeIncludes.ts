@@ -6,9 +6,6 @@ import { decryptNodeFields } from '../nodeCrypto.js';
 import { sessionKeyCache } from '../sessionKeyCache.js';
 import { IncludeSyntaxError, parseIncludeTags, type IncludeTag } from './parseIncludeTags.js';
 
-/** Deepest include chain a write accepts (#2040). */
-export const MAX_INCLUDE_DEPTH = 10;
-
 /** The `loc` of every derived include edge: one per (source, target). */
 export const includeEdgeLoc = (sourceId: string, targetId: string) => `includes:${sourceId}:${targetId}`;
 
@@ -75,17 +72,86 @@ export function includeRefusal(code: string, message: string, extra: Record<stri
 }
 
 /**
- * Refuse content whose include tags are malformed, nest deeper than
- * `MAX_INCLUDE_DEPTH`, or reach the writing node again (a cycle). Run inside
- * the writer's transaction on the PLAINTEXT content, before the node row is
- * written, so a refusal leaves nothing behind. The walk follows only nodes
- * the principal can read (`readable`); an unreadable or missing target ends
- * its branch silently, so a cycle through one cannot be learned from the error.
- * A node already seen on another branch is not re-walked (diamonds are fine).
+ * How a writer's include tags are judged (#2041 S2b). `storedPlaintext` is the
+ * includer's plaintext from the row the writer locked and revalidated in its
+ * own transaction, read before its update; absent for a create or a resurrected
+ * tombstone. `includeSystemWrite` is for git sync and the root-node seam only,
+ * which have no writing person: they keep the syntax and cycle checks and skip
+ * the read check (cor:dmo:150:04 applies to GraphQL, the CLI, the portal and MCP).
+ */
+export interface IncludeWriteOptions {
+  storedPlaintext?: string | null;
+  includeSystemWrite?: true;
+}
+
+/**
+ * A tag's identity for "added or changed": kind, target and settings, never its
+ * spelling. `rev` is keyed as a string: JSON would write a rev too large for a
+ * number (Infinity) as null, the same as no rev (Gene, #2226).
+ */
+export function includeTagKey(tag: IncludeTag): string {
+  const { rev, approved, signed } = tag.settings;
+  return JSON.stringify([tag.kind, tag.target, rev === undefined ? null : String(rev), approved === true, signed === true]);
+}
+
+/** Keys of the tags in the stored text; text that no longer parses has none, so every tag is checked. */
+function storedIncludeKeys(storedPlaintext: string | null | undefined): Set<string> {
+  return new Set(storedIncludeTags(storedPlaintext).map(includeTagKey));
+}
+
+/**
+ * Does the tag's target exist, live, in a memory the writer may read? Access
+ * only, never decryption: an encrypted target the writer may read counts with
+ * no session key (cor:dmo:150:04). A same-batch overlay file counts as existing.
+ */
+async function targetIsReadable(
+  tx: Tx, tag: IncludeTag, from: IncludeWriteNode, readable: ReadableMemoryIds, overlay?: IncludeOverlay,
+): Promise<boolean> {
+  const id = await targetIdOf(tx, tag, from, readable);
+  if (id) return true;
+  if (!overlay) return false;
+  const loc = tag.kind === 'loc' ? tag.target : null;
+  return loc !== null && from.memoryId === overlay.memoryId && overlay.contents.has(loc);
+}
+
+/** The id of a tag's live target in a memory `readable` admits, without reading its content. */
+async function targetIdOf(
+  tx: Tx, tag: IncludeTag, from: { memoryId: string }, readable: ReadableMemoryIds,
+): Promise<string | null> {
+  let memoryId = from.memoryId;
+  let loc = tag.target;
+  if (tag.kind === 'urn') {
+    let parts: ReturnType<typeof splitNodeUrn>;
+    try { parts = splitNodeUrn(tag.target); } catch { return null; }
+    const mem = await tx.memory.findUnique({ where: { urn: parts.memoryUrn }, select: { id: true } });
+    if (!mem) return null;
+    memoryId = mem.id;
+    loc = parts.loc;
+  }
+  if (readable !== null && !readable.includes(memoryId)) return null;
+  const node = await tx.node.findFirst({ where: { memoryId, loc, deletedAt: null }, select: { id: true } });
+  return node?.id ?? null;
+}
+
+/**
+ * Refuse content whose include tags are malformed, name a target the writer
+ * can't read, or reach the writing node again (a cycle). Only tags the write
+ * ADDS or CHANGES against `opts.storedPlaintext` are checked for access and
+ * start the cycle walk (R110): a tag already stored is not re-checked, and a
+ * cycle that formed later through one is a broken include at read, not a
+ * refusal of an unrelated save. Depth is not a write refusal: a chain deeper
+ * than the read cap saves and shows the notice at read (#2134, cor:dmo:150:06).
+ * Run inside the writer's transaction on the PLAINTEXT content, so a refusal
+ * leaves nothing behind. A missing, deleted or unreadable target gets one
+ * error naming only the authored tag (cor:dmo:150:05). The walk follows only
+ * nodes the principal can read; an unreadable or missing target ends its
+ * branch silently, so a cycle through one cannot be learned from the error. A
+ * node already walked is not re-walked (diamonds are fine): everything it
+ * reaches was walked with it, and did not reach the writer.
  */
 export async function assertIncludesWritable(
   tx: Tx, node: IncludeWriteNode, plaintextContent: string | null | undefined, readable: ReadableMemoryIds,
-  overlay?: IncludeOverlay,
+  overlay?: IncludeOverlay, opts: IncludeWriteOptions = {},
 ): Promise<IncludeTag[]> {
   if (!plaintextContent || !plaintextContent.includes('{{>')) return [];
   let tags: IncludeTag[];
@@ -95,71 +161,80 @@ export async function assertIncludesWritable(
     if (e instanceof IncludeSyntaxError) throw includeRefusal('INVALID_INCLUDE', e.message, { tag: e.raw });
     throw e;
   }
-  // Longest chain below a node (0 for a leaf), memoized so a node reached first
-  // by a shallow branch cannot hide a deeper one: acceptance never depends on
-  // tag order. `onPath` stops a cycle that does not pass through the writing node.
-  const height = new Map<string, number>();
-  const onPath = new Set<string>();
-  const levelsBelow = async (from: IncludeWriteNode, fromTags: IncludeTag[], level: number): Promise<number> => {
-    let deepest = 0;
+  // `visited` holds every node entered, so each is walked once and the walk
+  // ends on any graph, including a cycle that does not pass through the writer.
+  const visited = new Set<string>();
+  const walk = async (from: IncludeWriteNode, fromTags: IncludeTag[]): Promise<void> => {
     for (const tag of fromTags) {
       const target = await resolveTarget(tx, tag, from, readable, overlay);
       if (!target) continue;
       if (node.id && target.id === node.id) {
         throw includeRefusal('INCLUDE_CYCLE', `Include ${tag.raw} would make this node include itself.`, { tag: tag.raw });
       }
-      if (onPath.has(target.id)) continue;
-      let h = height.get(target.id);
-      if (h === undefined) {
-        let nested: IncludeTag[] = [];
-        try {
-          nested = target.content ? parseIncludeTags(target.content) : [];
-        } catch { /* a stored malformed tag is that node's problem, not this write's */ }
-        onPath.add(target.id);
-        try {
-          h = await levelsBelow(target, nested, level + 1);
-        } catch (e) {
-          // A depth refusal found deep in the chain names the tag the writer
-          // authored, not the tag inside some other node.
-          if (level === 1 && e instanceof GraphQLError && e.extensions?.code === 'INCLUDE_TOO_DEEP') {
-            throw includeRefusal('INCLUDE_TOO_DEEP', `Includes nest deeper than ${MAX_INCLUDE_DEPTH}.`, { tag: tag.raw });
-          }
-          throw e;
-        } finally {
-          onPath.delete(target.id);
-        }
-        height.set(target.id, h);
-      }
-      if (level + h > MAX_INCLUDE_DEPTH) {
-        throw includeRefusal('INCLUDE_TOO_DEEP', `Includes nest deeper than ${MAX_INCLUDE_DEPTH}.`, { tag: tag.raw });
-      }
-      deepest = Math.max(deepest, 1 + h);
+      if (visited.has(target.id)) continue;
+      visited.add(target.id);
+      let nested: IncludeTag[] = [];
+      try {
+        nested = target.content ? parseIncludeTags(target.content) : [];
+      } catch { /* a stored malformed tag is that node's problem, not this write's */ }
+      await walk(target, nested);
     }
-    return deepest;
   };
-  await levelsBelow(node, tags, 1);
+  const stored = storedIncludeKeys(opts.storedPlaintext);
+  const touched = tags.filter(tag => !stored.has(includeTagKey(tag)));
+  if (!opts.includeSystemWrite) {
+    for (const tag of touched) {
+      if (!(await targetIsReadable(tx, tag, node, readable, overlay))) {
+        throw includeRefusal('INCLUDE_TARGET_UNAVAILABLE',
+          `Include ${tag.raw} can't be used: the target doesn't exist or you can't read it.`, { tag: tag.raw });
+      }
+    }
+  }
+  for (const tag of touched) {
+    try {
+      await walk(node, [tag]);
+    } catch (e) {
+      // A cycle found deep in the chain names the tag the writer authored, not
+      // the tag inside some other node.
+      if (e instanceof GraphQLError && e.extensions?.code === 'INCLUDE_CYCLE') {
+        throw includeRefusal('INCLUDE_CYCLE', `Include ${tag.raw} would make this node include itself.`, { tag: tag.raw });
+      }
+      throw e;
+    }
+  }
   return tags;
 }
 
 /**
  * Replace the node's derived INCLUDE edges with exactly the targets its tags
- * name (one edge per distinct, live, readable target). Idempotent; only INCLUDE
- * rows are touched, so a client's own edges are never disturbed. The caller is
- * the node's content writer, inside its transaction.
+ * name (one edge per distinct, live, readable target). A tag already in
+ * `opts.storedPlaintext` keeps its existing edge even when the writer can no
+ * longer read its target (R110); no edge is ever created to a target the
+ * writer can't read. Idempotent; only INCLUDE rows are touched, so a client's
+ * own edges are never disturbed. The caller is the node's content writer,
+ * inside its transaction.
  */
 export async function syncDerivedIncludesEdges(
   tx: Tx, node: { id: string; memoryId: string; loc: string }, tags: IncludeTag[], readable: ReadableMemoryIds,
+  opts: Pick<IncludeWriteOptions, 'storedPlaintext'> = {},
 ): Promise<void> {
   const wanted = new Map<string, string>();
+  const kept = new Set<string>();
+  const stored = storedIncludeKeys(opts.storedPlaintext);
   for (const tag of tags) {
     const target = await resolveTarget(tx, tag, node, readable);
-    if (target && target.id !== node.id) wanted.set(target.id, includeEdgeLoc(node.id, target.id));
+    if (target && target.id !== node.id) {
+      wanted.set(target.id, includeEdgeLoc(node.id, target.id));
+    } else if (!target && stored.has(includeTagKey(tag))) {
+      const id = await targetIdOf(tx, tag, node, null);
+      if (id) kept.add(id);
+    }
   }
   const existing = await tx.edge.findMany({
     where: { sourceId: node.id, governedKind: 'INCLUDE' },
     select: { id: true, targetId: true },
   });
-  const stale = existing.filter(e => !wanted.has(e.targetId)).map(e => e.id);
+  const stale = existing.filter(e => !wanted.has(e.targetId) && !kept.has(e.targetId)).map(e => e.id);
   if (stale.length) await tx.edge.deleteMany({ where: { id: { in: stale } } });
   const have = new Set(existing.map(e => e.targetId));
   for (const [targetId, loc] of wanted) {
@@ -174,7 +249,7 @@ export async function syncDerivedIncludesEdges(
 export function includeRefusalText(e: unknown): string | null {
   if (!(e instanceof GraphQLError)) return null;
   const code = e.extensions?.code;
-  if (code !== 'INVALID_INCLUDE' && code !== 'INCLUDE_CYCLE' && code !== 'INCLUDE_TOO_DEEP') return null;
+  if (code !== 'INVALID_INCLUDE' && code !== 'INCLUDE_CYCLE' && code !== 'INCLUDE_TARGET_UNAVAILABLE') return null;
   const tag = typeof e.extensions?.tag === 'string' ? ` Tag: ${e.extensions.tag}` : '';
   return `[${String(code).toLowerCase()}] ${e.message}${tag}`;
 }

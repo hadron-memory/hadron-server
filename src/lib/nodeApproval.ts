@@ -356,6 +356,11 @@ export interface RevisionApproval {
   state: 'APPROVED' | 'NOT_APPROVED' | 'NOT_APPLICABLE';
   /** The covering record, with the revision it was recorded at. Null unless APPROVED. */
   record: NodeApprovalRecord | null;
+  /**
+   * Only when APPROVED: the exact content this verdict hashed, and the memory that captured it. An include serves
+   * THIS text, so what is served is what qualified; it never re-reads the revision after the verdict (#2041).
+   */
+  served?: { content: string | null; memoryId: string };
 }
 
 const NOT_APPROVED_REVISION: RevisionApproval = { state: 'NOT_APPROVED', record: null };
@@ -435,7 +440,7 @@ export async function revisionApprovalOf(
   // Prefer the record made AT this revision, else the earliest that covers it.
   const record = covering.find((c) => c.revision === revNo)
     ?? covering.reduce((a, b) => (b.revision < a.revision ? b : a));
-  return { state: 'APPROVED', record };
+  return { state: 'APPROVED', record, served: { content: (target ?? live).content, memoryId: captureMemoryId } };
 }
 
 /** How many revisions `newestApprovedRevisionOf` examines before it gives up (newest first). */

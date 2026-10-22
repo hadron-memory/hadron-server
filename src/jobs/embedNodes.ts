@@ -11,6 +11,7 @@
  */
 
 import { COMMENT_NODE_TYPE } from '../lib/comments/index.js';
+import { embeddingKindsWanted, memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
 import { Prisma } from '../generated/prisma/index.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { EmbeddingClient } from '../lib/embedding/index.js';
@@ -97,6 +98,7 @@ export async function embedNode(
           id: true,
           // 046-usage-metering: billable org for the embedding usage event.
           organizationId: true,
+          class: true,
           vectorIndexEnabled: true,
           embeddingSource: true,
           isEncrypted: true,
@@ -123,18 +125,15 @@ export async function embedNode(
     return 'skipped';
   }
 
-  // Index disabled: drop any stale vectors and clear the marker.
-  if (!memory.vectorIndexEnabled) {
+  // Not indexed (#2199: a system memory always is, by summary): drop any stale vectors and clear the marker.
+  if (!memoryIsVectorIndexed(memory)) {
     await deleteNodeVectors(db, nodeId);
     await clearMarkers(db, nodeId, capturedPendingAt);
     return 'skipped';
   }
 
-  const wantAbstract =
-    memory.embeddingSource === 'abstract' || memory.embeddingSource === 'both';
-  // 033 US2 — content-chunks ships now (alongside `both`).
-  const wantChunks =
-    memory.embeddingSource === 'contentChunks' || memory.embeddingSource === 'both';
+  // #2199: the one definition of what this memory is embedded for (a system memory: summary always, passages by setting).
+  const { abstract: wantAbstract, chunks: wantChunks } = embeddingKindsWanted(memory);
 
   // 046-usage-metering (FR-007): what this call actually sent to the
   // embedding endpoint, for the usage event written on success.

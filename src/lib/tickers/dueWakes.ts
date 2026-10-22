@@ -19,6 +19,8 @@
 // the channels pass. They wake at once like a mention, under the same floor
 // and budget, and are acknowledged per event through the v2 proof.
 
+import { coveringSignals, timeStoppedWorkers } from '../stopSignals/state.js';
+import { pendingStopNotices, s6NoticesAvailable, type PendingStopNotice } from '../stopSignals/delivery.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { batchTiming, loadDeliverySettings } from './batchTiming.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
@@ -26,8 +28,11 @@ import { getAccessibleMemoryIds, isAppParticipant } from '../../api/graphql/sche
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { recordInEffect } from '../agentTasks/availability.js';
 import { collectRegisterRows } from '../resolveRegister.js';
+import { loadPendingReasons } from './checkPending.js';
 import { decryptNodeFields } from '../nodeCrypto.js';
 import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from '../mentionToken.js';
+import { onStandbySql, standbyAdmitsSql } from './standby.js';
+import { s7Available } from './s7Availability.js';
 import { isWorkerDormant, toNaiveUtc } from '../sessionActivity.js';
 import {
   relevantMentionCount,
@@ -82,7 +87,7 @@ export type DueWakesResult = {
 
 /** #2069: the reasons a wake carries that a delivery must name: a mention, one tick of one ticker, one task event. */
 const reasonKeys = (wake: WorkerWake): Set<string> =>
-  new Set(wake.reasons.map((r) => (r.kind === 'MENTION' ? 'M' : r.kind === 'TICK' ? `T:${r.tickerId}:${r.k}` : `K:${r.eventId}:${r.chainIndex}`)));
+  new Set(wake.reasons.map((r) => (r.kind === 'MENTION' ? 'M' : r.kind === 'TICK' ? `T:${r.tickerId}:${r.k}` : r.kind === 'STOP' ? `S:${r.eventId}` : `K:${r.eventId}:${r.chainIndex}`)));
 /** True when `fresh` carries a TICK or TASK reason the outstanding wake lacks. A grown mention range alone is not one. */
 const absorbsNewReason = (outstanding: WorkerWake, fresh: WorkerWake): boolean => {
   const had = reasonKeys(outstanding);
@@ -92,10 +97,15 @@ const absorbsNewReason = (outstanding: WorkerWake, fresh: WorkerWake): boolean =
 const tasksOf = (wake: WorkerWake) =>
   wake.reasons.flatMap((r) => (r.kind === 'TASK' ? [{ eventId: r.eventId, chainIndex: r.chainIndex }] : []));
 
+/** #2022 — the wake's stop-signal notice, as the receipt it is acknowledged by (event id, chain position 0). */
+const stopsOf = (wake: WorkerWake) =>
+  wake.reasons.flatMap((r) => (r.kind === 'STOP' ? [{ eventId: r.eventId, chainIndex: 0 }] : []));
+const hasStop = (wake: WorkerWake): boolean => wake.reasons.some((r) => r.kind === 'STOP');
+
 const identityOf = (wake: WorkerWake) => ({
   channels: wake.channels.map((c) => ({ channelId: c.channelId, incarnation: c.incarnation, through: c.throughSeq })),
   ticks: wake.reasons.flatMap((r) => (r.kind === 'TICK' ? [{ tickerId: r.tickerId, k: r.k }] : [])),
-  tasks: tasksOf(wake),
+  tasks: [...tasksOf(wake), ...stopsOf(wake)],
 });
 
 const taskKey = (t: { eventId: string; chainIndex: number }) => `${t.eventId}#${t.chainIndex}`;
@@ -181,6 +191,7 @@ function envelopeOf(data: unknown): RoutedMessage | null {
     mentions: Array.isArray(e.mentions) ? e.mentions.filter((v): v is string => typeof v === 'string') : [],
     broadcastWakes: e.broadcastWakes === true,
     managerPost: e.managerPost === true,
+    humanAuthored: e.authorSystem !== true && typeof e.authorWorkerId !== 'string' && typeof e.authorUserId === 'string',
   };
 }
 
@@ -197,12 +208,14 @@ async function loadMessages(
   if (head <= lo) return [];
   if (!channel.encrypted) {
     const wanted = only && only.length > 0 ? Prisma.sql`AND (${candidatesFor(only)})` : Prisma.empty;
-    const rows = await db.$queryRaw<Array<{ seq: number; author: string | null; mentions: unknown; bw: boolean | null; mp: boolean | null; at: Date }>>(Prisma.sql`
+    const rows = await db.$queryRaw<Array<{ seq: number; author: string | null; mentions: unknown; bw: boolean | null; mp: boolean | null; human: boolean | null; at: Date }>>(Prisma.sql`
       SELECT n.seq::int AS seq,
              n.data->>'authorWorkerId' AS author,
              n.data->'mentions' AS mentions,
              (n.data->>'broadcastWakes') = 'true' AS bw,
              (n.data->>'managerPost') = 'true' AS mp,
+             ((n.data->'authorSystem') IS DISTINCT FROM 'true'::jsonb AND jsonb_typeof(n.data->'authorWorkerId') IS DISTINCT FROM 'string'
+               AND jsonb_typeof(n.data->'authorUserId') = 'string') AS human,
              n.created_at AS at
       FROM nodes n
       WHERE n.message_channel_id = ${channel.id}
@@ -220,6 +233,7 @@ async function loadMessages(
       mentions: Array.isArray(r.mentions) ? (r.mentions as unknown[]).filter((v): v is string => typeof v === 'string') : [],
       broadcastWakes: r.bw === true,
       managerPost: r.mp === true,
+      humanAuthored: r.human === true,
       postedAtMs: new Date(r.at).getTime(),
     }));
   }
@@ -257,7 +271,8 @@ async function loadMessages(
  *   subAll     — and an ALL ticker covers it on an entry that is not mention-only, so any message not their own counts.
  * A worker for whom none holds is not watched.
  */
-type Watcher = { floor: number; workerId: string; tokens: string[]; immediate: boolean; subCovers: boolean; subAll: boolean };
+/** `standbyHead` is set for a worker on standby: only a direct mention from a person or that head can wake it (ticks are not due). */
+type Watcher = { floor: number; workerId: string; tokens: string[]; immediate: boolean; subCovers: boolean; subAll: boolean; standbyHead?: string | null };
 
 const BROADCAST = BROADCAST_MENTION_TOKENS as readonly string[];
 
@@ -265,6 +280,7 @@ const BROADCAST = BROADCAST_MENTION_TOKENS as readonly string[];
 function mattersTo(m: RoutedMessage, w: Watcher): boolean {
   if (m.authorWorkerId === w.workerId) return false;
   const direct = m.mentions.some((t) => w.tokens.includes(t));
+  if (w.standbyHead) return direct && (m.humanAuthored === true || m.authorWorkerId === w.standbyHead);
   const broadcast = !direct && m.mentions.some((t) => BROADCAST.includes(t));
   if (w.immediate && (direct || (broadcast && m.broadcastWakes))) return true;
   if (w.subCovers && (direct || broadcast)) return true;
@@ -274,6 +290,7 @@ function mattersTo(m: RoutedMessage, w: Watcher): boolean {
 /** The SQL twin of {@link mattersTo}, for the rows still worth fetching: one OR-ed term per unmet watcher. */
 function candidatesFor(unmet: Watcher[]): Prisma.Sql {
   const terms = unmet.map((w) => {
+    if (w.standbyHead) return standbyAdmitsSql(Prisma.sql`n.data`, Prisma.sql`${w.tokens}::text[]`, w.standbyHead);
     const notOwn = Prisma.sql`(n.data->>'authorWorkerId') IS DISTINCT FROM ${w.workerId}`;
     const parts: Prisma.Sql[] = [];
     if (w.immediate || w.subCovers) parts.push(Prisma.sql`jsonb_exists_any(n.data->'mentions', ${w.tokens}::text[])`);
@@ -362,7 +379,7 @@ export async function computeDueWakes(args: {
     }),
     db.workerDeliveryChannel.findMany({ where: { workerId: { in: ids } } }),
     db.workerDeliveryTick.findMany({ where: { workerId: { in: ids } } }),
-    db.channelReadState.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, channelId: true, lastSeenSeq: true } }),
+    db.channelReadState.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, channelId: true, lastSeenSeq: true, lastCheckedAt: true } }),
     // #1708: the latest task-event delivery per worker, for the floor (cor:agt:080:13).
     db.workerDeliveryTaskEvent.groupBy({ by: ['workerId'], where: { workerId: { in: ids }, deliveredAt: { not: null } }, _max: { deliveredAt: true } }),
     // #2072 (R53): the latest acknowledged wake per worker. A textless wake moves no mark, so its receipt is the floor's clock.
@@ -371,12 +388,23 @@ export async function computeDueWakes(args: {
   const taskDeliveredOf = new Map(deliveryTasks.map((d) => [d.workerId, d._max.deliveredAt?.getTime() ?? 0]));
   const wakeAckedOf = new Map(wakeAcks.map((d) => [d.workerId, d._max.ackedAt?.getTime() ?? 0]));
   const settingsOf = new Map(wakeSettings.map((s) => [s.workerId, s]));
+  // S7: who is on standby, evaluated in this read (never cached), in one query.
+  const standbyRows = await db.$queryRaw<Array<{ id: string; head: string }>>(Prisma.sql`
+    SELECT w.id, w.reports_to_worker_id AS head FROM workers w WHERE w.id IN (${Prisma.join(ids)}) AND ${onStandbySql(Prisma.sql`w`)}`);
+  const standbyHeadOf = new Map(standbyRows.map((r) => [r.id, r.head]));
   const availabilityOf = new Map(availability.map((a) => [a.workerId, a]));
   const subsOf = new Map<string, typeof subs>();
   for (const s of subs) subsOf.set(s.workerId, [...(subsOf.get(s.workerId) ?? []), s]);
   const deliveredOf = new Map(deliveryChannels.map((d) => [`${d.workerId}:${d.channelId}`, d]));
   const tickAckOf = new Map(deliveryTicks.map((d) => [`${d.workerId}:${d.tickerId}`, d]));
   const seenOf = new Map(readStates.map((r) => [`${r.workerId}:${r.channelId}`, r.lastSeenSeq]));
+  // #2138 §3.1/§3.3: when each worker last CHECKED each channel, and which workers are PENDING (not expected to check).
+  const checkedOf = new Map(readStates.map((r) => [`${r.workerId}:${r.channelId}`, r.lastCheckedAt?.getTime() ?? null]));
+  const pendingOf = await loadPendingReasons(db, app.id, workers.map((w) => w.id), now);
+  // #2022 (R68): a worker a `pause` or `halt` covers is due no tick. Live coverage, worked out in this read.
+  const tickStopped = timeStoppedWorkers(await coveringSignals(db, app.id, ids, now));
+  // #2022 (cor:agt:090:04): the one stop notice each worker is due, offered only while the notice lane is on (DARK).
+  const stopOf = s6NoticesAvailable() ? await pendingStopNotices(db, app.id, ids) : new Map<string, PendingStopNotice>();
 
   // Registers: the channels each worker watches (not POST-only).
   const registers = await Promise.all(ids.map(async (id) => [id, await collectRegisterRows(db, { workerId: id })] as const));
@@ -400,7 +428,7 @@ export async function computeDueWakes(args: {
   const tasksFor = (workerId: string): PendingTaskWake[] => (holderOf.get(workerId) === null ? [] : pendingTasks.get(workerId) ?? []);
 
   // Per worker: the channels it counts that BOTH readers may read.
-  type Counted = { channelId: string; mentionOnly: boolean; seen: number; delivered: number; head: number };
+  type Counted = { channelId: string; mentionOnly: boolean; seen: number; delivered: number; head: number; checkedAtMs: number | null };
   const countedOf = new Map<string, Counted[]>();
   for (const w of workers) {
     const rows = registers.find(([id]) => id === w.id)?.[1]?.rows ?? [];
@@ -415,7 +443,7 @@ export async function computeDueWakes(args: {
       const d = deliveredOf.get(`${w.id}:${ch.id}`);
       // A channel recreated since the delivery was recorded starts over (its seqs restarted).
       const delivered = d && d.channelIncarnation === ch.incarnation ? d.deliveredThroughSeq : 0;
-      list.push({ channelId: ch.id, mentionOnly: r.mentionOnly, seen: seenOf.get(`${w.id}:${ch.id}`) ?? 0, delivered, head: ch.lastSeq });
+      list.push({ channelId: ch.id, mentionOnly: r.mentionOnly, seen: seenOf.get(`${w.id}:${ch.id}`) ?? 0, delivered, head: ch.lastSeq, checkedAtMs: checkedOf.get(`${w.id}:${ch.id}`) ?? null });
     }
     countedOf.set(w.id, list);
   }
@@ -441,7 +469,7 @@ export async function computeDueWakes(args: {
       if (!mentionsImmediate && !subCovers) continue;
       watchersOf.set(c.channelId, [
         ...(watchersOf.get(c.channelId) ?? []),
-        { floor: Math.max(c.seen, c.delivered), workerId: w.id, tokens: own ? [own] : [], immediate: mentionsImmediate, subCovers, subAll },
+        { floor: Math.max(c.seen, c.delivered), workerId: w.id, tokens: own ? [own] : [], immediate: mentionsImmediate, subCovers, subAll, standbyHead: standbyHeadOf.get(w.id) ?? null },
       ]);
     }
   }
@@ -466,7 +494,7 @@ export async function computeDueWakes(args: {
       // #2072 (R53): no channel range. The display channels stay on the wake; the proof carries the wake's identity.
       channels: [],
       ticks: wake.reasons.flatMap((r) => (r.kind === 'TICK' ? [{ tickerId: r.tickerId, k: r.k }] : [])),
-      tasks: tasksOf(wake),
+      tasks: [...tasksOf(wake), ...stopsOf(wake)],
       exempt: wake.exempt,
       issuedAt: now.getTime(),
       wakeKey: wakeIdentity(identityOf(wake)),
@@ -478,13 +506,16 @@ export async function computeDueWakes(args: {
     const ws = settingsOf.get(w.id);
     const own = mentionTokenOf(w.name);
     const workerTokens = own ? [own] : [];
+    const standbyHead = standbyHeadOf.get(w.id) ?? null;
     const inputs: ChannelInput[] = (countedOf.get(w.id) ?? []).map((c) => {
       const lo = Math.max(c.seen, c.delivered);
       return {
         channelId: c.channelId,
         incarnation: channelOf.get(c.channelId)!.incarnation,
         mentionOnly: c.mentionOnly,
-        messages: (messagesOf.get(c.channelId) ?? []).filter((m) => m.seq > lo && m.seq <= c.head),
+        lastCheckedAtMs: c.checkedAtMs,
+        messages: (messagesOf.get(c.channelId) ?? []).filter((m) => m.seq > lo && m.seq <= c.head
+          && (!standbyHead || (m.mentions.some((t) => workerTokens.includes(t)) && (m.humanAuthored === true || m.authorWorkerId === standbyHead)))),
       };
     });
 
@@ -494,9 +525,24 @@ export async function computeDueWakes(args: {
       if (n > 0) dormant.push({ workerId: w.id, mentions: n });
       continue; // never due
     }
+    // A worker's own pause holds a stop notice too (cor:agt:080:11, Decided; Vera's receipt §4): it waits.
     if (ws?.pausedUntil && ws.pausedUntil.getTime() > now.getTime()) continue; // a pause silences ticks AND mentions (Q2)
+    const stop = stopOf.get(w.id);
+    // #2138 §3.6: a TEAM pause silences EVERY reason (ticks of every kind, mentions, task events), exactly as a worker's own pause does.
+    // #2022: except one stop-signal notice (Holger R105), which then travels alone.
+    const teamPaused = pendingOf.get(w.id) === 'TEAM_PAUSED';
+    // S7 R85: a live isolation, its own state. #2022: a stop notice reaches an isolated worker (R86), alone.
+    const isolated = s7Available() && !!ws?.isolatedUntil && ws.isolatedUntil.getTime() > now.getTime();
+    if ((teamPaused || isolated) && !stop) continue;
+    const stopReason = (n: PendingStopNotice) => ({ kind: 'STOP' as const, eventId: n.eventId, signalId: n.signalId, level: n.level, notice: n.notice, interrupt: n.interrupt });
+    if (teamPaused || isolated) {
+      const only: WorkerWake = { reasons: [stopReason(stop!)], channels: [], unread: 0, unreadMentions: 0, exempt: false, anchorAtMs: stop!.at.getTime() };
+      issued.push({ workerId: w.id, wake: only, availability: null, proof: signFor(w.id, only), exempt: false });
+      continue;
+    }
 
-    const subscriptions: SubscriptionInput[] = (subsOf.get(w.id) ?? []).map((s) => ({
+    // S7: a TICK is not one of the four kinds a standby worker is sent.
+    const subscriptions: SubscriptionInput[] = (standbyHead || tickStopped.has(w.id) ? [] : subsOf.get(w.id) ?? []).map((s) => ({
       ticker: {
         id: s.ticker.id,
         anchorAt: s.ticker.anchorAt,
@@ -510,20 +556,27 @@ export async function computeDueWakes(args: {
       },
       lastAckedTick: tickAckOf.get(`${w.id}:${s.ticker.id}`)?.lastAckedTick ?? 0,
     }));
-    const wake = workerWake({
+    let wake = workerWake({
       workerId: w.id,
       workerTokens,
       mentionsImmediate: (ws?.mentions ?? 'IMMEDIATE') === 'IMMEDIATE',
       channels: inputs,
       subscriptions,
+      checkPending: (pendingOf.get(w.id) ?? null) !== null,
       tasks: tasksFor(w.id)
         .slice(0, WAKE_TASK_REASONS_MAX)
-        .map(({ taskId, eventId, chainIndex, event, title, at }) => ({ taskId, eventId, chainIndex, event, title, atMs: at.getTime() })),
+        .map(({ taskId, eventId, chainIndex, event, title, at, standbyHeld }) => ({ taskId, eventId, chainIndex, event, title, atMs: at.getTime(), ...(standbyHeld ? { standbyHeld } : {}) })),
       now,
     });
+    // #2022: the stop notice rides ahead of everything else in the wake (cor:agt:090:04), or is the wake.
+    if (stop) {
+      if (wake) wake.reasons.unshift(stopReason(stop));
+      else wake = { reasons: [stopReason(stop)], channels: [], unread: 0, unreadMentions: 0, exempt: false, anchorAtMs: stop.at.getTime() };
+    }
     if (!wake) continue;
 
     // cor:agt:080:13 — at most one wake per worker per floor, for every caller; a wake inside the window waits.
+    // #2022: a stop notice skips the floor (cor:agt:090:04, D-2026-10-16-002).
     const last = Math.max(
       0,
       ...deliveryChannels.filter((d) => d.workerId === w.id).map((d) => d.deliveredAt.getTime()),
@@ -531,7 +584,7 @@ export async function computeDueWakes(args: {
       taskDeliveredOf.get(w.id) ?? 0,
       wakeAckedOf.get(w.id) ?? 0,
     );
-    if (last > 0 && now.getTime() - last < floorMs) continue;
+    if (last > 0 && now.getTime() - last < floorMs && !hasStop(wake)) continue;
 
     const a = availabilityOf.get(w.id);
     let proof = signFor(w.id, wake);
@@ -566,7 +619,11 @@ export async function computeDueWakes(args: {
   const passes = (i: (typeof issued)[number]) => {
     const { exempt: _e, ...out } = i;
     const anchorMs = i.wake.anchorAtMs ?? now.getTime();
-    wakes.push({ ...out, timing: { anchorAt: new Date(anchorMs), ...batchTiming(deliverySettings, { oldestPostedAt: new Date(anchorMs) }) } });
+    // #2022: a stop notice waits for no batching window and no busy delay (cor:agt:090:04; cor:agt:080:27, Proposed).
+    const timing = hasStop(i.wake)
+      ? { anchorAt: new Date(anchorMs), deliverAfter: now, busyDeadline: now }
+      : { anchorAt: new Date(anchorMs), ...batchTiming(deliverySettings, { oldestPostedAt: new Date(anchorMs) }) };
+    wakes.push({ ...out, timing });
   };
   if (issued.length > 0) {
     await db.$transaction(async (tx) => {
@@ -635,8 +692,12 @@ export async function computeDueWakes(args: {
         // #1708: so is one carrying a task event that no longer asks anything of the worker (the task ended, the alarm's
         // episode passed, the worker acted): re-handing it would deliver exactly what the pre-delivery re-checks refuse.
         // Judged only by a reader of the App's tasks; for anyone else the stored wake is not theirs to see (below).
-        const stillPending = new Set(tasksFor(i.workerId).map(taskKey));
-        const staleTask = taskOk(i.workerId) && !!stored && tasksOf(stored.wake).some((t) => !stillPending.has(taskKey(t)));
+        const stillPending = new Set([...tasksFor(i.workerId).map(taskKey), ...(stopOf.has(i.workerId) ? [taskKey({ eventId: stopOf.get(i.workerId)!.eventId, chainIndex: 0 })] : [])]);
+        // #2022 (Diego #2166 P2-1): so is one carrying a TICK for a worker a `pause` or `halt` now covers (R68), or a
+        // stop notice that is no longer the one due: re-handing it would deliver what the stop forbids.
+        const staleTask = !!stored && ((taskOk(i.workerId) && tasksOf(stored.wake).some((t) => !stillPending.has(taskKey(t))))
+          || stopsOf(stored.wake).some((t) => !stillPending.has(taskKey(t)))
+          || (tickStopped.has(i.workerId) && stored.wake.reasons.some((r) => r.kind === 'TICK')));
         if (stored && (staleTask || !stored.wake.channels.every((c) => channelOf.get(c.channelId)?.incarnation === c.incarnation))) {
           await tx.$executeRaw`DELETE FROM app_wake_reservations WHERE worker_id = ${i.workerId}`;
           live.delete(i.workerId);
@@ -652,7 +713,8 @@ export async function computeDueWakes(args: {
           // non-exempt wake here would be a delivery no slot paid for (and, with room, a second inside one floor),
           // so it waits for the first to be acknowledged or to lapse; it is not "withheld" by the budget, so no
           // notice is raised. An exempt wake never takes a slot and still passes (Diego, #1751 cycle 4).
-          if (i.exempt) passes(i);
+          // #2022: a stop notice is never left behind another wake (cor:agt:090:04).
+          if (i.exempt || hasStop(i.wake)) passes(i);
           continue;
         }
         if (have) {
@@ -684,7 +746,8 @@ export async function computeDueWakes(args: {
           continue;
         }
         if (!i.exempt) {
-          if (consumed >= budget) { withheld++; continue; }
+          // #2022 (R89): a stop notice counts against the budget but is never withheld by it.
+          if (consumed >= budget && !hasStop(i.wake)) { withheld++; continue; }
           consumed++;
           reserve.push({ workerId: i.workerId, key: wakeIdentity(identityOf(i.wake)), wake: i.wake });
         }

@@ -15,6 +15,7 @@
  * and follows the write rule; calling `hadron_worker_wake_settings` with nothing
  * to set reads them.
  */
+import { s7Available } from '../lib/tickers/s7Availability.js';
 import { appKeyCaller } from '../lib/appKeyScopes/scopes.js';
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
@@ -39,12 +40,15 @@ const Q = resolvers.Query as unknown as {
 };
 const M = resolvers.Mutation as unknown as {
   setAppDeliverySettings: Resolver<{ appRef: string; input: unknown }, Row>;
+  setTeamPause: Resolver<{ appRef: string; paused: boolean }, Row>;
   createTicker: Resolver<{ appRef: string; input: Row }, Row>;
   updateTicker: Resolver<{ ref: string; input: Row }, Row>;
   deleteTicker: Resolver<{ ref: string }, boolean>;
   subscribeWorker: Resolver<{ tickerRef: string; workerRef: string }, { subscription: Row; announcement: string | null }>;
   unsubscribeWorker: Resolver<{ tickerRef: string; workerRef: string }, { subscription: Row; announcement: string | null }>;
   setWorkerWakeSettings: Resolver<{ workerRef: string; input: Row }, Row>;
+  isolateWorker: Resolver<{ workerRef: string; until?: string }, Row>;
+  clearWorkerIsolation: Resolver<{ workerRef: string }, Row>;
   acknowledgeWakes: Resolver<{ proofs: string[] }, { acknowledged: number; unchanged: number }>;
   acknowledgeDeliveryBatches: Resolver<{ batchIds: string[]; through?: Array<{ channelId: string; seq: number }> }, { acknowledged: number; unchanged: number }>;
 };
@@ -55,7 +59,8 @@ const FW = tickerFieldResolvers.WorkerWakeSettings;
 export const TICKER_WRITE_TOOLS = [
   'hadron_ticker_create', 'hadron_ticker_update', 'hadron_ticker_delete',
   'hadron_ticker_subscribe', 'hadron_ticker_unsubscribe', 'hadron_ack_wakes',
-  'hadron_delivery_settings_set', 'hadron_team_chat_inbox_ack',
+  'hadron_delivery_settings_set', 'hadron_set_team_pause', 'hadron_team_chat_inbox_ack',
+  'hadron_isolate_worker', 'hadron_clear_worker_isolation',
 ] as const;
 /**
  * Actor-neutral tools (listed in ACTOR_NEUTRAL_TOOLS): each takes its own
@@ -129,7 +134,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     userId: auth.userId ?? undefined,
     // #1868: the presented hdr_user_ key, so the shared authorized transaction
     // re-checks it is still unrevoked at the write (as #1864's signing tools do).
-    apiKeyId: auth.apiKeyId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     appKeyId: auth.appKeyId ?? undefined,
     // An App key's session state is the current request's (the transport refreshes it per request); anyone else's is
@@ -199,6 +204,13 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
 
   // #2025: thin over the shared manager transaction; cadence/window changes affect tickers too.
   server.tool(
+    'hadron_set_team_pause',
+    'Pause or resume the WHOLE TEAM of an App, as whoever manages it (#2138). Separate from each worker\'s own pause: a worker cannot lift it and ending it clears no self-pause. While paused no worker is nudged and every worker\'s check status is PENDING (TEAM_PAUSED). Idempotent.',
+    { appRef: z.string().describe('The App id or URN.'), paused: z.boolean().describe('true pauses the team, false resumes it.'), session: SESSION_WRITE },
+    async ({ appRef, paused, session }) => write('hadron_set_team_pause', session, async (ctx) =>
+      JSON.stringify(await M.setTeamPause({}, { appRef, paused }, ctx))),
+  );
+  server.tool(
     'hadron_delivery_settings_get',
     'Read an App’s delivery settings as a participant (cor:agt:080:05). The batching window is also the ticker cadence floor. Standby is not effective until S7.',
     { appRef: z.string().describe('The App id or URN.'), session: SESSION_READ },
@@ -214,6 +226,8 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
         busyDelaySeconds: z.number().nullable().optional().describe('Whole seconds 1..86400, Proposed bounds.'),
         stuckWindowSeconds: z.number().nullable().optional().describe('Whole seconds 1..604800 and greater than busy delay + window, Proposed bounds/relation.'),
         standbyEnabled: z.boolean().nullable().optional().describe('False clears; true is refused until S7 behavior ships.'),
+        checkPeriodSeconds: z.number().nullable().optional().describe('#2138: whole seconds 60..86400; a worker with a task is expected to check its team channel this often. Set together with the team ticker cadence.'),
+        failedChecksToOverdue: z.number().nullable().optional().describe('#2138: whole number 1..100; OVERDUE after this many missed periods + 5 minutes.'),
       }).passthrough().describe('Atomic patch. Unknown fields are refused by the shared resolver, never silently removed.'),
       session: SESSION_WRITE,
     },
@@ -248,7 +262,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       quietHours: quietHours.optional(),
       channelIds: z.array(z.string()).optional().describe('Channels whose unread can wake a subscriber. Not a grant. Omit for every channel the subscriber watches.'),
       relevance: z.enum(['ALL', 'MENTIONS']).optional().describe('Default ALL.'),
-      reasons: z.array(z.enum(['read-team-channel', 'every-tick'])).min(1).optional().describe('Why it fires (cor:agt:080:10). Default [read-team-channel]: only when there is relevant unread. every-tick fires on every tick; the floor, daily budget, pause and dormancy still apply. Never empty.'),
+      reasons: z.array(z.enum(['read-team-channel', 'every-tick', 'live-check'])).min(1).optional().describe('Why it fires (cor:agt:080:10). Default [read-team-channel]: only when there is relevant unread. every-tick fires on every tick; live-check fires when the worker has not checked its team channel within the cadence, whatever is unread, and never for a worker not expected to check; the floor, daily budget, pause and dormancy still apply. Never empty.'),
       enabled: z.boolean().optional().describe('Default true.'),
       session: SESSION_WRITE,
     },
@@ -273,7 +287,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       channelIds: z.array(z.string()).optional(),
       clearChannels: z.boolean().optional(),
       relevance: z.enum(['ALL', 'MENTIONS']).optional(),
-      reasons: z.array(z.enum(['read-team-channel', 'every-tick'])).min(1).optional(),
+      reasons: z.array(z.enum(['read-team-channel', 'every-tick', 'live-check'])).min(1).optional(),
       enabled: z.boolean().optional(),
       session: SESSION_WRITE,
     },
@@ -352,7 +366,8 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
         }
         return [
           `${verb ? `${verb}.\n` : ''}${worker ? worker.name : s.workerId}: mentions ${s.mentions}` +
-            `${s.pausedUntil ? `, paused until ${iso(s.pausedUntil)}` : ', not paused'}`,
+            `${s.pausedUntil ? `, paused until ${iso(s.pausedUntil)}` : ', not paused'}` +
+            `${FW.isolated(s as never) ? `, isolated by ${s.isolatedByUserId ? await FW.isolatedByHandle(s as never, {}, ctx) ?? 'unknown' : 'unknown'} until ${iso(s.isolatedUntil)}` : ''}`,
           `subscriptions: ${names.length ? names.join(', ') : 'none'} · effective cadence ${cadence ? `${cadence}s` : 'none'}`,
         ].join('\n');
       };
@@ -363,6 +378,27 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       return write('hadron_worker_wake_settings', session, async (ctx) =>
         render(ctx, await M.setWorkerWakeSettings({}, { workerRef: w, input }, ctx), 'Updated'));
     },
+  );
+  const isolationText = (verb: string, s: Row) =>
+    `${verb}. ${s7Available() && s.isolatedUntil && new Date(s.isolatedUntil).getTime() > Date.now() ? `Isolated until ${iso(s.isolatedUntil)}: no chat batches or ordinary wakes, and no task matching.` : 'Not isolated.'}`;
+  server.tool(
+    'hadron_isolate_worker',
+    'Isolate a worker (S7, #2023): until the time you give (default 2 hours, at most 7 days; a later time extends, an earlier one shortens). ' +
+      'While isolated it gets no chat batches or ordinary wakes and is not matched for work; at the end everything held comes as one batch. ' +
+      'Needs session. ONLY a person managing the App or holding the worker, acting as themselves with a plain session: a worker session ' +
+      '(even a manager\'s), an App key or an impersonation is refused WORKER_ISOLATION_FORBIDDEN. The worker\'s own pause is untouched.',
+    { workerRef, until: z.string().optional().describe('ISO date-time the isolation ends. Default: two hours from now.'), session: SESSION_WRITE },
+    async ({ session, workerRef: w, until }) =>
+      write('hadron_isolate_worker', session, async (ctx) =>
+        isolationText('Isolated', await M.isolateWorker({}, { workerRef: w, ...(until ? { until } : {}) }, ctx))),
+  );
+  server.tool(
+    'hadron_clear_worker_isolation',
+    'Lift a worker\'s isolation (S7, #2023): the same audience as hadron_isolate_worker. Clearing when none is set changes nothing.',
+    { workerRef, session: SESSION_WRITE },
+    async ({ session, workerRef: w }) =>
+      write('hadron_clear_worker_isolation', session, async (ctx) =>
+        isolationText('Cleared', await M.clearWorkerIsolation({}, { workerRef: w }, ctx))),
   );
   server.tool(
     'hadron_due_wakes',
@@ -385,7 +421,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
         const lines: string[] = [];
         for (const w of page.wakes) {
           const why = (w.reasons as Row[])
-            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : r.kind === 'TASK' ? `task ${JSON.stringify(r.task.title)} (${r.task.ref})` : 'mention'))
+            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : r.kind === 'STOP' ? `stop signal ${r.stop.level} ${r.stop.notice.toLowerCase()}${r.stop.interrupt ? ' (interrupt)' : ''}` : r.kind === 'TASK' ? `task ${JSON.stringify(r.task.title)} (${r.task.ref})${r.task.standbyHeld ? ` — ${r.task.standbyHeld} message${r.task.standbyHeld === 1 ? ' was' : 's were'} held while you were on standby` : ''}` : 'mention'))
             .join(' + ');
           const ch = (w.channels as Row[]).map((c) => `${c.channel.name} ${c.fromSeq}-${c.throughSeq}`).join(', ');
           lines.push(

@@ -81,7 +81,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // refuses a row DELETE while its App exists (append-only), and TRUNCATE
   // fires no row triggers. #1706: agent_team_alarm_schedule references the events, so it is
   // truncated with them. #1708: so is worker_delivery_task_events, for the same reason.
-  await db.$executeRawUnsafe('TRUNCATE worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, agent_tasks');
+  // #2022: a task's stop holds go with it.
+  await db.$executeRawUnsafe('TRUNCATE worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, agent_task_stop_holds, agent_tasks');
   // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
   await db.worker.deleteMany();
   await db.node.deleteMany();
@@ -579,4 +580,14 @@ export async function createDbWorkerAttribution(db: PrismaClient, userId: string
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: workerId, appId: app.id, agentId: agent.id, name: 'Fixture', slug: 'fixture' } });
   if (sessionId) await db.session.create({ data: { id: sessionId, workerId, userId, appId: app.id } });
+}
+
+/**
+ * Fixture: leave nodes tombstoned the way an earlier soft delete left them,
+ * without going through the delete door. The generic delete refuses a governed
+ * node (a `spec`, `review` or runnable task), so a test that needs "a deleted
+ * spec" as its starting state builds that state directly.
+ */
+export async function tombstoneNodes(db: PrismaClient, ids: readonly string[]): Promise<void> {
+  await db.node.updateMany({ where: { id: { in: [...ids] }, deletedAt: null }, data: { deletedAt: new Date(), deletedBy: null } });
 }

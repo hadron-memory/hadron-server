@@ -95,12 +95,59 @@ fi
 [ -n "$cwd" ] || { log "skip: no cwd in hook input"; exit 0; }
 name=$(basename "$cwd")
 
+# The claude process that owns this hook. Primary signal: CLAUDE_PID, exported
+# by Claude Code itself, the same mechanism as the working self-serve /shed
+# path. Fallback: walk /proc ancestry matching CMDLINE, never exe: claude is a
+# native ELF at a versioned path (.../claude/versions/<ver>) that an exe glob
+# can never match, which is why the original walk killed nothing on 20/20
+# fires (DEFECT record, 2026-10-12, in
+# hadron-dev-team-shared:tasks:trim-context-clear-and-recover). Both paths
+# verify the target's argv0, so a recycled pid or a neighbouring process
+# (router node, shells) is never taken for the owner. Prints nothing when no
+# owner is proven. The cooldown and the kill both use this, so they agree on
+# who the caller is (#2164, George's P2).
+is_claude_pid() {
+  tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null | head -1 \
+    | grep -qE '(^|/)claude(-worker|-glm)?$'
+}
+owner_pid() {
+  if [ -n "${CLAUDE_PID:-}" ] && [ "$CLAUDE_PID" -gt 0 ] 2>/dev/null \
+     && [ "$CLAUDE_PID" != "$$" ] && kill -0 "$CLAUDE_PID" 2>/dev/null \
+     && is_claude_pid "$CLAUDE_PID"; then
+    echo "$CLAUDE_PID"; return
+  fi
+  local p=$$
+  for _ in $(seq 1 6); do
+    p=$(awk '{print $4}' /proc/$p/stat 2>/dev/null) || break
+    [ -z "$p" ] || [ "$p" = "0" ] && break
+    if [ "$p" -gt 1 ] 2>/dev/null && kill -0 "$p" 2>/dev/null && is_claude_pid "$p"; then
+      echo "$p"; return
+    fi
+  done
+}
+
 # Cooldown: never shed the same worktree twice within 10 minutes.
 stamp="$STATE_DIR/${name}.last-auto-shed"
+# #2163 part 1 (Hugo 2026-10-20): a second PreCompact while the stopped process
+# is still dying must BLOCK, or the compaction completes in the dying process
+# and the relaunch opens on a compaction summary. Block only when the earlier
+# fire really stopped a process, that same process is still alive, AND this
+# hook's own verified owner is that process. Anything else (the earlier fire
+# stopped nothing, a different agent, no provable owner such as a missing,
+# empty or unverified CLAUDE_PID with no claude ancestor) is allowed as
+# before: blocking a live agent that was never stopped would wedge it.
+killmark="$STATE_DIR/${name}.last-auto-shed-pid"
 if [ -f "$stamp" ] && [ $(( $(date +%s) - $(stat -c %Y "$stamp") )) -lt 600 ]; then
+  kp=$(cat "$killmark" 2>/dev/null)
+  if [ -n "$kp" ] && kill -0 "$kp" 2>/dev/null && [ "$(owner_pid)" = "$kp" ]; then
+    log "skip: $name shed within the last 10 minutes (loop guard); stopped pid $kp still exiting, BLOCKING compaction"
+    echo "worker-auto-shed: this session is being replaced after an auto-shed; compaction blocked" >&2
+    exit 2
+  fi
   log "skip: $name shed within the last 10 minutes (loop guard)"
   exit 0
 fi
+rm -f "$killmark"
 touch "$stamp"
 
 # Safety net: the full transcript survives, timestamped, for mining/audit.
@@ -123,6 +170,14 @@ else
   log "$name: resume claim write FAILED (continuing — binding recovery stands): $claim_out"
 fi
 
+# Mechanical handoff (hadron-server#2131): a PreCompact hook cannot ask the
+# agent for a handoff, so write one FROM the transcript before the kill.
+# Skipped in DRY mode; any failure is logged and never blocks the shed.
+if [ "${WORKER_AUTO_SHED_DRY:-0}" != "1" ] && [ -x "$HOME/.local/bin/worker-auto-shed-handoff" ]; then
+  ho_out=$("$HOME/.local/bin/worker-auto-shed-handoff" "$cwd" "$transcript" 2>&1 | tail -3)
+  log "$name: auto handoff attempted: $ho_out"
+fi
+
 
 emit_prompt > "$STATE_DIR/${name}.prompt"
 log "$name: recovery prompt written"
@@ -133,19 +188,7 @@ if [ "${WORKER_AUTO_SHED_DRY:-0}" = "1" ]; then
   exit 0
 fi
 
-# Find and stop the claude process that owns this hook. Primary signal:
-# CLAUDE_PID — exported by Claude Code itself, the same mechanism as the
-# working self-serve /shed path. Fallback: walk /proc ancestry matching
-# CMDLINE, never exe — claude is a native ELF at a versioned path
-# (.../claude/versions/<ver>) that an exe glob can never match, which is why
-# the original walk killed nothing on 20/20 fires (DEFECT record, 2026-10-12,
-# in hadron-dev-team-shared:tasks:trim-context-clear-and-recover). Both paths
-# verify the target's argv0 so a recycled pid or a neighbouring process
-# (router node, shells) can never be killed by mistake.
-is_claude_pid() {
-  tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null | head -1 \
-    | grep -qE '(^|/)claude(-worker|-glm)?$'
-}
+# Stop the claude process that owns this hook (owner_pid above).
 stop_pid() {
   # Supervision guard (Jonas 2026-10-12, Charles 2026-10-13: killing an agent
   # whose terminal has NO worker-supervise wrapper strands the worker in the
@@ -159,6 +202,7 @@ stop_pid() {
     [ -z "$q" ] || [ "$q" = "0" ] && break
     if tr '\0' ' ' < /proc/$q/cmdline 2>/dev/null | grep -q 'worker-supervise'; then
       log "$name: stopping claude pid $1 (cmdline-verified, supervised)"
+      echo "$1" > "$killmark"
       kill "$1" 2>>"$LOG"
       return 0
     fi
@@ -167,21 +211,12 @@ stop_pid() {
   log "$name: skip kill — no worker-supervise wrapper in ancestry (would strand the worker; Jonas/Charles class); prompt removed, letting compaction proceed"
   exit 0
 }
-if [ -n "${CLAUDE_PID:-}" ] && [ "$CLAUDE_PID" -gt 0 ] 2>/dev/null \
-   && [ "$CLAUDE_PID" != "$$" ] && kill -0 "$CLAUDE_PID" 2>/dev/null \
-   && is_claude_pid "$CLAUDE_PID"; then
-  stop_pid "$CLAUDE_PID"
-  exit 0
+owner=$(owner_pid)
+if [ -n "$owner" ]; then
+  stop_pid "$owner"
+  echo "worker-auto-shed: session stopped for an auto-shed; compaction blocked" >&2
+  exit 2
 fi
-p=$$
-for _ in $(seq 1 6); do
-  p=$(awk '{print $4}' /proc/$p/stat 2>/dev/null) || break
-  [ -z "$p" ] || [ "$p" = "0" ] && break
-  if [ "$p" -gt 1 ] 2>/dev/null && kill -0 "$p" 2>/dev/null && is_claude_pid "$p"; then
-    stop_pid "$p"
-    exit 0
-  fi
-done
 # Booby-trap fix (Hugo finding, 2026-10-13): the prompt above was written
 # optimistically. No confirmed kill means NO shed happened — a live wrapper
 # must never feed this file as a false auto-shed recovery at the next agent

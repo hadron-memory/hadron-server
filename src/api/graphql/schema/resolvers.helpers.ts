@@ -83,6 +83,9 @@ import {
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isUserOwnedAgentDefinition } from '../../../lib/auth/userOwnedAgentDefinition.js';
+import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemory.js';
+import { isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
+import { installWriteAllowed } from './installMemory.js';
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
 
 /**
@@ -99,6 +102,13 @@ export const CONTENT_RAW_DEFAULT: unique symbol = Symbol('contentRawDefault');
 export interface Context {
   login?: import('../../../auth/jwt.js').HadronJwtPayload['login'];
   db: PrismaClient;
+  /**
+   * #2044: set ONLY by a door that re-runs its write gate on a transaction client holding the
+   * install memory's authority fence (writeNodeCore). On the pooled client an install memory's
+   * write gate otherwise answers NO: a writer that never rechecks in its own transaction
+   * (restoreNodeRevision, moveNode, deleteNode, ...) cannot hold the fence, so it fails closed.
+   */
+  installWritePreflight?: boolean;
   /**
    * #1301 — set by an MCP handler that DELEGATES to a GraphQL resolver (e.g.
    * `hadron_update_node_data` → `updateNodeData`), so a refusal addresses the
@@ -123,6 +133,7 @@ export interface Context {
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (#562)
+  signInId?: string;       // #1897: the factor-protected sign-in this credential descends from (JWT sid or key root)
   oauthScopes?: string[];  // immutable OAuth grant on the presented hdr_user_ key (#1261)
   // Admin impersonation: set when the request authenticated with an
   // impersonation JWT — userId is the TARGET, roles is [], and reads must be
@@ -130,6 +141,10 @@ export interface Context {
   // org-scope chokepoints in this file + src/lib/auth consult it). Mutations
   // are blocked wholesale by the read-only Apollo plugin.
   impersonation?: ImpersonationContext;
+  /** #2198 — task warnings collected during this request (see resolvers.taskWarnings.ts); lazily created. */
+  taskWarnings?: { path: string; warning: import('./resolvers.taskWarnings.js').TaskWarning }[];
+  /** #2198 — request-local gate/register answers and the read time spent on them (resolvers.taskWarnings.ts). */
+  taskWarningState?: import('./resolvers.taskWarnings.js').TaskWarningState;
   // Request-scoped memo for Edge.source/target lazy loads — avoids an N+1 of
   // identical node.findUnique calls when many edges in one response share an
   // endpoint (lazily created on first use; see loadEdgeEndpointNode). #381.
@@ -149,6 +164,9 @@ export interface Context {
   // response's nodes/edges overwhelmingly share a memory, so the memory-urn
   // lookup is memoized per request (lazily created; see loadMemoryUrn).
   memoryUrnCache?: Map<string, Promise<string | null>>;
+  // #2193 — Node.memory's record read, memoized per memory: a node list loads
+  // and gates each distinct memory once (see loadReadableMemoryRecord).
+  memoryRecordCache?: Map<string, Promise<unknown | null>>;
   // Request-scoped per-parent reconciliation. Node.revision,
   // Node.contentValidation and Node.authorship can all resolve on one GraphQL
   // Node object; share its locked read without mixing distinct parent states.
@@ -617,6 +635,7 @@ function userPrincipalOnly(ctx: Context): Context {
     roles: ctx.roles,
     organizationId: ctx.organizationId,
     apiKeyId: ctx.apiKeyId,
+    signInId: ctx.signInId,
     oauthScopes: ctx.oauthScopes,
     impersonation: ctx.impersonation,
   };
@@ -1148,6 +1167,14 @@ export async function canReadMemoryRecord(
   // System records follow the installed/licensed Agent or manager audience,
   // never the record-only org-member shortcut (#1807).
   if (memory.class === 'system') {
+    // #2064 §10: a user's own session is NOT a different principal for an App's INSTALL
+    // memory. Its record rights (a manager's, R45) are the user's, and binding a session
+    // of some other App must not drop them. A pure App key (no user), a run principal and
+    // an impersonation keep the hard-isolated content set below.
+    if (ctx.sessionId && ctx.userId && !ctx.impersonation && !isRunPrincipal(ctx)
+      && await ctx.db.memory.count({ where: { id: memory.id, isInstallMemory: true } }) > 0) {
+      return (await systemMemoryReadGrants(ctx.db, ctx, memory.id)).length > 0;
+    }
     if (ctx.sessionId || ctx.impersonation || isRunPrincipal(ctx) || !ctx.userId) {
       const ids = await accessible();
       return ids === null || ids.includes(memory.id);
@@ -1226,6 +1253,33 @@ export async function canReadMemoryRecord(
   // Scope the shared gate to THIS memory so it stays an indexed point-read.
   const accessibleIds = await accessible();
   return accessibleIds === null || accessibleIds.includes(memory.id);
+}
+
+/**
+ * #2193 — a memory's RECORD as `Query.memory` would answer it to this caller:
+ * the same full-row load, the same deleted check and the same
+ * {@link canReadMemoryRecord}, so impersonation, App-key, run and session
+ * scope match it by construction. Unreadable, deleted and missing are all
+ * null (cor:api:140:03).
+ *
+ * For a nested entity field such as `Node.memory` (cor:acl:110): the parent
+ * that admitted the node authorized the NODE, by its own rule, and never the
+ * memory record. Memoized per memory under a `*Cache` key, so a node list
+ * loads and gates each distinct memory once and `withoutRequestCaches` strips
+ * the memo like the others.
+ */
+export function loadReadableMemoryRecord(ctx: Context, memoryId: string): Promise<unknown | null> {
+  const cache = (ctx.memoryRecordCache ??= new Map<string, Promise<unknown | null>>());
+  let pending = cache.get(memoryId);
+  if (!pending) {
+    pending = (async () => {
+      const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, include: MEMORY_INCLUDE });
+      if (!memory || memory.deletedAt) return null;
+      return (await canReadMemoryRecord(ctx, memory)) ? memory : null;
+    })();
+    cache.set(memoryId, pending);
+  }
+  return pending;
 }
 
 // The ordering moved to src/lib/auth/orgRole.ts (#1196): this module imports
@@ -2264,7 +2318,9 @@ export async function getAccessibleMemoryIds(
           // where the two columns DISAGREE, and production has none (0 of 15
           // personal user-owned rows). Nobody loses reach; an aligned row still
           // arrives through the strict-owner clause above.
-          { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId },
+          // #2044: not an install memory — that kind has its own audience below, so
+          // a user-owned App's owner keeps no blanket read once the App is deleted.
+          { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId, isInstallMemory: false },
         ],
       },
       select: { id: true },
@@ -2314,6 +2370,12 @@ export async function getAccessibleMemoryIds(
     // runs on nearly every read surface, so the shortcut is worth stating.
     if (!options?.excludeAppDerived && !(onlyMemoryId && accessibleIds.has(onlyMemoryId))) {
       for (const id of await appDerivedMemoryIds(ctx, onlyMemoryId)) accessibleIds.add(id);
+    }
+    // #2044: install memories — content for the live App's participants only.
+    if (!options?.excludeAppDerived) {
+      for (const id of await readableInstallMemoryIds(ctx.db, ctx)) {
+        if (!onlyMemoryId || id === onlyMemoryId) accessibleIds.add(id);
+      }
     }
     if (isRunPrincipal(ctx)) {
       const privateCandidates = await ctx.db.memory.findMany({ where: { id: { in: [...accessibleIds] }, class: 'private' }, select: { id: true } });
@@ -2542,9 +2604,15 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   if (ctx.appId) {
     const memory = await ctx.db.memory.findUnique({
       where: { id: memoryId },
-      select: { ownerUserId: true, userId: true, class: true },
+      select: { id: true, ownerUserId: true, userId: true, class: true, appId: true, organizationId: true, installOfAgentId: true, isInstallMemory: true },
     });
     if (!memory) throw memoryWriteForbidden();
+    // #2044: an install memory has its own write audience; no platform-role
+    // shortcut below may reach it (a deleted App's memory takes no write at all).
+    if (isInstallMemoryRow(memory)) {
+      if (await installWriteAllowed(ctx, memory)) return;
+      throw memoryWriteForbidden();
+    }
     const strictOwner = memory.class === 'personal' || memory.class === 'private';
     // A strict owner's rights under App selection are decided by the shared
     // gate below, the same rule MCP applies (#1503, ruling (c)): an explicit
@@ -2573,8 +2641,16 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
       appId: true,
       userMemoryOfAgentId: true,
       createdBy: true,
+      installOfAgentId: true,
+      isInstallMemory: true,
     },
   });
+
+  // #2044: see the App-keyed branch above.
+  if (isInstallMemoryRow(memory)) {
+    if (await installWriteAllowed(ctx, memory)) return;
+    throw memoryWriteForbidden();
+  }
 
   // 034-memory-class-access: owner-owned personal/private memories are
   // owner-only to write — no ADMIN/OWNER bypass, no org-role path — EXCEPT a
@@ -2594,6 +2670,8 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   if (memory.ownerUserId !== null) {
     if (ctx.userId === memory.ownerUserId) return;
     if (memory.class === 'app' && await canWriteToMemory(ctx.db, ctx, memoryId)) return;
+    // #2206 case 2: a user-owned Agent's system memory, by whoever manages the Agent (the shared predicate).
+    if (memory.class === 'system' && await canManageAgentSystemMemory(ctx.db, ctx, memoryId)) return;
     throw memoryWriteForbidden();
   }
 
@@ -2628,11 +2706,12 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     throw memoryWriteForbidden();
   }
 
-  // Definition authoring uses the same org-management gate as Agent edits.
-  // User-owned and platform-admin cases were already decided above.
+  // Definition authoring follows whoever manages the Agent (#2206, cor:dmo:050:13), through the one predicate MCP
+  // shares: a live Agent's own system memory with matching tenant, never a class-only org-ADMIN shortcut (a system
+  // row no live Agent points at is nobody's definition). User-owned and platform-admin cases were decided above.
   if (memory.class === 'system') {
-    await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
-    return;
+    if (await canManageAgentSystemMemory(ctx.db, ctx, memoryId)) return;
+    throw memoryWriteForbidden();
   }
 
   // One shared predicate for GraphQL and MCP: free-standing knowledge via
@@ -2666,7 +2745,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
  * partial-response transport, but make the authorization classification
  * explicit so Apollo does not report an ordinary denial as a server fault.
  */
-function memoryWriteForbidden(): GraphQLError {
+export function memoryWriteForbidden(): GraphQLError {
   return new GraphQLError('Forbidden: no write access to this memory', {
     extensions: { code: 'FORBIDDEN' },
   });

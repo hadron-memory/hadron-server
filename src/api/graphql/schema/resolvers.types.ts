@@ -1,8 +1,12 @@
 import { liveTxContext } from './authorizedTx.js';
 import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
+import { sharedOrganizations } from './sharedOrganizations.js';
+import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // typeResolvers — GraphQL type-level field resolvers extracted from resolvers.ts
@@ -60,6 +64,7 @@ import {
   loadEdgeEndpointNode,
   isMemoryReadableCached,
   canReadMemoryRecord,
+  loadReadableMemoryRecord,
   filterReadableMemoryRecords,
   loadMemoryUrn,
   loadAppUrn,
@@ -197,7 +202,7 @@ async function callerReadableAgentFilter(ctx: Context): Promise<Record<string, u
   return { ...live, OR: or };
 }
 
-async function directReadableAgentFilter(ctx: Context): Promise<Record<string, unknown>> {
+export async function directReadableAgentFilter(ctx: Context): Promise<Record<string, unknown>> {
   const live = { deletedAt: null };
   // Query.agent applies strict user ownership before its org/admin branch.
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) {
@@ -228,7 +233,7 @@ type NestedAgentRow = {
 };
 
 /** Match the Agent read gate, including the App credential's installed-Agent authority. */
-async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context, agent: T | null | undefined): Promise<T | null> {
+export async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context, agent: T | null | undefined): Promise<T | null> {
   if (!agent || agent.deletedAt) return null;
   if (agent.visibility === 'PUBLIC') return agent;
   if (ctx.appId && !ctx.userId && !ctx.impersonation) {
@@ -393,12 +398,12 @@ async function resolveEdgeEndpoint(
   const otherPre = side === 'source' ? e.target : e.source;
 
   // The requested endpoint node — preloaded (even partially), else memoized FK.
-  const pre = wantPre as { memoryId?: string } | null | undefined;
+  const pre = wantPre as { memoryId?: string; deletedAt?: Date | null } | null | undefined;
   const node =
-    pre && typeof pre.memoryId === 'string'
+    pre && typeof pre.memoryId === 'string' && pre.deletedAt !== undefined
       ? pre
-      : ((await loadEdgeEndpointNode(ctx, wantId)) as { memoryId?: string } | null);
-  if (!node || typeof node.memoryId !== 'string') return null;
+      : ((await loadEdgeEndpointNode(ctx, wantId)) as { memoryId?: string; deletedAt?: Date | null } | null);
+  if (!node || node.deletedAt || typeof node.memoryId !== 'string') return null;
   // #1893 — an endpoint stamped inherited was admitted through the child it
   // was read through (resolveInheritedEdges); its own memory is the base's,
   // which a child-only reader can't read, and must not be re-gated here.
@@ -976,13 +981,17 @@ export const typeResolvers = {
       }
       return asset;
     },
-    // `node { memory { urn … } }` powers full-URN rendering in clients
-    // (the portal composes `<memory.urn>::<loc>`). The generic `nodes`
-    // query doesn't `include` the relation, so resolve it lazily by
-    // memoryId — use the preloaded relation when a resolver already
-    // included it (e.g. appNodes). Same pattern as MemoryShare.memory.
-    memory: async (n: { memoryId: string; memory?: unknown }, _: unknown, ctx: Context) =>
-      n.memory ?? ctx.db.memory.findUnique({ where: { id: n.memoryId } }),
+    // #2193 (cor:acl:110, cor:api:140:03): the memory RECORD, exactly as
+    // Query.memory answers it to this caller, else null. The parent that
+    // handed out this node authorized the node by its own rule (a Worker's
+    // team-visible handoff, an App's install scope), never the memory record,
+    // so the record is gated here, once per memory per request. A client that
+    // only needs the address has Node.urn / Node.memoryId.
+    //
+    // A preloaded `memory` is deliberately ignored, never trusted (#474):
+    // appNodes preloads a truncated row (id/urn/name/organizationId) for
+    // Node.urn, and a preload is no authorization decision either.
+    memory: (n: { memoryId: string }, _: unknown, ctx: Context) => loadReadableMemoryRecord(ctx, n.memoryId),
     // #481 — see resolveNodeUrnField.
     urn: (
       n: { loc: string; memoryId: string; memory?: { urn?: string } | null },
@@ -1003,6 +1012,10 @@ export const typeResolvers = {
     // absent everywhere else, which reads as not inherited.
     inheritedFrom: (n: { inheritedFrom?: InheritedFrom }) =>
       n.inheritedFrom ? { agentId: n.inheritedFrom.agentId, agentUrn: emitEntityUrnV2('agent', n.inheritedFrom.agentUrn) } : null,
+  },
+  GraphEdge: {
+    // #2124 — same strict projection as Edge.governedKind.
+    governedKind: (e: { governedKind?: unknown }) => projectGovernedKind(e.governedKind),
   },
   Edge: {
     // `Edge.source` / `Edge.target` are NULLABLE (`Node`) in the schema, for two
@@ -1030,6 +1043,8 @@ export const typeResolvers = {
     // #481 parity — edges are loc-addressed peers of nodes (spec 037), so
     // they carry their fully-qualified URN the same way. Edge.memoryId is the
     // denormalized SOURCE-side memory, which is exactly the URN's memory.
+    // #2124 — the edge's own stored kind through the one strict projection.
+    governedKind: (e: { governedKind?: unknown }) => projectGovernedKind(e.governedKind),
     urn: async (e: { loc: string; memoryId: string }, _: unknown, ctx: Context) => {
       const memUrn = await loadMemoryUrn(ctx, e.memoryId);
       if (!memUrn) return `hrn:edge:unknown:${e.loc}`;
@@ -1834,6 +1849,8 @@ export const typeResolvers = {
     ) => ((await canSeeOrgMemberRole(ctx, m)) ? m.role : null),
   },
   User: {
+    sharedOrganizations: (u: { id: string }, args: { limit?: number | null; offset?: number | null }, ctx: Context) =>
+      sharedOrganizations(u.id, args, ctx),
     // Canonical hrn:user:<handle> URN (spec cor:urn:010:01) — lowercase, and
     // null for a handle-less or not-URN-legal (grandfathered) handle.
     urn: (u: { handle?: string | null }) => userUrn(u.handle),
@@ -2012,18 +2029,18 @@ export const typeResolvers = {
     // ADMIN/OWNER of the org. Non-admins get an empty list (silent rather
     // than erroring — same shape as User.appMemberships).
     agentOrgGrants: async (org: { id: string }, _: unknown, ctx: Context) => {
-      const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-      if (!isPlatformAdmin && ctx.organizationId !== org.id) return [];
-      if (!isPlatformAdmin) {
-        const member = await ctx.db.orgMember.findFirst({
-          where: {
-            organizationId: org.id,
-            userId: ctx.userId ?? '',
-            ...LIVE_ORG_MEMBERSHIP,
-            role: { in: ['ADMIN', 'OWNER'] },
-          },
-        });
-        if (!member) return [];
+      // A headless run acts for its App, never as the admin it runs on behalf of (Xan's disposition on #2188), even with a platform role.
+      if (isRunPrincipal(ctx)) return [];
+      // An org-scoped client (app key / OAuth client) stays pinned to its own
+      // org; a user token carries no organizationId, so the role gate decides.
+      if (ctx.organizationId && ctx.organizationId !== org.id && !isPlatformAdmin(ctx)) return [];
+      // A worker-bound session acts for its Worker, never as the org admin whose token it rides (as stopSignal's personEntry).
+      if (currentActor().workerId || currentActorAmbiguity()) return [];
+      try {
+        await requireOrgRole(ctx, org.id, 'ADMIN');
+      } catch (e) {
+        if (e instanceof Error && e.message === 'Forbidden') return [];
+        throw e;
       }
       return ctx.db.agentOrgGrant.findMany({
         where: { orgId: org.id },

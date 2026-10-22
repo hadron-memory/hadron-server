@@ -39,7 +39,9 @@ import rateLimit from 'express-rate-limit';
 import { doubleCsrf, type DoubleCsrfUtilities } from 'csrf-csrf';
 import { decodeJwt } from 'jose';
 import { db } from '../integrations/db/client.js';
-import { signJwt, verifyJwt } from './jwt.js';
+import { signJwt } from './jwt.js';
+import { verifyAuthenticatedJwt, SignInNotLive, lockLiveSignInRoot } from './signIn.js';
+import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
 import { CONSENT_TEMPLATE } from './consent.template.js';
 import {
   EMAIL_ENTRY_TEMPLATE,
@@ -57,7 +59,7 @@ import { isServerLocalPath } from './server-local-path.js';
 import {
   SUPPORTED_OAUTH_SCOPES,
   USER_API_KEY_LABEL_MAX_LEN,
-  mintUserApiKey,
+  mintUserApiKeyInTx,
   type OAuthScope,
 } from '../middleware/auth.js';
 
@@ -684,15 +686,24 @@ function buildAuthorizeCsrfProtection(): DoubleCsrfUtilities {
  * to the selected first-party login provider).
  */
 async function getUserIdFromCookie(req: Request): Promise<string | null> {
+  return (await getSessionFromCookie(req))?.userId ?? null;
+}
+
+/**
+ * The signed-in user and, for a factor-protected sign-in (#1897), its root. `verifyAuthenticatedJwt`
+ * has already refused an ended or absent sign-in, so a returned `signInId` was live at this read; the
+ * issuing transaction rechecks it under the user authority anchor.
+ */
+async function getSessionFromCookie(req: Request): Promise<{ userId: string; signInId: string | null } | null> {
   const token = req.cookies?.hadron_token;
   if (typeof token !== 'string' || token.length === 0) return null;
   try {
-    const payload = await verifyJwt(token);
+    const payload = await verifyAuthenticatedJwt(token, db);
     // Admin impersonation: an impersonation token must never authenticate the
     // OAuth consent screen (it could mint long-lived credentials as the
     // target). Treat it as anonymous.
     if (payload.imp) return null;
-    return typeof payload.sub === 'string' ? payload.sub : null;
+    return typeof payload.sub === 'string' ? { userId: payload.sub, signInId: payload.sid ?? null } : null;
   } catch {
     return null;
   }
@@ -1035,7 +1046,8 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
   // 1. Auth check — same as GET. Without a signed-in user we can't
   // mint an AuthCode, but we ALSO can't safely redirect (we haven't
   // re-validated the redirect_uri yet). Treat as 401.
-  const userId = await getUserIdFromCookie(req);
+  const session = await getSessionFromCookie(req);
+  const userId = session?.userId ?? null;
   if (!userId) {
     res.status(401).json({ error: 'unauthorized', error_description: 'Not signed in' });
     return;
@@ -1120,20 +1132,31 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10-minute expiry
 
   try {
-    await db.authCode.create({
-      data: {
-        codeHash,
-        clientId: validated.clientId,
-        userId,
-        redirectUri,
-        codeChallenge,
-        resource: [resource],
-        oauthScopes: parsedScopes.scopes,
-        expiresAt,
-        createdBy: userId,
-      },
+    // #1897 / R66: the code carries its sign-in root, rechecked under the user authority anchor so
+    // a cancellation cannot interleave with the issue (no code is born from an ended sign-in).
+    await db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'user', id: userId }], 'shared');
+      if (session?.signInId) await lockLiveSignInRoot(tx, session.signInId, userId);
+      await tx.authCode.create({
+        data: {
+          codeHash,
+          clientId: validated.clientId,
+          userId,
+          redirectUri,
+          codeChallenge,
+          resource: [resource],
+          oauthScopes: parsedScopes.scopes,
+          expiresAt,
+          createdBy: userId,
+          signInId: session?.signInId ?? null,
+        },
+      });
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof SignInNotLive) {
+      res.status(401).json({ error: 'unauthorized', error_description: 'Not signed in' });
+      return;
+    }
     // Same posture as /oauth/register: a thrown Prisma error must
     // not become an unhandled rejection. 500 is the catch-all per
     // RFC 7591 §3.2.2.
@@ -1637,75 +1660,77 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  // 5. Atomic claim (SC-005 / R-9 race guard).
-  // Postgres handles the UPDATE under the row lock; under concurrent
-  // attempts, exactly one query sees count=1 + the others see count=0.
-  // No transaction / SELECT FOR UPDATE needed — the conditional WHERE
-  // is the lock.
-  let claimedCount: number;
+  // 5+6. Claim the code AND mint the key in ONE transaction under the user authority anchor
+  // (#1897 / R66). The claim is still the SC-005 / R-9 race guard (conditional updateMany under the
+  // row lock: exactly one concurrent redeemer sees count=1). Holding the anchor across both steps is
+  // what orders this against a first-passkey cancellation (`endSignInsCompletedBy`, which takes the
+  // anchor exclusively): cancellation first => the root is ended, the mint refuses and the whole
+  // transaction (claim included) rolls back, so no key exists; mint first => the cancellation finds
+  // the key by its origin root and revokes it. There is no interval where a cancelled sign-in's code
+  // yields a surviving key. A mint failure now also releases the claim instead of burning the code.
+  //
+  // The client lookup is inside because (a) submittedClientId was validated against the AuthCode
+  // binding above and (b) claiming first stops a concurrent client-deletion double-minting. RFC 7591
+  // §2 leaves clientName optional, so fall back to clientId so the label never reads
+  // "OAuth: undefined".
+  type TokenOutcome = { kind: 'ok'; rawKey: string } | { kind: 'lost' } | { kind: 'ended' };
+  let outcome: TokenOutcome;
   try {
-    const result = await db.authCode.updateMany({
-      where: { codeHash, redeemedAt: null },
-      data: { redeemedAt: new Date() },
+    outcome = await db.$transaction(async (tx): Promise<TokenOutcome> => {
+      await lockAuthorityAnchors(tx, [{ kind: 'user', id: authCode.userId }], 'shared');
+      // Expiry is judged by the DATABASE clock at the moment the row lock is actually held
+      // (Ruth P2, #2116): a cutoff bound in JS is fixed before the UPDATE waits on a competing row
+      // lock, so a code that expired during that wait would still be claimed. `clock_timestamp()`
+      // is the wall clock at evaluation, unlike `now()` (the transaction start).
+      // Take the row lock FIRST, as its own statement: an UPDATE that waits on a lock whose holder
+      // changed nothing keeps the qualification it evaluated BEFORE waiting (no recheck), so the
+      // expiry test must run in a statement that starts after the lock is held.
+      await tx.$queryRaw`SELECT id FROM auth_codes WHERE code_hash = ${codeHash} FOR UPDATE`;
+      const claimed = await tx.$executeRaw`
+        UPDATE auth_codes SET redeemed_at = (clock_timestamp() AT TIME ZONE 'UTC')
+        WHERE code_hash = ${codeHash} AND redeemed_at IS NULL
+          AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')`;
+      // Lost the race (or the code expired while this waited on the anchor or the row).
+      if (claimed !== 1) return { kind: 'lost' };
+      const live = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM users WHERE id = ${authCode.userId} AND deleted_at IS NULL FOR SHARE`;
+      if (!live[0]) throw new Error('User not found');
+      const client = await tx.oAuthClient.findUnique({ where: { clientId: authCode.clientId } });
+      const clientNameForLabel =
+        client?.clientName && client.clientName.length > 0 ? client.clientName : authCode.clientId;
+      // Cap the label at the same length as the GraphQL resolver's user-supplied label (DCR's
+      // 200-char client_name cap is only implicit); one shared constant bounds it regardless.
+      const label = `OAuth: ${clientNameForLabel}`.slice(0, USER_API_KEY_LABEL_MAX_LEN);
+      const minted = await mintUserApiKeyInTx(tx, {
+        userId: authCode.userId,
+        label,
+        createdBy: authCode.userId,
+        issuedVia: `oauth:${authCode.clientId}`,
+        oauthScopes,
+        originSignInId: authCode.signInId,
+      });
+      return { kind: 'ok', rawKey: minted.rawKey };
     });
-    claimedCount = result.count;
-  } catch {
-    res.status(500).json({
-      error: 'server_error',
-      error_description: 'failed to claim authorization code',
-    });
-    return;
+  } catch (error) {
+    if (error instanceof SignInNotLive) {
+      outcome = { kind: 'ended' };
+    } else {
+      res.status(500).json({
+        error: 'server_error',
+        error_description: 'failed to issue access token',
+      });
+      return;
+    }
   }
-  if (claimedCount !== 1) {
-    // Lost the race. The other side just minted a token; we don't.
+  if (outcome.kind !== 'ok') {
+    // Lost the race, or the sign-in this code descends from has ended: same answer as an unknown code.
     res.status(400).json({
       error: 'invalid_grant',
       error_description: 'code is unknown',
     });
     return;
   }
-
-  // 6. Mint via the shared FR-015 insert path.
-  // The client lookup is post-claim because: (a) we already validated
-  // submittedClientId against the AuthCode.clientId binding above, and
-  // (b) by claiming first, a concurrent client-deletion can't
-  // double-mint. RFC 7591 §2 leaves clientName optional, so fall back
-  // to clientId so the label never reads "OAuth: undefined".
-  const client = await db.oAuthClient.findUnique({
-    where: { clientId: authCode.clientId },
-  });
-  const clientNameForLabel =
-    client?.clientName && client.clientName.length > 0
-      ? client.clientName
-      : authCode.clientId;
-
-  let rawKey: string;
-  try {
-    // Cap the label at the same length as the GraphQL resolver's
-    // user-supplied label. Today the implicit cap depends on DCR's
-    // 200-char client_name cap from PR #154; if that ever changes,
-    // we'd want the OAuth label to stay bounded regardless. Defense
-    // in depth via a single shared constant.
-    const label = `OAuth: ${clientNameForLabel}`.slice(0, USER_API_KEY_LABEL_MAX_LEN);
-    const minted = await mintUserApiKey(db, {
-      userId: authCode.userId,
-      label,
-      createdBy: authCode.userId,
-      issuedVia: `oauth:${authCode.clientId}`,
-      oauthScopes,
-    });
-    rawKey = minted.rawKey;
-  } catch {
-    // The AuthCode is already claimed; we can't un-claim it
-    // safely. The user can retry the OAuth dance from scratch.
-    // Better to fail-loud than to silently leave them with a
-    // dead code.
-    res.status(500).json({
-      error: 'server_error',
-      error_description: 'failed to issue access token',
-    });
-    return;
-  }
+  const rawKey = outcome.rawKey;
 
   // 7. RFC 6749 §5.1 token response. No `expires_in` — opaque
   // tokens are long-lived per D-2026-05-17-001. No `refresh_token`

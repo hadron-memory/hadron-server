@@ -51,6 +51,7 @@ import { resolveAppTeamSpaceMemoryIds } from '../api/graphql/schema/resolvers.he
 import { pendingAtForRevival } from '../services/embedding/enqueue.js';
 import { assertNoMintedSpecRemoval } from './mintedSpecPermanence.js';
 import { archivedTombstoneLoc } from './tombstoneArchive.js';
+import { memoryIsVectorIndexed } from './embedding/indexing.js';
 
 /** The name of every App's default Channel — the row `chats:team` became. */
 export const DEFAULT_CHANNEL_NAME = 'team';
@@ -419,7 +420,7 @@ export async function ensureChannelWithRoot(
     // Re-checked under that lock: the preflight above ran outside it.
     const live = await tx.memory.findFirst({
       where: { id: args.memoryId, deletedAt: null },
-      select: { id: true, vectorIndexEnabled: true },
+      select: { id: true, vectorIndexEnabled: true, class: true },
     });
     if (!live) throw new GraphQLError('Host memory not found.', { extensions: { code: 'NOT_FOUND' } });
     await args.authorizeLockedHost?.(tx);
@@ -456,7 +457,7 @@ export async function ensureChannelWithRoot(
             where: { id: existing.id },
             data: {
               deletedAt: null, deletedBy: null,
-              embeddingPendingAt: pendingAtForRevival(existing.embeddingPendingAt, live.vectorIndexEnabled),
+              embeddingPendingAt: pendingAtForRevival(existing.embeddingPendingAt, memoryIsVectorIndexed(live)),
             },
           });
         }
@@ -468,7 +469,7 @@ export async function ensureChannelWithRoot(
       await restoreOrCreate(parent, () =>
         tx.node.create({
           data: { id: generateId(), memoryId: args.memoryId, loc: parent, name: parent.split(':').pop()!, nodeType: 'record', createdBy: args.createdBy,
-            embeddingPendingAt: live.vectorIndexEnabled ? new Date() : null },
+            embeddingPendingAt: memoryIsVectorIndexed(live) ? new Date() : null },
           select: { id: true },
         }),
         () => true,
@@ -508,7 +509,7 @@ export async function ensureChannelWithRoot(
     await restoreOrCreate(messagesLoc, () =>
       tx.node.create({
         data: { id: generateId(), memoryId: args.memoryId, loc: messagesLoc, name: 'messages', nodeType: 'record', createdBy: args.createdBy,
-          embeddingPendingAt: live.vectorIndexEnabled ? new Date() : null },
+          embeddingPendingAt: memoryIsVectorIndexed(live) ? new Date() : null },
         select: { id: true },
       }),
       () => true,
@@ -544,7 +545,7 @@ export async function ensureChannelWithRoot(
         messagesLoc,
         deletedBy: args.createdBy ?? null,
         memEncInfo,
-        vectorIndexEnabled: live.vectorIndexEnabled,
+        vectorIndexEnabled: memoryIsVectorIndexed(live),
       });
     }
     const channel = await ensureChannelRow(tx, { ...args, rootId, resetForReuse: reusingDeadAddress });

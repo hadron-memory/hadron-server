@@ -10,6 +10,7 @@
  * passing a bag through.
  */
 
+import { raiseDeliveredOnAssignment } from '../tickers/standbyAssignment.js';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { currentActor } from '../requestActor.js';
 import { generateId } from '../id.js';
@@ -126,6 +127,12 @@ export async function appendTaskEvent(
   tx: Prisma.TransactionClient,
   args: { appId: string; taskId: string; actor: EventActor; event: TaskEventPayload; createdAt?: Date },
 ): Promise<void> {
+  const subject = subjectWorkerId(args.event);
+  // S7 (#2023, R90): an assignment to a worker that was on standby raises its delivered mark past the held messages, in this
+  // same transaction, and the count rides the event so the task wake returns it exactly once.
+  const standbyHeld = subject && (ASSIGNED_EVENT_TYPES as readonly string[]).includes(args.event.type)
+    ? await raiseDeliveredOnAssignment(tx, { workerId: subject, taskId: args.taskId, actor: { userId: args.actor.userId, workerId: args.actor.workerId }, now: args.createdAt })
+    : 0;
   await tx.agentTeamEvent.create({
     data: {
       appId: args.appId,
@@ -135,8 +142,8 @@ export async function appendTaskEvent(
       actorWorkerId: args.actor.workerId,
       actorAgentId: args.actor.agentId,
       actorRunId: args.actor.runId ?? null,
-      subjectWorkerId: subjectWorkerId(args.event),
-      payload: payloadJson(args.event),
+      subjectWorkerId: subject,
+      payload: standbyHeld > 0 ? { ...payloadJson(args.event), standbyHeld } : payloadJson(args.event),
       ...(args.createdAt ? { createdAt: args.createdAt } : {}),
     },
   });

@@ -58,13 +58,17 @@ describe('include tags through the MCP writers (#2040)', () => {
     expect(await edgesOf('a')).toEqual([]);
   });
 
-  it('a depth refusal names its tag', async () => {
+  it('an over-depth chain saves on create and on update (#2134, cor:dmo:150:06)', async () => {
     for (let i = 1; i <= 10; i++) {
       await mcp().callToolText('hadron_create_node', { urn: urn(`n${i}`), name: `n${i}`, content: `{{> ${i === 1 ? 'b' : `n${i - 1}`}}}` });
     }
-    const refused = await mcp().callToolText('hadron_create_node', { urn: urn('top'), name: 'top', content: '{{> n10}}' });
-    expect(refused).toContain('[include_too_deep]');
-    expect(refused).toContain('{{> n10}}');
+    const created = await mcp().callToolText('hadron_create_node', { urn: urn('top'), name: 'top', content: '{{> n10}}' });
+    expect(created).not.toMatch(/\[include_/);
+    expect((await edgesOf('top')).map(e => e.target.loc)).toEqual(['n10']);
+    await mcp().callToolText('hadron_create_node', { urn: urn('later'), name: 'later', content: 'plain' });
+    const updated = await mcp().callToolText('hadron_update_node', { urn: urn('later'), content: '{{> n10}}' });
+    expect(updated).not.toMatch(/\[include_/);
+    expect((await edgesOf('later')).map(e => e.target.loc)).toEqual(['n10']);
   });
 
   it('hadron_create_parent_node: a tag in the description is checked', async () => {

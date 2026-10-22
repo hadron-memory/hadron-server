@@ -2,9 +2,10 @@ import { splitNodeUrn } from '@hadron-memory/urn-lib-js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { decryptNodeFields } from '../nodeCrypto.js';
 import { sessionKeyCache } from '../sessionKeyCache.js';
+import { revisionApprovalOf, newestApprovedRevisionOf } from '../nodeApproval.js';
 import { locateIncludeTags, IncludeSyntaxError, type IncludeTag } from './parseIncludeTags.js';
 
-/** Deepest include chain a read follows: the same cap a write enforces (#2040). */
+/** Deepest include chain a read follows; past it a reader sees the notice (cor:dmo:150:06). Writes don't enforce it (#2134). */
 export const MAX_RESOLVE_DEPTH = 10;
 
 /**
@@ -118,15 +119,30 @@ async function lookupRevision(db: Db, memo: IncludeReadMemo, target: Target, rev
   return hit;
 }
 
+/**
+ * The text of the revision an `approved` include qualifies for, or null (the notice). `rev=N approved` asks the
+ * shared predicate about N; an unpinned one asks `newestApprovedRevisionOf` which revision to try. Either way the
+ * text served is the content the predicate's own verdict hashed (`served`), checked again for the chosen number, so
+ * a snapshot deleted, altered or replaced after selection can only fail closed: no second read of the revision, no
+ * fall back to the live row or to another revision. A search that hit its cap and an exhausted one both end here as
+ * null; neither is evidence about approval. A snapshot captured in another memory is not this target's to serve, and
+ * an encrypted memory is NOT_APPLICABLE.
+ */
+async function approvedText(db: Db, target: Target, pinned: number | undefined): Promise<string | null> {
+  const revNo = pinned ?? (await newestApprovedRevisionOf(db, target.id)).found?.revNo;
+  if (revNo === undefined) return null;
+  const verdict = await revisionApprovalOf(db, target.id, revNo);
+  if (verdict.state !== 'APPROVED' || !verdict.served) return null;
+  if (verdict.served.memoryId !== target.memoryId) return null;
+  return verdict.served.content ?? '';
+}
+
 async function expandTag(
   db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, opts: SpliceOptions,
   tag: IncludeTag, includerMemoryId: string, trail: ReadonlySet<string>, level: number,
 ): Promise<string> {
-  // `approved` is a staged build: its qualification is #2083's predicate plus Basil's
-  // newest-approved selector (#2119), wired in a follow-up, so until then no revision
-  // qualifies. `signed` is stored and ignored until the signing ceremony ships
-  // (cor:dmo:150:02, Vera's D7): it serves as if absent, and `approved signed` as `approved`.
-  if (tag.settings.approved) return BROKEN_INCLUDE_NOTICE;
+  // `signed` is stored and ignored until the signing ceremony ships (cor:dmo:150:02,
+  // Vera's D7): it serves as if absent, and `approved signed` as `approved`.
   if (level > MAX_RESOLVE_DEPTH) return BROKEN_INCLUDE_NOTICE;
   let memoryId = includerMemoryId;
   let loc = tag.target;
@@ -140,9 +156,15 @@ async function expandTag(
   }
   const target = await lookupTarget(db, access, memo, memoryId, loc);
   if (!target || trail.has(target.id)) return BROKEN_INCLUDE_NOTICE;
-  const stored = tag.settings.rev !== undefined
-    ? await lookupRevision(db, memo, target, tag.settings.rev)
-    : target.content;
+  let stored: string | null;
+  if (tag.settings.approved) {
+    stored = await approvedText(db, target, tag.settings.rev);
+    if (stored === null) return BROKEN_INCLUDE_NOTICE;
+  } else {
+    stored = tag.settings.rev !== undefined
+      ? await lookupRevision(db, memo, target, tag.settings.rev)
+      : target.content;
+  }
   if (stored == null) return tag.settings.rev !== undefined ? BROKEN_INCLUDE_NOTICE : '';
   // Rendered per traversal: this node's ancestors and depth travel with it.
   return spliceWithin(db, access, memo, opts, stored, target.memoryId, new Set([...trail, target.id]), level + 1);

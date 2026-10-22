@@ -3,6 +3,9 @@ ALTER TABLE passkey_credentials DROP CONSTRAINT IF EXISTS chk_passkey_shape;
 ALTER TABLE passkey_credentials ADD CONSTRAINT chk_passkey_shape CHECK (
   octet_length(credential_id) BETWEEN 1 AND 1023 AND octet_length(public_key) > 0
   AND octet_length(user_handle) = 32 AND algorithm IN (-7, -257)
+  -- #1631 PR1b (Eden #10470): the enrollment RP ID is a bare lowercase host, never a URL or a port.
+  AND length(enrollment_rp_id) <= 253
+  AND enrollment_rp_id ~ '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$'
   AND counter BETWEEN 0 AND 4294967295
   AND transports IS NOT NULL AND (NOT backed_up OR backup_eligible)
   AND (last_used_at IS NULL OR last_used_at >= registered_at)
@@ -55,8 +58,8 @@ BEGIN
   IF OLD.revoked_at IS NOT NULL AND OLD.cancelled_at IS NULL AND ROW(NEW.cancelled_at,NEW.cancel_ip,NEW.cancel_user_agent) IS DISTINCT FROM ROW(OLD.cancelled_at,OLD.cancel_ip,OLD.cancel_user_agent) THEN
     RAISE EXCEPTION 'Cancel provenance cannot be attached after revocation' USING ERRCODE = '23514';
   END IF;
-  IF ROW(NEW.id,NEW.owner_id,NEW.credential_id,NEW.public_key,NEW.algorithm,NEW.user_handle,NEW.registered_at,NEW.backup_eligible,NEW.registration_method,NEW.window_ends_at)
-    IS DISTINCT FROM ROW(OLD.id,OLD.owner_id,OLD.credential_id,OLD.public_key,OLD.algorithm,OLD.user_handle,OLD.registered_at,OLD.backup_eligible,OLD.registration_method,OLD.window_ends_at) THEN
+  IF ROW(NEW.id,NEW.owner_id,NEW.credential_id,NEW.public_key,NEW.algorithm,NEW.user_handle,NEW.enrollment_rp_id,NEW.registered_at,NEW.backup_eligible,NEW.registration_method,NEW.window_ends_at)
+    IS DISTINCT FROM ROW(OLD.id,OLD.owner_id,OLD.credential_id,OLD.public_key,OLD.algorithm,OLD.user_handle,OLD.enrollment_rp_id,OLD.registered_at,OLD.backup_eligible,OLD.registration_method,OLD.window_ends_at) THEN
     RAISE EXCEPTION 'Passkey identity is immutable' USING ERRCODE = '23514';
   END IF;
   IF OLD.revoked_at IS NOT NULL AND NEW.revoked_at IS DISTINCT FROM OLD.revoked_at THEN
