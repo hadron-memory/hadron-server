@@ -140,6 +140,9 @@ export async function compileBootPrompt(
   target: CompileTargetInput,
   options: CompileBootPromptOptions = {},
 ): Promise<CompiledBootPromptResult> {
+  // An impersonated session is never "a manager as themselves" (the gate below refuses it too); stated here
+  // so no owner lookup runs for it.
+  if (ctx.impersonation) throw authorizationDenied();
   for (let attempt = 0; attempt < 3; attempt++) {
     // The anchors are chosen from the owner as read BEFORE the fence; a transfer that lands first is caught
     // inside and retried with the new ones (the setBootPromptPointer shape).

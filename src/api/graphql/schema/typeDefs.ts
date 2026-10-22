@@ -11570,7 +11570,7 @@ export const typeDefs = `#graphql
     setWorkerBootPrompt(workerRef: ID!, nodeRef: String): Worker!
 
     """
-    #2046 (S9-4, cor:agt:040:12) — compile an Agent's boot prompt from its source ('boot:source') in the Agent's
+    #2046 (S9-4, hrn:node:hadronmemory.com:specs:cor:agt:040:12) — compile an Agent's boot prompt from its source ('boot:source') in the Agent's
     system memory into the compiled node 'boot:compiled' there, as a NEW unapproved revision (every compile writes
     one, even when the text is unchanged), with its provenance and a derived 'compiled-from' edge to the source.
     Sets 'Agent.bootPromptRef' unless 'setPointer: false'. Never approves or signs ('approvalIssued' is always false).

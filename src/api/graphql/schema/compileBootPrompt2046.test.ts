@@ -109,6 +109,7 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     const before = await snapshot();
     expect(await codeOf(compileBootPrompt(ctxOf(f.member.id), { kind: 'APP_AGENT', appId: f.app.id, agentId: f.agent.id }))).toBe('FORBIDDEN');
     expect(await codeOf(compileBootPrompt(ctxOf(undefined), agentTarget(f)))).toBe('FORBIDDEN');
+    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id, { impersonation: { actorId: f.member.id } } as never), agentTarget(f)))).toBe('FORBIDDEN');
     expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), { kind: 'AGENT', agentId: generateId() }))).toBe('FORBIDDEN');
     expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), { kind: 'WORKER', workerId: generateId() }))).toBe('FORBIDDEN');
     expect(await runAsActor({ workerId: f.worker.id, agentId: null }, () => codeOf(compileBootPrompt(ctxOf(f.admin.id), agentTarget(f))))).toBe('BOOT_PROMPT_POINTER_SESSION_REFUSED');
@@ -161,5 +162,42 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     expect(await codeOf(M.compileAgentBootPrompt!(null, { agentRef: f.agent.id }, ctxOf(f.member.id)))).toBe('FORBIDDEN');
     expect(await codeOf(M.compileWorkerBootPrompt!(null, { workerRef: 'nope' }, ctxOf(f.admin.id)))).toBe('FORBIDDEN');
     expect(await codeOf(M.compileAppAgentBootPrompt!(null, { appRef: 'nope', agentRef: f.agent.id }, ctxOf(f.admin.id)))).toBe('FORBIDDEN');
+  });
+
+  it('S2: an App compile carries the install memory replacing node and records it as a replacement', async () => {
+    const f = await fixture();
+    await f.source(f.agentMem.id, 'boot:source', 'Style: {{> policies:style}}');
+    const own = await db.node.create({ data: { id: generateId(), memoryId: f.agentMem.id, loc: 'policies:style', name: 's', content: 'agent style' } });
+    await db.node.create({ data: { id: generateId(), memoryId: f.install.id, loc: 'policies:style', name: 's', content: 'app style' } });
+    const r = await compileBootPrompt(ctxOf(f.admin.id), { kind: 'APP_AGENT', appId: f.app.id, agentId: f.agent.id });
+    expect((await db.node.findUniqueOrThrow({ where: { id: r.nodeId } })).content).toBe('Style: app style');
+    const prov = (await readCompiledRevision(db, r.nodeId, 1))!.provenance.occurrences;
+    expect(prov[1]).toMatchObject({ kind: 'replacement', replacesNodeId: own.id });
+  });
+
+  it('a same-organisation base part with no grant is provisioned by the compile; a foreign Agent without one refuses and writes nothing', async () => {
+    const f = await fixture();
+    const partMem = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'part-sys', urn: 'cb-org:part-sys', organizationId: orgId } });
+    const part = await db.agent.create({ data: { id: generateId(), name: 'Part', urn: 'cb-org:part', organizationId: orgId, systemMemoryId: partMem.id, visibility: 'ORGANIZATION' } });
+    await db.agent.update({ where: { id: f.agent.id }, data: { extendsAgentId: part.id } });
+    await db.node.create({ data: { id: generateId(), memoryId: partMem.id, loc: 'parts:rules', name: 'r', content: 'base rules' } });
+    await f.source(f.agentMem.id, 'boot:source', '{{> parts:rules}}');
+    expect(await db.agentOrgGrant.count({ where: { orgId, agentId: part.id } })).toBe(0);
+    const r = await compileBootPrompt(ctxOf(f.admin.id), agentTarget(f));
+    expect((await db.node.findUniqueOrThrow({ where: { id: r.nodeId } })).content).toBe('base rules');
+    expect(await db.agentOrgGrant.count({ where: { orgId, agentId: part.id, revokedAt: null } })).toBe(1);
+  });
+
+  it('a foreign Agent base with no grant is refused BOOT_PROMPT_GRANT_REQUIRED and nothing is written or granted', async () => {
+    const f = await fixture();
+    const other = (await db.organization.create({ data: { id: generateId(), name: 'cb-other', urn: 'cb-other' } })).id;
+    const fm = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'f-sys', urn: 'cb-other:f-sys', organizationId: other } });
+    const foreign = await db.agent.create({ data: { id: generateId(), name: 'Foreign', urn: 'cb-other:foreign', organizationId: other, systemMemoryId: fm.id, visibility: 'PUBLIC' } });
+    await db.agent.update({ where: { id: f.agent.id }, data: { extendsAgentId: foreign.id } });
+    await db.node.create({ data: { id: generateId(), memoryId: fm.id, loc: 'parts:rules', name: 'r', content: 'foreign' } });
+    await f.source(f.agentMem.id, 'boot:source', '{{> parts:rules}}');
+    const before = { ...(await snapshot()), grants: await db.agentOrgGrant.count() };
+    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), agentTarget(f)))).toBe('BOOT_PROMPT_GRANT_REQUIRED');
+    expect({ ...(await snapshot()), grants: await db.agentOrgGrant.count() }).toEqual(before);
   });
 });
