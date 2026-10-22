@@ -153,6 +153,7 @@ import {
   resolveUserRefArg,
   resolveOrgRefArg,
   resolveMemoryRefArg,
+  getAccessibleMemoryIds,
   type MergeMemoriesInput,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
@@ -1493,6 +1494,8 @@ export const memoryMutations = {
         ownerUserId: isUserOwned ? ctx.userId! : null,
         groupOwnerUserId: source.class === 'group' ? (ctx.userId ?? null) : null,
         actorId: ctx.userId ?? ctx.clientId ?? null,
+        // #2167 — every copied include tag is checked against the copier's reads.
+        copierReadableMemoryIds: await getAccessibleMemoryIds(ctx),
       });
 
       // 033 — the clone carries the source's vector-index config but no
@@ -1722,6 +1725,8 @@ export const memoryMutations = {
         move,
         actorId: ctx.userId ?? ctx.clientId ?? null,
         principal: ctx,
+        // #2167 — every copied include tag is checked against the copier's reads.
+        copierReadableMemoryIds: await getAccessibleMemoryIds(ctx),
       });
 
       // The extract carries the subtree's content but no vectors; stamp every

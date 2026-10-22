@@ -146,21 +146,33 @@ export async function backfillSystemMemoryEmbeddings(
   return report;
 }
 
-// Hand-run entry point.
+// Hand-run entry point. It exits explicitly: an apply that stamps anything publishes the drain
+// wake, which opens the process-wide bus client, and that open connection would otherwise keep
+// the process alive after the report (#2243).
 if (process.argv[1] && process.argv[1].endsWith('backfillSystemMemoryEmbeddings.ts')) {
   const { db: prisma } = await import('../integrations/db/client.js');
+  const { closeBusClient } = await import('../lib/bus/index.js');
+  const shutdown = async (code: number): Promise<never> => {
+    await closeBusClient();
+    await prisma.$disconnect();
+    process.exit(code);
+  };
   let parsed: ReturnType<typeof parseBackfillArgs>;
   try {
     parsed = parseBackfillArgs(process.argv.slice(2));
   } catch (e) {
     console.error(`${(e as Error).message}\nusage: backfillSystemMemoryEmbeddings.ts [--apply] [--node-limit N] [--memory-limit M] [--batch N] [--after memoryId:nodeId]`);
-    await prisma.$disconnect();
-    process.exit(2);
+    await shutdown(2);
   }
-  const apply = parsed.apply === true;
-  const report = await backfillSystemMemoryEmbeddings(prisma, parsed);
-  console.log(JSON.stringify(report, null, 2));
-  if (!apply) console.log('\nDry run — nothing written. Re-run with --apply (production needs the recorded grant).');
-  if (!report.complete) console.log(`\nPartial: continue with --after ${report.cursor}`);
-  await prisma.$disconnect();
+  try {
+    const apply = parsed!.apply === true;
+    const report = await backfillSystemMemoryEmbeddings(prisma, parsed!);
+    console.log(JSON.stringify(report, null, 2));
+    if (!apply) console.log('\nDry run — nothing written. Re-run with --apply (production needs the recorded grant).');
+    if (!report.complete) console.log(`\nPartial: continue with --after ${report.cursor}`);
+  } catch (e) {
+    console.error(e);
+    await shutdown(1);
+  }
+  await shutdown(0);
 }
