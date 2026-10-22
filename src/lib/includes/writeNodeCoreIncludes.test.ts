@@ -231,6 +231,7 @@ describe('copy paths conceal foreign targets (#2040, §10)', () => {
     expect(refused?.extensions?.code).toBe('INCLUDE_TARGET_UNAVAILABLE');
     expect(refused.extensions.tag).toBe('{{> hrn:node:foreign.example:secret:hidden}}');
     expect(await db.memory.count({ where: { urn: `${org.urn}:copy` } })).toBe(0);
+    // loc-scope-ok: deliberately global — no include edge anywhere may name the foreign target.
     expect(await db.edge.count({ where: { governedKind: 'INCLUDE', loc: { contains: foreign.id } } })).toBe(0);
   });
 });
