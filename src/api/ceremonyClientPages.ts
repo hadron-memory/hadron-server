@@ -31,11 +31,11 @@ const CLIENT_PAGE_HEADERS = {
   'X-Frame-Options': 'DENY',
 };
 
-const signInForms = (next: 'register' | 'window') => `
+const signInForms = (next: 'register' | 'window' | 'revoke', providersOnly = false) => `
 <div class="signin">
 ${(['github', 'google', 'apple'] as const).map((p) => `<form method="post" action="/passkeys/sign-in/${p}/start"><input type="hidden" name="next" value="${next}"><button type="submit">Confirm with ${p === 'github' ? 'GitHub' : p === 'google' ? 'Google' : 'Apple'}</button></form>`).join('\n')}
-<form id="email-form"><input type="hidden" name="next" value="${next}"><label>Or email me a link <input type="email" name="email" required maxlength="320" autocomplete="email"></label> <button type="submit">Send link</button></form>
-<p class="hint">Open the link in this browser. It confirms who you are to this page only, and does not sign you in.</p>
+${providersOnly ? '<p class="hint">An email link can\'t be used to remove a passkey.</p>' : `<form id="email-form"><input type="hidden" name="next" value="${next}"><label>Or email me a link <input type="email" name="email" required maxlength="320" autocomplete="email"></label> <button type="submit">Send link</button></form>
+<p class="hint">Open the link in this browser. It confirms who you are to this page only, and does not sign you in.</p>`}
 </div>`;
 
 function send(res: Response, title: string, body: string): void {
@@ -94,6 +94,30 @@ ${signInForms('window')}
 </main>`);
   });
 
+  // #1631 PR3 (cor:aut:040:08): remove a passkey after proving who you are with ANOTHER passkey or an identity
+  // provider (never an email link). Removing it signs out the sessions it signed in (Holger, 2026-10-21, #29507).
+  app.get('/passkeys/revoke', async (req, res) => {
+    const live = await liveSignIn(req).catch(() => null);
+    const viaProvider = live && live.method !== 'email'
+      // Uma #2230 P2-1: start spends this one confirmation, so the provider buttons wait hidden for the script to swap in.
+      ? `<p class="done" role="status" id="revoke-idp-confirmed"><strong>Confirmed with ${METHOD_NAMES[live.method] ?? live.method}</strong>. <button id="revoke-idp">Show my passkeys</button></p>
+<div id="revoke-idp-again" hidden><p class="hint">That confirmation is used up. Confirm again to remove another passkey.</p>${signInForms('revoke', true)}</div>`
+      : signInForms('revoke', true);
+    send(res, 'Remove a passkey', `<main data-page="revoke" data-rp-id="${passkeyRpId()}">
+<h1>Remove a passkey</h1>
+<p>Prove it's you, then choose the passkey to remove. Anything it already signed keeps its state, except a first passkey still in its
+cooling-off window, whose pending signatures then never count. <strong>Removing a passkey also signs out the sessions it signed in.</strong></p>
+<h2>1. Prove it's you</h2>
+<p><button id="revoke-passkey">Use another of my passkeys</button></p>
+<p>Or confirm with the identity provider linked to your account:</p>
+${viaProvider}
+<p class="hint">Lost every passkey and have no linked GitHub, Google or Apple account? Contact Hadron support.</p>
+<p id="status-revoke" role="status" aria-live="polite"></p>
+<h2>2. Choose the passkey to remove</h2>
+<ul id="passkey-list" tabindex="-1" aria-live="polite"></ul>
+</main>`);
+  });
+
   app.get(CEREMONY_SCRIPT_PATH, (_req, res) => {
     res.status(200).set({ 'Cache-Control': 'no-store', 'Content-Type': 'application/javascript; charset=utf-8', 'X-Content-Type-Options': 'nosniff' })
       .send(CEREMONY_SCRIPT);
@@ -128,7 +152,9 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
     var f = new FormData(emailForm);
     // Andi P3: the status line of THIS page, for the result and for an error alike.
     var out = main.dataset.page === 'window' ? 'status-window' : 'status-first';
-    post('/passkeys/sign-in/email', { email: f.get('email'), next: f.get('next') }).then(function () {
+    post('/passkeys/sign-in/email', { email: f.get('email'), next: f.get('next') }).then(function (r) {
+      // Dorian P3: a refused or failed request is not a sent link.
+      if (!r.ok) throw new Error(r.status === 400 ? 'Enter a valid email address.' : 'That didn\'t work. Try again.');
       say(out, 'If that address belongs to an account, a link is on its way. Open it in this browser.');
     }).catch(function (e) { say(out, e && e.message ? e.message : 'That didn\'t work. Try again.'); });
   });
@@ -145,7 +171,13 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
       $('confirm-account').onclick = function () { box.hidden = true; resolve(); };
       $('stop-account').onclick = function () {
         box.hidden = true;
-        post('/passkeys/register/stop').then(function () { reject(new Error('Stopped. Nothing was added, and this page forgot the confirmation.')); });
+        // Dorian P3: stop always ends with a visible result, even when the request fails; nothing was added either way.
+        post('/passkeys/register/stop').then(function (r) {
+          reject(new Error(r.ok ? 'Stopped. Nothing was added, and this page forgot the confirmation.'
+            : 'Stopped. Nothing was added. Close this page to make sure the confirmation is forgotten.'));
+        }, function (e) {
+          reject(new Error(e && e.message === TOO_MANY ? TOO_MANY + ' Nothing was added.' : 'Stopped. Nothing was added. Close this page to make sure the confirmation is forgotten.'));
+        });
       };
     });
   };
@@ -194,6 +226,65 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
         : 'Passkey added. We emailed you a notice.');
     }).catch(function (e) { say(out, e && e.message && e.message !== 'refused' ? e.message : 'That didn\'t work. Start again.'); });
   };
+  // #1631 PR3: the revocation page.
+  var revokeCeremony = null;
+  var renderList = function (passkeys) {
+    var ul = $('passkey-list'); ul.textContent = '';
+    passkeys.forEach(function (p) {
+      var li = document.createElement('li');
+      var text = p.label + ', added ' + new Date(p.registeredAt).toLocaleString();
+      if (p.revokedAt) text += ' (removed)';
+      else if (p.inWindow) text += ' (in its cooling-off window)';
+      if (p.cancel) text += '. Removed by its email link at ' + new Date(p.cancel.at).toLocaleString() + ' from ' + (p.cancel.ip || 'an unknown address') + ' (' + (p.cancel.userAgent || 'unknown browser') + ')';
+      li.textContent = text;
+      if (!p.revokedAt && !p.prover) {
+        var b = document.createElement('button');
+        b.textContent = 'Remove';
+        b.setAttribute('aria-label', 'Remove the passkey ' + p.label);
+        b.onclick = function () {
+          if (!window.confirm('Remove the passkey "' + p.label + '"? This also signs out the sessions it signed in.')) return;
+          post('/passkeys/revoke/finish', { ceremonyId: revokeCeremony, credentialId: p.credentialId }).then(function (r) {
+            say('status-revoke', r.ok ? 'Removed "' + p.label + '".' + ' Start again to remove another.' : 'Not removed. Start again.');
+            if (r.ok) { $('passkey-list').textContent = ''; revokeCeremony = null; }
+          }).catch(function (e) { say('status-revoke', e.message); });
+        };
+        li.appendChild(document.createTextNode(' '));
+        li.appendChild(b);
+      } else if (p.prover) {
+        li.appendChild(document.createTextNode(' (used to prove it is you; use another passkey or a provider to remove it)'));
+      }
+      ul.appendChild(li);
+    });
+  };
+  // The identity-provider confirmation is spent (or was refused) at start: offer the providers again (Uma #2230 P2-1).
+  var idpSpent = function () {
+    if (!$('revoke-idp-confirmed') || !$('revoke-idp-again')) return;
+    $('revoke-idp-confirmed').hidden = true;
+    $('revoke-idp-again').hidden = false;
+  };
+  var revokeStart = function (viaPasskey) {
+    say('status-revoke', '');
+    post('/passkeys/revoke/challenge').then(function (r) { if (!r.ok) throw new Error('refused'); return r.json(); }).then(function (c) {
+      revokeCeremony = c.ceremonyId;
+      if (!viaPasskey) return post('/passkeys/revoke/start', { ceremonyId: c.ceremonyId });
+      return navigator.credentials.get({ publicKey: { challenge: dec(c.challenge), rpId: main.dataset.rpId, userVerification: 'required', allowCredentials: [] } })
+        .then(function (a) {
+          return post('/passkeys/revoke/start', { ceremonyId: c.ceremonyId,
+            credentialId: enc(a.rawId), authenticatorData: enc(a.response.authenticatorData),
+            clientDataJson: enc(a.response.clientDataJSON), signature: enc(a.response.signature) });
+        });
+    }).then(function (r) {
+      if (!viaPasskey) idpSpent();
+      if (!r.ok) throw new Error(viaPasskey ? 'That passkey can\'t prove it: it may be removed.' : 'Confirm with your identity provider first, in this browser, within the last 10 minutes.');
+      return r.json();
+    }).then(function (b) { renderList(b.passkeys); $('passkey-list').focus && $('passkey-list').focus(); })
+      .catch(function (e) {
+        if (e && e.name === 'NotAllowedError') return say('status-revoke', 'Cancelled. Nothing was removed.');
+        say('status-revoke', e && e.message && e.message !== 'refused' ? e.message : 'That didn\'t work. Start again.');
+      });
+  };
+  if ($('revoke-passkey')) $('revoke-passkey').addEventListener('click', function () { revokeStart(true); });
+  if ($('revoke-idp')) $('revoke-idp').addEventListener('click', function () { revokeStart(false); });
   if ($('add-first')) $('add-first').addEventListener('click', function () { register(false); });
   if ($('add-later')) $('add-later').addEventListener('click', function () { register(true); });
   if ($('end-window')) $('end-window').addEventListener('click', function () {

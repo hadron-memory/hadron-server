@@ -14,23 +14,21 @@
  *   registration's, ends its user's first passkey's cooling-off window early.
  * - The cancel link (cor:aut:040:08, Exceptions): `GET /passkeys/cancel` only renders; the POST
  *   revokes a first passkey in its window, once, with no sign-in, and ends the sign-ins it completed.
- * - `revoke/start` is opened only by an existing passkey's assertion over a server-issued challenge:
- *   the challenge is the ceremony id's own random bytes, the browser is the HttpOnly cookie holder
- *   (stored only as its SHA-256), the Origin must be on the SIGNING_CEREMONY_ORIGINS allowlist (an
- *   empty list refuses), and no durable session is minted. A credential counts only while its
- *   enrollment RP ID equals the deployment's (#1631 PR1b, Eden #10470), and each credential has its
- *   own attempt budget across client addresses, on top of the per-IP one.
- *
- * Order for `revoke/start`: load the credential snapshot without locks, verify OUTSIDE any
- * transaction, then in one transaction take the user authority anchor, recheck the live owner and
- * decide against the locked rows (`decideCeremonyAssertion`).
+ * - Revocation (#1631 PR3, cor:aut:040:08): `revoke/challenge` opens a REVOKE ceremony; `revoke/start`
+ *   binds it to the owner by another passkey's assertion over the ceremony's challenge (the ceremony id's
+ *   own random bytes; a credential counts only while its enrollment RP ID equals the deployment's, #2202,
+ *   and each has its own attempt budget across client addresses) or by this browser's ONE fresh
+ *   identity-provider sign-in, and lists the owner's passkeys; `revoke/finish` revokes one of them, never
+ *   the prover. The browser is the HttpOnly cookie holder (stored only as its SHA-256), the Origin must be
+ *   on the SIGNING_CEREMONY_ORIGINS allowlist (an empty list refuses), and no durable session is minted.
+ *   See `lib/passkeys/revoke.ts` for the order of verification, anchor and decision.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import express, { type Express, type Request, type Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { db } from '../integrations/db/client.js';
-import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
-import { createCeremony, decideCeremonyAssertion, verifyCeremonyAssertion } from '../lib/passkeys/ceremony.js';
+import { createCeremony } from '../lib/passkeys/ceremony.js';
+import { bindRevokeByIdp, bindRevokeByPasskey, finishRevoke } from '../lib/passkeys/revoke.js';
 import { bindFirstRegistration, bindLaterRegistration, finishRegistration, firstPasskeyWindowHours, type RegistrationBinding } from '../lib/passkeys/registration.js';
 import { CANCEL_TOKEN, cancelFirstPasskey } from '../lib/passkeys/cancel.js';
 import { endWindowEarly, previewWindowEnd } from '../lib/passkeys/endWindow.js';
@@ -65,6 +63,7 @@ function cookieValue(req: Request, name = COOKIE): string | null {
 export const PASSKEY_REGISTER_CHALLENGE_PATH = '/passkeys/register/challenge';
 export const PASSKEY_REGISTER_FINISH_PATH = '/passkeys/register/finish';
 export const PASSKEY_END_WINDOW_PATH = '/passkeys/window/end';
+export const PASSKEY_REVOKE_FINISH_PATH = '/passkeys/revoke/finish';
 /** Cancel POSTs a minute per client IP. */
 export const PASSKEY_CANCEL_RATE_LIMIT_PER_MINUTE = 10;
 const RP_NAME = 'Hadron';
@@ -250,57 +249,76 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
     } catch { cancelRefused(res); }
   });
 
-  // Issue a challenge to the browser that will answer it. Nothing here proves anyone; it only opens a ceremony.
+  // Open a REVOKE ceremony for this browser. Nothing here proves anyone; it only opens a ceremony.
   app.post(PASSKEY_REVOKE_CHALLENGE_PATH, limiter, async (req, res) => {
     try {
       if (!originAllowed(req)) return void refuse(res);
       const nonce = randomBytes(32).toString('base64url');
       const { id } = await db.$transaction((tx) => createCeremony(tx, {
-        purpose: 'STEP_UP_ONLY', browserNonceHash: sha256Hex(nonce), ttlSeconds: CEREMONY_TTL_SECONDS,
-        challengeIsId: true,
+        purpose: 'REVOKE', browserNonceHash: sha256Hex(nonce), ttlSeconds: CEREMONY_TTL_SECONDS, challengeIsId: true,
       }));
-      res.cookie(COOKIE, nonce, { httpOnly: true, sameSite: 'strict', secure: req.secure || req.headers.origin?.startsWith('https://') === true, path: '/passkeys', maxAge: CEREMONY_TTL_SECONDS * 1000 });
+      res.cookie(COOKIE, nonce, { ...ceremonyCookie(req), maxAge: CEREMONY_TTL_SECONDS * 1000 });
       res.status(200).set('Cache-Control', 'no-store').json({ ceremonyId: id, challenge: id });
     } catch { refuse(res); }
   });
 
+  // #1631 PR3 (cor:aut:040:08): prove who you are, binding the REVOKE ceremony to the owner, and get the owner's
+  // passkeys. The proof is another passkey's assertion (body) or, with none in the body, this browser's ONE fresh
+  // identity-provider sign-in (never a magic link). No bearer credential, session or body field names the user.
   app.post('/passkeys/revoke/start', limiter, json, perCredential, async (req: Request, res: Response) => {
     try {
       if (!originAllowed(req)) return void refuse(res);
       const nonce = cookieValue(req);
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const credentialId = b64(body.credentialId, 512);
-      const authenticatorData = b64(body.authenticatorData);
-      const clientDataJson = b64(body.clientDataJson);
-      const signature = b64(body.signature);
-      const ceremonyId = typeof body.ceremonyId === 'string' && /^[A-Za-z0-9_-]{20,64}$/.test(body.ceremonyId) ? body.ceremonyId : null;
-      if (!nonce || !credentialId || !authenticatorData || !clientDataJson || !signature || !ceremonyId) return void refuse(res);
-
-      // Snapshot without locks; the deciding transaction revalidates it under lock.
-      const [row] = await db.$queryRaw<Array<{ id: string; owner_id: string; public_key: Buffer; counter: bigint; revoked_at: Date | null; enrollment_rp_id: string }>>`
-        SELECT id, owner_id, public_key, counter, revoked_at, enrollment_rp_id FROM passkey_credentials WHERE credential_id = ${credentialId}`;
-      const rpId = passkeyRpId();
-      // Immutable column, so the unlocked read is final: no decide-time recheck needed.
-      if (!row || row.revoked_at !== null || row.enrollment_rp_id !== rpId) return void refuse(res);
-
-      const verified = await verifyCeremonyAssertion({
-        assertion: { authenticatorData, clientDataJson, signature },
-        credential: { passkeyId: row.id, ownerId: row.owner_id, credentialId, publicKey: row.public_key, counter: row.counter },
-        expectedChallenge: Buffer.from(ceremonyId, 'base64url'),
-        rpId,
-        origins: signingCeremonyOrigins(),
-      });
-
-      const decided = await db.$transaction(async (tx) => {
-        await lockAuthorityAnchors(tx, [{ kind: 'user', id: row.owner_id }], 'exclusive');
-        if (!(await tx.user.findFirst({ where: { id: row.owner_id, deletedAt: null }, select: { id: true } }))) return null;
-        return decideCeremonyAssertion(tx, {
-          ceremonyId, browserNonceHash: sha256Hex(nonce), purpose: 'STEP_UP_ONLY', verified: verified.snapshot,
+      const ceremonyId = ceremonyIdOf(body.ceremonyId);
+      if (!nonce || !ceremonyId) return void refuse(res);
+      let bound;
+      if (body.credentialId !== undefined) {
+        const credentialId = b64(body.credentialId, 512);
+        const authenticatorData = b64(body.authenticatorData);
+        const clientDataJson = b64(body.clientDataJson);
+        const signature = b64(body.signature);
+        if (!credentialId || !authenticatorData || !clientDataJson || !signature) return void refuse(res);
+        bound = await bindRevokeByPasskey(db, {
+          ceremonyId, ceremonyNonceHash: sha256Hex(nonce), proof: { credentialId, authenticatorData, clientDataJson, signature },
+          rpId: passkeyRpId(), origins: signingCeremonyOrigins(),
         });
+      } else {
+        const signInNonce = cookieValue(req, CEREMONY_BROWSER_COOKIE);
+        if (!signInNonce) return void refuse(res);
+        bound = await bindRevokeByIdp(db, { ceremonyId, ceremonyNonceHash: sha256Hex(nonce), signInBrowserHash: sha256Hex(signInNonce) });
+      }
+      if (!bound) return void refuse(res);
+      res.status(200).set('Cache-Control', 'no-store').json({
+        passkeys: bound.passkeys.map((p) => ({
+          credentialId: p.credentialId.toString('base64url'), label: p.label, registeredAt: p.registeredAt.toISOString(),
+          lastUsedAt: p.lastUsedAt?.toISOString() ?? null, revokedAt: p.revokedAt?.toISOString() ?? null,
+          inWindow: p.inWindow, prover: p.prover,
+          cancel: p.cancel ? { at: p.cancel.at.toISOString(), ip: p.cancel.ip, userAgent: p.cancel.userAgent } : null,
+        })),
       });
-      if (!decided) return void refuse(res);
-      // PR1a ends here: the proof is valid for this request only. Revocation itself is PR3.
-      res.status(200).set('Cache-Control', 'no-store').json({ ok: true });
+    } catch { refuse(res); }
+  });
+
+  // Revoke one of the owner's passkeys, consuming the bound ceremony, and end the sign-ins it completed (cor:aut:040:08;
+  // Holger, 2026-10-21, #29507).
+  app.post(PASSKEY_REVOKE_FINISH_PATH, limiter, json, async (req: Request, res: Response) => {
+    try {
+      if (!originAllowed(req)) return void refuse(res);
+      const nonce = cookieValue(req);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const ceremonyId = ceremonyIdOf(body.ceremonyId);
+      const target = b64(body.credentialId, 512);
+      if (!nonce || !ceremonyId || !target) return void refuse(res);
+      const signInNonce = cookieValue(req, CEREMONY_BROWSER_COOKIE);
+      const done = await finishRevoke(db, {
+        ceremonyId, ceremonyNonceHash: sha256Hex(nonce), signInBrowserHash: signInNonce ? sha256Hex(signInNonce) : null,
+        targetCredentialId: target,
+      });
+      if (!done) return void refuse(res);
+      res.clearCookie(COOKIE, ceremonyCookie(req));
+      clearCeremonyBrowserCookie(req, res);
+      res.status(200).set('Cache-Control', 'no-store').json({ ok: true, windowCancelled: done.windowCancelled });
     } catch { refuse(res); }
   });
 }

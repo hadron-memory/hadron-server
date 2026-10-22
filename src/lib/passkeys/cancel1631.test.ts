@@ -74,6 +74,14 @@ describe('cancel link', () => {
     expect((await db.passkeyCancelToken.findUniqueOrThrow({ where: { passkeyId: first } })).usedAt).toBeNull();
   });
 
+  it('writes nothing once the owner is deleted: no IP or user agent lands on an erased record (#2230 Rook P2-1)', async () => {
+    await db.user.update({ where: { id: ana }, data: { deletedAt: new Date() } });
+    expect(await cancelFirstPasskey(db, { token, ...req })).toBe(false);
+    const c = await cred();
+    expect(c).toMatchObject({ revokedAt: null, cancelIp: null, cancelUserAgent: null });
+    expect((await db.passkeyCancelToken.findUniqueOrThrow({ where: { passkeyId: first } })).usedAt).toBeNull();
+  });
+
   it('does nothing for a passkey already revoked by another route', async () => {
     await db.$executeRaw`UPDATE passkey_credentials SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3),
       window_outcome = 'cancelled', window_ended_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) WHERE id = ${first}`;
@@ -133,7 +141,7 @@ describe('issuing', () => {
 describe('guard', () => {
   it('the migration and both schema-push paths carry the same guard', () => {
     const guard = readFileSync('prisma/passkey-registration-invariants.sql', 'utf8');
-    expect(readFileSync('prisma/migrations/20261022010000_passkey_registration/migration.sql', 'utf8').endsWith(guard)).toBe(true);
+    expect(readFileSync('prisma/migrations/20261022030000_passkey_revoke/migration.sql', 'utf8').endsWith(guard)).toBe(true);
     expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir passkey-registration-invariants.sql');
     expect(readFileSync('src/test/globalSetup.ts', 'utf8')).toContain('../../prisma/passkey-registration-invariants.sql');
   });
