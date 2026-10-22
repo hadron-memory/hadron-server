@@ -269,6 +269,28 @@ export function storedIncludeTags(content: string | null | undefined): IncludeTa
  * the content was valid where it came from. Encrypted memories re-derive only
  * while their key is cached; otherwise the edges wait for the next content write.
  */
+/**
+ * #2167 — a copy (clone, extract) is an includer write: every tag in every
+ * copied node counts as added, so each is checked for the copier's read access
+ * and as a cycle root against where it landed (cor:dmo:150:04, :06). Run on the
+ * inserted rows inside the copy's transaction, after any content rewrite, so a
+ * refusal rolls the whole copy back. The copier owns the destination it is
+ * creating, so the destination joins `readable`. Copies are plaintext: both
+ * copy paths refuse an encrypted source.
+ */
+export async function assertCopiedIncludesWritable(
+  tx: Tx, nodeIds: string[], destinationMemoryId: string, readable: ReadableMemoryIds,
+): Promise<void> {
+  if (nodeIds.length === 0) return;
+  const withDestination = readable === null ? null : [...readable, destinationMemoryId];
+  const nodes = await tx.node.findMany({
+    where: { id: { in: nodeIds }, deletedAt: null },
+    select: { id: true, memoryId: true, loc: true, content: true },
+    orderBy: { loc: 'asc' },
+  });
+  for (const node of nodes) await assertIncludesWritable(tx, node, node.content, withDestination);
+}
+
 export async function resyncDerivedIncludesForNodes(tx: Tx, nodeIds: string[]): Promise<void> {
   if (nodeIds.length === 0) return;
   const nodes = await tx.node.findMany({
