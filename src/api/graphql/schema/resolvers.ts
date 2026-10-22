@@ -59,6 +59,7 @@ import { agentMutations } from './resolvers.mutation.agent.js';
 import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
 import { bootPromptPointerFieldResolvers } from './resolvers.bootPromptPointer.js';
 import { bootPromptPointerMutations } from './resolvers.mutation.bootPromptPointer.js';
+import { compileBootPromptMutations } from './resolvers.mutation.compileBootPrompt.js';
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamSpecQueries } from './resolvers.teamSpec.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
@@ -230,6 +231,7 @@ export const resolvers = {
     ...agentMutations,
     ...workerMutations,
     ...bootPromptPointerMutations,
+    ...compileBootPromptMutations,
     ...teamRoleMutations,
     ...teamChatMutations,
     ...teamAttentionMutations,

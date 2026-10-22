@@ -150,6 +150,12 @@ export async function compileBootPrompt(
       return await decide(ctx, target, options, before, expected);
     } catch (e) {
       if (e instanceof OwnerTenantChanged) continue;
+      // The assembler's typed refusal, as the GraphQL error a client sees. The position is the includer tag's, never the target's.
+      if (e instanceof BootCompileRefusal) {
+        throw new GraphQLError(`${e.code}: the boot prompt cannot be compiled.`, {
+          extensions: { code: e.code, ...(e.position ? { position: e.position } : {}) },
+        });
+      }
       throw e;
     }
   }

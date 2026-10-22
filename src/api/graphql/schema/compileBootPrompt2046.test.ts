@@ -11,6 +11,7 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { readCompiledRevision, sha256Hex } from '../../../lib/bootCompile/provenance.js';
 import { compileBootPrompt, workerCompiledLoc, type CompileTargetInput } from './compileBootPrompt.js';
 import type { Context } from './resolvers.helpers.js';
+import { resolvers } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -148,5 +149,17 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     const before = await snapshot();
     expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), agentTarget(f)))).not.toBe('NO_ERROR');
     expect(await snapshot()).toEqual(before);
+  });
+
+  it('the GraphQL doors: success returns the unapproved revision; an unknown ref and a non-manager are alike FORBIDDEN', async () => {
+    const f = await fixture();
+    await f.source(f.agentMem.id, 'boot:source', 'door');
+    const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<{ revNo: number; approvalIssued: boolean; pointerSet: boolean; node: { id: string } }>>;
+    const ok = await M.compileAgentBootPrompt!(null, { agentRef: f.agent.id }, ctxOf(f.admin.id));
+    expect(ok).toMatchObject({ revNo: 1, approvalIssued: false, pointerSet: true });
+    expect(await codeOf(M.compileAgentBootPrompt!(null, { agentRef: 'no-such-agent' }, ctxOf(f.admin.id)))).toBe('FORBIDDEN');
+    expect(await codeOf(M.compileAgentBootPrompt!(null, { agentRef: f.agent.id }, ctxOf(f.member.id)))).toBe('FORBIDDEN');
+    expect(await codeOf(M.compileWorkerBootPrompt!(null, { workerRef: 'nope' }, ctxOf(f.admin.id)))).toBe('FORBIDDEN');
+    expect(await codeOf(M.compileAppAgentBootPrompt!(null, { appRef: 'nope', agentRef: f.agent.id }, ctxOf(f.admin.id)))).toBe('FORBIDDEN');
   });
 });
