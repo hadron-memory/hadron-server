@@ -175,6 +175,19 @@ classes.push(
     effect: async () => (await db.agent.findUnique({ where: { id: agentB.id } }))?.deletedAt != null || (await db.agent.findUnique({ where: { id: agentB.id } })) === null,
   },
 );
+classes.push(
+  {
+    name: 'install (installAgentIntoApp)',
+    run: () => M.installAgentIntoApp({}, { appRef: app.id, agentRef: agentB.id }, ctx(admin.id)),
+    effect: async () => (await db.appAgent.count({ where: { appId: app.id, agentId: agentB.id } })) === 1,
+  },
+  {
+    name: 'uninstall (uninstallAgentFromApp)',
+    setup: async () => { await M.installAgentIntoApp({}, { appRef: app.id, agentRef: agentB.id }, ctx(admin.id)); },
+    run: () => M.uninstallAgentFromApp({}, { appRef: app.id, agentRef: agentB.id }, ctx(admin.id)),
+    effect: async () => (await db.appAgent.count({ where: { appId: app.id, agentId: agentB.id } })) === 0,
+  },
+);
 
 describe.each(classes)('#2046 S9-3 stale-wait matrix: $name', (c) => {
   it('a committed real holder ahead of the account makes the account fail 40001 with no work; the holder took effect and bumped once', async () => {
