@@ -228,8 +228,9 @@ export async function appendAlarmEvent(
  * stall), plus `lapse` (#1766): the platform writing down that an `until`
  * passed (cor:agt:060:02).
  */
-export type AvailabilitySetter = 'worker' | 'holder' | 'app-manager' | 'reports-to' | 'stall-rule' | 'host' | 'lapse';
-export type AvailabilityReason = 'stalled' | 'out-of-tokens' | 'host-down' | 'other';
+export type AvailabilitySetter = 'worker' | 'holder' | 'app-manager' | 'reports-to' | 'stall-rule' | 'host' | 'lapse' | 'context-reset';
+/** #2162: `resetting` is written only by the platform's context reset (cor:agt:050:27); no caller sets it. */
+export type AvailabilityReason = 'stalled' | 'out-of-tokens' | 'host-down' | 'other' | 'resetting';
 
 /** `availability.changed`: a worker's or a model family's record changed. Words and ids only. */
 export type AvailabilityEvent =
@@ -246,6 +247,8 @@ export type AvailabilityEvent =
       lapsedAt?: Date;
       /** #1709: the host whose key set it (`setBy: 'host'`, cor:agt:060:08). */
       hostId?: string;
+      /** #2162: the context reset that set or released it (`setBy: 'context-reset'`). */
+      resetId?: string;
     }
   | {
       kind: 'family';
@@ -269,6 +272,7 @@ export async function appendAvailabilityEvent(
         ...(e.alarmEventId ? { alarmEventId: e.alarmEventId } : {}),
         ...(e.lapsedAt ? { lapsedAt: e.lapsedAt.toISOString() } : {}),
         ...(e.hostId ? { hostId: e.hostId } : {}),
+        ...(e.resetId ? { resetId: e.resetId } : {}),
       }
     : { ...common, family: e.family };
   await tx.agentTeamEvent.create({

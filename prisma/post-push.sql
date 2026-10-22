@@ -661,7 +661,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 
 -- #1706: stall alarms (one per episode), alarm wakes, availability for work and
 -- per-App stall windows. One source, shared verbatim with migration
--- 20261014150000_host_report_timeout (the newest to carry it) (pinned by src/lib/agentTasks/invariants.test.ts).
+-- 20261022100200_context_reset_availability (the newest to carry it) (pinned by src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-stall-invariants.sql
 
 -- #1707: a session's model family and host registrations. One source, shared
@@ -685,10 +685,14 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 \ir app-key-scope-invariants.sql
 
 -- #1709: host operations and the record of host-key use. One source, shared
--- verbatim with migration 20261014150100_host_operation_settlement (the newest to carry it) (pinned by
+-- verbatim with migration 20261022100100_context_reset_host_operations (the newest to carry it) (pinned by
 -- src/lib/hostOperations/invariants.test.ts). After agent-task-matching-invariants.sql,
 -- whose host_operation_token_ok it uses.
 \ir host-operation-invariants.sql
+
+-- #2162: a worker's context reset (cor:agt:050:27). One source, shared verbatim with migration
+-- 20261022100000_context_reset (pinned by src/lib/contextReset/invariants.test.ts).
+\ir context-reset-invariants.sql
 
 -- #1709 slice 2: launch grants and host-launched sessions. One source, shared
 -- verbatim with migration 20261014030000_host_launch (pinned by

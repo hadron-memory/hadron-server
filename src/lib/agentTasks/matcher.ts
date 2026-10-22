@@ -48,6 +48,7 @@
  *      can never both assign one task — the loser's update matches no row.
  */
 
+import { lockWorkersForAssignment } from './workerLock.js';
 import { afterWaits, anchorNow, coveringSignals, liveSql, lockStopFence, timeStoppedWorkers, type StopSignal } from '../stopSignals/state.js';
 import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
@@ -343,12 +344,11 @@ async function tryAssign(
     await lockAuthorityAnchors(tx, [{ kind: 'app', id: task.appId }], 'shared');
     const app = await tx.app.findUnique({ where: { id: task.appId }, select: { deletedAt: true, uninstalledAt: true } });
     if (!app || app.deletedAt || app.uninstalledAt) return 'task-gone';
-    // The per-worker lock. $executeRaw: pg_advisory_xact_lock returns void,
-    // which $queryRaw cannot deserialize.
     // #2022: the App's stop fence, shared, then the authoritative stop check: a signal set after the candidates were
     // loaded is seen here, or waits for this assignment (src/lib/stopSignals/state.ts, the lock order).
     await lockStopFence(tx, task.appId, 'shared');
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('agent-task-matcher:worker'), hashtext(${workerId}))`;
+    // The per-worker lock (src/lib/agentTasks/workerLock.ts).
+    await lockWorkersForAssignment(tx, [workerId]);
     const currentTask = await tx.agentTask.findUnique({ where: { id: task.id }, select: { requirements: true } });
     if (!currentTask) return 'task-gone';
     if (!(await stillFreeAs(tx, task.appId, workerId, family, now, parseRequirements(currentTask.requirements), anchor))) return 'worker-not-free';

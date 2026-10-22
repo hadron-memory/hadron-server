@@ -90,6 +90,8 @@ import { currentActor } from '../../../lib/requestActor.js';
 import { appKeyCaller, refuseSessionBound } from '../../../lib/appKeyScopes/scopes.js';
 import { launchForAssignment } from '../../../lib/hostOperations/launch.js';
 import { requestSessionEnd } from '../../../lib/hostOperations/sessionEnd.js';
+import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
+import { isWorkerResetting, requestContextResetSafely } from '../../../lib/contextReset/contextReset.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import {
   appendTaskEvent,
@@ -642,7 +644,17 @@ export async function inTaskWriteTx<T>(
    * reportsTo graph lock (src/lib/stopSignals/state.ts, the lock order). Every task write holds it shared, so an
    * assignment decision and a stop signal change are ordered; a stop signal writer asks for it exclusive.
    */
-  options: { lockMode?: 'shared' | 'exclusive'; stopFence?: 'shared' | 'exclusive' } = {},
+  options: {
+    lockMode?: 'shared' | 'exclusive';
+    stopFence?: 'shared' | 'exclusive';
+    /**
+     * #2162: the workers whose per-worker assignment lock this write takes (src/lib/agentTasks/workerLock.ts), right
+     * after the reportsTo graph and BEFORE the app_members and workers rows below, so every task write takes it in
+     * one order with the matcher, a session bind and a context reset's steps (Dan, #29368: inside `write()` it would
+     * come after the worker row and cycle).
+     */
+    lockWorkerIds?: readonly (string | null | undefined)[];
+  } = {},
 ): Promise<T> {
   const anchors: AuthorityAnchor[] = [
     { kind: 'app', id: app.id },
@@ -676,6 +688,7 @@ export async function inTaskWriteTx<T>(
           // of cor:agt:050:09 then reads a graph no writer can change before
           // this commits.
           await lockAppReportsTo(tx, app.id, 'shared');
+          if (options.lockWorkerIds?.length) await lockWorkersForAssignment(tx, options.lockWorkerIds);
           if (ctx.userId) {
             await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId} FOR SHARE`;
           }
@@ -704,18 +717,63 @@ export async function inTaskWriteTx<T>(
 async function mutateTask(
   ctx: Context,
   taskId: string,
-  act: (tx: Prisma.TransactionClient, task: TaskRow, actor: TaskActor, app: TaskApp, txCtx: Context) => Promise<void>,
+  act: (tx: Prisma.TransactionClient, task: TaskRow, actor: TaskActor, app: TaskApp, txCtx: Context, locked: ReadonlySet<string>) => Promise<void>,
+  /**
+   * #2162: the workers to take the per-worker lock on (src/lib/agentTasks/workerLock.ts), before any row. `assignee`
+   * is the task's current worker assignee, read unlocked and then re-checked under the task's row lock: if it moved
+   * in between, the write is retried once, then refused TASK_CONFLICT. `workers` are named by the write itself (a new
+   * assignee).
+   */
+  locks: { assignee?: boolean; workers?: (appId: string) => Promise<(string | null)[]> } = {},
 ): Promise<TaskRow> {
   const readable = await loadReadableTask(ctx, taskId);
   if (!readable) throw notFound(taskId);
   const { app, actor } = readable;
   requireWritable(ctx, app);
-  await inTaskWriteTx(ctx, app, actor, () => notFound(taskId), async (tx, txCtx, freshApp) => {
-    const task = await lockTask(tx, taskId);
-    if (!task || task.appId !== freshApp.id) throw notFound(taskId);
-    await act(tx, task, actor, freshApp, txCtx);
-  });
+  for (let attempt = 0; ; attempt += 1) {
+    const named = locks.workers ? await locks.workers(app.id) : [];
+    const expected = locks.assignee
+      ? (await ctx.db.agentTask.findUnique({ where: { id: taskId }, select: { assigneeWorkerId: true } }))?.assigneeWorkerId ?? null
+      : null;
+    try {
+      await inTaskWriteTx(ctx, app, actor, () => notFound(taskId), async (tx, txCtx, freshApp) => {
+        const task = await lockTask(tx, taskId);
+        if (!task || task.appId !== freshApp.id) throw notFound(taskId);
+        if (locks.assignee && task.assigneeWorkerId !== expected) throw new AssigneeMoved();
+        await act(tx, task, actor, freshApp, txCtx, new Set([expected, ...named].filter((id): id is string => Boolean(id))));
+      }, { lockWorkerIds: [expected, ...named] });
+      break;
+    } catch (e) {
+      if (!(e instanceof AssigneeMoved)) throw e;
+      if (attempt > 0) {
+        throw taskError('TASK_CONFLICT', "The task's assignee changed while this write waited; read the task and try again.", { taskId });
+      }
+    }
+  }
   return ctx.db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
+}
+
+/**
+ * #2162: the worker a write locks for moved between the unlocked read that chose the per-worker lock and the row lock
+ * (the task's assignee, or the worker a ref resolves to).
+ */
+class AssigneeMoved extends Error {}
+
+/**
+ * #2162 (cor:agt:050:27 §4, R118): a worker under a `resetting` mark takes no new work on any path. Asked under the
+ * worker's per-worker lock, so a claim cannot slip in between this check and the write.
+ */
+async function refuseResettingAssignee(tx: Prisma.TransactionClient, appId: string, workerId: string | null | undefined): Promise<void> {
+  if (!workerId) return;
+  if (await isWorkerResetting(tx, workerId, appId, new Date())) {
+    throw taskError('WORKER_RESETTING', 'This worker is resetting its context; it takes no work until its relaunched agent acts.', { workerId });
+  }
+}
+
+/** The worker a party input names, resolved unlocked to choose the per-worker lock; the write re-checks it locked. */
+async function partyWorkerForLock(ctx: Context, appId: string, input: PartyInput): Promise<string | null> {
+  const ref = input?.worker?.trim();
+  return ref ? resolveTaskWorkerId(ctx, appId, ref) : null;
 }
 
 function refuseEnded(task: TaskRow): void {
@@ -829,6 +887,7 @@ export async function createRootTaskForRun(
   const closeSessionWhenDone = input.closeSessionWhenDone ?? true;
   const now = new Date();
   const evActor: EventActor = { userId: null, workerId: null, agentId: null, runId: run.id };
+  const lockedAssignee = await partyWorkerForLock(principal, app.id, input.assignee);
   const made = await inTaskWriteTx(principal, app, { kind: 'run', runId: run.id }, () => appNotFound(run.appId), async (tx, txCtx, fresh) => {
     const requirements = await normalizeRequirements(txCtx, fresh, input.requirements);
     let owner: TaskParty;
@@ -836,13 +895,18 @@ export async function createRootTaskForRun(
     else if (principal.userId) owner = await resolveParty(txCtx, fresh, { user: principal.userId }, 'TASK_OWNER_INVALID');
     else throw taskError('TASK_OWNER_REQUIRED', 'A run that acts for no person names the task\'s owner: a worker of the App or a person who participates in it.');
     const assignee = input.assignee ? await resolveParty(txCtx, fresh, input.assignee, 'TASK_ASSIGNEE_INVALID') : null;
+    if (assignee?.workerId && assignee.workerId !== lockedAssignee) {
+      throw taskError('TASK_CONFLICT', 'The assignee named changed while this write waited; try again.');
+    }
+    // #2162 (cor:agt:050:27 §4): never onto a worker that is resetting.
+    await refuseResettingAssignee(tx, fresh.id, assignee?.workerId);
     return insertTask(tx, {
       app: fresh, parentId: null, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee,
       created: { createdBy: null, createdByWorkerId: null, createdByAgentId: null, createdByRunId: run.id, updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null },
       assigned: { assignedAt: now, assignedBy: null, assignedByWorkerId: null, assignedByAgentId: null },
       evActor,
     });
-  });
+  }, { lockWorkerIds: [lockedAssignee] });
   if (made.queued) await matchAfterChange(principal.db, app.id);
   return principal.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
 }
@@ -933,6 +997,8 @@ export const agentTaskMutations = {
     const refused = parentId ? () => notFound(parentId) : () => appNotFound(input.appRef as string);
     // #2198: advice decided inside the write transaction, filed after it commits.
     const warn: TaskWarningCode[] = source === null ? ['task.create.no-source'] : [];
+    // #2162: a task created straight onto a worker takes that worker's per-worker lock, before any row.
+    const lockedAssignee = await partyWorkerForLock(ctx, app.id, input.assignee);
     const made = await inTaskWriteTx(ctx, app, actor, refused, async (tx, txCtx, app) => {
       if (parentId) {
         // Lock the parent so its assignee and status can't move under us,
@@ -945,12 +1011,16 @@ export const agentTaskMutations = {
         refuseEnded(parent);
       }
       const { requirements, owner, assignee } = await resolveParties(txCtx, app);
+      if (assignee?.workerId && assignee.workerId !== lockedAssignee) {
+        throw taskError('TASK_CONFLICT', 'The assignee named changed while this write waited; try again.');
+      }
+      await refuseResettingAssignee(tx, app.id, assignee?.workerId);
       await assigneeAdvice(tx, app.id, assignee, null, warn);
       return insertTask(tx, {
         app, parentId, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee, status,
         created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
       });
-    });
+    }, { lockWorkerIds: [lockedAssignee] });
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
     // committed; the returned task shows the assignee when one was free.
     if (made.queued) await matchAfterChange(ctx.db, app.id);
@@ -976,7 +1046,7 @@ export const agentTaskMutations = {
   ) => {
     let party: TaskParty | null = null;
     const warn: TaskWarningCode[] = [];
-    const assigned = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+    const assigned = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx, locked) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, assigns it.", { taskId });
       }
@@ -985,6 +1055,11 @@ export const agentTaskMutations = {
         throw taskError('TASK_INVALID_TRANSITION', 'This task already has an assignee; reassign it instead.', { taskId });
       }
       party ??= await resolveParty(txCtx, app, assignee, 'TASK_ASSIGNEE_INVALID');
+      if (party.workerId && !locked.has(party.workerId)) {
+        party = null;
+        throw new AssigneeMoved();
+      }
+      await refuseResettingAssignee(tx, app.id, party.workerId);
       // #2022 (cor:agt:090:03): never to a worker a live stop signal covers.
       if (party.workerId) await refuseStoppedAssignee(tx, app.id, party.workerId, new Date(), task.id);
       await assigneeAdvice(tx, app.id, party, task.id, warn);
@@ -1019,7 +1094,7 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: evActor,
         event: { type: 'task.assigned', assignee: party, closeSessionWhenDone: close },
       });
-    });
+    }, { workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] });
     // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no live session through its host.
     await launchAssignee(ctx.db, assigned);
     await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn });
@@ -1109,7 +1184,7 @@ export const agentTaskMutations = {
   ) => {
     let party: TaskParty | null = null;
     const warn: TaskWarningCode[] = [];
-    const reassigned = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+    const reassigned = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx, locked) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, reassigns it.", { taskId });
       }
@@ -1119,11 +1194,16 @@ export const agentTaskMutations = {
         throw taskError('TASK_INVALID_TRANSITION', 'This task has no assignee yet; assign it instead.', { taskId });
       }
       party ??= await resolveParty(txCtx, app, assignee, 'TASK_ASSIGNEE_INVALID');
+      if (party.workerId && !locked.has(party.workerId)) {
+        party = null;
+        throw new AssigneeMoved();
+      }
       if (sameParty(from, party)) {
         throw taskError('TASK_INVALID_TRANSITION', 'The task is already assigned there.', { taskId });
       }
       // #2022 (cor:agt:090:03): never to a worker a live stop signal covers; moving it away is not refused.
       if (party.workerId) await refuseStoppedAssignee(tx, app.id, party.workerId, new Date(), task.id);
+      await refuseResettingAssignee(tx, app.id, party.workerId);
       await assigneeAdvice(tx, app.id, party, task.id, warn);
       const close = closeSessionWhenDone ?? task.closeSessionWhenDone;
       await tx.agentTask.update({
@@ -1134,7 +1214,7 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
         event: { type: 'task.reassigned', from, to: party, closeSessionWhenDone: close },
       });
-    });
+    }, { assignee: true, workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] });
     await launchAssignee(ctx.db, reassigned);
     await emitTaskWarnings(ctx, info, reassigned.appId, { codes: warn });
     return reassigned;
@@ -1153,12 +1233,14 @@ export const agentTaskMutations = {
       if (task.status !== 'pending') {
         throw taskError('TASK_INVALID_TRANSITION', 'This task has already started.', { taskId, status: task.status });
       }
+      // #2162: unreachable while the claim requires no open task, and asserted here as a guard, not a path.
+      await refuseResettingAssignee(tx, app.id, task.assigneeWorkerId);
       await tx.agentTask.update({
         where: { id: task.id },
         data: { status: 'started', startedAt: new Date(), ...updatedStamp(ctx) },
       });
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.started' } });
-    }),
+    }, { assignee: true }),
 
   /** Record progress on a started task: the assignee only (cor:agt:050:08). Carries no text (050:11). */
   recordAgentTaskProgress: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
@@ -1215,8 +1297,12 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.finished', outcome },
       });
       // #1709 (cor:agt:050:10): ask the assignee to end its session when the task says so.
-      await requestSessionEnd(tx, { appId: app.id, task, actor: eventActor(ctx.userId), now: new Date() });
-    });
+      const ending = await requestSessionEnd(tx, { appId: app.id, task, actor: eventActor(ctx.userId), now: new Date() });
+      // #2162 (cor:agt:050:27): or reset its context, when its Agent asks for that and no session end was asked (R119).
+      await requestContextResetSafely(tx, {
+        appId: app.id, task, wasStarted: true, sessionEndRequested: ending !== null, actor: eventActor(ctx.userId), now: new Date(),
+      });
+    }, { assignee: true });
     // #1707: a worker may have freed up (cor:agt:060:06).
     await matchAfterChange(ctx.db, finished.appId);
     await emitTaskWarnings(ctx, info, finished.appId, { codes: warn });
@@ -1243,8 +1329,13 @@ export const agentTaskMutations = {
         event: { type: 'task.cancelled', fromStatus: task.status as 'backlog' | 'pending' | 'started', openChildCount },
       });
       // #1709 (cor:agt:050:10): cancelling asks the assignee to end its session too.
-      await requestSessionEnd(tx, { appId: app.id, task, actor: eventActor(ctx.userId), now: new Date() });
-    });
+      const ending = await requestSessionEnd(tx, { appId: app.id, task, actor: eventActor(ctx.userId), now: new Date() });
+      // #2162 (cor:agt:050:27, R117): a started-then-cancelled task resets too; one never started requests none.
+      await requestContextResetSafely(tx, {
+        appId: app.id, task, wasStarted: task.status === 'started', sessionEndRequested: ending !== null,
+        actor: eventActor(ctx.userId), now: new Date(),
+      });
+    }, { assignee: true });
     // #1707: a worker may have freed up (cor:agt:060:06).
     await matchAfterChange(ctx.db, cancelled.appId);
     return cancelled;
