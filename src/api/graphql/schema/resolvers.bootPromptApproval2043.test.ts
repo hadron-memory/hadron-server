@@ -273,6 +273,15 @@ describe('#2043 S6 — an outside approval ends when its node enters the placed 
     await ended(node.id);
   });
 
+  it('A2: the same role flip in the install memory ends a session-made approval (the install placement arm)', async () => {
+    const f = await fixture();
+    const node = await plain(f.install.id);
+    expect(await runAsActor({ workerId: f.worker.id, agentId: null }, () => codeOf(approve(node.id, ctxOf(f.admin.id))))).toBe('NO_ERROR');
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvalHash).not.toBeNull();
+    await M.updateNode(null, { input: { id: node.id, role: 'boot-prompt' } }, ctxOf(f.admin.id));
+    await ended(node.id);
+  });
+
   it('C: an Agent attaching a memory that holds approved boot-role nodes ends those approvals', async () => {
     const f = await fixture();
     const loose = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'loose', urn: 'ba-org:loose', organizationId: orgId } });
@@ -385,6 +394,60 @@ describe('#2043 S6 — a refusal changes nothing, and the fenced recheck decides
       await demote;
     }
     expect(await approval).toBe('FORBIDDEN');
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvalHash).toBeNull();
+  });
+});
+
+// §10 Rook P3-4 / carried P3-2: the bulk door mirrors the direct door.
+describe('#2043 S6 — the bulk door takes install authority first and rechecks in the transaction', () => {
+  it('bulk parks on the Agent anchor before the memory anchor, then completes', async () => {
+    const f = await fixture();
+    const node = await bootSource(f.install.id);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    const holder = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'agent', id: f.agent.id }], 'exclusive');
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await isHeld;
+    const result = bulk(f.install.id, ctxOf(f.admin.id));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      const free = await db.$transaction(async (tx) => (await tx.$queryRaw<Array<{ ok: boolean }>>`
+        SELECT pg_try_advisory_xact_lock(hashtext('authorization:memory'), hashtext(${f.install.id})) AS ok`)[0]!.ok);
+      expect(free).toBe(true);
+    } finally {
+      release();
+      await holder;
+    }
+    expect((await result).approved.map((r: { nodeId: string }) => r.nodeId)).toContain(node.id);
+  });
+
+  it('a manager demoted while bulk waits on the org anchor is refused inside the transaction', async () => {
+    const f = await fixture();
+    const node = await plain(f.agentMem.id);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    const demote = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'org', id: orgId }], 'exclusive');
+      await tx.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: f.admin.id } }, data: { role: 'READER' } });
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await isHeld;
+    const result = codeOf(bulk(f.agentMem.id, ctxOf(f.admin.id)));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      release();
+      await demote;
+    }
+    expect(await result).toBe('FORBIDDEN');
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvalHash).toBeNull();
   });
 });
