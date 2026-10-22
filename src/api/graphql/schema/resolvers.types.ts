@@ -77,6 +77,7 @@ import {
   AGENT_INCLUDE,
   APP_INCLUDE,
   ORG_INCLUDE,
+  listOrgExchangeConnections,
   readPrimaryAgentIdFromEager,
   readPrimaryAgentRecordFromEager,
   readAllAgentRecordsFromEager,
@@ -1964,6 +1965,20 @@ export const typeResolvers = {
     },
   },
   Organization: {
+    /**
+     * The direct query's audience and rows (`listOrgExchangeConnections`). Its
+     * FORBIDDEN becomes `[]` here, indistinguishable from an org with none, so an
+     * admitted parent keeps its other fields; any other error propagates. Ignores
+     * any eager row (hadron-internal#18).
+     */
+    exchangeConnections: async (org: { id: string }, _: unknown, ctx: Context) => {
+      try {
+        return await listOrgExchangeConnections(ctx, org.id);
+      } catch (error) {
+        if (error instanceof GraphQLError && error.extensions?.code === 'FORBIDDEN') return [];
+        throw error;
+      }
+    },
     /** Every org-list record uses the point-read gate (cor:acl:010:01, #1626). */
     memories: async (
       org: { id: string; memories?: Prisma.MemoryGetPayload<{ include: typeof ORG_INCLUDE.memories.include }>[] },
