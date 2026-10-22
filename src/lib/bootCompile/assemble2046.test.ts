@@ -131,6 +131,17 @@ describe('#2046 S9-2 — every refusal', () => {
     expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a rev=1 approved}}')))).toBe('BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE');
   });
 
+  // Dara P2-2 (held dependency): `signed` is accepted and stored, not checked, until the signing slice
+  // (cor:dmo:150:02, D7). The shared selector is the ONE place that says so; the compile must not diverge.
+  it('signed is selected as if absent, and `approved signed` as `approved` (held until signing ships)', async () => {
+    await put(agent.child!.mem, 'parts:a', 'latest');
+    const plan = await assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a signed}}'));
+    expect(plan.text).toBe('latest');
+    expect(plan.occurrences[1]!.selection).toEqual({ rev: null, approved: false, signed: true });
+    await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: 'boot:source' } });
+    expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a approved signed}}')))).toBe('BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE');
+  });
+
   it('a cycle refuses', async () => {
     await put(agent.child!.mem, 'parts:a', '{{> parts:b}}');
     await put(agent.child!.mem, 'parts:b', '{{> parts:a}}');
