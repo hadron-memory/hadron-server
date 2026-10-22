@@ -45,9 +45,9 @@ export const CEREMONY_BROWSER_COOKIE = 'hadron_ceremony_browser';
 export const CEREMONY_LEG_COOKIE = 'hadron_ceremony_leg';
 /** Which passkey page the leg was started from, so the confirm page can link back. Not a secret; allowlisted. */
 export const CEREMONY_NEXT_COOKIE = 'hadron_ceremony_next';
-export const CEREMONY_NEXT_PAGES = { register: '/passkeys/register', window: '/passkeys/window/end' } as const;
+export const CEREMONY_NEXT_PAGES = { register: '/passkeys/register', window: '/passkeys/window/end', revoke: '/passkeys/revoke' } as const;
 type NextPage = keyof typeof CEREMONY_NEXT_PAGES;
-const nextPageOf = (v: unknown): NextPage => (v === 'window' ? 'window' : 'register');
+const nextPageOf = (v: unknown): NextPage => (v === 'window' || v === 'revoke' ? v : 'register');
 /** The browser binding outlives an IdP round trip, but never the pending login state it rides with. */
 export const CEREMONY_BROWSER_TTL_SECONDS = FRESH_SIGN_IN_LEG_TTL_SECONDS;
 if (CEREMONY_BROWSER_TTL_SECONDS * 1000 > LOGIN_STATE_TTL_MS) {

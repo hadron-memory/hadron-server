@@ -31,7 +31,7 @@ export async function issueCancelToken(tx: Prisma.TransactionClient, passkeyId: 
  * uniform refusal (unknown or spent token, window closed, passkey already revoked) and changes nothing.
  *
  * Order: find the passkey from the token without locks; then, in one transaction, take the owner's authority anchor,
- * lock the credential and re-check the open window, spend the token, revoke, and end the sign-ins. Concurrent cancels
+ * lock the credential and re-check the open window and that the owner is not deleted (an erased owner's record takes no IP or user agent), spend the token, revoke, and end the sign-ins. Concurrent cancels
  * serialise on the anchor, and the second finds the token spent.
  */
 export async function cancelFirstPasskey(
@@ -51,6 +51,7 @@ export async function cancelFirstPasskey(
     const open = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM passkey_credentials
       WHERE id = ${probe.passkey_id} AND owner_id = ${probe.owner_id} AND revoked_at IS NULL AND window_outcome IS NULL
         AND window_ends_at > (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3)
+        AND EXISTS (SELECT 1 FROM users u WHERE u.id = owner_id AND u.deleted_at IS NULL)
       FOR UPDATE`;
     if (open.length !== 1) return false;
     const spent = await tx.$queryRaw<Array<{ id: string }>>`UPDATE passkey_cancel_tokens SET used_at = clock_timestamp()

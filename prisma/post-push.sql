@@ -708,7 +708,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 \ir fresh-sign-in-invariants.sql
 
 -- #1631 PR2: passkey registration lifecycle (cancel tokens). One source, shared verbatim with migration
--- 20261022010000_passkey_registration (pinned by src/lib/passkeys/cancel1631.test.ts).
+-- 20261022030000_passkey_revoke (pinned by src/lib/passkeys/cancel1631.test.ts).
 \ir passkey-registration-invariants.sql
 -- #1897 slice B1: pending email sign-ins. One source, shared verbatim with migration
 -- 20261021120000_pending_email_sign_ins (pinned by src/auth/pendingEmailSignIn1897.test.ts).
