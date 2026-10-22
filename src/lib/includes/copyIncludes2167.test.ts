@@ -13,6 +13,7 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { sessionKeyCache } from '../sessionKeyCache.js';
 import { generateDataKey } from '../crypto.js';
 import { encryptNodeFields } from '../nodeCrypto.js';
+import { computeContentHash } from '../contentHash.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -144,6 +145,9 @@ describe('extract: copied tags resolve where they land (cor:dmo:150:04, :06)', (
   const exEdges = async (slug: string) => (await db.edge.findMany({
     where: { memory: { urn: EX(slug) }, governedKind: 'INCLUDE' }, include: { source: true, target: true },
   })).map(e => `${e.source.loc}>${e.target.loc}`).sort();
+  const exContent = async (slug: string, loc: string) =>
+    // loc-scope-ok: scoped to the extracted memory by its URN.
+    (await db.node.findFirstOrThrow({ where: { memory: { urn: EX(slug) }, loc } })).content;
   const sourceLive = async () => db.node.count({ where: { memoryId, loc: { startsWith: 'sub' }, deletedAt: null } });
 
   beforeEach(async () => {
@@ -158,13 +162,12 @@ describe('extract: copied tags resolve where they land (cor:dmo:150:04, :06)', (
     expect(await exEdges('sub')).toEqual(['sub:a>sub:b']);
   });
 
-  it('a tag inside the subtree refuses when the root is rebased: the verbatim tag names nothing in the new memory', async () => {
+  it('a tag inside the subtree is rebound to the rebased loc, then derives its edge (R180)', async () => {
     await seed('sub:b', 'B');
-    await seed('sub:a', '{{> sub:b}}');
-    const r = await refusal(extract('ex', true));
-    expect(r).toEqual({ code: 'INCLUDE_TARGET_UNAVAILABLE', tag: '{{> sub:b}}' });
-    expect(await db.memory.count({ where: { urn: EX('ex') } })).toBe(0);
-    expect(await sourceLive()).toBe(3);
+    await seed('sub:a', 'see {{> sub:b}} here');
+    expect((await refusal(extract('ex', true))).code).toBe('NO_ERROR');
+    expect(await exContent('ex', 'ex:a')).toBe('see {{> ex:b}} here');
+    expect(await exEdges('ex')).toEqual(['ex:a>ex:b']);
   });
 
   it('a relative tag to a sibling left outside the subtree refuses', async () => {
@@ -192,5 +195,124 @@ describe('extract: copied tags resolve where they land (cor:dmo:150:04, :06)', (
     expect((await refusal(extract('sub', true))).code).toBe('INCLUDE_CYCLE');
     expect(await db.memory.count({ where: { urn: EX('sub') } })).toBe(0);
     expect(await sourceLive()).toBe(3);
+  });
+});
+
+describe('extract rebinds include tags that name a copied node (R180, cor:api:160:01)', () => {
+  const EX = 'cp.example:ex';
+  const exUrn = (loc: string) => `hrn:node:${EX}:${loc}`;
+  const extract = async (move = false) => {
+    const parent = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'sub' } });
+    return M.extractParentNodeToMemory(null, { parentRef: parent.id, targetUrn: `hrn:mem:${EX}`, move }, as());
+  };
+  // loc-scope-ok: scoped to the extracted memory by its URN.
+  const exNode = (loc: string) => db.node.findFirstOrThrow({ where: { memory: { urn: EX }, loc } });
+  const exEdges = async () => (await db.edge.findMany({
+    where: { memory: { urn: EX }, governedKind: 'INCLUDE' }, include: { source: true, target: true },
+  })).map(e => `${e.source.loc}>${e.target.loc}`).sort();
+  const sourceLive = async () => db.node.count({ where: { memoryId, loc: { startsWith: 'sub' }, deletedAt: null } });
+
+  beforeEach(async () => {
+    await seed('other', 'O');
+    await seed('sub', 'root');
+    await seed('sub:b', 'B');
+  });
+
+  it('keeps the settings, their order and the spacing byte for byte; only the target changes', async () => {
+    await seed('sub:a', '{{>  sub:b   approved rev=2 }} and {{> sub}}');
+    expect((await refusal(extract())).code).toBe('NO_ERROR');
+    expect((await exNode('ex:a')).content).toBe('{{>  ex:b   approved rev=2 }} and {{> ex}}');
+  });
+
+  it('a URN tag to a copied node becomes the new memory\'s URN, and on a move resolves to the copy', async () => {
+    await seed('sub:a', `{{> ${urn('sub:b')}}}`);
+    expect((await refusal(extract(true))).code).toBe('NO_ERROR');
+    expect((await exNode('ex:a')).content).toBe(`{{> ${exUrn('ex:b')}}}`);
+    expect(await exEdges()).toEqual(['ex:a>ex:b']);
+  });
+
+  it('a legacy v1 URN spelling naming a copied node is not rewritten to the canonical form (R78)', async () => {
+    const v1 = `{{> ${urn('sub:b').replace(/^(hrn:node:[^:]+):([^:]+):/, '$1::$2::')}}}`;
+    expect(v1).toContain('::');
+    await seed('sub:a', v1);
+    expect((await refusal(extract())).code).toBe('NO_ERROR');
+    const rows = await db.node.findMany({ where: { memory: { urn: EX }, loc: 'ex:a' } }); // loc-scope-ok: scoped to the extracted memory by its URN.
+    expect(rows.map(r => r.content)).toEqual([v1]);
+  });
+
+  it('a URN tag to ANOTHER memory whose loc equals a copied node\'s source loc is never retargeted to the copy (Ruth, #2253 P3-1)', async () => {
+    const fm = await db.memory.findFirstOrThrow({ where: { urn: foreignUrn } });
+    await seed('sub:b', 'FOREIGN_B', fm.id);
+    const tag = `{{> hrn:node:${foreignUrn}:sub:b}}`;
+    await seed('sub:a', tag);
+    expect(await refusal(extract())).toEqual({ code: 'INCLUDE_TARGET_UNAVAILABLE', tag });
+    expect(await db.memory.count({ where: { urn: EX } })).toBe(0);
+  });
+
+  it('a tag outside the subtree stays as written: a URN to a readable source node passes unchanged', async () => {
+    await seed('sub:a', `{{> ${urn('other')}}}`);
+    expect((await refusal(extract())).code).toBe('NO_ERROR');
+    expect((await exNode('ex:a')).content).toBe(`{{> ${urn('other')}}}`);
+  });
+
+  it('a sibling left behind, and a loc under the parent with no copied node, stay as written and refuse', async () => {
+    await seed('sub:a', '{{> other}}');
+    expect(await refusal(extract())).toEqual({ code: 'INCLUDE_TARGET_UNAVAILABLE', tag: '{{> other}}' });
+    await db.node.updateMany({ where: { memoryId, loc: 'sub:a' }, data: { content: '{{> sub:missing}}' } });
+    expect(await refusal(extract())).toEqual({ code: 'INCLUDE_TARGET_UNAVAILABLE', tag: '{{> sub:missing}}' });
+    expect(await db.memory.count({ where: { urn: EX } })).toBe(0);
+  });
+
+  it('an outside loc tag whose text equals a rebased loc refuses, naming the tag, and retargets nothing (R188)', async () => {
+    await seed('ex:b', 'OUTSIDE');
+    await seed('sub:a', 'see {{> ex:b approved}}');
+    expect(await refusal(extract())).toEqual({ code: 'INCLUDE_TARGET_UNAVAILABLE', tag: '{{> ex:b approved}}' });
+    expect(await db.memory.count({ where: { urn: EX } })).toBe(0);
+    expect(await refusal(extract(true))).toEqual({ code: 'INCLUDE_TARGET_UNAVAILABLE', tag: '{{> ex:b approved}}' });
+    expect(await sourceLive()).toBe(3);
+  });
+
+  it('an outside loc spelled only inside code does not refuse (R188)', async () => {
+    await seed('ex:b', 'OUTSIDE');
+    await seed('sub:a', 'run `{{> ex:b}}`');
+    expect((await refusal(extract())).code).toBe('NO_ERROR');
+  });
+
+  it('a tag inside code is text and is not rewritten', async () => {
+    await seed('sub:a', 'run `{{> sub:b}}`\n\n```\n{{> sub:b}}\n```\n');
+    expect((await refusal(extract())).code).toBe('NO_ERROR');
+    expect((await exNode('ex:a')).content).toBe('run `{{> sub:b}}`\n\n```\n{{> sub:b}}\n```\n');
+  });
+
+  it('a rewritten node drops its content hash and authorship and refreshes a fresh abstract hash; an untouched one keeps them', async () => {
+    const stamp = { contentHash: 'h-external', authorshipKind: 'HUMAN' as const, authoredByHuman: writer.id, authoredAt: new Date() };
+    await db.node.create({ data: {
+      id: generateId(), memoryId, loc: 'sub:a', name: 'a', content: '{{> sub:b}}', abstract: 'A',
+      abstractOriginHash: computeContentHash('{{> sub:b}}'), ...stamp,
+    } });
+    await db.node.create({ data: {
+      id: generateId(), memoryId, loc: 'sub:c', name: 'c', content: 'plain', abstract: 'C',
+      abstractOriginHash: computeContentHash('plain'), ...stamp,
+    } });
+    expect((await refusal(extract())).code).toBe('NO_ERROR');
+    const a = await exNode('ex:a');
+    expect(a).toMatchObject({ content: '{{> ex:b}}', contentHash: null, authorshipKind: null, authoredByHuman: null });
+    expect(a.abstractOriginHash).toBe(computeContentHash('{{> ex:b}}'));
+    const c = await exNode('ex:c');
+    expect(c).toMatchObject({ content: 'plain', contentHash: 'h-external', authorshipKind: 'HUMAN', authoredByHuman: writer.id });
+    expect(c.abstractOriginHash).toBe(computeContentHash('plain'));
+  });
+
+  it('a cycle that forms after the rewrite refuses a move with no residue, and the source stays live', async () => {
+    await seed('sub:a', '{{> sub:b}}');
+    await db.node.updateMany({ where: { memoryId, loc: 'sub:b' }, data: { content: '{{> sub:a}}' } });
+    expect((await refusal(extract(true))).code).toBe('INCLUDE_CYCLE');
+    expect(await db.memory.count({ where: { urn: EX } })).toBe(0);
+    expect(await sourceLive()).toBe(3);
+  });
+
+  it('a self-include rewritten to its own rebased loc refuses as a cycle', async () => {
+    await seed('sub:a', '{{> sub:a}}');
+    expect(await refusal(extract())).toEqual({ code: 'INCLUDE_CYCLE', tag: '{{> ex:a}}' });
   });
 });
