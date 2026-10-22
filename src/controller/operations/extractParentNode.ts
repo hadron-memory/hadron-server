@@ -1,4 +1,4 @@
-import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
+import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { decisionContainedError, isDecisionFamilyRole } from '../../lib/decisions/index.js';
@@ -85,6 +85,8 @@ export interface ExtractParentNodeArgs {
   move: boolean;
   /** Audit attribution for createdBy / deletedBy columns. */
   actorId: string | null;
+  /** #2167 — memories the copier may read (`getAccessibleMemoryIds`); `null` = unrestricted. */
+  copierReadableMemoryIds: ReadableMemoryIds;
 }
 
 export interface ExtractParentNodeResult {
@@ -401,8 +403,12 @@ export async function extractParentNodeGraph(
       if (edgeRows.length > 0) {
         await tx.edge.createMany({ data: edgeRows });
       }
+      // #2167 — every copied tag is an added tag, resolved where it landed: the
+      // content is verbatim, so a relative tag resolves against the rebased locs.
+      const copiedIds = nodeRows.map((r) => r.id as string);
+      await assertCopiedIncludesWritable(tx, copiedIds, memoryId, args.copierReadableMemoryIds);
       // #2040 — the copies' include edges are re-derived from their content.
-      await resyncDerivedIncludesForNodes(tx, nodeRows.map((r) => r.id as string));
+      await resyncDerivedIncludesForNodes(tx, copiedIds);
 
       // ── Move disposition ─────────────────────────────────────────────────
       // Soft-delete the source subtree so the parent is truly relocated.

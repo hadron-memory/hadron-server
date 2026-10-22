@@ -1725,6 +1725,8 @@ export const memoryMutations = {
         move,
         actorId: ctx.userId ?? ctx.clientId ?? null,
         principal: ctx,
+        // #2167 — every copied include tag is checked against the copier's reads.
+        copierReadableMemoryIds: await getAccessibleMemoryIds(ctx),
       });
 
       // The extract carries the subtree's content but no vectors; stamp every

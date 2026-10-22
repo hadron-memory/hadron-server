@@ -134,3 +134,55 @@ describe('clone: no copied tag may close a cycle (cor:dmo:150:06)', () => {
     expect(await copyEdges()).toEqual(['a>b', 'a>c', 'b>d', 'c>d']);
   });
 });
+
+describe('extract: copied tags resolve where they land (cor:dmo:150:04, :06)', () => {
+  const EX = (slug: string) => `cp.example:${slug}`;
+  const extract = async (slug: string, move = false) => {
+    const parent = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'sub' } });
+    return M.extractParentNodeToMemory(null, { parentRef: parent.id, targetUrn: `hrn:mem:${EX(slug)}`, move }, as());
+  };
+  const exEdges = async (slug: string) => (await db.edge.findMany({
+    where: { memory: { urn: EX(slug) }, governedKind: 'INCLUDE' }, include: { source: true, target: true },
+  })).map(e => `${e.source.loc}>${e.target.loc}`).sort();
+  const sourceLive = async () => db.node.count({ where: { memoryId, loc: { startsWith: 'sub' }, deletedAt: null } });
+
+  beforeEach(async () => {
+    await seed('other', 'O');
+    await seed('sub', 'root');
+  });
+
+  it('a tag inside the subtree passes when the root keeps its loc, and derives its edge', async () => {
+    await seed('sub:b', 'B');
+    await seed('sub:a', '{{> sub:b}}');
+    expect((await refusal(extract('sub'))).code).toBe('NO_ERROR');
+    expect(await exEdges('sub')).toEqual(['sub:a>sub:b']);
+  });
+
+  it('a tag inside the subtree refuses when the root is rebased: the verbatim tag names nothing in the new memory', async () => {
+    await seed('sub:b', 'B');
+    await seed('sub:a', '{{> sub:b}}');
+    const r = await refusal(extract('ex', true));
+    expect(r).toEqual({ code: 'INCLUDE_TARGET_UNAVAILABLE', tag: '{{> sub:b}}' });
+    expect(await db.memory.count({ where: { urn: EX('ex') } })).toBe(0);
+    expect(await sourceLive()).toBe(3);
+  });
+
+  it('a relative tag to a sibling left outside the subtree refuses', async () => {
+    await seed('sub:a', '{{> other}}');
+    expect((await refusal(extract('sub'))).code).toBe('INCLUDE_TARGET_UNAVAILABLE');
+    expect(await db.memory.count({ where: { urn: EX('sub') } })).toBe(0);
+  });
+
+  it('a URN tag back to a readable node of the source passes', async () => {
+    await seed('sub:a', `{{> ${urn('other')}}}`);
+    expect((await refusal(extract('sub'))).code).toBe('NO_ERROR');
+  });
+
+  it('a cycle in the subtree refuses a move with no residue, and the source stays live', async () => {
+    await seed('sub:a', '{{> sub:b}}');
+    await seed('sub:b', '{{> sub:a}}');
+    expect((await refusal(extract('sub', true))).code).toBe('INCLUDE_CYCLE');
+    expect(await db.memory.count({ where: { urn: EX('sub') } })).toBe(0);
+    expect(await sourceLive()).toBe(3);
+  });
+});
