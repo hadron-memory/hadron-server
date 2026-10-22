@@ -1407,6 +1407,19 @@ export const typeDefs = `#graphql
   type RecoveryGraphEdge { id: ID!, name: String, source: RecoveryEndpoint!, target: RecoveryEndpoint! }
   type RecoveryEdgesPage { items: [RecoveryGraphEdge!]!, total: Int! }
 
+  """#2046 — the result of a compile: the new unapproved revision of the compiled node."""
+  type CompiledBootPrompt {
+    node: Node!
+    "The revision this compile wrote."
+    revNo: Int!
+    "SHA-256 hex of the compiled text."
+    contentHash: String!
+    "Whether this compile wrote the pointer."
+    pointerSet: Boolean!
+    "Always false: a compile never approves or signs."
+    approvalIssued: Boolean!
+  }
+
   type Node {
     "Deletion marker. Ordinary reads still omit tombstones; explicit recovery is writer-only."
     deletedAt: DateTime
@@ -11572,6 +11585,32 @@ export const typeDefs = `#graphql
     otherwise as setAgentBootPrompt. workerRef is the worker's id or URN.
     """
     setWorkerBootPrompt(workerRef: ID!, nodeRef: String): Worker!
+
+    """
+    #2046 (S9-4, hrn:node:hadronmemory.com:specs:cor:agt:040:12) — compile an Agent's boot prompt from its source ('boot:source') in the Agent's
+    system memory into the compiled node 'boot:compiled' there, as a NEW unapproved revision (every compile writes
+    one, even when the text is unchanged), with its provenance and a derived 'compiled-from' edge to the source.
+    Sets 'Agent.bootPromptRef' unless 'setPointer: false'. Never approves or signs ('approvalIssued' is always false).
+
+    Whoever manages the Agent, as themselves: a request bound to a worker session, a non-manager, an App key, an
+    impersonation, a run, and a target that does not exist are alike refused BOOT_PROMPT_COMPILE_NOT_PERMITTED. Only then: BOOT_PROMPT_TARGET_RETIRED, BOOT_PROMPT_NO_SOURCE, BOOT_PROMPT_SOURCE_INVALID, the
+    include refusals (BOOT_PROMPT_INCLUDE_*, _GRANT_REQUIRED, _COMPILE_LIMIT_EXCEEDED, with the tag's 'position'),
+    and CONFLICT when the compile could not settle inside its 30-second budget (retry).
+    A refusal changes nothing. No MCP twin.
+    """
+    compileAgentBootPrompt(agentRef: String!, setPointer: Boolean = true): CompiledBootPrompt!
+    """
+    #2046 — compile an installed Agent's boot prompt for one App into 'boot:compiled' in the App's install memory
+    (the App's own 'boot:source' if it has a live one, else the Agent's, with the App's replacing nodes). Always sets
+    'AppAgent.bootPromptRef'. Whoever manages the App; otherwise as compileAgentBootPrompt.
+    """
+    compileAppAgentBootPrompt(appRef: String!, agentRef: String!): CompiledBootPrompt!
+    """
+    #2046 — compile a customised worker's boot prompt from 'boot:workers:<workerId>:source' into
+    'boot:workers:<workerId>:compiled' in the App's install memory. Sets the worker's pointer unless 'setPointer: false'.
+    Whoever manages the worker's App; otherwise as compileAgentBootPrompt. workerRef is the worker's id or URN.
+    """
+    compileWorkerBootPrompt(workerRef: ID!, setPointer: Boolean = true): CompiledBootPrompt!
 
     """
     #1162 — hard-delete a never-referenced miscast only.

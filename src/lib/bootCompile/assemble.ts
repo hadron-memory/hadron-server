@@ -369,6 +369,12 @@ export async function assembleBootPrompt(
   });
   if (!root) throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
   await admitSource(root.memoryId, null);
+  // The Agent being compiled for needs its own entitlement even when the source sits wholly in the install
+  // memory (admitted directly above) and traverses none of the Agent's content (cor:agt:040:12, missing grant).
+  if (!grantPlans.has(input.target.agentId)) {
+    grantPlans.set(input.target.agentId, planGrant(db, input.target.agentId, input.recipient, null));
+  }
+  await grantPlans.get(input.target.agentId);
   const rootText = root.content ?? '';
   occurrences.push({
     order: 0, depth: 0, parent: null, kind: 'source', nodeId: root.id, revNo: root.revSeq,
