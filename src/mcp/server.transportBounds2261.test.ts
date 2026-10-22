@@ -14,6 +14,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../middleware/auth.js';
 import {
+  handleMcpRequest,
   reserveMcpSession,
   mcpTransportStateForTests,
   sweepIdleMcpTransportsForTests,
@@ -27,13 +28,16 @@ import {
 } from './transportBounds.js';
 
 /** Lets a test hold an initialize suspended inside App resolution (after its reservation, before registration). */
-const gate = vi.hoisted(() => ({ hold: null as Promise<void> | null }));
+const gate = vi.hoisted(() => ({ hold: null as Promise<void> | null, entered: 0 }));
 vi.mock('../auth/user-app-resolution.js', async (orig) => {
   const real = await orig<typeof import('../auth/user-app-resolution.js')>();
   return {
     ...real,
     resolveAppForRequest: async (...args: Parameters<typeof real.resolveAppForRequest>) => {
-      if (gate.hold) await gate.hold;
+      if (gate.hold) {
+        gate.entered += 1;
+        await gate.hold;
+      }
       return real.resolveAppForRequest(...args);
     },
   };
@@ -496,27 +500,29 @@ describe('#2261 terminal reservation state (review P2: a late initialize must no
 });
 
 describe('#2261 failure after reserve (review, Andi P2)', () => {
-  it('a handler that throws after reserving frees the slot at once, not when the hung response finally closes', async () => {
+  it('a handler that throws after reserving frees the slot at once, while the response is still open', async () => {
     process.env.MCP_MAX_SESSIONS_PER_PRINCIPAL = '1';
     const a = await makeUser();
-    const failing = Promise.reject(new Error('app resolution failed'));
-    failing.catch(() => undefined);
-    gate.hold = failing as Promise<void>;
-    const ac = new AbortController();
-    const sent = fetch(`${baseUrl}/mcp`, {
+    gate.hold = Promise.reject(new Error('app resolution failed'));
+    gate.hold.catch(() => undefined);
+    gate.entered = 0;
+    const res = Object.assign(new EventEmitter(), { setHeader: () => undefined, status: () => ({ json: () => undefined }), destroyed: false, writableEnded: false, writableFinished: false });
+    const req = {
       method: 'POST',
-      headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', authorization: `Bearer ${a.token}` },
-      body: JSON.stringify(initialize),
-      signal: ac.signal,
-    }).catch(() => undefined);
+      headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', authorization: `Bearer ${a.token}`, host: '127.0.0.1' },
+      body: initialize,
+      protocol: 'http',
+      get: (h: string) => (h.toLowerCase() === 'host' ? '127.0.0.1' : undefined),
+    };
     try {
-      await sleep(300); // the request is still open (Express 4 never answers a rejected async handler)
-      expect(mcpTransportStateForTests().reservations).toBe(0);
+      // Called directly: Express 4 never answers a rejected async handler, so over HTTP this is an unhandled rejection.
+      await expect(handleMcpRequest(req as never, res as never)).rejects.toThrow('app resolution failed');
     } finally {
       gate.hold = null;
-      ac.abort();
-      await sent;
     }
+    expect(gate.entered).toBe(1); // it reached the failing hook after reserving
+    expect(res.writableEnded).toBe(false); // the response never ended: the slot was returned by the exit path, not a close event
+    expect(mcpTransportStateForTests().reservations).toBe(0);
   });
 });
 
