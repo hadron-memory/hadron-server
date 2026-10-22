@@ -3166,6 +3166,13 @@ export const nodeMutations = {
 
       // ── Write pass: revision snapshot + node update, all-or-nothing ──
       await mapDeadlockToWriteConflict(plans[0]?.raw.memoryId ?? '', () => withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+        const writeMemoryIds = [...new Set(plans.map((plan) => plan.raw.memoryId))].sort();
+        await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, writeMemoryIds);
+        const txCtx = await liveTxContext(ctx, tx);
+        for (const memoryId of writeMemoryIds) {
+          await requireMemoryWriteAccess(txCtx, memoryId);
+          if (await isWriteBeyondRead(tx as unknown as Context['db'], txCtx, memoryId)) throw memoryWriteForbidden();
+        }
         // A Channel can claim an ancestor after selection but before this
         // transaction. Take its per-memory key BEFORE any node row lock (the
         // Channel/create and delete paths use the same order), then classify
@@ -3237,7 +3244,7 @@ export const nodeMutations = {
           const locked = lockedRoles.get(plan.raw.id);
           const role = locked?.role ?? null;
           const runnable = locked?.isRunnable ?? null;
-          if ((role || runnable === true) && await roleWritersRefusal(tx, ctx, plan.raw.memoryId, {
+          if ((role || runnable === true) && await roleWritersRefusal(tx, txCtx, plan.raw.memoryId, {
             priorRole: role, nextRole: role, priorRunnable: runnable, nextRunnable: runnable,
           })) {
             skipCounts.governed += 1;
@@ -3316,7 +3323,7 @@ export const nodeMutations = {
           // refusal throws and rolls the whole batch back with it.
           if (p.contentChanged) {
             const text = p.plaintext.content;
-            readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+            readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(txCtx) : null;
             const stored = { storedPlaintext: p.storedContent };
             const tags = await assertIncludesWritable(tx, raw, text, readableForIncludes, undefined, stored);
             await syncDerivedIncludesEdges(tx, raw, tags, readableForIncludes, stored);
@@ -3818,6 +3825,8 @@ export const nodeMutations = {
       // the stale stamp permanently. A concurrent move or delete is a miss in
       // the memory this caller was authorized to read.
       const source = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+        const fresh = await liveTxContext(ctx, tx);
+        if (!(await canReadMemory(tx as unknown as Context['db'], fresh, selectedSource.memoryId))) return null;
         if ((await ensureCurrentNodeRevisionInTransaction(tx, selectedSource.id, {
           expectedMemoryId: selectedSource.memoryId,
         })) == null) return null;
@@ -4154,6 +4163,12 @@ export const nodeMutations = {
       //    source delete ──────────────────────────────────────────────────
       let pendingSourceMemories: string[] = []; // #449
       await mapDeadlockToWriteConflict(target.memoryId, () => withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+        await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [source.memoryId, target.memoryId]);
+        const txCtx = await liveTxContext(ctx, tx);
+        if (!(await canReadMemory(tx as unknown as Context['db'], txCtx, source.memoryId))) throw nodeNotFoundError(rawSource);
+        if (!(await canReadMemory(tx as unknown as Context['db'], txCtx, target.memoryId))) throw nodeNotFoundError(rawTarget);
+        await requireMemoryWriteAccess(txCtx, target.memoryId);
+        if (deleteSource || fields.has('EDGES')) await requireMemoryWriteAccess(txCtx, source.memoryId);
         // #1187 — DECLARE the complete key set first, in the one global order.
         // A merge takes two keys and used to take them target-then-source,
         // which inverted against move's destination-then-source; sorting only
@@ -4223,11 +4238,11 @@ export const nodeMutations = {
         }
         // #1331 — the target is written, and a source that is deleted or whose edges
         // are re-pointed is written too: each role's writer level, on the locked rows.
-        await assertRoleWritersForWrite(tx, ctx, target.memoryId, {
+        await assertRoleWritersForWrite(tx, txCtx, target.memoryId, {
           priorRole: lockedTarget.role, nextRole: lockedTarget.role, priorRunnable: lockedTarget.isRunnable, nextRunnable: lockedTarget.isRunnable,
         });
         if (takesSource) {
-          await assertRoleWritersForWrite(tx, ctx, source.memoryId, {
+          await assertRoleWritersForWrite(tx, txCtx, source.memoryId, {
             priorRole: lockedSource.role, nextRole: lockedSource.role, priorRunnable: lockedSource.isRunnable, nextRunnable: lockedSource.isRunnable,
           });
         }
@@ -4277,7 +4292,7 @@ export const nodeMutations = {
           // can combine two nodes' tags into a cycle); a refusal rolls it back.
           if ('content' in changed) {
             const text = changed.content as string | null;
-            const readable = text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+            const readable = text?.includes('{{>') ? await getAccessibleMemoryIds(txCtx) : null;
             // The target's text before the fold: tgtPt, revalidated against the
             // locked row above (revisionStateMatches), so only the source's tags
             // and any the fold changes count as added (#2041 S2b).
