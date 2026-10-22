@@ -264,3 +264,45 @@ it.each(['skillPlan', 'selectedSkillFilePlan'] as const)(
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
   },
 );
+
+it.each(['skillPlan', 'selectedSkillFilePlan', 'selectedMetadataSkip'] as const)(
+  '%s drift rechecks authority after its own Node row wait', async (surface) => {
+    await db.user.update({ where: { id: userId }, data: { roles: [] } });
+    const node = await db.node.create({ data: {
+      memoryId, loc: 'tasks:row-authority', name: 'Row authority', isRunnable: true, content: '# Before',
+      properties: { exports: { [surface === 'selectedMetadataSkip' ? 'codexSkill' : 'claudeSkill']: {
+        name: 'row-authority', description: 'Row authority task.', enable: true,
+      } } },
+    } });
+    await db.node.update({ where: { id: node.id }, data: { content: '# Drift' } });
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${node.id} FOR UPDATE`;
+      entered();
+      await gate;
+    });
+    await ready;
+    const context = { ...ctx(), roles: [] };
+    const pending = surface === 'skillPlan'
+      ? resolvers.Query.skillPlan(null, { input: { intent: 'EXPORT' } }, context)
+      : resolvers.Query.selectedSkillFilePlan(null, { input: { nodes: [node.id], host: 'claudeSkill' } }, context);
+    const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await waitForLockWaitersOfType(db, 'transactionid', 1, 750);
+      await db.orgMember.deleteMany({ where: { userId } });
+    } finally {
+      release();
+      await holder;
+      await outcome;
+    }
+    expect((await pending).entries).toEqual([]);
+    if (surface === 'selectedMetadataSkip') {
+      expect((await pending).selectionResults).toMatchObject([{ action: 'FAIL', reason: { code: 'node-unavailable' } }]);
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
+  },
+);

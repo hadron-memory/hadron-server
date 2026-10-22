@@ -48,7 +48,8 @@ fingerprints, credential/authority reads, selected JSON sizing, metadata-only
 SKIP and content projection share one read-only RR snapshot with no row or
 advisory locks. Only drift closes that snapshot and takes the outer fence,
 then refreshes credential/authority and expected-memory checks at RC. Selected
-drift rows are locked before JSON sizing and projection. Spec prereconciliation
+drift rows are locked and authority is refreshed again after the row wait,
+before JSON sizing, metadata SKIP or reconciliation/projection. Spec prereconciliation
 still always takes the fence; it is not an unchanged read fast path.
 
 ## Remaining participants

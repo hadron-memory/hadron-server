@@ -736,16 +736,18 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
         const readProjection = async (tx: Prisma.TransactionClient, history?: IncludeHistoryTransaction) => {
           const fresh = await (history ? liveTxContext : liveReadSnapshotContext)(ctx, tx);
           if (!(await isMemoryReadableCached(fresh, candidateMemory.get(id)!))) return null;
+          if (history) {
+            // RC can wait again on the Node after taking the outer fence.
+            // Re-read credential/authority state after that wait, before any
+            // metadata SKIP, sizing, reconciliation or content projection.
+            const locked = await tx.$queryRaw<Array<{ id: string }>>`
+              SELECT id FROM nodes WHERE id = ${id} AND memory_id = ${candidateMemory.get(id)!}
+                AND deleted_at IS NULL FOR UPDATE`;
+            if (locked.length !== 1) return null;
+            const afterRowWait = await liveTxContext(ctx, tx);
+            if (!(await isMemoryReadableCached(afterRowWait, candidateMemory.get(id)!))) return null;
+          }
           if (selectedRefs !== undefined) {
-            // The drift path is RC after the outer fence: hold the row
-            // across sizing/projection. The fast path's RR snapshot needs
-            // no row lock, including the metadata-only SKIP projection.
-            if (history) {
-              const locked = await tx.$queryRaw<Array<{ id: string }>>`
-                SELECT id FROM nodes WHERE id = ${id} AND memory_id = ${candidateMemory.get(id)!}
-                  AND deleted_at IS NULL FOR UPDATE`;
-              if (locked.length !== 1) return null;
-            }
             // A named task may have no declaration for this host. Recheck
             // access, then bound the live JSON before deserializing it. A
             // writer can enlarge properties after the candidate snapshot;
