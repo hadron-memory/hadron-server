@@ -56,6 +56,23 @@ export function familySpellings(family: string): string[] {
   return f === 'claude' ? ['claude', 'anthropic'] : f === 'codex' ? ['codex', 'openai'] : f ? [f] : [];
 }
 
+/**
+ * #2252 / R189 — a coarse model tier, from the platform's ONE model-to-tier mapping (no per-App override). Raw model
+ * names churn every release, so coordinators reason in tiers: opus-class `high`, sonnet-class `mid`, haiku-class `low`.
+ * Only the Claude family is mapped: R189 authorizes the mapping's ownership, not guessing that another family's models
+ * (GPT, GLM, Gemini) or an unlisted Claude model are equivalent to one. Everything else is null, never a guess. The
+ * server team adds entries here when a model appears. Advisory like the family: self-declared, never authorization.
+ */
+export type ModelTier = 'high' | 'mid' | 'low';
+export function tierOf(llmModel: string | null | undefined): ModelTier | null {
+  const model = llmModel?.trim().toLowerCase();
+  if (!model || deriveFamily({ llmModel: model }) !== 'claude') return null;
+  if (/opus/.test(model)) return 'high';
+  if (/sonnet/.test(model)) return 'mid';
+  if (/haiku/.test(model)) return 'low';
+  return null;
+}
+
 /** The family a reported model and tool imply, or null when they don't classify the session. */
 export function deriveFamily(args: { llmModel?: string | null; tool?: string | null }): string | null {
   const model = args.llmModel?.trim().toLowerCase();

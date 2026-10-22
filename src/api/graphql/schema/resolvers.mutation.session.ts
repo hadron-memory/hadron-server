@@ -489,9 +489,10 @@ function modelFamilyRefresh(
   explicitFamily: string | null,
   llmModel: string | null | undefined,
   storedTool: string | null,
-): { llmModel?: string; family?: string } {
+): { llmModel?: string; modelReportedAt?: Date; family?: string } {
   const family = explicitFamily ?? (llmModel != null ? deriveFamily({ llmModel, tool: storedTool }) : null);
-  return { ...(llmModel != null ? { llmModel } : {}), ...(family != null ? { family } : {}) };
+  // #2252: a supplied model IS a report, so it stamps the time (a repeat of the same model refreshes it).
+  return { ...(llmModel != null ? { llmModel, modelReportedAt: new Date() } : {}), ...(family != null ? { family } : {}) };
 }
 
 // ── #1956: resume claims ───────────────────────────────────────────────────
@@ -1422,6 +1423,8 @@ export const sessionMutations = {
           customerId: input.customerId,
           language: input.language,
           llmModel: input.llmModel,
+          // #2252: a model given at bind is a report.
+          modelReportedAt: input.llmModel != null ? new Date() : null,
           parentSessionId: input.parentSessionId,
           prevSessionId: input.prevSessionId ?? supersedes[0]?.id ?? derivedPrevSessionId,
           // #928 coding-session provenance.
