@@ -3,17 +3,22 @@
  * caller may clone (cor:dmo:050:18, R144-R149, R156, R169-R174, R179, R181). One transaction; any
  * failure leaves nothing behind.
  *
- * Lock order (pinned by `cloneAgentLockOrder.test.ts`; every step releases at commit):
+ * Lock order (pinned by `cloneAgentPins.test.ts`; every step releases at commit):
  *   1. authority anchors, exclusive, in one `lockAuthorityAnchors` call: target org, caller, source
- *      Agent, each import Agent, source system memory, the source's owner org/user; then their rows FOR SHARE;
- *   2. afterLock: the source system memory's channel-host key (`lockMemoryForChannelChange`), then the
- *      memory rows sorted by id (system memory FOR UPDATE, each linked memory FOR SHARE), then the
- *      base-graph lock, then the Agent rows (source, imports, base) FOR SHARE; the pre-read plan is
- *      re-checked against those rows;
- *   3. the live context, then the gates re-run on it; then snapshot read, write, subscribe + re-classify,
+ *      Agent, each import Agent, source system memory, the source's owner org/user;
+ *   2. `afterAnchors`, advisory only and before ANY row lock: the source system memory's channel-host key
+ *      (`lockMemoryForChannelChange`), then the base-graph lock. `setAgentBase` takes the graph lock and then
+ *      the child row FOR UPDATE, so a clone holding an Agent row FOR SHARE and waiting for the graph lock
+ *      would cycle with it;
+ *   3. the anchor rows FOR SHARE (org, user, memory, agent), then in `afterLock` the memory rows sorted by id
+ *      (system memory FOR UPDATE, each linked memory FOR SHARE), then the Agent rows (source, imports, base)
+ *      FOR SHARE; the pre-read plan is re-checked against those rows;
+ *   4. the live context, then the gates re-run on it; then snapshot read, write, subscribe + re-classify,
  *      validation read, audit row.
  * READ COMMITTED, so the snapshot is linearizable rather than MVCC: a fingerprint of everything copied is
- * taken before the write and again after it, and a difference rolls the clone back for a bounded retry.
+ * taken before the write and again after it, and a difference rolls the clone back for a bounded retry. Each
+ * fingerprint includes the rows' `xmin`, so a change that is reverted before the second read still differs
+ * (a reverted update is a new tuple version); an `xmin` freeze mid-transaction can only cause a spurious retry.
  */
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../generated/prisma/index.js';
@@ -105,21 +110,21 @@ const samePlan = (a: Plan, b: Plan) =>
 async function fingerprint(tx: Prisma.TransactionClient, plan: Plan) {
   const [row] = await tx.$queryRaw<Array<Record<string, string | null>>>`
     SELECT
-      (SELECT md5(coalesce(string_agg(n.id || ':' || hadron_node_revision_state_hash(n) || ':' || n.is_placeholder::text
+      (SELECT md5(coalesce(string_agg(n.id || ':' || hadron_node_revision_state_hash(n) || ':' || n.xmin::text || ':' || n.is_placeholder::text
           || ':' || coalesce(n.content_hash, '') || ':' || coalesce(n.owner_repo, '') || ':' || coalesce(n.tokens::text, ''), ',' ORDER BY n.id), ''))
          FROM nodes n WHERE n.memory_id = ${plan.systemMemoryId} AND n.deleted_at IS NULL) AS nodes,
       (SELECT md5(coalesce(string_agg(jsonb_build_array(e.id, e.source_id, e.target_id, e.loc, e.name, e.description, e.is_runnable,
-          e.condition, e.priority, e.data, e.governed_kind)::text, ',' ORDER BY e.id), ''))
+          e.condition, e.priority, e.data, e.governed_kind, e.xmin::text)::text, ',' ORDER BY e.id), ''))
          FROM edges e WHERE e.memory_id = ${plan.systemMemoryId} AND e.deleted_at IS NULL) AS edges,
-      (SELECT md5(coalesce(string_agg(jsonb_build_array(p.id, p.source_id, p.target_id, p.loc, p.name, p.description, p.data)::text, ',' ORDER BY p.id), ''))
+      (SELECT md5(coalesce(string_agg(jsonb_build_array(p.id, p.source_id, p.target_id, p.loc, p.name, p.description, p.data, p.xmin::text)::text, ',' ORDER BY p.id), ''))
          FROM pending_edges p JOIN nodes n ON n.id = p.source_id
          WHERE n.memory_id = ${plan.systemMemoryId} AND p.deleted_at IS NULL) AS pending,
       (SELECT md5(jsonb_build_array(a.name, a.description, a.system_prompt, a.type, a.surfaces, a.uses_tasks, a.register_defaults,
           a.installation_policy, a.memory_provisioning, a.persona_role, a.tasks_index_ref, a.processes_index_ref, a.extends_agent_id,
-          a.system_memory_id, a.visibility, a.deleted_at, a.urn)::text) FROM agents a WHERE a.id = ${plan.sourceId}) AS agent,
-      (SELECT md5(coalesce(string_agg(jsonb_build_array(i.imported_agent_id, i.position, i.required)::text, ',' ORDER BY i.position), ''))
+          a.system_memory_id, a.visibility, a.deleted_at, a.urn, a.xmin::text)::text) FROM agents a WHERE a.id = ${plan.sourceId}) AS agent,
+      (SELECT md5(coalesce(string_agg(jsonb_build_array(i.imported_agent_id, i.position, i.required, i.xmin::text)::text, ',' ORDER BY i.position), ''))
          FROM agent_imports i WHERE i.parent_agent_id = ${plan.sourceId}) AS imports,
-      (SELECT md5(coalesce(string_agg(jsonb_build_array(l.memory_id, l.role)::text, ',' ORDER BY l.memory_id), ''))
+      (SELECT md5(coalesce(string_agg(jsonb_build_array(l.memory_id, l.role, l.xmin::text)::text, ',' ORDER BY l.memory_id), ''))
          FROM agent_memory_items l JOIN memories m ON m.id = l.memory_id
          WHERE l.agent_id = ${plan.sourceId} AND l.deleted_at IS NULL AND m.deleted_at IS NULL) AS links`;
   return row;
@@ -170,8 +175,13 @@ export async function cloneAgent(ctx: Context, input: CloneAgentInput, hooks: Cl
         {
           lockMode: 'exclusive',
           timeout: 120_000,
-          afterLock: async (tx) => {
+          // Advisory keys first, before ANY row lock (Andi/Dara P2 on #2245): setAgentBase takes the graph lock and
+          // then the child row FOR UPDATE, and every channel-host key holder takes the key before a memory row.
+          afterAnchors: async (tx) => {
             await lockMemoryForChannelChange(tx, plan.systemMemoryId);
+            await lockAgentBaseGraph(tx);
+          },
+          afterLock: async (tx) => {
             const memoryLocks = [
               { id: plan.systemMemoryId, update: true },
               ...plan.linkedMemoryIds.filter((id) => id !== plan.systemMemoryId).map((id) => ({ id, update: false })),
@@ -180,7 +190,6 @@ export async function cloneAgent(ctx: Context, input: CloneAgentInput, hooks: Cl
               if (m.update) await tx.$queryRaw`SELECT id FROM memories WHERE id = ${m.id} FOR UPDATE`;
               else await tx.$queryRaw`SELECT id FROM memories WHERE id = ${m.id} FOR SHARE`;
             }
-            await lockAgentBaseGraph(tx);
             const agentIds = [...new Set([plan.sourceId, ...plan.importIds, ...(plan.baseId ? [plan.baseId] : [])])].sort();
             for (const id of agentIds) await tx.$queryRaw`SELECT id FROM agents WHERE id = ${id} FOR SHARE`;
             const fresh = await readPlan(tx as unknown as Context['db'], plan.sourceId, input.source);
@@ -240,9 +249,11 @@ async function writeClone(
   const source = await tx.agent.findUniqueOrThrow({ where: { id: plan.sourceId } });
   const read1 = await fingerprint(tx, plan);
 
+  // The target's URN is re-read under the org row's FOR SHARE lock: the pre-transaction read may predate a rename.
+  const targetUrn = (await tx.organization.findUniqueOrThrow({ where: { id: target.orgId }, select: { urn: true } })).urn;
   const name = (input.name ?? '').trim() || source.name;
   const slug = deriveSlugFromName((input.slug ?? '').trim() || name);
-  const urn = `${target.urn}:${slug}`;
+  const urn = `${targetUrn}:${slug}`;
   await claimUrn(tx, urn);
 
   const memoryCopy = await cloneMemoryGraphInTx(tx, {

@@ -269,3 +269,53 @@ describe('writers that hold the channel-host key, racing the clone (amendment 4b
     }
   });
 });
+
+describe('review of 00e3a4c9 (Andi, Cloe, Dara): the lock inversion, the stale target URN, the transient edit', () => {
+  it('a setAgentBase-ordered writer (graph lock, then the source row FOR UPDATE) and the clone do not deadlock', async () => {
+    const src = await sourceAgent(orgA, 'PUBLIC');
+    const writer = new Client({ connectionString: process.env.DATABASE_URL });
+    await writer.connect();
+    let cloneP: Promise<{ value: any; code: string | undefined }> | undefined;
+    try {
+      await writer.query('BEGIN');
+      await writer.query(`SELECT pg_advisory_xact_lock(hashtext('agent-extends-base'))`);
+      cloneP = outcome(M.cloneAgent(null, { source: src.urn, target: orgB.urn }, ctxFor(adminB)));
+      // The clone is queued on the graph lock. Before the fix it already held the source row FOR SHARE here,
+      // so this FOR UPDATE closed a cycle (40P01); now it holds no row yet and the writer gets through.
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      await writer.query('SELECT id FROM agents WHERE id = $1 FOR UPDATE', [src.id]);
+      await writer.query('COMMIT');
+    } finally {
+      await writer.query('ROLLBACK').catch(() => undefined);
+      await writer.end();
+    }
+    const r = await cloneP!;
+    expect(r.code).toBeUndefined();
+    expect(await db.agentCloneAudit.count()).toBe(1);
+  });
+
+  it('a target organization renamed while the clone is queued: the new Agent takes the new URN', async () => {
+    const src = await sourceAgent(orgA, 'PUBLIC');
+    const r = await racing({ kind: 'org', id: orgB.id },
+      async (tx) => { await tx.$executeRaw`UPDATE organizations SET urn = 'rc-b-renamed' WHERE id = ${orgB.id}`; },
+      run(adminB, src, orgB, { slug: 'moved' }));
+    expect(r.code).toBeUndefined();
+    expect(r.value.urn).toBe('rc-b-renamed:moved');
+  });
+
+  it('a node edited and put back between the reads still differs: the clone retries', async () => {
+    const src = await sourceAgent(orgA, 'PUBLIC');
+    const attempts: number[] = [];
+    const out = await cloneAgent(ctxFor(adminB), { source: src.urn, target: orgB.urn }, {
+      afterCopy: async (attempt) => {
+        attempts.push(attempt);
+        if (attempt === 0) {
+          await db.$executeRaw`UPDATE nodes SET name = 'transient' WHERE id = ${src.nodes[0].id}`;
+          await db.$executeRaw`UPDATE nodes SET name = 'a' WHERE id = ${src.nodes[0].id}`;
+        }
+      },
+    });
+    expect(attempts).toEqual([0, 1]);
+    expect(await db.agent.count({ where: { id: out.id } })).toBe(1);
+  });
+});

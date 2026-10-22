@@ -24,15 +24,16 @@ function inOrder(text: string, needles: string[]) {
 
 describe('cloneAgent lock order', () => {
   const text = read('src/lib/agentClone/cloneAgent.ts');
-  it('takes the anchors exclusively, then key, memory rows, base graph, agent rows', () => {
+  it('takes the anchors exclusively, then the advisory key and graph lock, then memory rows, agent rows', () => {
     expect(text).toContain("lockMode: 'exclusive'");
     inOrder(text, [
       'await withAuthorizedTx(',
-      'afterLock: async (tx) => {',
+      'afterAnchors: async (tx) => {',
       'await lockMemoryForChannelChange(tx, plan.systemMemoryId)',
+      'await lockAgentBaseGraph(tx)',
+      'afterLock: async (tx) => {',
       'FOR UPDATE`',
       'FOR SHARE`',
-      'await lockAgentBaseGraph(tx)',
       'FROM agents WHERE id = ${id} FOR SHARE',
       'samePlan(plan, fresh)',
     ]);
