@@ -3397,6 +3397,40 @@ export const typeDefs = `#graphql
     rawKey: String!
   }
 
+  """#1631: a passkey record, as its owner sees it. Never a private key."""
+  type PasskeyCredential {
+    id: ID!
+    """The owner's name for it; the fixed text "Erased passkey" once the owner's account is deleted."""
+    label: String!
+    transports: [String!]!
+    backupEligible: Boolean!
+    backedUp: Boolean!
+    registeredAt: DateTime!
+    lastUsedAt: DateTime
+    revokedAt: DateTime
+    """A first passkey's cooling-off window; null for a later passkey."""
+    window: PasskeyWindow
+    """
+    When its cancel link was used; null if never cancelled. The cancel IP address and user agent,
+    and the credential id, are shown only on the interactive revocation page after the owner proves who they are,
+    never over a bearer credential (#1631 PR3 §10).
+    """
+    cancel: PasskeyCancelRecord
+  }
+
+  type PasskeyWindow {
+    endsAt: DateTime!
+    endedAt: DateTime
+    """ran-out | ended-early | cancelled, or null while open (a window that ran out reads by its end time)."""
+    outcome: String
+    """The fresh sign-in method it was registered with."""
+    registrationMethod: String
+  }
+
+  type PasskeyCancelRecord {
+    at: DateTime!
+  }
+
   """
   025-oauth-for-mcp: user-scoped bearer-token credential. Mirrors the
   AppKey shape but resolves to a User instead of an App. Surfaced to
@@ -8195,6 +8229,13 @@ export const typeDefs = `#graphql
     not present in PR 137.
     """
     myUserApiKeys: [UserApiKey!]!
+
+    """
+    #1631 PR3: the caller's own passkey records, revoked ones included, newest first. Only the
+    owner sees them: an App key or an impersonation session is refused. Registering and revoking are interactive
+    ceremonies on the server-hosted pages, never GraphQL. Present only while passkey registration is enabled.
+    """
+    myPasskeys: [PasskeyCredential!]!
 
     """
     Agent AI config (org ADMIN) — returns the decrypted API key so the

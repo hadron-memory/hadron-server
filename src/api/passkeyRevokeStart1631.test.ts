@@ -58,12 +58,14 @@ const start = (b: string, cookie: string | undefined, origin: string | null = OR
 });
 
 describe('#1631 revoke/start proof by existing passkey', () => {
-  it('accepts a UV assertion over the issued challenge from the cookie holder, mints no session, advances the counter', async () => {
+  it('accepts a UV assertion over the issued challenge from the cookie holder, mints no session, advances the counter, lists the owner\'s passkeys', async () => {
     const c = await challenge();
     expect((c.cookie.length)).toBeGreaterThan(0);
     const r = await start(body(c.ceremonyId, c.ch), c.cookie);
     expect(r.status).toBe(200);
-    expect(await r.json()).toEqual({ ok: true });
+    // #1631 PR3: the proof now binds a REVOKE ceremony and lists the owner's passkeys, the prover marked.
+    const { passkeys } = await r.json() as { passkeys: Array<{ credentialId: string; prover: boolean }> };
+    expect(passkeys).toEqual([expect.objectContaining({ credentialId: key.credentialId.toString('base64url'), prover: true })]);
     expect(r.headers.get('set-cookie')).toBeNull();
     expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: passkeyId } })).counter).toBe(1n);
   });

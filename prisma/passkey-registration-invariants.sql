@@ -1,5 +1,5 @@
 -- #1631 PR2 / cor:aut:040:07-08: passkey registration lifecycle invariants. One source, shared verbatim with migration
--- 20261022010000_passkey_registration (pinned by src/lib/passkeys/cancel1631.test.ts).
+-- 20261022030000_passkey_revoke (pinned by src/lib/passkeys/cancel1631.test.ts).
 
 -- A first passkey's cancel link: one token per first passkey, stored as SHA-256, spent once, never deleted (the
 -- cancel itself is recorded on the credential: cancelled_at, cancel_ip, cancel_user_agent).
@@ -34,7 +34,7 @@ DROP TRIGGER IF EXISTS passkey_cancel_token_guard ON passkey_cancel_tokens;
 CREATE TRIGGER passkey_cancel_token_guard BEFORE INSERT OR UPDATE OR DELETE ON passkey_cancel_tokens
 FOR EACH ROW EXECUTE FUNCTION hadron_guard_passkey_cancel_token();
 
--- The registration binding on a ceremony: all or nothing, REGISTER purpose only, consistent with its kind, set once.
+-- The binding on a ceremony: all or nothing, consistent with its purpose and kind, set once.
 ALTER TABLE "passkey_ceremonies" DROP CONSTRAINT IF EXISTS "chk_passkey_ceremony_registration";
 ALTER TABLE "passkey_ceremonies" ADD CONSTRAINT "chk_passkey_ceremony_registration" CHECK (
   ("user_id" IS NULL AND "kind" IS NULL AND "registration_method" IS NULL AND "sign_in_browser_hash" IS NULL
@@ -45,6 +45,13 @@ ALTER TABLE "passkey_ceremonies" ADD CONSTRAINT "chk_passkey_ceremony_registrati
           AND "sign_in_browser_hash" IS NOT NULL AND "sign_in_browser_hash" ~ '^[0-9a-f]{64}$' AND "vouch_passkey_id" IS NULL)
       OR ("kind" IS NOT NULL AND "kind" = 'later' AND "vouch_passkey_id" IS NOT NULL
           AND "registration_method" IS NULL AND "sign_in_browser_hash" IS NULL)))
+  -- #1631 PR3 (cor:aut:040:08): a REVOKE ceremony is bound to its owner by the proof: another passkey's assertion
+  -- (the prover, never revocable by its own ceremony) or this browser's fresh identity-provider sign-in, never a
+  -- magic link. It carries no WebAuthn user handle.
+  OR ("purpose" = 'REVOKE' AND "user_id" IS NOT NULL AND "kind" IS NOT NULL AND "kind" = 'revoke' AND "user_handle" IS NULL
+    AND (("vouch_passkey_id" IS NOT NULL AND "registration_method" IS NULL AND "sign_in_browser_hash" IS NULL)
+      OR ("vouch_passkey_id" IS NULL AND "registration_method" IS NOT NULL AND "registration_method" IN ('github', 'google', 'apple')
+        AND "sign_in_browser_hash" IS NOT NULL AND "sign_in_browser_hash" ~ '^[0-9a-f]{64}$')))
 );
 CREATE OR REPLACE FUNCTION hadron_guard_passkey_ceremony_binding() RETURNS trigger
 LANGUAGE plpgsql AS $$

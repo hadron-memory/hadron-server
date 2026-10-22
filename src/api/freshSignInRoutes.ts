@@ -47,9 +47,9 @@ export const CEREMONY_LEG_COOKIE = 'hadron_ceremony_leg';
 export const CEREMONY_NEXT_COOKIE = 'hadron_ceremony_next';
 // 'sign-in' (#1897 B2): the person came from an email sign-in that has no passkey yet; after the second link confirms
 // them, the confirm page leads back to the registration page, which then leads to the sign-in page.
-export const CEREMONY_NEXT_PAGES = { register: '/passkeys/register', window: '/passkeys/window/end', 'sign-in': '/passkeys/register?next=sign-in' } as const;
+export const CEREMONY_NEXT_PAGES = { register: '/passkeys/register', window: '/passkeys/window/end', revoke: '/passkeys/revoke', 'sign-in': '/passkeys/register?next=sign-in' } as const;
 type NextPage = keyof typeof CEREMONY_NEXT_PAGES;
-const nextPageOf = (v: unknown): NextPage => (v === 'window' ? 'window' : v === 'sign-in' ? 'sign-in' : 'register');
+const nextPageOf = (v: unknown): NextPage => (v === 'window' || v === 'revoke' || v === 'sign-in' ? v : 'register');
 /** The browser binding outlives an IdP round trip, but never the pending login state it rides with. */
 export const CEREMONY_BROWSER_TTL_SECONDS = FRESH_SIGN_IN_LEG_TTL_SECONDS;
 if (CEREMONY_BROWSER_TTL_SECONDS * 1000 > LOGIN_STATE_TTL_MS) {
