@@ -8,7 +8,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../bootPrompt.js';
 import { writeNodeCore } from '../../api/graphql/schema/resolvers.mutation.node.js';
-import type { Context } from '../../api/graphql/context.js';
+import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 
 let memoryId: string;
 let ctx: Context;
@@ -19,6 +19,7 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { id: generateId(), email: `${generateId()}@fr.test`, name: 'U' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   memoryId = (await db.memory.create({ data: { id: generateId(), class: 'system', name: 'sys', urn: 'fr-org:sys', organizationId: org.id } })).id;
+  await db.agent.create({ data: { id: generateId(), name: 'A', urn: 'fr-org:a', organizationId: org.id, systemMemoryId: memoryId } });
   ctx = { db, userId: user.id, roles: [], clientId: `user:${user.id}` } as unknown as Context;
 });
 
