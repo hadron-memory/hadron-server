@@ -137,32 +137,32 @@
  "src/lib/mergeOwnerNamespacedUrns.ts :: agent.deleteMany": {
   "count": 1,
   "status": "counterparty-pending",
-  "reason": "owner URN merge rewrites Agent urn/owner; field-level callgraph pending"
+  "reason": "only caller is mergeUsers (SERIALIZABLE whole-transaction); re-owns Agent ownerUserId, so it is covered by the mergeUsers account-operation composition (Xylon #30516), not fenced separately"
  },
  "src/lib/mergeOwnerNamespacedUrns.ts :: agent.update": {
   "count": 1,
   "status": "counterparty-pending",
-  "reason": "owner URN merge rewrites Agent urn/owner; field-level callgraph pending"
+  "reason": "only caller is mergeUsers (SERIALIZABLE whole-transaction); re-owns Agent ownerUserId, so it is covered by the mergeUsers account-operation composition (Xylon #30516), not fenced separately"
  },
  "src/lib/mergeOwnerNamespacedUrns.ts :: agent.updateMany": {
   "count": 1,
   "status": "counterparty-pending",
-  "reason": "owner URN merge rewrites Agent urn/owner; field-level callgraph pending"
+  "reason": "only caller is mergeUsers (SERIALIZABLE whole-transaction); re-owns Agent ownerUserId, so it is covered by the mergeUsers account-operation composition (Xylon #30516), not fenced separately"
  },
  "src/lib/org/propagateOrgUrnRename.ts :: raw UPDATE agents": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "org rename rewrites agents.urn; display-vs-identity classification pending"
+  "status": "excluded",
+  "reason": "org rename rewrites the agents.urn text only; entitlement and the compile read agents by id, owner_user_id/organization_id unchanged, and the pointer stores memory-derived node URNs, never an agent URN (bootPromptPointer.ts)"
  },
  "src/lib/ownerUrnRename.ts :: raw DELETE FROM agents": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "owner rename rewrites agents.urn / deletes agent shells; classification pending"
+  "status": "excluded",
+  "reason": "owner rename reclaims SOFT-DELETED agent tombstones at the new URN only (deleted_at IS NOT NULL), which hold no entitlement; entitlement and the compile read agents by id, owner_user_id/organization_id unchanged, and the pointer stores memory-derived node URNs, never an agent URN (bootPromptPointer.ts)"
  },
  "src/lib/ownerUrnRename.ts :: raw UPDATE agents": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "owner rename rewrites agents.urn / deletes agent shells; classification pending"
+  "status": "excluded",
+  "reason": "owner rename rewrites the agents.urn text only; entitlement and the compile read agents by id, owner_user_id/organization_id unchanged, and the pointer stores memory-derived node URNs, never an agent URN (bootPromptPointer.ts)"
  },
  "src/lib/workerReportsTo.ts :: worker.update": {
   "count": 1,
