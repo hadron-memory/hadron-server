@@ -63,6 +63,7 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     const node = await db.node.findUniqueOrThrow({ where: { id: r.nodeId } });
     expect(node).toMatchObject({ content: 'You are {{worker.name}}.', nodeType: 'compiled-boot-prompt', role: 'boot-prompt' });
     expect((await readCompiledRevision(db, r.nodeId, 1))!.provenance.occurrences[0]).toMatchObject({ nodeId: src.id, revNo: src.revSeq });
+    expect((await db.compiledPromptRevision.findUniqueOrThrow({ where: { compiledNodeId_compiledRevNo: { compiledNodeId: r.nodeId, compiledRevNo: 1 } } })).compiledBy).toBe(f.admin.id);
     const edge = await db.edge.findFirstOrThrow({ where: { sourceId: r.nodeId, name: 'compiled-from' } });
     expect(edge.targetId).toBe(src.id);
     expect((await db.agent.findUniqueOrThrow({ where: { id: f.agent.id } })).bootPromptNodeId).toBe(r.nodeId);

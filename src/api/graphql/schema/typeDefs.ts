@@ -11577,7 +11577,8 @@ export const typeDefs = `#graphql
 
     Whoever manages the Agent, as themselves: a request bound to a worker session, a non-manager, an App key, an
     impersonation, a run, and a target that does not exist are alike refused BOOT_PROMPT_COMPILE_NOT_PERMITTED. Only then: BOOT_PROMPT_TARGET_RETIRED, BOOT_PROMPT_NO_SOURCE, BOOT_PROMPT_SOURCE_INVALID, the
-    include refusals (BOOT_PROMPT_INCLUDE_*, _GRANT_REQUIRED, _COMPILE_LIMIT_EXCEEDED, with the tag's 'position').
+    include refusals (BOOT_PROMPT_INCLUDE_*, _GRANT_REQUIRED, _COMPILE_LIMIT_EXCEEDED, with the tag's 'position'),
+    and CONFLICT when the compile could not settle inside its 30-second budget (retry).
     A refusal changes nothing. No MCP twin.
     """
     compileAgentBootPrompt(agentRef: String!, setPointer: Boolean = true): CompiledBootPrompt!
