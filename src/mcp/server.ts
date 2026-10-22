@@ -759,10 +759,13 @@ export type AddEdgeResult =
 async function withLiveMcpHistoryTransaction<T>(
   database: Pick<typeof db, '$transaction'>,
   presented: AuthContext,
+  memoryIds: string | readonly string[],
   work: (tx: Prisma.TransactionClient, auth: AuthContext) => Promise<T>,
   options: { timeout?: number; maxWait?: number } = {},
 ): Promise<T> {
   return withIncludeHistoryClientTransaction(database, async (tx) => {
+    // Definition authority must precede presented-key/root row locks.
+    await lockAgentDefinitionAuthority(tx, presented.userId ?? null, memoryIds);
     const fresh = await liveTxContext({ ...presented, db: database as typeof db }, tx);
     return work(tx, { ...presented, roles: fresh.roles });
   }, options);
@@ -885,7 +888,7 @@ export async function addEdge(args: {
     throw e;
   }
 
-  const writeError = await withLiveMcpHistoryTransaction(db, auth, async (tx, auth): Promise<string | null> => {
+  const writeError = await withLiveMcpHistoryTransaction(db, auth, [sourceNode.memoryId, target.memoryId], async (tx, auth): Promise<string | null> => {
     const locked = await lockLiveEdgeEndpoints(
       tx,
       sourceNode,
@@ -4020,7 +4023,7 @@ export function createMcpServerInstance(
       // was otherwise overwritable here (Codex P1 on PR #1165).
       let sectionId: string;
       try {
-        sectionId = await withLiveMcpHistoryTransaction(db, auth, async (tx, auth) => {
+        sectionId = await withLiveMcpHistoryTransaction(db, auth, memoryId, async (tx, auth) => {
           // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
           await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           await lockAncestorsForCreate(tx, memoryId, loc);
@@ -6254,7 +6257,7 @@ export function createMcpServerInstance(
 
       let upserted;
       try {
-        upserted = await withLiveMcpHistoryTransaction(db, auth, async (tx, auth) => {
+        upserted = await withLiveMcpHistoryTransaction(db, auth, memoryId, async (tx, auth) => {
           // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
           await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           if (resolvedEdges !== null) {
@@ -6664,7 +6667,7 @@ export function createMcpServerInstance(
         // under it — the check above is the fast refusal, this the
         // authoritative one (Copilot on PR #1165).
         try {
-          await withLiveMcpHistoryTransaction(db, auth, async (tx, auth) => {
+          await withLiveMcpHistoryTransaction(db, auth, existing.memoryId, async (tx, auth) => {
             // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
             await lockAgentDefinitionAuthority(tx, auth.userId ?? null, existing.memoryId);
             if (resolvedEdges !== null) {
@@ -7398,7 +7401,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
 
       // #449 — source memories whose pending-edge count a hard delete changed.
       let pendingSourceMemories: string[] = [];
-      const result: DeleteResult = await withLiveMcpHistoryTransaction(db, auth, async (tx, auth) => {
+      const result: DeleteResult = await withLiveMcpHistoryTransaction(db, auth, memory.id, async (tx, auth) => {
         // Keep the dead-Channel cleanup verdict stable through the delete.
         // Channel resurrection takes this same key before any loc key.
         await lockMemoryForChannelChange(tx, memory.id);
@@ -7716,7 +7719,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let relocated: MoveNodeSubtreeResult['moved'] = [];
       let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
       try {
-        result = await withLiveMcpHistoryTransaction(db, auth, async (tx, auth) => {
+        result = await withLiveMcpHistoryTransaction(db, auth, [fromMemory.id, toMemory.id], async (tx, auth) => {
           // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
           await lockAgentDefinitionAuthority(tx, auth.userId ?? null, [fromMemory.id, toMemory.id]);
           // #664/#752: moving a node INTO a subtree is the same orphan vector as

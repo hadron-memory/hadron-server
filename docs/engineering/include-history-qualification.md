@@ -161,19 +161,20 @@ evidence by retaining the cleanup inside the same F-first authorized transaction
 
 ## Evidence and remaining gates
 
-- Current delivery controls: qualification34, role40 (including two red-first
+- Current delivery controls: qualification51, role40 (including two red-first
   App-wait refusals), restore/provenance38, encryption104 pass locally. Test
   counts overlap; they are never summed as unique controls.
-- Scoped combined predecessor `3de28cdd` composes exact held heads #2263
+- Scoped combined predecessor `22d364a3` composes exact held heads #2263
   `417253fd043c7910db73dc138facccde5cd2c73a`, #2258
-  `c65e694a1a192d41078f73215082a1966bab6d79`, and delivery458c3f18. Its
-  qualification/actual-compile/account matrix153 passes. Role/restore follow-up
-  must be merged into and validated on a refreshed evidence tree.
-- A full diagnostic run is executing from immutable predecessor48d3aa15.
-  It found legacy helper transactions, missing live ADMIN actors, old lock-wait
+  `c65e694a1a192d41078f73215082a1966bab6d79`, and deliveryb2ff8fc9. Its
+  qualification/actual-compile/account/role matrix213 passes. The current MCP
+  order and generic-caller additions must be merged into a refreshed tree.
+- The full diagnostic run at immutable predecessor48d3aa15 completed with
+  848 passing files and 44 failures across12 files. It found legacy helper transactions, missing live ADMIN actors, old lock-wait
   assumptions and a nested real-writer test hook. Focused repairs preserve the
-  assertions and adapt fixtures to the actual prepared boundary; they do not
-  weaken production gates. No full or final-head pass is claimed.
+  assertions and adapt fixtures to the actual prepared boundary; all12 affected
+  suites now pass together (188 tests). They do not weaken production gates.
+  No local full or final-head pass is claimed.
 - Full per-boundary controls remain required for every enumerated integration,
   including encryption subtransactions, retention/prune affected-source
   semantics, and source/destination authority after waits.
@@ -181,3 +182,39 @@ evidence by retaining the cleanup inside the same F-first authorized transaction
   and the named Sonnet stack campaign remain pending with Marco. #2263/#2258
   stay held. Their epoch old-binary/default-off availability issue remains in
   its owning lane. No migration, merge, deployment or activation is granted.
+
+## Combined readiness: excluded raw writers are not waived
+
+Xylon #31001 confirms the separate follow-up and keeps a blocker on every
+qualified-identity or served-text/provenance guarantee that depends on fencing
+these writers. Packaging does not establish their safety. The follow-up is [#2274](https://github.com/hadron-memory/hadron-server/issues/2274),
+filed by Marco in #31015. The combined-gate blocker must cite it. The census is:
+
+| Excluded entry / raw writer | Fields or retained evidence affected | Required combined assessment |
+| --- | --- | --- |
+| updateMyProfile / renameOwnerNamespacedUrns | raw DELETE of tombstoned Agents and Memories in the target namespace, cascaded source nodes/history; Memory/Agent/App URNs, aliases and persisted trigger entry-node URNs | Can a raw reclaim invalidate an occurrence's nodeId/revNo or a source selected during compile? Prove refusal/serialization/atomicity against actual read and write holders before clearing the blocker. |
+| updateOrganization / propagateOrgUrnRename | Memory/Agent/App URNs and old-name aliases via raw bulk statements | Test source/include resolution and namespace reuse across the deciding read set; a stable id alone is not proof of one coherent selection. |
+| updateMemory URN path | Memory.urn and rename aliases inside its existing memory-row transaction | Assess fully qualified includes, alias collision/reuse and before/after source selection on the actual combined tree. |
+
+Compiled occurrences store nodeId, revNo, hash, selection flags, position and
+parent/order (not a copied memory URN). Therefore the question is whether
+selection of those ids/revisions and the resulting compiled content hash remain
+coherent, not whether an unrecorded URN string changes. The immutable provenance
+row, compiled-from edge and published pointer must still commit together or all
+roll back. These are unresolved assessment obligations, not a demonstrated
+runtime failure or permission to change the excluded writers here.
+
+MCP managed-definition writers also acquire their existing definition-authority
+set before credential/root rows. A real-writer SQL-order observer passes; removing
+that pre-acquisition makes the observer fail, and the source is restored. This
+keeps F first and first acquisitions of authority keys ahead of presented-key
+locks; later same-key re-acquisitions are reentrant.
+
+
+The generic-caller matrix now separately exercises edit, property merge, move,
+clone, merge/delete-source, hard delete and bulk replacement in both fence
+orders. Clone's source reconciliation refreshes the read gate; merge and bulk
+replacement refresh actor/credential and their source/target or planned-memory
+gates before reconciliation. New key-revoked-during-F controls leave clone,
+merge and bulk source/history/target unchanged. The pairwise compile/account
+matrix must include these actual entry classes in its next evidence hash.
