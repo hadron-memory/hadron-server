@@ -1,9 +1,5 @@
 import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
 import { liveTxContext } from './authorizedTx.js';
-// Draft spec corpora (#1447): the server-owned spec-corpus operations.
-//
-// #1450 — reserveSpecCitation. Contract:
-// https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862 §4.
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { mirrorNodeMoveToGit, type MovedNodeRef } from '../../../integrations/github/mirrorNodeMove.js';
@@ -48,6 +44,11 @@ import {
   rewriteCorpusReferences,
   type ScannedField,
 } from '../../../lib/specReferences.js';
+
+// Draft spec corpora (#1447): the server-owned spec-corpus operations.
+//
+// #1450 — reserveSpecCitation. Contract:
+// https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862 §4.
 
 export const specCorpusMutations = {
   /**

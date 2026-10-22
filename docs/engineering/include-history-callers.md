@@ -12,12 +12,11 @@ these reads yet. No include-retention/coverage/maintenance state is activated.
 | GraphQL `nodeBatch` per-node read | prepared reconcile, existing final access-filtered refetch | 60s / 15s |
 | GraphQL `reconciledNodeForParent` | row check, prepared reconcile, matching projection | 5s / 2s |
 | MCP `loadCurrentReadProjection` | prepared reconcile and same-tx row refetch; shared single/batch | 5s / 2s |
-| Skill / selected-skill per-node plan transaction (dependent cut 2) | fresh authority; selected row lock before JSON size/properties; prepared reconcile | 60s / 15s |
+| Skill / selected-skill per-node plan transaction (dependent cut 2) | unchanged read-only RR sizing/projection; drift-only fence, fresh authority and selected row lock; prepared reconcile | 60s / 15s |
 | Spec renumber standalone prereconcile (dependent cut 2) | fresh write gate; prepared reconcile before later independent CAS rewrite | 5s / 2s |
 
-The first four entries share `withReconciledNodeRead`. The two standalone
-entries still always take the exclusive fence before their prune-capable work. An unchanged row is checked and
-projected in one **read-only REPEATABLE READ** snapshot, without advisory or row
+The first four canonical entries share `withReconciledNodeRead`. Their unchanged
+rows are checked and projected in one **read-only REPEATABLE READ** snapshot, without advisory or row
 locks. The fingerprint and projection cannot straddle a concurrent raw writer.
 Missing/moved/deleted rows refuse without entering a mutation transaction.
 The fast GraphQL/MCP authority adapter verifies READ ONLY / REPEATABLE READ at
@@ -44,6 +43,14 @@ readers still serialize globally and can hold the fence during a Node row-lock
 wait; unchanged readers no longer queue behind them. This is not a production
 throughput guarantee or a reduction of the T3/§10 caller-integration scope.
 
+Skill / selected-skill final reads use the same two-phase policy: unchanged
+fingerprints, credential/authority reads, selected JSON sizing, metadata-only
+SKIP and content projection share one read-only RR snapshot with no row or
+advisory locks. Only drift closes that snapshot and takes the outer fence,
+then refreshes credential/authority and expected-memory checks at RC. Selected
+drift rows are locked before JSON sizing and projection. Spec prereconciliation
+still always takes the fence; it is not an unchanged read fast path.
+
 ## Remaining participants
 
 Standalone skill-plan and spec-corpus reconciliation are migrated in dependent cut 2.
@@ -61,9 +68,10 @@ base-client fallback, or stub caller may satisfy that gate.
 `withAuthorizedTx` has SERIALIZABLE consumers and established authority-anchor
 ordering; it must not be globally swapped or nested behind an already-held
 anchor. Skill-plan keeps its read-only candidate REPEATABLE READ scan. Its final
-prune-capable transaction in cut 2 now uses READ COMMITTED plus a selected
-Node row lock before measuring or fetching properties, preserving that
-coherent size limit without freezing a snapshot before the outer fence.
+unchanged transaction also uses read-only RR. Its drift transaction uses READ
+COMMITTED plus a selected Node row lock before measuring or fetching properties,
+preserving that coherent size limit without freezing a snapshot before the
+outer fence.
 
 The four inherited nonblocking foundation P3s remain: late callback lock waits
 retain full lock_timeout; the maximum PostgreSQL timeout cap is not validated;

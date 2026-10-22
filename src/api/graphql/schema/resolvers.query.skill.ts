@@ -1,45 +1,5 @@
-import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
-import { liveTxContext } from './authorizedTx.js';
-/**
- * #1177 §3 — the seam: the server judges, the client does I/O.
- *
- * One read surface serving `skill lint`, `skill status` and `skill export`.
- * The client sends what it can see of each file on disk; the server returns a
- * drift CLASS and the lint findings per declared node, plus the rendered body
- * for anything the client is to write.
- *
- * ## Why the class and not the inputs (A4)
- *
- * **The client cannot name a tenth class, so the vocabulary cannot drift from
- * the server's.** Same argument that made kind-specific doors right over one
- * generic door: the surface that can express a thing decides whether the thing
- * stays countable.
- *
- * ## Why a QUERY and not a mutation
- *
- * This is the design decision §7 left to the server, and §3 states the
- * property it has to buy: *"`status` writes nothing, `export` is the only
- * writer, `lint` touches no disk. The server surface should make an accidental
- * write impossible for `status`/`lint` rather than merely unlikely."*
- *
- * A mutation that promises not to write is a promise. A **query** is the
- * guarantee — nothing on this path can write a node, and A9 ("nothing here
- * writes to a node; one-way publishing") becomes structural rather than
- * observed. The only writer in the whole feature is the client's filesystem.
- *
- * ## Why the client sending file content is not a hole
- *
- * It looks like one and is not: the server never reads the caller's disk, it
- * receives what the caller chose to send. **A caller who lies about
- * `fileHash` gets a wrong class for their own file and harms nobody else.**
- *
- * ## Access
- *
- * Through the SHARED gate (`memoryAccessFilter` / `getAccessibleMemoryIds`),
- * never a bespoke one — a hand-rolled admin-or-member check drifts, and this
- * surface returns node CONTENT, which is the thing a read gate exists to
- * protect.
- */
+import { withIncludeHistoryTransaction, includeHistoryClient, type IncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
+import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { GraphQLError } from 'graphql';
 import { createHash } from 'node:crypto';
@@ -85,6 +45,47 @@ import {
   type NodeFacts,
   type SkillNode,
 } from '../../../lib/skilldoc/index.js';
+
+/**
+ * #1177 §3 — the seam: the server judges, the client does I/O.
+ *
+ * One read surface serving `skill lint`, `skill status` and `skill export`.
+ * The client sends what it can see of each file on disk; the server returns a
+ * drift CLASS and the lint findings per declared node, plus the rendered body
+ * for anything the client is to write.
+ *
+ * ## Why the class and not the inputs (A4)
+ *
+ * **The client cannot name a tenth class, so the vocabulary cannot drift from
+ * the server's.** Same argument that made kind-specific doors right over one
+ * generic door: the surface that can express a thing decides whether the thing
+ * stays countable.
+ *
+ * ## Why a QUERY and not a mutation
+ *
+ * This is the design decision §7 left to the server, and §3 states the
+ * property it has to buy: *"`status` writes nothing, `export` is the only
+ * writer, `lint` touches no disk. The server surface should make an accidental
+ * write impossible for `status`/`lint` rather than merely unlikely."*
+ *
+ * A mutation that promises not to write is a promise. A **query** is the
+ * guarantee — nothing on this path can write a node, and A9 ("nothing here
+ * writes to a node; one-way publishing") becomes structural rather than
+ * observed. The only writer in the whole feature is the client's filesystem.
+ *
+ * ## Why the client sending file content is not a hole
+ *
+ * It looks like one and is not: the server never reads the caller's disk, it
+ * receives what the caller chose to send. **A caller who lies about
+ * `fileHash` gets a wrong class for their own file and harms nobody else.**
+ *
+ * ## Access
+ *
+ * Through the SHARED gate (`memoryAccessFilter` / `getAccessibleMemoryIds`),
+ * never a bespoke one — a hand-rolled admin-or-member check drifts, and this
+ * surface returns node CONTENT, which is the thing a read gate exists to
+ * protect.
+ */
 
 /** The intent decides the ACTION, never the class (§3). */
 export type SkillPlanIntent = 'LINT' | 'STATUS' | 'EXPORT';
@@ -725,77 +726,90 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
     }
     let declaredRows: Prisma.NodeGetPayload<{ select: typeof declaredSelect }>[] = [];
     if (candidates.length > 0) {
-      // One short transaction per node: retaining every FOR UPDATE lock until
-      // the whole plan commits can deadlock a Git sync that visits the same
-      // rows in filesystem order. Fetch the final projection BEFORE releasing
-      // that node's lock: a bypass writer landing after reconciliation must not
-      // pair newer fields with the older revSeq in one exported artifact.
+      // Unchanged reads size, authorize and project in one read-only RR
+      // snapshot. Only drift enters the outer history fence; its RC callback
+      // rechecks credentials, authority and expected memory after any wait.
       const liveRows: typeof declaredRows = [];
       let liveMetadataBytes = 0n;
       const candidateMemory = new Map(candidates.map((r) => [r.id, r.memoryId]));
       for (const id of candidates.map((r) => r.id).sort()) {
-        const live = await withIncludeHistoryTransaction(ctx.db,
-          async (history) => {
-            const tx = includeHistoryClient(history);
-            const fresh = await liveTxContext(ctx, tx);
-            if (!(await isMemoryReadableCached(fresh, candidateMemory.get(id)!))) return null;
-            if (selectedRefs !== undefined) {
-              // READ COMMITTED after the outer fence: hold this selected row
-              // before reading its JSON size or properties, so those reads
-              // describe one state without a frozen pre-fence snapshot.
+        const readProjection = async (tx: Prisma.TransactionClient, history?: IncludeHistoryTransaction) => {
+          const fresh = await (history ? liveTxContext : liveReadSnapshotContext)(ctx, tx);
+          if (!(await isMemoryReadableCached(fresh, candidateMemory.get(id)!))) return null;
+          if (selectedRefs !== undefined) {
+            // The drift path is RC after the outer fence: hold the row
+            // across sizing/projection. The fast path's RR snapshot needs
+            // no row lock, including the metadata-only SKIP projection.
+            if (history) {
               const locked = await tx.$queryRaw<Array<{ id: string }>>`
                 SELECT id FROM nodes WHERE id = ${id} AND memory_id = ${candidateMemory.get(id)!}
                   AND deleted_at IS NULL FOR UPDATE`;
               if (locked.length !== 1) return null;
-              // A named task may have no declaration for this host. Recheck
-              // access, then bound the live JSON before deserializing it. A
-              // writer can enlarge properties after the candidate snapshot;
-              // The row lock keeps this check and fetch coherent.
-              const authorized = await tx.node.findFirst({
-                where: { AND: [declaredWhere, { id }] } as never,
-                select: { id: true },
-              });
-              if (authorized === null) return null;
-              const sizes = await tx.$queryRaw<{ bytes: bigint }[]>`
-                SELECT COALESCE(octet_length(properties::text), 0)::bigint AS bytes
-                FROM nodes WHERE id = ${id}
-              `;
-              const nextBytes = liveMetadataBytes + (sizes[0]?.bytes ?? 0n);
-              if (nextBytes > BigInt(SKILL_PLAN_MAX_SELECTED_PROPERTIES_BYTES)) {
-                throw new GraphQLError('selectedSkillFilePlan: selected task properties exceed the safe byte ceiling.', {
-                  extensions: { code: 'BAD_USER_INPUT' },
-                });
-              }
-              liveMetadataBytes = nextBytes;
-              // The SKIP needs metadata only, even for a very large body.
-              const metadata = await tx.node.findFirst({
-                where: { AND: [declaredWhere, { id }] } as never,
-                select: declaredMetadataSelect,
-              });
-              if (metadata === null) return null;
-              const { declaration, malformed } = classifyDeclaration(metadata.properties, host);
-              if (declaration === null && malformed.length === 0) {
-                return { ...metadata, content: null };
-              }
             }
-            // Never reconcile a row that left the memory it was discovered in
-            // (@codex P1, PR #1339) — the refetch below would drop it anyway,
-            // but only after a revision had been written into another tenant.
-            if ((await reconcileNodeWithIncludeHistory(history, id, { expectedMemoryId: candidateMemory.get(id)! })) == null) return null;
-            return tx.node.findFirst({
-              // Reapply BOTH discovery and access/scope predicates after
-              // waiting for the lock. The id can move into another tenant's
-              // memory while we wait; id-only here would turn the locked
-              // refetch into a cross-tenant content read.
+            // A named task may have no declaration for this host. Recheck
+            // access, then bound the live JSON before deserializing it. A
+            // writer can enlarge properties after the candidate snapshot;
+            // The RR snapshot or slow-path row lock keeps size and fetch coherent.
+            const authorized = await tx.node.findFirst({
               where: { AND: [declaredWhere, { id }] } as never,
-              select: declaredSelect,
+              select: { id: true },
             });
-          },
-          {
-            timeoutMs: 60_000,
-            maxWaitMs: 15_000,
-          },
-        );
+            if (authorized === null) return null;
+            const sizes = await tx.$queryRaw<{ bytes: bigint }[]>`
+              SELECT COALESCE(octet_length(properties::text), 0)::bigint AS bytes
+              FROM nodes WHERE id = ${id}
+            `;
+            const nextBytes = liveMetadataBytes + (sizes[0]?.bytes ?? 0n);
+            if (nextBytes > BigInt(SKILL_PLAN_MAX_SELECTED_PROPERTIES_BYTES)) {
+              throw new GraphQLError('selectedSkillFilePlan: selected task properties exceed the safe byte ceiling.', {
+                extensions: { code: 'BAD_USER_INPUT' },
+              });
+            }
+            liveMetadataBytes = nextBytes;
+            // The SKIP needs metadata only, even for a very large body.
+            const metadata = await tx.node.findFirst({
+              where: { AND: [declaredWhere, { id }] } as never,
+              select: declaredMetadataSelect,
+            });
+            if (metadata === null) return null;
+            const { declaration, malformed } = classifyDeclaration(metadata.properties, host);
+            if (declaration === null && malformed.length === 0) {
+              return { ...metadata, content: null };
+            }
+          }
+          // Never reconcile a row that left the memory it was discovered in
+          // (@codex P1, PR #1339) — the refetch below would drop it anyway,
+          // but only after a revision had been written into another tenant.
+          if (history && (await reconcileNodeWithIncludeHistory(history, id, { expectedMemoryId: candidateMemory.get(id)! })) == null) return null;
+          return tx.node.findFirst({
+            // Reapply BOTH discovery and access/scope predicates after
+            // waiting for the lock. The id can move into another tenant's
+            // memory while we wait; id-only here would turn the locked
+            // refetch into a cross-tenant content read.
+            where: { AND: [declaredWhere, { id }] } as never,
+            select: declaredSelect,
+          });
+        };
+        const fast = await ctx.db.$transaction(async (tx) => {
+          await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+          const [row] = await tx.$queryRaw<Array<{ unchanged: boolean }>>`
+            SELECT revision_content_hash IS NOT NULL
+              AND revision_content_hash = hadron_node_revision_state_hash(n) AS unchanged
+            FROM nodes n WHERE id = ${id} AND memory_id = ${candidateMemory.get(id)!}
+              AND deleted_at IS NULL`;
+          if (!row) return { drift: false as const, value: null };
+          if (!row.unchanged) return { drift: true as const };
+          return { drift: false as const, value: await readProjection(tx) };
+        }, {
+          isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+          timeout: 60_000,
+          maxWait: 15_000,
+        });
+        const live = fast.drift
+          ? await withIncludeHistoryTransaction(ctx.db,
+            (history) => readProjection(includeHistoryClient(history), history),
+            { timeoutMs: 60_000, maxWaitMs: 15_000 })
+          : fast.value;
         if (live != null) liveRows.push(live);
       }
       declaredRows = liveRows.sort(
