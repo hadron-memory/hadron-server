@@ -13,7 +13,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
-import { deriveFamily, normalizeFamily } from './family.js';
+import { deriveFamily, normalizeFamily, tierOf } from './family.js';
 import { backfillSessionFamilies } from './familyBackfill.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
@@ -201,4 +201,17 @@ describe('startSession family, and Worker.family following the binding', () => {
   it('the database refuses a family in no token shape (chk_sessions_family)', async () => {
     await expect(db.session.create({ data: { id: generateId(), family: 'Claude' } })).rejects.toThrow(/chk_sessions_family/);
   });
+});
+
+describe('#2252 tierOf (R189: one server-owned mapping)', () => {
+  it.each([
+    ['claude-opus-5-5', 'high'], ['claude-opus-4-6', 'high'], ['Claude-Opus-5-5', 'high'],
+    ['claude-sonnet-5-5', 'mid'], ['claude-3-5-sonnet-20241022', 'mid'],
+    ['claude-haiku-5-5', 'low'], ['claude-3-5-haiku-latest', 'low'],
+  ])('%s is %s', (model, tier) => expect(tierOf(model)).toBe(tier));
+
+  it.each(['gpt-5.1-codex', 'glm-4.6', 'gemini-2.5-pro', 'claude-fable-5-1', 'opus-like-glm-5', '', '  ', null, undefined])(
+    'unmapped or unknown %j is null: no guessed tier for another family or an unlisted model', (model) => {
+      expect(tierOf(model as string | null | undefined)).toBeNull();
+    });
 });
