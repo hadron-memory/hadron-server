@@ -12,12 +12,12 @@
  "src/api/graphql/schema/resolvers.mutation.agent.ts :: agent.create": {
   "count": 1,
   "status": "excluded",
-  "reason": "a brand-new Agent has no prior compile source or entitlement; not a counterparty (confirm: create with systemMemoryId of an existing memory)"
+  "reason": "a brand-new Agent has no prior compile source or entitlement; a systemMemoryId of an existing memory is attached in the same create and validated by the shared owner assertion, and no earlier compile can have read the new id"
  },
  "src/api/graphql/schema/resolvers.mutation.agent.ts :: agent.delete": {
   "count": 1,
   "status": "excluded",
-  "reason": "create-failure compensation delete of a just-created Agent that no compile can have seen; confirm callgraph before final"
+  "reason": "hard-delete of a SOFT-DELETED tombstone at the reclaimed URN (createAgentCore, ~168); a tombstone holds no entitlement and a Worker's agent FK is Restrict, so a casting's agent cannot be removed here"
  },
  "src/api/graphql/schema/resolvers.mutation.agent.ts :: agent.update": {
   "count": 3,
@@ -37,7 +37,7 @@
  "src/api/graphql/schema/resolvers.mutation.session.ts :: agent.update": {
   "count": 3,
   "status": "excluded",
-  "reason": "editor lock / revision restore bookkeeping on the Agent row; confirm no compile-relevant field (pending callgraph)"
+  "reason": "editor lock acquire/release (editorLockUserId/editorLockExpiresAt) and publishedRevisionLoc (selects the revision node the chat prompt reads, resolvers.helpers.ts:3836, chat.ts:227); none is the boot-prompt pointer (bootPromptNodeId/Urn, fenced via writePointer), retirement, base or entitlement"
  },
  "src/api/graphql/schema/resolvers.mutation.session.ts :: agentSubscription.createMany": {
   "count": 1,
