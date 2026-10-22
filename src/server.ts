@@ -38,7 +38,6 @@ import {
 import { issueLoginCode, redeemLoginCode } from './auth/authHandoff.js';
 import { startUserDeletionNoticeLoop } from './jobs/sendUserDeletionNotices.js';
 import { startPasskeyRegistrationNoticeLoop } from './jobs/sendPasskeyRegistrationNotices.js';
-import { signingSurfacePolicy } from './lib/signing/surface.js';
 import {
   createPendingLoginState,
   claimPendingLoginState,
