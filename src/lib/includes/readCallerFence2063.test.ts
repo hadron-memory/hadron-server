@@ -242,7 +242,7 @@ describe('outer-fenced reconciliation read callers', () => {
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
   });
 
-  it.each(['explicit', 'prefix'] as const)('batch %s rechecks child authority, not the readable base', async (selection) => {
+  it.each(['node', 'explicit', 'prefix', 'mcp-explicit', 'mcp-prefix'] as const)('%s rechecks child authority, not the readable base', async (selection) => {
     await db.user.update({ where: { id: userId }, data: { roles: [] } });
     const childMemory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
     const org = await db.organization.create({ data: { name: 'Public base', urn: 'base-fence.example' } });
@@ -262,13 +262,19 @@ describe('outer-fenced reconciliation read callers', () => {
     await db.node.update({ where: { id: n.id }, data: { content: 'raw inherited' } });
     const args = selection === 'explicit' ? { refs: ['hrn:node:read-fence.example:mem:inherited'] } : { memory: memoryId, locPrefix: 'inherited' };
     const result = await underHeldFence(
-      () => resolvers.Query.nodeBatch(null, args, { db, userId, roles: [] }),
+      async () => {
+        if (selection === 'node') return resolvers.Query.node(null, { ref: 'hrn:node:read-fence.example:mem:inherited', raw: true }, { db, userId, roles: [] });
+        if (selection.startsWith('mcp-')) return createTestableMcpServer({ userId, roles: [], clientId: `user:${userId}` }).callToolText('hadron_get_nodes', selection === 'mcp-explicit' ? { refs: ['hrn:node:read-fence.example:mem:inherited'] } : { memoryUrn: 'hrn:mem:read-fence.example:mem', locPrefix: 'inherited' });
+        return resolvers.Query.nodeBatch(null, args, { db, userId, roles: [] });
+      },
       async () => {
         await db.orgMember.deleteMany({ where: { userId, organizationId: childMemory.organizationId! } });
         await db.appMember.deleteMany({ where: { userId, app: { organizationId: childMemory.organizationId! } } });
       },
     );
-    expect(result.nodes).toEqual([]);
+    if (selection === 'node') expect(result).toBeNull();
+    else if (typeof result === 'string') expect(result).not.toContain('raw inherited');
+    else expect((result as { nodes: unknown[] }).nodes).toEqual([]);
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
     expect(await resolvers.Query.node(null, { ref: n.id, raw: true }, { db, userId, roles: [] })).not.toBeNull();
   });
@@ -351,8 +357,8 @@ describe('outer-fenced reconciliation read callers', () => {
   });
 
   it.each([
-    ['key', 'node'], ['key', 'batch'], ['key', 'revision'],
-    ['sign-in', 'node'], ['sign-in', 'batch'], ['sign-in', 'revision'],
+    ['key', 'node'], ['key', 'batch'], ['key', 'revision'], ['key', 'mcp'], ['key', 'mcp-batch'],
+    ['sign-in', 'node'], ['sign-in', 'batch'], ['sign-in', 'revision'], ['sign-in', 'mcp'], ['sign-in', 'mcp-batch'],
   ] as const)('%s credential permits unchanged %s reads and refuses revoked credentials', async (credential, surface) => {
     const n = await db.node.create({ data: { memoryId, loc: 'credential', name: 'Credential', content: 'unchanged' } });
     const c = ctx();
@@ -370,10 +376,16 @@ describe('outer-fenced reconciliation read callers', () => {
       ? resolvers.Query.node(null, { ref: n.id, raw: true }, { ...c })
       : surface === 'batch'
         ? resolvers.Query.nodeBatch(null, { refs: [n.id] }, { ...c })
-        : resolvers.Node.revision(n as never, {}, { ...c });
+        : surface === 'revision' ? resolvers.Node.revision(n as never, {}, { ...c })
+          : surface === 'mcp'
+            ? createTestableMcpServer(c).callToolText('hadron_get_node', { urn: 'hrn:node:read-fence.example:mem:credential' })
+            : createTestableMcpServer(c).callToolText('hadron_get_nodes', { refs: ['hrn:node:read-fence.example:mem:credential'] });
     expect(await read()).not.toBeNull();
     await revoke();
-    await expect(read()).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    if (surface === 'mcp' || surface === 'mcp-batch') {
+      const denied = await read();
+      expect(denied).not.toContain('unchanged');
+    } else await expect(read()).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
   });
 
@@ -385,7 +397,10 @@ describe('outer-fenced reconciliation read callers', () => {
       .rejects.toThrow('A read-only repeatable-read snapshot is required');
   });
 
-  it.each(['key', 'sign-in'] as const)('drift read still rechecks %s revocation after the fence wait', async (credential) => {
+  it.each([
+    ['key', 'node'], ['key', 'mcp'], ['key', 'mcp-batch'],
+    ['sign-in', 'node'], ['sign-in', 'mcp'], ['sign-in', 'mcp-batch'],
+  ] as const)('drift %s %s read rechecks revocation after the fence wait', async (credential, surface) => {
     const n = await drifted();
     const c = ctx();
     let revoke: () => Promise<unknown>;
@@ -398,10 +413,13 @@ describe('outer-fenced reconciliation read callers', () => {
       c.signInId = root.id;
       revoke = () => db.signIn.update({ where: { id: root.id }, data: { endedAt: new Date(), endReason: 'test' } });
     }
-    await expect(underHeldFence(
-      () => resolvers.Query.node(null, { ref: n.id, raw: true }, c),
+    const result = underHeldFence(
+      () => surface === 'node' ? resolvers.Query.node(null, { ref: n.id, raw: true }, c)
+        : createTestableMcpServer(c).callToolText(surface === 'mcp' ? 'hadron_get_node' : 'hadron_get_nodes', surface === 'mcp' ? { urn: 'hrn:node:read-fence.example:mem:drift' } : { refs: ['hrn:node:read-fence.example:mem:drift'] }),
       async () => { await revoke(); },
-    )).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    );
+    if (surface === 'node') await expect(result).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    else expect(await result).not.toContain('raw change');
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
   });
 
