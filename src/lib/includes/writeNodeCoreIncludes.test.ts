@@ -212,7 +212,7 @@ describe('run prompt assembly (#2040)', () => {
 });
 
 describe('copy paths conceal foreign targets (#2040, §10)', () => {
-  it('clone re-derives same-memory tags only: an unreadable foreign target gets no edge, exactly like a missing one', async () => {
+  it('clone refuses a copied tag to an unreadable foreign target, exactly like a missing one (#2167)', async () => {
     const foreignOrg = await db.organization.create({ data: { id: generateId(), name: 'Foreign', urn: 'foreign.example' } });
     const foreign = await db.memory.create({ data: { id: generateId(), name: 'secret', urn: 'foreign.example:secret', class: 'knowledge', organizationId: foreignOrg.id } });
     await db.node.create({ data: { id: generateId(), memoryId: foreign.id, loc: 'hidden', name: 'hidden', content: 'H' } });
@@ -224,9 +224,13 @@ describe('copy paths conceal foreign targets (#2040, §10)', () => {
     await update('src', `${srcText} .`);
     expect((await includeEdges('src')).map(e => e.target.loc)).toEqual(['local']);
     const org = await db.organization.findFirstOrThrow({ where: { urn: 'inc.example' } });
-    const clone = await M.cloneMemory(null, { ref: memoryId, targetUrn: `hrn:mem:${org.urn}:copy` }, as());
-    const edges = await db.edge.findMany({ where: { memoryId: clone.id, governedKind: 'INCLUDE' }, include: { source: true, target: true } });
-    expect(edges.map(e => `${e.source.loc}>${e.target.loc}`)).toEqual(['src>local']);
-    expect(edges.every(e => e.targetId !== undefined && !e.loc.includes(foreign.id))).toBe(true);
+    // A copy is an includer write: every copied tag counts as added, so the
+    // unreadable and the missing foreign tag refuse alike, naming only the tag.
+    const refused = await M.cloneMemory(null, { ref: memoryId, targetUrn: `hrn:mem:${org.urn}:copy` }, as())
+      .then(() => null, (e: any) => e);
+    expect(refused?.extensions?.code).toBe('INCLUDE_TARGET_UNAVAILABLE');
+    expect(refused.extensions.tag).toBe('{{> hrn:node:foreign.example:secret:hidden}}');
+    expect(await db.memory.count({ where: { urn: `${org.urn}:copy` } })).toBe(0);
+    expect(await db.edge.count({ where: { governedKind: 'INCLUDE', loc: { contains: foreign.id } } })).toBe(0);
   });
 });
