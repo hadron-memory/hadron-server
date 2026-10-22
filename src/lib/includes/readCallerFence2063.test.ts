@@ -413,7 +413,7 @@ describe('outer-fenced reconciliation read callers', () => {
       c.signInId = root.id;
       revoke = () => db.signIn.update({ where: { id: root.id }, data: { endedAt: new Date(), endReason: 'test' } });
     }
-    const result = underHeldFence(
+    const result = underHeldFence<unknown>(
       () => surface === 'node' ? resolvers.Query.node(null, { ref: n.id, raw: true }, c)
         : createTestableMcpServer(c).callToolText(surface === 'mcp' ? 'hadron_get_node' : 'hadron_get_nodes', surface === 'mcp' ? { urn: 'hrn:node:read-fence.example:mem:drift' } : { refs: ['hrn:node:read-fence.example:mem:drift'] }),
       async () => { await revoke(); },
