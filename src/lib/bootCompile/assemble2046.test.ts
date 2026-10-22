@@ -118,6 +118,19 @@ describe('#2046 S9-2 — every refusal', () => {
     expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a rev=7 approved}}')))).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
   });
 
+  // Dara P2-4: a pin to a lower revision that was never kept or has been pruned is MISSING (R79), also with approved.
+  it('R79: a pin to a lower revision that no longer exists refuses as unavailable, with and without approved', async () => {
+    const part = await put(agent.child!.mem, 'parts:a', 'v3');
+    await db.node.update({ where: { id: part.id }, data: { revSeq: 3 } }); // revisions 1 and 2 have no snapshot
+    for (const tag of ['{{> parts:a rev=1}}', '{{> parts:a rev=1 approved}}', '{{> parts:a rev=2 approved}}']) {
+      expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, tag)))).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
+      await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: 'boot:source' } });
+    }
+    // Control: a RETAINED but unapproved revision is "no qualifying revision", not missing.
+    await db.nodeRevision.create({ data: { nodeId: part.id, memoryId: part.memoryId, loc: part.loc, name: part.name, content: 'v1', revNo: 1, tags: [] } });
+    expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a rev=1 approved}}')))).toBe('BOOT_PROMPT_INCLUDE_REVISION_UNAVAILABLE');
+  });
+
   it('a cycle refuses', async () => {
     await put(agent.child!.mem, 'parts:a', '{{> parts:b}}');
     await put(agent.child!.mem, 'parts:b', '{{> parts:a}}');
@@ -172,10 +185,13 @@ describe('#2046 S9-2 — every refusal', () => {
     expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a rev=x}}')))).toBe('BOOT_PROMPT_INCLUDE_MALFORMED');
   });
 
-  it('the occurrence limit refuses', async () => {
+  // Dara P2-3 / Cooper F1: the bound is on INCLUDE occurrences; the provenance root is not one.
+  it('the occurrence bound counts includes only: N pass, N+1 refuse', async () => {
     await put(agent.child!.mem, 'parts:a', 'x');
-    const i = await input(agent.child!.mem, '{{> parts:a}}{{> parts:a}}{{> parts:a}}');
-    expect(await refusal(assembleBootPrompt(db, i, { ...DEFAULT_ASSEMBLE_LIMITS, maxOccurrences: 2 }))).toBe('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
+    const limits = { ...DEFAULT_ASSEMBLE_LIMITS, maxOccurrences: 2 };
+    expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a}}{{> parts:a}}'), limits))).toBe('NO_REFUSAL');
+    await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: 'boot:source' } });
+    expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a}}{{> parts:a}}{{> parts:a}}'), limits))).toBe('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
   });
 
   // Xavier 6258672877: the byte bound is on the compiled OUTPUT, not on source read (Anne, #2236).
@@ -315,5 +331,46 @@ describe('#2046 S9-2 — R8: a bare loc in a foreign Agent\'s part resolves in T
     const plan = await assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:z}}', true));
     expect(plan.text).toBe('install');
     expect(plan.occurrences.some((o) => o.kind === 'replacement')).toBe(true);
+  });
+});
+
+describe('#2046 S9-2 — grant arms left unpinned (Rook, Cooper)', () => {
+  it('a deleted Agent is concealed', async () => {
+    await makeAgent('gone');
+    await put(agent.gone!.mem, 'parts:g', 'g');
+    await db.agent.update({ where: { id: agent.gone!.id }, data: { deletedAt: new Date() } });
+    const urn = `hrn:node:${(await db.memory.findUniqueOrThrow({ where: { id: agent.gone!.mem } })).urn}:parts:g`;
+    expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, `{{> ${urn}}}`)))).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
+  });
+
+  describe('a user recipient', () => {
+    let userId: string;
+    const asUser = async (text: string): Promise<AssembleInput> => ({ ...(await input(agent.child!.mem, text)), recipient: { kind: 'user', userId } });
+    beforeEach(async () => {
+      userId = (await db.user.create({ data: { id: generateId(), email: `${generateId()}@u.test`, name: 'U' } })).id;
+      // The compiled Agent itself is the user's own (a user recipient compiles for an Agent they own).
+      await db.agent.update({ where: { id: agent.child!.id }, data: { ownerUserId: userId, organizationId: null } });
+      await makeAgent('upriv', { org: otherOrgId });
+      await makeAgent('upub', { org: otherOrgId, visibility: 'PUBLIC' });
+      await put(agent.upriv!.mem, 'parts:p', 'p');
+      await put(agent.upub!.mem, 'parts:p', 'p');
+    });
+    const urnOf = async (key: string) => `hrn:node:${(await db.memory.findUniqueOrThrow({ where: { id: agent[key]!.mem } })).urn}:parts:p`;
+
+    it('the owner needs no subscription', async () => {
+      await db.agent.update({ where: { id: agent.upriv!.id }, data: { ownerUserId: userId, organizationId: null } });
+      const plan = await assembleBootPrompt(db, await asUser(`{{> ${await urnOf('upriv')}}}`));
+      expect(plan.grants).toContainEqual({ agentId: agent.upriv!.id, provision: false });
+    });
+
+    it('a stranger: public needs a subscription, non-public is concealed; an active subscription passes', async () => {
+      expect(await refusal(assembleBootPrompt(db, await asUser(`{{> ${await urnOf('upub')}}}`)))).toBe('BOOT_PROMPT_GRANT_REQUIRED');
+      await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: 'boot:source' } });
+      expect(await refusal(assembleBootPrompt(db, await asUser(`{{> ${await urnOf('upriv')}}}`)))).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
+      await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: 'boot:source' } });
+      await db.agentSubscription.create({ data: { userId, agentId: agent.upub!.id, activatedAt: new Date() } });
+      const plan = await assembleBootPrompt(db, await asUser(`{{> ${await urnOf('upub')}}}`));
+      expect(plan.text).toBe('p');
+    });
   });
 });

@@ -87,6 +87,8 @@ export function parseCompiledProvenance(raw: unknown, nodeId: string, revNo: num
       return fail(`occurrence ${i} misplaced`);
     }
     if (!root && !(isInt(x.parent, 0) && (x.parent as number) < i)) return fail(`occurrence ${i} has no includer`);
+    // R75: an include is one level deeper than its includer.
+    if (!root && x.depth !== ((p.occurrences as CompiledOccurrence[])[x.parent as number]).depth + 1) return fail(`occurrence ${i} depth`);
     if (x.kind !== 'source' && x.kind !== 'include' && x.kind !== 'replacement') return fail(`occurrence ${i} kind`);
     const s = x.selection;
     if (!s || typeof s.approved !== 'boolean' || typeof s.signed !== 'boolean' || !(s.rev === null || isInt(s.rev, 1))) {
@@ -142,6 +144,9 @@ export async function readCompiledRevision(db: Reader, nodeId: string, revNo: nu
       select: { content: true },
     });
     content = history ? history.content ?? '' : null;
+  }
+  if (row.occurrenceCount !== provenance.occurrences.length) {
+    throw new CompiledRevisionIntegrityError(nodeId, revNo, 'occurrence count disagrees with the stored occurrences');
   }
   const target: CompiledTarget = row.targetKind === 'AGENT'
     ? { kind: 'AGENT', agentId: row.targetAgentId }

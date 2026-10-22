@@ -260,7 +260,7 @@ export async function assembleBootPrompt(
 
   /** Occurrences are bounded as they are recorded; the byte bound is on EMITTED output (see emit). */
   const checkOccurrences = () => {
-    if (occurrences.length > limits.maxOccurrences) throw new BootCompileRefusal('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
+    if (occurrences.length - 1 > limits.maxOccurrences) throw new BootCompileRefusal('BOOT_PROMPT_COMPILE_LIMIT_EXCEEDED');
   };
   /**
    * The 1 MiB bound is on the compiled OUTPUT (Xavier 6258672877), never on source read: tags
@@ -303,6 +303,13 @@ export async function assembleBootPrompt(
       };
       // R79: a pin to a revision the target does not have refuses like a missing include.
       if (tag.settings.rev !== undefined && tag.settings.rev > found.node.revSeq) {
+        throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE', position);
+      }
+      // R79: a pin to a revision that is not stored (never kept, or pruned) is a missing include, with
+      // `approved` too. Existence is decided on the pin alone, apart from qualification, so an existing
+      // revision that merely fails `approved` stays REVISION_UNAVAILABLE.
+      if (tag.settings.rev !== undefined && tag.settings.approved
+        && !(await selectIncludeRevision(db, memo, target, { ...tag.settings, approved: false, signed: false }))) {
         throw new BootCompileRefusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE', position);
       }
       const selected = await selectIncludeRevision(db, memo, target, tag.settings);

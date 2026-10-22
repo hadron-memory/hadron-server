@@ -136,6 +136,25 @@ describe('#2046 S9-1 — readCompiledRevision', () => {
     await expect(readCompiledRevision(db, node.id, 1)).rejects.toBeInstanceOf(CompiledRevisionIntegrityError);
   });
 
+  // Dara P3: structural consistency a later writer or consumer would otherwise have to trust.
+  it('an include whose depth is not its includer\'s plus one is an integrity failure', async () => {
+    const node = await compiledNode('v1');
+    const root = provenance('s', 1, 's').occurrences[0]!;
+    const bad = { version: 1, occurrences: [root, { order: 1, depth: 3, parent: 0, kind: 'include', nodeId: 'p', revNo: 1, hash: sha256Hex('p'), selection: { rev: null, approved: false, signed: false } }] };
+    await db.compiledPromptRevision.create({
+      data: { compiledNodeId: node.id, compiledRevNo: 1, contentHash: sha256Hex('v1'), targetKind: 'AGENT', targetAgentId: agentId, provenance: bad as never, occurrenceCount: 2 },
+    });
+    await expect(readCompiledRevision(db, node.id, 1)).rejects.toBeInstanceOf(CompiledRevisionIntegrityError);
+  });
+
+  it('an occurrenceCount that disagrees with the stored occurrences is an integrity failure', async () => {
+    const node = await compiledNode('v1');
+    await db.compiledPromptRevision.create({
+      data: { compiledNodeId: node.id, compiledRevNo: 1, contentHash: sha256Hex('v1'), targetKind: 'AGENT', targetAgentId: agentId, provenance: provenance('s', 1, 's') as never, occurrenceCount: 5 },
+    });
+    await expect(readCompiledRevision(db, node.id, 1)).rejects.toBeInstanceOf(CompiledRevisionIntegrityError);
+  });
+
   it('answers null for a missing node or a revision past the current one', async () => {
     const node = await compiledNode('v1');
     await record(node.id, 1, 'v1');
