@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 /**
  * App-scoped memory mutations — add a memory to an App.
  *
@@ -274,7 +275,7 @@ export const appMemoryMutations = {
       select: { id: true },
     });
     // #1468 — refused for a stamped corpus still holding a spec.
-    if (tombstone) await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, tombstone.id));
+    if (tombstone) await withIncludeHistoryClientTransaction(ctx.db, (tx) => reclaimTombstonedMemory(tx, tombstone.id));
     // A LIVE collision on a name-addressable app-mem slug now DETERMINISTICALLY
     // aliases (`<slug>-<agent>`) via mintLocalSlug — replacing the pre-v2 hard
     // MEMORY_URN_CONFLICT — so two apps/agents in one org can each name a memory

@@ -1,3 +1,5 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
+import { liveTxContext } from './authorizedTx.js';
 // Workers — #974 (re-cut): the named casting of an installed Agent into an
 // App (cor:dmo:050:11, cor:agt:020:01/:02). A persona is universal DRESSING on
 // an Agent (`personaRole` + the `systemPrompt` template); the Worker is the
@@ -626,16 +628,18 @@ function nameTaken(name: string, appId: string): GraphQLError {
 export async function withRoleWriteLock<T>(
   ctx: Context,
   systemMemoryId: string,
-  fn: () => Promise<T>,
+  fn: (tx: Prisma.TransactionClient, txCtx: Context, transaction: {
+    tx: Prisma.TransactionClient; pooledDb: Context['db']; afterCommit: (effect: () => void) => void;
+  }) => Promise<T>,
 ): Promise<T> {
-  return ctx.db.$transaction(
-    async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'role-write:' + systemMemoryId}))`;
-      return fn();
-    },
-    // Generous: the bracket spans a full node write including the git mirror.
-    { timeout: 30_000 },
-  );
+  const effects: Array<() => void> = [];
+  const result = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'role-write:' + systemMemoryId}))`;
+    const fresh = await liveTxContext(ctx, tx);
+    return fn(tx, fresh, { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) });
+  }, { timeout: 30_000 });
+  for (const effect of effects) effect();
+  return result;
 }
 
 

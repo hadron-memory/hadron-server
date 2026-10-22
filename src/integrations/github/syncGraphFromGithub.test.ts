@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../lib/includes/includeHistoryFence.js';
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { dirname, join } from 'path';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
@@ -226,7 +227,7 @@ describe('syncGraphFromGithub', () => {
     let releaseMove!: () => void;
     const pathHeld = new Promise<void>((resolve) => { signalPathHeld = resolve; });
     const mayMove = new Promise<void>((resolve) => { releaseMove = resolve; });
-    const moving = db.$transaction(async (tx) => {
+    const moving = withIncludeHistoryClientTransaction(db, async (tx) => {
       await acquireLockSet(tx, [{ memoryId: dbGraphId, loc: 'source' }]);
       signalPathHeld();
       await mayMove;
@@ -798,7 +799,7 @@ describe('syncGraphFromGithub', () => {
     const nodeId = 'aaaa000000000000000000000000001340';
     const row = await db.node.create({ data: { id: nodeId, memoryId: dbGraphId, loc: 'moved:away', name: 'n', content: 'mine' } });
     await expect(
-      db.$transaction((tx) => updateNodeFromGitSync(tx, row, { content: 'from git' }, undefined, 'some-other-memory')),
+      withIncludeHistoryClientTransaction(db, (tx) => updateNodeFromGitSync(tx, row, { content: 'from git' }, undefined, 'some-other-memory')),
     ).rejects.toBeInstanceOf(GitSyncTargetMovedError);
     const after = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     expect(after.content).toBe('mine');
@@ -816,13 +817,13 @@ describe('syncGraphFromGithub', () => {
         authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1, authoredAt,
       },
     });
-    await db.$transaction((tx) => updateNodeFromGitSync(tx, original, { loc: 'new-path' }, undefined, dbGraphId));
+    await withIncludeHistoryClientTransaction(db, (tx) => updateNodeFromGitSync(tx, original, { loc: 'new-path' }, undefined, dbGraphId));
     const moved = await db.node.findUniqueOrThrow({ where: { id: original.id } });
     expect(moved).toMatchObject({
       loc: 'new-path', authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1, authoredAt,
     });
 
-    await db.$transaction((tx) => updateNodeFromGitSync(tx, moved, { content: 'new body' }, undefined, dbGraphId));
+    await withIncludeHistoryClientTransaction(db, (tx) => updateNodeFromGitSync(tx, moved, { content: 'new body' }, undefined, dbGraphId));
     expect(await db.node.findUniqueOrThrow({ where: { id: original.id } })).toMatchObject({
       content: 'new body', authorshipKind: null, authoredByTask: null,
       authoredByRevision: null, authoredAt: null,
@@ -1532,7 +1533,7 @@ describe('Channel-protected mirror cleanup (#1226)', () => {
       // The edge insert has reached the target FK and is blocked while the
       // sync transaction still holds the source's complete path lock.
       await waitForLockWaitersOfType(db, 'transactionid', 1);
-      const moving = db.$transaction(async (tx) => {
+      const moving = withIncludeHistoryClientTransaction(db, async (tx) => {
         await acquireLockSet(tx, [
           ...ancestorLocs('moved:source').map((loc) => ({ memoryId: movedMemory.id, loc })),
           ...ancestorLocs(source.loc).map((loc) => ({ memoryId: source.memoryId, loc })),

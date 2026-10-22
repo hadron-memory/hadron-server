@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 /**
  * #1606 — generic paths never create, convert, edit, move or remove a comment
  * (cor:dmo:110:04), and a target's lifecycle carries its threads (110:02/05).
@@ -31,7 +32,7 @@ const as = (userId = admin.id): Context => ({ db, userId, roles: [] });
 /** A comment revision as the comment path wrote them before #1721 (it writes none now). */
 const legacyRevision = async (id: string) => {
   const row = await db.node.findUniqueOrThrow({ where: { id } });
-  await createNodeRevision(db, buildNodeRevisionSnapshot(row, editorFromAuth({ userId: admin.id }), { revLabel: 'edit', changes: ['content'] }));
+  await withIncludeHistoryClientTransaction(db, (tx) => createNodeRevision(tx, buildNodeRevisionSnapshot(row, editorFromAuth({ userId: admin.id }), { revLabel: 'edit', changes: ['content'] })));
 };
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
 const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;

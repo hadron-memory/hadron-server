@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { refuseLegacyBaseUrl, requireEndpointFor, requireKeyFor, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
@@ -205,7 +206,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // the dropped `type` column) and its `visibility` is always NULL
   // (chk_memory_visibility_class forbids a non-null visibility on
   // class='system'); agent visibility does not sync onto it.
-  const createdAgent = await ctx.db.$transaction(async (tx) => {
+  const createdAgent = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
     let resolvedSystemMemoryId: string;
     if (systemMemoryId) {
       const target = await tx.memory.findUniqueOrThrow({ where: { id: systemMemoryId } });
@@ -1327,32 +1328,26 @@ export const agentMutations = {
           }
           await requireAgentAccess(txCtx, current, 'ADMIN');
         },
-        (tx) => tx.agentSubscription.update({
-          where: { userId_agentId: { userId: resolvedUserId, agentId: resolvedAgentId } },
-          data: {
-            revokedAt: new Date(),
-            revokedBy: ctx.userId ?? null,
-          },
-        }),
-        { lockMode: 'exclusive' },
+        async (tx) => {
+          const updated = await tx.agentSubscription.update({
+            where: { userId_agentId: { userId: resolvedUserId, agentId: resolvedAgentId } },
+            data: { revokedAt: new Date(), revokedBy: ctx.userId ?? null },
+          });
+          // FR-029: qualify emptiness in the SAME fenced revocation transaction.
+          // FOR UPDATE excludes a node's FK insertion until the delete commits.
+          const candidates = await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT id FROM memories
+            WHERE user_id = ${resolvedUserId} AND user_memory_of_agent_id = ${resolvedAgentId}
+              AND class IN ('personal', 'private') AND deleted_at IS NULL
+            ORDER BY id LIMIT 1 FOR UPDATE`;
+          for (const candidate of candidates) {
+            await tx.memory.deleteMany({ where: { id: candidate.id, nodes: { none: {} } } });
+          }
+          return updated;
+        },
+        { lockMode: 'exclusive', fence: true },
       );
 
-      // FR-029: empty per-user Memory at revocation time → hard-delete. The
-      // auto-provisioned memory is class='personal' (plaintext USER_ID mode) or
-      // 'private' (encrypted SECRET mode, 041/#516); scope by userMemoryOfAgentId
-      // so free-standing user memories (agent NULL) never match.
-      const userMemory = await ctx.db.memory.findFirst({
-        where: {
-          userId: resolvedUserId,
-          userMemoryOfAgentId: resolvedAgentId,
-          class: { in: ['personal', 'private'] },
-          deletedAt: null,
-        },
-        include: { _count: { select: { nodes: true } } },
-      });
-      if (userMemory && userMemory._count.nodes === 0) {
-        await ctx.db.memory.delete({ where: { id: userMemory.id } });
-      }
 
       return updated;
     },

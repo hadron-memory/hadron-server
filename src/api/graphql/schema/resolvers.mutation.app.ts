@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
@@ -471,7 +472,7 @@ export const appMutations = {
           await assertNoWorkers(ctx.db, existing.id, appUrn, 'reclaim');
           // #1468 — the delete cascades the App's memories: refused while one
           // is a stamped corpus still holding a spec.
-          await ctx.db.$transaction(async (tx) => {
+          await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
             await assertNoInstallMemories(tx, existing.id, appUrn);
             await detachAppOwnerMemories(tx, [existing.id]);
             const doomed = await tx.memory.findMany({ where: { appId: existing.id }, select: { id: true } });
@@ -673,7 +674,7 @@ export const appMutations = {
               // castings and recycle their permanently-reserved names.
               await assertNoWorkers(ctx.db, depCollision.id, depUrn, 'reclaim');
               // #1468 — same cascade rule as the parent App branch.
-              await ctx.db.$transaction(async (tx) => {
+              await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
                 await assertNoInstallMemories(tx, depCollision.id, depUrn);
                 await detachAppOwnerMemories(tx, [depCollision.id]);
                 const doomed = await tx.memory.findMany({ where: { appId: depCollision.id }, select: { id: true } });

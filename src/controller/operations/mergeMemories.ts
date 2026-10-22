@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../lib/includes/includeHistoryFence.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptMergeCollisions, assertNoBootPromptRows, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
 import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
@@ -531,7 +532,7 @@ async function runMerge(
       // authoritative inside.
       for (let i = 0; i < relocateIds.length; i += batchSize) {
         const ids = relocateIds.slice(i, i + batchSize);
-        const moved = await db.$transaction(async (tx) => {
+        const moved = await withIncludeHistoryClientTransaction(db, async (tx) => {
           let rows = await tx.node.findMany({
             where: { id: { in: ids }, memoryId: sourceMemoryId, deletedAt: null },
           });
@@ -680,7 +681,7 @@ async function runMerge(
   for (let i = 0; i < collidingSrcIds.length; i += batchSize) {
     const batchIds = collidingSrcIds.slice(i, i + batchSize);
 
-    const batch = await db.$transaction(async (tx) => {
+    const batch = await withIncludeHistoryClientTransaction(db, async (tx) => {
       let moved = 0;
       let dropped = 0;
 
@@ -975,7 +976,7 @@ async function runMerge(
     );
     const drop = edges.filter((e) => taken.has(e.loc)).map((e) => e.id);
     const move = edges.filter((e) => !taken.has(e.loc)).map((e) => e.id);
-    await db.$transaction(async (tx) => {
+    await withIncludeHistoryClientTransaction(db, async (tx) => {
       await lockMergeMemoryRows(tx);
       if (drop.length > 0) await tx.edge.deleteMany({ where: { id: { in: drop } } });
       if (move.length > 0) {
@@ -997,7 +998,7 @@ async function runMerge(
     });
     for (let i = 0; i < tagged.length; i += batchSize) {
       const ids = tagged.slice(i, i + batchSize).map((n) => n.id);
-      await db.$transaction((tx) => resyncDerivedIncludesForNodes(tx, ids), BATCH_TX_OPTS);
+      await withIncludeHistoryClientTransaction(db, (tx) => resyncDerivedIncludesForNodes(tx, ids), BATCH_TX_OPTS);
     }
   }
 
@@ -1008,7 +1009,7 @@ async function runMerge(
     // created between the last batch and this update would otherwise let a
     // merge soft-delete a memory that now HOSTS one — the normal delete path
     // locks and re-checks for exactly this reason, and this one did not.
-    await db.$transaction(async (tx) => {
+    await withIncludeHistoryClientTransaction(db, async (tx) => {
       // `'all'`, not the batch form with an empty row list — that would make
       // the check vacuous, since an empty loc list overlaps nothing. Deleting
       // the memory puts EVERY address in it out of reach, so any Channel at all

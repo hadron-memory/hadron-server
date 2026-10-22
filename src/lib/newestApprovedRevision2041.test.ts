@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from './includes/includeHistoryFence.js';
 /**
  * #2041 (cor:dmo:150:05) — newestApprovedRevisionOf: the newest revision the
  * #1838 predicate reads APPROVED; a newer unapproved edit is skipped.
@@ -88,7 +89,7 @@ describe('newestApprovedRevisionOf (#2041)', () => {
     await approve(n.id);
     await edit(n.id, 'v2');
     expect((await newestApprovedRevisionOf(db, n.id)).found).not.toBeNull();
-    await db.$transaction((tx) => endApprovalsOnEncryptedEntry(tx, { nodeIds: [n.id] }));
+    await withIncludeHistoryClientTransaction(db, (tx) => endApprovalsOnEncryptedEntry(tx, { nodeIds: [n.id] }));
     expect((await newestApprovedRevisionOf(db, n.id)).found).toBeNull();
   });
 

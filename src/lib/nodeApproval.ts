@@ -1,3 +1,4 @@
+import { assertIncludeHistoryClient } from './includes/includeHistoryFence.js';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from './comments/index.js';
 import { DECISION_LOG_ROLE, isDecisionFamilyRole } from './decisions/index.js';
@@ -168,6 +169,7 @@ export async function approveNodeInTransaction(
     bootPromptGate: BootPromptApprovalGate;
   },
 ): Promise<{ node: NodeApprovalRow; approvedNow: boolean }> {
+  assertIncludeHistoryClient(tx);
   // #2043 (R30, cor:agt:040:18) — judged on the LOCKED row, before the revision
   // reconcile below can write anything: a refusal changes nothing.
   const gate = opts.bootPromptGate;
@@ -528,6 +530,7 @@ export async function endApprovalsOnEncryptedEntry(
   tx: Prisma.TransactionClient,
   scope: { nodeIds: string[] } | { memoryId: string },
 ): Promise<void> {
+  assertIncludeHistoryClient(tx);
   if ('nodeIds' in scope && scope.nodeIds.length === 0) return;
   // By memory: every node the memory holds (tombstones included) and every
   // snapshot of those nodes, whichever memory captured it (a node moved in

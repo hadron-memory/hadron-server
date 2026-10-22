@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 /**
  * Integration tests for Query.resolveUrn (hadron-portal#262).
  *
@@ -290,10 +291,9 @@ describe('Query.resolveUrn — #696 per-entity v2 shapes', () => {
   it('mints monotonic revNo and resolves the noderev URN (round-trips)', async () => {
     const editor = { userId: member.id };
     const snap = () =>
-      createNodeRevision(
-        db,
+      withIncludeHistoryClientTransaction(db, (tx) => createNodeRevision(tx,
         buildNodeRevisionSnapshot({ ...node, memoryId: memory.id, loc: NODE_LOC, name: 'Topic' } as never, editor),
-      );
+      ));
     await snap();
     await snap();
 

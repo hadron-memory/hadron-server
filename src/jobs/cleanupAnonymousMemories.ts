@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../lib/includes/includeHistoryFence.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { DECISION_FAMILY_WHERE } from '../lib/decisions/index.js';
 
@@ -9,7 +10,7 @@ import { DECISION_FAMILY_WHERE } from '../lib/decisions/index.js';
  * Returns the number of rows deleted.
  */
 export async function cleanupAnonymousMemories(db: PrismaClient): Promise<number> {
-  const result = await db.memory.deleteMany({
+  const result = await withIncludeHistoryClientTransaction(db, (tx) => tx.memory.deleteMany({
     where: {
       anonymousExpiresAt: { lt: new Date() },
       userMemoryOfAgentId: { not: null },
@@ -20,7 +21,7 @@ export async function cleanupAnonymousMemories(db: PrismaClient): Promise<number
       // #1641 §3.2 — nor one holding a decision or a decision log (Q17).
       nodes: { none: DECISION_FAMILY_WHERE },
     },
-  });
+  }));
   return result.count;
 }
 

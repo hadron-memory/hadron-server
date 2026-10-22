@@ -8,6 +8,7 @@
  * Every transition runs inside the caller's transaction with the node row
  * locked first (the approval lock order), then the request row.
  */
+import { assertIncludeHistoryClient } from '../includes/includeHistoryFence.js';
 import { randomBytes } from 'node:crypto';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../comments/index.js';
@@ -151,6 +152,7 @@ export async function createSigningRequestInTransaction(
  * NOT_FOUND, the same as an unknown id.
  */
 async function lockRequest(tx: Prisma.TransactionClient, requestId: string, memoryId: string) {
+  assertIncludeHistoryClient(tx);
   const peek = await tx.signingRequest.findUnique({ where: { id: requestId }, select: { nodeId: true } });
   if (!peek) throw new SigningRefusal('SIGNING_REQUEST_NOT_FOUND', 'Signing request not found');
   const [node] = await tx.$queryRaw<Array<{ id: string; memory_id: string }>>`

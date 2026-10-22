@@ -35,7 +35,7 @@ import {
   ROLES_BRANCH_PREFIX,
 } from './resolvers.worker.js';
 import { templateBindsName } from '../../../lib/personaDescription.js';
-import { writeNodeCore, nodeMutations } from './resolvers.mutation.node.js';
+import { writeNodeCore, deleteNodeInTransaction } from './resolvers.mutation.node.js';
 import {
   type Context,
   requireMemoryWriteAccess,
@@ -346,7 +346,8 @@ async function writeTeamRole(
   // role writes can each observe a name absent and both persist it, and a
   // register-mode cast can interleave with a removal. castWorker's register
   // mode takes the same lock, so cast-vs-edit serializes too.
-  return withRoleWriteLock(ctx, systemMemoryId, async () => {
+  return withRoleWriteLock(ctx, systemMemoryId, async (_tx, ctx, transaction) => {
+    await requireMemoryWriteAccess(ctx, systemMemoryId);
     const allNodes = await loadRoleNodes(ctx, systemMemoryId);
     const existing = allNodes.find((n) => n.loc === loc) ?? null;
 
@@ -441,7 +442,7 @@ async function writeTeamRole(
         },
         ctx,
         mode,
-        mode === 'update'
+        { ...(mode === 'update'
           ? {
               targetNodeId: existing!.id,
               // Only when this write carries data. A description-only edit stays
@@ -458,7 +459,7 @@ async function writeTeamRole(
             // The refusal itself is correct; the residue is an audit artifact.
             ...(wantsRepoWrite ? { guardRevSeq: existing!.revSeq } : {}),
             }
-          : undefined,
+          : undefined), transaction },
       );
     } catch (e) {
       // #1024: the guard fired. Translate rather than leak the generic node
@@ -546,7 +547,8 @@ async function deleteTeamRoleImpl(
   const systemMemoryId = teamAgent.systemMemoryId;
   const loc = `${ROLES_BRANCH_PREFIX}${role}`;
 
-  return withRoleWriteLock(ctx, systemMemoryId, async () => {
+  return withRoleWriteLock(ctx, systemMemoryId, async (_tx, ctx, transaction) => {
+    await requireMemoryWriteAccess(ctx, systemMemoryId);
     const allNodes = await loadRoleNodes(ctx, systemMemoryId);
     const existing = allNodes.find((n) => n.loc === loc) ?? null;
     if (!existing) {
@@ -583,7 +585,7 @@ async function deleteTeamRoleImpl(
         select: { id: true },
       })
     ).map((n) => n.id);
-    await nodeMutations.deleteNode(null, { nodeRef: existing.id, recursive: true }, ctx);
+    await deleteNodeInTransaction({ nodeRef: existing.id, recursive: true }, ctx, transaction);
 
     return {
       role,

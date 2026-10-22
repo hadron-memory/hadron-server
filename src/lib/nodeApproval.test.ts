@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from './includes/includeHistoryFence.js';
 /** #1591: approving a node's current revision, its status reads, and the tamper check. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
@@ -140,7 +141,7 @@ describe('approve racing an edit (#1591)', () => {
     const gate = new Promise<void>((r) => { release = r; });
     let locked!: () => void;
     const isLocked = new Promise<void>((r) => { locked = r; });
-    const done = db.$transaction(async (tx) => {
+    const done = withIncludeHistoryClientTransaction(db, async (tx) => {
       await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
       const current = await tx.node.findUniqueOrThrow({ where: { id } });
       await createNodeRevision(tx, { id: generateId(), ...buildNodeRevisionSnapshot(current, { userId: admin.id }, { changes: ['content'] }) });
@@ -156,7 +157,7 @@ describe('approve racing an edit (#1591)', () => {
     const n = await node('a:1');
     const held = await holdEdit(n.id, 'edited meanwhile');
     const approving = codeOf(approve(n.id, { revision: 1 }));
-    await waitForLockWaitersOfType(db, 'transactionid');
+    await waitForLockWaitersOfType(db, 'advisory');
     held.release();
     await held.done;
     expect(await approving).toBe('REVISION_MISMATCH');
@@ -167,7 +168,7 @@ describe('approve racing an edit (#1591)', () => {
     const n = await node('a:1');
     const held = await holdEdit(n.id, 'edited meanwhile');
     const approving = approve(n.id);
-    await waitForLockWaitersOfType(db, 'transactionid');
+    await waitForLockWaitersOfType(db, 'advisory');
     held.release();
     await held.done;
     const { approval } = await approving;

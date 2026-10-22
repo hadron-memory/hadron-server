@@ -7,6 +7,7 @@
  * (the ONE qualifying row on this browser, as for registration) and must own the in-window passkey (Rook, #1631
  * 6316353964). The window's end is recorded with the platform clock; its pending signatures then stop being pending.
  */
+import { withIncludeHistoryTransaction, includeHistoryClient } from '../includes/includeHistoryFence.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { consumeFreshSignIn, FRESH_SIGN_IN_MAX_AGE_SECONDS } from './freshSignIn.js';
@@ -23,7 +24,8 @@ export async function endWindowEarly(db: PrismaClient, input: { signInBrowserHas
   const peek = await qualifying(db);
   if (peek.length !== 1) return null;
   const { user_id: userId } = peek[0];
-  return db.$transaction(async (tx) => {
+  return withIncludeHistoryTransaction(db, async (history) => {
+    const tx = includeHistoryClient(history);
     await lockAuthorityAnchors(tx, [{ kind: 'user', id: userId }], 'exclusive');
     if (!(await tx.user.findFirst({ where: { id: userId, deletedAt: null }, select: { id: true } }))) return null;
     const recheck = await qualifying(tx);

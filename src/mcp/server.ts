@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../lib/includes/includeHistoryFence.js';
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
 import { assertBootPromptWriteAllowed, assertNoBootPromptRows } from '../lib/bootPrompt.js';
@@ -754,6 +755,19 @@ export type AddEdgeResult =
   | { error: string }
   | { sourceUrn: string; targetUrn: string; edgeUrn: string; name: string | null; loc: string };
 
+/** Refresh the presented writer after waiting on the outer history fence. */
+async function withLiveMcpHistoryTransaction<T>(
+  database: Pick<typeof db, '$transaction'>,
+  presented: AuthContext,
+  work: (tx: Prisma.TransactionClient, auth: AuthContext) => Promise<T>,
+  options: { timeout?: number; maxWait?: number } = {},
+): Promise<T> {
+  return withIncludeHistoryClientTransaction(database, async (tx) => {
+    const fresh = await liveTxContext({ ...presented, db: database as typeof db }, tx);
+    return work(tx, { ...presented, roles: fresh.roles });
+  }, options);
+}
+
 export async function addEdge(args: {
   sourceUrn: string;
   targetUrn: string;
@@ -871,7 +885,7 @@ export async function addEdge(args: {
     throw e;
   }
 
-  const writeError = await db.$transaction(async (tx): Promise<string | null> => {
+  const writeError = await withLiveMcpHistoryTransaction(db, auth, async (tx, auth): Promise<string | null> => {
     const locked = await lockLiveEdgeEndpoints(
       tx,
       sourceNode,
@@ -974,7 +988,7 @@ export async function replaceOutgoingEdges(args: {
   createdBy: string | null;
 }): Promise<string | null> {
   try {
-    return await db.$transaction(async (tx) => {
+    return await withIncludeHistoryClientTransaction(db, async (tx) => {
       await lockOutgoingEdgeMemories(tx, args.sourceMemoryId, args.resolved);
       return replaceOutgoingEdgesInTransaction(tx, args);
     });
@@ -4006,7 +4020,7 @@ export function createMcpServerInstance(
       // was otherwise overwritable here (Codex P1 on PR #1165).
       let sectionId: string;
       try {
-        sectionId = await db.$transaction(async (tx) => {
+        sectionId = await withLiveMcpHistoryTransaction(db, auth, async (tx, auth) => {
           // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
           await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           await lockAncestorsForCreate(tx, memoryId, loc);
@@ -6240,7 +6254,7 @@ export function createMcpServerInstance(
 
       let upserted;
       try {
-        upserted = await db.$transaction(async (tx) => {
+        upserted = await withLiveMcpHistoryTransaction(db, auth, async (tx, auth) => {
           // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
           await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           if (resolvedEdges !== null) {
@@ -6650,7 +6664,7 @@ export function createMcpServerInstance(
         // under it — the check above is the fast refusal, this the
         // authoritative one (Copilot on PR #1165).
         try {
-          await db.$transaction(async (tx) => {
+          await withLiveMcpHistoryTransaction(db, auth, async (tx, auth) => {
             // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
             await lockAgentDefinitionAuthority(tx, auth.userId ?? null, existing.memoryId);
             if (resolvedEdges !== null) {
@@ -7384,7 +7398,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
 
       // #449 — source memories whose pending-edge count a hard delete changed.
       let pendingSourceMemories: string[] = [];
-      const result: DeleteResult = await db.$transaction(async (tx) => {
+      const result: DeleteResult = await withLiveMcpHistoryTransaction(db, auth, async (tx, auth) => {
         // Keep the dead-Channel cleanup verdict stable through the delete.
         // Channel resurrection takes this same key before any loc key.
         await lockMemoryForChannelChange(tx, memory.id);
@@ -7702,7 +7716,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let relocated: MoveNodeSubtreeResult['moved'] = [];
       let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
       try {
-        result = await db.$transaction(async (tx) => {
+        result = await withLiveMcpHistoryTransaction(db, auth, async (tx, auth) => {
           // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
           await lockAgentDefinitionAuthority(tx, auth.userId ?? null, [fromMemory.id, toMemory.id]);
           // #664/#752: moving a node INTO a subtree is the same orphan vector as

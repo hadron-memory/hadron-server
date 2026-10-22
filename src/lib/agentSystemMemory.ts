@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from './includes/includeHistoryFence.js';
 /**
  * Agent ↔ system-memory tenancy (#949).
  *
@@ -233,7 +234,7 @@ export async function repairAgentSystemMemoryOwner(
 
   const derivedUrn = `${agent.urn}-system`;
   const actor = opts.actorId ?? null;
-  return db.$transaction(async (tx) => {
+  return withIncludeHistoryClientTransaction(db, async (tx) => {
     let urn = memory.urn;
     let urnNote: string | undefined;
     if (memory.urn !== derivedUrn) {

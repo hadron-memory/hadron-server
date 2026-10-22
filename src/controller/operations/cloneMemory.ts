@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../lib/includes/includeHistoryFence.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -144,7 +145,7 @@ export async function cloneMemoryGraph(
   db: PrismaClient,
   args: CloneMemoryArgs,
 ): Promise<CloneMemoryResult> {
-  return db.$transaction(
+  return withIncludeHistoryClientTransaction(db,
     async (tx) => {
       const source = await tx.memory.findUniqueOrThrow({
         where: { id: args.sourceMemoryId },

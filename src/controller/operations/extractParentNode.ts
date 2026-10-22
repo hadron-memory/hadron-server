@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../lib/includes/includeHistoryFence.js';
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -105,7 +106,7 @@ export async function extractParentNodeGraph(
   db: PrismaClient,
   args: ExtractParentNodeArgs,
 ): Promise<ExtractParentNodeResult> {
-  return db.$transaction(
+  return withIncludeHistoryClientTransaction(db,
     async (tx) => {
       const source = await tx.memory.findUniqueOrThrow({ where: { id: args.sourceMemoryId } });
 

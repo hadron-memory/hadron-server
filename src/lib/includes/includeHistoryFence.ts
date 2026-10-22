@@ -94,3 +94,27 @@ export async function withIncludeHistoryTransaction<T>(
     timeout,
   });
 }
+
+/**
+ * Bridge existing client callbacks at their OUTER transaction entry. This
+ * opens the prepared fence before any callback statement; it never upgrades
+ * or reuses an unprepared transaction and offers no isolation override.
+ */
+export function withIncludeHistoryClientTransaction<T>(
+  db: Pick<PrismaClient, '$transaction'>,
+  work: (tx: Prisma.TransactionClient) => Promise<T>,
+  options: { timeout?: number; maxWait?: number } = {},
+): Promise<T> {
+  return withIncludeHistoryTransaction(db, (history) => work(includeHistoryClient(history)), {
+    timeoutMs: options.timeout,
+    maxWaitMs: options.maxWait,
+  });
+}
+
+/** A legacy client-shaped helper still needs the SAME live opaque outer proof. */
+export function assertIncludeHistoryClient(client: unknown): void {
+  const history = current.getStore();
+  if (!history || includeHistoryClient(history) !== client) {
+    throw new Error('A live prepared include-history client is required before revision or qualification work');
+  }
+}
