@@ -147,8 +147,7 @@ source/address renames. `renameOwnerNamespacedUrns` bypasses snapshot APIs and
 can raw-delete tombstoned Memories/Agents before rewriting the namespace.
 `propagateOrgUrnRename` rewrites addresses/aliases without history deletion.
 The briefly integrated owner-handle change was removed when the scope ruling
-arrived; historical owner-inclusive evidence is superseded. Marco will file the
-follow-up on Xylon's ruling. Do not treat this PR as a complete global
+arrived; historical owner-inclusive evidence is superseded. Marco filed #2274 on Xylon's ruling. Do not treat this PR as a complete global
 source-writer fence or as authority to activate compile.
 
 Basil #30977 confirms #2263 owns setAgentBase, retireWorker, grant create/revoke,
@@ -159,16 +158,25 @@ operations and node-read reconciliation. It owns neither App deletion/reclaim
 nor source/address writers. The subscription-revoker overlap is resolved in
 evidence by retaining the cleanup inside the same F-first authorized transaction.
 
+Memory clone/extract and each bounded merge batch refresh authorization on the
+same prepared client before reconciliation or graph work. The explicit reuse
+option rejects raw or escaped clients and cannot open a nested transaction.
+An owner-scope change refuses the whole prepared attempt: it cannot retry while
+holding the old authority anchors. Channel keys precede Memory row locks; final
+merge cleanup takes source UPDATE and target NO KEY UPDATE on first acquisition.
+A real key revocation between committed merge batches stops the next batch and
+preserves the partial receipt (250 relocated, one remaining, source retained).
+
 ## Evidence and remaining gates
 
-- Current delivery controls: qualification51, role40 (including two red-first
+- Current delivery controls: qualification66, role40 (including two red-first
   App-wait refusals), restore/provenance38, encryption104 pass locally. Test
   counts overlap; they are never summed as unique controls.
-- Scoped combined predecessor `22d364a3` composes exact held heads #2263
+- Scoped combined predecessor `badc7f00` composes exact held heads #2263
   `417253fd043c7910db73dc138facccde5cd2c73a`, #2258
-  `c65e694a1a192d41078f73215082a1966bab6d79`, and deliveryb2ff8fc9. Its
-  qualification/actual-compile/account/role matrix213 passes. The current MCP
-  order and generic-caller additions must be merged into a refreshed tree.
+  `c65e694a1a192d41078f73215082a1966bab6d79`, and deliveryad2e8f8c. Its
+  qualification/actual-compile/account/role matrix285 passes. The current controller
+  authorization additions must be merged into a refreshed tree.
 - The full diagnostic run at immutable predecessor48d3aa15 completed with
   848 passing files and 44 failures across12 files. It found legacy helper transactions, missing live ADMIN actors, old lock-wait
   assumptions and a nested real-writer test hook. Focused repairs preserve the

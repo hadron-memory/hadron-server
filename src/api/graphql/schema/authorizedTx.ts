@@ -1,7 +1,7 @@
 import { Prisma } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
-import { includeHistoryClient, withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
+import { assertIncludeHistoryClient, includeHistoryClient, withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { type Context, withoutRequestCaches } from './resolvers.helpers.js';
 
 /**
@@ -35,6 +35,12 @@ export async function withAuthorizedTx<T>(
      * no isolation override, so combining it with `isolationLevel` is refused before any work.
      */
     fence?: boolean;
+    /** Explicit same-client reuse; only a live prepared outer transaction is accepted. */
+    preparedTransaction?: Prisma.TransactionClient;
+    /** Existing operation keys that must precede its first Memory row lock. */
+    beforeMemoryRows?: (tx: Prisma.TransactionClient) => Promise<void>;
+    /** Acquire an operation's eventual stronger Memory lock first, never by upgrade. */
+    memoryRowLocks?: ReadonlyMap<string, 'update' | 'no-key-update'>;
   } = {},
 ): Promise<T> {
   if (options.fence && options.isolationLevel !== undefined) {
@@ -57,13 +63,24 @@ export async function withAuthorizedTx<T>(
     // Owner rows precede child rows, matching rename/transfer cascades. SHARE
     // (rather than KEY SHARE) makes a SERIALIZABLE waiter fail with 40001 if a
     // revoker soft-deleted or re-roled an anchor row before the lock arrived.
+    let preparedMemoryRows = false;
     for (const anchor of uniqueRows) {
+      if (anchor.kind === 'memory' && !preparedMemoryRows) {
+        await options.beforeMemoryRows?.(tx);
+        preparedMemoryRows = true;
+      }
       switch (anchor.kind) {
         case 'org':
           await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${anchor.id} FOR SHARE`;
           break;
         case 'memory':
-          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${anchor.id} FOR SHARE`;
+          if (options.memoryRowLocks?.get(anchor.id) === 'update') {
+            await tx.$queryRaw`SELECT id FROM memories WHERE id = ${anchor.id} FOR UPDATE`;
+          } else if (options.memoryRowLocks?.get(anchor.id) === 'no-key-update') {
+            await tx.$queryRaw`SELECT id FROM memories WHERE id = ${anchor.id} FOR NO KEY UPDATE`;
+          } else {
+            await tx.$queryRaw`SELECT id FROM memories WHERE id = ${anchor.id} FOR SHARE`;
+          }
           break;
         case 'app':
           await tx.$queryRaw`SELECT id FROM apps WHERE id = ${anchor.id} FOR SHARE`;
@@ -121,6 +138,13 @@ export async function withAuthorizedTx<T>(
     await authorize(txCtx);
     return write(tx, txCtx);
   };
+  if (options.preparedTransaction) {
+    assertIncludeHistoryClient(options.preparedTransaction);
+    if (options.fence || options.isolationLevel !== undefined || options.timeout !== undefined) {
+      throw new Error('The prepared transaction already owns its fence, isolation and budget');
+    }
+    return body(options.preparedTransaction);
+  }
   if (options.fence) {
     return withIncludeHistoryTransaction(ctx.db, (fence) => body(includeHistoryClient(fence)), {
       timeoutMs: options.timeout ?? 30_000,
@@ -155,8 +179,15 @@ export async function withAuthorizedMemoryTx<T>(
     allowDeletedOrg?: boolean;
     /** Opt in before authority anchors; same contract as withAuthorizedTx. */
     fence?: boolean;
+    /** Explicit same-client reuse; only a live prepared outer transaction is accepted. */
+    preparedTransaction?: Prisma.TransactionClient;
+    /** Existing operation keys that must precede its first Memory row lock. */
+    beforeMemoryRows?: (tx: Prisma.TransactionClient) => Promise<void>;
+    /** Acquire an operation's eventual stronger Memory lock first, never by upgrade. */
+    memoryRowLocks?: ReadonlyMap<string, 'update' | 'no-key-update'>;
   } = {},
 ): Promise<T> {
+  if (options.preparedTransaction) assertIncludeHistoryClient(options.preparedTransaction);
   for (let attempt = 0; attempt < 3; attempt++) {
     const owner = await ctx.db.memory.findUnique({
       where: { id: memoryId },
@@ -184,7 +215,12 @@ export async function withAuthorizedMemoryTx<T>(
         },
       });
     } catch (error) {
-      if (error instanceof AuthorityScopeChanged) continue;
+      if (error instanceof AuthorityScopeChanged) {
+        // A prepared root still holds the old anchors. Retrying here would add a changed
+        // authority set after those locks; only a fresh outer transaction may retry.
+        if (options.preparedTransaction) throw authorizationDenied('Memory ownership changed; retry the operation');
+        continue;
+      }
       throw error;
     }
   }

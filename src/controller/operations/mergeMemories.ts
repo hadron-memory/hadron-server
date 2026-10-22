@@ -123,6 +123,8 @@ export interface MergeMemoryArgs {
    * Omitted only by server-authored callers.
    */
   principal?: RoleWriterPrincipal;
+  /** Recheck external authority for each actual batch, including final disposition. */
+  authorize?: (tx: Prisma.TransactionClient, phase: 'batch' | 'delete-source') => Promise<RoleWriterPrincipal | undefined>;
   /** Nodes folded / edges drained per inner transaction. Test seam; defaults to MERGE_BATCH_SIZE. */
   batchSize?: number;
   /** Source nodes scanned per classify+relocate page. Test seam; defaults to CLASSIFY_PAGE. */
@@ -273,6 +275,14 @@ async function runMerge(
 ): Promise<MergeMemoryResult> {
   const { sourceMemoryId, targetMemoryId, fields, deleteSourceMem, editor } = args;
   const actorId = editor.userId ?? editor.info ?? null;
+  const authorizedBatch = <T>(
+    work: (tx: Prisma.TransactionClient, principal: RoleWriterPrincipal | undefined) => Promise<T>,
+    options: { timeout?: number; maxWait?: number } = {},
+    phase: 'batch' | 'delete-source' = 'batch',
+  ): Promise<T> => withIncludeHistoryClientTransaction(db, async (tx) => {
+    const principal = args.authorize ? await args.authorize(tx, phase) : args.principal;
+    return work(tx, principal);
+  }, options);
   // Clamp to >= 1: a zero/negative batchSize (the test seam is public) would
   // never advance the fold loop and spin forever.
   const batchSize = Math.max(1, Math.floor(args.batchSize ?? MERGE_BATCH_SIZE));
@@ -532,7 +542,7 @@ async function runMerge(
       // authoritative inside.
       for (let i = 0; i < relocateIds.length; i += batchSize) {
         const ids = relocateIds.slice(i, i + batchSize);
-        const moved = await withIncludeHistoryClientTransaction(db, async (tx) => {
+        const moved = await authorizedBatch(async (tx, principal) => {
           let rows = await tx.node.findMany({
             where: { id: { in: ids }, memoryId: sourceMemoryId, deletedAt: null },
           });
@@ -540,8 +550,8 @@ async function runMerge(
           // protocol. This first gate acquires them and gives a fast refusal;
           // the second gate below rechecks the authoritative post-loc-lock rows.
           await assertBatchMutable(tx, [sourceMemoryId, targetMemoryId], rows, 'merge');
-          if (args.principal) {
-            await assertRoleWritersForNodes(tx, args.principal, rows, { from: sourceMemoryId, to: targetMemoryId });
+          if (principal) {
+            await assertRoleWritersForNodes(tx, principal, rows, { from: sourceMemoryId, to: targetMemoryId });
           }
           await acquireLockSet(
             tx,
@@ -588,8 +598,8 @@ async function runMerge(
           // #2043 — the preflight boot-prompt scan is fail-fast only: a role set or a
           // compiled node created after it is caught here, on the locked rows.
           await assertNoBootPromptRows(tx, rows.map((r) => r.id), 'merge');
-          if (args.principal) {
-            await assertRoleWritersForNodes(tx, args.principal, rows, { from: sourceMemoryId, to: targetMemoryId });
+          if (principal) {
+            await assertRoleWritersForNodes(tx, principal, rows, { from: sourceMemoryId, to: targetMemoryId });
           }
           // #1323 (@codex P1, PR #1339): reconcile unrevisioned drift as each
           // row's OWN revision before its relocation snapshot, under the row
@@ -681,7 +691,7 @@ async function runMerge(
   for (let i = 0; i < collidingSrcIds.length; i += batchSize) {
     const batchIds = collidingSrcIds.slice(i, i + batchSize);
 
-    const batch = await withIncludeHistoryClientTransaction(db, async (tx) => {
+    const batch = await authorizedBatch(async (tx, principal) => {
       let moved = 0;
       let dropped = 0;
 
@@ -769,9 +779,9 @@ async function runMerge(
       // #2043 — authoritative boot-prompt recheck on the locked source AND target rows
       // (the preflight collision scan cannot see a role or compiled node added since).
       await assertNoBootPromptRows(tx, [...srcRows, ...tgtRows].map((r) => r.id), 'merge');
-      if (args.principal) {
-        await assertRoleWritersForNodes(tx, args.principal, srcRows, { from: sourceMemoryId, to: targetMemoryId });
-        await assertRoleWritersForNodes(tx, args.principal, tgtRows, { from: targetMemoryId });
+      if (principal) {
+        await assertRoleWritersForNodes(tx, principal, srcRows, { from: sourceMemoryId, to: targetMemoryId });
+        await assertRoleWritersForNodes(tx, principal, tgtRows, { from: targetMemoryId });
       }
       const foldedIds: string[] = []; // source rows actually folded → safe to delete
 
@@ -976,7 +986,7 @@ async function runMerge(
     );
     const drop = edges.filter((e) => taken.has(e.loc)).map((e) => e.id);
     const move = edges.filter((e) => !taken.has(e.loc)).map((e) => e.id);
-    await withIncludeHistoryClientTransaction(db, async (tx) => {
+    await authorizedBatch(async (tx, principal) => {
       await lockMergeMemoryRows(tx);
       if (drop.length > 0) await tx.edge.deleteMany({ where: { id: { in: drop } } });
       if (move.length > 0) {
@@ -998,7 +1008,7 @@ async function runMerge(
     });
     for (let i = 0; i < tagged.length; i += batchSize) {
       const ids = tagged.slice(i, i + batchSize).map((n) => n.id);
-      await withIncludeHistoryClientTransaction(db, (tx) => resyncDerivedIncludesForNodes(tx, ids), BATCH_TX_OPTS);
+      await authorizedBatch((tx) => resyncDerivedIncludesForNodes(tx, ids), BATCH_TX_OPTS);
     }
   }
 
@@ -1009,7 +1019,7 @@ async function runMerge(
     // created between the last batch and this update would otherwise let a
     // merge soft-delete a memory that now HOSTS one — the normal delete path
     // locks and re-checks for exactly this reason, and this one did not.
-    await withIncludeHistoryClientTransaction(db, async (tx) => {
+    await authorizedBatch(async (tx, principal) => {
       // `'all'`, not the batch form with an empty row list — that would make
       // the check vacuous, since an empty loc list overlaps nothing. Deleting
       // the memory puts EVERY address in it out of reach, so any Channel at all
@@ -1026,7 +1036,7 @@ async function runMerge(
       // #1468 — the source memory's deletion: whatever the batches left.
       await assertNoMintedCorpusRemoval(tx, sourceMemoryId, 'merge out of its corpus', { includeTombstones: false });
       await tx.memory.update({ where: { id: sourceMemoryId }, data: { deletedAt: new Date() } });
-    });
+    }, {}, 'delete-source');
   }
 
   return progress;

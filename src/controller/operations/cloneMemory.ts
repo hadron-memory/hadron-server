@@ -127,6 +127,8 @@ export interface CloneMemoryArgs {
   actorId: string | null;
   /** #2167 — memories the copier may read (`getAccessibleMemoryIds`); `null` = unrestricted. */
   copierReadableMemoryIds: ReadableMemoryIds;
+  /** Recheck an external caller under this prepared outer transaction before any copy/reconciliation. */
+  authorize?: (tx: Prisma.TransactionClient) => Promise<ReadableMemoryIds>;
 }
 
 export interface CloneMemoryResult {
@@ -147,6 +149,7 @@ export async function cloneMemoryGraph(
 ): Promise<CloneMemoryResult> {
   return withIncludeHistoryClientTransaction(db,
     async (tx) => {
+      const copierReadableMemoryIds = args.authorize ? await args.authorize(tx) : args.copierReadableMemoryIds;
       const source = await tx.memory.findUniqueOrThrow({
         where: { id: args.sourceMemoryId },
       });
@@ -363,7 +366,7 @@ export async function cloneMemoryGraph(
       }
       // #2167 — every copied tag is an added tag, checked after the URN rewrite.
       const copiedIds = nodeRows.map((r) => r.id as string);
-      await assertCopiedIncludesWritable(tx, copiedIds, memoryId, args.copierReadableMemoryIds);
+      await assertCopiedIncludesWritable(tx, copiedIds, memoryId, copierReadableMemoryIds);
       // #2040 — the copies' include edges are re-derived from their content.
       await resyncDerivedIncludesForNodes(tx, copiedIds);
 
