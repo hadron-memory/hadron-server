@@ -187,7 +187,7 @@ describe('#2045 gate (R23): the manager as themselves, never a worker session', 
     for (const e of errors) expect(e).toEqual(errors[0]);
   });
 
-  it('a user-owned Agent: its owner manages it; an org admin and a platform admin do not', async () => {
+  it('a user-owned Agent: its owner and a platform admin manage it (cor:dmo:050:13); an org admin does not', async () => {
     const f = await fixture();
     const owner = await user('owner');
     const mem = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'u-sys', urn: 'u:u-sys', ownerUserId: owner.id } });
@@ -196,7 +196,7 @@ describe('#2045 gate (R23): the manager as themselves, never a worker session', 
     const target: BootPromptPointerTarget = { field: 'AGENT', agentId: agent.id };
     expect(await codeOf(write(ctxOf(f.admin.id), target, node.id))).toBe('FORBIDDEN');
     const platform = await db.user.create({ data: { id: generateId(), name: 'platform', roles: ['ADMIN'] } });
-    expect(await codeOf(write(ctxOf(platform.id, { roles: ['ADMIN'] } as Partial<Context>), target, node.id))).toBe('FORBIDDEN');
+    expect(await write(ctxOf(platform.id, { roles: ['ADMIN'] } as Partial<Context>), target, node.id)).toMatchObject({ nodeId: node.id });
     expect(await write(ctxOf(owner.id), target, node.id)).toMatchObject({ nodeId: node.id });
   });
 

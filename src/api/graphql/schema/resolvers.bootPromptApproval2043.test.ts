@@ -54,6 +54,7 @@ async function fixture() {
   await db.orgMember.create({ data: { organizationId: orgId, userId: writer.id, role: 'CONTRIBUTOR' } });
   const appOwner = await user('appowner');
   const owner = await user('owner');
+  const platform = await db.user.create({ data: { id: generateId(), name: 'platform', handle: `ba-platform-${generateId().slice(-6)}`, roles: ['ADMIN'] } });
 
   const agentMem = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'agent-sys', urn: 'ba-org:agent-sys', organizationId: orgId } });
   const agent = await db.agent.create({ data: { id: generateId(), name: 'Agent', urn: 'ba-org:agent', organizationId: orgId, systemMemoryId: agentMem.id } });
@@ -73,7 +74,7 @@ async function fixture() {
   const group = await db.memory.create({ data: { id: generateId(), class: 'group', visibility: 'GROUP', name: 'group', urn: 'ba-org:group', organizationId: orgId } });
   await db.memoryMember.create({ data: { memoryId: group.id, userId: writer.id, role: 'writer' } });
 
-  return { admin, writer, appOwner, owner, agent, agentMem, app, appKey, install, worker, ownedMem, group };
+  return { platform, admin, writer, appOwner, owner, agent, agentMem, app, appKey, install, worker, ownedMem, group };
 }
 
 const codeOf = async (p: Promise<unknown>) => {
@@ -112,6 +113,20 @@ describe('#2043 S6 — the manager approves a placed boot prompt, as themselves'
     const f = await fixture();
     const node = await bootSource(f.ownedMem.id);
     expect(await codeOf(approve(node.id, ctxOf(f.owner.id)))).toBe('NO_ERROR');
+  });
+
+  it("a platform admin approves a user-owned Agent's source (cor:dmo:050:13), and a plain org ADMIN still cannot", async () => {
+    const f = await fixture();
+    const node = await bootSource(f.ownedMem.id);
+    expect(await codeOf(approve(node.id, ctxOf(f.admin.id)))).not.toBe('NO_ERROR');
+    expect(await codeOf(approve(node.id, ctxOf(f.platform.id, { roles: ['ADMIN'] })))).toBe('NO_ERROR');
+  });
+
+  it("a platform admin's bulk approval of a user-owned Agent's memory places the boot prompt too", async () => {
+    const f = await fixture();
+    const node = await bootSource(f.ownedMem.id);
+    expect(await codeOf(bulk(f.ownedMem.id, ctxOf(f.platform.id, { roles: ['ADMIN'] })))).toBe('NO_ERROR');
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvedRevNo).not.toBeNull();
   });
 
   it('a compiled node in the Agent system memory takes the same gate', async () => {
@@ -236,6 +251,9 @@ describe('#2043 S6 — the gate decides on its own, whatever the write gate admi
     }
     expect(await decide(ctxOf(f.appOwner.id), f.agentMem.id)).toEqual({ placed: true, refusal: 'BOOT_PROMPT_APPROVAL_FORBIDDEN' });
     expect(await decide(ctxOf(f.admin.id), f.ownedMem.id)).toEqual({ placed: true, refusal: 'BOOT_PROMPT_APPROVAL_FORBIDDEN' });
+    expect(await decide(ctxOf(f.platform.id, { roles: ['ADMIN'] }), f.ownedMem.id)).toEqual({ placed: true, refusal: null });
+    expect(await decide(ctxOf(f.writer.id, { roles: ['ADMIN'], impersonation: { sessionId: generateId(), actorUserId: generateId(), organizationId: orgId } }), f.ownedMem.id))
+      .toEqual({ placed: true, refusal: 'BOOT_PROMPT_APPROVAL_FORBIDDEN' });
     expect(await decide(ctxOf(f.writer.id), f.group.id)).toEqual({ placed: false });
   });
 });
