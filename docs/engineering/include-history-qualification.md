@@ -173,3 +173,25 @@ matrix passes82 tests. The initial combined compile/epoch/writer suites192 pass
 and tsc passes. Owner-handle/encryption follow-up is not in that evidence hash
 yet. Full suite is running from immutable48d3aa15 in a separate validation
 worktree; no full-suite pass is claimed for the delivery head.
+
+
+## Scope ruling #30980 (supersedes owner-handle implementation above)
+
+Marco explicitly excludes owner-handle namespace reclamation and ordinary
+org/memory source/address writers from this PR pending Xylon's ruling. The
+owner-handle implementation and its two controls have therefore been removed
+from delivery; the historical evidence hash above is not the current scope.
+`renameOwnerNamespacedUrns` bypasses snapshot APIs and can raw-delete tombstoned
+memories/Agents; it is NOT covered here. Org/memory address rewrites are also
+NOT covered. Do not claim a complete global source-writer fence or compile
+availability while those gaps remain. No new follow-up contract is inferred;
+Marco will file the follow-up issue on Xylon's word.
+
+Basil #30977 confirms #2263 owns setAgentBase, retireWorker, grant create/revoke,
+subscription revocation (not its old pooled cleanup), deleteAgent's agent/system
+memory tombstone, boot-pointer setters, install/uninstall, createApp and dep
+installs, updateAgent publish, first-contact session, deleteWorker, account
+operations and node-read reconciliation. Our subscription-cleanup overlap is
+resolved in the evidence tree by keeping the cleanup inside that same F-first
+authorized transaction. #2263 owns neither App deletion/reclaim nor address
+writers; the census must not attribute those to its account adapter.

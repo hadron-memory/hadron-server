@@ -1,3 +1,4 @@
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 /**
  * searchReplaceInNodes — bulk literal/regex search-and-replace across selected
  * nodes. Covers selection (nodeIds / memoryIds / prefix), field coverage,
@@ -565,7 +566,7 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: ordinary.id } })).content).toBe('dog');
   });
 
-  it('bulk-first holds the row lock until its write commits, then the move sees that content', async () => {
+  it('bulk-first holds the history fence until its write commits, then the move sees that content', async () => {
     const node = await makeNode('bulk-first', { content: 'cat' });
     const destination = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: 'sr-org:dest', name: 'dest', class: 'knowledge' },
@@ -577,14 +578,8 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
     try {
       await paused.atBulkWrite;
       move = resolvers.Mutation.moveNode({}, { sourceRef: node.id, targetMemoryRef: destination.id }, ctx());
-      await vi.waitFor(async () => {
-        const waits = await db.$queryRaw<Array<{ pid: number }>>`
-          SELECT pid FROM pg_stat_activity
-          WHERE datname = current_database() AND wait_event_type = 'Lock'
-            AND query LIKE '%nodes%' AND pid <> pg_backend_pid()
-        `;
-        expect(waits.length).toBeGreaterThan(0);
-      }, { timeout: 2_000, interval: 25 });
+      // Both writers enter the outer fence before their Node locks.
+      await waitForLockWaitersOfType(db, 'advisory', 1, 2_000);
     } finally {
       paused.release();
       paused.restore();

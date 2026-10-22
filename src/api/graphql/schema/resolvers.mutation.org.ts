@@ -1,5 +1,3 @@
-import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
-import { liveTxContext } from './authorizedTx.js';
 // orgMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
@@ -86,9 +84,8 @@ export const orgMutations = {
       // ONE transaction so a handle can never diverge from the URNs that embed
       // it (a half-rename would orphan `@<old>:…` App/Agent/Memory URNs).
       const userId = ctx.userId;
-      const runProfileTransaction = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
-        newHandle ? withIncludeHistoryClientTransaction(ctx.db, work) : ctx.db.$transaction(work);
-      return runProfileTransaction(async (tx) => {
+      return ctx.db
+        .$transaction(async (tx) => {
           // Lock the user row FOR UPDATE before reading the current handle, so a
           // concurrent updateMyProfile can't let us read a stale handle and then
           // skip / mis-target the propagation (gemini review, #686 — mirrors the
@@ -97,7 +94,6 @@ export const orgMutations = {
             SELECT handle, principal_id, email FROM users WHERE id = ${userId} FOR UPDATE
           `;
           if (locked.length === 0) throw new Error('Unauthenticated');
-          await liveTxContext(ctx, tx);
           const current = locked[0];
           // Identity addresses require proof of control. Profile edits cannot
           // establish or replace one; an unchanged form field is a no-op.

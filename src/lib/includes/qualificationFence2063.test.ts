@@ -132,7 +132,7 @@ it('snapshot helpers reject a pooled client, raw/manual-lock transaction, and es
   expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
 });
 
-type QualificationSurface = 'encryptMemory' | 'ownerHandleReclamation' | 'cleanupAnonymousMemories' | 'deleteMemory' | 'approveNode' | 'approveMemoryNodes' | 'requestNodeSignature' | 'withdrawSigningRequest' | 'deleteNodeRevision' | 'clearNodeHistory' | 'cancelFirstPasskey' | 'endWindowEarly' | 'finishRevoke';
+type QualificationSurface = 'encryptMemory' | 'cleanupAnonymousMemories' | 'deleteMemory' | 'approveNode' | 'approveMemoryNodes' | 'requestNodeSignature' | 'withdrawSigningRequest' | 'deleteNodeRevision' | 'clearNodeHistory' | 'cancelFirstPasskey' | 'endWindowEarly' | 'finishRevoke';
 async function qualificationAct(surface: QualificationSurface): Promise<{
   run: (database: typeof db) => Promise<unknown>;
   check: (value: unknown) => void;
@@ -141,11 +141,6 @@ async function qualificationAct(surface: QualificationSurface): Promise<{
     await db.memory.update({ where: { id: memoryId }, data: { class: 'private', userId } });
     await db.node.create({ data: { memoryId, loc: 'encrypt-source', name: 'Encrypt source', content: '# Plaintext before flip' } });
     return { run: (database) => resolvers.Mutation.encryptMemory(null, { memoryId, dataKey: Buffer.alloc(32, 7).toString('base64') }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ isEncrypted: true }) };
-  }
-  if (surface === 'ownerHandleReclamation') {
-    const dead = await db.memory.create({ data: { ownerUserId: userId, class: 'knowledge', name: 'Reclaimed tombstone', urn: 'qualification-next:dead', deletedAt: new Date() } });
-    await db.node.create({ data: { memoryId: dead.id, loc: 'retained', name: 'Retained source', content: '# Old history' } });
-    return { run: (database) => resolvers.Mutation.updateMyProfile(null, { handle: 'qualification-next' }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ handle: 'qualification-next' }) };
   }
   if (surface === 'cleanupAnonymousMemories') {
     const agent = await db.agent.create({ data: { ownerUserId: userId, urn: 'qualification-admin:cleanup-agent', name: 'Cleanup', type: 'CHATBOT' } });
@@ -197,7 +192,7 @@ async function qualificationAct(surface: QualificationSurface): Promise<{
     : { run: (database) => resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, { ...ctx(), db: database }), check: (value) => expect(value).toBe(1) };
 }
 
-it.each<QualificationSurface>(['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories', 'ownerHandleReclamation', 'encryptMemory'])(
+it.each<QualificationSurface>(['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories', 'encryptMemory'])(
   '%s holds the fence through its actual deciding write and commit (inverse order)', async (surface) => {
     const act = await qualificationAct(surface);
     let entered!: () => void;
@@ -295,29 +290,4 @@ it('anonymous cleanup waits before taking any cascading memory/node lock', async
   }
   act.check(await pending);
   expect(await db.memory.findUnique({ where: { id: memoryId } })).toBeNull();
-});
-
-
-it('owner-handle reclamation waits before its user and cascading memory locks', async () => {
-  const act = await qualificationAct('ownerHandleReclamation');
-  const dead = await db.memory.findUniqueOrThrow({ where: { urn: 'qualification-next:dead' } });
-  let entered!: () => void;
-  let release!: () => void;
-  const ready = new Promise<void>((r) => { entered = r; });
-  const gate = new Promise<void>((r) => { release = r; });
-  const holder = withIncludeHistoryTransaction(db, async () => { entered(); await gate; });
-  await ready;
-  const pending = act.run(db);
-  const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }));
-  try {
-    await waitForLockWaitersOfType(db, 'advisory', 1, 750);
-    await db.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE NOWAIT`;
-      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${dead.id} FOR UPDATE NOWAIT`;
-    });
-  } finally {
-    release(); await holder; await outcome;
-  }
-  act.check(await pending);
-  expect(await db.memory.findUnique({ where: { id: dead.id } })).toBeNull();
 });

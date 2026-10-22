@@ -484,22 +484,24 @@ describe('global ADMIN bypass', () => {
   });
 
   it('ADMIN can write to any memory', async () => {
+    const admin = await db.user.create({ data: { roles: ['ADMIN'] } });
     const node = await resolvers.Mutation.createNode(
       null,
       { input: { memoryId: graphB.id, loc: 'org-b.repo.admin-node', name: 'admin' } },
-      ctx({ clientId: 'github:admin', userId: 'admin-id', roles: ['ADMIN'] }),
+      ctx({ clientId: 'github:admin', userId: admin.id, roles: ['ADMIN'] }),
     );
     expect(node.loc).toBe('org-b.repo.admin-node');
   });
 
   it('ADMIN can delete any node', async () => {
+    const admin = await db.user.create({ data: { roles: ['ADMIN'] } });
     const target = await db.node.findFirstOrThrow({
       where: { loc: 'org-b.repo.nodeB', memoryId: graphB.id },
     });
     const result = await resolvers.Mutation.deleteNode(
       null,
       { nodeRef: target.id },
-      ctx({ clientId: 'github:admin', userId: 'admin-id', roles: ['ADMIN'] }),
+      ctx({ clientId: 'github:admin', userId: admin.id, roles: ['ADMIN'] }),
     );
     expect(result).toBe(true);
   });
