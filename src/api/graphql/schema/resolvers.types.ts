@@ -1,3 +1,5 @@
+import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
+import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { sharedOrganizations } from './sharedOrganizations.js';
 import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
@@ -35,7 +37,6 @@ import { parseRunRegisterSnapshot, resolveRegister, snapshotRowsAsEntries, toGql
 import { userUrn } from '../../../lib/userHandle.js';
 import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
 import {
-  ensureCurrentNodeRevisionInTransaction,
   RECONCILE_EDITOR_INFO,
   revisionStateMatches,
   type SnapshotSourceNode,
@@ -582,26 +583,30 @@ async function reconciledNodeForParent(
   const cache = ctx.nodeReconcileCache ??= new WeakMap();
   const existing = cache.get(n);
   if (existing) return existing;
-  const pending = ctx.db.$transaction(async (tx) => {
+  const pending = withReconciledNodeRead(ctx.db, n.id, n.memoryId, async (tx, mayReconcile) => {
+    const fresh = await (mayReconcile ? liveTxContext : liveReadSnapshotContext)(ctx, tx);
+    const inherited = (n as typeof n & { inheritedFrom?: InheritedFrom }).inheritedFrom;
+    if (!(await isMemoryReadableCached(fresh, inherited?.via ?? n.memoryId))) return false;
+    if (mayReconcile) await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${n.id} FOR UPDATE`;
     // A newer number is safe only when every intervening revision came from
     // another reader's reconcile. An authored or edge write may have changed
     // the parent's state even when its tracked fields happen to look equal.
-    await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${n.id} FOR UPDATE`;
     const pre = await tx.node.findUnique({ where: { id: n.id }, select: { memoryId: true, revSeq: true } });
-    if (!pre || pre.memoryId !== n.memoryId || pre.revSeq < n.revSeq) return null;
+    if (!pre || pre.memoryId !== n.memoryId || pre.revSeq < n.revSeq) return false;
     if (pre.revSeq > n.revSeq) {
       const reconciles = await tx.nodeRevision.count({
         where: { nodeId: n.id, revNo: { gte: n.revSeq, lt: pre.revSeq }, editedByInfo: RECONCILE_EDITOR_INFO },
       });
-      if (reconciles !== pre.revSeq - n.revSeq) return null;
+      if (reconciles !== pre.revSeq - n.revSeq) return false;
     }
-    if ((await ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: n.memoryId })) == null) return null;
+    return true;
+  }, async (tx) => {
     const current = await tx.node.findUnique({ where: { id: n.id } });
     if (!current) return null;
     const key = sessionKeyCache.getByMemoryId(current.memoryId);
     if (key) decryptNodeFieldsWithKey(current, key);
     return revisionStateMatchesWithoutAuthorship(n, current) ? current : null;
-  });
+  }, { timeoutMs: 5_000, maxWaitMs: 2_000 });
   cache.set(n, pending);
   return pending;
 }

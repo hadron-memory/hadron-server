@@ -1,3 +1,5 @@
+import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
+import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
 import { assertBootPromptWriteAllowed, assertNoBootPromptRows } from '../lib/bootPrompt.js';
 import { sessionEndReason } from '../lib/sessionEndReason.js';
 import { governedKindAnnotation } from '../lib/edgeGovernedKind.js';
@@ -1487,16 +1489,26 @@ const readProjectionInclude = {
 async function loadCurrentReadProjection(
   nodeId: string,
   authorizedMemoryId: string,
+  auth: AuthContext,
+  readViaMemoryId: string = authorizedMemoryId,
 ): Promise<ReadProjectionNode | null> {
-  return db.$transaction(async (tx) => {
-    // Reconcile only while the row is still in the memory the caller
-    // authorized (@codex P1, PR #1339); a relocated row reads as not found.
-    if ((await ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: authorizedMemoryId })) == null) return null;
+  return withReconciledNodeRead(db, nodeId, authorizedMemoryId, async (tx, mayReconcile) => {
+    let fresh: Context;
+    try {
+      fresh = await (mayReconcile ? liveTxContext : liveReadSnapshotContext)({ ...auth, db }, tx);
+    } catch (error) {
+      // Credential/actor refusal is concealed like an unreadable memory. DB
+      // faults and transaction-mode errors remain errors, never "not found".
+      if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return false;
+      throw error;
+    }
+    return canReadMemory(tx as unknown as typeof db, { ...auth, roles: fresh.roles }, readViaMemoryId, EXPLICIT_REF);
+  }, async (tx) => {
     return tx.node.findFirst({
       where: { id: nodeId, deletedAt: null },
       include: readProjectionInclude,
     }) as Promise<ReadProjectionNode | null>;
-  });
+  }, { timeoutMs: 5_000, maxWaitMs: 2_000 });
 }
 
 /**
@@ -4879,7 +4891,7 @@ export function createMcpServerInstance(
       // Reconcile + fetch under one row lock. The first lookup selects the
       // address and authorizes its memory; it must not supply the body after a
       // reconciliation advanced the counter.
-      const current = await loadCurrentReadProjection(node.id, node.memoryId);
+      const current = await loadCurrentReadProjection(node.id, node.memoryId, auth, inheritedFrom?.via ?? node.memoryId);
       if (
         !current ||
         current.memoryId !== node.memoryId ||
@@ -5015,6 +5027,7 @@ export function createMcpServerInstance(
       const echoByNodeId = new Map<string, string>();
       const unavailable: string[] = [];
       let prefixInheritance: Awaited<ReturnType<typeof effectiveScope>> | null = null;
+      let prefixReadMemoryId: string | undefined;
 
       if (hasPrefix) {
         // ── Prefix subtree (one memory, gated once) ──────────────────────────
@@ -5023,6 +5036,7 @@ export function createMcpServerInstance(
           // Don't leak existence — mirror the single read's phrasing.
           return textResult(`Memory not found: "${memoryUrn}".`);
         }
+        prefixReadMemoryId = mem.id;
         // Count cap (cor:api:040:02): take MAX+1 to detect overflow, then fail
         // loud rather than silently returning a truncated subtree.
         // #1885 (cor:dmo:050:14) — the subtree of an Agent's system memory
@@ -5316,9 +5330,9 @@ export function createMcpServerInstance(
       let truncated = false;
       const visible: ReadProjectionNode[] = [];
       for (const selected of ordered) {
-        const n = await loadCurrentReadProjection(selected.id, selected.memoryId);
-        // #1885 — an inherited row was admitted through the child's memory.
+        // #1885 — recheck the child through which the inherited row was admitted.
         const inheritedFrom = (selected as { inheritedFrom?: InheritedFrom }).inheritedFrom;
+        const n = await loadCurrentReadProjection(selected.id, selected.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? selected.memoryId);
         if (
           !n ||
           n.memoryId !== selected.memoryId ||

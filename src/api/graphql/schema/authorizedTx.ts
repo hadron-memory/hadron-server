@@ -180,6 +180,26 @@ export async function withAuthorizedMemoryTx<T>(
  * that takes its anchors itself (#1708, Riana's demotion P2 on #1859).
  */
 export async function liveTxContext(ctx: Context, tx: Prisma.TransactionClient): Promise<Context> {
+  return readLiveContext(ctx, tx, true);
+}
+
+/**
+ * Pure reads in one READ ONLY / REPEATABLE READ snapshot validate credential
+ * liveness at that snapshot without row locks. They make no authority-granting
+ * write. Refuse other transaction modes so this cannot replace a write gate's
+ * credential locks. Drift reconciliation continues to use liveTxContext.
+ */
+export async function liveReadSnapshotContext(ctx: Context, tx: Prisma.TransactionClient): Promise<Context> {
+  const [mode] = await tx.$queryRaw<Array<{ readOnly: string; isolation: string }>>`
+    SELECT current_setting('transaction_read_only') AS "readOnly",
+      current_setting('transaction_isolation') AS isolation`;
+  if (mode?.readOnly !== 'on' || mode.isolation !== 'repeatable read') {
+    throw new Error('A read-only repeatable-read snapshot is required');
+  }
+  return readLiveContext(ctx, tx, false);
+}
+
+async function readLiveContext(ctx: Context, tx: Prisma.TransactionClient, lockCredentials: boolean): Promise<Context> {
   const actor = ctx.userId
     ? await tx.user.findUnique({ where: { id: ctx.userId }, select: { roles: true, deletedAt: true } })
     : null;
@@ -194,7 +214,7 @@ export async function liveTxContext(ctx: Context, tx: Prisma.TransactionClient):
     const keys = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM user_api_keys
       WHERE id = ${ctx.apiKeyId} AND user_id = ${ctx.userId} AND revoked_at IS NULL
-      FOR SHARE`;
+      ${lockCredentials ? Prisma.sql`FOR SHARE` : Prisma.empty}`;
     if (keys.length !== 1) throw authorizationDenied();
   }
   // #1897 / R66: a credential descending from a sign-in dies with it. The share lock orders this
@@ -203,7 +223,7 @@ export async function liveTxContext(ctx: Context, tx: Prisma.TransactionClient):
     if (!ctx.userId) throw authorizationDenied();
     const roots = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM sign_ins
-      WHERE id = ${ctx.signInId} AND user_id = ${ctx.userId} AND ended_at IS NULL FOR SHARE`;
+      WHERE id = ${ctx.signInId} AND user_id = ${ctx.userId} AND ended_at IS NULL ${lockCredentials ? Prisma.sql`FOR SHARE` : Prisma.empty}`;
     if (roots.length !== 1) throw authorizationDenied();
   }
 
