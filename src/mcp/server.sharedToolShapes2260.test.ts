@@ -126,6 +126,7 @@ describe('#2260 per-session state stays per-session', () => {
   });
 
   it('shares parameter schemas across instances without any call mutating them', async () => {
+    // A plain user principal, which also registers the userId-gated tools (see the presence test above).
     const a = build(VARIANTS.user.auth);
     const b = build(VARIANTS.user.auth);
     type Registered = Record<string, { inputSchema?: z.ZodObject<z.ZodRawShape> }>;
