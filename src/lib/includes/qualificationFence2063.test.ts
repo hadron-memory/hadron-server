@@ -283,3 +283,155 @@ it('anonymous cleanup waits before taking any cascading memory/node lock', async
   act.check(await pending);
   expect(await db.memory.findUnique({ where: { id: memoryId } })).toBeNull();
 });
+
+// Evidence-only combined tree: these imports and controls require held #2258.
+import { compileBootPrompt } from '../../api/graphql/schema/compileBootPrompt.js';
+const combinedSurfaces: QualificationSurface[] = ['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories'];
+async function compileCounterparty() {
+  const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+  const system = await db.memory.create({ data: { class: 'system', organizationId: memory.organizationId, name: 'Compile system', urn: 'qualification-fence.example:compile-system' } });
+  const agent = await db.agent.create({ data: { organizationId: memory.organizationId, systemMemoryId: system.id, urn: 'qualification-fence.example:compile-agent', name: 'Compile agent' } });
+  await db.node.create({ data: { memoryId: system.id, loc: 'boot:source', role: 'boot-prompt', name: 'Source', content: 'Counterparty {{worker.name}}' } });
+  return { agentId: agent.id, target: { kind: 'AGENT' as const, agentId: agent.id } };
+}
+
+it.each(combinedSurfaces.flatMap((surface) => (['read', 'write'] as const).map((phase) => ({ surface, phase }))))(
+  'actual compile $phase holder excludes $surface through commit', async ({ surface, phase }) => {
+    const act = await qualificationAct(surface);
+    const compile = await compileCounterparty();
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const transaction = db.$transaction.bind(db);
+    const heldDb = phase === 'read' ? db : new Proxy(db, {
+      get(target, key, receiver) {
+        if (key !== '$transaction') return Reflect.get(target, key, receiver);
+        return (work: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<unknown>, options: unknown) => transaction(async (tx) => {
+          const value = await work(tx);
+          entered(); await gate;
+          return value;
+        }, options as never);
+      },
+    });
+    const holder = compileBootPrompt({ ...ctx(), db: heldDb }, compile.target,
+      phase === 'read' ? { seams: { beforeAssemble: async () => { entered(); await gate; } } } : {});
+    const holderOutcome = holder.then((value) => ({ value }), (error: unknown) => ({ error }));
+    await Promise.race([ready, holderOutcome.then((result) => {
+      if ('error' in result) throw result.error;
+      throw new Error('Compile returned before its phase barrier');
+    })]);
+    const writer = act.run(db);
+    const writerOutcome = writer.then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1, 750);
+      expect(await db.compiledPromptRevision.count()).toBe(0);
+    } finally {
+      release(); await holderOutcome; await writerOutcome;
+    }
+    expect(await holder).toMatchObject({ revNo: 1, pointerSet: true });
+    act.check(await writer);
+    expect((await db.agent.findUniqueOrThrow({ where: { id: compile.agentId } })).bootPromptNodeId).not.toBeNull();
+  },
+);
+
+it.each(combinedSurfaces)(
+  '$surface excludes actual compile until the qualification commit (inverse order)', async (surface) => {
+    const act = await qualificationAct(surface);
+    const compile = await compileCounterparty();
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const transaction = db.$transaction.bind(db);
+    const heldDb = new Proxy(db, {
+      get(target, key, receiver) {
+        if (key !== '$transaction') return Reflect.get(target, key, receiver);
+        return (work: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<unknown>, options: unknown) => transaction(async (tx) => {
+          const value = await work(tx); entered(); await gate; return value;
+        }, options as never);
+      },
+    });
+    const writer = act.run(heldDb);
+    const writerOutcome = writer.then((value) => ({ value }), (error: unknown) => ({ error }));
+    await Promise.race([ready, writerOutcome.then((result) => {
+      if ('error' in result) throw result.error;
+      throw new Error('Qualification returned before its commit barrier');
+    })]);
+    let assembled = false;
+    const holder = compileBootPrompt(ctx(), compile.target, { seams: { beforeAssemble: async () => { assembled = true; } } });
+    const holderOutcome = holder.then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1, 750);
+      expect(assembled).toBe(false);
+      expect(await db.compiledPromptRevision.count()).toBe(0);
+    } finally {
+      release(); await writerOutcome; await holderOutcome;
+    }
+    act.check(await writer);
+    expect(await holder).toMatchObject({ revNo: 1, pointerSet: true });
+    expect(assembled).toBe(true);
+  },
+);
+
+import { accountFenceClient, isSerializationConflict, withAccountFenceTransaction } from './includeHistoryFence.js';
+it.each(combinedSurfaces)(
+  '$surface commits before a queued account and forces stale-snapshot retry before account work', async (surface) => {
+    const act = await qualificationAct(surface);
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const blocker = withIncludeHistoryTransaction(db, async () => { entered(); await gate; throw new Error('rollback staging holder'); });
+    const blockerOutcome = blocker.catch(() => undefined);
+    await ready;
+    const writer = act.run(db);
+    const writerOutcome = writer.then((value) => ({ value }), (error: unknown) => ({ error }));
+    let worked = false;
+    let account: Promise<unknown> | undefined;
+    let accountOutcome: Promise<unknown> | undefined;
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1, 750);
+      account = withAccountFenceTransaction(db, async (proof) => {
+        worked = true;
+        await accountFenceClient(proof).organization.create({ data: { name: 'Must not write', urn: 'qualification-stale-account' } });
+      });
+      accountOutcome = account.catch((error: unknown) => error);
+      await waitForLockWaitersOfType(db, 'advisory', 2, 750);
+    } finally {
+      release(); await blockerOutcome; await writerOutcome; await accountOutcome;
+    }
+    act.check(await writer);
+    expect(account).toBeDefined();
+    expect(isSerializationConflict(await accountOutcome)).toBe(true);
+    expect(worked).toBe(false);
+    expect(await db.organization.count({ where: { urn: 'qualification-stale-account' } })).toBe(0);
+  },
+);
+
+it.each(combinedSurfaces)(
+  'account commit precedes the waiting $surface boundary without downgrade or nested fence', async (surface) => {
+    const act = await qualificationAct(surface);
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const account = withAccountFenceTransaction(db, async (proof) => {
+      await accountFenceClient(proof).organization.create({ data: { name: 'Committed account', urn: 'qualification-account-first' } });
+      entered(); await gate;
+    });
+    const accountOutcome = account.then(() => undefined, (error: unknown) => error);
+    await ready;
+    const writer = act.run(db);
+    const writerOutcome = writer.then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1, 750);
+      expect(await db.organization.count({ where: { urn: 'qualification-account-first' } })).toBe(0);
+    } finally {
+      release(); await accountOutcome; await writerOutcome;
+    }
+    await account;
+    act.check(await writer);
+    expect(await db.organization.count({ where: { urn: 'qualification-account-first' } })).toBe(1);
+  },
+);
