@@ -99,7 +99,9 @@ ${signInForms('window')}
   app.get('/passkeys/revoke', async (req, res) => {
     const live = await liveSignIn(req).catch(() => null);
     const viaProvider = live && live.method !== 'email'
-      ? `<p class="done" role="status"><strong>Confirmed with ${METHOD_NAMES[live.method] ?? live.method}</strong>. <button id="revoke-idp">Show my passkeys</button></p>`
+      // Uma #2230 P2-1: start spends this one confirmation, so the provider buttons wait hidden for the script to swap in.
+      ? `<p class="done" role="status" id="revoke-idp-confirmed"><strong>Confirmed with ${METHOD_NAMES[live.method] ?? live.method}</strong>. <button id="revoke-idp">Show my passkeys</button></p>
+<div id="revoke-idp-again" hidden><p class="hint">That confirmation is used up. Confirm again to remove another passkey.</p>${signInForms('revoke', true)}</div>`
       : signInForms('revoke', true);
     send(res, 'Remove a passkey', `<main data-page="revoke" data-rp-id="${passkeyRpId()}">
 <h1>Remove a passkey</h1>
@@ -112,7 +114,7 @@ ${viaProvider}
 <p class="hint">Lost every passkey and have no linked GitHub, Google or Apple account? Contact Hadron support.</p>
 <p id="status-revoke" role="status" aria-live="polite"></p>
 <h2>2. Choose the passkey to remove</h2>
-<ul id="passkey-list" aria-live="polite"></ul>
+<ul id="passkey-list" tabindex="-1" aria-live="polite"></ul>
 </main>`);
   });
 
@@ -238,6 +240,7 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
       if (!p.revokedAt && !p.prover) {
         var b = document.createElement('button');
         b.textContent = 'Remove';
+        b.setAttribute('aria-label', 'Remove the passkey ' + p.label);
         b.onclick = function () {
           if (!window.confirm('Remove the passkey "' + p.label + '"? This also signs out the sessions it signed in.')) return;
           post('/passkeys/revoke/finish', { ceremonyId: revokeCeremony, credentialId: p.credentialId }).then(function (r) {
@@ -253,6 +256,12 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
       ul.appendChild(li);
     });
   };
+  // The identity-provider confirmation is spent (or was refused) at start: offer the providers again (Uma #2230 P2-1).
+  var idpSpent = function () {
+    if (!$('revoke-idp-confirmed') || !$('revoke-idp-again')) return;
+    $('revoke-idp-confirmed').hidden = true;
+    $('revoke-idp-again').hidden = false;
+  };
   var revokeStart = function (viaPasskey) {
     say('status-revoke', '');
     post('/passkeys/revoke/challenge').then(function (r) { if (!r.ok) throw new Error('refused'); return r.json(); }).then(function (c) {
@@ -265,10 +274,14 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
             clientDataJson: enc(a.response.clientDataJSON), signature: enc(a.response.signature) });
         });
     }).then(function (r) {
+      if (!viaPasskey) idpSpent();
       if (!r.ok) throw new Error(viaPasskey ? 'That passkey can\'t prove it: it may be removed.' : 'Confirm with your identity provider first, in this browser, within the last 10 minutes.');
       return r.json();
     }).then(function (b) { renderList(b.passkeys); $('passkey-list').focus && $('passkey-list').focus(); })
-      .catch(function (e) { say('status-revoke', e && e.message && e.message !== 'refused' ? e.message : 'That didn\'t work. Start again.'); });
+      .catch(function (e) {
+        if (e && e.name === 'NotAllowedError') return say('status-revoke', 'Cancelled. Nothing was removed.');
+        say('status-revoke', e && e.message && e.message !== 'refused' ? e.message : 'That didn\'t work. Start again.');
+      });
   };
   if ($('revoke-passkey')) $('revoke-passkey').addEventListener('click', function () { revokeStart(true); });
   if ($('revoke-idp')) $('revoke-idp').addEventListener('click', function () { revokeStart(false); });

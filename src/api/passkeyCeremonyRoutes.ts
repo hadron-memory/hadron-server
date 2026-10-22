@@ -300,7 +300,8 @@ export function mountPasskeyCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
     } catch { refuse(res); }
   });
 
-  // Revoke one of the owner's passkeys, consuming the bound ceremony. Ends no sign-in (cor:aut:040:08).
+  // Revoke one of the owner's passkeys, consuming the bound ceremony, and end the sign-ins it completed (cor:aut:040:08;
+  // Holger, 2026-10-21, #29507).
   app.post(PASSKEY_REVOKE_FINISH_PATH, limiter, json, async (req: Request, res: Response) => {
     try {
       if (!originAllowed(req)) return void refuse(res);

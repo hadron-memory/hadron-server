@@ -3,6 +3,7 @@
  * (GitHub's two HTTP calls stubbed), never by a magic link; then one of the owner's passkeys is revoked.
  */
 import { createHash } from 'node:crypto';
+import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -141,6 +142,50 @@ describe('revoke with an identity provider (040:08 S2)', () => {
   });
 });
 
+/**
+ * Runs the served page script against a minimal DOM holding the revoke page's ids, with `fetch` answering the
+ * challenge and then `startStatus` for revoke/start. Returns the elements once the click's promise chain settles.
+ */
+async function clickShowMyPasskeys(startStatus: number) {
+  const el = (hidden = false) => {
+    const listeners: Record<string, () => void> = {};
+    return { hidden, textContent: '', dataset: {} as Record<string, string>, listeners,
+      addEventListener: (t: string, f: () => void) => { listeners[t] = f; },
+      appendChild: () => undefined, focus: () => undefined, setAttribute: () => undefined };
+  };
+  const ids: Record<string, ReturnType<typeof el>> = {
+    'revoke-idp-confirmed': el(), 'revoke-idp-again': el(true), 'revoke-idp': el(), 'status-revoke': el(), 'passkey-list': el(),
+  };
+  const answers = [{ status: 200, body: { ceremonyId: 'c1', challenge: 'AA' } }, { status: startStatus, body: { passkeys: [] } }];
+  const fetch = async () => {
+    const a = answers.shift()!;
+    return { ok: a.status === 200, status: a.status, json: async () => a.body };
+  };
+  const script = await (await realFetch(`${base}/passkeys/assets/ceremony.js`)).text();
+  runInNewContext(script, {
+    document: { getElementById: (id: string) => ids[id] ?? null, querySelector: () => ({ dataset: { rpId: 'localhost' } }),
+      createElement: () => el() },
+    fetch, window: { confirm: () => true }, navigator: {}, btoa, atob, Uint8Array, JSON, Error, Date,
+  });
+  ids['revoke-idp'].listeners.click();
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  return ids;
+}
+
+describe('the provider confirmation is single-use on the page (Uma #2230 P2-1)', () => {
+  it('a confirmed page carries the provider buttons, hidden, for after the confirmation is spent', async () => {
+    const page = await (await realFetch(`${base}/passkeys/revoke`, { headers: { cookie: await githubLeg() } })).text();
+    expect(page).toContain('id="revoke-idp-confirmed"');
+    expect(page).toMatch(/<div id="revoke-idp-again" hidden>[\s\S]*action="\/passkeys\/sign-in\/github\/start"[\s\S]*name="next" value="revoke"/);
+  });
+
+  it.each([[200, 'spent by a successful start'], [403, 'refused at start']])('the providers come back once the confirmation is %s', async (status) => {
+    const ids = await clickShowMyPasskeys(status as number);
+    expect(ids['revoke-idp-confirmed'].hidden).toBe(true);
+    expect(ids['revoke-idp-again'].hidden).toBe(false);
+  });
+});
+
 describe('never by a bearer, and only on the server origin', () => {
   it('a bearer credential proves nothing and names nobody (040:08 S3)', async () => {
     const jwt = await signJwt({ sub: ana, roles: [] });
@@ -157,7 +202,7 @@ describe('never by a bearer, and only on the server origin', () => {
 });
 
 describe('the page', () => {
-  it('says sessions stay signed in, offers no email link, and is dark with the switch', async () => {
+  it('says removing signs out the sessions the passkey signed in, offers no email link, and is dark with the switch', async () => {
     const r = await realFetch(`${base}/passkeys/revoke`);
     expect(r.status).toBe(200);
     const html = await r.text();
