@@ -3267,7 +3267,7 @@ export async function installAgentIntoAppCore(
       });
       return installed;
     },
-    { afterLock: async (tx) => {
+    { fence: true, afterLock: async (tx) => {
       await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
       await tx.$queryRaw`SELECT id FROM agents WHERE id = ${resolvedAgentId} FOR SHARE`;
     } },
@@ -3323,7 +3323,7 @@ export async function uninstallAgentFromAppCore(
       await tx.appAgent.deleteMany({ where: { appId: resolvedAppId, agentId: resolvedAgentId } });
       await removeRegisterRowsForUninstall(tx, resolvedAppId, resolvedAgentId, ctx.userId ?? null);
     },
-    { lockMode: 'exclusive', afterLock: async (tx) => {
+    { fence: true, lockMode: 'exclusive', afterLock: async (tx) => {
       await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
     } },
   );

@@ -1,4 +1,5 @@
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
+import { includeHistoryClient, withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { storedIncludeTags, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
@@ -1818,7 +1819,19 @@ export const sessionMutations = {
       const hasSuppliedKey = hasRequestOperationKey();
       // Lock the App before provisioning any dependent row. The lock and all
       // writes commit together, so uninstall cannot pass the check mid-flight.
-      const { session, memoryId, parsedKey } = await ctx.db.$transaction(async (tx) => {
+      // #2046 S9-3: the license write is ON CONFLICT DO NOTHING, so it changes compile entitlement only when no
+      // subscription row exists (a new end-user, or a user without one). Only that first contact enters the
+      // include-history fence, from the transaction's first statement; a returning end-user stays unfenced.
+      const knownUser = externalUserId
+        ? await ctx.db.user.findFirst({ where: { externalAppId: appId, externalId: externalUserId, deletedAt: null }, select: { id: true } })
+        : null;
+      const mayCreateSubscription = !!externalUserId && !(knownUser && await ctx.db.agentSubscription.findUnique({
+        where: { userId_agentId: { userId: knownUser.id, agentId } }, select: { userId: true },
+      }));
+      const startTx = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> => mayCreateSubscription
+        ? withIncludeHistoryTransaction(ctx.db, (fence) => work(includeHistoryClient(fence)))
+        : ctx.db.$transaction(work);
+      const { session, memoryId, parsedKey } = await startTx(async (tx) => {
         await lockSessionAppActive(tx, appId);
         const app = await tx.app.findUniqueOrThrow({ where: { id: appId } });
 

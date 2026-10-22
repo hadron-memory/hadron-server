@@ -628,6 +628,13 @@ export const chatMutations = {
           ctx, gateRow, effectiveUserId !== 'anonymous' ? effectiveUserId : null,
         );
         const anchored = new Set(chatAnchors.map((a) => `${a.kind}:${a.id}`));
+        // #2046 S9-3: the license write is ON CONFLICT DO NOTHING, so it changes compile entitlement only when
+        // NO subscription row exists. Only that first contact enters the include-history fence (a global,
+        // exclusive lock); a chat for an existing row, revoked or not, writes no entitlement and stays unfenced.
+        const mayCreateSubscription = effectiveUserId !== 'anonymous' && !isTestRun
+          && !(await ctx.db.agentSubscription.findUnique({
+            where: { userId_agentId: { userId: effectiveUserId, agentId: resolvedAgentId } }, select: { userId: true },
+          }));
         try {
           await withAuthorizedTx(ctx, chatAnchors, async (txCtx) => {
             const current = await txCtx.db.agent.findUnique({
@@ -706,7 +713,7 @@ export const chatMutations = {
                 createdBy: ctx.userId ?? null,
               },
             });
-          });
+          }, { fence: mayCreateSubscription });
           chatStarted = true;
         } catch (error) {
           if (error instanceof ChatAuthorityScopeChanged) continue;

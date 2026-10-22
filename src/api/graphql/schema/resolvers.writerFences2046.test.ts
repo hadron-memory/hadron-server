@@ -150,3 +150,45 @@ describe('#2046 S9-3 worker retirement and the S8 pointer writers enter the fenc
     await expectFenceFirst(() => M.setWorkerBootPrompt({}, { workerRef: f.worker.id, nodeRef: f.installNode.id }, ctxOf(f.a.id)), set);
   });
 });
+
+describe('#2046 S9-3 install, uninstall, createApp and first-contact subscription creators enter the fence first', () => {
+  it('createApp (grant/subscription/AppAgent commit together)', async () => {
+    const a = await admin();
+    const agent = await orgAgent('apps');
+    const made = async () => (await db.app.count({ where: { organizationId: orgId, name: 'Fenced App' } })) === 1;
+    await expectFenceFirst(() => M.createApp({}, { orgRef: orgId, agentRef: agent.id, name: 'Fenced App' }, ctxOf(a.id)), made);
+  });
+
+  it('installAgentIntoApp and uninstallAgentFromApp', async () => {
+    const a = await admin();
+    const first = await orgAgent('first');
+    const second = await orgAgent('second');
+    const app = await M.createApp({}, { orgRef: orgId, agentRef: first.id, name: 'Inst App' }, ctxOf(a.id));
+    const installed = async () => (await db.appAgent.count({ where: { appId: app.id, agentId: second.id } })) === 1;
+    await expectFenceFirst(() => M.installAgentIntoApp({}, { appRef: app.id, agentRef: second.id }, ctxOf(a.id)), installed);
+    await expectFenceFirst(() => M.uninstallAgentFromApp({}, { appRef: app.id, agentRef: second.id }, ctxOf(a.id)), async () => !(await installed()));
+  });
+
+  it('startAgentSession fences a first contact (new end-user, no subscription) and not a returning one', async () => {
+    const agent = await orgAgent('sess');
+    const { app } = await createDbAppWithKey(db, 'sess-app', orgId);
+    await createDbAppAgent(db, app.id, agent.id);
+    await db.app.update({ where: { id: app.id }, data: { createUserPermission: 'IMPLICIT' } });
+    const appCtx = { db, appId: app.id, roles: [] } as unknown as Context;
+    const subscribed = async () => (await db.agentSubscription.count({ where: { agentId: agent.id } })) === 1;
+    await expectFenceFirst(() => M.startAgentSession({}, { agentId: agent.id, externalUserId: 'ext-1' }, appCtx), subscribed);
+    // Returning end-user: the subscription row exists, the write is a no-op, so the start does not wait for the fence.
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let entered!: () => void;
+    const inside = new Promise<void>((r) => { entered = r; });
+    const holder = withIncludeHistoryTransaction(db, async () => { entered(); await held; });
+    await inside;
+    try {
+      await expect(M.startAgentSession({}, { agentId: agent.id, externalUserId: 'ext-1' }, appCtx)).resolves.toBeTruthy();
+    } finally {
+      release();
+      await holder;
+    }
+  });
+});
