@@ -201,7 +201,7 @@ describe('the cancel link (040:08 S6-S9)', () => {
   it('the GET renders without spending, unframeable and with no referrer', async () => {
     const r = await realFetch(`${base}/passkeys/cancel?token=${token}`);
     expect(r.status).toBe(200);
-    expect(r.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(r.headers.get('referrer-policy')).toBe('same-origin');
     expect(r.headers.get('x-frame-options')).toBe('DENY');
     expect((await db.passkeyCredential.findUniqueOrThrow({ where: { id: passkeyId } })).revokedAt).toBeNull();
   });
@@ -289,7 +289,7 @@ describe('the server-hosted pages', () => {
     expect(csp).not.toMatch(/script-src[^;]*unsafe-inline/);
     expect(csp).toMatch(/default-src 'none'/);
     expect(csp).toMatch(/frame-ancestors 'none'/);
-    expect(r.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(r.headers.get('referrer-policy')).toBe('same-origin');
     const html = await r.text();
     expect(html).toContain(`data-rp-id="${RP}"`);
     expect(html).toContain('action="/passkeys/sign-in/github/start"');
@@ -353,6 +353,17 @@ describe('the server-hosted pages', () => {
       headers: { 'content-type': 'application/x-www-form-urlencoded', origin: ORIGIN, cookie: `${browser}; ${cookieNamed(cb, 'hadron_ceremony_leg')}; ${next}` }, body: '',
     });
     expect(await ok.text()).toContain('href="/passkeys/window/end"');
+  });
+});
+
+describe('Referrer-Policy keeps the real Origin (Chip #2210 browser QA 6329343431)', () => {
+  // Under the Fetch spec a non-GET request from a page with Referrer-Policy: no-referrer serializes its Origin as
+  // "null", so a real browser's form POSTs and same-origin fetch POSTs from these pages all failed the Origin
+  // allowlist (stubbed tests set Origin themselves and couldn't see it). 'same-origin' sends the real Origin on
+  // same-origin requests and still sends no referrer to any third party.
+  it.each(['/passkeys/register', '/passkeys/window/end', '/passkeys/sign-in/confirm'])('%s is never no-referrer', async (path) => {
+    const r = await realFetch(`${base}${path}`);
+    expect(r.headers.get('referrer-policy')).toBe('same-origin');
   });
 });
 
