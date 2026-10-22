@@ -28,7 +28,9 @@ export function rebindIncludeTags(
     let next: string | undefined;
     if (tag.kind === 'loc') {
       next = rebasedLocByLoc.get(tag.target);
-    } else {
+    } else if (!tag.target.includes('::')) {
+      // A legacy v1 spelling (`root::memory::loc`) is not a valid include target (cor:dmo:150:02, R78):
+      // rewriting it would make a tag valid that its author never wrote, so it stays as written.
       const parts = splitNodeUrn(tag.target);
       const rebased = parts.memoryUrn === sourceMemoryUrn ? rebasedLocByLoc.get(parts.loc) : undefined;
       if (rebased !== undefined) next = `hrn:node:${newMemoryUrn}:${rebased}`;

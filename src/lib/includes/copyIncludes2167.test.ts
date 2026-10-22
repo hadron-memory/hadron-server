@@ -223,6 +223,15 @@ describe('extract rebinds include tags that name a copied node (R180, cor:api:16
     expect(await exEdges()).toEqual(['ex:a>ex:b']);
   });
 
+  it('a legacy v1 URN spelling naming a copied node is not rewritten to the canonical form (R78)', async () => {
+    const v1 = `{{> ${urn('sub:b').replace(/^(hrn:node:[^:]+):([^:]+):/, '$1::$2::')}}}`;
+    expect(v1).toContain('::');
+    await seed('sub:a', v1);
+    await refusal(extract());
+    const rows = await db.node.findMany({ where: { memory: { urn: EX }, loc: 'ex:a' } });
+    expect(rows.every(r => r.content === v1)).toBe(true);
+  });
+
   it('a tag outside the subtree stays as written: a URN to a readable source node passes unchanged', async () => {
     await seed('sub:a', `{{> ${urn('other')}}}`);
     expect((await refusal(extract())).code).toBe('NO_ERROR');
