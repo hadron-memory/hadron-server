@@ -3,6 +3,7 @@ import { GraphQLError } from 'graphql';
 import { lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
 import { consumeUserMergeConsent, mergeConsentAlreadyApplied } from '../../lib/userMergeConsent.js';
 import { Prisma, type PrismaClient, type User } from '../../generated/prisma/index.js';
+import { accountFenceClient, isSerializationConflict, withAccountFenceTransaction } from '../../lib/includes/includeHistoryFence.js';
 import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js';
 
 /**
@@ -121,8 +122,8 @@ function isUniqueViolation(e: unknown): boolean {
  * how a concurrent execution of the same proof loses (#1770).
  */
 function isSerializationAbort(e: unknown): boolean {
-  if (!(e instanceof Prisma.PrismaClientKnownRequestError)) return false;
-  return e.code === 'P2034' || (e.code === 'P2010' && (e.meta as { code?: string } | undefined)?.code === '40001');
+  // #2046 S9-3: the shared classifier, which also covers 40P01 (the fence and epoch statements raise these).
+  return isSerializationConflict(e);
 }
 
 /** The template-name grammar's length cap (`validateAiConfigName`). */
@@ -301,7 +302,9 @@ async function runMergeTxn(
   db: PrismaClient,
   { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles = false, consentProof }: MergeUsersArgs,
 ): Promise<User> {
-  return db.$transaction(async (tx) => {
+  return withAccountFenceTransaction(db, async (fence) => {
+    // #2046 S9-3: the fence and the epoch proof come first, on this same SERIALIZABLE backend.
+    const tx = accountFenceClient(fence);
     // Serialize two merges involving either account. Ref resolution happens
     // in the GraphQL layer, but the rows are rechecked after the lock so a
     // concurrent soft-delete cannot be merged through. Parameterized template
@@ -628,9 +631,5 @@ async function runMergeTxn(
     await tx.userMerge.create({ data: { sourceUserId, targetUserId, mergedBy: actor, ...consent } });
 
     return tx.user.findUniqueOrThrow({ where: { id: targetUserId } });
-  }, {
-    timeout: 60_000,
-    maxWait: 15_000,
-    isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-  });
+  }, { timeoutMs: 60_000, maxWaitMs: 15_000 });
 }

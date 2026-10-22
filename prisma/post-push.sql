@@ -751,3 +751,6 @@ CREATE TRIGGER user_deletion_audits_immutable
 
 -- #1162: newly introduced typed Worker/session references fence hard deletion.
 \ir worker-reference-invariants.sql
+
+-- #2046 S9-3: the include-history authority epoch (singleton, monotone, never reset).
+\ir include-history-epoch-invariants.sql

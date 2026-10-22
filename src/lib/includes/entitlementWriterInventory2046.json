@@ -56,8 +56,8 @@
  },
  "src/api/graphql/schema/resolvers.worker.ts :: worker.delete": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "deleteWorker is a SERIALIZABLE whole-transaction with its own reference-fence census: same composition problem as deleteUser/mergeUsers (Xylon #30516), so it waits on the account-operation composition; not fenced by a wrapper"
+  "status": "fenced",
+  "reason": "deleteWorker: whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
  },
  "src/api/graphql/schema/resolvers.worker.ts :: worker.update": {
   "count": 1,
@@ -71,23 +71,23 @@
  },
  "src/controller/operations/deleteUser.ts :: agent.deleteMany": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "SERIALIZABLE whole-transaction; required counterparty, composition awaits Baloo assessment (Xylon #30503)"
+  "status": "fenced",
+  "reason": "whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
  },
  "src/controller/operations/deleteUser.ts :: agentSubscription.deleteMany": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "SERIALIZABLE whole-transaction; required counterparty, composition awaits Baloo assessment (Xylon #30503)"
+  "status": "fenced",
+  "reason": "whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
  },
  "src/controller/operations/deleteUser.ts :: worker.deleteMany": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "SERIALIZABLE whole-transaction; required counterparty, composition awaits Baloo assessment (Xylon #30503)"
+  "status": "fenced",
+  "reason": "whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
  },
  "src/controller/operations/deleteUser.ts :: worker.updateMany": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "SERIALIZABLE whole-transaction; required counterparty, composition awaits Baloo assessment (Xylon #30503)"
+  "status": "fenced",
+  "reason": "whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
  },
  "src/controller/operations/ensureAgentOrgGrant.ts :: raw INSERT INTO agent_org_grants": {
   "count": 1,
@@ -101,18 +101,18 @@
  },
  "src/controller/operations/mergeUsers.ts :: raw DELETE FROM agent_subscriptions": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "SERIALIZABLE whole-transaction; required counterparty, composition awaits Baloo assessment (Xylon #30503)"
+  "status": "fenced",
+  "reason": "whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
  },
  "src/controller/operations/mergeUsers.ts :: raw UPDATE agent_subscriptions": {
   "count": 2,
-  "status": "counterparty-pending",
-  "reason": "SERIALIZABLE whole-transaction; required counterparty, composition awaits Baloo assessment (Xylon #30503)"
+  "status": "fenced",
+  "reason": "whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
  },
  "src/controller/operations/mergeUsers.ts :: raw UPDATE workers": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "SERIALIZABLE whole-transaction; required counterparty, composition awaits Baloo assessment (Xylon #30503)"
+  "status": "fenced",
+  "reason": "whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
  },
  "src/lib/agentBase.ts :: agent.update": {
   "count": 1,
@@ -136,18 +136,18 @@
  },
  "src/lib/mergeOwnerNamespacedUrns.ts :: agent.deleteMany": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "only caller is mergeUsers (SERIALIZABLE whole-transaction); re-owns Agent ownerUserId, so it is covered by the mergeUsers account-operation composition (Xylon #30516), not fenced separately"
+  "status": "fenced",
+  "reason": "runs only inside mergeUsers' withAccountFenceTransaction (its only caller); whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
  },
  "src/lib/mergeOwnerNamespacedUrns.ts :: agent.update": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "only caller is mergeUsers (SERIALIZABLE whole-transaction); re-owns Agent ownerUserId, so it is covered by the mergeUsers account-operation composition (Xylon #30516), not fenced separately"
+  "status": "fenced",
+  "reason": "runs only inside mergeUsers' withAccountFenceTransaction (its only caller); whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
  },
  "src/lib/mergeOwnerNamespacedUrns.ts :: agent.updateMany": {
   "count": 1,
-  "status": "counterparty-pending",
-  "reason": "only caller is mergeUsers (SERIALIZABLE whole-transaction); re-owns Agent ownerUserId, so it is covered by the mergeUsers account-operation composition (Xylon #30516), not fenced separately"
+  "status": "fenced",
+  "reason": "runs only inside mergeUsers' withAccountFenceTransaction (its only caller); whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
  },
  "src/lib/org/propagateOrgUrnRename.ts :: raw UPDATE agents": {
   "count": 1,

@@ -13,6 +13,8 @@
 // (`roles:<role>` nodes, `data.names`), read at CASTING time — and only when
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
+import { accountFenceClient, isSerializationConflict, withAccountFenceTransaction } from '../../../lib/includes/includeHistoryFence.js';
+import { retryAccountFence } from '../../../lib/includes/accountFenceRetry.js';
 import { includeHistoryClient, withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { normalizeFamily } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
@@ -1570,7 +1572,10 @@ export const workerMutations = {
     });
     if (await miscastHasReferences(ctx.db, worker)) throw refuse();
     try {
-      await ctx.db.$transaction(async (tx) => {
+      // #2046 S9-3: removing a compile target is a fence participant. Fence + epoch proof first, same
+      // SERIALIZABLE backend; a conflict re-runs the whole attempt (3 total) before the typed refusal.
+      await retryAccountFence(() => withAccountFenceTransaction(ctx.db, async (fence) => {
+        const tx = accountFenceClient(fence);
         // Re-read after acquiring the identity lock; stale pre-wait eligibility
         // never authorizes destruction. The private MVCC fence
         // and SERIALIZABLE census jointly reject pre-wait snapshots.
@@ -1583,12 +1588,11 @@ export const workerMutations = {
         await tx.session.deleteMany({ where: { workerId: worker.id } });
         await tx.worker.delete({ where: { id: worker.id } });
         if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      }), { conflictAttempts: 3 });
     } catch (error) {
       // The fence deliberately makes a stale SERIALIZABLE snapshot abort.
       // Raw statements report 40001/40P01 as P2010; model writes use P2034.
-      if (error instanceof Prisma.PrismaClientKnownRequestError &&
-        (error.code === 'P2034' || (error.code === 'P2010' && ['40001', '40P01'].includes(String(error.meta?.code))))) {
+      if (isSerializationConflict(error)) {
         throw new GraphQLError('Worker references changed concurrently. Retry the verified-unused repair, or retire instead.', {
           extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
         });
