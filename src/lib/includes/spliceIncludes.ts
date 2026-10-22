@@ -18,7 +18,8 @@ export const BROKEN_INCLUDE_NOTICE = '[Include unavailable]';
 export const INCLUDE_LITERAL_NODE_TYPES: ReadonlySet<string> = new Set(['chat-message', 'record']);
 
 /** `content` is the live row's decrypted text; `memory` is kept so a past revision can be decrypted with the same authorized context. */
-interface Target { id: string; memoryId: string; content: string | null; revSeq: number; memory: { id: string; isEncrypted: boolean } }
+export interface IncludeTarget { id: string; memoryId: string; content: string | null; revSeq: number; memory: { id: string; isEncrypted: boolean } }
+type Target = IncludeTarget;
 
 /**
  * Per-request lookups, and nothing else. It holds a reader's authorized
@@ -42,7 +43,8 @@ export interface SpliceOptions {
   memo?: IncludeReadMemo;
 }
 
-type Db = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision'>;
+export type IncludeDb = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision'>;
+type Db = IncludeDb;
 
 async function memoryIdOfUrn(db: Db, memo: IncludeReadMemo, urn: string): Promise<string | null> {
   let hit = memo.memoryByUrn.get(urn);
@@ -128,13 +130,32 @@ async function lookupRevision(db: Db, memo: IncludeReadMemo, target: Target, rev
  * null; neither is evidence about approval. A snapshot captured in another memory is not this target's to serve, and
  * an encrypted memory is NOT_APPLICABLE.
  */
-async function approvedText(db: Db, target: Target, pinned: number | undefined): Promise<string | null> {
+async function approvedText(db: Db, target: Target, pinned: number | undefined): Promise<{ revNo: number; text: string } | null> {
   const revNo = pinned ?? (await newestApprovedRevisionOf(db, target.id)).found?.revNo;
   if (revNo === undefined) return null;
   const verdict = await revisionApprovalOf(db, target.id, revNo);
   if (verdict.state !== 'APPROVED' || !verdict.served) return null;
   if (verdict.served.memoryId !== target.memoryId) return null;
-  return verdict.served.content ?? '';
+  return { revNo, text: verdict.served.content ?? '' };
+}
+
+/**
+ * #2046 — THE include selector (cor:dmo:150:02), shared by every read and by the
+ * boot-prompt compile so the two cannot disagree about which revision a tag
+ * serves. `approved` (pinned or not) serves the revision the shared approval
+ * predicate qualifies; `rev=N` alone serves stored revision N; no settings
+ * serves the latest. `signed` is ignored until signing ships (D7), as before.
+ * Null when no revision qualifies: a reader shows the notice, a compile refuses.
+ */
+export async function selectIncludeRevision(
+  db: IncludeDb, memo: IncludeReadMemo, target: IncludeTarget, settings: IncludeTag['settings'],
+): Promise<{ revNo: number; text: string } | null> {
+  if (settings.approved) return approvedText(db, target, settings.rev);
+  if (settings.rev !== undefined) {
+    const text = await lookupRevision(db, memo, target, settings.rev);
+    return text == null ? null : { revNo: settings.rev, text };
+  }
+  return { revNo: target.revSeq, text: target.content ?? '' };
 }
 
 async function expandTag(
@@ -156,18 +177,11 @@ async function expandTag(
   }
   const target = await lookupTarget(db, access, memo, memoryId, loc);
   if (!target || trail.has(target.id)) return BROKEN_INCLUDE_NOTICE;
-  let stored: string | null;
-  if (tag.settings.approved) {
-    stored = await approvedText(db, target, tag.settings.rev);
-    if (stored === null) return BROKEN_INCLUDE_NOTICE;
-  } else {
-    stored = tag.settings.rev !== undefined
-      ? await lookupRevision(db, memo, target, tag.settings.rev)
-      : target.content;
-  }
-  if (stored == null) return tag.settings.rev !== undefined ? BROKEN_INCLUDE_NOTICE : '';
+  const selected = await selectIncludeRevision(db, memo, target, tag.settings);
+  if (!selected) return BROKEN_INCLUDE_NOTICE;
+  if (!tag.settings.approved && tag.settings.rev === undefined && target.content == null) return '';
   // Rendered per traversal: this node's ancestors and depth travel with it.
-  return spliceWithin(db, access, memo, opts, stored, target.memoryId, new Set([...trail, target.id]), level + 1);
+  return spliceWithin(db, access, memo, opts, selected.text, target.memoryId, new Set([...trail, target.id]), level + 1);
 }
 
 async function spliceWithin(
