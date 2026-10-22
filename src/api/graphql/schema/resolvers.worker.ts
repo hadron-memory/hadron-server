@@ -1590,11 +1590,12 @@ export const workerMutations = {
         if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
       }), { conflictAttempts: 3 });
     } catch (error) {
-      // The fence deliberately makes a stale SERIALIZABLE snapshot abort.
+      // The fence deliberately makes a stale SERIALIZABLE snapshot abort. Exhausted retries are TRANSIENT contention, not a
+      // found reference: a real reference is refused as WORKER_IN_USE by the census on a fresh attempt.
       // Raw statements report 40001/40P01 as P2010; model writes use P2034.
       if (isSerializationConflict(error)) {
-        throw new GraphQLError('Worker references changed concurrently. Retry the verified-unused repair, or retire instead.', {
-          extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
+        throw new GraphQLError('Concurrent account activity kept this deletion from completing after retries. No reference to the worker was found; retry, or retire instead.', {
+          extensions: { code: 'WORKER_DELETE_CONFLICT', workerId: worker.id },
         });
       }
       throw error;
