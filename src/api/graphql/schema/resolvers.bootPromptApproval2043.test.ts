@@ -452,3 +452,65 @@ describe('#2043 S6 — the bulk door takes install authority first and rechecks 
   });
 });
 
+// R178 (Holger, 2026-10-22: A) / Dara P2-2: the upgrade ends approvals on boot
+// prompts ALREADY placed, once. Pre-trigger fixture: rows are seeded with the
+// entry triggers disabled (the database before this lands), then the migration's
+// own one-time pass is executed, read from the migration file itself.
+describe('#2043 S6 R178 — the one-time upgrade pass', () => {
+  const migration = () => readFileSync(join(fileURLToPath(new URL('../../../../prisma/', import.meta.url)),
+    'migrations/20261022010000_boot_prompt_approval_entry/migration.sql'), 'utf8');
+  const pass = () => {
+    const text = migration();
+    const start = text.indexOf('-- BEGIN one-time upgrade pass');
+    const end = text.indexOf('-- END one-time upgrade pass');
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    return text.slice(start, end);
+  };
+  const triggers = ['boot_prompt_approval_entry_node', 'boot_prompt_approval_entry_revisions'];
+  const approvedRevision = (nodeId: string, memoryId: string, by: string) => db.nodeRevision.create({
+    data: { nodeId, memoryId, loc: 'x', name: 'x', content: 'old', revNo: 1, tags: [], approvedBy: by, approvedAt: new Date(), approvalHash: 'a'.repeat(64) },
+  });
+
+  it('is not in the idempotent invariants file post-push re-runs', () => {
+    const guard = readFileSync(join(fileURLToPath(new URL('../../../../prisma/', import.meta.url)), 'boot-prompt-approval-invariants.sql'), 'utf8');
+    expect(guard).not.toContain('one-time upgrade pass');
+    expect(migration().indexOf('-- END one-time upgrade pass')).toBeLessThan(migration().indexOf('-- Verbatim copy'));
+  });
+
+  it('ends approvals on already-placed boot prompts (node and revisions) and on nothing else', async () => {
+    const f = await fixture();
+    for (const t of triggers) await db.$executeRawUnsafe(`ALTER TABLE nodes DISABLE TRIGGER ${t}`);
+    try {
+      const placed = await bootSource(f.agentMem.id, 'boot:old-agent');
+      const installed = await bootSource(f.install.id, 'boot:old-install');
+      const group = await bootSource(f.group.id, 'boot:old-group');
+      const ordinary = await plain(f.agentMem.id, 'notes:old');
+      await approve(placed.id, ctxOf(f.admin.id));
+      await approve(installed.id, ctxOf(f.admin.id));
+      await approve(group.id, ctxOf(f.writer.id));
+      await approve(ordinary.id, ctxOf(f.admin.id));
+      await approvedRevision(placed.id, f.agentMem.id, f.admin.id);
+      await approvedRevision(group.id, f.group.id, f.writer.id);
+      for (const id of [placed.id, installed.id, group.id, ordinary.id]) {
+        expect((await db.node.findUniqueOrThrow({ where: { id } })).approvalHash).not.toBeNull();
+      }
+      for (const t of triggers) await db.$executeRawUnsafe(`ALTER TABLE nodes ENABLE TRIGGER ${t}`);
+      const statements = pass().split('\n').filter((l) => !l.trim().startsWith('--')).join('\n').split(';').map((x) => x.trim()).filter(Boolean);
+      expect(statements).toHaveLength(2);
+      for (const sql of statements) await db.$executeRawUnsafe(sql);
+      for (const id of [placed.id, installed.id]) {
+        const node = await db.node.findUniqueOrThrow({ where: { id } });
+        expect(node.approvalHash).toBeNull();
+        expect(node.approvedBy).not.toBeNull(); // who/when kept, as ending does
+      }
+      expect(await db.nodeRevision.count({ where: { nodeId: placed.id, approvalHash: { not: null } } })).toBe(0);
+      expect((await db.node.findUniqueOrThrow({ where: { id: group.id } })).approvalHash).not.toBeNull();
+      expect(await db.nodeRevision.count({ where: { nodeId: group.id, approvalHash: { not: null } } })).toBe(1);
+      expect((await db.node.findUniqueOrThrow({ where: { id: ordinary.id } })).approvalHash).not.toBeNull();
+    } finally {
+      for (const t of triggers) await db.$executeRawUnsafe(`ALTER TABLE nodes ENABLE TRIGGER ${t}`);
+    }
+  });
+});
+

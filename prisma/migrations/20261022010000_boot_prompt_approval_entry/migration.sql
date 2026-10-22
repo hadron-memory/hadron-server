@@ -1,6 +1,26 @@
 -- #2043 (S6 PR 2): an approval made outside the boot-prompt gate ends when its
--- node enters the gated state. Triggers only; no backfill (no placed boot
--- prompt carries an outside approval before this lands: S6 PR 2 adds the gate).
+-- node enters the gated state (triggers, below), and R178 (Holger, 2026-10-22,
+-- option A) ends such approvals on boot prompts ALREADY placed when this lands.
+
+-- BEGIN one-time upgrade pass (R178). Runs once, here only: it is NOT in the
+-- idempotent invariants file, which post-push.sql re-runs on every dev/test push
+-- and would otherwise end legitimate manager approvals each time. Like
+-- endApprovalsOnEncryptedEntry, it clears the hash on the node and on every
+-- revision record and keeps who/when/revision. Placed = an Agent's system memory
+-- or an install memory (isInstallMemoryRow); boot family = boot-prompt(.*).
+UPDATE node_revisions SET approval_hash = NULL
+ WHERE approval_hash IS NOT NULL
+   AND node_id IN (
+     SELECT n.id FROM nodes n
+      WHERE (n.role = 'boot-prompt' OR n.role LIKE 'boot-prompt.%')
+        AND (EXISTS (SELECT 1 FROM agents a WHERE a.system_memory_id = n.memory_id)
+          OR EXISTS (SELECT 1 FROM memories m WHERE m.id = n.memory_id AND m.class = 'system' AND m.is_install_memory)));
+UPDATE nodes n SET approval_hash = NULL
+ WHERE n.approval_hash IS NOT NULL
+   AND (n.role = 'boot-prompt' OR n.role LIKE 'boot-prompt.%')
+   AND (EXISTS (SELECT 1 FROM agents a WHERE a.system_memory_id = n.memory_id)
+     OR EXISTS (SELECT 1 FROM memories m WHERE m.id = n.memory_id AND m.class = 'system' AND m.is_install_memory));
+-- END one-time upgrade pass
 
 -- Verbatim copy of prisma/boot-prompt-approval-invariants.sql (pinned by
 -- src/api/graphql/schema/resolvers.bootPromptApproval2043.test.ts).
