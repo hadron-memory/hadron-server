@@ -50,6 +50,38 @@ async function drifted() {
 }
 
 describe('outer-fenced reconciliation read callers', () => {
+  it.each(['node', 'revision', 'batch', 'mcp', 'mcp-batch'] as const)('%s unchanged read finishes while an unrelated fence is held', async (surface) => {
+    const n = await db.node.create({ data: { memoryId, loc: 'steady', name: 'Steady', content: 'unchanged' } });
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const holder = withIncludeHistoryTransaction(db, async () => { entered(); await gate; });
+    await ready;
+    const pending = (async () => {
+      if (surface === 'node') return resolvers.Query.node(null, { ref: n.id, raw: true }, ctx());
+      if (surface === 'revision') return resolvers.Node.revision(n as never, {}, ctx());
+      if (surface === 'batch') return resolvers.Query.nodeBatch(null, { refs: [n.id] }, ctx());
+      const mcp = createTestableMcpServer({ userId, roles: ['ADMIN'], clientId: `user:${userId}` });
+      return surface === 'mcp'
+        ? mcp.callToolText('hadron_get_node', { urn: 'hrn:node:read-fence.example:mem:steady' })
+        : mcp.callToolText('hadron_get_nodes', { refs: ['hrn:node:read-fence.example:mem:steady'] });
+    })();
+    const settled = pending.then((value) => ({ value }), (error: unknown) => ({ error }));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const outcome = await Promise.race([settled, new Promise<'blocked'>((r) => { timer = setTimeout(() => r('blocked'), 750); })]);
+      expect(outcome, 'unchanged reads must not queue behind the global history fence').not.toBe('blocked');
+      expect(outcome).toHaveProperty('value');
+    } finally {
+      clearTimeout(timer);
+      release();
+      await holder;
+      await settled;
+    }
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
   it.each(['node', 'revision', 'batch', 'mcp', 'mcp-batch'] as const)('%s waits before touching revision state, then reconciles', async (surface) => {
     const n = await drifted();
     const parent = await db.node.findUniqueOrThrow({ where: { id: n.id } });
