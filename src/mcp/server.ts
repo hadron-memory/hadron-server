@@ -1,4 +1,4 @@
-import { withIncludeHistoryTransaction, includeHistoryClient } from '../lib/includes/includeHistoryFence.js';
+import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
 import { assertBootPromptWriteAllowed, assertNoBootPromptRows } from '../lib/bootPrompt.js';
 import { sessionEndReason } from '../lib/sessionEndReason.js';
 import { governedKindAnnotation } from '../lib/edgeGovernedKind.js';
@@ -43,7 +43,6 @@ import {
   buildNodeRevisionSnapshot,
   revisionStateHashRefreshMarker,
   ensureCurrentNodeRevisionInTransaction,
-  reconcileNodeWithIncludeHistory,
   createNodeRevision,
   editorFromAuth,
   diffNodeChanges,
@@ -1492,15 +1491,12 @@ async function loadCurrentReadProjection(
   auth: AuthContext,
   readViaMemoryId: string = authorizedMemoryId,
 ): Promise<ReadProjectionNode | null> {
-  return withIncludeHistoryTransaction(db, async (history) => {
-    const tx = includeHistoryClient(history);
+  return withReconciledNodeRead(db, nodeId, authorizedMemoryId, async (tx) => {
     const user = auth.userId ? await tx.user.findUnique({ where: { id: auth.userId }, select: { roles: true, deletedAt: true } }) : null;
-    if (auth.userId && (!user || user.deletedAt)) return null;
+    if (auth.userId && (!user || user.deletedAt)) return false;
     const freshAuth = { ...auth, roles: auth.impersonation ? [] : user ? user.roles : auth.roles };
-    if (!(await canReadMemory(tx as unknown as typeof db, freshAuth, readViaMemoryId, EXPLICIT_REF))) return null;
-    // Reconcile only while the row is still in the memory the caller
-    // authorized (@codex P1, PR #1339); a relocated row reads as not found.
-    if ((await reconcileNodeWithIncludeHistory(history, nodeId, { expectedMemoryId: authorizedMemoryId })) == null) return null;
+    return canReadMemory(tx as unknown as typeof db, freshAuth, readViaMemoryId, EXPLICIT_REF);
+  }, async (tx) => {
     return tx.node.findFirst({
       where: { id: nodeId, deletedAt: null },
       include: readProjectionInclude,

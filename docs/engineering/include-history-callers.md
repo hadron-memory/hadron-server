@@ -12,11 +12,27 @@ these reads yet. No include-retention/coverage/maintenance state is activated.
 | GraphQL `reconciledNodeForParent` | row check, prepared reconcile, matching projection | 5s / 2s |
 | MCP `loadCurrentReadProjection` | prepared reconcile and same-tx row refetch; shared single/batch | 5s / 2s |
 
-All four use the exclusive first-statement fence at READ COMMITTED, before
-node locks. Authority is re-read after the fence wait on the same transaction client,
+All four share `withReconciledNodeRead`. An unchanged row is checked and
+projected in one **read-only REPEATABLE READ** snapshot, without advisory or row
+locks. The fingerprint and projection cannot straddle a concurrent raw writer.
+Missing/moved/deleted rows refuse without entering a mutation transaction.
+
+Drift (including a missing fingerprint) closes the read-only transaction before
+opening the exclusive first-statement fence at READ COMMITTED, before node
+locks. Authority is re-read after the fence wait on the same transaction client,
 including current user roles and the child memory used for inherited reads.
-Existing memory/address/liveness gates and final projection logic stay in place. The prepared read entry rejects forged/raw/escaped contexts;
-legacy snapshot entry points are not its fallback.
+Revision state is rechecked under the fence; another reader may already have
+reconciled it. Parent-version checks precede reconciliation, with the existing
+Node row lock on this slow path only. Existing memory/address/liveness gates
+and final projection logic stay in place. The prepared entry rejects
+forged/raw/escaped contexts; legacy snapshot entry points are not its fallback.
+The batch's final access-filtered refetch remains outside its per-row transaction;
+this does not provide a whole-batch snapshot.
+
+The budgets above apply per transaction, not to both phases combined. Drift
+readers still serialize globally and can hold the fence during a Node row-lock
+wait; unchanged readers no longer queue behind them. This is not a production
+throughput guarantee or a reduction of the T3/§10 caller-integration scope.
 
 ## Remaining participants
 
@@ -47,6 +63,10 @@ can outlive the transaction. Callers do no external work under this fence.
 This records source call sites (including internal bridge calls), not a claim
 of independently reviewed complete migration. The accompanying static pin
 requires every API use to remain classified when later code adds or moves one.
+The four migrated sites now call `withReconciledNodeRead` (two query sites,
+one parent, one MCP); its single slow-path call to
+`reconcileNodeWithIncludeHistory` is also counted. The historical listing below
+records the remaining base sites; the JSON census is the current exact map.
 
 ```text
 src/api/graphql/schema/resolvers.decisions.ts:350:  await ensureCurrentNodeRevisionInTransaction(tx, logId, { expectedMemoryId: memoryId });

@@ -8,6 +8,7 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from '../../mcp/server.js';
 import { reconcileNodeWithIncludeHistory } from '../nodeRevisionSnapshot.js';
 import { withIncludeHistoryTransaction } from './includeHistoryFence.js';
+import { withReconciledNodeRead } from './reconciledNodeRead.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 let userId: string;
@@ -209,6 +210,142 @@ describe('outer-fenced reconciliation read callers', () => {
     }
     expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).revSeq).toBe(1);
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it('parent revision rechecks readability after its fence wait', async () => {
+    const n = await drifted();
+    const parent = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+    const result = await underHeldFence(
+      () => resolvers.Node.revision(parent as never, {}, ctx()),
+      async () => {
+        await db.user.update({ where: { id: userId }, data: { roles: [] } });
+        await db.orgMember.deleteMany({ where: { userId } });
+      },
+    );
+    expect(result).toBe(parent.revSeq); // revision's existing unavailable fallback
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it('MCP impersonation never imports target platform roles after waiting', async () => {
+    const n = await drifted();
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const auth = { userId, roles: [], clientId: `user:${userId}`, impersonation: {
+      sessionId: generateId(), actorUserId: generateId(), orgId: memory.organizationId!, expiresAt: new Date(Date.now() + 60_000),
+    } };
+    const result = await underHeldFence(
+      () => createTestableMcpServer(auth).callToolText('hadron_get_node', { urn: 'hrn:node:read-fence.example:mem:drift' }),
+      async () => { await db.orgMember.deleteMany({ where: { userId } }); },
+    );
+    expect(result).not.toContain('raw change');
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it.each(['explicit', 'prefix'] as const)('batch %s rechecks child authority, not the readable base', async (selection) => {
+    await db.user.update({ where: { id: userId }, data: { roles: [] } });
+    const childMemory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const org = await db.organization.create({ data: { name: 'Public base', urn: 'base-fence.example' } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'READER' } });
+    const base = await db.memory.create({ data: { class: 'system', organizationId: org.id, urn: 'base-fence.example:system', name: 'Base' } });
+    const agent = await db.agent.create({ data: { name: 'Base', urn: 'base-fence.example:agent', organizationId: org.id, systemMemoryId: base.id, visibility: 'PUBLIC' } });
+    await db.memory.update({ where: { id: memoryId }, data: { class: 'system' } });
+    const child = await db.agent.create({ data: { name: 'Child', urn: 'read-fence.example:child', organizationId: childMemory.organizationId!, systemMemoryId: memoryId, extendsAgentId: agent.id, visibility: 'ORGANIZATION' } });
+    for (const [label, agentId, organizationId] of [['base', agent.id, org.id], ['child', child.id, childMemory.organizationId!]]) {
+      const app = await db.app.create({ data: { name: label!, urn: `read-fence.example:${label}-app`, organizationId: organizationId! } });
+      await db.appAgent.create({ data: { appId: app.id, agentId: agentId! } });
+      await db.appMember.create({ data: { appId: app.id, userId, role: 'member' } });
+    }
+    const n = await db.node.create({ data: { memoryId: base.id, loc: 'inherited', name: 'Inherited', content: 'before' } });
+    // Base remains readable after the child's org membership disappears.
+    expect(await resolvers.Query.node(null, { ref: n.id, raw: true }, { db, userId, roles: [] })).not.toBeNull();
+    await db.node.update({ where: { id: n.id }, data: { content: 'raw inherited' } });
+    const args = selection === 'explicit' ? { refs: ['hrn:node:read-fence.example:mem:inherited'] } : { memory: memoryId, locPrefix: 'inherited' };
+    const result = await underHeldFence(
+      () => resolvers.Query.nodeBatch(null, args, { db, userId, roles: [] }),
+      async () => {
+        await db.orgMember.deleteMany({ where: { userId, organizationId: childMemory.organizationId! } });
+        await db.appMember.deleteMany({ where: { userId, app: { organizationId: childMemory.organizationId! } } });
+      },
+    );
+    expect(result.nodes).toEqual([]);
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+    expect(await resolvers.Query.node(null, { ref: n.id, raw: true }, { db, userId, roles: [] })).not.toBeNull();
+  });
+
+  it('unchanged other-tenant read finishes while a drift reader holds the fence waiting for a row', async () => {
+    const a = await drifted();
+    const otherUser = await db.user.create({ data: { handle: 'other-tenant', roles: [] } });
+    const other = await db.memory.create({ data: { class: 'personal', ownerUserId: otherUser.id, userId: otherUser.id, urn: 'other-fence.example:private', name: 'Other tenant' } });
+    const b = await db.node.create({ data: { memoryId: other.id, loc: 'steady', name: 'Other', content: 'other tenant body' } });
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${a.id} FOR UPDATE`;
+      entered(); await gate;
+    });
+    await ready;
+    const aRead = resolvers.Query.node(null, { ref: a.id, raw: true }, ctx());
+    const aSettled = aRead.then((value) => ({ value }), (error: unknown) => ({ error }));
+    let bSettled: Promise<unknown> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await waitForLockWaitersOfType(db, 'transactionid', 1, 750);
+      const start = performance.now();
+      const bRead = resolvers.Query.node(null, { ref: b.id, raw: true }, { db, userId: otherUser.id, roles: [] });
+      bSettled = bRead.then((value) => ({ value }), (error: unknown) => ({ error }));
+      const result = await Promise.race([bSettled, new Promise<'blocked'>((r) => { timer = setTimeout(() => r('blocked'), 750); })]);
+      process.stdout.write(`S3b row-contention other-tenant ms ${performance.now() - start}\n`);
+      expect(result, 'other tenant must not wait for the drift reader or its blocked row').not.toBe('blocked');
+      expect(result).toMatchObject({ value: { id: b.id, content: 'other tenant body' } });
+    } finally {
+      clearTimeout(timer); release(); await holder; await aSettled; await bSettled;
+    }
+    expect((await aRead)?.revSeq).toBe(2);
+  });
+
+  it('reports synthetic canonical-read throughput and other-tenant latency under 200 reads', async () => {
+    const a = await db.node.create({ data: { memoryId, loc: 'steady', name: 'Steady', content: 'unchanged' } });
+    const userB = await db.user.create({ data: { handle: 'throughput-other', roles: [] } });
+    const other = await db.memory.create({ data: { class: 'personal', ownerUserId: userB.id, userId: userB.id, urn: 'throughput.example:private', name: 'Other' } });
+    const b = await db.node.create({ data: { memoryId: other.id, loc: 'steady', name: 'Other', content: 'other' } });
+    const singleStart = performance.now();
+    await resolvers.Query.node(null, { ref: b.id, raw: true }, { db, userId: userB.id, roles: [] });
+    const baselineMs = performance.now() - singleStart;
+    const start = performance.now();
+    const load = Array.from({ length: 200 }, () => resolvers.Query.node(null, { ref: a.id, raw: true }, ctx()));
+    const bStart = performance.now();
+    const otherRead = resolvers.Query.node(null, { ref: b.id, raw: true }, { db, userId: userB.id, roles: [] });
+    let otherTenantMs = 0;
+    const measuredOther = otherRead.then(() => { otherTenantMs = performance.now() - bStart; });
+    const results = await Promise.allSettled(load);
+    await measuredOther;
+    const elapsedMs = performance.now() - start;
+    process.stdout.write(`S3b throughput ${JSON.stringify({ baselineMs, elapsedMs, readsPerSecond: 201_000 / elapsedMs, failures: results.filter((r) => r.status === 'rejected').length, otherTenantMs })}\n`);
+    expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+    expect(await db.nodeRevision.count()).toBe(0);
+  }, 15_000);
+
+  it('fast read fingerprint and projection share one read-only snapshot across a raw writer', async () => {
+    const n = await db.node.create({ data: { memoryId, loc: 'snapshot', name: 'Snapshot', content: 'before' } });
+    const current = await withReconciledNodeRead(db, n.id, memoryId,
+      async () => {
+        await db.node.update({ where: { id: n.id }, data: { content: 'after' } });
+        return true;
+      },
+      (tx) => tx.node.findUniqueOrThrow({ where: { id: n.id } }),
+    );
+    expect(current).toMatchObject({ content: 'before', revSeq: 1 });
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).content).toBe('after');
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  it('fast path refuses a projection that attempts a write', async () => {
+    const n = await db.node.create({ data: { memoryId, loc: 'readonly', name: 'Readonly', content: 'before' } });
+    await expect(withReconciledNodeRead(db, n.id, memoryId, async () => true,
+      (tx) => tx.node.update({ where: { id: n.id }, data: { content: 'must not write' } }),
+    )).rejects.toThrow(/read.only/i);
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).content).toBe('before');
   });
 
 });

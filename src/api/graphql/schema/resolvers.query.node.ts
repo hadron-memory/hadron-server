@@ -1,5 +1,5 @@
 import { liveTxContext } from './authorizedTx.js';
-import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
+import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { contentScopeWhere, effectiveContentScope, type ContentScope } from '../../../lib/comments/scope.js';
 import { isConcealedCommentHistory } from './resolvers.comments.js';
@@ -92,7 +92,6 @@ import {
   toUsageNodeRef,
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
-import { reconcileNodeWithIncludeHistory } from '../../../lib/nodeRevisionSnapshot.js';
 import { approvalStatePrismaWhere, mintedPrismaWhere, type NodeApprovalState } from '../../../lib/nodeApproval.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { INDEXED_MEMORY_WHERE } from '../../../lib/embedding/indexing.js';
@@ -670,13 +669,13 @@ export const nodeQueries = {
         // The lookup above selects the address. Reconcile and re-fetch while
         // holding its row lock so Node.revision and every sibling field come
         // from one database state (never old body + new counter).
-        const current = await withIncludeHistoryTransaction(ctx.db, async (history) => {
-          const tx = includeHistoryClient(history);
-          const fresh = await liveTxContext(ctx, tx);
-          if (!(await isMemoryReadableCached(fresh, inheritedFrom?.via ?? selected.memoryId))) return null;
-          if ((await reconcileNodeWithIncludeHistory(history, selected.id, { expectedMemoryId: selected.memoryId })) == null) return null;
-          return tx.node.findUnique({ where: { id: selected.id }, include });
-        }, { timeoutMs: 5_000, maxWaitMs: 2_000 });
+        const current = await withReconciledNodeRead(ctx.db, selected.id, selected.memoryId,
+          async (tx) => {
+            const fresh = await liveTxContext(ctx, tx);
+            return isMemoryReadableCached(fresh, inheritedFrom?.via ?? selected.memoryId);
+          },
+          (tx) => tx.node.findUnique({ where: { id: selected.id }, include }),
+          { timeoutMs: 5_000, maxWaitMs: 2_000 });
         if (
           !current ||
           current.deletedAt ||
@@ -1984,14 +1983,13 @@ export const nodeQueries = {
       const selectedById = new Map(ordered.map((n) => [n.id, n]));
       const liveIds: string[] = [];
       for (const id of [...selectedById.keys()].sort()) {
-        const live = await withIncludeHistoryTransaction(ctx.db,
-          async (history) => {
-            const tx = includeHistoryClient(history);
+        const live = await withReconciledNodeRead(ctx.db, id, selectedById.get(id)!.memoryId,
+          async (tx) => {
             const fresh = await liveTxContext(ctx, tx);
             const via = explicitInherited.get(id)?.via ?? readViaMemoryId ?? selectedById.get(id)!.memoryId;
-            if (!(await isMemoryReadableCached(fresh, via))) return null;
-            return reconcileNodeWithIncludeHistory(history, id, { expectedMemoryId: selectedById.get(id)!.memoryId });
+            return isMemoryReadableCached(fresh, via);
           },
+          (tx) => tx.node.findUnique({ where: { id }, select: { revSeq: true } }),
           { timeoutMs: 60_000, maxWaitMs: 15_000 },
         );
         if (live != null) liveIds.push(id);

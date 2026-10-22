@@ -8,11 +8,11 @@
   "src/api/graphql/schema/resolvers.mutation.node.ts :: tx.nodeRevision.deleteMany": 1,
   "src/api/graphql/schema/resolvers.mutation.session.ts :: createNodeRevision": 1,
   "src/api/graphql/schema/resolvers.mutation.session.ts :: ensureCurrentNodeRevisionInTransaction": 1,
-  "src/api/graphql/schema/resolvers.query.node.ts :: reconcileNodeWithIncludeHistory": 2,
+  "src/api/graphql/schema/resolvers.query.node.ts :: withReconciledNodeRead": 2,
   "src/api/graphql/schema/resolvers.query.skill.ts :: ensureCurrentNodeRevisionInTransaction": 1,
   "src/api/graphql/schema/resolvers.searchReplaceSpec.ts :: createNodeRevision": 1,
   "src/api/graphql/schema/resolvers.specCorpus.ts :: ensureCurrentNodeRevisionInTransaction": 1,
-  "src/api/graphql/schema/resolvers.types.ts :: reconcileNodeWithIncludeHistory": 1,
+  "src/api/graphql/schema/resolvers.types.ts :: withReconciledNodeRead": 1,
   "src/controller/operations/cloneMemory.ts :: ensureCurrentNodeRevisionInTransaction": 1,
   "src/controller/operations/createNode.ts :: createNodeRevision": 1,
   "src/controller/operations/createNode.ts :: ensureCurrentNodeRevisionInTransaction": 1,
@@ -21,6 +21,7 @@
   "src/controller/operations/mergeMemories.ts :: ensureCurrentNodeRevisionInTransaction": 2,
   "src/integrations/github/syncGraphFromGithub.ts :: createNodeRevision": 1,
   "src/integrations/github/syncGraphFromGithub.ts :: ensureCurrentNodeRevisionInTransaction": 2,
+  "src/lib/includes/reconciledNodeRead.ts :: reconcileNodeWithIncludeHistory": 1,
   "src/lib/nodeApproval.ts :: ensureCurrentNodeRevisionInTransaction": 1,
   "src/lib/nodeRevisionSnapshot.ts :: createNodeRevision": 1,
   "src/lib/nodeRevisionSnapshot.ts :: db.nodeRevision.deleteMany": 1,
@@ -30,5 +31,5 @@
   "src/lib/signing/requests.ts :: ensureCurrentNodeRevisionInTransaction": 1,
   "src/mcp/server.ts :: createNodeRevision": 4,
   "src/mcp/server.ts :: ensureCurrentNodeRevisionInTransaction": 4,
-  "src/mcp/server.ts :: reconcileNodeWithIncludeHistory": 1
+  "src/mcp/server.ts :: withReconciledNodeRead": 1
 }
