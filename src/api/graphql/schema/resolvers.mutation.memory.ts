@@ -2580,6 +2580,10 @@ export const memoryMutations = {
       // encrypts rows under its own key (#1346).
       if (!memory.isEncrypted) {
         await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+          await withAuthorizedMemoryTx(ctx, resolvedMemoryId, [], async () => {}, async () => {}, {
+            preparedTransaction: tx,
+            memoryRowLocks: new Map([[resolvedMemoryId, 'update']]),
+          });
           // A transfer may win after the preflight above. Hold the same row
           // lock as transfer while checking the current owner and class, so
           // the former owner's key cannot encrypt the receiver's nodes.
@@ -2628,6 +2632,9 @@ export const memoryMutations = {
       }
       /** Keep conversion authority current while holding memory before node locks. */
       const lockConversionMemory = async (tx: Prisma.TransactionClient) => {
+        await withAuthorizedMemoryTx(ctx, resolvedMemoryId, [], async () => {}, async () => {}, {
+          preparedTransaction: tx,
+        });
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR SHARE`;
         const current = await tx.memory.findUnique({ where: { id: resolvedMemoryId } });
         const txCtx = await liveTxContext(ctx, tx);

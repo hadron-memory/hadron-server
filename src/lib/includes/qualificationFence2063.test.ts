@@ -400,6 +400,40 @@ it('a prepared authorization scope change refuses without retrying under held an
   expect(authorized).toBe(false);
 });
 
+it('every encryption conversion root takes authority anchors before Memory rows', async () => {
+  const act = await qualificationAct('encryptMemory');
+  const transactions: Array<Array<{ sql: string; values: unknown[] }>> = [];
+  const transaction = db.$transaction.bind(db);
+  const recordedDb = new Proxy(db, {
+    get(target, property, receiver) {
+      if (property !== '$transaction') return Reflect.get(target, property, receiver);
+      return (work: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<unknown>, options: unknown) => transaction(async (tx) => {
+        const events: Array<{ sql: string; values: unknown[] }> = [];
+        transactions.push(events);
+        const recorded = new Proxy(tx, {
+          get(client, method, recv) {
+            if (method !== '$queryRaw' && method !== '$executeRaw') return Reflect.get(client, method, recv);
+            return (strings: TemplateStringsArray, ...values: unknown[]) => {
+              events.push({ sql: strings.join('?'), values });
+              return (client[method] as (...args: unknown[]) => unknown).call(client, strings, ...values);
+            };
+          },
+        });
+        return work(recorded);
+      }, options as never);
+    },
+  });
+  act.check(await act.run(recordedDb));
+  expect(transactions.length).toBeGreaterThanOrEqual(2);
+  for (const events of transactions) expect(events[0].sql).toContain('pg_advisory_xact_lock(2063, 1772)');
+  for (const events of transactions) {
+    const authority = events.findIndex((event) => event.values.includes('authorization:user'));
+    const memoryRow = events.findIndex((event) => event.sql.includes('FROM memories') && event.sql.includes('FOR '));
+    expect(authority).toBeGreaterThan(0);
+    expect(memoryRow).toBeGreaterThan(authority);
+  }
+});
+
 it('final memory-merge disposition takes Channel keys before strong Memory locks, without a prior SHARE upgrade', async () => {
   const act = await qualificationAct('mergeMemories');
   const target = await db.memory.findUniqueOrThrow({ where: { urn: 'qualification-fence.example:merged-memory' } });
@@ -471,3 +505,29 @@ it('memory merge rechecks the presented key between committed batches and preser
   expect(await db.node.count({ where: { memoryId, deletedAt: null } })).toBe(1);
   expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).deletedAt).toBeNull();
 }, 30_000);
+
+it('encryption conversion rechecks a credential revoked after the flag-flip transaction', async () => {
+  await db.memory.update({ where: { id: memoryId }, data: { class: 'private', userId } });
+  const node = await db.node.create({ data: { memoryId, loc: 'conversion', name: 'Conversion', content: '# Plaintext' } });
+  const key = await db.userApiKey.create({ data: { userId, keyHash: generateId(), keyPreview: 'conversion', oauthScopes: [] } });
+  const transaction = db.$transaction.bind(db);
+  let revoked = false;
+  const pausedDb = new Proxy(db, {
+    get(client, property, receiver) {
+      if (property !== '$transaction') return Reflect.get(client, property, receiver);
+      return async (work: never, options: never) => {
+        const result = await transaction(work, options);
+        if (!revoked) {
+          revoked = true;
+          await resolvers.Mutation.revokeUserApiKey(null, { id: key.id }, ctx());
+        }
+        return result;
+      };
+    },
+  });
+  await expect(resolvers.Mutation.encryptMemory(null, { memoryId, dataKey: Buffer.alloc(32, 7).toString('base64') }, { ...ctx(), db: pausedDb, apiKeyId: key.id })).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  expect(revoked).toBe(true);
+  expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).isEncrypted).toBe(true);
+  expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content).toBe('# Plaintext');
+  expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
+});
