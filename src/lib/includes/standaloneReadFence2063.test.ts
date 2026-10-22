@@ -1,5 +1,6 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
+import { generateId } from '../id.js';
 import { cleanDb } from '../../test/helpers.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
@@ -306,3 +307,30 @@ it.each(['skillPlan', 'selectedSkillFilePlan', 'selectedMetadataSkip'] as const)
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
   },
 );
+
+it.each([
+  ['key', 'skillPlan'], ['key', 'selectedSkillFilePlan'],
+  ['sign-in', 'skillPlan'], ['sign-in', 'selectedSkillFilePlan'],
+] as const)('%s credential permits unchanged %s content through the read-only snapshot', async (credential, surface) => {
+  const body = '# Standalone credential content 2063';
+  const node = await db.node.create({ data: {
+    memoryId, loc: 'tasks:credential', name: 'Credential', isRunnable: true, content: body,
+    properties: { exports: { claudeSkill: { name: 'credential', description: 'Credential task.', enable: true } } },
+  } });
+  const context = ctx();
+  if (credential === 'key') {
+    const key = await db.userApiKey.create({ data: { userId, keyHash: generateId(), keyPreview: 'test', oauthScopes: [] } });
+    context.apiKeyId = key.id;
+  } else {
+    const root = await db.signIn.create({ data: { userId, method: 'email', expiresAt: new Date(Date.now() + 60_000) } });
+    context.signInId = root.id;
+  }
+  const result = surface === 'skillPlan'
+    ? await resolvers.Query.skillPlan(null, { input: { intent: 'EXPORT' } }, context)
+    : await resolvers.Query.selectedSkillFilePlan(null, { input: { nodes: [node.id] } }, context);
+  expect(result.entries).toHaveLength(1);
+  expect(result.entries[0].nodeId).toBe(node.id);
+  expect(result.entries[0].renderedBody).toContain(body);
+  expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq).toBe(1);
+  expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
+});
