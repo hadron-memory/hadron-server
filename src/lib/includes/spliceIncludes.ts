@@ -5,7 +5,7 @@ import { sessionKeyCache } from '../sessionKeyCache.js';
 import { revisionApprovalOf, newestApprovedRevisionOf } from '../nodeApproval.js';
 import { locateIncludeTags, IncludeSyntaxError, type IncludeTag } from './parseIncludeTags.js';
 
-/** Deepest include chain a read follows: the same cap a write enforces (#2040). */
+/** Deepest include chain a read follows; past it a reader sees the notice (cor:dmo:150:06). Writes don't enforce it (#2134). */
 export const MAX_RESOLVE_DEPTH = 10;
 
 /**

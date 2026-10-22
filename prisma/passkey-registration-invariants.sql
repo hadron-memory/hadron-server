@@ -1,5 +1,5 @@
 -- #1631 PR2 / cor:aut:040:07-08: passkey registration lifecycle invariants. One source, shared verbatim with migration
--- 20261021090000_passkey_registration (pinned by src/lib/passkeys/cancel1631.test.ts).
+-- 20261022010000_passkey_registration (pinned by src/lib/passkeys/cancel1631.test.ts).
 
 -- A first passkey's cancel link: one token per first passkey, stored as SHA-256, spent once, never deleted (the
 -- cancel itself is recorded on the credential: cancelled_at, cancel_ip, cancel_user_agent).

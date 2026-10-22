@@ -239,8 +239,10 @@ export async function loadLaunchableFamilies(
     ORDER BY 1, 2`;
   const out = new Map<string, string[]>();
   for (const r of rows) {
+    const family = normalizeFamily(r.family);
+    if (!family) continue;
     const list = out.get(r.workerId) ?? [];
-    list.push(r.family);
+    if (!list.includes(family)) list.push(family);
     out.set(r.workerId, list);
   }
   return out;

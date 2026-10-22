@@ -61,6 +61,13 @@ describe('deriveFamily (Proposed, cor:agt:060:04): llmModel first, then tool, el
     expect(normalizeFamily('not a family')).toBeNull();
     expect(normalizeFamily('-x')).toBeNull();
   });
+
+  it('#2191 canonicalizes provider aliases and preserves custom family identity', () => {
+    expect(normalizeFamily(' AnTHropic ')).toBe('claude');
+    expect(normalizeFamily(' OPENAI ')).toBe('codex');
+    expect(normalizeFamily(' Private.Model-7 ')).toBe('private.model-7');
+    expect(normalizeFamily('claude-opus')).toBe('claude-opus');
+  });
 });
 
 describe('startSession family, and Worker.family following the binding', () => {
@@ -90,6 +97,13 @@ describe('startSession family, and Worker.family following the binding', () => {
   it('an explicit family is stored, normalized; Worker.family reads it while bound', async () => {
     const s = await start({ family: 'Codex', tool: 'claude-code', llmModel: 'claude-opus-5-5' });
     expect(s.family).toBe('codex'); // explicit wins over the derivation
+    expect(await familyOf()).toBe('codex');
+  });
+
+  it('#2191 aliases use the same canonical storage on start and update', async () => {
+    const s = await start({ family: ' Anthropic ' });
+    expect(s.family).toBe('claude');
+    expect((await M.updateSession({}, { id: s.id, family: ' OpenAI ' }, ctx(mia.id))).family).toBe('codex');
     expect(await familyOf()).toBe('codex');
   });
 

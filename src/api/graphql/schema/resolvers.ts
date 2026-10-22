@@ -11,6 +11,7 @@ import { automationPinQueries, automationPinMutations } from './resolvers.automa
 // This file only imports those slices and spreads them into the resolver map.
 // `Context` is re-exported so existing importers (mcp/server.ts + the resolver
 // test suite, ~80 files) keep importing it from './resolvers.js' unchanged.
+import { withInstallConcealment } from './installMemory.js';
 import { withInheritedNodeProjection } from './resolvers.inheritedNode.js';
 import { type Context } from './resolvers.helpers.js';
 export type { Context };
@@ -19,6 +20,7 @@ import { dateTimeScalar } from './dateTimeScalar.js';
 import { typeResolvers } from './resolvers.types.js';
 
 import { nodeQueries } from './resolvers.query.node.js';
+import { recoveryQueries, recoveryMutations, recoveryFieldResolvers } from './resolvers.recovery.js';
 import { skillQueries } from './resolvers.query.skill.js';
 import { edgeQueries } from './resolvers.query.edge.js';
 import { assetQueries } from './resolvers.query.asset.js';
@@ -54,6 +56,8 @@ import { appMemoryMutations } from './resolvers.mutation.appMemory.js';
 import { orgMutations } from './resolvers.mutation.org.js';
 import { agentMutations } from './resolvers.mutation.agent.js';
 import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
+import { bootPromptPointerFieldResolvers } from './resolvers.bootPromptPointer.js';
+import { bootPromptPointerMutations } from './resolvers.mutation.bootPromptPointer.js';
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamSpecQueries } from './resolvers.teamSpec.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
@@ -77,6 +81,7 @@ import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers 
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
 import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
 import { nodeAttributionFieldResolvers } from './resolvers.nodeAttribution.js';
+import { agentExtendedByFieldResolvers } from './resolvers.agentExtendedBy.js';
 import { signingFieldResolvers, signingMutations, signingQueries } from './resolvers.signing.js';
 import { commentFieldResolvers, commentMutations, commentQueries } from './resolvers.comments.js';
 import { decisionFieldResolvers, decisionMutations, decisionQueries } from './resolvers.decisions.js';
@@ -107,6 +112,7 @@ export const resolvers = {
   // property of the schema rather than something each type has to remember.
   DateTime: dateTimeScalar,
   ...typeResolvers,
+  ...recoveryFieldResolvers,
   ...impersonationTypeResolvers,
   ...workerFieldResolvers,
   ...agentTaskFieldResolvers,
@@ -124,14 +130,18 @@ export const resolvers = {
   // `Agent` already has a block in typeResolvers; the register's field joins
   // it rather than replacing it (a bare spread would clobber the AI-config
   // and relation fields).
-  Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent },
+  Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent, ...agentExtendedByFieldResolvers.Agent, ...bootPromptPointerFieldResolvers.Agent },
+  // #2045: the boot-prompt pointer read fields join the existing blocks.
+  AppAgent: { ...typeResolvers.AppAgent, ...bootPromptPointerFieldResolvers.AppAgent },
+  Worker: { ...workerFieldResolvers.Worker, ...bootPromptPointerFieldResolvers.Worker },
   // Same for Memory: the config field joins the existing type block (#1325).
   Memory: { ...typeResolvers.Memory, ...memoryConfigFieldResolvers.Memory },
   // #1591: approval status joins the existing Node block; #1610 the
   // Worker / Agent attribution with it.
   // #1885: an inherited node shows its content and nothing of the base
   // tenant's records (resolvers.inheritedNode.ts).
-  Node: withInheritedNodeProjection({ ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node, ...signingFieldResolvers.Node }),
+  // #2064: a non-participant's install-memory write response reads empty (installMemory.ts).
+  Node: withInstallConcealment(withInheritedNodeProjection({ ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node, ...signingFieldResolvers.Node })),
   // #1632: signing requests and signatures.
   SigningRequest: signingFieldResolvers.SigningRequest,
   NodeSignature: signingFieldResolvers.NodeSignature,
@@ -148,6 +158,7 @@ export const resolvers = {
   MemoryConfigTemplate: memoryConfigTemplateFieldResolvers.MemoryConfigTemplate,
   MemoryConfigTemplateRule: memoryConfigTemplateFieldResolvers.MemoryConfigTemplateRule,
   Query: {
+    ...recoveryQueries,
     ...nodeQueries,
     ...specCorpusQueries,
     ...nodeApprovalQueries,
@@ -199,6 +210,7 @@ export const resolvers = {
     ...impersonationQueries,
   },
   Mutation: {
+    ...recoveryMutations,
     ...nodeMutations,
     ...objectMutations,
     ...dashboardMutations,
@@ -215,6 +227,7 @@ export const resolvers = {
     ...orgMutations,
     ...agentMutations,
     ...workerMutations,
+    ...bootPromptPointerMutations,
     ...teamRoleMutations,
     ...teamChatMutations,
     ...teamAttentionMutations,

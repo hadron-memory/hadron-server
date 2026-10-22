@@ -1,5 +1,5 @@
 import { defineConfig } from 'vitest/config';
-import { PARALLEL_DBS } from './src/test/dbWorkers.js';
+import { PARALLEL_DBS, testMaxWorkers } from './src/test/dbWorkers.js';
 
 export default defineConfig({
   test: {
@@ -17,6 +17,8 @@ export default defineConfig({
     // concurrently at vitest's default fork concurrency (~cores-2).
     // HADRON_TEST_PARALLEL=0 restores the old single-DB serial behavior.
     fileParallelism: PARALLEL_DBS,
+    // HADRON_TEST_MAX_WORKERS caps the fork count on a shared host; unset keeps vitest's default.
+    maxWorkers: testMaxWorkers(process.env.HADRON_TEST_MAX_WORKERS),
     setupFiles: ['./src/test/perWorkerDb.ts', './src/test/graphRootSetup.ts', './src/test/drainUsage.ts'],
     // CHECK constraints declared in migrations don't survive `prisma db push`
     // (which is what tests use to set up a fresh schema). Apply them once

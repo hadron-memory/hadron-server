@@ -79,6 +79,8 @@ function stampNodeUpdate(data: NodeData): void {
   const actor = currentActor();
   if (!('updatedByWorkerId' in data)) data.updatedByWorkerId = actor.workerId;
   if (!('updatedByAgentId' in data)) data.updatedByAgentId = actor.agentId;
+  // #2176: the User behind the edit, stamped with the Worker / Agent so a clear is a clear for all three.
+  if (!('updatedByUserId' in data)) data.updatedByUserId = actor.userId ?? null;
 }
 
 /**

@@ -28,6 +28,7 @@ import {
   runTemplateUrl,
   PARALLEL_DBS,
   WORKER_CONNECTION_LIMIT,
+  testMaxWorkers,
 } from './dbWorkers.js';
 
 const ORIGINAL = process.env.TEST_DATABASE_URL;
@@ -455,3 +456,17 @@ function withDbNameForTest(url: string, dbName: string): string {
   u.pathname = `/${dbName}`;
   return u.toString();
 }
+
+describe('testMaxWorkers (HADRON_TEST_MAX_WORKERS)', () => {
+  it('a positive integer caps the forks; unset, empty or invalid keeps vitest\'s default', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(testMaxWorkers('4')).toBe(4);
+    expect(testMaxWorkers(' 12 ')).toBe(12);
+    expect(testMaxWorkers(undefined)).toBeUndefined();
+    expect(testMaxWorkers('')).toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
+    for (const bad of ['0', '-2', '2.5', 'four', '50%']) expect(testMaxWorkers(bad)).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(5);
+    warn.mockRestore();
+  });
+});

@@ -55,6 +55,7 @@ import { resolveNodeRevRef } from '../../../lib/entityRef/nodeRevRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
+import { recoveryMemoryIds } from './resolvers.recovery.js';
 import { AmbiguousLegacyUrnError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
@@ -1107,6 +1108,7 @@ export const nodeQueries = {
       // so query results respect them exactly like the list does.
       const contentScope = effectiveContentScope(f);
       const scopeWhere = contentScopeWhere(contentScope);
+      const recoverableIds = f.includeDeleted ? await recoveryMemoryIds(ctx, scopeIds) : [];
       const structuredWhere: Record<string, unknown> = {
         ...(f.includeDeleted ? {} : { deletedAt: null }),
         // Explicit nodeType wins; otherwise exclude system-type nodes (orthogonal
@@ -1136,6 +1138,7 @@ export const nodeQueries = {
         // comments; #1608 (cor:dmo:110:08) — content, comments or both, CONTENT
         // by default. Both ride AND so neither clobbers the nodeType key above.
         AND: [
+          ...(f.includeDeleted ? [{ OR: [{ deletedAt: null }, { memoryId: { in: recoverableIds }, nodeType: { not: COMMENT_NODE_TYPE } }] }] : []),
           ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
           ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
           ...(scopeWhere ? [scopeWhere] : []),
@@ -1154,6 +1157,7 @@ export const nodeQueries = {
       // browse when a `where` predicate is present). Mirrors `structuredWhere`
       // (the Prisma form) but adds the JSONB `where`, which Prisma can't express.
       const sqlFilter: NodeSqlFilter = {
+        ...(f.includeDeleted ? { tombstoneMemoryIds: recoverableIds } : {}),
         nodeType: f.nodeType ?? null,
         objectType: f.objectType ?? null,
         isRunnable: f.isRunnable ?? null,
@@ -1267,6 +1271,7 @@ export const nodeQueries = {
         if (f.where != null) {
           candidates = await provider.filterWhere({
             db: ctx.db, ids, memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
+            tombstoneMemoryIds: recoverableIds,
           });
         }
         const rows = await ctx.db.node.findMany({
@@ -1331,7 +1336,7 @@ export const nodeQueries = {
           const allowed = new Set(
             await provider.filterWhere({
               db: ctx.db, ids: candidateIds, memoryIds: scopeIds,
-              where: f.where, includeDeleted: !!f.includeDeleted,
+              where: f.where, includeDeleted: !!f.includeDeleted, tombstoneMemoryIds: recoverableIds,
             }),
           );
           candidateIds = candidateIds.filter((id) => allowed.has(id));
@@ -1628,6 +1633,7 @@ export const nodeQueries = {
             await provider.filterWhere({
               db: ctx.db, ids: candidateParentIds,
               memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
+              tombstoneMemoryIds: recoverableIds,
             }),
           );
         }
@@ -2387,6 +2393,7 @@ export const nodeQueries = {
         throw badInput('appNodes filter.updatedBefore must be a valid date string.');
       }
 
+      const recoverableAppMemoryIds = f.includeDeleted ? await recoveryMemoryIds(ctx, memoryIds) : [];
       const results = await ctx.db.node.findMany({
         where: {
           memoryId: { in: memoryIds },
@@ -2416,6 +2423,7 @@ export const nodeQueries = {
           // #1607 + #1608 — no comments in status sets; content, comments or
           // both by contentScope (CONTENT by default, cor:dmo:110:08).
           AND: [
+            ...(f.includeDeleted ? [{ OR: [{ deletedAt: null }, { memoryId: { in: recoverableAppMemoryIds }, nodeType: { not: COMMENT_NODE_TYPE } }] }] : []),
             ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
             ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
             ...((sw) => (sw ? [sw] : []))(contentScopeWhere(effectiveContentScope(f))),

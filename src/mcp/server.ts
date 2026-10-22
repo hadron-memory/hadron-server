@@ -57,7 +57,7 @@ import {
   UrnNotQualifiedError,
 } from '../lib/urn.js';
 import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
-import { currentActorAmbiguity, publishActor, publishAmbiguousActor, runInChildActorScope } from '../lib/requestActor.js';
+import { currentActorAmbiguity, publishActor, publishAmbiguousActor, publishUser, runInChildActorScope } from '../lib/requestActor.js';
 import {
   emitEntityUrnV2,
   emitNodeUrnV2,
@@ -101,7 +101,7 @@ import { foreignEdgeMemoryIds } from '../lib/foreignEdgeMemories.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
-import { governedRemovalError, lockGovernedRowsIn } from '../lib/governedRemoval.js';
+import { governedAmong, governedRemovalError, lockGovernedRowsIn, lockRemovalRows } from '../lib/governedRemoval.js';
 import { escapePrismaLikePattern } from '../lib/literalLocPrefix.js';
 import {
   moveNodeSubtree,
@@ -1034,10 +1034,14 @@ async function applyIncludesInTransaction(
   node: { id: string; loc: string; memoryId: string },
   plaintextContent: string | null,
   auth: AuthContext,
+  storedPlaintext: string | null,
 ): Promise<void> {
+  // #2041 S2b — `storedPlaintext` is the node's plaintext from the row this
+  // write locked and revalidated, before its update (null for a create).
   const readable = plaintextContent?.includes('{{>') ? await getAccessibleMemoryIds(db, auth) : null;
-  const tags = await assertIncludesWritable(tx, node, plaintextContent, readable);
-  await syncDerivedIncludesEdges(tx, node, tags, readable);
+  const stored = { storedPlaintext };
+  const tags = await assertIncludesWritable(tx, node, plaintextContent, readable, undefined, stored);
+  await syncDerivedIncludesEdges(tx, node, tags, readable, stored);
 }
 
 async function replaceOutgoingEdgesInTransaction(
@@ -2157,6 +2161,7 @@ export function createMcpServerInstance(
     'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_attention',
     'hadron_team_attention_page', 'hadron_list_workers', 'hadron_get_worker', 'hadron_team_work_items',
     'hadron_list_comments', 'hadron_get_comment', 'hadron_team_chat_mark_read',
+    'hadron_list_recovery_nodes', 'hadron_list_recovery_edges', 'hadron_get_recovery_node',
     // #1705 — agent-task reads (each takes its own optional session).
     'hadron_task_get', 'hadron_task_list', 'hadron_team_events',
     // #1706 — availability read (its own optional session).
@@ -2277,6 +2282,9 @@ export function createMcpServerInstance(
       // an unnamed sibling was about to be refused on.
       args[cbIndex] = (input: unknown, extra: unknown) =>
         runInChildActorScope(async () => {
+          // #2176: this tool call's own validated user (auth is the connection's, refreshed per request),
+          // published in the call's own scope like its Worker, so a batch sibling cannot overwrite it.
+          publishUser(auth.userId ?? null);
           const named = (input as Record<string, unknown> | undefined)?.[argumentName];
           const humanArgument = EXPLICIT_HUMAN_ARGUMENT[name];
           const asHuman = humanArgument !== undefined && (input as Record<string, unknown> | undefined)?.[humanArgument] === true;
@@ -3488,6 +3496,44 @@ export function createMcpServerInstance(
     organizationId: auth.organizationId ?? undefined,
   });
 
+  // #2175: explicit recovery twins delegate to the same writer-plus-reader resolver gate.
+  const recoveryCtx = (): Context => ({ ...scopeCtx(), appKeyId: auth.appKeyId ?? undefined,
+    impersonation: auth.impersonation ?? undefined });
+  const recoveryCall = async (work: () => Promise<ReturnType<typeof textResult>>) => {
+    try { return await work(); }
+    catch (error) {
+      return { ...toolErrorResult(error, () => {
+        if (error instanceof ScopeGraphQLError) return `[${String(error.extensions.code ?? 'ERROR').toLowerCase()}] ${error.message}`;
+        if (error instanceof MemoryNotFoundError) return '[not_found] Memory not found.';
+        if (error instanceof UrnNotQualifiedError) return `[bad_user_input] ${error.message}`;
+        throw error;
+      }, 'node_recovery'), isError: true as const };
+    }
+  };
+  const recoveryPageArgs = {
+    memoryRef: z.string().describe('One live memory ID or qualified URN.'),
+    limit: z.number().int().nullable().optional().describe('Default 20 (also null), maximum 200; use total to fetch remaining pages.'),
+    offset: z.number().int().nullable().optional().describe('Page offset, default 0.'),
+  };
+  server.tool('hadron_list_recovery_nodes', 'List retained deleted nodes in one live memory that you can read and write. Ordinary reads return live nodes only.',
+    recoveryPageArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryNodes({}, args, recoveryCtx())))));
+  server.tool('hadron_list_recovery_edges', 'Inspect live edges and accessible deleted endpoints in one memory that you can read and write. Unavailable endpoints are excluded from the page and total.',
+    recoveryPageArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryEdges({}, args, recoveryCtx())))));
+  server.tool('hadron_get_recovery_node', 'Read retained deleted-node content in a live memory that you can read and write. Returns the stored body without expanding templates or includes.',
+    { nodeRef: z.string().describe('Stable node ID or qualified node URN.') }, async (args) => recoveryCall(async () => {
+      const ctx = recoveryCtx();
+      const retained = await resolvers.Query.recoveryNode({}, args, ctx);
+      if (!retained) return { ...textResult('[not_found] No deleted node you can recover at that reference.'), isError: true as const };
+      const { _retainedNode: _internal, ...dto } = retained;
+      const content = await resolvers.RecoveryNode.content(retained as never, {}, ctx);
+      return textResult(JSON.stringify({ ...dto, content }));
+    }));
+  server.tool('hadron_restore_node', 'Restore one retained deleted node in a live memory that you can read and write. Restore deleted ancestors first. Governed nodes, comments, compiled boot prompts and protected internal addresses refuse. Does not restore descendants or revisions.',
+    { nodeRef: z.string().describe('Stable node ID or qualified node URN.') }, async (args) => recoveryCall(async () => {
+      const restored = await resolvers.Mutation.restoreNode({}, args, recoveryCtx());
+      return textResult(JSON.stringify({ id: restored.id, loc: restored.loc, memoryId: restored.memoryId, deletedAt: restored.deletedAt }));
+    }));
+
   /** A resolver refusal as `[<code>] <message>` text, the app-selection envelope convention. */
   const scopeErrorText = (e: unknown) => {
     if (e instanceof ScopeGraphQLError) {
@@ -4072,6 +4118,7 @@ export function createMcpServerInstance(
               priorRunnable: lockedSection.isRunnable, nextRunnable: lockedSection.isRunnable,
             });
           }
+          let storedForIncludes: string | null = null;
           if (prior && !prior.deletedAt) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
             await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted, auth);
@@ -4093,6 +4140,7 @@ export function createMcpServerInstance(
             const currentForDiff = parentKey
               ? decryptNodeFieldsWithKey({ ...current }, parentKey)
               : current;
+            storedForIncludes = (currentForDiff.content as string | null) ?? null;
             const changes = diffNodeChanges(currentForDiff, {
               ...upsertArgs.update, content,
             });
@@ -4115,7 +4163,7 @@ export function createMcpServerInstance(
             ...upsertArgs,
             update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
-          await applyIncludesInTransaction(tx, row, content, auth);
+          await applyIncludesInTransaction(tx, row, content, auth, storedForIncludes);
           return row.id;
         });
       } catch (e) {
@@ -5887,6 +5935,38 @@ export function createMcpServerInstance(
     },
   );
 
+  // #2044 (cor:agt:040:06): `install: { app, agent }` on hadron_create_node / hadron_update_node
+  // targets an App's install memory. Both delegate to the GraphQL createNode / updateNode, so the
+  // first-customisation create, the authority anchors and the gates are the ones the portal uses.
+  const writeInstallNodeViaGraphql = async (
+    op: 'create' | 'update',
+    install: { app: string; agent: string },
+    fields: Record<string, unknown>,
+  ) => {
+    const ctx: Context = {
+      db,
+      transport: 'mcp',
+      governedCanReplay: () => true,
+      clientId: auth.clientId ?? undefined,
+      userId: auth.userId ?? undefined,
+      apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
+      appId: auth.appId ?? undefined,
+      sessionId: auth.sessionId ?? undefined,
+      roles: auth.roles as Context['roles'],
+      organizationId: auth.organizationId ?? undefined,
+    };
+    const input = { ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)), install: { appRef: install.app, agentRef: install.agent } };
+    try {
+      const node = op === 'create'
+        ? await resolvers.Mutation.createNode({}, { input: input as never }, ctx)
+        : await resolvers.Mutation.updateNode({}, { input: input as never }, ctx);
+      const urn = await nodeUrn(node.loc, node.memoryId);
+      return textResult(`${op === 'create' ? 'Node created' : 'Node updated'} in the App's install memory: ${urn} (id: ${node.id})`);
+    } catch (e) {
+      return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : `${op} failed`}`, `hadron_${op}_node:install`);
+    }
+  };
+
   // ── hadron_create_node ───────────────────────────────────────────────────────────
 
   server.tool(
@@ -5915,8 +5995,21 @@ export function createMcpServerInstance(
         description: z.string().optional().describe(EDGE_DESCRIPTION_DOC),
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('Outgoing edges (replaces the full set on the source node)'),
+      install: z.object({
+        app: z.string().describe('The App: its ID or fully-qualified URN.'),
+        agent: z.string().describe('The Agent the App customises: its ID or fully-qualified URN.'),
+      }).optional().describe('#2044 — write into an App\'s INSTALL MEMORY (where it keeps its customisation of an installed Agent, cor:agt:040:06) instead of a memory named by `urn`. When set, `urn` is just the node\'s LOC (e.g. "prompts:lane"), not a URN. The first create finds-or-creates the install memory in the same step as the write; later calls reuse it. Only whoever manages the App may write, while the App is live and the Agent installed. Not supported with `edges`, `isRunnable` or `abstractStillAccurate`.'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, install }) => {
+      // #2044: an App's install memory is written through the GraphQL operation (one write path
+      // for the first-customisation create), not this inline parity writer.
+      if (install) {
+        if (edges || isRunnable) return textResult('`install` does not support `edges` or `isRunnable`; write those with a plain memory node.');
+        return writeInstallNodeViaGraphql('create', install, {
+          loc: rawUrn, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
+          properties, data: nodeData, llmModel, aiAgent,
+        });
+      }
       // #1219 — this tool is an inline parity writer, NOT a writeNodeCore
       // delegate (#206), so the core's role normalization does not reach it:
       // normalize here, before the governance probe and the payload build.
@@ -6399,7 +6492,7 @@ export function createMcpServerInstance(
             });
             if (edgeError) throw new InlineEdgeEndpointError(edgeError);
           }
-          await applyIncludesInTransaction(tx, written, content ?? null, auth);
+          await applyIncludesInTransaction(tx, written, content ?? null, auth, null);
           return written;
         });
       } catch (e) {
@@ -6496,8 +6589,19 @@ export function createMcpServerInstance(
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
+      install: z.object({
+        app: z.string().describe('The App: its ID or fully-qualified URN.'),
+        agent: z.string().describe('The Agent the App customises: its ID or fully-qualified URN.'),
+      }).optional().describe('#2044 — write into an App\'s INSTALL MEMORY (where it keeps its customisation of an installed Agent, cor:agt:040:06) instead of a memory named by `urn`. When set, `urn` is just the node\'s LOC (e.g. "prompts:lane"), not a URN. The first create finds-or-creates the install memory in the same step as the write; later calls reuse it. Only whoever manages the App may write, while the App is live and the Agent installed. Creates nothing: the memory exists once the first hadron_create_node with `install` has run. Not supported with `edges`, `isRunnable` or `abstractStillAccurate`.'),
     },
-    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install }) => {
+      if (install) {
+        if (edges || isRunnable || abstractStillAccurate) return textResult('`install` does not support `edges`, `isRunnable` or `abstractStillAccurate`.');
+        return writeInstallNodeViaGraphql('update', install, {
+          loc: rawUrn, expectedRevision, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
+          properties, data: nodeData, llmModel, aiAgent, reason,
+        });
+      }
       // #1219 — inline parity writer, not a writeNodeCore delegate (#206):
       // normalize before mergedGovernedState, the door replay and the payload.
       const role = normalizeRole(rawRole);
@@ -6837,7 +6941,7 @@ export function createMcpServerInstance(
               });
               if (edgeError) throw new InlineEdgeEndpointError(edgeError);
             }
-            if (content !== undefined) await applyIncludesInTransaction(tx, updated, content, auth);
+            if (content !== undefined) await applyIncludesInTransaction(tx, updated, content, auth, (currentForDiff.content as string | null) ?? null);
           });
         } catch (e) {
           if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
@@ -7581,6 +7685,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'comment'; message: string }
         | { refused: 'decision'; message: string }
         | { refused: 'governed'; message: string }
+        | { refused: 'writerLevel'; message: string }
         | { ok: true; descendantCount: number };
 
       // #449 — source memories whose pending-edge count a hard delete changed.
@@ -7659,9 +7764,19 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
         // A governed node is removed only after its marker is cleared through
         // the kind's door: the whole affected set is judged on locked rows.
-        const governedHits = await lockGovernedRowsIn(tx, memory.id, affectedIds);
+        const removed = await lockRemovalRows(tx, memory.id, affectedIds, { hard: !!hard });
+        const governedHits = governedAmong(removed);
         if (governedHits.length > 0) {
           return { refused: 'governed', message: governedRemovalError(governedHits, 'mcp').message };
+        }
+        // cor:acl:130:07 — removing a node writes it: each removed row needs its
+        // writer level, judged on the rows locked above.
+        try {
+          await assertRoleWritersForNodes(tx, auth, removed, { from: memory.id });
+        } catch (e) {
+          const text = roleWriterRefusalText(e);
+          if (text) return { refused: 'writerLevel', message: text };
+          throw e;
         }
         if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
         else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy: auth.userId ?? auth.clientId ?? null, at: new Date() });
@@ -7750,6 +7865,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
         if (result.refused === 'governed') {
           return textResult(`[role_governed] ${result.message}`);
+        }
+        if (result.refused === 'writerLevel') {
+          return textResult(result.message);
         }
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';
@@ -10874,6 +10992,13 @@ function ageOf(at: Date, now: Date = new Date()): string {
           // #2138 §3.4 — gated like hasLiveSession; null on deny.
           resolvers.Worker.checkStatus(worker, {}, ctx) as Promise<WorkerCheckStatus | null>,
         ]);
+        // #2045: the boot-prompt pointer, through the SAME gated field resolvers
+        // GraphQL serves (null on deny, and null when unset). A read only: R24
+        // keeps every pointer WRITE off MCP.
+        const [bootPromptRef, bootPromptTargetDeleted] = await Promise.all([
+          resolvers.Worker.bootPromptRef(worker, {}, ctx),
+          resolvers.Worker.bootPromptTargetDeleted(worker, {}, ctx),
+        ]);
         const prompt = briefing.text;
         const agentName = (agent as { name?: string } | null)?.name ?? null;
         const readUrl = workerPortalUrl(workerUrn as string | null);
@@ -10970,6 +11095,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // Only the caller's OWN driving session is named. Whose session it
             // is otherwise stays behind the takeover refusal, which is a
             // deliberate act rather than a listing (hadron_list_workers' rule).
+            (bootPromptRef
+              ? `Boot prompt pointer: ${bootPromptRef}${bootPromptTargetDeleted ? ' (TARGET DELETED: nothing can be served from it; clear or repoint it)' : ''}\n`
+              : '') +
             (mine
               ? `Your active session: ${mine.id} (worker session id; pass as \`session\` to team tools; since ${mine.startedAt.toISOString()})\n`
               : '') +

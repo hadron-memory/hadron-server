@@ -432,6 +432,7 @@ model User {
   freshSignIns                  FreshSignIn[]
   passkeyCeremonies             PasskeyCeremony[]
   passkeyRegistrationNotices    PasskeyRegistrationNotice[]
+  pendingEmailSignIns           PendingEmailSignIn[]
   signIns                       SignIn[]
   authHandoffCodes              AuthHandoffCode[]
   // #620: revisions this user approved (NodeRevision.approvedBy).
@@ -780,6 +781,22 @@ model Memory {
   /// memory when its App was renamed. Enforced by chk_memory_shared_agent_scope
   /// (set ⇒ `class='app'` AND `app_id IS NOT NULL`).
   sharedMemoryOfAgentId String? @map("shared_memory_of_agent_id")
+  /// #2044 (S7) — the IDENTITY of an App's INSTALL MEMORY: the Agent this
+  /// `class='system'` row customises for `appId` (cor:agt:040:06). Set ONLY
+  /// there; NULL on every other row, including an Agent's own system memory
+  /// (which is `app_id IS NULL` and is reached through `Agent.systemMemoryId`,
+  /// a pointer an install memory never has). Identity is by COLUMNS, never by
+  /// URN, so a renamed App or Agent cannot orphan it. One LIVE row per
+  /// (app_id, install_of_agent_id): the partial unique index lives in
+  /// prisma/post-push.sql (Prisma cannot model the WHERE). Enforced by
+  /// chk_memory_class_app_id (system ⇒ both set or both NULL).
+  installOfAgentId      String? @map("install_of_agent_id")
+  /// R94 C (#2064): TRUE for an App's install memory, for its whole life. The
+  /// link to the Agent above is NULLed when the Agent is erased with its
+  /// owner's account (the memory stays with its App, a detached install), so
+  /// the discriminator every gate branches on cannot be that link. Enforced by
+  /// chk_memory_class_app_id: class='system' with an app_id ⇔ TRUE.
+  isInstallMemory       Boolean @default(false) @map("is_install_memory")
 
   /// Globally unique identifier, e.g. "baragaun.com:secureid".
   /// Derived from `org.urn + ":" + slug`.
@@ -971,6 +988,11 @@ model Memory {
   // the legacy key), and user-account deletion cascades the App's memories away
   // in the same pass, so the window is narrow and self-closing.
   sharedMemoryOfAgent Agent?            @relation("SharedMemoriesOfAgent", fields: [sharedMemoryOfAgentId], references: [id], onDelete: SetNull)
+  // #2044 / R94 C: SetNull. Org Agents are soft-deleted, so this fires only for
+  // user-account deletion: another App's install memory of the erased Agent is
+  // KEPT and detached (never erased, never blocking the erasure). It stays an
+  // install memory through `isInstallMemory`, not through this link.
+  installOfAgent      Agent?            @relation("InstallMemoriesOfAgent", fields: [installOfAgentId], references: [id], onDelete: SetNull)
   user                User?             @relation("UserMemoriesOwned", fields: [userId], references: [id], onDelete: SetNull)
   // 008-agent-installation: hard App deletion cascades to its personal/app
   // memories (per data-model.md "Cascade behavior"). The CHECK constraint
@@ -1010,6 +1032,7 @@ model Memory {
   @@index([anonymousExpiresAt])
   @@index([userId])
   @@index([appId])
+  @@index([installOfAgentId])
   @@index([ownerUserId])
   @@index([legacyUrn])
   @@map("memories")
@@ -1367,6 +1390,14 @@ model Node {
   createdByAgentId    String?             @map("created_by_agent_id")
   updatedByWorkerId   String?             @map("updated_by_worker_id")
   updatedByAgentId    String?             @map("updated_by_agent_id")
+  /// #2176 — the User behind the last authored edit, beside the Worker / Agent
+  /// above and stamped with them in one place (src/integrations/db/client.ts).
+  /// It is exactly what NodeRevision.editedBy records for the same edit
+  /// (`editorFromAuth`): the request's validated `auth.userId`, from the
+  /// RequestActor holder, never a clientId or a credential holder. An authored
+  /// edit with no user behind it clears it. Null = unknown (nodes edited before
+  /// #2176 are not backfilled). No FK, like the audit stamps (cor:dmo:010:01).
+  updatedByUserId     String?             @map("updated_by_user_id")
 
   memory                   Memory                        @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   outgoingEdges            Edge[]                        @relation("SourceNode")
@@ -1939,6 +1970,17 @@ model Agent {
   /// Agent prompt template. {{name}}/{{role}} bind to the Worker's identity
   /// for a worker briefing, or to this Agent's name/role for a chat.
   systemPrompt         String?         @map("system_prompt")
+  /// #2045 (S8, cor:agt:040:07) — this Agent's boot-prompt POINTER: the id of a
+  /// compiled boot-prompt node (`nodeType = 'compiled-boot-prompt'`), never its
+  /// source. NO foreign key: nodes are hard-deleted on some paths (deleteNode
+  /// hard/subtree, memory merge, git-sync cleanup), and SET NULL would turn a
+  /// deleted target (R27) into "no pointer" (R26) while RESTRICT would block
+  /// those deletes. `bootPromptUrn` is the target's canonical URN at write time,
+  /// read only when the row is gone; both are set or both NULL
+  /// (chk_*_boot_prompt_pointer_pair, prisma/boot-prompt-pointer-invariants.sql).
+  /// Written only through `setBootPromptPointer` (src/lib/bootPromptPointer.ts).
+  bootPromptNodeId     String?         @map("boot_prompt_node_id")
+  bootPromptUrn        String?         @map("boot_prompt_urn")
   /// Memory containing conversation designs (stages, prompts,
   /// partials). Universally read-only from any App context post-008
   /// (DEVELOP-from-App is dropped per R-10); edits happen in the
@@ -2049,6 +2091,8 @@ model Agent {
   /// #723 — the per-App `shared` app-class memories this Agent is the identity
   /// of (at most one per App).
   sharedMemories     Memory[]            @relation("SharedMemoriesOfAgent")
+  /// #2044 — the per-App install memories that customise this Agent.
+  installMemories    Memory[]            @relation("InstallMemoriesOfAgent")
   sessions           Session[]           @relation("SessionAgent")
   userSubscriptions  AgentSubscription[] @relation("AgentUserSubscriptions")
   // 023-app-shape Phase 2b: App↔Agent goes through `AppAgent` (N:M).
@@ -2074,6 +2118,7 @@ model Agent {
   @@index([ownerUserId])
   @@index([extendsAgentId])
   @@index([legacyUrn])
+  @@index([bootPromptNodeId])
   @@map("agents")
 }
 
@@ -3626,21 +3671,35 @@ model AppLogEntry {
 /// (FR-005; orphan retention preserved). Duplicate inserts for the
 /// same (app_id, agent_id) are rejected by the composite PK.
 model AppAgent {
-  appId     String    @map("app_id")
-  agentId   String    @map("agent_id")
+  appId            String    @map("app_id")
+  agentId          String    @map("agent_id")
   // Audit fields mirror AppMember (no soft-delete). Uninstall is a
   // hard row delete; predicate lookups use `findUnique` on the
   // composite PK with no filter.
-  createdAt DateTime  @default(now()) @map("created_at")
-  createdBy String?   @map("created_by")
-  updatedAt DateTime? @updatedAt @map("updated_at")
-  updatedBy String?   @map("updated_by")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  createdBy        String?   @map("created_by")
+  updatedAt        DateTime? @updatedAt @map("updated_at")
+  updatedBy        String?   @map("updated_by")
+  /// #2045 (S8, cor:agt:040:07) — the install's boot-prompt POINTER: the id of a
+  /// compiled boot-prompt node (`nodeType = 'compiled-boot-prompt'`), never its
+  /// source. NO foreign key: nodes are hard-deleted on some paths (deleteNode
+  /// hard/subtree, memory merge, git-sync cleanup), and SET NULL would turn a
+  /// deleted target (R27) into "no pointer" (R26) while RESTRICT would block
+  /// those deletes. `bootPromptUrn` is the target's canonical URN at write time,
+  /// read only when the row is gone; both are set or both NULL
+  /// (chk_*_boot_prompt_pointer_pair, prisma/boot-prompt-pointer-invariants.sql).
+  /// Written only through `setBootPromptPointer` (src/lib/bootPromptPointer.ts).
+  /// The row is hard-deleted on uninstall, so a reinstall starts empty until
+  /// the App's manager next compiles (cor:agt:040:06, cor:dmo:050:03).
+  bootPromptNodeId String?   @map("boot_prompt_node_id")
+  bootPromptUrn    String?   @map("boot_prompt_urn")
 
   app   App   @relation(fields: [appId], references: [id], onDelete: Cascade)
   agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@id([appId, agentId])
   @@index([agentId])
+  @@index([bootPromptNodeId])
   @@map("app_agents")
 }
 
@@ -3697,6 +3756,18 @@ model Worker {
   signature         String
   /// Per-worker commit trailer template, delivered through S4 (cor:agt:040:04).
   trailer           String
+  /// #2045 (S8, cor:agt:040:07) — this worker's boot-prompt POINTER: the id of a
+  /// compiled boot-prompt node (`nodeType = 'compiled-boot-prompt'`), never its
+  /// source. NO foreign key: nodes are hard-deleted on some paths (deleteNode
+  /// hard/subtree, memory merge, git-sync cleanup), and SET NULL would turn a
+  /// deleted target (R27) into "no pointer" (R26) while RESTRICT would block
+  /// those deletes. `bootPromptUrn` is the target's canonical URN at write time,
+  /// read only when the row is gone; both are set or both NULL
+  /// (chk_*_boot_prompt_pointer_pair, prisma/boot-prompt-pointer-invariants.sql).
+  /// Written only through `setBootPromptPointer` (src/lib/bootPromptPointer.ts).
+  /// Set for customised workers only, empty otherwise (cor:dmo:050:11).
+  bootPromptNodeId  String?   @map("boot_prompt_node_id")
+  bootPromptUrn     String?   @map("boot_prompt_urn")
   /// #974 — the worker-scoped working memory in the App's container
   /// (`hrn:mem:<owner>:<app-slug>:<worker-slug>`), provisioned at cast.
   /// Identity is THIS column, never the memory's URN (the #723 rule).
@@ -3786,6 +3857,7 @@ model Worker {
   /// #1050 — "what does this person hold", across Apps.
   @@index([heldByUserId])
   @@index([reportsToWorkerId])
+  @@index([bootPromptNodeId])
   @@map("workers")
 }
 
@@ -4169,6 +4241,38 @@ model FreshSignIn {
   @@map("fresh_sign_ins")
 }
 
+/// #1897 slice B1: an email sign-in waiting for its passkey. Created when a magic link is claimed for a user who
+/// has a passkey, and completed only by that passkey's assertion over a SIGN_IN ceremony bound to this browser.
+/// Publishes nothing: no handoff code, no JWT, no cookie, no key exists until it completes. Identity and
+/// continuation are immutable; completion is set once, together with the sign-in it produced.
+model PendingEmailSignIn {
+  id              String    @id
+  userId          String    @map("user_id")
+  /// 'PORTAL' | 'OAUTH'. Each kind carries exactly its own columns (CHECK).
+  continuation    String
+  /// Portal: the ORIGINAL SHA-256 of the requesting browser's nonce, carried untouched to the handoff code.
+  clientStateHash String?   @map("client_state_hash")
+  redirect        String?
+  isNew           Boolean?  @map("is_new")
+  /// OAuth: the already-validated server-local path to resume at.
+  returnTo        String?   @map("return_to")
+  /// SHA-256 of the pending cookie; the cookie value is never stored.
+  browserHash     String    @unique @map("browser_hash")
+  /// The current SIGN_IN ceremony; replacing it consumes the earlier one.
+  ceremonyId      String?   @map("ceremony_id")
+  createdAt       DateTime  @default(dbgenerated("(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  expiresAt       DateTime  @map("expires_at")
+  completedAt     DateTime? @map("completed_at")
+  signInId        String?   @map("sign_in_id")
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  signIn SignIn? @relation(fields: [signInId, userId], references: [id, userId], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("pending_email_sign_ins")
+}
+
 /// #1631 schema-first: shared credential registry (cor:aut:040:05), no enrollment route yet.
 /// Identity/public-key fields are immutable; records are never deleted, revokedAt is set once.
 model PasskeyCredential {
@@ -4231,11 +4335,12 @@ model SignIn {
   endedAt              DateTime? @map("ended_at")
   endReason            String?   @map("end_reason")
 
-  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  passkey   PasskeyCredential? @relation(fields: [completedByPasskeyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  passkey   PasskeyCredential?   @relation(fields: [completedByPasskeyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   handoffs  AuthHandoffCode[]
   authCodes AuthCode[]
   keys      UserApiKey[]
+  pendings  PendingEmailSignIn[]
 
   @@unique([id, userId])
   @@index([userId])
