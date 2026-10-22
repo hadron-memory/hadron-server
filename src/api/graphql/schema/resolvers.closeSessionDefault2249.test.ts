@@ -98,6 +98,12 @@ describe('#2249 every create path defaults the flag to false', () => {
     expect(await stored(id)).toBe(false);
   });
 
+  it('an explicit null on create is treated like omitted, so a client that sends neither flag still gets false (cli#988)', async () => {
+    const t = await create(ctx(member.id), { closeSessionWhenDone: null });
+    expect(t.closeSessionWhenDone).toBe(false);
+    expect(await stored(t.id)).toBe(false);
+  });
+
   it('an explicit value on create is kept, true and false', async () => {
     expect(await stored((await create(ctx(member.id), { closeSessionWhenDone: true })).id)).toBe(true);
     expect(await stored((await create(ctx(member.id), { closeSessionWhenDone: false })).id)).toBe(false);
