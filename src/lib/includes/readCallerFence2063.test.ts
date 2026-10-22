@@ -348,4 +348,31 @@ describe('outer-fenced reconciliation read callers', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).content).toBe('before');
   });
 
+  it.each([
+    ['key', 'node'], ['key', 'batch'], ['key', 'revision'],
+    ['sign-in', 'node'], ['sign-in', 'batch'], ['sign-in', 'revision'],
+  ] as const)('%s credential permits unchanged %s reads and refuses revoked credentials', async (credential, surface) => {
+    const n = await db.node.create({ data: { memoryId, loc: 'credential', name: 'Credential', content: 'unchanged' } });
+    const c = ctx();
+    let revoke: () => Promise<unknown>;
+    if (credential === 'key') {
+      const key = await db.userApiKey.create({ data: { userId, keyHash: generateId(), keyPreview: 'test', oauthScopes: [] } });
+      c.apiKeyId = key.id;
+      revoke = () => db.userApiKey.update({ where: { id: key.id }, data: { revokedAt: new Date() } });
+    } else {
+      const root = await db.signIn.create({ data: { userId, method: 'email', expiresAt: new Date(Date.now() + 60_000) } });
+      c.signInId = root.id;
+      revoke = () => db.signIn.update({ where: { id: root.id }, data: { endedAt: new Date(), endReason: 'test' } });
+    }
+    const read = () => surface === 'node'
+      ? resolvers.Query.node(null, { ref: n.id, raw: true }, { ...c })
+      : surface === 'batch'
+        ? resolvers.Query.nodeBatch(null, { refs: [n.id] }, { ...c })
+        : resolvers.Node.revision(n as never, {}, { ...c });
+    expect(await read()).not.toBeNull();
+    await revoke();
+    await expect(read()).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
 });
