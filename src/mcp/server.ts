@@ -11151,10 +11151,28 @@ export function sweepIdleMcpTransports(now: number = Date.now()): number {
  * When every live transport of the principal is in flight (or reserved), answers 429 and returns null: no live
  * request is ever evicted. Release the returned function on conversion; it also fires when the response ends.
  */
+/** Whether the response ended or died BEFORE this handler started to answer it (nothing legitimate ends first). */
+function isResponseTerminal(res: Response): boolean {
+  return res.destroyed || res.writableEnded;
+}
+
+/** Whether the client went away: the socket is gone and the response never finished normally. */
+function isResponseAborted(res: Response): boolean {
+  return res.destroyed && !res.writableFinished;
+}
+
 /** A held new-session slot; see `reserveMcpSession`. */
-export type McpSessionReservation = { convert(): boolean };
+export type McpSessionReservation = {
+  /** Registers the slot: true once, false if it was cancelled or the response is already terminal. */
+  convert(): boolean;
+  /** Gives the slot back on a failure path; idempotent, and a later convert() is refused. */
+  cancel(): void;
+};
 
 export function reserveMcpSession(principalKey: string, res: Response): McpSessionReservation | null {
+  // `close`/`finish` events do not replay: a response that ended while authentication was awaited has already
+  // fired them, so listeners attached below would never run. Check the terminal state directly (review, Andi P2).
+  if (isResponseTerminal(res)) return null;
   const cap = maxSessionsPerPrincipal();
   const live = (): number => {
     let n = mcpSessionReservations.get(principalKey) ?? 0;
@@ -11188,18 +11206,25 @@ export function reserveMcpSession(principalKey: string, res: Response): McpSessi
     if (left <= 0) mcpSessionReservations.delete(principalKey);
     else mcpSessionReservations.set(principalKey, left);
   };
-  releaseOnceOnResponseEnd(res, () => {
+  const cancel = (): void => {
     if (state !== 'held') return;
     state = 'cancelled';
     free();
+  };
+  // A normal `finish` is NOT a cancellation: the initialize response is written before the handler converts.
+  res.once('close', () => {
+    if (isResponseAborted(res)) cancel();
   });
   return {
     convert(): boolean {
+      // A terminal response whose event was missed must not convert either (belt and braces with the listeners).
+      if (state === 'held' && isResponseAborted(res)) cancel();
       if (state !== 'held') return false;
       state = 'converted';
       free();
       return true;
     },
+    cancel,
   };
 }
 
@@ -11657,10 +11682,22 @@ async function handleKnownMcpSession(
 }
 
 /** An unknown or absent session id: answer the stale-id 404, or authenticate and open a new session. */
-async function handleUnknownOrNewMcpSession(
+async function handleUnknownOrNewMcpSession(req: Request, res: Response, sessionId: string | undefined): Promise<void> {
+  const held: { reservation?: McpSessionReservation } = {};
+  try {
+    await openOrRejectMcpSession(req, res, sessionId, held);
+  } finally {
+    // Every exit gives an unconverted slot back: a throw (Express 4 never answers a rejected async handler, so the
+    // response may stay open long after) or any early return. A converted reservation ignores this.
+    held.reservation?.cancel();
+  }
+}
+
+async function openOrRejectMcpSession(
   req: Request,
   res: Response,
   sessionId: string | undefined,
+  held: { reservation?: McpSessionReservation },
 ): Promise<void> {
   // Stale session — the client presented a session ID we don't know
   // (typically: the server restarted and the in-memory registry was wiped).
@@ -11744,7 +11781,11 @@ async function handleUnknownOrNewMcpSession(
   // the per-principal cap. The key is read before `auth.appId` is filled in from a default or a restored selection.
   const principalKey = mcpPrincipalKey(auth);
   const reservation = reserveMcpSession(principalKey, res);
-  if (!reservation) return;
+  if (!reservation) {
+    // Either refused with a 429, or the response had already ended and there is nothing to answer.
+    return;
+  }
+  held.reservation = reservation;
 
   // Spec 025 / 026 — App-identification resolution at the MCP boundary for
   // user-credential callers (userId set, appId not set; JWT or

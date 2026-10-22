@@ -402,7 +402,7 @@ describe('#2261 terminal reservation state (review P2: a late initialize must no
     const ee = new EventEmitter() as EventEmitter & { setHeader: () => void; status: () => { json: () => void } };
     ee.setHeader = () => undefined;
     ee.status = () => ({ json: () => undefined });
-    return { res: ee as never, end: () => ee.emit('close') };
+    return { res: ee as never, end: () => { (ee as unknown as Record<string, boolean>).destroyed = true; ee.emit('close'); } };
   }
 
   it('convert() succeeds exactly once and frees the slot', () => {
