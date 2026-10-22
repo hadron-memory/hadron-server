@@ -2064,6 +2064,9 @@ model Agent {
   /// edges list this Agent's own tasks; null when it names none. Written only
   /// by `setAgentIndexRefs`, read by src/lib/agentDefinitionLists.ts.
   /// `SetNull`: removing the index node unsets the pointer.
+  /// #2245 (R145/R146): the Agent this one was cloned from, as a plain ref (the source's URN at clone time).
+  /// No FK: the source may be retired or renamed, and the provenance must survive both.
+  clonedFromAgentRef   String?         @map("cloned_from_agent_ref")
   tasksIndexRef        String?         @map("tasks_index_ref")
   /// #1892 (cor:dmo:050:16) — the index node whose incoming, trigger-labelled
   /// edges list the processes this Agent starts or owns; null when none.
@@ -6353,4 +6356,26 @@ model WorkerReferenceFence {
   version   BigInt @default(0)
 
   @@map("worker_reference_fences")
+}
+
+/// #2245 (R170.6): one append-only record per Agent clone. Written in the clone's own transaction, so the audit and
+/// the copy commit or roll back together. Ids are plain columns, deliberately NOT foreign keys: the record must
+/// outlive the Agents, orgs and users it names. Exactly one of the two targets is set (CHECK in post-push.sql);
+/// S1 only writes `targetOrgId`. Immutable (trigger) and exposed on no read surface.
+model AgentCloneAudit {
+  id                String   @id @map("id")
+  actorUserId       String?  @map("actor_user_id")
+  sourceAgentId     String   @map("source_agent_id")
+  newAgentId        String   @map("new_agent_id")
+  targetOrgId       String?  @map("target_org_id")
+  targetUserId      String?  @map("target_user_id")
+  nodeCount         Int      @map("node_count")
+  edgeCount         Int      @map("edge_count")
+  skippedEdgeCount  Int      @map("skipped_edge_count")
+  importCount       Int      @map("import_count")
+  linkCount         Int      @map("link_count")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([sourceAgentId])
+  @@map("agent_clone_audits")
 }
