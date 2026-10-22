@@ -113,7 +113,7 @@ describe('#2046 S9-2 — every refusal', () => {
   it('R79: a pin past the target\'s revisions refuses as unavailable', async () => {
     await put(agent.child!.mem, 'parts:a', 'v1');
     expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a rev=7}}')))).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
-    await db.node.deleteMany({ where: { loc: 'boot:source' } });
+    await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: 'boot:source' } });
     // With `approved` too: still missing (R79), not "no qualifying revision".
     expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:a rev=7 approved}}')))).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
   });
@@ -139,7 +139,7 @@ describe('#2046 S9-2 — every refusal', () => {
 
   it('a missing include refuses as unavailable; a soft-deleted URN target as retired', async () => {
     expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:none}}')))).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
-    await db.node.deleteMany({ where: { loc: 'boot:source' } });
+    await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: 'boot:source' } });
     await put(agent.root!.mem, 'parts:gone', 'gone', { deletedAt: new Date() });
     const urn = `hrn:node:${(await db.memory.findUniqueOrThrow({ where: { id: agent.root!.mem } })).urn}:parts:gone`;
     expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, `{{> ${urn}}}`)))).toBe('BOOT_PROMPT_INCLUDE_RETIRED');
@@ -203,9 +203,9 @@ describe('#2046 S9-2 — grants (cor:agt:040:08)', () => {
     await put(agent.priv!.mem, 'parts:q', 'private part');
     const urnOf = async (key: string, loc: string) => `hrn:node:${(await db.memory.findUniqueOrThrow({ where: { id: agent[key]!.mem } })).urn}:${loc}`;
     expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, `{{> ${await urnOf('pub', 'parts:p')}}}`)))).toBe('BOOT_PROMPT_GRANT_REQUIRED');
-    await db.node.deleteMany({ where: { loc: 'boot:source' } });
+    await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: 'boot:source' } });
     expect(await refusal(assembleBootPrompt(db, await input(agent.child!.mem, `{{> ${await urnOf('priv', 'parts:q')}}}`)))).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
-    await db.node.deleteMany({ where: { loc: 'boot:source' } });
+    await db.node.deleteMany({ where: { memoryId: agent.child!.mem, loc: 'boot:source' } });
     await db.agentOrgGrant.create({ data: { orgId, agentId: agent.pub!.id, activatedAt: new Date() } });
     const plan = await assembleBootPrompt(db, await input(agent.child!.mem, `{{> ${await urnOf('pub', 'parts:p')}}}`));
     expect(plan.text).toBe('public part');
