@@ -21,7 +21,8 @@ export const CEREMONY_SCRIPT_PATH = '/passkeys/assets/ceremony.js';
 
 const CLIENT_PAGE_HEADERS = {
   'Cache-Control': 'no-store',
-  'Referrer-Policy': 'no-referrer',
+  // Not no-referrer: that makes a browser send Origin: null on the pages' POSTs (see ceremonyPages.ts).
+  'Referrer-Policy': 'same-origin',
   'Content-Security-Policy': [
     "default-src 'none'", "script-src 'self'", "connect-src 'self'", "style-src 'unsafe-inline'",
     "form-action 'self' https://github.com https://accounts.google.com https://appleid.apple.com",
