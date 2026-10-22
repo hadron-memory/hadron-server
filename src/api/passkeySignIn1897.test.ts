@@ -123,7 +123,7 @@ describe('portal continuation, switch on', () => {
     const ok = await fetch(`${base}/auth/passkey/sign-in`, { headers: { cookie: cookie! } });
     expect(ok.status).toBe(200);
     expect(ok.headers.get('cache-control')).toBe('no-store');
-    expect(ok.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(ok.headers.get('referrer-policy')).toBe('same-origin');
     expect(ok.headers.get('content-security-policy')).toContain("script-src 'self'");
     expect(await ok.text()).not.toContain('<script>');
     const none = await fetch(`${base}/auth/passkey/sign-in`);
@@ -278,14 +278,17 @@ describe('portal continuation, switch on', () => {
     expect(await db.authHandoffCode.count()).toBe(0);
   });
 
-  it('a user with no passkey gets the fixed refusal and no pending row: the factor is never skipped', async () => {
+  it('a user with no passkey is NOT signed in: the flow leads to enrolment (B2) and publishes nothing; the factor is never skipped', async () => {
     await db.user.create({ data: { email: 'nopass@example.test', handle: 'nopass', roles: ['READER'] } });
     const r = await verify(await magicLink({ email: 'nopass@example.test' }));
-    expect(r.status).toBe(400);
-    expect(await r.json()).toEqual({ error: 'Invalid or expired token' });
-    expect(await pendingCount()).toBe(0);
+    expect(r.status).toBe(302);
+    expect(r.headers.get('location')).toBe('/auth/passkey/sign-in');
+    expect(await pendingCount()).toBe(1);
     expect(await db.authHandoffCode.count()).toBe(0);
     expect(cookieOf(r, 'hadron_token')).toBeUndefined();
+    // Nothing to assert with yet: the routes refuse until a passkey exists (enrolment itself: passkeySignInEnroll1897.test.ts).
+    expect((await post('/options', cookieOf(r, 'hadron_pending_signin'))).status).toBe(403);
+    expect(await db.signIn.count()).toBe(0);
   });
 
   it('a passkey cancelled after completion ends the sign-in and its handoff code is dead (lineage holds)', async () => {

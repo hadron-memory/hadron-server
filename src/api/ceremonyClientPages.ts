@@ -31,7 +31,7 @@ const CLIENT_PAGE_HEADERS = {
   'X-Frame-Options': 'DENY',
 };
 
-const signInForms = (next: 'register' | 'window') => `
+const signInForms = (next: 'register' | 'window' | 'sign-in') => `
 <div class="signin">
 ${(['github', 'google', 'apple'] as const).map((p) => `<form method="post" action="/passkeys/sign-in/${p}/start"><input type="hidden" name="next" value="${next}"><button type="submit">Confirm with ${p === 'github' ? 'GitHub' : p === 'google' ? 'Google' : 'Apple'}</button></form>`).join('\n')}
 <form id="email-form"><input type="hidden" name="next" value="${next}"><label>Or email me a link <input type="email" name="email" required maxlength="320" autocomplete="email"></label> <button type="submit">Send link</button></form>
@@ -54,12 +54,14 @@ async function liveSignIn(req: Request) {
 /** Mount the pages; called from the dark ceremony mount only. */
 export function mountCeremonyClientPages(app: Express, opts: { windowHours: number }): void {
   app.get('/passkeys/register', async (req, res) => {
+    // #1897 B2: a person sent here from an email sign-in with no passkey is led back to it once the passkey is added.
+    const next: 'register' | 'sign-in' = req.query.next === 'sign-in' ? 'sign-in' : 'register';
     // Uma P2-1: show step 1 as done when this browser holds a live confirmation, and gate step 2 on it.
     const live = await liveSignIn(req).catch(() => null);
     const step1 = live
       ? `<p class="done" role="status"><strong>Confirmed with ${METHOD_NAMES[live.method] ?? live.method}</strong>, ${Math.max(1, Math.ceil(live.secondsLeft / 60))} minute(s) left to add your passkey.</p>`
-      : `<p>Confirm who you are in this browser. The confirmation lasts 10 minutes.</p>\n${signInForms('register')}`;
-    send(res, 'Add a passkey', `<main data-page="register" data-rp-id="${passkeyRpId()}">
+      : `<p>Confirm who you are in this browser. The confirmation lasts 10 minutes.</p>\n${signInForms(next)}`;
+    send(res, 'Add a passkey', `<main data-page="register" data-next="${next}" data-rp-id="${passkeyRpId()}">
 <h1>Add a passkey</h1>
 <p>A passkey lets you sign Hadron changes with your fingerprint, face or device PIN. Your first passkey goes through a
 <strong>cooling-off window of ${opts.windowHours} hours</strong>: anything it signs stays pending until the window ends, and we email you a link to remove it if you didn't add it.</p>
@@ -71,6 +73,7 @@ ${step1}
 <p><button id="add-first"${live ? '' : ' disabled aria-describedby="add-first-why"'}>Add my first passkey</button></p>
 ${live ? '' : '<p id="add-first-why" class="hint">Available once step 1 is done.</p>'}
 <p id="status-first" role="status" aria-live="polite"></p>
+${next === 'sign-in' ? '<p id="continue-signin" hidden><a href="/auth/passkey/sign-in">Continue signing in</a></p>' : ''}
 <h2>Already have a passkey?</h2>
 <p>Use it to vouch for the new one. A passkey still in its cooling-off window can't vouch.</p>
 <p><button id="add-later">Use my passkey, then add another</button></p>
@@ -192,6 +195,7 @@ const CEREMONY_SCRIPT = String.raw`'use strict';
       say(out, done.kind === 'first'
         ? 'Passkey added. Anything it signs stays pending for its cooling-off window. We emailed you a link to remove it if this wasn\'t you.'
         : 'Passkey added. We emailed you a notice.');
+      if (done.kind === 'first' && main.dataset.next === 'sign-in' && $('continue-signin')) $('continue-signin').hidden = false;
     }).catch(function (e) { say(out, e && e.message && e.message !== 'refused' ? e.message : 'That didn\'t work. Start again.'); });
   };
   if ($('add-first')) $('add-first').addEventListener('click', function () { register(false); });
