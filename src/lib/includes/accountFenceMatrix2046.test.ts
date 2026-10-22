@@ -8,7 +8,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { generateId } from '../id.js';
-import { cleanDb, createDbAgentSubscription, createDbAppAgent, createDbAppMember } from '../../test/helpers.js';
+import { cleanDb, createDbAppWithKey, createDbAgentSubscription, createDbAppAgent, createDbAppMember } from '../../test/helpers.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../bootPrompt.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
@@ -204,6 +204,20 @@ classes.push({
     return withReconciledNodeRead(db, driftNode, memoryId, async () => true, async () => 'ok');
   },
   effect: async () => (await db.$queryRaw<Array<{ h: string | null }>>`SELECT revision_content_hash AS h FROM nodes WHERE id = ${driftNode}`)[0].h != null,
+});
+let firstContactApp: string;
+classes.push({
+  // First contact: a new end-user with no subscription row, so the license write can create entitlement and the start
+  // runs in the fence (a returning user runs unfenced and is pinned in resolvers.writerFences2046.test.ts).
+  name: 'first contact (startAgentSession)',
+  setup: async () => {
+    const { app: a2 } = await createDbAppWithKey(db, 'fc-app', org.id);
+    await createDbAppAgent(db, a2.id, agentA.id);
+    await db.app.update({ where: { id: a2.id }, data: { createUserPermission: 'IMPLICIT' } });
+    firstContactApp = a2.id;
+  },
+  run: () => M.startAgentSession({}, { agentId: agentA.id, externalUserId: 'ext-1' }, { db, appId: firstContactApp, roles: [] } as unknown as Context),
+  effect: async () => (await db.agentSubscription.count({ where: { agentId: agentA.id } })) === 1,
 });
 
 describe.each(classes)('#2046 S9-3 stale-wait matrix: $name', (c) => {
