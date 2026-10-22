@@ -176,6 +176,14 @@ describe('extract: copied tags resolve where they land (cor:dmo:150:04, :06)', (
     expect(await db.memory.count({ where: { urn: EX('sub') } })).toBe(0);
   });
 
+  it('a URN tag to a memory the copier cannot read refuses the extract, naming the tag (Ruth, #2241 P3)', async () => {
+    const tag = `{{> hrn:node:${foreignUrn}:secret}}`;
+    await seed('sub:a', `x ${tag}`);
+    expect(await refusal(extract('sub', true))).toEqual({ code: 'INCLUDE_TARGET_UNAVAILABLE', tag });
+    expect(await db.memory.count({ where: { urn: EX('sub') } })).toBe(0);
+    expect(await sourceLive()).toBe(2);
+  });
+
   it('a URN tag back to a readable node of the source passes', async () => {
     await seed('sub:a', `{{> ${urn('other')}}}`);
     expect((await refusal(extract('sub'))).code).toBe('NO_ERROR');
