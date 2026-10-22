@@ -11575,9 +11575,8 @@ export const typeDefs = `#graphql
     one, even when the text is unchanged), with its provenance and a derived 'compiled-from' edge to the source.
     Sets 'Agent.bootPromptRef' unless 'setPointer: false'. Never approves or signs ('approvalIssued' is always false).
 
-    Whoever manages the Agent, as themselves: a request bound to a worker session is refused
-    BOOT_PROMPT_POINTER_SESSION_REFUSED; a non-manager, an App key, an impersonation, a run, and a target that does
-    not exist are alike FORBIDDEN. Only then: BOOT_PROMPT_TARGET_RETIRED, BOOT_PROMPT_NO_SOURCE, BOOT_PROMPT_SOURCE_INVALID, the
+    Whoever manages the Agent, as themselves: a request bound to a worker session, a non-manager, an App key, an
+    impersonation, a run, and a target that does not exist are alike refused BOOT_PROMPT_COMPILE_NOT_PERMITTED. Only then: BOOT_PROMPT_TARGET_RETIRED, BOOT_PROMPT_NO_SOURCE, BOOT_PROMPT_SOURCE_INVALID, the
     include refusals (BOOT_PROMPT_INCLUDE_*, _GRANT_REQUIRED, _COMPILE_LIMIT_EXCEEDED, with the tag's 'position').
     A refusal changes nothing. No MCP twin.
     """

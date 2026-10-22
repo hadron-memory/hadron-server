@@ -107,12 +107,12 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     const f = await fixture();
     await f.source(f.agentMem.id, 'boot:source', 'x');
     const before = await snapshot();
-    expect(await codeOf(compileBootPrompt(ctxOf(f.member.id), { kind: 'APP_AGENT', appId: f.app.id, agentId: f.agent.id }))).toBe('FORBIDDEN');
-    expect(await codeOf(compileBootPrompt(ctxOf(undefined), agentTarget(f)))).toBe('FORBIDDEN');
-    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id, { impersonation: { actorId: f.member.id } } as never), agentTarget(f)))).toBe('FORBIDDEN');
-    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), { kind: 'AGENT', agentId: generateId() }))).toBe('FORBIDDEN');
-    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), { kind: 'WORKER', workerId: generateId() }))).toBe('FORBIDDEN');
-    expect(await runAsActor({ workerId: f.worker.id, agentId: null }, () => codeOf(compileBootPrompt(ctxOf(f.admin.id), agentTarget(f))))).toBe('BOOT_PROMPT_POINTER_SESSION_REFUSED');
+    expect(await codeOf(compileBootPrompt(ctxOf(f.member.id), { kind: 'APP_AGENT', appId: f.app.id, agentId: f.agent.id }))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await codeOf(compileBootPrompt(ctxOf(undefined), agentTarget(f)))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id, { impersonation: { actorId: f.member.id } } as never), agentTarget(f)))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), { kind: 'AGENT', agentId: generateId() }))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), { kind: 'WORKER', workerId: generateId() }))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await runAsActor({ workerId: f.worker.id, agentId: null }, () => codeOf(compileBootPrompt(ctxOf(f.admin.id), agentTarget(f))))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
     expect(await snapshot()).toEqual(before);
   });
 
@@ -122,7 +122,7 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     await db.worker.update({ where: { id: f.worker.id }, data: { retiredAt: new Date() } });
     const before = await snapshot();
     expect(await codeOf(compileBootPrompt(ctxOf(f.admin.id), { kind: 'WORKER', workerId: f.worker.id }))).toBe('BOOT_PROMPT_TARGET_RETIRED');
-    expect(await codeOf(compileBootPrompt(ctxOf(f.member.id), { kind: 'WORKER', workerId: f.worker.id }))).toBe('FORBIDDEN');
+    expect(await codeOf(compileBootPrompt(ctxOf(f.member.id), { kind: 'WORKER', workerId: f.worker.id }))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
     expect(await snapshot()).toEqual(before);
   });
 
@@ -158,10 +158,10 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<{ revNo: number; approvalIssued: boolean; pointerSet: boolean; node: { id: string } }>>;
     const ok = await M.compileAgentBootPrompt!(null, { agentRef: f.agent.id }, ctxOf(f.admin.id));
     expect(ok).toMatchObject({ revNo: 1, approvalIssued: false, pointerSet: true });
-    expect(await codeOf(M.compileAgentBootPrompt!(null, { agentRef: 'no-such-agent' }, ctxOf(f.admin.id)))).toBe('FORBIDDEN');
-    expect(await codeOf(M.compileAgentBootPrompt!(null, { agentRef: f.agent.id }, ctxOf(f.member.id)))).toBe('FORBIDDEN');
-    expect(await codeOf(M.compileWorkerBootPrompt!(null, { workerRef: 'nope' }, ctxOf(f.admin.id)))).toBe('FORBIDDEN');
-    expect(await codeOf(M.compileAppAgentBootPrompt!(null, { appRef: 'nope', agentRef: f.agent.id }, ctxOf(f.admin.id)))).toBe('FORBIDDEN');
+    expect(await codeOf(M.compileAgentBootPrompt!(null, { agentRef: 'no-such-agent' }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await codeOf(M.compileAgentBootPrompt!(null, { agentRef: f.agent.id }, ctxOf(f.member.id)))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await codeOf(M.compileWorkerBootPrompt!(null, { workerRef: 'nope' }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await codeOf(M.compileAppAgentBootPrompt!(null, { appRef: 'nope', agentRef: f.agent.id }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
   });
 
   it('S2: an App compile carries the install memory replacing node and records it as a replacement', async () => {

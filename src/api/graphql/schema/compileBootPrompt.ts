@@ -33,7 +33,6 @@ import { assembleBootPrompt, BootCompileRefusal, type CompileRecipient } from '.
 import { sourceForCompile, type CompileSourceTarget } from '../../../lib/bootCompile/sourceForCompile.js';
 import type { CompiledTarget } from '../../../lib/bootCompile/provenance.js';
 import { lockAgentBaseGraph } from '../../../lib/agentBase.js';
-import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
@@ -56,7 +55,12 @@ export interface CompileBootPromptOptions {
 }
 
 /** The S9-4 refusals this adds to the S9-2 assembler's; the codes cor:agt:040:12 lists (R33). */
-export const BOOT_COMPILE_CODES = ['BOOT_PROMPT_TARGET_RETIRED', 'BOOT_PROMPT_NO_SOURCE'] as const;
+export const BOOT_COMPILE_CODES = ['BOOT_PROMPT_COMPILE_NOT_PERMITTED', 'BOOT_PROMPT_TARGET_RETIRED', 'BOOT_PROMPT_NO_SOURCE'] as const;
+
+/** The one answer for every way of not being permitted: a non-manager, a worker session, a missing target. */
+export function compileNotPermitted(): GraphQLError {
+  return compileError('BOOT_PROMPT_COMPILE_NOT_PERMITTED', 'you may not compile this boot prompt.');
+}
 
 /** The loc of each compiled node (R32; confirmed by Vera on the team chat, 2026-10-22). */
 export const AGENT_COMPILED_LOC = 'boot:compiled';
@@ -142,17 +146,20 @@ export async function compileBootPrompt(
 ): Promise<CompiledBootPromptResult> {
   // An impersonated session is never "a manager as themselves" (the gate below refuses it too); stated here
   // so no owner lookup runs for it.
-  if (ctx.impersonation) throw authorizationDenied();
+  if (ctx.impersonation) throw compileNotPermitted();
   for (let attempt = 0; attempt < 3; attempt++) {
     // The anchors are chosen from the owner as read BEFORE the fence; a transfer that lands first is caught
     // inside and retried with the new ones (the setBootPromptPointer shape).
     const before = await loadCompileOwner(ctx.db, target);
-    if (!before) throw authorizationDenied();
+    if (!before) throw compileNotPermitted();
     const expected = tenantOf(before.owner);
     try {
       return await decide(ctx, target, options, before, expected);
     } catch (e) {
       if (e instanceof OwnerTenantChanged) continue;
+      if (e instanceof GraphQLError && (e.extensions?.code === 'FORBIDDEN' || e.extensions?.code === 'BOOT_PROMPT_POINTER_SESSION_REFUSED')) {
+        throw compileNotPermitted();
+      }
       // The assembler's typed refusal, as the GraphQL error a client sees. The position is the includer tag's, never the target's.
       if (e instanceof BootCompileRefusal) {
         throw new GraphQLError(`${e.code}: the boot prompt cannot be compiled.`, {
@@ -191,7 +198,7 @@ async function decide(
 
     // 1. The gate, on the live owner and the live caller. Nothing about the target is said before it passes.
     const live = await loadCompileOwner(tx, target);
-    if (!live) throw authorizationDenied();
+    if (!live) throw compileNotPermitted();
     const tenant = tenantOf(live.owner);
     if (tenant.organizationId !== expected.organizationId || tenant.ownerUserId !== expected.ownerUserId) {
       throw new OwnerTenantChanged();
@@ -314,7 +321,7 @@ async function decide(
     const setPointer = target.kind === 'APP_AGENT' || options.setPointer !== false;
     if (setPointer) {
       const owner = await loadBootPromptPointerOwner(tx, ptr(target));
-      if (!owner) throw authorizationDenied();
+      if (!owner) throw compileNotPermitted();
       await setBootPromptPointer(tx, txCtx, owner, node.id, (memoryId) => isMemoryReadableFresh(txCtx, memoryId, tx));
     }
 

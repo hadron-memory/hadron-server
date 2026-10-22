@@ -2,15 +2,14 @@
  * #2046 (S9-4, cor:agt:040:12) — the compile's GraphQL doors: `compileAgentBootPrompt`,
  * `compileAppAgentBootPrompt`, `compileWorkerBootPrompt`. GraphQL only: there is no MCP twin.
  *
- * Every ref that does not resolve answers the same `FORBIDDEN` a non-manager gets, so
+ * Every ref that does not resolve answers the same BOOT_PROMPT_COMPILE_NOT_PERMITTED a non-manager gets, so
  * the call tells a caller nothing about whether a target exists (spec: "not permitted,
  * also for a target that doesn't exist").
  */
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
-import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
-import { compileBootPrompt, type CompileTargetInput } from './compileBootPrompt.js';
+import { compileBootPrompt, compileNotPermitted, type CompileTargetInput } from './compileBootPrompt.js';
 import type { Context } from './resolvers.helpers.js';
 
 async function run(ctx: Context, resolve: () => Promise<CompileTargetInput>, setPointer: boolean | null | undefined) {
@@ -18,7 +17,7 @@ async function run(ctx: Context, resolve: () => Promise<CompileTargetInput>, set
   try {
     target = await resolve();
   } catch {
-    throw authorizationDenied();
+    throw compileNotPermitted();
   }
   const result = await compileBootPrompt(ctx, target, { setPointer: setPointer ?? true });
   const node = await ctx.db.node.findUniqueOrThrow({ where: { id: result.nodeId } });
