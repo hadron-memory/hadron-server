@@ -188,6 +188,25 @@ export async function assembleBootPrompt(
     );
   }
 
+  /**
+   * Whether the recipient may read this memory, decided WITHOUT recording a grant and without
+   * throwing: the shadow scan's question. An Agent already admitted answers from its plan; any
+   * other is evaluated on the side and left out of the plan, so the scan never provisions a grant
+   * or refuses a compile for a memory the output did not read.
+   */
+  async function admittedQuietly(memoryId: string): Promise<boolean> {
+    const kind = await kindOf(memoryId);
+    if (kind.kind === 'install') return memoryId === input.installMemoryId;
+    if (kind.kind !== 'agent') return false;
+    try {
+      await (grantPlans.get(kind.agentId) ?? planGrant(db, kind.agentId, input.recipient, null));
+      return true;
+    } catch (e) {
+      if (e instanceof BootCompileRefusal) return false;
+      throw e;
+    }
+  }
+
   /** The bare-loc lookup chain for a tag written in `includerMemoryId` (R8). */
   async function lookupChain(includerMemoryId: string): Promise<{ memories: string[]; installFirst: boolean }> {
     const targetChain = await agentChain(input.target.agentId);
@@ -214,12 +233,19 @@ export async function assembleBootPrompt(
     let found: Found | null = null;
     let sawTombstone = false;
     for (const [i, memoryId] of memories.entries()) {
-      await admitSource(memoryId, position);
+      // Before the hit, every memory is ADMITTED: it may decide the answer, so its grant is qualified
+      // and planned. After the hit the output is decided; the scan only looks for the node the install
+      // node replaces, and it may not widen what the compile reads, plans or refuses on (Cooper).
+      if (found) {
+        if (!(await admittedQuietly(memoryId))) continue;
+      } else {
+        await admitSource(memoryId, position);
+      }
       const rows = await db.node.findMany({
         where: { memoryId, loc },
         select: { id: true, memoryId: true, content: true, revSeq: true, role: true, deletedAt: true },
       });
-      if (rows.some((r) => r.deletedAt)) sawTombstone = true;
+      if (!found && rows.some((r) => r.deletedAt)) sawTombstone = true;
       const row = rows.find((r) => !r.deletedAt);
       if (!row) continue;
       // A base's boot prompt is never inherited (R8); only the child's own and the install's count.

@@ -385,3 +385,25 @@ describe('#2046 S9-2 — grant arms left unpinned (Rook, Cooper)', () => {
     });
   });
 });
+
+describe('#2046 S9-2 — the shadow scan reads nothing the output did not (Cooper, #2236)', () => {
+  it('after an install hit, a same-org base holding the loc is recorded as replaced but gets no provisioned grant', async () => {
+    await put(agent.root!.mem, 'parts:z', 'base');
+    await put(installId, 'parts:z', 'install');
+    const plan = await assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:z}}', true));
+    expect(plan.text).toBe('install');
+    expect(plan.occurrences.some((o) => o.kind === 'replacement')).toBe(true);
+    expect(plan.grants.map((g) => g.agentId)).not.toContain(agent.root!.id);
+  });
+
+  it('after an install hit, an unlicensed foreign base neither refuses the compile nor is recorded as replaced', async () => {
+    await makeAgent('fbase', { org: otherOrgId });
+    await db.agent.update({ where: { id: agent.child!.id }, data: { extendsAgentId: agent.fbase!.id } });
+    await put(agent.fbase!.mem, 'parts:z', 'foreign base');
+    await put(installId, 'parts:z', 'install');
+    const plan = await assembleBootPrompt(db, await input(agent.child!.mem, '{{> parts:z}}', true));
+    expect(plan.text).toBe('install');
+    expect(plan.occurrences.every((o) => o.kind !== 'replacement' || o.replacesNodeId === undefined)).toBe(true);
+    expect(plan.grants.map((g) => g.agentId)).not.toContain(agent.fbase!.id);
+  });
+});
