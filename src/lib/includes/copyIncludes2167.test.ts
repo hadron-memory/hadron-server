@@ -254,6 +254,21 @@ describe('extract rebinds include tags that name a copied node (R180, cor:api:16
     expect(await db.memory.count({ where: { urn: EX } })).toBe(0);
   });
 
+  it('an outside loc tag whose text equals a rebased loc refuses, naming the tag, and retargets nothing (R188)', async () => {
+    await seed('ex:b', 'OUTSIDE');
+    await seed('sub:a', 'see {{> ex:b approved}}');
+    expect(await refusal(extract())).toEqual({ code: 'INCLUDE_TARGET_UNAVAILABLE', tag: '{{> ex:b approved}}' });
+    expect(await db.memory.count({ where: { urn: EX } })).toBe(0);
+    expect(await refusal(extract(true))).toEqual({ code: 'INCLUDE_TARGET_UNAVAILABLE', tag: '{{> ex:b approved}}' });
+    expect(await sourceLive()).toBe(3);
+  });
+
+  it('an outside loc spelled only inside code does not refuse (R188)', async () => {
+    await seed('ex:b', 'OUTSIDE');
+    await seed('sub:a', 'run `{{> ex:b}}`');
+    expect((await refusal(extract())).code).toBe('NO_ERROR');
+  });
+
   it('a tag inside code is text and is not rewritten', async () => {
     await seed('sub:a', 'run `{{> sub:b}}`\n\n```\n{{> sub:b}}\n```\n');
     expect((await refusal(extract())).code).toBe('NO_ERROR');
