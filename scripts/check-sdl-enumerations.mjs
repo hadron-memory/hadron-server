@@ -55,6 +55,7 @@ import { HOST_OPERATION_TYPES } from '../src/lib/hostOperations/types.js';
 import { TASK_WARNING_CODES } from '../src/api/graphql/schema/resolvers.taskWarnings.js';
 import { EMAIL_PROVIDER_KEYS } from '../src/lib/emailClient.js';
 import { GOVERNED_ROLES } from '../src/lib/governedRole.js';
+import { AI_PROVIDER_ENDPOINTS, usesProcessCredential } from '../src/lib/aiEndpoint.js';
 import { WORK_KINDS } from '../src/lib/workRef.js';
 import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions/operators.js';
 
@@ -86,6 +87,15 @@ import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions
  * which costs more than the drift it would have caught.
  */
 const WATCHED_SETS = [
+  {
+    // #2305: derive this conditional subset from the actual runtime predicate,
+    // not a copied provider list. Provider words elsewhere are not evidence.
+    name: 'PROCESS_CREDENTIAL_PROVIDERS', source: 'src/lib/aiEndpoint.ts',
+    members: Object.keys(AI_PROVIDER_ENDPOINTS).filter(provider =>
+      usesProcessCredential({ provider, endpoint: null }, 'HADRON_SERVER')),
+    coordinates: ['Mutation.createAiServiceConfig'],
+    enumerationPattern: /process-credential providers:\s*([^;]+);/i,
+  },
   {
     // #2301: dotted host operation identifiers, imported from the dispatch table.
     name: 'HOST_OPERATION_TYPES',
