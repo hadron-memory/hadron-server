@@ -101,7 +101,7 @@ describe('#2277 comment writers in a SOURCE memory queue on F', () => {
       name: 'reopenCommentThread (a resolved thread)',
       setup: async (f, c) => {
         c.id = (await M.createComment(null, { targetRef: f.targetUrn, body: 'root' }, as())).id;
-        await M.resolveCommentThread(null, { commentRef: c.id, expectedRevision: await rev(c.id) }, as());
+        await M.resolveCommentThread(null, { commentRef: c.id, expectedRevision: await rev(c.id!) }, as());
       },
       run: async (_f, c) => M.reopenCommentThread(null, { commentRef: c.id, expectedRevision: await rev(c.id!) }, as()),
     },
