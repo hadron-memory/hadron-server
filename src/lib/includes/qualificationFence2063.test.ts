@@ -1077,3 +1077,42 @@ it.each(['read', 'write', 'writer-first'] as const)('cloneAgent / actual compile
   expect((await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId: copy.systemMemoryId!, loc: 'boot:source' } } })).content).toBe('Counterparty {{worker.name}}');
   expect(await db.compiledPromptRevision.count()).toBe(1);
 });
+
+import { updateChatRootData } from '../chatRoot.js';
+import { getMemoryEncryptionInfo } from '../nodeCrypto.js';
+it('diagnostic: actual Channel producer admits root, messages parent and message while root metadata is not selected text', async () => {
+  const compile = await compileCounterparty();
+  const agent = await db.agent.findUniqueOrThrow({ where: { id: compile.agentId } });
+  const memory = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId! } });
+  const channel = await resolvers.Mutation.createChannel(null, { input: { memoryRef: memory.id, loc: 'source-channel', name: 'Source channel' } }, ctx());
+  await resolvers.Mutation.createChannelMessage(null, { channelRef: channel.id, body: 'Actual channel message' }, ctx());
+  const rootBefore = await db.node.findUniqueOrThrow({ where: { id: channel.chatRootNodeId } });
+  const parent = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId: memory.id, loc: 'source-channel:messages' } } });
+  const message = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, messageChannelId: channel.id, nodeType: 'chat-message' } });
+  const refs = [rootBefore, parent, message];
+  await db.node.updateMany({ where: { memoryId: memory.id, loc: 'boot:source' }, data: { content: refs.map((node) => `{{> hrn:node:${memory.urn}:${node.loc}}}`).join('|') } });
+  const initial = await compileBootPrompt(ctx(), compile.target, { setPointer: false });
+  expect((await db.node.findUniqueOrThrow({ where: { id: initial.nodeId } })).content).toBe('||Actual channel message');
+  const initialReceipt = await db.compiledPromptRevision.findFirstOrThrow({ where: { compiledNodeId: initial.nodeId }, orderBy: { compiledRevNo: 'desc' } });
+  const emptyHash = createHash('sha256').update('').digest('hex');
+  expect(initialReceipt.provenance).toMatchObject({ occurrences: [{},
+    { nodeId: rootBefore.id, revNo: rootBefore.revSeq, hash: emptyHash },
+    { nodeId: parent.id, revNo: parent.revSeq, hash: emptyHash },
+    { nodeId: message.id, revNo: message.revSeq, hash: createHash('sha256').update(message.content!).digest('hex') },
+  ] });
+  await updateChatRootData(db, { id: rootBefore.id, memoryId: memory.id, loc: rootBefore.loc }, await getMemoryEncryptionInfo(db, memory.id),
+    (data) => ({ ...data, conversationName: 'Metadata after', stageName: 'next' }), { asChannel: true });
+  await resolvers.Mutation.createChannelMessage(null, { channelRef: channel.id, body: 'Second actual message' }, ctx());
+  const rootAfter = await db.node.findUniqueOrThrow({ where: { id: rootBefore.id } });
+  expect(rootAfter.data).toMatchObject({ conversationName: 'Metadata after', stageName: 'next', messageCount: 2 });
+  expect(rootAfter.content).toBe(rootBefore.content);
+  expect(rootAfter.revSeq).toBe(rootBefore.revSeq);
+  const after = await compileBootPrompt(ctx(), compile.target, { setPointer: false });
+  expect((await db.node.findUniqueOrThrow({ where: { id: after.nodeId } })).content).toBe('||Actual channel message');
+  const afterReceipt = await db.compiledPromptRevision.findFirstOrThrow({ where: { compiledNodeId: after.nodeId }, orderBy: { compiledRevNo: 'desc' } });
+  expect(afterReceipt.provenance).toEqual(initialReceipt.provenance);
+  const second = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, messageChannelId: channel.id, seq: 2 } });
+  await db.node.updateMany({ where: { memoryId: memory.id, loc: 'boot:source' }, data: { content: `{{> hrn:node:${memory.urn}:${second.loc}}}` } });
+  const secondCompile = await compileBootPrompt(ctx(), compile.target, { setPointer: false });
+  expect((await db.node.findUniqueOrThrow({ where: { id: secondCompile.nodeId } })).content).toBe('Second actual message');
+});
