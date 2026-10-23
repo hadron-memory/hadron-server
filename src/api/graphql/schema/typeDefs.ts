@@ -1559,8 +1559,9 @@ export const typeDefs = `#graphql
     """
     isRunnable: Boolean
     """
-    #1201 — what this node is FOR, as an OPEN string. Set it to anything; the
-    platform reads a small CLOSED subset and ignores every other value.
+    #1201 — what this node is FOR, as an OPEN string. A closed governed
+    subset has dedicated authoring doors; memory role rules can additionally
+    constrain arbitrary roles.
 
     NOT 'nodeType' (the platform-kind axis, load-bearing for retrieval) and NOT
     'objectType' (the collection discriminator, schema-validated). This field
@@ -1569,9 +1570,11 @@ export const typeDefs = `#graphql
 
     A GOVERNED family routes the write to that kind's own authoring door, and
     the generic node surface is refused: 'review' / 'review.*' and 'spec' /
-    'spec.*' today, alongside the task kind, which is gated on 'isRunnable'
+    'spec.*' and 'decision' / 'decision.*', alongside the task kind, which is
+    gated on 'isRunnable'
     rather than on any label because a label can be omitted and a capability
-    cannot. Other values are inert unless a caller explicitly filters for them.
+    cannot. Other roles do not invoke a governed door, but can still be
+    constrained by memory role rules and selected by explicit role filters.
     """
     role: String
     llmModel: String
@@ -4744,8 +4747,9 @@ export const typeDefs = `#graphql
     role: String
     """
     #1024 — the repo affinity of this worker's ROLE, resolved so a client that
-    already holds the worker needs no second round-trip to teamRoles. The CLI
-    warns on a role/repo mismatch at session start (hadron-cli#456).
+    already holds the worker needs no second round-trip to teamRoles. Clients
+    may use it to warn on a role/repo mismatch at session start; the server
+    does not enforce a repo-affinity refusal.
 
     WORKING-STATE field: behind the worker read gate and masked to [] on deny,
     like promptOverride and the holder — Session.worker reaches a Worker
@@ -4823,17 +4827,11 @@ export const typeDefs = `#graphql
     mid-stint, which is the question a coordinator asks about a name already
     theirs. Conflating the two is the CLI bug this field exists for.
 
-    #1114 — COMPUTED, never stored. It is "the session has not ended AND it was
-    driven inside its type's idle window", not "a row is open". Nothing ends a
-    session for inactivity any more, because silence is not evidence of
-    abandonment — an agent used once a year is not abandoned in month two — so
-    an open row proves only that nobody closed it. Deriving the answer at read
-    time says exactly what the evidence supports; the previous design expressed
-    the same judgement by ENDING the session, which wrote a guess into the
-    record as a fact and destroyed the handoff that stint had not written yet.
-
-    A worker that reads false is not gone: its session is untouched, and it
-    reads true again the moment it is driven.
+    #1114 — COMPUTED, never stored: an unended session driven inside its
+    type's idle window, with no promised hard expiry at or before now.
+    An open row alone is insufficient. Inactivity does not end the session
+    or release a human-held name. An eligible act may resume a lapsed session;
+    a dormant or terminal session cannot be revived by an agent act.
 
     Uses the SAME predicate startSession refuses WORKER_TAKEN on
     (\`cor:agt:020:11\`) — a reader must not be told a worker is busy that a
@@ -5675,8 +5673,8 @@ export const typeDefs = `#graphql
     """
     #1201 — what this node is FOR (open string). NOT 'nodeType' (the
     platform-kind axis) and NOT 'objectType' (the collection discriminator).
-    A GOVERNED value ('review', 'spec') requires that kind's own door; the
-    generic createNode refuses it.
+    A GOVERNED family ('review', 'spec', 'decision', including dotted descendants)
+    requires that kind's own door; generic createNode refuses it.
     """
     role: String
     alias: String
@@ -6549,8 +6547,9 @@ export const typeDefs = `#graphql
     naming a worker in an App the caller cannot read refuses exactly like an
     absent ref (WORKER_NOT_FOUND, same message and extensions), so no other
     refusal here tells an outsider the worker exists. The one exception is the
-    worker the caller's own launchGrant names (see launchGrant). #940: a worker with an
-    ACTIVE session refuses WORKER_TAKEN — extensions carry workerId, sessionId,
+    worker the caller's own launchGrant names (see launchGrant). #940: a worker
+    with a LIVE session (the shared derived liveness predicate) refuses
+    WORKER_TAKEN — extensions carry workerId, sessionId,
     lastDriver, lastSeenAt, everything the takeover prompt needs — unless
     force is true (informed takeover, cor:agt:020:03: show who last drove it,
     proceed only on explicit override, never silently).
@@ -8800,7 +8799,7 @@ export const typeDefs = `#graphql
     Dry-run castWorker (#964): run the cast's exact resolution — same
     arguments, same typed refusals (WORKER_AGENT_NOT_FOUND / _AMBIGUOUS /
     _NOT_INSTALLED, WORKER_NAME_REQUIRED, WORKER_NAME_TAKEN,
-    WORKER_NAME_CONFUSABLE, APP_UNINSTALLED),
+    WORKER_NAME_CONFUSABLE, WORKER_NAME_RESERVED, APP_UNINSTALLED),
     same MINT gate — up to but not
     including the writes, and return what would be created. A Query, not a
     dryRun flag: casting a name is the one irreversible act in the team
@@ -10000,11 +9999,10 @@ export const typeDefs = `#graphql
 
     """
     End a session, and — for a worker-bound one — write its closing handoff
-    (#1029). This is the CLIENT operation that ends a worker session. Since
-    #1114 it is very nearly the ONLY one: the reaper ends a session only when a
-    hard expiresAt promised at session start has passed, never for going
-    quiet. A client's chat session ending **does not end a worker session**, and
-    never reaches this server (#1034).
+    (#1029). Closing a client's conversation does not call this operation or
+    end its worker session. Inactivity alone never ends a session; the reaper
+    enforces a hard expiresAt promised at session start. Other explicit
+    platform lifecycle operations can also end sessions.
 
     It ends the SESSION, not any HOLD. Where a person bound the worker the name
     stays theirs until explicitly released (#1050,
@@ -10036,7 +10034,8 @@ export const typeDefs = `#graphql
     continuity prose in \`summary\` succeeds, returns a normal receipt, and
     produces NO handoff — discovered only once the context that could have
     written one is gone, and not correctable in place, since the sequence is
-    append-only and the stint has ended (re-ending is refused). The remedy is to
+    append-only and adding a handoff to an ended session is refused. A repeat
+    end without a new handoff preserves the first end. The remedy is to
     bind again and end THAT session with the prose. Putting a label in
     \`handoff\` is merely untidy: the row lacks its label and the text reaches
     the next driver anyway.
@@ -11494,6 +11493,8 @@ export const typeDefs = `#graphql
     identifier nobody picked. The workers_app_name_uniq constraint IS the
     arbiter. Names are unique per App, case-insensitively, FOREVER (two Apps
     may each have an Iris; retirement and uninstall never free a name).
+    Names whose mention token is a broadcast word are refused
+    WORKER_NAME_RESERVED; choose a name whose token does not broadcast.
     #1677: NFKC-normalized Unicode 16 UTS #39 skeletons (original-case and
     caseless) must also be distinct within the App, including retired workers. A collision refuses
     WORKER_NAME_CONFUSABLE and names the existing worker; the chosen display
@@ -11508,7 +11509,7 @@ export const typeDefs = `#graphql
     user-owned App. Pure App-key principals are denied.
 
     Error codes (extensions.code): WORKER_NAME_TAKEN, WORKER_NAME_CONFUSABLE,
-    WORKER_NAME_REQUIRED, WORKER_AGENT_NOT_INSTALLED,
+    WORKER_NAME_REQUIRED, WORKER_NAME_RESERVED, WORKER_AGENT_NOT_INSTALLED,
     WORKER_AGENT_NOT_FOUND, WORKER_AGENT_AMBIGUOUS, APP_UNINSTALLED.
 
     #1050 also removed WORKER_ROLE_NOT_FOUND from this mutation: it fired only
@@ -11775,11 +11776,12 @@ export const typeDefs = `#graphql
     so racing posts get distinct consecutive seqs.
 
     Author derivation (#974): with sessionRef, the message is authored by
-    that session's bound Worker (the session must be writable by the caller, a
-    session OF this App, active, and bound to a non-retired Worker OF this
-    App — the worker-App pin, checked at post time so retirement revokes) and
-    the envelope records the driving sessionId; without it, by the calling
-    human. Mentions ('@worker-name' / '@handle'; a multi-word name is
+    that session's bound non-retired Worker. The session must be writable by
+    the caller and live (or eligible for the shared lapsed-session resume).
+    Its Worker belongs to this App, or its on-behalf-of user may write the
+    Channel's host memory (item J below). The envelope records the driving
+    sessionId; without it, the author is the calling human. Mentions
+    ('@worker-name' / '@handle'; a multi-word name is
     mentioned by its slug, e.g. '@mary-jane') are extracted server-side at
     write time into the envelope. replyToSeq wires a replies-to edge to the
     cited message. body is capped at 65536 characters.
