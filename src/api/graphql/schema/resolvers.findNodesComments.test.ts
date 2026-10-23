@@ -39,11 +39,30 @@ const stubClient: EmbeddingClient = {
 let admin: { id: string };
 let memory: { id: string; urn: string };
 const as = (): Context => ({ db, userId: admin.id, roles: ['ADMIN'] });
-const findNodes = (args: Record<string, unknown>) => (resolvers.Query as any).findNodes(null, args, as());
+// These tests assert exact ranks and complete scopes, not approximate-page size.
+// Match the exact-plan controls in findNodesVectorWindow1345 (#1970/#1982).
+function withLocalSettings(base: typeof db, statements: string[]): typeof db {
+  return new Proxy(base, {
+    get(target, property) {
+      const value = Reflect.get(target, property);
+      if (property !== '$transaction') return typeof value === 'function' ? value.bind(target) : value;
+      return (work: unknown, options?: unknown) => typeof work !== 'function'
+        ? (target.$transaction as any)(work, options)
+        : (target.$transaction as any)(async (tx: any) => {
+            for (const statement of statements) await tx.$executeRawUnsafe(statement);
+            return (work as (tx: unknown) => unknown)(tx);
+          }, options);
+    },
+  });
+}
+const EXACT_PLAN = ['SET LOCAL enable_sort = on', 'SET LOCAL enable_indexscan = off'];
+let searchBase = db;
+const findNodes = (args: Record<string, unknown>) => (resolvers.Query as any).findNodes(null, args, { ...as(), db: withLocalSettings(searchBase, EXACT_PLAN) });
 const types = (res: { hits: Array<{ node: { nodeType: string } }> }) => [...new Set(res.hits.map((h) => h.node.nodeType))];
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
 
 beforeEach(async () => {
+  searchBase = db;
   await cleanDb(db);
   process.env.EMBEDDING_API_URL = 'http://stub.local/api/embed';
   setEmbeddingClientForTests(stubClient);
@@ -256,4 +275,33 @@ describe('#1674 review cycle (Jane)', () => {
     await M.deleteComment(null, { commentRef: comments[2], expectedRevision: 1 }, as());
     expect(await db.nodeEmbedding.count({ where: { nodeId: comments[2] } })).toBe(0);
   });
+});
+
+// Red before the exact query handle: dead vectors consume the approximate window.
+it('exact content/comment scopes survive a dead HNSW graph and an HNSW-preferring planner', async () => {
+  const deadIds = Array.from({ length: 1500 }, () => generateId());
+  await db.node.createMany({ data: deadIds.map((id, i) => ({ id, memoryId: memory.id, loc: `dead:${i}`, name: 'Dead vector fixture' })) });
+  await db.$executeRaw`INSERT INTO node_embeddings (id,node_id,memory_id,kind,provider,model,dim,embedding)
+    SELECT 'dead-vector-' || id,id,memory_id,'abstract'::"EmbeddingKind",'test','stub-model',768,${JSON.stringify(oneHot(1))}::vector
+    FROM nodes WHERE id=ANY(${deadIds}::text[])`;
+  await db.node.deleteMany({ where: { id: { in: deadIds } } });
+  await db.$executeRawUnsafe('ANALYZE node_embeddings');
+  await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: true } });
+  const { comments } = await seed(30);
+  for (const node of await db.node.findMany({ where: { memoryId: memory.id, deletedAt: null } })) {
+    await db.node.update({ where: { id: node.id }, data: { embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date() } });
+    expect(['embedded', 'skipped']).toContain(await embedNode(db, node.id, node.nodeType === 'comment' ? { content: node.content } : { abstract: node.abstract }));
+  }
+  searchBase = withLocalSettings(db, ['SET LOCAL enable_sort = off']);
+  try {
+    const rawPlan = await searchBase.$transaction((tx) => tx.$queryRaw`EXPLAIN (FORMAT JSON) SELECT id FROM node_embeddings ORDER BY embedding <=> ${JSON.stringify(oneHot(1))}::vector LIMIT 20`);
+    expect(JSON.stringify(rawPlan)).toContain('node_embeddings_embedding_hnsw');
+    const exactPlan = await withLocalSettings(searchBase, EXACT_PLAN).$transaction((tx) => tx.$queryRaw`EXPLAIN (FORMAT JSON) SELECT id FROM node_embeddings ORDER BY embedding <=> ${JSON.stringify(oneHot(1))}::vector LIMIT 20`);
+    expect(JSON.stringify(exactPlan)).not.toContain('node_embeddings_embedding_hnsw');
+    const content = await findNodes({ query: 'retention', mode: 'vector', filter: { memoryIds: [memory.id] }, limit: 2 });
+    expect(content.hits).toHaveLength(2);
+    expect(types(content)).toEqual(['info']);
+    const feedback = await findNodes({ query: 'retention', mode: 'vector', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 5 });
+    expect(feedback.hits.map((h: any) => h.node.id).sort()).toEqual([...comments].sort());
+  } finally { searchBase = db; }
 });
