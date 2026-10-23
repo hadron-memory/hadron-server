@@ -41,7 +41,7 @@ export function projectBlocker(b: CloneBlocker): OfferReason {
 }
 
 /** A principal with no membership, grant, share or ownership anywhere: the outsider organisation of 050:19. */
-const outsiderReader = (ctx: Context): Context => ({ db: ctx.db, userId: generateId(), roles: ['READER'] }) as Context;
+export const outsiderReader = (ctx: Context): Context => ({ db: ctx.db, userId: generateId(), roles: ['READER'] }) as Context;
 
 export async function resolveOfferReadiness(
   parent: { id: string; organizationId?: string | null; ownerUserId?: string | null },

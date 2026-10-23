@@ -11,7 +11,7 @@ import { generateId } from '../../../lib/id.js';
 import { CLONE_BLOCKER_CODES, cloneBlockers } from '../../../lib/agentClone/blockers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
-import { OFFER_SUBJECT_CAP } from './resolvers.agentOfferReadiness.js';
+import { OFFER_SUBJECT_CAP, outsiderReader } from './resolvers.agentOfferReadiness.js';
 
 vi.mock('../../../lib/agentClone/blockers.js', async (orig) => {
   const m = await orig<typeof import('../../../lib/agentClone/blockers.js')>();
@@ -212,6 +212,17 @@ describe('subject lists: cap, redaction and the arithmetic', () => {
     }
     expect(res.reasons.map((x: any) => x.code)).toEqual(['CLONE_LINKED_MEMORY_ENCRYPTED', 'CLONE_LINKED_MEMORY_UNREADABLE']);
     expect(JSON.stringify(res)).not.toContain('TOP-SECRET');
+  });
+});
+
+describe('the outsider reader is a no-authority adapter (Xylon, #2246 6355547126)', () => {
+  it('carries ONLY db + a fresh nonexistent userId + READER, and nothing is written for it', async () => {
+    const r = outsiderReader(ctxFor(generateId(), ['ADMIN']));
+    expect(Object.keys(r).sort()).toEqual(['db', 'roles', 'userId']);
+    expect(r.roles).toEqual(['READER']);
+    expect(r.db).toBe(db);
+    expect(await db.user.findUnique({ where: { id: r.userId! } })).toBeNull();
+    expect(outsiderReader(r).userId).not.toBe(r.userId);
   });
 });
 
