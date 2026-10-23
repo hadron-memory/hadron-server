@@ -5620,6 +5620,10 @@ model AgentTeamAlarmSchedule {
   chainIndex Int       @map("chain_index")
   dueAt      DateTime  @map("due_at")
   wokenAt    DateTime? @map("woken_at")
+  /// #2200 (R196) — when the escalation found that the alarm's OWN episode had ended (the task moved, so the
+  /// condition no longer holds) and closed this row unwoken. Woken or ended, never both
+  /// (chk_agent_team_alarm_schedule_shape); the alarm event, its chain and every `woken_at` stay as written.
+  endedAt    DateTime? @map("ended_at")
 
   event AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
 

@@ -14,10 +14,11 @@ ALTER TABLE agent_team_events ADD CONSTRAINT chk_agent_team_events_episode CHECK
 );
 
 -- cor:agt:050:19 — a wake is one owner of the alarm's chain; it is woken no
--- earlier than it falls due.
+-- earlier than it falls due. #2200 (R196): a row whose alarm's own episode
+-- ended is closed (ended_at), and a row is woken or ended, never both.
 ALTER TABLE agent_team_alarm_schedule DROP CONSTRAINT IF EXISTS chk_agent_team_alarm_schedule_shape;
 ALTER TABLE agent_team_alarm_schedule ADD CONSTRAINT chk_agent_team_alarm_schedule_shape CHECK (
-  chain_index >= 0 AND (woken_at IS NULL OR woken_at >= due_at)
+  chain_index >= 0 AND (woken_at IS NULL OR woken_at >= due_at) AND (ended_at IS NULL OR woken_at IS NULL)
 );
 
 -- cor:agt:060:02 — available or unavailable; a reason only when unavailable
@@ -67,3 +68,12 @@ ALTER TABLE agent_task_stall_schedule ADD CONSTRAINT chk_agent_task_stall_schedu
   (session_end_grace_minutes IS NULL OR session_end_grace_minutes BETWEEN 1 AND 1440) AND
   (host_report_timeout_minutes IS NULL OR host_report_timeout_minutes BETWEEN 5 AND 1440)
 );
+
+-- #2200: the escalation's due-row read, over the rows still open (neither woken
+-- nor ended). Prisma cannot model a partial index. Production builds it with
+-- 20261023010100_alarm_schedule_open_due_idx (CONCURRENTLY, one statement, so it
+-- is not part of the migration copy of this file above this marker); push-managed
+-- databases get it here.
+-- INDEX-SECTION
+CREATE INDEX IF NOT EXISTS agent_team_alarm_schedule_open_due_idx
+  ON agent_team_alarm_schedule (due_at) WHERE woken_at IS NULL AND ended_at IS NULL;
