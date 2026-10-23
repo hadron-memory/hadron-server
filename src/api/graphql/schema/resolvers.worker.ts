@@ -493,9 +493,6 @@ export async function resolveWorkerBindCandidatesByName(ctx: Context, name: stri
       if (!(e instanceof GraphQLError && e.extensions.code === 'FORBIDDEN')) throw e;
       continue;
     }
-    // #1764: membership of a user-owned App is not permission to hold its
-    // worker. Match the bind's owner/manager check before offering this App.
-    if (app.ownerUserId !== null && app.ownerUserId !== ctx.userId && !(await managesApp(ctx, app))) continue;
     const id = await resolveWorkerIdByName(ctx.db, app.id, name);
     if (!id) continue;
     const row = await ctx.db.worker.findFirst({
@@ -504,6 +501,11 @@ export async function resolveWorkerBindCandidatesByName(ctx: Context, name: stri
         heldBy: { select: { id: true, handle: true, githubUsername: true } } },
     });
     if (!row) continue;
+    // #1764 restricts taking an unheld name, not rebinding one already held
+    // by this caller. Holds survive role changes: omitting that identity could
+    // silently choose and claim a different same-name worker (#1597 P2-1).
+    if (app.ownerUserId !== null && app.ownerUserId !== ctx.userId &&
+        row.heldBy?.id !== ctx.userId && !(await managesApp(ctx, app))) continue;
     let urn: string | null = null;
     try { urn = composeWorkerUrn(normalizeUrnForLookup(app.urn), row.slug); } catch { /* legacy unaddressable App: use worker id */ }
     candidates.push({ id: row.id, name: row.name, urn, role: row.role,

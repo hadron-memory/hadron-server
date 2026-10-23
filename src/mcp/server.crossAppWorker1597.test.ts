@@ -139,6 +139,37 @@ describe('cross-App bare-name bind (#1597)', () => {
     await worker(own); const a = await worker(appA);
     expect((await start('Iris')).workerId).toBe(a.id);
   });
+  it('includes an already-held user-owned worker after its holder is demoted to ordinary membership', async () => {
+    const own = await db.app.create({ data: { ownerUserId: other.id, name: 'Solo', urn: `solo-${generateId()}:team` } });
+    await db.appAgent.create({ data: { appId: own.id, agentId } });
+    await db.appMember.create({ data: { appId: own.id, userId: user.id, role: 'owner' } });
+    const held = await worker(own, 'Iris', { heldByUserId: user.id, heldAt: new Date() });
+    await db.appMember.update({ where: { appId_userId: { appId: own.id, userId: user.id } }, data: { role: 'member' } });
+    expect((await start('Iris')).workerId).toBe(held.id);
+    expect((await db.worker.findUniqueOrThrow({ where: { id: held.id } })).heldByUserId).toBe(user.id);
+  });
+  it('direct and actual MCP ambiguity include an already-held user-owned match without claiming its namesake', async () => {
+    const own = await db.app.create({ data: { ownerUserId: other.id, name: 'Solo', urn: `solo-${generateId()}:team` } });
+    await db.appAgent.create({ data: { appId: own.id, agentId } });
+    await db.appMember.create({ data: { appId: own.id, userId: user.id, role: 'owner' } });
+    const held = await worker(own, 'Iris', { heldByUserId: user.id, heldAt: new Date() });
+    await db.appMember.update({ where: { appId_userId: { appId: own.id, userId: user.id } }, data: { role: 'member' } });
+    const a = await worker(appA);
+    // Both explicit memberships keep MCP authentication in its multi-App
+    // state; otherwise the existing auth resolver selects the sole member App.
+    await db.appMember.create({ data: { appId: appA.id, userId: user.id, role: 'member' } });
+    const e = await refusal(start('Iris'));
+    expect(e.extensions.code).toBe('SESSION_WORKER_NAME_AMBIGUOUS');
+    expect(e.extensions.candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: held.id }), expect.objectContaining({ id: a.id }),
+    ]));
+    const c = await mcp();
+    const out = text(await c.callTool({ name: 'hadron_start_session', arguments: { description: 'held identity is not absent', workerRef: 'Iris' } }));
+    expect(out).toContain('ambiguous'); expect(out).toContain(held.urn); expect(out).toContain(a.urn);
+    expect(await db.session.count()).toBe(0);
+    expect((await db.worker.findUniqueOrThrow({ where: { id: held.id } })).heldByUserId).toBe(user.id);
+    expect((await db.worker.findUniqueOrThrow({ where: { id: a.id } })).heldByUserId).toBeNull();
+  });
   it('App-membership alone admits org Apps but org READER alone does not', async () => {
     await db.orgMember.updateMany({ where: { userId: user.id }, data: { role: 'READER' } });
     await db.appMember.create({ data: { appId: appA.id, userId: user.id, role: 'reader' } });
