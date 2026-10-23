@@ -707,11 +707,11 @@ it.each((['clearNodeHistory', 'deleteNodeRevision'] as const).flatMap((surface) 
         }, options as never);
       },
     });
-    const first = phase === 'writer-first' ? remove(heldDb) : compileBootPrompt({ ...ctx(), db: phase === 'write' ? heldDb : db }, compile.target,
+    const first: Promise<unknown> = phase === 'writer-first' ? remove(heldDb) : compileBootPrompt({ ...ctx(), db: phase === 'write' ? heldDb : db }, compile.target,
       phase === 'read' ? { seams: { beforeAssemble: async () => { entered(); await gate; } } } : {});
     const firstResult = first.then((value) => ({ value }), (error: unknown) => ({ error }));
     await Promise.race([ready, firstResult.then((result) => { if ('error' in result) throw result.error; throw new Error('missing phase barrier'); })]);
-    const second = phase === 'writer-first' ? compileBootPrompt(ctx(), compile.target) : remove(db);
+    const second: Promise<unknown> = phase === 'writer-first' ? compileBootPrompt(ctx(), compile.target) : remove(db);
     const secondResult = second.then((value) => ({ value }), (error: unknown) => ({ error }));
     try { await waitForLockWaitersOfType(db, 'advisory', 1, 750); }
     finally { release(); await firstResult; await secondResult; }
