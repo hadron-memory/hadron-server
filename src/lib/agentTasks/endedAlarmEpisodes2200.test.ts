@@ -467,6 +467,19 @@ describe('#2200 — stallCandidates({ episodesRunning }) is a superset of the de
     expect(sawFlaggedOnly).toBe(true); // young episodes and stops are what the flag lifts
   });
 
+  it('the flagged mode ignores the window and a stop: a young episode and a stopped one both run', () => {
+    const now = at('12:00');
+    const young: World = {
+      status: 'pending', assignee: 'w1', assignedAt: new Date(now.getTime() - 2 * MINUTE), startedAt: null, queuedAt: null,
+      progressAt: null, activityAt: null, openChildren: 0, lastChildEndedAt: null, ended: [], stops: [], t0: at('09:00'),
+    };
+    expect(stallCandidates(inputsOf(young), windows, now)).toEqual([]);
+    expect(flagged(inputsOf(young), now).map((c) => c.rule)).toEqual(['not-started']);
+    const stopped = { ...young, assignedAt: new Date(now.getTime() - 60 * MINUTE), stops: [{ start: new Date(now.getTime() - 5 * MINUTE), end: null }] };
+    expect(stallCandidates(inputsOf(stopped), windows, now)).toEqual([]);
+    expect(flagged(inputsOf(stopped), now).map((c) => c.rule)).toEqual(['not-started']);
+  });
+
   it('(c) a bounded random walk: once a key stops running it never runs again', () => {
     for (let seed = 1; seed <= 300; seed++) {
       const r = rng(seed);
