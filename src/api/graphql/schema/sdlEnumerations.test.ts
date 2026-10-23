@@ -252,3 +252,17 @@ describe('#2304 commentable-class list', () => {
     expect(findPartialEnumerations(at('An app has personal and group data.', 'other'))).toEqual([]);
   });
 });
+
+describe('#2304 reserved object-field list', () => {
+  it('does not let an incidental type example hide an omitted reserved field', () => {
+    const doc = 'type Mutation { "Reserved object field names: id; type is the collection argument." createObject: String }';
+    expect(findPartialEnumerations(doc)).toMatchObject([
+      { coord: 'Mutation.createObject', set: 'RESERVED_OBJECT_KEYS', missing: ['type'] },
+    ]);
+  });
+
+  it('accepts the live reserved list and ignores other uses of id/type', () => {
+    expect(findPartialEnumerations('type Mutation { "Reserved object field names: id, type; both refused." createObject: String }')).toEqual([]);
+    expect(findPartialEnumerations('type Query { "An id field and a type name." other: String }')).toEqual([]);
+  });
+});
