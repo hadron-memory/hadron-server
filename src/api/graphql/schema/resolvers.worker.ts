@@ -59,6 +59,7 @@ import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
@@ -462,6 +463,55 @@ export async function resolveWorkerIdByName(
     WHERE app_id = ${appId} AND lower(name) = lower(${trimmed})
     LIMIT 1`;
   return rows[0]?.id ?? null;
+}
+
+/** #1597: authorized, live-App NAME discovery for a bind with no App context.
+ * Reuses the participation set and point gate (hrn:node:hadronmemory.com:specs:cor:agt:020:00).
+ * No name query runs for a denied App; hold/liveness decisions remain with startSession.
+ */
+export async function resolveWorkerBindCandidatesByName(ctx: Context, name: string) {
+  if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return [];
+  const participant = await participantAppWhere(ctx.db, ctx, { includeMemberships: true });
+  // The existing point gate admits platform administrators to live org Apps,
+  // never to another person's user-owned App merely by platform role.
+  const apps = await ctx.db.app.findMany({
+    where: {
+      deletedAt: null, uninstalledAt: null,
+      OR: [
+        ...(participant ? [participant] : []),
+        ...(isPlatformAdmin(ctx) ? [{ organizationId: { not: null }, organization: { is: { deletedAt: null } } }] : []),
+      ],
+    },
+    select: { id: true, name: true, urn: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+    orderBy: [{ urn: 'asc' }, { id: 'asc' }],
+  });
+  const candidates = [];
+  for (const app of apps) {
+    try {
+      await requireWorkerReadAccess(ctx, app);
+    } catch (e) {
+      if (!(e instanceof GraphQLError && e.extensions.code === 'FORBIDDEN')) throw e;
+      continue;
+    }
+    const id = await resolveWorkerIdByName(ctx.db, app.id, name);
+    if (!id) continue;
+    const row = await ctx.db.worker.findFirst({
+      where: { id, appId: app.id, retiredAt: null },
+      select: { id: true, name: true, slug: true, role: true,
+        heldBy: { select: { id: true, handle: true, githubUsername: true } } },
+    });
+    if (!row) continue;
+    // #1764 restricts taking an unheld name, not rebinding one already held
+    // by this caller. Holds survive role changes: omitting that identity could
+    // silently choose and claim a different same-name worker (#1597 P2-1).
+    if (app.ownerUserId !== null && app.ownerUserId !== ctx.userId &&
+        row.heldBy?.id !== ctx.userId && !(await managesApp(ctx, app))) continue;
+    let urn: string | null = null;
+    try { urn = composeWorkerUrn(normalizeUrnForLookup(app.urn), row.slug); } catch { /* legacy unaddressable App: use worker id */ }
+    candidates.push({ id: row.id, name: row.name, urn, role: row.role,
+      app: { id: app.id, name: app.name, urn: safeCanonicalUrn('app', app.urn) }, holder: row.heldBy });
+  }
+  return candidates;
 }
 
 /**
