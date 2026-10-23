@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../lib/workerSignature.js';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -163,7 +164,7 @@ describe('mergeUsers audit actor registry', () => {
       data: { organizationId: org.id, name: 'Audit Agent', urn: `${org.urn}:agent` },
     });
     const worker = await db.worker.create({
-      data: {
+      data: { ...WORKER_SIGNATURE_DEFAULTS,
         appId: app.id,
         agentId: agent.id,
         name: 'Audit Worker',

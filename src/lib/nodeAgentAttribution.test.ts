@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /** #1610: the Worker / Agent behind node writes, beside the user. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Request } from 'express';
@@ -44,7 +45,7 @@ beforeEach(async () => {
   memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'attribution' }, as());
   agent = await db.agent.create({ data: { id: generateId(), urn: 'attr.example:server-engineer', name: 'server-engineer', organizationId: org.id } });
   const app = await db.app.create({ data: { id: generateId(), name: 'Team', urn: 'attr.example:team', organizationId: org.id } });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
   session = await db.session.create({
     data: { id: generateId(), appId: app.id, userId: user.id, workerId: worker.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() },
   });
@@ -110,16 +111,29 @@ describe('the actor comes only from a validated session binding (#1610)', () => 
     const seen = await requestActorStorage.run(emptyActor(), async () => {
       const ctx = await resolveAuthContext(req(`Bearer ${rawKey}`, session.id), db);
       expect(ctx.sessionId).toBe(session.id);
-      return { ...currentActor() };
+      const { workerId, agentId } = currentActor();
+      return { workerId, agentId }; // the Worker / Agent; the authenticated user is pinned in requestActor.userId2176.test.ts
     });
     expect(seen).toEqual({ workerId: worker.id, agentId: agent.id });
+  });
+
+  it('also publishes the authenticated user, whatever the session binding says (#2176)', async () => {
+    const { rawKey } = await mintUserApiKey(db, { userId: user.id, label: null, createdBy: user.id, issuedVia: 'test' });
+    const { rawKey: foreignKey } = await mintUserApiKey(db, { userId: other.id, label: null, createdBy: other.id, issuedVia: 'test' });
+    const own = await requestActorStorage.run(emptyActor(), async () => { await resolveAuthContext(req(`Bearer ${rawKey}`, session.id), db); return currentActor().userId; });
+    expect(own).toBe(user.id);
+    // a session that is not the caller's binds no worker, but the caller is still the caller
+    const foreign = await requestActorStorage.run(emptyActor(), async () => { await resolveAuthContext(req(`Bearer ${foreignKey}`, session.id), db); return currentActor(); });
+    expect(foreign.userId).toBe(other.id);
+    expect(foreign.workerId).toBeNull();
   });
 
   it('publishes nobody for another user session, an ended session, or no session', async () => {
     const { rawKey } = await mintUserApiKey(db, { userId: other.id, label: null, createdBy: other.id, issuedVia: 'test' });
     const foreign = await requestActorStorage.run(emptyActor(), async () => {
       await resolveAuthContext(req(`Bearer ${rawKey}`, session.id), db);
-      return { ...currentActor() };
+      const { workerId, agentId } = currentActor();
+      return { workerId, agentId }; // the Worker / Agent; the authenticated user is pinned in requestActor.userId2176.test.ts
     });
     expect(foreign).toEqual(NOBODY);
 
@@ -127,12 +141,14 @@ describe('the actor comes only from a validated session binding (#1610)', () => 
     await db.session.update({ where: { id: session.id }, data: { endedAt: new Date() } });
     const ended = await requestActorStorage.run(emptyActor(), async () => {
       await resolveAuthContext(req(`Bearer ${own}`, session.id), db);
-      return { ...currentActor() };
+      const { workerId, agentId } = currentActor();
+      return { workerId, agentId }; // the Worker / Agent; the authenticated user is pinned in requestActor.userId2176.test.ts
     });
     expect(ended).toEqual(NOBODY);
     const unbound = await requestActorStorage.run(emptyActor(), async () => {
       await resolveAuthContext(req(`Bearer ${own}`), db);
-      return { ...currentActor() };
+      const { workerId, agentId } = currentActor();
+      return { workerId, agentId }; // the Worker / Agent; the authenticated user is pinned in requestActor.userId2176.test.ts
     });
     expect(unbound).toEqual(NOBODY);
   });
@@ -145,7 +161,8 @@ describe('a dormant session neither binds nor attributes (DY-5, #1665 both doors
     const seen = await requestActorStorage.run(emptyActor(), async () => {
       const ctx = await resolveAuthContext({ headers: { authorization: `Bearer ${rawKey}`, 'x-hadron-session': session.id } } as unknown as Request, db);
       expect(ctx.sessionId).toBeUndefined();
-      return { ...currentActor() };
+      const { workerId, agentId } = currentActor();
+      return { workerId, agentId }; // the Worker / Agent; the authenticated user is pinned in requestActor.userId2176.test.ts
     });
     expect(seen).toEqual(NOBODY);
   });
@@ -239,7 +256,7 @@ describe('#1658 review cycle', () => {
   });
 
   it('keeps concurrent requests apart: each write records its own actor', async () => {
-    const other = await db.worker.create({ data: { id: generateId(), appId: (await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).appId, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+    const other = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: (await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).appId, agentId: agent.id, name: 'Iris', slug: 'iris' } });
     const [a, b] = await Promise.all([
       runAsActor(W(), async () => { await new Promise((r) => setTimeout(r, 20)); return makeNode('c:1'); }),
       runAsActor({ workerId: other.id, agentId: agent.id }, () => makeNode('c:2')),

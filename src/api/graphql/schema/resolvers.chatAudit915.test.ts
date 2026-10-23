@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /** #915 / cor:dmo:010:01: request-user audit is separate from Worker lineage and platform prose. */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -34,7 +35,7 @@ beforeEach(async () => {
   for (const name of ['Alpha', 'Beta']) {
     const agent = await db.agent.create({ data: { organizationId: orgId, name, urn: `hrn:agent:audit915:${name.toLowerCase()}-${generateId()}` } });
     await db.appAgent.create({ data: { appId, agentId: agent.id } });
-    const worker = await db.worker.create({ data: { appId, agentId: agent.id, name, slug: name.toLowerCase() } });
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: agent.id, name, slug: name.toLowerCase() } });
     actors.push({ workerId: worker.id, agentId: agent.id });
   }
 });

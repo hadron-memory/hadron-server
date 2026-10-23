@@ -1,3 +1,6 @@
+import { lockStopFence } from '../../../lib/stopSignals/state.js';
+import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
+import { storedIncludeTags, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // sessionMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { ownsSession } from '../../../lib/sessionOwnership.js';
@@ -60,7 +63,7 @@ import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
-import { deleteToolConnection, type ToolCalendarEvent } from '../../../lib/emailClient.js';
+import { deleteToolConnection, runEmailOperation, type ToolCalendarEvent } from '../../../lib/emailClient.js';
 import {
   loadLastEventBySession,
   mostRecentlyActive,
@@ -83,6 +86,8 @@ import {
   SESSION_INCLUDE,
   mapToolCalendarEvent,
   runOwnedEmailOperation,
+  requireEmailConnection,
+  ConnectionNotFoundError,
   type SessionInput,
   type UsageEventInput,
 } from './resolvers.helpers.js';
@@ -99,6 +104,7 @@ import {
 } from '../../../lib/resumeClaims.js';
 import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx } from '../../../lib/teamAttention.js';
 import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 
@@ -461,6 +467,32 @@ export async function writeSessionHandoff(
       { extensions: { code: 'HANDOFF_WRITE_FAILED', sessionId } },
     );
   }
+}
+
+// ── #2086 / #1931 / #1948: refresh a bound session's model and family ─────────────────────────────────────────
+/** A supplied family must be a valid token; checked before any write (and, on a resume, before the claim is spent). */
+function explicitFamilyOrThrow(family: string | null | undefined): string | null {
+  const explicit = family != null ? normalizeFamily(family) : null;
+  if (family != null && !explicit) {
+    throw new GraphQLError('family must be a valid model-family token.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  return explicit;
+}
+
+/**
+ * What a binding-preserving flow writes back: an explicit family wins, otherwise a supplied model is read against
+ * the session's STORED tool (never a transport's). Null/omitted input never clears, and a model nothing classifies
+ * keeps the existing family rather than guessing one. Shared by updateSession and the resume of an open session,
+ * so the two cannot drift.
+ */
+function modelFamilyRefresh(
+  explicitFamily: string | null,
+  llmModel: string | null | undefined,
+  storedTool: string | null,
+): { llmModel?: string; modelReportedAt?: Date; family?: string } {
+  const family = explicitFamily ?? (llmModel != null ? deriveFamily({ llmModel, tool: storedTool }) : null);
+  // #2252: a supplied model IS a report, so it stamps the time (a repeat of the same model refreshes it).
+  return { ...(llmModel != null ? { llmModel, modelReportedAt: new Date() } : {}), ...(family != null ? { family } : {}) };
 }
 
 // ── #1956: resume claims ───────────────────────────────────────────────────
@@ -1133,6 +1165,11 @@ export const sessionMutations = {
         // checked lifecycle. Recheck the settled App in the transaction before
         // claiming a name or inserting a session. An explicit Worker ref may
         // have replaced a stale selection above; only the final App matters.
+        // #2022 (Diego #2166 P2-2): a bind that sets reportsTo is a stop-coverage writer, so it takes the App's stop
+        // fence EXCLUSIVE before any row lock, the App row included: an App-row writer (setTeamPause, under the
+        // App's anchors) holds the fence shared before it updates that row, so taking the fence after the App row
+        // here was a real deadlock (40P01). This path takes no authority anchors, so the fence is its first lock.
+        if (reportsToId && appId) await lockStopFence(tx, appId, 'exclusive');
         if (appId) {
           await lockSessionAppActive(tx, appId);
         }
@@ -1386,6 +1423,8 @@ export const sessionMutations = {
           customerId: input.customerId,
           language: input.language,
           llmModel: input.llmModel,
+          // #2252: a model given at bind is a report.
+          modelReportedAt: input.llmModel != null ? new Date() : null,
           parentSessionId: input.parentSessionId,
           prevSessionId: input.prevSessionId ?? supersedes[0]?.id ?? derivedPrevSessionId,
           // #928 coding-session provenance.
@@ -1432,6 +1471,8 @@ export const sessionMutations = {
               );
             },
           });
+          // #2022 (R95): a team signal covers the worker from the moment it joins the team.
+          await reconcileStopCoverage(tx, bindAppId, new Date());
         }
         if (supersedes.length > 0) {
           const ids = supersedes.map((r) => r.id).filter((id) => id !== created.id);
@@ -1474,18 +1515,13 @@ export const sessionMutations = {
       await requireSessionWriteAccess(ctx, session);
       // #1931: refresh a binding without guessing a model family from its host.
       // Null/omitted metadata never clears an existing family during recovery.
-      const explicit = family != null ? normalizeFamily(family) : null;
-      if (family != null && !explicit) {
-        throw new GraphQLError('family must be a valid model-family token.', { extensions: { code: 'BAD_USER_INPUT' } });
-      }
-      const refreshedFamily = explicit ?? (llmModel != null ? deriveFamily({ llmModel, tool: session.tool }) : null);
+      const refresh = modelFamilyRefresh(explicitFamilyOrThrow(family), llmModel, session.tool);
       return ctx.db.session.update({
         where: { id },
         data: {
           ...(prNumber !== undefined ? { prNumber } : {}),
           ...(branch !== undefined ? { branch } : {}),
-          ...(llmModel != null ? { llmModel } : {}),
-          ...(refreshedFamily != null ? { family: refreshedFamily } : {}),
+          ...refresh,
           updatedBy: ctx.userId ?? ctx.clientId ?? null,
           // #1543 — a pr/branch edit must not revive a lapsed session.
           ...(await preserveHeartbeatIfLapsed(ctx.db as never, id)),
@@ -1594,6 +1630,9 @@ export const sessionMutations = {
       const given = input ?? {};
       if (!ctx.userId || ctx.impersonation) throw nothingToResume();
       const userId = ctx.userId;
+      // #2086: a bad family refuses BEFORE any claim is read or spent. It sits after the NOTHING_TO_RESUME line
+      // above, so an App key or an impersonation learns nothing about the value either way.
+      const explicitFamily = explicitFamilyOrThrow(given.family);
       const now = new Date();
       const claims = await liveClaimsOf(ctx.db, userId, now);
 
@@ -1618,6 +1657,12 @@ export const sessionMutations = {
         try {
           verdict = await ctx.db.$transaction(async (tx) => {
             const ok = await resumeOwnLapsedSessionInTx(ctx, tx, sessionId);
+            // #2086: only after the gate permits, inside its transaction, so a refusal or a lost claim writes nothing.
+            if (ok) {
+              const stored = await tx.session.findUniqueOrThrow({ where: { id: sessionId }, select: { tool: true } });
+              const refresh = modelFamilyRefresh(explicitFamily, given.llmModel, stored.tool);
+              if (Object.keys(refresh).length) await tx.session.update({ where: { id: sessionId }, data: { ...refresh, updatedBy: userId } });
+            }
             if (claimId) {
               if (!(await consumeResumeClaim(tx, claimId, userId))) throw lost;
               if (ok) await tx.resumeClaim.update({ where: { id: claimId }, data: { resumedSessionId: sessionId } });
@@ -2041,7 +2086,8 @@ export const sessionMutations = {
         select: { id: true },
       })).map((n) => n.id);
       const edges = await ctx.db.edge.findMany({
-        where: { sourceId: { in: nodeIds }, deletedAt: null },
+        // Derived INCLUDE edges (#2040) are not snapshotted: restore re-derives them from content.
+        where: { sourceId: { in: nodeIds }, deletedAt: null, governedKind: null },
         include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
       });
       const edgeSnapshots = edges.map((e) => ({
@@ -2206,7 +2252,7 @@ export const sessionMutations = {
             select: { id: true },
           })).map((n) => n.id);
           await tx.edge.updateMany({
-            where: { sourceId: { in: currentNodeIds }, deletedAt: null },
+            where: { sourceId: { in: currentNodeIds }, deletedAt: null, governedKind: null },
             data: { deletedAt: new Date() },
           });
 
@@ -2274,6 +2320,10 @@ export const sessionMutations = {
               },
             });
             locToId.set(loc, upserted.id);
+            // #2040 — re-derive the include edges from the restored content. No
+            // refusal here: the snapshot was valid when taken, and the walk would
+            // see a half-restored graph.
+            await syncDerivedIncludesEdges(tx, upserted, storedIncludeTags(nodeData.content), [sysMemId]);
           }
 
           // Restore edges from snapshot. Spec 037: derive loc when an older
@@ -2393,22 +2443,49 @@ export const sessionMutations = {
       return true;
     },
 
+    /**
+     * Probe the owner's connection and record the outcome (hadron-internal#18).
+     * The gate runs first and alone: a denied, missing or deleted connection is
+     * the same typed FORBIDDEN, with no provider call and no write. The probe's
+     * own error, typed by the email client, reaches the caller unchanged. Each
+     * status write re-runs the gate under the connection fence that delete and
+     * grant revocation take, so authority lost during the probe writes nothing.
+     */
     testExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const operation = 'list-messages';
+      let connection: Awaited<ReturnType<typeof requireEmailConnection>>;
       try {
-        await runOwnedEmailOperation(ctx, id, 'list-messages', { top: 1 });
-        await ctx.db.exchangeConnection.update({
-          where: { id },
-          data: { syncStatus: 'OK', lastError: null, lastSyncAt: new Date() },
-        });
-        return true;
-      } catch (err: unknown) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        await ctx.db.exchangeConnection.update({
-          where: { id },
-          data: { syncStatus: 'ERROR', lastError: errMsg },
-        });
-        throw new Error(`Exchange connection test failed: ${errMsg}`);
+        connection = await requireEmailConnection(ctx, id, operation);
+      } catch (err) {
+        if (err instanceof ConnectionNotFoundError) throw authorizationDenied();
+        throw err;
       }
+      const recordStatus = async (data: { syncStatus: 'OK' | 'ERROR'; lastError: string | null; lastSyncAt?: Date }) => {
+        try {
+          await withAuthorizedTx(
+            ctx,
+            [{ kind: 'connection', id: connection.id }],
+            async (txCtx) => { await requireEmailConnection(txCtx, connection.id, operation); },
+            (tx) => tx.exchangeConnection.updateMany({ where: { id: connection.id, deletedAt: null }, data }),
+            { afterLock: async (tx) => {
+              await tx.$queryRaw`SELECT id FROM exchange_connections WHERE id = ${connection.id} FOR UPDATE`;
+            } },
+          );
+        } catch (err) {
+          // Authority lost during the probe: record nothing. Anything else is a fault.
+          if (err instanceof ConnectionNotFoundError) return;
+          if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') return;
+          throw err;
+        }
+      };
+      try {
+        await runEmailOperation(connection.provider, operation, { top: 1, connectionId: connection.toolConnectionId });
+      } catch (err: unknown) {
+        await recordStatus({ syncStatus: 'ERROR', lastError: err instanceof Error ? err.message : String(err) });
+        throw err;
+      }
+      await recordStatus({ syncStatus: 'OK', lastError: null, lastSyncAt: new Date() });
+      return true;
     },
 
     exchangeReply: async (

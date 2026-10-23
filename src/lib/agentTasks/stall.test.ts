@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1706 (Task Management T2) — the stall evaluator, the alarm chain and its
  * escalation, acknowledgement, and the stall mark on availability.
@@ -78,7 +79,7 @@ beforeEach(async () => {
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `stall-${n}.example:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
   const worker = (name: string) =>
-    db.worker.create({ data: { appId: app.id, agentId, name, slug: name.toLowerCase(), heldByUserId: mia.id }, select: { id: true } });
+    db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name, slug: name.toLowerCase(), heldByUserId: mia.id }, select: { id: true } });
   ada = await worker('Ada');
   anne = await worker('Anne');
   rook = await worker('Rook');
@@ -1018,7 +1019,7 @@ describe('Diego P3 on #1720 — clearing stall marks pages through every record'
   it('a worker who acted again is cleared even when 500 idle stalled workers sort before it', async () => {
     const ids = Array.from({ length: 501 }, () => generateId()).sort();
     await db.worker.createMany({
-      data: ids.map((id, i) => ({ id, appId: app.id, agentId, name: `Idle ${i}`, slug: `idle-${i}` })),
+      data: ids.map((id, i) => ({ ...WORKER_SIGNATURE_DEFAULTS, id, appId: app.id, agentId, name: `Idle ${i}`, slug: `idle-${i}` })),
     });
     await db.workerAvailability.createMany({
       data: ids.map((workerId) => ({ workerId, state: 'unavailable', reason: 'stalled', setAt: at('10:00'), setBy: 'stall-rule' })),

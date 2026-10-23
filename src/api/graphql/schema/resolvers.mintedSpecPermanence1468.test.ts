@@ -116,13 +116,15 @@ describe('#1468 — GraphQL deleteNode', () => {
     const a = await node(draft.id, 'pas:010', { tags: ['spec'] });
     expect(await del(a.id)).toBe(true);
     const parent = await node(draft.id, 'mod');
-    await node(draft.id, 'mod:010', { role: 'spec' });
+    // A spec-role node is governed: its role is cleared first, as a caller must.
+    await node(draft.id, 'mod:010', { role: null, tags: ['spec'] });
     expect(await del(parent.id, { recursive: true, hard: true })).toBe(true);
     expect(await liveIds(draft.id)).toEqual([]);
   });
 
   it('control: a never-stamped non-draft memory (the live-corpus case) is outside this guard', async () => {
-    const spec = await node(unstamped.id, 'pas:010', { tags: ['spec'], role: 'spec' });
+    // Cleared first: the governed-node rule is a separate guard from this one.
+    const spec = await node(unstamped.id, 'pas:010', { tags: ['spec'], role: null });
     expect(await del(spec.id)).toBe(true);
   });
 });

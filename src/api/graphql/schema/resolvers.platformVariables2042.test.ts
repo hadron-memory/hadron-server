@@ -110,7 +110,7 @@ describe('composeWorkerPrompt — filled at each bind', () => {
   const prompt = async (id: string, opts?: { llmModel?: string | null }) =>
     (await composeWorkerPrompt(ctx(userId), await db.worker.findUniqueOrThrow({ where: { id } }), opts)).text;
 
-  it('fills worker, agent, reports-to, url and the bind session model; signature and trailer are empty until S5', async () => {
+  it('fills worker, agent, reports-to, url and the bind session model; signature and trailer carry their stored defaults', async () => {
     const boss = await cast('Bo');
     const w = await cast('Ada', 'coordinator');
     await db.worker.update({ where: { id: w.id }, data: { reportsToWorkerId: boss.id } });
@@ -118,13 +118,13 @@ describe('composeWorkerPrompt — filled at each bind', () => {
     const url = await (resolvers as any).Worker.portalUrl(row, {}, ctx(userId));
     expect(url).toMatch(/^https:\/\/portal\.test\/app\/u\/hrn:worker:/);
     // The same link the worker read prints, not a rebuilt one.
-    expect(await prompt(w.id, { llmModel: 'claude-x' })).toBe(`Ada|coordinator|PV Agent|Bo|[]|[]|${url}|claude-x`);
+    expect(await prompt(w.id, { llmModel: 'claude-x' })).toBe(`Ada|coordinator|PV Agent|Bo|[— [Ada, coordinator](${url}) · claude-x]|[Worker: Ada (coordinator) <${url}>]|${url}|claude-x`);
   });
 
   it('worker.role falls back to the Agent persona role; a worker with no report line fills reports-to empty', async () => {
     const w = await cast('Cy');
     const text = (await prompt(w.id, { llmModel: null }))!;
-    expect(text.startsWith('Cy|engineer|PV Agent||[]|[]|')).toBe(true);
+    expect(text.startsWith('Cy|engineer|PV Agent||[— [Cy, engineer](')).toBe(true);
     expect(text.endsWith('|')).toBe(true);
   });
 

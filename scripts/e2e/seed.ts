@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../src/lib/workerSignature.js';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -95,7 +96,7 @@ async function seed() {
       const workerMemoryId = id(`${org}:${role}:worker-memory`);
       await db.memory.create({ data: { id: workerMemoryId, organizationId, appId,
         urn: `${org}:${role}-working`, name: `${role} working`, class: 'app', tags: ['e2e'] } });
-      await db.worker.create({ data: { id: id(`${org}:${role}:worker`), appId, agentId,
+      await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: id(`${org}:${role}:worker`), appId, agentId,
         name: workerNames[role],
         slug: role === 'coordinator' ? 'test-coordinator' : 'test-reviewer', role, memoryId: workerMemoryId } });
     }

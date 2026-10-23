@@ -72,6 +72,45 @@ export async function managesApp(
 }
 
 /**
+ * #2045 (R23, cor:agt:040:11, :12) — does the caller manage this AGENT? The
+ * Agent-side twin of {@link managesApp}, shared by the boot-prompt pointer
+ * writer and S9's Agent compile so the two cannot drift:
+ *
+ *   - a user-owned Agent: its owner, or a platform ADMIN / OWNER (cor:dmo:050:13,
+ *     "for any Agent, platform admins", #2206 / #1787; unlike an App, a rogue
+ *     personal Agent must be reachable to shut down);
+ *   - an org-owned Agent: a live ADMIN / OWNER of its org, or a platform
+ *     ADMIN / OWNER (#7790, managesApp's org branch).
+ *
+ * The arms are getManagedSystemMemoryIds' manager arm plus managesApp's
+ * platform arm. There is no member arm: an Agent has no members. Identity-scoped,
+ * so never under impersonation, and a principal with no user never manages.
+ * Pass a transaction client in `ctx.db` to decide under held anchors.
+ */
+export async function managesAgent(
+  ctx: Pick<AppManagerCaller, 'userId' | 'impersonation' | 'roles'> & { db: Pick<PrismaClient, 'orgMember'> },
+  agent: { organizationId: string | null; ownerUserId: string | null },
+): Promise<boolean> {
+  if (!ctx.userId || ctx.impersonation) return false;
+  // Branch on the ownership CLASS first (findings:org-xor-owner-null-comparison-bypass).
+  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) {
+    if (agent.ownerUserId !== null || agent.organizationId !== null) return true;
+  }
+  if (agent.ownerUserId !== null) return ctx.userId === agent.ownerUserId;
+  if (agent.organizationId === null) return false;
+  const admin = await ctx.db.orgMember.findFirst({
+    where: {
+      organizationId: agent.organizationId,
+      userId: ctx.userId,
+      ...LIVE_ORG_MEMBERSHIP,
+      role: { in: ['ADMIN', 'OWNER'] },
+    },
+    select: { userId: true },
+  });
+  return admin !== null;
+}
+
+/**
  * The people who manage this App, as a LIST, nearest first (#1761, cor:agt:050:25;
  * cor:dmo:050:12). The same arms as {@link managesApp}, so a root task's alarm
  * chain and the acknowledgement gate cannot drift apart:

@@ -5,6 +5,7 @@ import { cleanDb, createDbNode } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { chatScopeAccessFilter } from './chat-scope.js';
+import { BROKEN_INCLUDE_NOTICE as N } from '../../../lib/includes/spliceIncludes.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 let alpha: string, beta: string, shared: string, alphaOnly: string, parent: string, including: string;
@@ -35,10 +36,14 @@ const local = 'LOCAL_PARTIAL_SENTINEL / LOCAL_DATA_SENTINEL / LOCAL_DEFAULT_SENT
 
 describe('#1835 real GraphQL resolver reads', () => {
   it.each(['node', 'nextNode'])('%s cannot borrow foreign refs, before or after same-loc local rows exist', async surface => {
-    const read = (userId: string) => surface === 'node'
-      ? resolvers.Query.node({}, { ref: including }, context(userId))
-      : resolvers.Query.nextNode({}, { parentRef: parent }, context(userId));
-    for (const userId of [shared, alphaOnly]) expect((await read(userId))?.content).toBe(' /  / ');
+    // The row keeps its stored text; Node.content renders it (#2041).
+    const read = async (userId: string) => {
+      const row = surface === 'node'
+        ? await resolvers.Query.node({}, { ref: including }, context(userId))
+        : await resolvers.Query.nextNode({}, { parentRef: parent }, context(userId));
+      return row && { content: await resolvers.Node.content(row as never, {}, context(userId)) };
+    };
+    for (const userId of [shared, alphaOnly]) expect((await read(userId))?.content).toBe(`${N} /  / `);
     await addLocal();
     for (const userId of [shared, alphaOnly]) expect((await read(userId))?.content).toBe(local);
   });
@@ -50,8 +55,8 @@ describe('#1835 real GraphQL resolver reads', () => {
 describe('#1835 compiler siblings with real database lookups', () => {
   it('retains the authorization filter even when the local target exists', async () => {
     await addLocal();
-    expect(await compileTemplate(template, null, alpha, db, { memoryId: { in: [beta] } })).toBe(' /  / ');
-    expect(await compileTemplate(template, null, alpha, db, { memoryId: { in: [alpha, beta] }, NOT: { loc: { in: ['data', 'chipcross'] } } })).toBe(' /  / ');
+    expect(await compileTemplate(template, null, alpha, db, { memoryId: { in: [beta] } })).toBe(`${N} /  / `);
+    expect(await compileTemplate(template, null, alpha, db, { memoryId: { in: [alpha, beta] }, NOT: { loc: { in: ['data', 'chipcross'] } } })).toBe(`${N} /  / `);
   });
   it('keeps shared-chat D5 filtering while narrowing bare refs to the holding memory', async () => {
     await addLocal();
@@ -66,13 +71,13 @@ describe('#1835 compiler siblings with real database lookups', () => {
       { knowledgeMemoryIds: [], systemMemoryId: null, appClassMemoryId: beta },
     );
     expect(excluded.memoryId.in).not.toContain(alpha);
-    expect(await compileTemplate(template, null, alpha, db, excluded)).toBe(' /  / ');
+    expect(await compileTemplate(template, null, alpha, db, excluded)).toBe(`${N} /  / `);
   });
   it('keeps the run/preview empty-filter path local and honors own-data precedence and soft deletion', async () => {
     await addLocal();
     expect(await compileTemplate(template, null, alpha, db, {})).toBe(local);
     expect(await compileTemplate('{{defaultField}}', { defaultField: 'OWN' }, alpha, db, { memoryId: { in: [alpha, beta] } })).toBe('OWN');
     await db.node.updateMany({ where: { memoryId: alpha, loc: { in: ['data', 'chipcross'] } }, data: { deletedAt: new Date() } });
-    expect(await compileTemplate(template, null, alpha, db, { memoryId: { in: [alpha, beta] } })).toBe(' /  / ');
+    expect(await compileTemplate(template, null, alpha, db, { memoryId: { in: [alpha, beta] } })).toBe(`${N} /  / `);
   });
 });

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1868 — the MCP modules that delegate to GraphQL carry the presented
  * hdr_user_ key (`auth.apiKeyId`) into their per-call Context, so the shared
@@ -48,8 +49,8 @@ beforeEach(async () => {
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.id.toLowerCase()}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
   const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, as(admin.id));
-  workerId = (await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Anne', slug: 'anne', heldByUserId: member.id }, select: { id: true } })).id;
-  rookId = (await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Rook', slug: 'rook' }, select: { id: true } })).id;
+  workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Anne', slug: 'anne', heldByUserId: member.id }, select: { id: true } })).id;
+  rookId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Rook', slug: 'rook' }, select: { id: true } })).id;
 });
 
 /** A genuine, signed wake proof issued to `userId` for the App's worker: it passes every check before the transaction. */

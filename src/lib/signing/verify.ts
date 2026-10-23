@@ -47,14 +47,15 @@ function responseJson(credentialId: Buffer, a: AssertionParts) {
 }
 
 /**
- * Full verification at completion: user verification required, the exact RP
- * ID, an origin from the exact allowlist, and the challenge derived from the
- * pinned payload. Returns the authenticator's new counter.
+ * Full verification over an exact challenge: user verification required, the
+ * exact RP ID, an origin from the exact allowlist, `webauthn.get`. Shared by
+ * signing (challenge derived from the payload) and ceremony sign-in (#1631,
+ * challenge issued by the server). Returns the authenticator's new counter.
  */
-export async function verifySigningAssertion(args: {
+export async function verifyAssertionOverChallenge(args: {
   assertion: AssertionParts;
   credential: VerifierCredential;
-  payload: Buffer;
+  challenge: Buffer;
   rpId: string;
   origins: string[];
 }): Promise<{ newCounter: number }> {
@@ -63,7 +64,7 @@ export async function verifySigningAssertion(args: {
   try {
     result = await verifyAuthenticationResponse({
       response: responseJson(args.credential.credentialId, args.assertion),
-      expectedChallenge: b64url(signatureChallenge(args.payload)),
+      expectedChallenge: b64url(args.challenge),
       expectedOrigin: args.origins,
       expectedRPID: args.rpId,
       expectedType: 'webauthn.get',
@@ -79,6 +80,17 @@ export async function verifySigningAssertion(args: {
   }
   if (!result.verified || !result.authenticationInfo.userVerified) throw new SignatureVerificationError('not verified');
   return { newCounter: result.authenticationInfo.newCounter };
+}
+
+/** Signing completion: the challenge is derived from the pinned payload. */
+export async function verifySigningAssertion(args: {
+  assertion: AssertionParts;
+  credential: VerifierCredential;
+  payload: Buffer;
+  rpId: string;
+  origins: string[];
+}): Promise<{ newCounter: number }> {
+  return verifyAssertionOverChallenge({ ...args, challenge: signatureChallenge(args.payload) });
 }
 
 /** A stored signature record, as re-verification needs it. */

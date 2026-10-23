@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * Spec 049 Phase 8 — Channel-addressed chat and item J, what is pinned:
  *   - channelMessages / createChannelMessage work on a custom Channel with the
@@ -103,7 +104,7 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId: appA.id, userId: member.id, role: 'member' } });
   memA = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:a-shared`, name: 'a', class: 'app', appId: appA.id, sharedMemoryOfAgentId: agent.id } });
   memB = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:b-shared`, name: 'b', class: 'app', appId: appB.id, sharedMemoryOfAgentId: agent.id } });
-  workerA = await db.worker.create({ data: { id: generateId(), appId: appA.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+  workerA = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: appA.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
   await ensureChannelWithRoot(db, { memoryId: memA.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: appA.id });
   release = (await ensureChannelWithRoot(db, { memoryId: memA.id, loc: 'chats:release', name: 'release', createdBy: admin.id })).channel;
   teamB = (await ensureChannelWithRoot(db, { memoryId: memB.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: appB.id })).channel;
@@ -154,7 +155,7 @@ describe('Channel-addressed chat', () => {
       },
     });
 
-    expect(await Q.channelMessages({}, { channelRef: underscored.id }, ctx(admin.id))).toEqual({ items: [], total: 0 });
+    expect(await Q.channelMessages({}, { channelRef: underscored.id }, ctx(admin.id))).toMatchObject({ items: [], total: 0 });
     await expect(
       M.createChannelMessage({}, { channelRef: underscored.id, body: 'reply', replyToSeq: 99 }, ctx(admin.id)),
     ).rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND' } });
@@ -323,7 +324,7 @@ describe('#1540 — authoring through a live session keeps it live', () => {
     const adminUser = await db.user.findUniqueOrThrow({ where: { id: admin.id }, select: { handle: true } });
     const orgB = await db.orgMember.findFirstOrThrow({ where: { userId: stranger.id }, select: { organizationId: true } });
     const appU = await db.app.create({ data: { id: generateId(), ownerUserId: admin.id, name: 'U', urn: `${adminUser.handle}:u` } });
-    const workerU = await db.worker.create({ data: { id: generateId(), appId: appU.id, agentId: agent.id, name: 'Kit', slug: 'kit' } });
+    const workerU = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: appU.id, agentId: agent.id, name: 'Kit', slug: 'kit' } });
     const memK = await db.memory.create({ data: { id: generateId(), organizationId: orgB.organizationId, urn: `${strangerUser.handle}-k`, name: 'k', class: 'knowledge' } });
     const free = (await ensureChannelWithRoot(db, { memoryId: memK.id, loc: 'chats:k', name: 'k', createdBy: stranger.id })).channel;
     const before = new Date(Date.now() - 2 * H);

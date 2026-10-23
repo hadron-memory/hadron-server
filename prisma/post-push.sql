@@ -31,9 +31,10 @@ ALTER TABLE memories
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_class_app_id
   CHECK (
-    (class = 'app' AND app_id IS NOT NULL)
-    OR (class = 'system' AND app_id IS NULL)
-    OR (class IN ('knowledge', 'group', 'personal', 'private'))
+    (class = 'app' AND app_id IS NOT NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+    OR (class = 'system' AND app_id IS NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+    OR (class = 'system' AND app_id IS NOT NULL AND is_install_memory = true)
+    OR (class IN ('knowledge', 'group', 'personal', 'private') AND install_of_agent_id IS NULL AND is_install_memory = false)
   );
 
 -- #723: shared_memory_of_agent_id IDENTIFIES an App's runtime `shared`
@@ -46,6 +47,15 @@ ALTER TABLE memories
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_shared_agent_scope
   CHECK (shared_memory_of_agent_id IS NULL OR (class = 'app' AND app_id IS NOT NULL));
+
+-- #2044 (S7): an App's INSTALL MEMORY is a class='system' row with BOTH app_id
+-- and install_of_agent_id set (cor:agt:040:06); the CHECK above carries the
+-- all-or-nothing pair. ONE live install memory per (App, Agent); a soft-deleted
+-- one never blocks its replacement (Prisma cannot model the WHERE). Synced with
+-- the 20261019090000 migration and src/test/globalSetup.ts.
+CREATE UNIQUE INDEX IF NOT EXISTS memories_install_memory_live_uniq
+  ON memories (app_id, install_of_agent_id)
+  WHERE install_of_agent_id IS NOT NULL AND deleted_at IS NULL;
 
 -- 023-app-shape FR-024: bidirectional invariant — class='group' ⇔
 -- visibility='GROUP'.
@@ -539,14 +549,14 @@ ALTER TABLE "nodes" ADD CONSTRAINT "chk_node_mint_complete" CHECK (CASE
       AND ("minted_rev_no" IS NULL) = ("minted_hash" IS NULL)
       AND ("minted_rev_no" IS NULL OR "minted_rev_no" > 0)
   END);
--- #1591: an approval is complete or absent. Synced with the migration and
+-- #1591: an approval is complete or absent (#1838: the hash alone may be NULL, an approval ended on encrypted entry). Synced with the migration and
 -- src/test/globalSetup.ts.
 ALTER TABLE "nodes" DROP CONSTRAINT IF EXISTS "chk_node_approval_complete";
 ALTER TABLE "nodes" ADD CONSTRAINT "chk_node_approval_complete" CHECK (CASE
   WHEN "approved_rev_no" IS NULL THEN
     "approved_at" IS NULL AND "approval_hash" IS NULL AND "approved_by" IS NULL AND "approved_by_info" IS NULL
   ELSE
-    "approved_rev_no" > 0 AND "approved_at" IS NOT NULL AND "approval_hash" IS NOT NULL
+    "approved_rev_no" > 0 AND "approved_at" IS NOT NULL
       AND ("approved_by" IS NOT NULL OR "approved_by_info" IS NOT NULL)
   END);
 ALTER TABLE "node_content_validation_reports" DROP CONSTRAINT IF EXISTS "chk_node_content_validation_revisions_positive";
@@ -638,6 +648,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1606 / #1607 — comment-node invariants. One source, shared verbatim with
 -- migration 20261005200000_comment_nodes (pinned by src/lib/comments/invariantsSql.test.ts).
 \ir comment-invariants.sql
+\ir boot-prompt-invariants.sql
+\ir boot-prompt-pointer-invariants.sql
+\ir compiled-prompt-revision-invariants.sql
+\ir boot-prompt-approval-invariants.sql
 
 -- #1655: compiled automation versions.
 \ir automation-invariants.sql
@@ -662,6 +676,11 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- 20261011020000_tickers (pinned by src/lib/tickers/invariants.test.ts).
 \ir ticker-invariants.sql
 \ir delivery-settings-invariants.sql
+\ir channel-checks-invariants.sql
+
+-- #2022: stop signals, their coverage history and the stop holds of queued tasks. One source, shared verbatim with
+-- migration 20261020030000_stop_signals (pinned by src/lib/stopSignals/invariants.test.ts).
+\ir stop-signal-invariants.sql
 
 -- #1749: App key scopes (cor:aut:010:03). One source, shared verbatim with migration
 -- 20261011190000_app_key_scopes (pinned by src/lib/appKeyScopes/appKeyScopes.test.ts).
@@ -680,6 +699,25 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 
 -- #1631: shared passkey registry invariant guards.
 \ir passkey-invariants.sql
+
+-- #1897: sign-in lineage guards. One source, shared verbatim with migration
+-- 20261019120000_sign_in_lineage.
+\ir signin-invariants.sql
+
+-- #1631 PR1b slice 2: fresh sign-ins bound to the ceremony browser. One source, shared verbatim with migration
+-- 20261021080000_fresh_sign_ins (pinned by src/lib/passkeys/freshSignIn1631.test.ts).
+\ir fresh-sign-in-invariants.sql
+
+-- #2204: OIDC nonce hash on pending logins. One source, shared verbatim with migration
+-- 20261023120000_pending_login_provider_nonce (pinned by src/auth/providerNonce.test.ts).
+\ir login-nonce-invariants.sql
+
+-- #1631 PR2: passkey registration lifecycle (cancel tokens). One source, shared verbatim with migration
+-- 20261022030000_passkey_revoke (pinned by src/lib/passkeys/cancel1631.test.ts).
+\ir passkey-registration-invariants.sql
+-- #1897 slice B1: pending email sign-ins. One source, shared verbatim with migration
+-- 20261021120000_pending_email_sign_ins (pinned by src/auth/pendingEmailSignIn1897.test.ts).
+\ir pending-email-sign-in-invariants.sql
 
 -- #1632: signing requests, append-only signature records, the content-change
 -- marker. One source, shared verbatim with migration 20261013160000_signing_requests.
@@ -714,6 +752,21 @@ DROP TRIGGER IF EXISTS user_deletion_audits_immutable ON user_deletion_audits;
 CREATE TRIGGER user_deletion_audits_immutable
   BEFORE UPDATE OR DELETE ON user_deletion_audits
   FOR EACH ROW EXECUTE FUNCTION hadron_user_deletion_audit_immutable();
+
+-- #2245 (R170.6): the Agent-clone audit is append-only and names exactly one target
+-- (Prisma can model neither; the migration carries the same statements).
+ALTER TABLE agent_clone_audits DROP CONSTRAINT IF EXISTS chk_agent_clone_audit_one_target;
+ALTER TABLE agent_clone_audits ADD CONSTRAINT chk_agent_clone_audit_one_target
+  CHECK ((target_org_id IS NOT NULL) <> (target_user_id IS NOT NULL));
+CREATE OR REPLACE FUNCTION hadron_agent_clone_audit_immutable() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'agent_clone_audits is append-only';
+END $$;
+DROP TRIGGER IF EXISTS agent_clone_audits_immutable ON agent_clone_audits;
+CREATE TRIGGER agent_clone_audits_immutable
+  BEFORE UPDATE OR DELETE ON agent_clone_audits
+  FOR EACH ROW EXECUTE FUNCTION hadron_agent_clone_audit_immutable();
 
 -- #1162: newly introduced typed Worker/session references fence hard deletion.
 \ir worker-reference-invariants.sql

@@ -17,6 +17,7 @@ class AgentLinkSetChangedError extends Error {
 }
 import {
   assertSystemMemoryOwner,
+  assertNotInstallMemory,
   repairAgentSystemMemoryOwner,
 } from '../../../lib/agentSystemMemory.js';
 import {
@@ -39,6 +40,7 @@ import {
   MissingGrantError,
   PositionConflictError,
 } from '../../../controller/operations/publishAgentImport.js';
+import { assertMaySubscribeOrgToPublicAgent } from '../../../controller/operations/subscribeOrgToPublicAgent.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
@@ -75,6 +77,7 @@ import {
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { backfillMemoryEmbeddings } from '../../../services/embedding/enqueue.js';
 import { assertNoLiveAgentReferences } from '../../../lib/agentLiveReferences.js';
 import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 
@@ -120,6 +123,8 @@ export interface CreateAgentCoreInput {
   type?: 'ASSISTANT' | 'CHATBOT';
   surfaces?: string[];
   personaRole?: string | null;
+  /** #2138 §3.5: false = every worker cast from this Agent counts as having a task. Default true. */
+  usesTasks?: boolean | null;
 }
 
 /**
@@ -205,6 +210,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
     let resolvedSystemMemoryId: string;
     if (systemMemoryId) {
       const target = await tx.memory.findUniqueOrThrow({ where: { id: systemMemoryId } });
+      assertNotInstallMemory(target);
       // spec 047 / #949: the promoted memory must share the agent's owner —
       // same org (org-owned) OR same user (user-owned). One shared assertion
       // so this path and updateAgent's first-attach can't drift.
@@ -279,6 +285,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
         surfaces: surfaces ?? defaultSurfaces,
         // #928 persona dressing — pure metadata (see schema.prisma).
         personaRole: personaRoleNorm,
+        ...(input.usesTasks != null ? { usesTasks: input.usesTasks } : {}),
         createdBy: ctx.userId ?? ctx.clientId ?? null,
       },
       include: AGENT_INCLUDE,
@@ -297,6 +304,14 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
     }
     throw e;
   });
+  // #2199 (cor:rag:010:01 r17): a memory promoted to class='system' is always summary-indexed. Its existing nodes were
+  // written while it was an ordinary memory, so stamp them for the drain (post-commit; a fresh auto-provisioned memory
+  // is empty and every later write enqueues itself). Never fails the create.
+  if (systemMemoryId && createdAgent.systemMemoryId) {
+    await backfillMemoryEmbeddings(ctx.db, createdAgent.systemMemoryId).catch((err) => {
+      console.warn('[createAgent] system memory embedding backfill failed:', err);
+    });
+  }
   return createdAgent;
 }
 
@@ -398,7 +413,7 @@ async function requireKnownImportedAgent(
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string },
+      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
@@ -456,12 +471,13 @@ export const agentMutations = {
         type,
         surfaces,
         personaRole,
+        usesTasks,
       });
     },
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, registerDefaults }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; registerDefaults?: { mentionOnly?: boolean | null } | null },
+      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, registerDefaults }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; registerDefaults?: { mentionOnly?: boolean | null } | null },
       ctx: Context,
     ) => {
       // #929 review: normalize persona dressing (blank-after-trim clears).
@@ -555,6 +571,7 @@ export const agentMutations = {
           // waves through ANOTHER user's memory
           // (findings:org-xor-owner-null-comparison-bypass). The shared
           // assertion branches on the ownership class first.
+          assertNotInstallMemory(target);
           assertSystemMemoryOwner(agent, {
             organizationId: target.organizationId,
             ownerUserId: target.ownerUserId,
@@ -720,8 +737,9 @@ export const agentMutations = {
           }
           const lockedTarget = await tx.memory.findUniqueOrThrow({
             where: { id: promoteSystemMemoryId },
-            select: { organizationId: true, ownerUserId: true, id: true, deletedAt: true },
+            select: { organizationId: true, ownerUserId: true, id: true, deletedAt: true, appId: true, installOfAgentId: true, isInstallMemory: true },
           });
+          assertNotInstallMemory(lockedTarget);
           if (lockedTarget.deletedAt) {
             throw new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
           }
@@ -786,6 +804,7 @@ export const agentMutations = {
           // #928 persona dressing — pure metadata. An explicit null (or a
           // blank-after-trim string) clears the field; omitted preserves.
           ...(personaRoleNorm !== undefined ? { personaRole: personaRoleNorm } : {}),
+          ...(usesTasks != null ? { usesTasks } : {}),
           // Spec 049 Phase 5: the install-row defaults — a scalar declaration,
           // stored as given; null clears to the platform defaults.
           ...(registerDefaults !== undefined
@@ -806,6 +825,14 @@ export const agentMutations = {
         throw err;
       }
       break;
+      }
+
+      // #2199: a memory promoted to class='system' by this update is now always summary-indexed — stamp its existing
+      // nodes post-commit (the provisioning-seam half of the amendment; never fails the update).
+      if (promoteSystemMemoryId && published?.systemMemoryId === promoteSystemMemoryId) {
+        await backfillMemoryEmbeddings(ctx.db, promoteSystemMemoryId).catch((err) => {
+          console.warn('[updateAgent] system memory embedding backfill failed:', err);
+        });
       }
 
       // ── URN sync for an auto-derived system memory.
@@ -1068,15 +1095,7 @@ export const agentMutations = {
       await withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: resolvedOrgId }, { kind: 'agent', id: resolvedAgentId }],
-        async (txCtx) => {
-          await requireOrgRole(txCtx, resolvedOrgId, 'ADMIN');
-          const current = await txCtx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-          if (current.organizationId === resolvedOrgId || current.visibility !== 'PUBLIC') {
-            throw new GraphQLError('Only PUBLIC agents from another organization can be subscribed to.', {
-              extensions: { code: 'AGENT_NOT_PUBLIC', agentId: resolvedAgentId },
-            });
-          }
-        },
+        (txCtx) => assertMaySubscribeOrgToPublicAgent(txCtx, resolvedOrgId, resolvedAgentId),
         (tx) => ensureAgentOrgGrant(tx, resolvedOrgId, resolvedAgentId, {
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         }),

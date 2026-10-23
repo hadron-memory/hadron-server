@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1755 cycle 1 (Diego P2, Chip QA) — the App key's task reads across the REAL MCP HTTP boundary. The explicit
  * `session` argument must never be dropped: a key that names ANY session (plain, worker, invalid) is refused, exactly
@@ -46,7 +47,7 @@ beforeEach(async () => {
   const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   appId = app.id;
   await db.appMember.create({ data: { appId, userId: user.id, role: 'member' } });
-  const worker = await db.worker.create({ data: { id: generateId(), appId, agentId: agent.id, name: 'Anne', slug: 'anne' }, select: { id: true } });
+  const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: agent.id, name: 'Anne', slug: 'anne' }, select: { id: true } });
   taskId = (await M.createAgentTask({}, { input: { appRef: appId, title: 'visible' } }, { db, userId: user.id, roles: ['READER'] })).id;
   const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
   await db.appKey.create({ data: { id: generateId(), appId, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4) } });

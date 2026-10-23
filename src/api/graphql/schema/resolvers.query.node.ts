@@ -1,3 +1,5 @@
+import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
+import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { contentScopeWhere, effectiveContentScope, type ContentScope } from '../../../lib/comments/scope.js';
 import { isConcealedCommentHistory } from './resolvers.comments.js';
@@ -42,6 +44,7 @@ import {
   splitNodeUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
+import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -54,6 +57,7 @@ import { resolveNodeRevRef } from '../../../lib/entityRef/nodeRevRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
+import { recoveryMemoryIds } from './resolvers.recovery.js';
 import { AmbiguousLegacyUrnError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
@@ -77,7 +81,7 @@ import {
   memoryAccessFilter,
   isMemoryReadableCached,
   loadMemoryUrn,
-  STORED_NODE_CONTENT,
+  CONTENT_RAW_DEFAULT,
 } from './resolvers.helpers.js';
 import { getAppMemoryAccess, filterReadableMemoryIds } from '../../../mcp/access-control.js';
 import { type AuthContext } from '../../../middleware/auth.js';
@@ -88,9 +92,9 @@ import {
   toUsageNodeRef,
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
-import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 import { approvalStatePrismaWhere, mintedPrismaWhere, type NodeApprovalState } from '../../../lib/nodeApproval.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { INDEXED_MEMORY_WHERE } from '../../../lib/embedding/indexing.js';
 
 /** findNodes' arguments (cor:api:090), shared by the resolver and its spec-049 scope wrapper. */
 export interface FindNodesArgs {
@@ -665,10 +669,13 @@ export const nodeQueries = {
         // The lookup above selects the address. Reconcile and re-fetch while
         // holding its row lock so Node.revision and every sibling field come
         // from one database state (never old body + new counter).
-        const current = await ctx.db.$transaction(async (tx) => {
-          if ((await ensureCurrentNodeRevisionInTransaction(tx, selected.id, { expectedMemoryId: selected.memoryId })) == null) return null;
-          return tx.node.findUnique({ where: { id: selected.id }, include });
-        });
+        const current = await withReconciledNodeRead(ctx.db, selected.id, selected.memoryId,
+          async (tx, mayReconcile) => {
+            const fresh = await (mayReconcile ? liveTxContext : liveReadSnapshotContext)(ctx, tx);
+            return isMemoryReadableCached(fresh, inheritedFrom?.via ?? selected.memoryId);
+          },
+          (tx) => tx.node.findUnique({ where: { id: selected.id }, include }),
+          { timeoutMs: 5_000, maxWaitMs: 2_000 });
         if (
           !current ||
           current.deletedAt ||
@@ -693,16 +700,10 @@ export const nodeQueries = {
         // unresolvable template reference), and the caller then gets an error
         // instead of content (PR #1062 review — Copilot).
         await decryptNodesBatch(ctx.db, [node]);
-        if (!raw && node.content?.includes('{{')) {
-          const compiled = await compileTemplate(
-            node.content, node.data as Record<string, unknown> | null, node.memoryId, ctx.db, access,
-          );
-          recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
-          // Keep the stored template for parent-verifying field resolvers.
-          return { ...node, content: compiled, [STORED_NODE_CONTENT]: node.content };
-        }
         recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
-        return node;
+        // Includes and variables resolve in the `Node.content` field (#2041);
+        // the row keeps its stored text. `raw` only picks that field's default.
+        return raw ? Object.assign(node, { [CONTENT_RAW_DEFAULT]: true }) : node;
       };
 
       // Form 1: primary key. #391: a soft-deleted node must not resolve by PK
@@ -877,13 +878,21 @@ export const nodeQueries = {
 
       const fmt: NodeExportFormat = format ?? 'MD';
 
+      // cor:dmo:150:03 (R40/R47): `full` is the restore export and reads with
+      // resolution off, so a round trip keeps its include tags; a presentation
+      // render (PDF, or `full: false`) reads like any reader, with includes
+      // resolved by the exporter's access. Variables stay as stored in both.
+      const exportContent = fmt === 'PDF' || full === false
+        ? await resolveNodeContent(ctx, node, { mode: 'includes' })
+        : node.content;
+
       // PDF is a presentation render produced by the external hadrontool-pdf
       // service from the node's (already-decrypted) Markdown content. Unlike
       // MD/JSON it is not the canonical round-trippable file, so `full` /
       // `sections` do not apply. Delivered BASE64.
       if (fmt === 'PDF') {
         const markdown =
-          node.content && node.content.trim().length > 0 ? node.content : `# ${node.name}`;
+          exportContent && exportContent.trim().length > 0 ? exportContent : `# ${node.name}`;
         const { base64, bytes } = await renderMarkdownToPdf(markdown, { title: node.name });
         const leaf = node.loc ? node.loc.split(':').pop() || node.loc : node.name || 'node';
         recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
@@ -909,7 +918,7 @@ export const nodeQueries = {
           description: node.description,
           abstract: node.abstract,
           abstractOriginHash: node.abstractOriginHash,
-          content: node.content,
+          content: exportContent,
           tags: deserializeTags(node.tags) as string[],
           seq: node.seq,
           role: node.role,
@@ -1103,6 +1112,7 @@ export const nodeQueries = {
       // so query results respect them exactly like the list does.
       const contentScope = effectiveContentScope(f);
       const scopeWhere = contentScopeWhere(contentScope);
+      const recoverableIds = f.includeDeleted ? await recoveryMemoryIds(ctx, scopeIds) : [];
       const structuredWhere: Record<string, unknown> = {
         ...(f.includeDeleted ? {} : { deletedAt: null }),
         // Explicit nodeType wins; otherwise exclude system-type nodes (orthogonal
@@ -1132,6 +1142,7 @@ export const nodeQueries = {
         // comments; #1608 (cor:dmo:110:08) — content, comments or both, CONTENT
         // by default. Both ride AND so neither clobbers the nodeType key above.
         AND: [
+          ...(f.includeDeleted ? [{ OR: [{ deletedAt: null }, { memoryId: { in: recoverableIds }, nodeType: { not: COMMENT_NODE_TYPE } }] }] : []),
           ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
           ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
           ...(scopeWhere ? [scopeWhere] : []),
@@ -1150,6 +1161,7 @@ export const nodeQueries = {
       // browse when a `where` predicate is present). Mirrors `structuredWhere`
       // (the Prisma form) but adds the JSONB `where`, which Prisma can't express.
       const sqlFilter: NodeSqlFilter = {
+        ...(f.includeDeleted ? { tombstoneMemoryIds: recoverableIds } : {}),
         nodeType: f.nodeType ?? null,
         objectType: f.objectType ?? null,
         isRunnable: f.isRunnable ?? null,
@@ -1263,6 +1275,7 @@ export const nodeQueries = {
         if (f.where != null) {
           candidates = await provider.filterWhere({
             db: ctx.db, ids, memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
+            tombstoneMemoryIds: recoverableIds,
           });
         }
         const rows = await ctx.db.node.findMany({
@@ -1327,7 +1340,7 @@ export const nodeQueries = {
           const allowed = new Set(
             await provider.filterWhere({
               db: ctx.db, ids: candidateIds, memoryIds: scopeIds,
-              where: f.where, includeDeleted: !!f.includeDeleted,
+              where: f.where, includeDeleted: !!f.includeDeleted, tombstoneMemoryIds: recoverableIds,
             }),
           );
           candidateIds = candidateIds.filter((id) => allowed.has(id));
@@ -1519,7 +1532,8 @@ export const nodeQueries = {
 
       // ── VECTOR / HYBRID: narrow to vector-indexed memories ──
       const indexed = await ctx.db.memory.findMany({
-        where: { id: { in: scopeIds }, vectorIndexEnabled: true, deletedAt: null },
+        // #2199: a system memory is indexed by summary whatever its setting; indexing grants no access (scopeIds is already the caller's).
+        where: { id: { in: scopeIds }, deletedAt: null, ...INDEXED_MEMORY_WHERE },
         select: { id: true },
       });
       const indexedIds = indexed.map((m) => m.id);
@@ -1623,6 +1637,7 @@ export const nodeQueries = {
             await provider.filterWhere({
               db: ctx.db, ids: candidateParentIds,
               memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
+              tombstoneMemoryIds: recoverableIds,
             }),
           );
         }
@@ -1824,6 +1839,7 @@ export const nodeQueries = {
       }> = [];
       const unavailable: string[] = [];
       let batchInheritance: Awaited<ReturnType<typeof effectiveScope>> | null = null;
+      let readViaMemoryId: string | null = null;
       // Explicit-set form only: resolved node id -> the caller's ref string, so
       // `unavailable` / `omitted` report back what the caller actually sent.
       // Null for the prefix form, where there are no caller refs (ids there).
@@ -1937,6 +1953,7 @@ export const nodeQueries = {
         // silently returning a truncated subtree.
         // #1885 (cor:dmo:050:14) — the subtree of an Agent's system memory
         // reads as its effective memory, as MCP hadron_get_nodes does.
+        readViaMemoryId = memId;
         batchInheritance = await effectiveScope(ctx.db, [memId]);
         const rows = await ctx.db.node.findMany({
           where: {
@@ -1966,9 +1983,14 @@ export const nodeQueries = {
       const selectedById = new Map(ordered.map((n) => [n.id, n]));
       const liveIds: string[] = [];
       for (const id of [...selectedById.keys()].sort()) {
-        const live = await ctx.db.$transaction(
-          (tx) => ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: selectedById.get(id)!.memoryId }),
-          { timeout: 60_000, maxWait: 15_000 },
+        const live = await withReconciledNodeRead(ctx.db, id, selectedById.get(id)!.memoryId,
+          async (tx, mayReconcile) => {
+            const fresh = await (mayReconcile ? liveTxContext : liveReadSnapshotContext)(ctx, tx);
+            const via = explicitInherited.get(id)?.via ?? readViaMemoryId ?? selectedById.get(id)!.memoryId;
+            return isMemoryReadableCached(fresh, via);
+          },
+          (tx) => tx.node.findUnique({ where: { id }, select: { revSeq: true } }),
+          { timeoutMs: 60_000, maxWaitMs: 15_000 },
         );
         if (live != null) liveIds.push(id);
       }
@@ -2043,7 +2065,7 @@ export const nodeQueries = {
           omitted.push(echo(n.id));
           continue;
         }
-        nodes.push(n);
+        nodes.push(Object.assign(n, { [CONTENT_RAW_DEFAULT]: true }));
         bytes += size;
       }
 
@@ -2382,6 +2404,7 @@ export const nodeQueries = {
         throw badInput('appNodes filter.updatedBefore must be a valid date string.');
       }
 
+      const recoverableAppMemoryIds = f.includeDeleted ? await recoveryMemoryIds(ctx, memoryIds) : [];
       const results = await ctx.db.node.findMany({
         where: {
           memoryId: { in: memoryIds },
@@ -2411,6 +2434,7 @@ export const nodeQueries = {
           // #1607 + #1608 — no comments in status sets; content, comments or
           // both by contentScope (CONTENT by default, cor:dmo:110:08).
           AND: [
+            ...(f.includeDeleted ? [{ OR: [{ deletedAt: null }, { memoryId: { in: recoverableAppMemoryIds }, nodeType: { not: COMMENT_NODE_TYPE } }] }] : []),
             ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
             ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
             ...((sw) => (sw ? [sw] : []))(contentScopeWhere(effectiveContentScope(f))),

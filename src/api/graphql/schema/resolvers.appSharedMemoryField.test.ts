@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #965 — `App.sharedMemory`: the App → shared-memory hop.
  *
@@ -128,7 +129,7 @@ describe('#965 — App.sharedMemory', () => {
     });
     const roleAgent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
     await db.worker.create({
-      data: {
+      data: { ...WORKER_SIGNATURE_DEFAULTS,
         appId: app.id,
         agentId: roleAgent.id,
         name: `Iris-${Date.now()}`,
@@ -306,7 +307,7 @@ describe('#965 — App.sharedMemory', () => {
       },
     });
     await db.worker.create({
-      data: { appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', memoryId: workerMem.id },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', memoryId: workerMem.id },
     });
     await db.node.create({
       data: {

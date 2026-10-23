@@ -366,6 +366,68 @@ export async function sendMagicLink(
   });
 }
 
+/**
+ * #1631 PR1b slice 2: the passkey ceremony's email leg. The link proves the inbox to the ONE browser that started
+ * the leg and signs the person in to nothing, so the text says so rather than "sign in".
+ */
+export async function sendCeremonySignInLink(to: string, verifyUrl: string): Promise<void> {
+  const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
+  const result = await getResend().emails.send({
+    from: fromAddress,
+    to,
+    subject: 'Confirm it is you, to manage your Hadron passkeys',
+    html: `
+      <p>Someone asked to confirm this address to manage passkeys on Hadron.</p>
+      <p><a href="${verifyUrl}">Confirm it is you</a></p>
+      <p>Open it in the same browser you started from. This link expires in ${TOKEN_EXPIRY_MINUTES} minutes and does not sign you in.</p>
+      <p>If you didn't request this, you can safely ignore this email.</p>
+    `,
+  });
+  assertProviderAck(result);
+}
+
+/** What a passkey registration notice says (cor:aut:040:02). */
+export interface PasskeyNoticeContent {
+  kind: 'first' | 'later';
+  label: string;
+  registeredAt: Date;
+  /** A first passkey's cancel link (cor:aut:040:07-08); absent for a later one. */
+  cancelUrl?: string;
+  windowEndsAt?: Date;
+}
+
+/**
+ * #1631 PR2: the registration notice's subject and HTML. Pure, so its escaping and its cancel link are pinned without a
+ * mail provider. The label is the user's input and is escaped (Rook, #1631 6316353964).
+ */
+export function passkeyNoticeEmail(n: PasskeyNoticeContent): { subject: string; html: string } {
+  const esc = (v: string) => v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const when = (d: Date) => `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+  const what = `<p>A passkey named <strong>${esc(n.label)}</strong> was added to your Hadron account on ${when(n.registeredAt)}.</p>`;
+  if (n.kind === 'first' && n.cancelUrl) {
+    return {
+      subject: 'A passkey was added to your Hadron account',
+      html: `${what}
+<p>Anything it signs stays pending until ${n.windowEndsAt ? when(n.windowEndsAt) : 'its cooling-off window ends'}.</p>
+<p><strong>If this wasn't you</strong>, remove it now. No sign-in is needed, and it also signs out any sessions it started:</p>
+<p><a href="${esc(n.cancelUrl)}">Remove this passkey</a></p>
+<p>The link works once, and only until the cooling-off window ends.</p>`,
+    };
+  }
+  return {
+    subject: 'A passkey was added to your Hadron account',
+    html: `${what}
+<p>It was vouched for by a passkey you already hold. If this wasn't you, revoke it from your account's passkey page.</p>`,
+  };
+}
+
+/** Send a registration notice. Throws when the provider refuses, so the caller can count a try. */
+export async function sendPasskeyRegisteredNotice(to: string, n: PasskeyNoticeContent): Promise<void> {
+  const { subject, html } = passkeyNoticeEmail(n);
+  const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
+  assertProviderAck(await getResend().emails.send({ from: fromAddress, to, subject, html }));
+}
+
 export async function verifyMagicLink(
   token: string,
   db: PrismaClient,

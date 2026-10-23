@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1705 — agent tasks (Task Management T1): authorization matrix, lifecycle,
  * events and the read gate.
@@ -82,7 +83,7 @@ async function user(suffix: string, n: number, handle?: string) {
 
 async function worker(appId: string, name: string, extra: Record<string, unknown> = {}) {
   return db.worker.create({
-    data: { id: generateId(), appId, agentId: teamAgent.id, name, slug: name.toLowerCase(), ...extra },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: teamAgent.id, name, slug: name.toLowerCase(), ...extra },
     select: { id: true },
   });
 }
@@ -133,7 +134,7 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
     expect(t.ownerUserId).toBe(member.id);
     expect(t.ownerWorkerId).toBeNull();
     expect(t.status).toBe('pending');
-    expect(t.closeSessionWhenDone).toBe(true);
+    expect(t.closeSessionWhenDone).toBe(false); // #2249 / R182: the session ends only when the assigner asks
     const ev = await events(t.id);
     // #1707: a task created with no assignee enters the queue.
     expect(ev.map((e) => e.type)).toEqual(['task.created', 'assignment.queued']);

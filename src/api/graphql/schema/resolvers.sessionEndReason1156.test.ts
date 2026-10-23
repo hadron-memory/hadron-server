@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /** #1156 / cor:dmo:070:05: end evidence is first-writer-wins, never inferred. */
 import { buildSchema, type GraphQLObjectType } from 'graphql';
 import { typeDefs } from './typeDefs.js';
@@ -74,7 +75,7 @@ describe('session end reason #1156', () => {
       const app = await db.app.create({ data: { ownerUserId: owner.id, name: 'Team', urn: `hrn:app:test:team-${generateId()}` } });
       const agent = await db.agent.create({ data: { ownerUserId: owner.id, name: 'Engineer', urn: `hrn:agent:test:eng-${generateId()}` } });
       await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-      const worker = await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Test', slug: 'test', heldByUserId: owner.id } });
+      const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Test', slug: 'test', heldByUserId: owner.id } });
       const at = new Date(Date.now() - (force ? 1000 : 7 * 86400000));
       const previous = await create({ appId: app.id, agentId: agent.id, workerId: worker.id, startedAt: at, updatedAt: at, summary: 'driver summary' });
       await M.startSession({}, { input: { id: generateId(), workerRef: worker.id, tool: 'codex', force } }, ctx());

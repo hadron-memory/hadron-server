@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #947 — recordTeamWork + teamWorkItems: the team-worklog platform operations.
  *
@@ -246,7 +247,7 @@ describe('recordTeamWork — session conditions', () => {
       data: { id: generateId(), organizationId: org.id, name: 'Other Team', urn: `${org.urn}:other-team` },
     });
     const foreignWorker = await db.worker.create({
-      data: { appId: otherApp.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: otherApp.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
     });
     const s = await db.session.create({
       data: { id: generateId(), userId: contrib.id, appId: app.id, workerId: foreignWorker.id },
@@ -258,7 +259,7 @@ describe('recordTeamWork — session conditions', () => {
     // cor:agt:020:05 — retirement AFTER the bind still refuses: the check
     // runs at record time, unlike the ended-session case (late attribution).
     const worker = await db.worker.create({
-      data: { appId: app.id, agentId: teamAgent.id, name: 'Henry', slug: 'henry' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: teamAgent.id, name: 'Henry', slug: 'henry' },
     });
     const s = await M.startSession(
       {},
@@ -271,7 +272,7 @@ describe('recordTeamWork — session conditions', () => {
 
   it('a worker-bound session records under the worker name, with workerId stamped', async () => {
     const worker = await db.worker.create({
-      data: { appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
     });
     const s = await M.startSession(
       {},
@@ -757,7 +758,7 @@ describe('#1053 — an ENDED session may still be recorded against', () => {
     // clause, and making the chat accept would invalidate cor:agt:020:04's
     // authorship condition (c).
     const worker = await db.worker.create({
-      data: { appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
     });
     const s = await db.session.create({
       data: { id: generateId(), userId: contrib.id, appId: app.id, agentId: teamAgent.id, workerId: worker.id },
@@ -785,7 +786,7 @@ describe('teamWorkItems — the workerRef filter (#1035)', () => {
    */
   async function workerWithRecords(name: string, slug: string, refs: string[]) {
     const worker = await db.worker.create({
-      data: { appId: app.id, agentId: teamAgent.id, name, slug },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: teamAgent.id, name, slug },
     });
     const session = await db.session.create({
       data: { id: generateId(), userId: contrib.id, appId: app.id, agentId: teamAgent.id, workerId: worker.id },
@@ -872,7 +873,7 @@ describe('teamWorkItems — the workerRef filter (#1035)', () => {
       data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other-${Date.now()}` },
     });
     const foreign = await db.worker.create({
-      data: { appId: elsewhere.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: elsewhere.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
     });
     expect((await items(ctx(contrib.id), { workerRef: foreign.id })).total).toBe(0);
   });
@@ -915,7 +916,7 @@ describe('teamWorkItems — the workerRef filter (#1035)', () => {
       data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other2-${Date.now()}` },
     });
     const foreign = await db.worker.create({
-      data: { appId: elsewhere.id, agentId: teamAgent.id, name: 'Nadia', slug: 'nadia' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: elsewhere.id, agentId: teamAgent.id, name: 'Nadia', slug: 'nadia' },
     });
     const root = await db.node.findFirstOrThrow({
       // loc-scope-ok: scoped to the fixture App's worklog root by memory.

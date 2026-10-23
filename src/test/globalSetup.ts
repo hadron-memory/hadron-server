@@ -24,7 +24,9 @@ import {
   createDatabaseFromTemplate,
   quoteDbIdent,
   templateLockKey,
-  isRunAlive,
+  isOwnedRunDead,
+  runToken,
+  stampTestRunIdentity,
   parseWorkerDbName,
   type WorkerCloneName,
 } from './dbWorkers.js';
@@ -37,7 +39,7 @@ export async function setup() {
   // carries the id to `perWorkerDb.ts` — nothing else crosses that boundary.
   // Set unconditionally rather than defaulted, so a stale value exported into
   // the shell cannot quietly make two runs share a name-space again.
-  process.env.HADRON_TEST_RUN_ID = String(process.pid);
+  stampTestRunIdentity();
   const runId = testRunId();
 
   // This run's graph-fixture root (#1951), in BOTH modes: serial runs write
@@ -84,15 +86,10 @@ async function setupDatabases(): Promise<(() => Promise<void>) | undefined> {
     return;
   }
 
-  // A pid is meaningless across hosts, and cleanup drops on the strength of one
-  // (@codex, #1136). Refuse rather than guess — see isLocalDbHost.
+  // Scope tokens protect Linux PID-namespace sharing of local endpoints (#1137).
+  // Remote Postgres remains outside the supported locality model.
   if (!isLocalDbHost()) {
-    throw new Error(
-      `Parallel test databases need a LOCAL Postgres: the run id is this machine's pid, ` +
-        `so a shared server cannot tell one host's run from another's (equal pids collide, ` +
-        `and a foreign pid reads as dead and would be dropped WITH (FORCE) under a live run). ` +
-        `Point TEST_DATABASE_URL at a local server, or set HADRON_TEST_PARALLEL=0.`,
-    );
+    throw new Error('Parallel test databases require a local loopback/Unix-socket Postgres endpoint. Remote ownership is unsupported; use HADRON_TEST_PARALLEL=0.');
   }
 
   // Serialize provisioning against other lock-honouring runs (#1091). Since
@@ -130,6 +127,16 @@ async function provision(admin: Client) {
 /** The CHECK constraints `prisma db push` cannot express. Source of truth: prisma/post-push.sql. */
 async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/passkey-invariants.sql', import.meta.url), 'utf8'));
+  // #1897 — sign-in lineage guards (sign_ins depends on passkey_credentials).
+  await client.query(readFileSync(new URL('../../prisma/signin-invariants.sql', import.meta.url), 'utf8'));
+  // #1631 PR1b slice 2 — fresh sign-ins bound to the ceremony browser.
+  await client.query(readFileSync(new URL('../../prisma/fresh-sign-in-invariants.sql', import.meta.url), 'utf8'));
+  // #2204 — OIDC nonce hash on pending logins.
+  await client.query(readFileSync(new URL('../../prisma/login-nonce-invariants.sql', import.meta.url), 'utf8'));
+  // #1631 PR2 — passkey registration lifecycle (cancel tokens).
+  await client.query(readFileSync(new URL('../../prisma/passkey-registration-invariants.sql', import.meta.url), 'utf8'));
+  // #1897 slice B1 — pending email sign-ins (depend on sign_ins).
+  await client.query(readFileSync(new URL('../../prisma/pending-email-sign-in-invariants.sql', import.meta.url), 'utf8'));
   // #1632 — signing requests, append-only signature records, the content-change marker.
   await client.query(readFileSync(new URL('../../prisma/signing-invariants.sql', import.meta.url), 'utf8'));
   await client.query(readFileSync(new URL('../../prisma/automation-invariants.sql', import.meta.url), 'utf8'));
@@ -141,6 +148,16 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/agent-task-matching-invariants.sql', import.meta.url), 'utf8'));
   // #1747 — tickers, subscriptions, wake settings, app grants, App ticker bounds.
   await client.query(readFileSync(new URL('../../prisma/ticker-invariants.sql', import.meta.url), 'utf8'));
+  // #2043 — a compiled boot prompt keeps its role.
+  await client.query(readFileSync(new URL('../../prisma/boot-prompt-invariants.sql', import.meta.url), 'utf8'));
+  // #2045 — a boot-prompt pointer's id and URN snapshot are set or cleared together.
+  await client.query(readFileSync(new URL('../../prisma/boot-prompt-pointer-invariants.sql', import.meta.url), 'utf8'));
+  // #2046 — compiled boot-prompt revision provenance: shape CHECK + immutability trigger.
+  await client.query(readFileSync(new URL('../../prisma/compiled-prompt-revision-invariants.sql', import.meta.url), 'utf8'));
+  // #2043 PR 2 — an outside approval ends when its node enters the placed boot-prompt state.
+  await client.query(readFileSync(new URL('../../prisma/boot-prompt-approval-invariants.sql', import.meta.url), 'utf8'));
+  // #2022 — stop signals, their coverage history, the stop holds of queued tasks.
+  await client.query(readFileSync(new URL('../../prisma/stop-signal-invariants.sql', import.meta.url), 'utf8'));
 
   // #1326 — nullable attribution is either unknown, a task at an exact
   // revision, or an authenticated human. A CHECK with a bare OR of enum
@@ -183,7 +200,7 @@ async function applyTemplateConstraints(client: Client) {
       WHEN "approved_rev_no" IS NULL THEN
         "approved_at" IS NULL AND "approval_hash" IS NULL AND "approved_by" IS NULL AND "approved_by_info" IS NULL
       ELSE
-        "approved_rev_no" > 0 AND "approved_at" IS NOT NULL AND "approval_hash" IS NOT NULL
+        "approved_rev_no" > 0 AND "approved_at" IS NOT NULL
           AND ("approved_by" IS NOT NULL OR "approved_by_info" IS NOT NULL)
       END);
   `);
@@ -212,10 +229,14 @@ async function applyTemplateConstraints(client: Client) {
     ALTER TABLE "memories"
       ADD CONSTRAINT "chk_memory_class_app_id"
       CHECK (
-        (class = 'app' AND app_id IS NOT NULL)
-        OR (class = 'system' AND app_id IS NULL)
-        OR (class IN ('knowledge', 'group', 'personal', 'private'))
+(class = 'app' AND app_id IS NOT NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+      OR (class = 'system' AND app_id IS NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+      OR (class = 'system' AND app_id IS NOT NULL AND is_install_memory = true)
+      OR (class IN ('knowledge', 'group', 'personal', 'private') AND install_of_agent_id IS NULL AND is_install_memory = false)
       );
+    CREATE UNIQUE INDEX IF NOT EXISTS memories_install_memory_live_uniq
+      ON memories (app_id, install_of_agent_id)
+      WHERE install_of_agent_id IS NOT NULL AND deleted_at IS NULL;
   `);
 
   // 034-memory-class-access: agent scope required only for an app-scoped
@@ -532,7 +553,8 @@ async function applyTemplateConstraints(client: Client) {
 
 }
 
-async function provisionParallel(admin: Client, base: string, runId: string) {
+export async function provisionParallel(admin: Client, base: string, runId: string) {
+  const ownToken = runToken(runId);
   await dropOrphanWorkerDbs(admin, base, runId);
 
   // Snapshot the shared template into a RUN-SCOPED one, while still holding the
@@ -574,9 +596,9 @@ async function provisionParallel(admin: Client, base: string, runId: string) {
     const a = new Client({ connectionString: maintenanceUrl() });
     await a.connect();
     try {
-      // Best-effort: a failure here leaks a clone, and the next run whose pid
-      // differs collects it as an orphan.
-      await dropWorkerDbs(a, base, (c) => c.runId === runId, { swallow: true });
+      // Best-effort: this captured full token only. Future same-scope runs
+      // may collect it once its PID is provably dead.
+      await dropWorkerDbs(a, base, (c) => c.runToken === ownToken, { swallow: true });
     } finally {
       await a.end();
     }
@@ -601,13 +623,13 @@ async function provisionParallel(admin: Client, base: string, runId: string) {
  * collection, and it is best-effort: an orphan we fail to drop is wasted disk,
  * not a wrong result.
  *
- * Ownership is decided by {@link isRunAlive} and by NOTHING else — in
+ * Ownership is decided by the full scope token and {@link isOwnedRunDead} and by NOTHING else — in
  * particular never by "has no open connections", since a run that has just
  * issued `CREATE DATABASE` and not yet connected has no connections either, and
  * dropping it there is precisely the bug being fixed. That rule now has no
  * exceptions: a clone this sweep cannot prove is dead is left alone.
  */
-async function dropOrphanWorkerDbs(admin: Client, base: string, runId: string): Promise<void> {
+export async function dropOrphanWorkerDbs(admin: Client, base: string, runId: string): Promise<void> {
   const { rows } = await admin.query<{ datname: string }>('SELECT datname FROM pg_database');
   const datnames = rows.map((r) => r.datname);
 
@@ -617,21 +639,17 @@ async function dropOrphanWorkerDbs(admin: Client, base: string, runId: string): 
   // suite against the CRASHED run's schema — the stale-clone masking that the
   // pre-run pass exists to prevent, and the one case where being best-effort
   // produces a wrong result rather than wasted disk.
-  await dropWorkerDbs(admin, base, (c) => c.runId === runId, { swallow: false }, datnames);
+  await dropWorkerDbs(admin, base, (c) => c.runToken === runToken(runId), { swallow: false }, datnames);
 
-  // Everything else is garbage collection, so best-effort is right: an orphan we
-  // fail to drop costs disk, and the next run with a free pid collects it.
-  //
-  // LEGACY `<base>_<digits>` clones are deliberately NOT here. They name no run,
-  // so nothing can prove them dead, and the only available signal — "has no open
-  // connections" — is the heuristic this function refuses on the grounds above.
-  // Leaving them is free: no run-scoped name can equal an unscoped one, so no
-  // run can adopt one, and nothing creates them any more.
-  // `pnpm db:test-prune-legacy` clears them once the last pre-#1091 checkout is.
+  // Same-scope provably dead runs only. Previous-boot, foreign, unknown,
+  // pid-only and unscoped legacy names are never automatically dropped.
+  // These leftovers can accumulate without bound (disk/inodes). Manual removal
+  // requires all namespaces sharing this endpoint to be quiescent, not merely
+  // a PID absent here. db:test-prune-legacy is not a namespace-ownership tool.
   await dropWorkerDbs(
     admin,
     base,
-    (clone) => clone.runId !== null && clone.runId !== runId && !isRunAlive(clone.runId),
+    (clone) => clone.runToken !== runToken(runId) && isOwnedRunDead(clone.scope, clone.runId),
     { swallow: true },
     datnames,
   );

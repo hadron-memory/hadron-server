@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /**
  * 033-rag-vector-retrieval US2 — chunking strategy + per-memory dials (SC-006).
  *
@@ -100,7 +101,7 @@ async function makeChunkMemory(extra: {
 async function seedAndEmbed(memId: string, loc: string, content: string): Promise<string> {
   const nodeId = generateId();
   await db.node.create({
-    data: { id: nodeId, memoryId: memId, loc, name: loc, content, embeddingPendingAt: new Date() },
+    data: { id: nodeId, memoryId: memId, loc, name: loc, content, embeddingPendingAt: new Date(), embeddingWorkToken: randomUUID() },
   });
   await embedNode(db, nodeId);
   return nodeId;

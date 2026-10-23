@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /**
  * Spec 049 Phase 5 — the chat register (D-2026-09-13-007), what is pinned:
  *   - the install default is MATERIALISED: the moment an App gets its default
@@ -69,7 +70,7 @@ beforeEach(async () => {
   appMem = await db.memory.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agent.id },
   });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
 });
 
 async function defaultChannel() {
@@ -149,7 +150,7 @@ describe('owner gates and attendees', () => {
     const channel = await defaultChannel();
     const appB = await db.app.create({ data: { id: generateId(), organizationId: orgB.id, name: 'B', urn: `${orgB.urn}:b` } });
     await db.appAgent.create({ data: { appId: appB.id, agentId: agent.id } });
-    const foreignWorker = await db.worker.create({ data: { id: generateId(), appId: appB.id, agentId: agent.id, name: 'Bo', slug: 'bo' } });
+    const foreignWorker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: appB.id, agentId: agent.id, name: 'Bo', slug: 'bo' } });
     await expect(
       M.createRegisterEntry({}, { input: { ownerRef: app.urn, channelRef: channel.id, attendeeRef: foreignWorker.id } }, ctx(admin.id)),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });

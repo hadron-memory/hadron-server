@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1709 — the database facts of host operations (prisma/host-operation-invariants.sql),
  * tested at the database rather than through a resolver: the closed set and its
@@ -40,14 +41,14 @@ beforeEach(async () => {
   const agent = await db.agent.create({ data: { organizationId: org.id, name: 'A', urn: `${org.urn}:a`, visibility: 'ORGANIZATION' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'T', urn: `${org.urn}:t` }, select: { id: true } });
   otherApp = await db.app.create({ data: { organizationId: org.id, name: 'O', urn: `${org.urn}:o` }, select: { id: true } });
-  kit = await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' }, select: { id: true } });
-  zed = await db.worker.create({ data: { appId: otherApp.id, agentId: agent.id, name: 'Zed', slug: 'zed' }, select: { id: true } });
+  kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' }, select: { id: true } });
+  zed = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: otherApp.id, agentId: agent.id, name: 'Zed', slug: 'zed' }, select: { id: true } });
 });
 
 describe('the invariants file', () => {
   it('the migration carries a byte-identical copy, and post-push includes it after the file whose token function it uses', () => {
     const source = readFileSync(new URL('../../../prisma/host-operation-invariants.sql', import.meta.url), 'utf8');
-    const migration = readFileSync(new URL('../../../prisma/migrations/20261016050000_host_key_use_issue_action/migration.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261020030100_host_key_use_stop_action/migration.sql', import.meta.url), 'utf8');
     expect(migration.endsWith(`\n${source}`)).toBe(true);
     const post = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
     const at = post.indexOf('\\ir host-operation-invariants.sql');

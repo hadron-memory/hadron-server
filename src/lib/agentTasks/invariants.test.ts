@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1705 — the database half of the agent-task contract
  * (prisma/agent-task-invariants.sql), tested at the database rather than
@@ -174,7 +175,7 @@ async function workerRow(): Promise<string> {
     select: { id: true },
   });
   const w = await db.worker.create({
-    data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'W', slug: 'w' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'W', slug: 'w' },
     select: { id: true },
   });
   return w.id;
@@ -316,8 +317,8 @@ describe('agent-task-matching-invariants.sql (#1707)', () => {
     const other = await db.app.create({
       data: { id: generateId(), name: 'Other', urn: `inv-${generateId().toLowerCase()}:team`, ownerUserId: owner.id },
     });
-    const mine = await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' } });
-    const theirs = await db.worker.create({ data: { appId: other.id, agentId: agent.id, name: 'Zed', slug: 'zed' } });
+    const mine = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' } });
+    const theirs = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: other.id, agentId: agent.id, name: 'Zed', slug: 'zed' } });
     const r = await registration();
     await expectCheckViolation(
       db.hostRegistrationWorker.create({ data: { registrationId: r.id, workerId: mine.id, family: 'Codex' } }),

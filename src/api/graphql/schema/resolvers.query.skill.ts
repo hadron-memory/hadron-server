@@ -1,3 +1,51 @@
+import { withIncludeHistoryTransaction, includeHistoryClient, type IncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
+import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
+import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
+import { GraphQLError } from 'graphql';
+import { createHash } from 'node:crypto';
+import { BATCH_READ_MAX_BYTES } from '../../../lib/batchRead.js';
+import { Prisma } from '../../../generated/prisma/index.js';
+import type { Context } from './resolvers.helpers.js';
+import { getAccessibleMemoryIds, memoryAccessFilter, isMemoryReadableCached } from './resolvers.helpers.js';
+import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
+import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { resolveScopeRef } from '../../../lib/entityRef/scopeRef.js';
+import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { isId } from '../../../lib/entityRef/shape.js';
+import { assertFullyQualifiedUrn, splitNodeUrn } from '../../../lib/urn.js';
+import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { isCiphertext } from '../../../lib/crypto.js';
+import { canReadScope, explainScope } from '../../../lib/scopes.js';
+import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
+import { reconcileNodeWithIncludeHistory } from '../../../lib/nodeRevisionSnapshot.js';
+import {
+  classifyDeclaration,
+  classifySkill,
+  declaredSkill,
+  EXPORTS_KEY,
+  HOST_CLAUDE_SKILL,
+  LEGACY_TOP_LEVEL_KEYS,
+  SKILL_HOSTS,
+  skillHost,
+  requireSkillHost,
+  isHostReservedName,
+  lintCollisions,
+  lintNode,
+  pairFileToNode,
+  render,
+  hash,
+  storedName,
+  unknownHostKeyFinding,
+  unknownHostKeysBounded,
+  unknownHostKeysOmittedFinding,
+  type Finding,
+  type FileFacts,
+  type DriftClass,
+  type NodeFacts,
+  type SkillNode,
+} from '../../../lib/skilldoc/index.js';
+
 /**
  * #1177 §3 — the seam: the server judges, the client does I/O.
  *
@@ -38,50 +86,6 @@
  * surface returns node CONTENT, which is the thing a read gate exists to
  * protect.
  */
-import { GraphQLError } from 'graphql';
-import { createHash } from 'node:crypto';
-import { BATCH_READ_MAX_BYTES } from '../../../lib/batchRead.js';
-import { Prisma } from '../../../generated/prisma/index.js';
-import type { Context } from './resolvers.helpers.js';
-import { getAccessibleMemoryIds, memoryAccessFilter } from './resolvers.helpers.js';
-import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
-import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { resolveScopeRef } from '../../../lib/entityRef/scopeRef.js';
-import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
-import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
-import { isId } from '../../../lib/entityRef/shape.js';
-import { assertFullyQualifiedUrn, splitNodeUrn } from '../../../lib/urn.js';
-import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
-import { isCiphertext } from '../../../lib/crypto.js';
-import { canReadScope, explainScope } from '../../../lib/scopes.js';
-import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
-import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
-import {
-  classifyDeclaration,
-  classifySkill,
-  declaredSkill,
-  EXPORTS_KEY,
-  HOST_CLAUDE_SKILL,
-  LEGACY_TOP_LEVEL_KEYS,
-  SKILL_HOSTS,
-  skillHost,
-  requireSkillHost,
-  isHostReservedName,
-  lintCollisions,
-  lintNode,
-  pairFileToNode,
-  render,
-  hash,
-  storedName,
-  unknownHostKeyFinding,
-  unknownHostKeysBounded,
-  unknownHostKeysOmittedFinding,
-  type Finding,
-  type FileFacts,
-  type DriftClass,
-  type NodeFacts,
-  type SkillNode,
-} from '../../../lib/skilldoc/index.js';
 
 /** The intent decides the ACTION, never the class (§3). */
 export type SkillPlanIntent = 'LINT' | 'STATUS' | 'EXPORT';
@@ -722,68 +726,92 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
     }
     let declaredRows: Prisma.NodeGetPayload<{ select: typeof declaredSelect }>[] = [];
     if (candidates.length > 0) {
-      // One short transaction per node: retaining every FOR UPDATE lock until
-      // the whole plan commits can deadlock a Git sync that visits the same
-      // rows in filesystem order. Fetch the final projection BEFORE releasing
-      // that node's lock: a bypass writer landing after reconciliation must not
-      // pair newer fields with the older revSeq in one exported artifact.
+      // Unchanged reads size, authorize and project in one read-only RR
+      // snapshot. Only drift enters the outer history fence; its RC callback
+      // rechecks credentials, authority and expected memory after any wait.
       const liveRows: typeof declaredRows = [];
       let liveMetadataBytes = 0n;
       const candidateMemory = new Map(candidates.map((r) => [r.id, r.memoryId]));
       for (const id of candidates.map((r) => r.id).sort()) {
-        const live = await ctx.db.$transaction(
-          async (tx) => {
-            if (selectedRefs !== undefined) {
-              // A named task may have no declaration for this host. Recheck
-              // access, then bound the live JSON before deserializing it. A
-              // writer can enlarge properties after the candidate snapshot;
-              // REPEATABLE READ holds this check and fetch to one snapshot.
-              const authorized = await tx.node.findFirst({
-                where: { AND: [declaredWhere, { id }] } as never,
-                select: { id: true },
-              });
-              if (authorized === null) return null;
-              const sizes = await tx.$queryRaw<{ bytes: bigint }[]>`
-                SELECT COALESCE(octet_length(properties::text), 0)::bigint AS bytes
-                FROM nodes WHERE id = ${id}
-              `;
-              const nextBytes = liveMetadataBytes + (sizes[0]?.bytes ?? 0n);
-              if (nextBytes > BigInt(SKILL_PLAN_MAX_SELECTED_PROPERTIES_BYTES)) {
-                throw new GraphQLError('selectedSkillFilePlan: selected task properties exceed the safe byte ceiling.', {
-                  extensions: { code: 'BAD_USER_INPUT' },
-                });
-              }
-              liveMetadataBytes = nextBytes;
-              // The SKIP needs metadata only, even for a very large body.
-              const metadata = await tx.node.findFirst({
-                where: { AND: [declaredWhere, { id }] } as never,
-                select: declaredMetadataSelect,
-              });
-              if (metadata === null) return null;
-              const { declaration, malformed } = classifyDeclaration(metadata.properties, host);
-              if (declaration === null && malformed.length === 0) {
-                return { ...metadata, content: null };
-              }
-            }
-            // Never reconcile a row that left the memory it was discovered in
-            // (@codex P1, PR #1339) — the refetch below would drop it anyway,
-            // but only after a revision had been written into another tenant.
-            if ((await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: candidateMemory.get(id)! })) == null) return null;
-            return tx.node.findFirst({
-              // Reapply BOTH discovery and access/scope predicates after
-              // waiting for the lock. The id can move into another tenant's
-              // memory while we wait; id-only here would turn the locked
-              // refetch into a cross-tenant content read.
+        const readProjection = async (tx: Prisma.TransactionClient, history?: IncludeHistoryTransaction) => {
+          const fresh = await (history ? liveTxContext : liveReadSnapshotContext)(ctx, tx);
+          if (!(await isMemoryReadableCached(fresh, candidateMemory.get(id)!))) return null;
+          if (history) {
+            // RC can wait again on the Node after taking the outer fence.
+            // Re-read credential/authority state after that wait, before any
+            // metadata SKIP, sizing, reconciliation or content projection.
+            const locked = await tx.$queryRaw<Array<{ id: string }>>`
+              SELECT id FROM nodes WHERE id = ${id} AND memory_id = ${candidateMemory.get(id)!}
+                AND deleted_at IS NULL FOR UPDATE`;
+            if (locked.length !== 1) return null;
+            const afterRowWait = await liveTxContext(ctx, tx);
+            if (!(await isMemoryReadableCached(afterRowWait, candidateMemory.get(id)!))) return null;
+          }
+          if (selectedRefs !== undefined) {
+            // A named task may have no declaration for this host. Recheck
+            // access, then bound the live JSON before deserializing it. A
+            // writer can enlarge properties after the candidate snapshot;
+            // The RR snapshot or slow-path row lock keeps size and fetch coherent.
+            const authorized = await tx.node.findFirst({
               where: { AND: [declaredWhere, { id }] } as never,
-              select: declaredSelect,
+              select: { id: true },
             });
-          },
-          {
-            timeout: 60_000,
-            maxWait: 15_000,
-            ...(selectedRefs !== undefined ? { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : {}),
-          },
-        );
+            if (authorized === null) return null;
+            const sizes = await tx.$queryRaw<{ bytes: bigint }[]>`
+              SELECT COALESCE(octet_length(properties::text), 0)::bigint AS bytes
+              FROM nodes WHERE id = ${id}
+            `;
+            const nextBytes = liveMetadataBytes + (sizes[0]?.bytes ?? 0n);
+            if (nextBytes > BigInt(SKILL_PLAN_MAX_SELECTED_PROPERTIES_BYTES)) {
+              throw new GraphQLError('selectedSkillFilePlan: selected task properties exceed the safe byte ceiling.', {
+                extensions: { code: 'BAD_USER_INPUT' },
+              });
+            }
+            liveMetadataBytes = nextBytes;
+            // The SKIP needs metadata only, even for a very large body.
+            const metadata = await tx.node.findFirst({
+              where: { AND: [declaredWhere, { id }] } as never,
+              select: declaredMetadataSelect,
+            });
+            if (metadata === null) return null;
+            const { declaration, malformed } = classifyDeclaration(metadata.properties, host);
+            if (declaration === null && malformed.length === 0) {
+              return { ...metadata, content: null };
+            }
+          }
+          // Never reconcile a row that left the memory it was discovered in
+          // (@codex P1, PR #1339) — the refetch below would drop it anyway,
+          // but only after a revision had been written into another tenant.
+          if (history && (await reconcileNodeWithIncludeHistory(history, id, { expectedMemoryId: candidateMemory.get(id)! })) == null) return null;
+          return tx.node.findFirst({
+            // Reapply BOTH discovery and access/scope predicates after
+            // waiting for the lock. The id can move into another tenant's
+            // memory while we wait; id-only here would turn the locked
+            // refetch into a cross-tenant content read.
+            where: { AND: [declaredWhere, { id }] } as never,
+            select: declaredSelect,
+          });
+        };
+        const fast = await ctx.db.$transaction(async (tx) => {
+          await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+          const [row] = await tx.$queryRaw<Array<{ unchanged: boolean }>>`
+            SELECT revision_content_hash IS NOT NULL
+              AND revision_content_hash = hadron_node_revision_state_hash(n) AS unchanged
+            FROM nodes n WHERE id = ${id} AND memory_id = ${candidateMemory.get(id)!}
+              AND deleted_at IS NULL`;
+          if (!row) return { drift: false as const, value: null };
+          if (!row.unchanged) return { drift: true as const };
+          return { drift: false as const, value: await readProjection(tx) };
+        }, {
+          isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+          timeout: 60_000,
+          maxWait: 15_000,
+        });
+        const live = fast.drift
+          ? await withIncludeHistoryTransaction(ctx.db,
+            (history) => readProjection(includeHistoryClient(history), history),
+            { timeoutMs: 60_000, maxWaitMs: 15_000 })
+          : fast.value;
         if (live != null) liveRows.push(live);
       }
       declaredRows = liveRows.sort(
@@ -883,6 +911,20 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
         return declaration !== null || malformed.length > 0;
     }) as (SkillNode & { _id: string; revSeq: number })[];
 
+    // cor:dmo:150:03 (R9): an export reads like any reader, so its body is the
+    // node's text with include tags resolved by the EXPORTER's access; `{{var}}`
+    // stays verbatim (mode 'includes'). Lint keeps judging the stored text, and
+    // the hash below covers the body actually exported, so a changed include
+    // target reads as a stale file rather than an up-to-date one.
+    const rowById = new Map(actionableRows.map((r) => [r.id, r]));
+    const exportBodies = new Map<string, string>();
+    for (const n of skillNodes) {
+      const row = rowById.get(n._id);
+      if (!row || lockedIds.has(n._id) || !row.content) continue;
+      exportBodies.set(n._id, (await resolveNodeContent(ctx, row, { mode: 'includes' })) ?? '');
+    }
+    const bodyOf = (n: { _id: string; content: string }) => exportBodies.get(n._id) ?? n.content;
+
     // ── Lint: per node, plus the corpus-wide collision rule ──────────────
     // Keyed by node ID, never URN: two DIFFERENT nodes can emit one URN (the
     // emitter flattens a compound memory), and a URN key made them share a
@@ -936,7 +978,7 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
           n.urn,
           name,
           declaration?.description ?? '',
-          n.content,
+          bodyOf(n as SkillNode & { _id: string }),
         ),
         revision: n.revSeq,
         collides: collidingIds.has((n as SkillNode & { _id: string })._id),
@@ -1062,7 +1104,7 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
             name,
             nf.urn,
             nf.declaration?.description ?? '',
-            findContent(skillNodes, nf.id),
+            exportBodies.get(nf.id) ?? findContent(skillNodes, nf.id),
             nf.revision,
           );
         } catch (error) {

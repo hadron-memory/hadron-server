@@ -508,7 +508,7 @@ describe('POST /oauth/token — expiry', () => {
 // ── DB failure containment ───────────────────────────────────────────
 
 describe('POST /oauth/token — DB failure containment', () => {
-  it('key mint transaction throws → 500 server_error (not a crash, AuthCode stays claimed)', async () => {
+  it('claim+mint transaction throws → 500 server_error (not a crash, nothing claimed or minted)', async () => {
     // Same posture as Phase 2B/2C: Express 4 doesn't auto-forward
     // async rejections; the try/catch keeps the failure local to
     // the request.
@@ -522,10 +522,11 @@ describe('POST /oauth/token — DB failure containment', () => {
       const body = (await res.json()) as Record<string, unknown>;
       expect(body.error).toBe('server_error');
       expect(JSON.stringify(body)).not.toMatch(/simulated DB outage/);
-      // The claim happened (race-safety; the code is gone) but no
-      // token was minted. User must restart the dance — documented
-      // tradeoff vs. risk of un-claim race.
-      await assertCodeRedeemed(authCodeId);
+      // #1897: claim and mint are ONE anchored transaction, so a failed
+      // transaction leaves the code unclaimed (no un-claim race exists any
+      // more) and no token minted; the client may retry the same code.
+      const row = await db.authCode.findUniqueOrThrow({ where: { id: authCodeId } });
+      expect(row.redeemedAt).toBeNull();
       expect(await db.userApiKey.count()).toBe(0);
     } finally {
       spy.mockRestore();

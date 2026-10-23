@@ -60,6 +60,7 @@ import { mentionTokenOf, BROADCAST_MENTION_TOKENS } from '../../../lib/mentionTo
 import { reachesWorker } from '../../../lib/mentionReach.js';
 import { extractMentions } from '../../../lib/teamChatMentions.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
+import { recordCheckMiss } from '../../../lib/channelReadState.js';
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
 import { DEFAULT_CHANNEL_NAME, ensureChannelWithRoot } from '../../../lib/channels.js';
@@ -67,11 +68,13 @@ import { locateTeamAgent } from './resolvers.worker.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { recordMentionsWorker } from '../../../lib/mentionsReadResolution.js';
 import {
   maybeAdvanceOwnChannelRead,
   lapsedResumeVerdict,
   resumeOwnLapsedSessionInTx,
   mayStillDriveWorkerApp,
+  channelIncarnationChanged,
 } from '../../../lib/teamAttention.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
@@ -1353,7 +1356,10 @@ async function readChannelRoot(
           ? matching.slice(Math.max(0, matching.length - take))
           : matching.slice(skip, skip + take);
     recordRead(page.map((m) => m.row));
-    return { items: page.map((m) => m.msg), total: matching.length };
+    const out = { items: page.map((m) => m.msg), total: matching.length };
+    // #2018: the own-read advance moves marks only for the worker this page was filtered by.
+    if (workerId !== null) recordMentionsWorker(out, workerId);
+    return out;
   }
 
   const total = await ctx.db.node.count({ where });
@@ -1486,7 +1492,7 @@ export const teamChatQueries = {
       offset?: number | null;
     },
     ctx: Context,
-  ): Promise<{ items: TeamChatMessageOut[]; total: number }> => {
+  ): Promise<{ items: TeamChatMessageOut[]; total: number; channelId?: string | null; channelIncarnation?: number | null }> => {
     requirePrincipal(ctx);
     const { id: appId } = await resolveAppRef(ctx.db, appRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
@@ -1505,15 +1511,19 @@ export const teamChatQueries = {
     // this App's Channel. The helper verifies that session's App
     // participation and register entry before advancing; the Channel host
     // is not the key.
-    const pilotChannel =
-      ctx.sessionId
-        ? await ctx.db.channel.findFirst({
-            where: { chatRootNodeId: root.id, deletedAt: null },
-            select: { id: true, lastSeq: true },
-          })
-        : null;
+    // #2181: the channel is selected for every read now (the page names it), not only for a session's.
+    const readChannel = await ctx.db.channel.findFirst({
+      where: { chatRootNodeId: root.id, deletedAt: null },
+      select: { id: true, lastSeq: true, incarnation: true },
+    });
+    const pilotChannel = ctx.sessionId || ctx.sessionBindingRefused ? readChannel : null;
     const page = await readChannelRoot(ctx, appId, root, args);
-    if (pilotChannel) {
+    // #2138 follow-up: a request that NAMED a session the server refused is served as a session-less read, so it can never
+    // count as a check. Say so in the App log (reason code only); behaviour is unchanged.
+    if (pilotChannel && !ctx.sessionId && ctx.sessionBindingRefused) {
+      await recordCheckMiss(ctx.db, { channelId: pilotChannel.id, reason: 'BINDING_REFUSED', via: 'read' });
+    }
+    if (pilotChannel && ctx.sessionId) {
       try {
         await maybeAdvanceOwnChannelRead(ctx, {
           channelId: pilotChannel.id,
@@ -1528,7 +1538,8 @@ export const teamChatQueries = {
         console.warn('[teamChatMessages] pilot read-state advance failed:', error);
       }
     }
-    return page;
+    // The SAME object: the mentions read is recorded against this page's identity (recordMentionsWorker).
+    return Object.assign(page, { channelId: readChannel?.id ?? null, channelIncarnation: readChannel?.incarnation ?? null });
   },
 
   /** Spec 049 Phase 8 — read ANY Channel by ref; a Channel the caller may not read is "no match". */
@@ -1536,31 +1547,55 @@ export const teamChatQueries = {
     _: unknown,
     {
       channelRef,
+      expectedIncarnation,
+      advanceReadState,
       ...args
     }: {
       channelRef: string;
+      advanceReadState?: boolean | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
       mentionsRef?: string | null;
       limit?: number | null;
       offset?: number | null;
+      expectedIncarnation?: number | null;
     },
     ctx: Context,
-  ): Promise<{ items: TeamChatMessageOut[]; total: number }> => {
+  ): Promise<{ items: TeamChatMessageOut[]; total: number; channelId: string; channelIncarnation: number }> => {
     const target = await resolveChannelTarget(ctx, channelRef, 'read');
+    const pinned = expectedIncarnation != null;
+    // #2181 (a): a pinned read that already names a different incarnation reads nothing.
+    if (pinned && expectedIncarnation !== target.incarnation.value) {
+      throw channelIncarnationChanged(target.channelId, target.incarnation.value);
+    }
     const page = await readChannelRoot(ctx, target.app?.id ?? null, target.root, args);
+    // (c): incarnation only rises, so equality before and after proves no recreation happened while the page was read;
+    // otherwise old contents would be emitted under new metadata.
+    if (pinned) {
+      const after = await ctx.db.channel.findUnique({ where: { id: target.channelId }, select: { incarnation: true, deletedAt: true } });
+      if (!after || after.deletedAt) throw channelNotFound(channelRef);
+      if (after.incarnation !== expectedIncarnation) throw channelIncarnationChanged(target.channelId, after.incarnation);
+    }
+    if (!ctx.sessionId && ctx.sessionBindingRefused) {
+      await recordCheckMiss(ctx.db, { channelId: target.channelId, reason: 'BINDING_REFUSED', via: 'read' });
+    }
     if (ctx.sessionId) {
       try {
         await maybeAdvanceOwnChannelRead(ctx, {
           channelId: target.channelId,
           capturedHead: target.lastSeq,
+          expectedIncarnation,
+          advanceReadState,
           ...args,
           page,
         });
       } catch (error) {
+        // (d): the final fence (page check to effects) refuses with the typed error and no effects; anything else is a
+        // cursor write failing, which must leave the transcript readable.
+        if (pinned && error instanceof GraphQLError && ['CHANNEL_INCARNATION_CHANGED', 'CHANNEL_NOT_FOUND'].includes(String(error.extensions?.code))) throw error;
         console.warn('[channelMessages] pilot read-state advance failed:', error);
       }
     }
-    return page;
+    return Object.assign(page, { channelId: target.channelId, channelIncarnation: pinned ? expectedIncarnation : target.incarnation.value });
   },
 };

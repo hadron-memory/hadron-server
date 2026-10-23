@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * MCP compaction recovery + the amendable casting — #1015, #1016, #1010.
  *
@@ -90,7 +91,7 @@ function appKeyAuth(): AuthContext {
 
 const worker = (name: string, slug: string, extra: Record<string, unknown> = {}) =>
   db.worker.create({
-    data: { appId: app.id, agentId: agent.id, name, slug, role: 'backend-engineer', ...extra },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name, slug, role: 'backend-engineer', ...extra },
   });
 
 const ctxFor = (userId = user.id): Context =>
@@ -131,7 +132,7 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
       },
     });
     await db.worker.create({
-      data: { id: generateId(), appId: app.id, agentId: nullStampAgent.id, name: 'Stale', slug: 'stale', role: 'archivist' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: nullStampAgent.id, name: 'Stale', slug: 'stale', role: 'archivist' },
     });
     const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', { workerRef: 'Stale' });
     expect(out).toContain('You are Stale, the archivist.');

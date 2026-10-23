@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1196 — chat participation is DERIVED from the host memory, for read AND for
  * write, on a Channel hosted in a memory of any class.
@@ -387,7 +388,7 @@ describe('class=app is STILL four row shapes (@copilot round 2 on PR #1207)', ()
     });
     if (kind === 'worker') {
       await db.worker.create({
-        data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', memoryId: mem.id },
+        data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', memoryId: mem.id },
       });
     }
     const ch = (
@@ -560,7 +561,7 @@ describe('the team-space narrowing applies to EVERY site that classifies one (@c
       },
     });
     await db.worker.create({
-      data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', memoryId: workerMem.id },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', memoryId: workerMem.id },
     });
     const wch = (
       await ensureChannelWithRoot(db, { memoryId: workerMem.id, loc: 'chats:team', name: 'team', createdBy: owner.id })

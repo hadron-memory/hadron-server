@@ -147,15 +147,15 @@ describe('#1326 content provenance reads', () => {
       },
     });
     const parent = await resolvers.Query.node(null, { ref: nodeId }, reader());
-    expect(parent?.content).toBe('Hello world');
+    // The row keeps its stored template; `Node.content` is where it renders (#2041).
+    expect(parent?.content).toBe('Hello {{who}}');
+    expect(await typeResolvers.Node.content(parent as never, {}, reader())).toBe('Hello world');
     expect(await typeResolvers.Node.authorship(parent as never, null, reader())).toMatchObject({
       kind: 'TASK', authoredAt: at,
     });
     const raw = await resolvers.Query.node(null, { ref: nodeId, raw: true }, reader());
     expect(raw?.content).toBe('Hello {{who}}');
     expect(await typeResolvers.Node.authorship(raw as never, null, reader())).toMatchObject({ kind: 'TASK' });
-    // The stored template never reaches the wire: symbol keys do not serialize.
-    expect(JSON.stringify(parent)).not.toContain('{{who}}');
   });
 
   it('keeps a task stamp and creates no revision for an identical save', async () => {

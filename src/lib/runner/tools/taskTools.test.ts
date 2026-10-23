@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../workerSignature.js';
 /**
  * hadron_task_create — a headless run creates root agent tasks in its own App
  * (#1756, cor:agt:050:06, Holger team chat #7799). The run is the creator: it
@@ -56,7 +57,7 @@ beforeEach(async () => {
   agentId = agent.id;
   appId = (await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Team', urn: `${org.urn}:team` } })).id;
   otherAppId = (await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Other', urn: `${org.urn}:other` } })).id;
-  anne = await db.worker.create({ data: { id: generateId(), appId, agentId, name: 'Anne', slug: 'anne' }, select: { id: true } });
+  anne = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId, name: 'Anne', slug: 'anne' }, select: { id: true } });
 });
 
 describe('registry', () => {

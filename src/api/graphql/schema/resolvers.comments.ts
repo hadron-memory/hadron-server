@@ -1,3 +1,4 @@
+import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 /**
  * #1606 — the comment path (`cor:dmo:110`): the ONE way a comment node is
  * created or changed (`cor:dmo:110:04`). Contract of record:
@@ -72,7 +73,7 @@ type Tx = Prisma.TransactionClient;
 const COMMENT_NODE_SELECT = {
   id: true, memoryId: true, loc: true, nodeType: true, revSeq: true, content: true, data: true,
   createdAt: true, updatedAt: true, createdBy: true, deletedAt: true,
-  commentMeta: true,
+  commentMeta: true, embeddingWorkToken: true,
 } as const;
 
 type CommentNodeRow = Prisma.NodeGetPayload<{ select: typeof COMMENT_NODE_SELECT }>;
@@ -142,6 +143,8 @@ function decryptComment(row: { content: string | null; data: unknown }, key: Enc
  * Load comments by id as views, in the given order. Missing or non-comment
  * ids are dropped. The caller has already passed the memory's read gate.
  */
+const embeddingTokenOfView = new WeakMap<CommentView, string | null>();
+
 async function loadCommentViews(db: Context['db'] | Tx, ids: string[], key: EncryptionKey | null): Promise<CommentView[]> {
   if (ids.length === 0) return [];
   const rows = await db.node.findMany({ where: { id: { in: ids }, nodeType: COMMENT_NODE_TYPE }, select: COMMENT_NODE_SELECT });
@@ -195,6 +198,8 @@ async function loadCommentViews(db: Context['db'] | Tx, ids: string[], key: Encr
       revSeq: row.revSeq,
       target,
     });
+    // Token and decrypted body originate in the SAME selected row; never adopt a later token for old text.
+    embeddingTokenOfView.set(byId.get(row.id)!, row.embeddingWorkToken);
   }
   return ids.map((id) => byId.get(id)).filter((v): v is CommentView => v != null);
 }
@@ -487,6 +492,7 @@ async function insertComment(
       createdBy,
     },
   });
+  await stampEmbeddingObligation(tx, id, args.memoryId);
   await tx.commentMeta.create({
     data: {
       nodeId: id,
@@ -578,6 +584,7 @@ async function reviseComment(
       revSeq: { increment: 1 }, revisionContentHash: revisionStateHashRefreshMarker(), ...extra,
     },
   });
+  if (patch.content !== undefined) await stampEmbeddingObligation(tx, row.id, row.memoryId);
 }
 
 /**
@@ -590,6 +597,7 @@ async function reviseComment(
 function indexed(ctx: Context, view: CommentView): CommentView {
   void enqueueNodeEmbedding(ctx.db, {
     nodeId: view.id,
+    workToken: embeddingTokenOfView.get(view) ?? null,
     memoryId: view.memoryId,
     plaintext: { content: view.body, abstract: null },
   }).catch((error) => console.error('[comments] embedding enqueue failed:', error));

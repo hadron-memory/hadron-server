@@ -35,6 +35,8 @@ export type LexicalSort = 'relevance' | 'loc' | 'seq' | 'updatedAt';
  * sort + pagination are exact — no relevance-truncation-then-filter artifacts).
  */
 export interface NodeSqlFilter {
+  /** #2175: caller-scoped recovery audience. When set, other memories' tombstones never reach ranking/paging. */
+  tombstoneMemoryIds?: string[];
   nodeType?: string | null;
   /** #725 — collection discriminator facet (which domain object; e.g. "competitor"). */
   objectType?: string | null;
@@ -80,6 +82,8 @@ export interface FilterSearchOpts {
 }
 
 export interface FilterWhereOpts {
+  /** #2175: same recovery subset as the ranked candidate selector. */
+  tombstoneMemoryIds?: string[];
   db: PrismaClient;
   /** Candidate node ids (e.g. a ranked vector/hybrid set) to narrow. */
   ids: string[];

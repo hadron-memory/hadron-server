@@ -98,6 +98,25 @@ that drift is what the deprecated `hadron_dev` row above warns about).
 > HNSW index) to sync schema without wiping, or **`pnpm db:dev-reset`** for a
 > clean wipe + reseed. Both follow `.env`.
 
+## Test-run ownership (#1137)
+
+`HADRON_TEST_RUN_ID` remains the bare vitest main PID. Global setup overwrites
+`HADRON_TEST_RUN_SCOPE` from Linux boot identity and PID-namespace device/inode,
+then workers inherit it unchanged. Database names and graph roots use the full
+scope-plus-PID token; shared loopback or Unix sockets do not establish ownership.
+Native non-Linux retains parallel mode in an explicit platform/machine scope with
+the existing local-machine assumption. Linux without verifiable `/proc` identity
+refuses parallel mode; `HADRON_TEST_PARALLEL=0` remains available.
+
+Automatic cleanup preserves previous-boot, foreign, unknown and legacy names.
+Their disk/inode cost is **unbounded**, including old graph roots (#1951).
+Manual maintenance must establish quiescence of **all** namespaces sharing the
+Postgres endpoint or temporary directory; local PID absence is insufficient.
+`db:test-prune-legacy` does not prove ownership and does not collect pid-only
+`r<pid>` clones or graph roots. No boot-mismatch deletion rule is authorized.
+Keep checkout/venv/probe scratch in a private disk-backed `TMPDIR` when `/tmp`'s
+inode limit is tight; never clear another run's files based on local PID absence.
+
 ## Common commands
 
 ```bash

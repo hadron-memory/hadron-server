@@ -12,7 +12,8 @@ import { generateId } from '../../lib/id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 
 const Q = resolvers.Query as Record<string, (p: unknown, a: unknown, c: Context) => Promise<unknown>>;
-const adminCtx = (): Context => ({ db, roles: ['ADMIN'], userId: generateId() });
+let adminId: string;
+const adminCtx = (): Context => ({ db, roles: ['ADMIN'], userId: adminId });
 
 interface Fx {
   memoryId: string;
@@ -43,6 +44,9 @@ describe('#391 soft-deleted nodes excluded from read resolvers', () => {
   let fx: Fx;
   beforeEach(async () => {
     await cleanDb(db);
+    // Canonical reads recheck the live actor after the include-history fence.
+    // A random non-existent id is not an authenticated platform admin.
+    adminId = (await db.user.create({ data: { handle: 'soft-delete-admin', roles: ['ADMIN'] } })).id;
     fx = await build();
   });
 

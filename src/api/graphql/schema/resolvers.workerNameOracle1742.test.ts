@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1742 — the worker surfaces must not tell a caller who cannot READ an App
  * whether a worker of that App exists.
@@ -61,7 +62,7 @@ async function user(n: number) {
   return db.user.create({ data: { id: generateId(), githubId: 97_420 + n, githubUsername: `wo-${n}`, roles: ['READER'] }, select: { id: true } });
 }
 async function worker(appId: string, name: string) {
-  return db.worker.create({ data: { id: generateId(), appId, agentId: teamAgent.id, name, slug: name.toLowerCase() }, select: { id: true } });
+  return db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: teamAgent.id, name, slug: name.toLowerCase() }, select: { id: true } });
 }
 
 beforeEach(async () => {
