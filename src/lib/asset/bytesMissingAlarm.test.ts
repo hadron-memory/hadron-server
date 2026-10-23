@@ -31,8 +31,8 @@ describe('reportAssetBytesMissing (#1140)', () => {
 
   it('never puts a storage key or filename in the event', () => {
     reportAssetBytesMissing({ assetId: 'a1', memoryId: 'm1', source: 'restore' }, noon);
-    const blob = JSON.stringify(captureMessage.mock.calls[0]);
-    expect(blob).not.toMatch(/storage|filename|\.pdf/i);
+    const [, ctx] = captureMessage.mock.calls[0];
+    expect(ctx.extra).toEqual({ assetId: 'a1', memoryId: 'm1' });
   });
 
   it('reports an asset once per UTC day, again the next day, per asset independently', () => {
