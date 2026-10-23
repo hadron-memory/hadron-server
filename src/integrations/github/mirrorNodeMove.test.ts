@@ -39,7 +39,7 @@ let orgId: string;
 
 /** Written paths, as (memoryId, loc) pairs — the checkout fake encodes the memory in localPath. */
 const written = () =>
-  vi.mocked(writeNodeFile).mock.calls.map(([localPath, node]) => [localPath, node.loc]);
+  vi.mocked(writeNodeFile).mock.calls.map(([localPath, node]) => [localPath, node.loc]).sort((a, b) => a[1].localeCompare(b[1]));
 /** Removals, as (repo, loc) pairs. */
 const removed = () => vi.mocked(removeNodeFile).mock.calls.map(([localPath, loc]) => [localPath, loc]);
 /** Removals with the id the removal is gated on — every one must carry the MOVED node's id. */
