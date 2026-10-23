@@ -1484,10 +1484,10 @@ export const typeDefs = `#graphql
     """
     inheritedFrom: InheritedFrom
     """
-    #1450 — true for a RESERVED spec citation that has no spec written yet (a
-    placeholder in a draft corpus, created by reserveSpecCitation). Set only by
-    the server, never inferred from an empty body; writing real content through
-    updateSpecNode clears it. Minting refuses while any remain.
+    #1450 — a server-recorded placeholder awaiting authored content, such as a
+    RESERVED spec citation created by reserveSpecCitation. A placeholder may
+    exist in any memory; it is never inferred from an empty body. Writing real
+    content through updateSpecNode clears it. Placeholders block minting.
     """
     isPlaceholder: Boolean!
     isLink: Boolean!
@@ -1673,6 +1673,14 @@ export const typeDefs = `#graphql
     governedKind: EdgeGovernedKind
   }
 
+  "#2288: derived per-session state; ENDED means terminal, not necessarily an explicit end."
+  enum SessionState {
+    LIVE
+    LAPSED
+    DORMANT
+    ENDED
+  }
+
   """
   A unit of work recorded against a user or App: the general row, and what the
   bare word "session" means throughout this schema (#1034). \`type\` says which
@@ -1774,6 +1782,18 @@ export const typeDefs = `#graphql
     still be ended with a handoff. False for an ended or deleted session.
     """
     isLive: Boolean!
+    """
+    #2288 / hrn:node:hadronmemory.com:specs:cor:agt:020:13:
+    this session's derived state, using its own App's dormancy period (platform
+    default when App-less), never the viewer's App. ENDED means terminal: an
+    explicit/reaped end, deletion, or now >= promised expiresAt before reap.
+    It does not assert an explicit ending act. Otherwise DORMANT uses the same
+    activity and strict older-than threshold as the resume refusal. At exact
+    dormancy equality it is not dormant. LIVE includes idle deadline equality;
+    hard expiry is exclusive even when the deadlines coincide. The remaining
+    open sessions are LAPSED. Reading state never drives or resumes a session.
+    """
+    state: SessionState!
     """
     #1617 / #1036: the earlier of last activity plus the type's idle window
     and a promised expiresAt (hrn:node:hadronmemory.com:specs:cor:agt:020:03).
@@ -2738,7 +2758,7 @@ export const typeDefs = `#graphql
     Empty for legacy rows.
     """
     changes: [String!]!
-    "Reserved (#620): User id that approved this revision. No write surface yet."
+    "User id recorded by per-node approval for this revision; null when no user approval was recorded."
     approvedBy: String
     "approvedBy resolved to public identifiers (handle + URN), like editedByUser."
     approvedByUser: NodeRevisionEditor
@@ -4199,6 +4219,41 @@ export const typeDefs = `#graphql
     hasMore: Boolean!
   }
 
+  "#2246 - why an Agent is not ready to be offered; the values are the clone refusal's codes (hrn:node:hadronmemory.com:specs:cor:dmo:050:19)."
+  enum AgentOfferReasonCode {
+    AGENT_NOT_PUBLIC
+    AGENT_RETIRED
+    CLONE_LINKED_MEMORY_ENCRYPTED
+    CLONE_LINKED_MEMORY_UNREADABLE
+    CLONE_BASE_UNUSABLE
+    CLONE_IMPORT_UNUSABLE
+  }
+
+  "#2246 - the name of one blocking subject, shown only because you may read it. Nothing else about it is reachable."
+  type AgentOfferSubject {
+    name: String!
+  }
+
+  """
+  #2246 - one reason an Agent is not ready to be offered. count is every blocked subject; subjects are at
+  most 20 of the ones you may read; omittedByCap are readable ones past the cap; hiddenByAccess are ones
+  you may not read, never named. subjects + omittedByCap + hiddenByAccess = count.
+  """
+  type AgentOfferReason {
+    code: AgentOfferReasonCode!
+    count: Int!
+    subjects: [AgentOfferSubject!]!
+    omittedByCap: Int!
+    hiddenByAccess: Int!
+  }
+
+  "#2246 - whether another organisation could subscribe to, install and clone the Agent as it stands."
+  type AgentOfferReadiness {
+    ready: Boolean!
+    "Every reason that holds, in the clone refusal's order. Empty exactly when ready."
+    reasons: [AgentOfferReason!]!
+  }
+
   """
   The reusable definition a Builder creates and the marketplace can list.
   Agents are installed into runtime Apps through the AppAgent N:M join: an App
@@ -4252,6 +4307,15 @@ export const typeDefs = `#graphql
     keep paging. There is deliberately no total.
     """
     extendedBy(first: Int = 20, after: String): AgentExtensionPage!
+    """
+    #2246 (hrn:node:hadronmemory.com:specs:cor:dmo:050:19) - is this Agent ready to be offered to other
+    organisations: could an organisation with no relation to it subscribe to, install and clone it as it
+    stands, and if not, why. Readable only by whoever manages the Agent (hrn:node:hadronmemory.com:specs:cor:dmo:050:13); null for everyone
+    else, readers of a PUBLIC Agent included, and when the Agent is gone. A reason names a memory or Agent only
+    if you may read it; otherwise only the count shows. Answers for an outsider, so a non-PUBLIC Agent is not
+    ready even though its own manager can still clone it. Read-only; grants nothing.
+    """
+    offerReadiness: AgentOfferReadiness
     """
     #2281 - the URN of the Agent this one was cloned from (cloneAgent), as that Agent's current URN. Null when
     this is not a clone, when you cannot read the source, when the source was deleted, or when the clone's origin identity is not recorded: those cases are indistinguishable by design. Never an id or an object.
@@ -6292,10 +6356,11 @@ export const typeDefs = `#graphql
   enum SpecTextField { content abstract }
 
   """
-  Replace text in explicit nodes of one DRAFT spec corpus. A dry run returns
-  plan; apply must present that exact plan and refuses if any selected row,
-  protection, match, or corpus state changed. Minted corpora are never edited
-  through this door. Generic replacement keeps its governed-node protections.
+  Replace text in explicit unminted spec nodes of one memory. A dry run returns
+  a plan; apply must present that exact plan and refuses if any selected row,
+  protection, match, or mint state changed. A minted target node is refused,
+  even when other nodes in the memory are unminted. Generic replacement keeps
+  its governed-node protections.
   """
   input SpecSearchReplaceInput {
     memoryRef: ID!
@@ -7166,7 +7231,7 @@ export const typeDefs = `#graphql
   type SpecCorpusMintReport {
     memoryId: ID!
     dryRun: Boolean!
-    "True when this call minted the corpus."
+    "True when this call stamped nodes in its mint scope; false for a dry run or an empty scope."
     minted: Boolean!
     blockers: [SpecMintFinding!]!
     staleAbstracts: [SpecMintFinding!]!
@@ -7203,6 +7268,13 @@ export const typeDefs = `#graphql
 
     "#1747 — the live tickers of an App the caller participates in. An App the caller cannot reach reads as APP_NOT_FOUND (hrn:node:hadronmemory.com:specs:cor:agt:080:18)."
     tickers(appRef: String!): [Ticker!]!
+
+    """
+    #2213 — \`tickers\` as a page: the same App gate, rows and order, with the real total.
+    \`limit\` defaults to 20, 0 returns the count only, a negative limit is 0 and a limit
+    over 200 is served as 200 (never refused). \`offset\` below 0 is 0.
+    """
+    tickersPage(appRef: String!, limit: Int, offset: Int): TickerPage!
 
     "#1747 — one ticker by id or hrn:ticker: URN; null when it does not exist or the caller may not reach it."
     ticker(ref: String!): Ticker
@@ -7903,11 +7975,29 @@ export const typeDefs = `#graphql
     ): [DashboardWidgetPreset!]!
 
     """
+    #2213 — \`dashboardWidgetPresets\` as a page: the same owner scope and order, with the
+    real total. Empty for a non-user or impersonated caller. Sizes as \`tickersPage\`.
+    """
+    dashboardWidgetPresetsPage(
+      "Return only presets for this widget type. Omit for all of them."
+      type: DashboardWidgetType
+      limit: Int
+      offset: Int
+    ): DashboardWidgetPresetPage!
+
+    """
     Exchange connections for an org.
 
     Accepts the entity's ID or URN.
     """
     exchangeConnections(orgId: ID!): [ExchangeConnection!]!
+
+    """
+    #2213 — \`exchangeConnections\` as a page: the same admission (org ADMIN/OWNER,
+    platform admin) and FORBIDDEN refusal, the same rows and order, with the real
+    total. Sizes as \`tickersPage\`.
+    """
+    exchangeConnectionsPage(orgId: ID!, limit: Int, offset: Int): ExchangeConnectionPage!
 
     """
     Fetch one Slack connection by id (spec 043). Returns null when the row
@@ -12711,6 +12801,27 @@ export const typeDefs = `#graphql
     TICKER_DELETED
   }
 
+  "#2213 — one page of tickers; hasMore is whether rows remain past it."
+  type TickerPage {
+    items: [Ticker!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 — one page of an org's exchange connections."
+  type ExchangeConnectionPage {
+    items: [ExchangeConnection!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 — one page of the caller's saved widget presets."
+  type DashboardWidgetPresetPage {
+    items: [DashboardWidgetPreset!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
   """
   #1747 — a named wake schedule owned by one team App (hrn:node:hadronmemory.com:specs:cor:agt:080:01). Its URN is hrn:ticker:ROOT:APP-SLUG:SLUG,
   computed from the App and the permanent slug. Ticks are computed, not stored; nothing reads a ticker until due wakes ship.
@@ -13308,6 +13419,12 @@ export const typeDefs = `#graphql
     liveSession: Boolean!
     "The binding's model family: its newest open session's (hrn:node:hadronmemory.com:specs:cor:agt:060:04), kept while the session is quiet. Null when unbound or none was reported."
     family: String
+    "Self-reported model of the same newest open binding as family, retained while quiet. Null when unbound or unreported; advisory, never authorization."
+    model: String
+    "When that binding last reported its model; null when unbound or never reported. Not inferred from session activity."
+    modelReportedAt: DateTime
+    "Coarse tier from the server model mapping: high, mid or low. Null when unbound, unreported or unmapped; advisory, never authorization."
+    tier: String
     "Families a live host registration can launch it as (hrn:node:hadronmemory.com:specs:cor:agt:070:01)."
     launchableFamilies: [String!]!
     "Free for work (hrn:node:hadronmemory.com:specs:cor:agt:060:05)."

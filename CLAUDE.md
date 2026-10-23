@@ -283,9 +283,14 @@ two-layer model without further setup:
   Enforced by `chk_personal_visibility_user` (the name predates 035 — it's now
   keyed on `class`, not a `visibility = 'PERSONAL'` value, which no longer
   exists). Set the owner whenever creating a personal/private memory.
-- **Memory app_id invariant** (008, relaxed by 034 and #653): `app_id` is
-  REQUIRED for `class='app'`, FORBIDDEN for `class='system'` (an agent's own
-  definition is never app-scoped), and OPTIONAL for
+- **Memory app_id invariant** (008, 034, #653, #2064;
+  `hrn:node:hadronmemory.com:specs:cor:dmo:060:01`): `app_id` is REQUIRED for
+  `class='app'`. For `class='system'`, it is NULL on an Agent's own system
+  memory and set only on an install memory (`is_install_memory = true`).
+  `install_of_agent_id` names that install's Agent while present; it may be
+  NULL after erasure detaches the retained App-owned install memory. Other
+  classes require `is_install_memory = false` and `install_of_agent_id` NULL.
+  `app_id` is OPTIONAL for
   `knowledge`/`group`/`personal`/`private` — set when provisioned inside an App
   (e.g. the `(app_id, user_id)` scope for personal), NULL when **free-standing**
   (created via the CLI or Cowork outside any App). #653 moved `knowledge` +

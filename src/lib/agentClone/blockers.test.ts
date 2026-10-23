@@ -75,25 +75,25 @@ describe('AGENT_NOT_PUBLIC (R181, amendment 2)', () => {
     const a = await agent(orgA, 'PUBLIC');
     expect(await codes(a, { kind: 'org', orgId: orgA, ctx: ctxFor(admin) })).toEqual([]);
     expect(await codes(a, { kind: 'org', orgId: orgB, ctx: ctxFor(admin) })).toEqual([]);
-    expect(await codes(a, { kind: 'outsider', ctx: ctxFor(admin) })).toEqual([]);
+    expect(await codes(a, { kind: 'outsider', ctx: ctxFor(admin), reader: ctxFor(outsider) })).toEqual([]);
   });
   it('non-PUBLIC: same-org manager passes, everyone else gets AGENT_NOT_PUBLIC', async () => {
     const a = await agent(orgA, 'ORGANIZATION');
     expect(await codes(a, { kind: 'org', orgId: orgA, ctx: ctxFor(admin) })).toEqual([]);
     expect(await codes(a, { kind: 'org', orgId: orgA, ctx: ctxFor(reader) })).toEqual(['AGENT_NOT_PUBLIC']);
     expect(await codes(a, { kind: 'org', orgId: orgB, ctx: ctxFor(admin) })).toEqual(['AGENT_NOT_PUBLIC']);
-    expect(await codes(a, { kind: 'outsider', ctx: ctxFor(admin) })).toEqual(['AGENT_NOT_PUBLIC']);
+    expect(await codes(a, { kind: 'outsider', ctx: ctxFor(admin), reader: ctxFor(outsider) })).toEqual(['AGENT_NOT_PUBLIC']);
   });
 });
 
 describe('retired and missing', () => {
   it('a retired source lists AGENT_RETIRED right after AGENT_NOT_PUBLIC', async () => {
     const a = await agent(orgA, 'ORGANIZATION', { deletedAt: new Date() });
-    expect(await codes(a, { kind: 'outsider', ctx: ctxFor(admin) })).toEqual(['AGENT_NOT_PUBLIC', 'AGENT_RETIRED']);
+    expect(await codes(a, { kind: 'outsider', ctx: ctxFor(admin), reader: ctxFor(outsider) })).toEqual(['AGENT_NOT_PUBLIC', 'AGENT_RETIRED']);
     expect(await codes(a, { kind: 'org', orgId: orgA, ctx: ctxFor(admin) })).toEqual(['AGENT_RETIRED']);
   });
   it('a missing source is AgentNotFoundError', async () => {
-    await expect(cloneBlockers(db, 'nope', { kind: 'outsider', ctx: ctxFor(admin) })).rejects.toBeInstanceOf(AgentNotFoundError);
+    await expect(cloneBlockers(db, 'nope', { kind: 'outsider', ctx: ctxFor(admin), reader: ctxFor(outsider) })).rejects.toBeInstanceOf(AgentNotFoundError);
   });
 });
 
@@ -153,5 +153,27 @@ it('keeps the fixed order across blockers', async () => {
   const a = await agent(orgA, 'ORGANIZATION');
   const enc = await memory(orgA, { isEncrypted: true });
   await link(a, enc);
-  expect(await codes(a, { kind: 'outsider', ctx: ctxFor(admin) })).toEqual(['AGENT_NOT_PUBLIC', 'CLONE_LINKED_MEMORY_ENCRYPTED']);
+  expect(await codes(a, { kind: 'outsider', ctx: ctxFor(admin), reader: ctxFor(outsider) })).toEqual(['AGENT_NOT_PUBLIC', 'CLONE_LINKED_MEMORY_ENCRYPTED']);
+});
+
+describe('outsider audience: blockers follow the outsider, names follow the reading manager (#2246)', () => {
+  it('a linked memory only the manager can read blocks the outsider and is named to the manager', async () => {
+    const a = await agent(orgA, 'PUBLIC');
+    const m = await memory(orgA, { name: 'ORG-PRIVATE' });
+    await link(a, m);
+    const audience = { kind: 'outsider' as const, ctx: ctxFor(admin), reader: ctxFor(outsider) };
+    const blockers = await cloneBlockers(db, a, audience);
+    expect(blockers.map((b) => b.code)).toEqual(['CLONE_LINKED_MEMORY_UNREADABLE']);
+    expect(blockers[0].subjects).toEqual([{ position: 0, name: 'ORG-PRIVATE' }]);
+    // The same answer a real unrelated-org cloner is refused with.
+    expect(await codes(a, { kind: 'org', orgId: orgB, ctx: ctxFor(outsider) })).toEqual(['CLONE_LINKED_MEMORY_UNREADABLE']);
+  });
+  it('the reader never changes who is named: a memory the manager cannot read stays unnamed', async () => {
+    const a = await agent(orgA, 'PUBLIC');
+    const secret = await memory(orgB, { class: 'personal', userId: reader, name: 'TOP-SECRET' });
+    await link(a, secret);
+    const blockers = await cloneBlockers(db, a, { kind: 'outsider', ctx: ctxFor(admin), reader: ctxFor(outsider) });
+    expect(blockers.map((b) => b.code)).toEqual(['CLONE_LINKED_MEMORY_UNREADABLE']);
+    expect(JSON.stringify(blockers)).not.toContain('TOP-SECRET');
+  });
 });
