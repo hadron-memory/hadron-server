@@ -1673,6 +1673,14 @@ export const typeDefs = `#graphql
     governedKind: EdgeGovernedKind
   }
 
+  "#2288: derived per-session state; ENDED means terminal, not necessarily an explicit end."
+  enum SessionState {
+    LIVE
+    LAPSED
+    DORMANT
+    ENDED
+  }
+
   """
   A unit of work recorded against a user or App: the general row, and what the
   bare word "session" means throughout this schema (#1034). \`type\` says which
@@ -1774,6 +1782,18 @@ export const typeDefs = `#graphql
     still be ended with a handoff. False for an ended or deleted session.
     """
     isLive: Boolean!
+    """
+    #2288 / hrn:node:hadronmemory.com:specs:cor:agt:020:13:
+    this session's derived state, using its own App's dormancy period (platform
+    default when App-less), never the viewer's App. ENDED means terminal: an
+    explicit/reaped end, deletion, or now >= promised expiresAt before reap.
+    It does not assert an explicit ending act. Otherwise DORMANT uses the same
+    activity and strict older-than threshold as the resume refusal. At exact
+    dormancy equality it is not dormant. LIVE includes idle deadline equality;
+    hard expiry is exclusive even when the deadlines coincide. The remaining
+    open sessions are LAPSED. Reading state never drives or resumes a session.
+    """
+    state: SessionState!
     """
     #1617 / #1036: the earlier of last activity plus the type's idle window
     and a promised expiresAt (hrn:node:hadronmemory.com:specs:cor:agt:020:03).
