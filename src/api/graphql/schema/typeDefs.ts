@@ -4253,6 +4253,11 @@ export const typeDefs = `#graphql
     """
     extendedBy(first: Int = 20, after: String): AgentExtensionPage!
     """
+    #2281 - the URN of the Agent this one was cloned from (cloneAgent), as that Agent's current URN. Null when
+    this is not a clone, when you cannot read the source, when the source was deleted, or when the clone's origin identity is not recorded: those cases are indistinguishable by design. Never an id or an object.
+    """
+    clonedFromAgentRef: String
+    """
     #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - the id of the index node whose incoming,
     trigger-labelled edges list this Agent's own tasks, or null. Set or clear
     it with setAgentIndexRefs; read the Agent's whole task list with agentTaskList.
@@ -10451,6 +10456,25 @@ export const typeDefs = `#graphql
     orgId accepts the org's ID or URN.
     """
     createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean): Agent!
+    """
+    Clone an Agent into an organization you administer: a new PERSONAL-draft Agent
+    with its own copy of the source's system memory, its links and imports, and a recorded origin. Needs a
+    PUBLIC source, or one you manage in its own organization. Refusals are typed (AGENT_NOT_PUBLIC,
+    CLONE_*); a source that keeps changing answers CONFLICT with reason AGENT_CLONE_SOURCE_CHANGED
+    (retryable). target must be an organization.
+
+    Copied: name, description, systemPrompt, type, surfaces, usesTasks, registerDefaults, installationPolicy,
+    memoryProvisioning, personaRole; the system memory graph (nodes, edges, pending edges) with the tasks and
+    processes index pointers remapped; memory links (kept as links, not copied); imports and the base, re-pointed.
+    NOT copied: visibility (the clone is PERSONAL), AI service config, boot-prompt pointers, node comments,
+    decisions and decision logs, compiled boot-prompt nodes, derived include edges (re-derived), node revision
+    history, embeddings (re-stamped), assets (their bytes stay with the source), git-sync config, the editor lock
+    and published-revision pointer, Worker castings, App installs, and the source organization's subscriptions
+    and grants. A base or import is licensed for the TARGET organization at clone time, or the clone refuses
+    (BASE_UNUSABLE, IMPORT_UNUSABLE). A refusal's blocker subjects carry a name only when you can read the
+    subject; otherwise only a position. The clone's origin is Agent.clonedFromAgentRef.
+    """
+    cloneAgent(source: ID!, target: ID!, name: String, slug: String): Agent!
 
     """
     Update an Agent.
@@ -13284,6 +13308,12 @@ export const typeDefs = `#graphql
     liveSession: Boolean!
     "The binding's model family: its newest open session's (hrn:node:hadronmemory.com:specs:cor:agt:060:04), kept while the session is quiet. Null when unbound or none was reported."
     family: String
+    "Self-reported model of the same newest open binding as family, retained while quiet. Null when unbound or unreported; advisory, never authorization."
+    model: String
+    "When that binding last reported its model; null when unbound or never reported. Not inferred from session activity."
+    modelReportedAt: DateTime
+    "Coarse tier from the server model mapping: high, mid or low. Null when unbound, unreported or unmapped; advisory, never authorization."
+    tier: String
     "Families a live host registration can launch it as (hrn:node:hadronmemory.com:specs:cor:agt:070:01)."
     launchableFamilies: [String!]!
     "Free for work (hrn:node:hadronmemory.com:specs:cor:agt:060:05)."

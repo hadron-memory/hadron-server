@@ -32,6 +32,7 @@
  */
 
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
+import { tierOf, type ModelTier } from './family.js';
 import type { AvailabilityRecord } from './availability.js';
 import { loadWorkerWorkStates, type WorkerWorkState } from './matcher.js';
 import { alarmEpisodeKey, endedAlarmEpisodes, loadStallInputs, unreactedChildren } from './stall.js';
@@ -56,6 +57,10 @@ export type RosterEntry = {
   liveSession: boolean;
   /** The binding's family (its newest open session's); null when unbound or none was reported. */
   family: string | null;
+  /** Self-reported metadata from the same newest open binding as family. */
+  model: string | null;
+  modelReportedAt: Date | null;
+  tier: ModelTier | null;
   launchableFamilies: string[];
   /** The families it is free for work as now; empty when not free. */
   freeFamilies: string[];
@@ -198,6 +203,9 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
         bound: w.bound,
         liveSession: w.live,
         family: w.bindingFamily,
+        model: w.bindingModel,
+        modelReportedAt: w.modelReportedAt,
+        tier: tierOf(w.bindingModel),
         launchableFamilies: w.launchableFamilies,
         freeFamilies: w.freeFamilies,
         free: w.free,
