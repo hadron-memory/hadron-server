@@ -141,3 +141,68 @@ describe('#2277 scope control: a NON-source memory is not serialized on F', () =
     await fence.done;
   });
 });
+
+describe('#2277 the writer HOLDS F for its whole transaction (reverse order)', () => {
+  it('a compile-like F holder queued behind an in-flight source comment edit waits for its commit', async () => {
+    const f = await memoryFixture('system');
+    const id = (await M.createComment(null, { targetRef: f.targetUrn, body: 'root' }, as())).id;
+    const expectedRevision = await rev(id);
+    // Park the writer inside its transaction (after F) on the comment row lock.
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let entered!: () => void;
+    const inside = new Promise<void>((r) => { entered = r; });
+    const blocker = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
+      entered();
+      await held;
+    });
+    await inside;
+    const edit = M.editComment(null, { commentRef: id, body: 'edited', expectedRevision }, as());
+    edit.catch(() => {});
+    await waitForLockWaitersOfType(db, 'transactionid', 1, 5_000);
+    let holderDone = false;
+    const holder = withIncludeHistoryTransaction(db, async () => { holderDone = true; });
+    holder.catch(() => {});
+    await waitForLockWaitersOfType(db, 'advisory', 1, 5_000);
+    expect(holderDone).toBe(false);
+    release();
+    await blocker;
+    await edit;
+    await holder;
+    expect(holderDone).toBe(true);
+    expect((await db.node.findUniqueOrThrow({ where: { id } })).content).toBe('edited');
+  });
+});
+
+describe('#2277 locked drift refusal: a class change between the decision and the memory lock re-decides', () => {
+  it('a knowledge memory turned system while the writer waits is retried WITH the fence and still commits', async () => {
+    const f = await memoryFixture('knowledge');
+    const id = (await M.createComment(null, { targetRef: f.targetUrn, body: 'root' }, as())).id;
+    const expectedRevision = await rev(id);
+    // The agent that will own the memory as its system memory, so the caller keeps write access after the flip.
+    await db.agent.create({ data: { id: generateId(), name: 'Src', urn: `cs2277.example:agent-${generateId().slice(-6)}`, organizationId: orgId, visibility: 'ORGANIZATION', systemMemoryId: f.memoryId } });
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let entered!: () => void;
+    const inside = new Promise<void>((r) => { entered = r; });
+    // The class flip commits only after the writer has decided (not fenced) and is waiting for the memory lock.
+    const flip = db.$transaction(async (tx) => {
+      await tx.$queryRaw`UPDATE memories SET class = 'system' WHERE id = ${f.memoryId}`;
+      entered();
+      await held;
+    });
+    await inside;
+    const edit = M.editComment(null, { commentRef: id, body: 'edited', expectedRevision }, as());
+    edit.catch(() => {});
+    await waitForLockWaitersOfType(db, 'transactionid', 1, 5_000);
+    // Hold F too: the retried attempt must now queue on it, which proves it re-decided to fence.
+    const fence = await holdF();
+    release();
+    await flip;
+    await waitForLockWaitersOfType(db, 'advisory', 1, 5_000);
+    fence.release();
+    await fence.done;
+    expect((await edit).body).toBe('edited');
+  });
+});

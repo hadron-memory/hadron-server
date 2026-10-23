@@ -23,6 +23,7 @@ import { isDeadlockVictim } from '../../../lib/memoryLockConflict.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { liveTxContext } from './authorizedTx.js';
 import { lockInstallAuthorityFirst } from './installMemory.js';
+import { includeHistoryClient, withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { type Context, isAuthorizationDenial, isMemoryReadableCached, nodeNotFoundError, requireMemoryWriteAccess, withoutRequestCaches } from './resolvers.helpers.js';
 
 /** Expected authorization failures alone collapse to a concealed recovery miss. */
@@ -174,7 +175,12 @@ export const recoveryMutations = {
       ...(memory.userId ? [{ kind: 'user' as const, id: memory.userId }] : []),
       ...[...new Set([memory.appId, ctx.appId].filter((id): id is string => !!id))].map((id) => ({ kind: 'app' as const, id })),
     ];
-    const result = await ctx.db.$transaction(async (tx) => {
+    // #2277: a restore in a boot-prompt SOURCE memory (class 'system': Agent system or install memory) changes what a
+    // compile reads, so it enters the #2063 include-history fence first. The fence is READ COMMITTED, the isolation
+    // this body already used. Other classes keep the plain transaction; the class is re-checked under the Memory lock
+    // below (`currentMemory.class !== memory.class` refuses before any write).
+    const fenced = memory.class === 'system';
+    const body = async (tx: Prisma.TransactionClient) => {
       await lockInstallAuthorityFirst(tx, ctx, memory.id);
       await lockAuthorityAnchors(tx, anchors, 'shared');
       await lockMemoryForChannelChange(tx, memory.id);
@@ -235,7 +241,11 @@ export const recoveryMutations = {
       await restoreThreadsOfTargets(tx, [current.id]);
       const node = await tx.node.findUniqueOrThrow({ where: { id: current.id }, include: { outgoingEdges: { include: { target: true } } } });
       return { node, changed: true };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }).catch((error: unknown) => {
+    };
+    const result = await (fenced
+      ? withIncludeHistoryTransaction(ctx.db, (fence) => body(includeHistoryClient(fence)))
+      : ctx.db.$transaction(body, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted })
+    ).catch((error: unknown) => {
       if (isDeadlockVictim(error)) throw changed();
       throw error;
     });
