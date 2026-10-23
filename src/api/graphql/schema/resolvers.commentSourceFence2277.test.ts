@@ -98,6 +98,14 @@ describe('#2277 comment writers in a SOURCE memory queue on F', () => {
       run: async (_f, c) => M.resolveCommentThread(null, { commentRef: c.id, expectedRevision: await rev(c.id!) }, as()),
     },
     {
+      name: 'reopenCommentThread (a resolved thread)',
+      setup: async (f, c) => {
+        c.id = (await M.createComment(null, { targetRef: f.targetUrn, body: 'root' }, as())).id;
+        await M.resolveCommentThread(null, { commentRef: c.id, expectedRevision: await rev(c.id!) }, as());
+      },
+      run: async (_f, c) => M.reopenCommentThread(null, { commentRef: c.id, expectedRevision: await rev(c.id!) }, as()),
+    },
+    {
       name: 'deleteCommentThread',
       setup: async (f, c) => { c.id = (await M.createComment(null, { targetRef: f.targetUrn, body: 'root' }, as())).id; },
       run: (_f, c) => M.deleteCommentThread(null, { commentRef: c.id, reason: 'cleanup' }, as()),
@@ -204,5 +212,20 @@ describe('#2277 locked drift refusal: a class change between the decision and th
     fence.release();
     await fence.done;
     expect((await edit).body).toBe('edited');
+  });
+});
+
+describe('#2277 the author who has LOST read access deletes their own comment (deleteOwnCommentWithoutAccess)', () => {
+  it('queues behind a held F in a source memory, and the delete still commits after release', async () => {
+    const f = await memoryFixture('system');
+    const author = await db.user.create({ data: { githubId: 227702, githubUsername: 'cs-author', handle: 'cs-author', roles: [] } });
+    const member = await db.orgMember.create({ data: { organizationId: orgId, userId: author.id, role: 'ADMIN' } });
+    const asAuthor = (): Context => ({ db, userId: author.id, roles: [] });
+    const id = (await M.createComment(null, { targetRef: f.targetUrn, body: 'mine' }, asAuthor())).id;
+    // The author leaves the org: no read access remains, so the no-access delete path runs.
+    await db.orgMember.delete({ where: { organizationId_userId: { organizationId: member.organizationId, userId: author.id } } });
+    const expectedRevision = await rev(id);
+    expect(await queuedOnFence(() => M.deleteComment(null, { commentRef: id, expectedRevision }, asAuthor()))).toBe(true);
+    expect((await db.node.findUniqueOrThrow({ where: { id } })).deletedAt).not.toBeNull();
   });
 });
