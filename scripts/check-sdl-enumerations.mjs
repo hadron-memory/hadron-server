@@ -57,6 +57,8 @@ import { HOST_OPERATION_TYPES } from '../src/lib/hostOperations/types.js';
 import { TASK_WARNING_CODES } from '../src/api/graphql/schema/resolvers.taskWarnings.js';
 import { EMAIL_PROVIDER_KEYS } from '../src/lib/emailClient.js';
 import { GOVERNED_ROLES } from '../src/lib/governedRole.js';
+import { SKILL_HOSTS } from '../src/lib/skilldoc/hosts.js';
+import { MemoryMemberRole } from '../src/generated/prisma/index.js';
 import { AI_PROVIDER_ENDPOINTS, usesProcessCredential } from '../src/lib/aiEndpoint.js';
 import { WORK_KINDS } from '../src/lib/workRef.js';
 import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions/operators.js';
@@ -101,6 +103,21 @@ const WATCHED_SETS = [
     members: [...COMMENTABLE_CLASSES],
     coordinates: ['Mutation.createComment'],
     enumerationPattern: /commentable classes:\s*([^;]+);/i,
+  },
+  {
+    // #2303: names come from the live host registry; one surviving host is
+    // still a promised supported-host list, not an incidental mention.
+    name: 'SKILL_HOSTS', source: 'src/lib/skilldoc/hosts.ts',
+    members: SKILL_HOSTS.map(host => host.key),
+    coordinates: ['SkillPlanInput.host'],
+    enumerationPattern: /supported hosts:\s*([^.;]+)/i,
+  },
+  {
+    name: 'MemoryMemberRole', source: 'prisma/schema.prisma',
+    members: Object.values(MemoryMemberRole), coordinates: ['MemoryMemberRole'],
+    // Owner references in the later protection rule cannot mask a missing
+    // owner entry in the promised role list.
+    enumerationPattern: /([\s\S]*?)(?:Subject to|$)/i,
   },
   {
     // #2305: derive this conditional subset from the actual runtime predicate,

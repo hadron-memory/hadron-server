@@ -66,3 +66,8 @@ Baseline and edited parsed SDL are identical after descriptions are stripped. Th
 ## Author validation
 
 37/37 enumeration tests pass. TypeScript typecheck, SDL/template parsing, enumeration scan (11 sets), hash-description scan, added-line citation check, schema export and whitespace check pass. Two live SDL omission controls are killed at the intended coordinates. After stripping descriptions, parsed SDL matches baseline32a0b107 exactly. Existing citation-baseline/comment-allowlist cleanup notices are advisory and outside this slice. No runtime/source-policy file, DB state, provider credential or deployed stack was changed.
+
+
+## S3 main-merge integration
+
+After initial S4 freeze8c6f743b, main64f15a41 landed S3. A plain merge (no rebase) had one registry insertion conflict; resolution retains S3 SKILL_HOSTS and MemoryMemberRole entries/imports alongside S4 COMMENTABLE_CLASSES and RESERVED_OBJECT_KEYS, and retains all earlier S1/S2/S5 registrations. SDL and enumeration tests auto-merged, with no manual changes to either slice's descriptions or tests. The34-entry S4 ledger still uses32a0b107 source anchors; integration validation compares schema topology to newmain64f15a41. Current merged-head test count supersedes the historical37 above.
