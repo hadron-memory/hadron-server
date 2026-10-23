@@ -133,7 +133,7 @@ address/row order. App uninstall during the F wait refuses before any node or
 history mutation (two red-before-fix controls). Restore refreshes presented
 credentials and source/destination read/write gates before reconciliation; published-agent
 restore also holds current Agent/Memory authority and refuses changed snapshot data
-before destructive work. Spec replacement apply uses the prepared context for its
+before destructive work. Spec citation reservation refreshes authorization before tombstone archival; reservation and renumber prereconciliation acquire the existing complete Agent-definition authority set before key/address/history work. Spec replacement apply uses the prepared context for its
 write/readable-include gates and preserves its deleted-corpus stale-plan refusal;
 each encryption flip/conversion/completion root takes complete owner/actor authority anchors before Memory rows and refreshes credentials before conversion. A red-first SQL-order control covers every root; real revocation after the flag flip refuses conversion without adding a snapshot. Generic node gates and
 principal-bearing MCP writes also refresh the presented actor/key/root.
@@ -172,7 +172,7 @@ preserves the partial receipt (250 relocated, one remaining, source retained).
 
 ## Evidence and remaining gates
 
-- Current delivery controls: qualification70, role40 (including two red-first
+- Current delivery controls: qualification73, role40 (including two red-first
   App-wait refusals), restore/provenance38, encryption104 pass locally. Test
   counts overlap; they are never summed as unique controls.
 - Scoped combined predecessor `badc7f00` composes exact held heads #2263
