@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb, createDbAppWithKey } from '../../../test/helpers.js';
+import { cleanDb, createDbAppWithKey, createDbAppAgent } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
@@ -162,8 +162,28 @@ describe('Agent.clonedFromAgentRef', () => {
     expect(await field(await cloneRow(priv.urn, priv), ctx)).toBeNull();
   });
 
+  it('a pure App key reads an INSTALLED, licensed private source', async () => {
+    const priv = await source('inst', 'ORGANIZATION');
+    const { app } = await createDbAppWithKey(db, `cf-inst-${n}`, orgA.id);
+    await createDbAppAgent(db, app.id, priv.id);
+    const ctx: Context = { db, appId: app.id, roles: ['READER'] };
+    expect(await field(await cloneRow(priv.urn, priv), ctx)).toBe(await emit(priv));
+  });
+
+  it('an impersonating admin or App context gets no platform-admin or install bypass', async () => {
+    const owner = await user('ow');
+    const personal = await db.agent.create({ data: { id: generateId(), ownerUserId: owner, urn: `cf-pers-${n}.example:p`, name: 'p', visibility: 'PERSONAL', systemMemoryId: await memoryFor(orgA.id, `cf-pers-${n}.example:p`) } as never });
+    const c = await cloneRow(personal.urn, personal);
+    const admin = await db.user.create({ data: { id: generateId(), name: 'adm', handle: `adm-${n}`, email: `adm-${n}@x.test`, roles: ['ADMIN'] } });
+    const imp = { orgId: orgB.id, adminUserId: admin.id } as never;
+    expect(await field(c, { db, userId: stranger, roles: ['ADMIN'], impersonation: imp })).toBeNull();
+    const { app } = await createDbAppWithKey(db, `cf-imp-${n}`, orgA.id);
+    await createDbAppAgent(db, app.id, personal.id);
+    expect(await field(c, { db, appId: app.id, userId: stranger, roles: ['READER'], impersonation: imp })).toBeNull();
+  });
+
   it('makes no lookup for a row that is not a clone', async () => {
-    const spy = vi.spyOn(db.agentCloneAudit, 'findMany');
+    const spy = vi.spyOn(db.agentCloneAudit, 'groupBy');
     await field(await cloneRow(null), asUser(adminB));
     expect(spy).not.toHaveBeenCalled();
     const a = await source('ctl', 'PUBLIC');

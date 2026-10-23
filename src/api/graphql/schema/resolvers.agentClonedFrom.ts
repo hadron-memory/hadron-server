@@ -21,9 +21,11 @@ export async function resolveClonedFromAgentRef(
   const ref = parent.clonedFromAgentRef;
   if (!ref) return null;
   // Missing or ambiguous identity fails closed: exactly one DISTINCT recorded source across ALL rows
-  // (same-source duplicates are one identity), or null. DISTINCT bounded to two answers "one or many".
-  const audits = await ctx.db.agentCloneAudit.findMany({
-    where: { newAgentId: parent.id }, select: { sourceAgentId: true }, distinct: ['sourceAgentId'], take: 2,
+  // (same-source duplicates are one identity), or null. 
+  // groupBy keeps DISTINCT and LIMIT in PostgreSQL (the SQL is GROUP BY ... LIMIT 2), so a clone with many
+  // duplicate rows costs the same as one with two.
+  const audits = await ctx.db.agentCloneAudit.groupBy({
+    by: ['sourceAgentId'], where: { newAgentId: parent.id }, orderBy: { sourceAgentId: 'asc' }, take: 2,
   });
   if (audits.length !== 1) return null;
   const audit = audits[0];
