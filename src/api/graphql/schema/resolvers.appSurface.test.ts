@@ -348,7 +348,7 @@ describe('App field resolvers', () => {
       adminCtx(),
     );
     const members = await resolvers.App.members({ id: created.id }, {}, adminCtx());
-    expect(members.length).toBe(1);
+    expect(members!.length).toBe(1);
     expect((members as Array<{ userId: string; role: string }>)[0].userId).toBe(user.id);
     expect((members as Array<{ userId: string; role: string }>)[0].role).toBe('owner');
 

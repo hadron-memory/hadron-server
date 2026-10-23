@@ -71,9 +71,12 @@ import {
   requireOrgRole,
   isPlatformAdmin,
   requireAgentAccess,
-  requireOwnerOrOrgRole,
   defaultAiConfigOf,
   isOrgMemberOrAdmin,
+  requireAppRead,
+  appChildrenWithheld,
+  APP_OWNER_MEMBER_ROLE,
+  userOwnedAppOwnerMemberWhere,
   safeCanonicalUrn,
   AGENT_INCLUDE,
   APP_INCLUDE,
@@ -289,12 +292,24 @@ async function loadReadableNestedApp(ctx: Context, appId: string) {
   const app = await loadApp(ctx, appId);
   if (!app || app.deletedAt) return null;
   try {
-    await requireOwnerOrOrgRole(ctx, app, 'READER');
+    await requireAppRead(ctx, app);
   } catch (error) {
     if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return null;
     throw error;
   }
   return app;
+}
+
+/**
+ * #2089: is this App's roster / install / AI projection withheld from the
+ * caller? Decided from the App row (request-memoized by `loadApp`), never from
+ * a prefetched relation on the parent object, so an eager `appAgents`, `_count`
+ * or first-Agent id cannot override it. `false` when the App is unknown (the
+ * pre-existing behavior of each field then applies).
+ */
+async function appProjectionWithheld(ctx: Context, appId: string): Promise<boolean> {
+  const app = await loadApp(ctx, appId);
+  return !!app && appChildrenWithheld(ctx, app);
 }
 
 async function filterReadableAppRows<T extends {
@@ -312,10 +327,29 @@ async function filterReadableAppRows<T extends {
     : [];
   const readableOrgIds = new Set(orgIds);
   const platformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+  // #2089: the user-owned Apps the caller manages as a CURRENT owner-role
+  // member, read in ONE query for the whole list (no per-row lookup).
+  const candidateIds = ctx.userId && !ctx.impersonation
+    ? apps.filter((a) => !a.deletedAt && a.ownerUserId !== null && a.ownerUserId !== ctx.userId).map((a) => a.id)
+    : [];
+  const ownerMemberOf = new Set(
+    candidateIds.length === 0
+      ? []
+      : (await ctx.db.appMember.findMany({
+          where: {
+            userId: ctx.userId!,
+            role: APP_OWNER_MEMBER_ROLE,
+            appId: { in: candidateIds },
+            app: { deletedAt: null }, // live-App and current-member decided in the same statement
+          },
+          select: { appId: true },
+        })).map((m) => m.appId),
+  );
   return apps.filter((app) => {
     if (app.deletedAt) return false;
     if (app.ownerUserId !== null) {
-      return !ctx.impersonation && !!ctx.userId && app.ownerUserId === ctx.userId;
+      if (ctx.impersonation || !ctx.userId) return false;
+      return app.ownerUserId === ctx.userId || ownerMemberOf.has(app.id);
     }
     return app.organizationId !== null && (platformAdmin || readableOrgIds.has(app.organizationId));
   });
@@ -1246,7 +1280,7 @@ export const typeResolvers = {
       // common case the caller already cleared org-READER on the run's org and
       // this passes; it is the cross-org and user-owned shapes that need it.
       try {
-        await requireOwnerOrOrgRole(ctx, app, 'READER');
+        await requireAppRead(ctx, app);
       } catch {
         return null;
       }
@@ -1546,12 +1580,21 @@ export const typeResolvers = {
     },
     // 036-ai-service-config: registry-backed reads of the App's
     // 'default' config (legacy ai_* columns dropped).
-    aiProvider: async (a: { id: string }, _: unknown, ctx: Context) =>
-      (await defaultAiConfigOf(a, 'appId', ctx))?.provider ?? null,
-    aiModel: async (a: { id: string }, _: unknown, ctx: Context) =>
-      (await defaultAiConfigOf(a, 'appId', ctx))?.model ?? null,
-    hasAiApiKey: async (a: { id: string }, _: unknown, ctx: Context) =>
-      !!(await defaultAiConfigOf(a, 'appId', ctx))?.apiKeyEncrypted,
+    // #2089: `null` on aiProvider / aiModel / hasAiApiKey means WITHHELD from
+    // this caller for a user-owned App it only reaches as an owner-role member
+    // (only the owning user holds the AI configuration, cor:dmo:050:12).
+    aiProvider: async (a: { id: string }, _: unknown, ctx: Context) => {
+      if (await appProjectionWithheld(ctx, a.id)) return null;
+      return (await defaultAiConfigOf(a, 'appId', ctx))?.provider ?? null;
+    },
+    aiModel: async (a: { id: string }, _: unknown, ctx: Context) => {
+      if (await appProjectionWithheld(ctx, a.id)) return null;
+      return (await defaultAiConfigOf(a, 'appId', ctx))?.model ?? null;
+    },
+    hasAiApiKey: async (a: { id: string }, _: unknown, ctx: Context) => {
+      if (await appProjectionWithheld(ctx, a.id)) return null;
+      return !!(await defaultAiConfigOf(a, 'appId', ctx))?.apiKeyEncrypted;
+    },
     // spec 047: organizationId is nullable (a user-owned App has no org) —
     // guard the fallback lookup so it resolves to null (codex review, #685).
     organization: (a: { organizationId: string | null; organization?: unknown }, _: unknown, ctx: Context) =>
@@ -1567,6 +1610,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
+      if (await appProjectionWithheld(ctx, a.id)) return null;
       const agentUrn = await readPrimaryAgentField(a, ctx, 'urn');
       if (!agentUrn) return null;
       // #697 Stage 2 / D10: an installed agent stays AUTHOR-ROOTED forever, so
@@ -1598,6 +1642,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ): Promise<string | null> => {
+      if (await appProjectionWithheld(ctx, a.id)) return null;
       const id = readPrimaryAgentIdFromEager(a);
       if (id !== undefined) return id;
       return getPrimaryAgentId(ctx.db, a.id);
@@ -1607,6 +1652,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
+      if (await appProjectionWithheld(ctx, a.id)) return null;
       const eager = readPrimaryAgentRecordFromEager(a) as (NestedAgentRow & Record<string, unknown>) | null | undefined;
       if (eager !== undefined) return readableNestedAgent(ctx, eager);
       const agent = await getPrimaryAgent(ctx.db, a.id, { include: AGENT_INCLUDE });
@@ -1617,6 +1663,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
+      if (await appProjectionWithheld(ctx, a.id)) return null;
       const eagerAll = readAllAgentRecordsFromEager(a);
       if (eagerAll !== undefined) {
         const visible = await Promise.all(eagerAll.map((ag) =>
@@ -1633,6 +1680,7 @@ export const typeResolvers = {
       return visible.filter((ag): ag is NonNullable<typeof ag> => ag !== null);
     },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {
+      if (await appProjectionWithheld(ctx, a.id)) return null;
       if (!(await loadReadableNestedApp(ctx, a.id))) return [];
       return ctx.db.appMember.findMany({
         where: { appId: a.id },
@@ -1640,6 +1688,7 @@ export const typeResolvers = {
       });
     },
     memberCount: async (a: { id: string }, _: unknown, ctx: Context) => {
+      if (await appProjectionWithheld(ctx, a.id)) return null;
       if (!(await loadReadableNestedApp(ctx, a.id))) return 0;
       return ctx.db.appMember.count({ where: { appId: a.id } });
     },
@@ -1715,6 +1764,7 @@ export const typeResolvers = {
     // parent App onto each row so `AppAgent.app` resolves without an
     // N+1 DB lookup per row.
     appAgents: async (a: { id: string; appAgents?: unknown } & Record<string, unknown>, _: unknown, ctx: Context) => {
+      if (await appProjectionWithheld(ctx, a.id)) return null;
       if (Array.isArray(a.appAgents)) {
         return a.appAgents
           .filter((aa) => {
@@ -2299,8 +2349,15 @@ export const typeResolvers = {
         const orgIds = ctx.userId
           ? await getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId)
           : [];
-        if (orgIds.length === 0) return [];
-        where.organizationId = { in: orgIds };
+        // #2089: the user-owned Apps the caller manages as a current
+        // owner-role member join the org-scoped prefilter in the SQL itself
+        // (never every user's personal Apps); the row filter decides.
+        const memberArm = ctx.userId && !ctx.impersonation ? userOwnedAppOwnerMemberWhere(ctx.userId) : null;
+        if (orgIds.length === 0 && !memberArm) return [];
+        where.OR = [
+          ...(orgIds.length > 0 ? [{ organizationId: { in: orgIds } }] : []),
+          ...(memberArm ? [memberArm] : []),
+        ];
       }
       const apps = await ctx.db.app.findMany({ where, orderBy: { createdAt: 'asc' } });
       return filterReadableAppRows(ctx, apps);
@@ -2328,8 +2385,13 @@ export const typeResolvers = {
         const orgIds = ctx.userId
           ? await getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId)
           : [];
-        if (orgIds.length === 0) return [];
-        appWhere.organizationId = { in: orgIds };
+        // #2089: see Agent.apps — the qualified owner-role-member arm only.
+        const memberArm = ctx.userId && !ctx.impersonation ? userOwnedAppOwnerMemberWhere(ctx.userId) : null;
+        if (orgIds.length === 0 && !memberArm) return [];
+        appWhere.OR = [
+          ...(orgIds.length > 0 ? [{ organizationId: { in: orgIds } }] : []),
+          ...(memberArm ? [memberArm] : []),
+        ];
       }
       const rows = await ctx.db.appAgent.findMany({
         where: { agentId: a.id, app: appWhere, agent: { deletedAt: null } },

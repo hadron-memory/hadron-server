@@ -1577,6 +1577,101 @@ export async function isOwnerOrOrgMember(
 }
 
 /**
+ * The `AppMember.role` that MANAGES a user-owned App: "every member with the
+ * owner role" has the App owner's rights on it (cor:dmo:050:12, Holger
+ * #7790/#8130), except the AI configuration, which only the owning user holds.
+ */
+export const APP_OWNER_MEMBER_ROLE = 'owner';
+
+/**
+ * `where` over Apps: user-owned Apps on which `userId` holds a CURRENT
+ * owner-role membership (#2089). One predicate for the list, the batch filter
+ * and the point reads, so they cannot drift. AppMember has no `deletedAt`:
+ * removal deletes the row and demotion rewrites `role`, so row existence plus
+ * the exact role IS the current membership.
+ */
+export function userOwnedAppOwnerMemberWhere(userId: string): Prisma.AppWhereInput {
+  return {
+    ownerUserId: { not: null },
+    members: { some: { userId, role: APP_OWNER_MEMBER_ROLE } },
+  };
+}
+
+/**
+ * Is the caller a real, non-impersonated user holding a current owner-role
+ * AppMember row on this live USER-owned App? (#2089.) A point query on the
+ * deciding read, never a cached or token-carried role: a demotion or removal
+ * committed before this statement refuses; a read whose deciding statement ran
+ * earlier may complete as an already authorized read. Grants READ reach of the
+ * App record only, no write or credential authority and no child fields (see
+ * {@link appChildrenWithheld}).
+ */
+export async function isUserOwnedAppOwnerMember(
+  ctx: Context,
+  app: { id: string; ownerUserId: string | null; deletedAt?: Date | null },
+): Promise<boolean> {
+  // Cheap short-circuits only; neither of them decides admission. The row the
+  // caller holds may have been loaded before a deleteApp committed.
+  if (app.ownerUserId === null || app.deletedAt) return false;
+  if (ctx.impersonation || !ctx.userId) return false;
+  // ONE statement decides live-App AND current-membership together (the join
+  // reads the App row and the AppMember row in the same snapshot), so an App
+  // deleted after it was loaded is refused here rather than trusted from the
+  // caller's earlier read.
+  const member = await ctx.db.appMember.findFirst({
+    where: {
+      appId: app.id,
+      userId: ctx.userId,
+      role: APP_OWNER_MEMBER_ROLE,
+      app: { deletedAt: null, ownerUserId: { not: null } },
+    },
+    select: { appId: true },
+  });
+  return member !== null;
+}
+
+/**
+ * The App READ gate (#2089): {@link requireOwnerOrOrgRole} plus exactly one new
+ * arm, an owner-role member of a user-owned App. App-specific on purpose: the
+ * generic helper also guards Agents, memories and the App's AI credentials,
+ * which must stay owner-only.
+ */
+export async function requireAppRead(
+  ctx: Context,
+  app: { id: string; organizationId: string | null; ownerUserId: string | null; deletedAt?: Date | null },
+): Promise<void> {
+  if (app.ownerUserId !== null && ctx.userId !== app.ownerUserId && (await isUserOwnedAppOwnerMember(ctx, app))) return;
+  return requireOwnerOrOrgRole(ctx, app, 'READER');
+}
+
+/** Boolean form of {@link requireAppRead}. Mirrors {@link isOwnerOrOrgMember} plus the new arm. */
+export async function canReadApp(
+  ctx: Context,
+  app: { id: string; organizationId: string | null; ownerUserId: string | null; deletedAt?: Date | null },
+): Promise<boolean> {
+  return (await isOwnerOrOrgMember(ctx, app)) || (await isUserOwnedAppOwnerMember(ctx, app));
+}
+
+/**
+ * Is the App's roster / install / AI-config projection WITHHELD from this
+ * caller? (#2089.) Reaching a user-owned App's parent record is not a grant of
+ * these children: only the owning user (non-impersonated) and the App's own
+ * pure App key keep them, as before. Anyone else who reaches the record gets
+ * `null` = "withheld", never `[]`, `0` or `false`. Org-owned Apps are
+ * unchanged. Every affected field calls this BEFORE using a prefetched
+ * relation or the fallback load.
+ */
+export function appChildrenWithheld(
+  ctx: Context,
+  app: { id: string; ownerUserId: string | null },
+): boolean {
+  if (app.ownerUserId === null) return false;
+  if (!ctx.impersonation && ctx.userId && ctx.userId === app.ownerUserId) return false;
+  if (!ctx.userId && ctx.appId === app.id) return false;
+  return true;
+}
+
+/**
  * Boolean form of the org-membership gate (`requireOrgRole` throws; this
  * returns a boolean). True for a platform ADMIN/OWNER, or a live (non-revoked)
  * member of `orgId` at any role. Used where no-access must degrade gracefully
