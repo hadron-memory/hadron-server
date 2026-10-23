@@ -40,6 +40,7 @@ import {
   MissingGrantError,
   PositionConflictError,
 } from '../../../controller/operations/publishAgentImport.js';
+import { assertMaySubscribeOrgToPublicAgent } from '../../../controller/operations/subscribeOrgToPublicAgent.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
@@ -1094,15 +1095,7 @@ export const agentMutations = {
       await withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: resolvedOrgId }, { kind: 'agent', id: resolvedAgentId }],
-        async (txCtx) => {
-          await requireOrgRole(txCtx, resolvedOrgId, 'ADMIN');
-          const current = await txCtx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-          if (current.organizationId === resolvedOrgId || current.visibility !== 'PUBLIC') {
-            throw new GraphQLError('Only PUBLIC agents from another organization can be subscribed to.', {
-              extensions: { code: 'AGENT_NOT_PUBLIC', agentId: resolvedAgentId },
-            });
-          }
-        },
+        (txCtx) => assertMaySubscribeOrgToPublicAgent(txCtx, resolvedOrgId, resolvedAgentId),
         (tx) => ensureAgentOrgGrant(tx, resolvedOrgId, resolvedAgentId, {
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         }),
