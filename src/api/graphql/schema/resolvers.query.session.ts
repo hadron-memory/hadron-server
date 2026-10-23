@@ -9,6 +9,7 @@ import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { GraphQLError } from 'graphql';
+import { Prisma } from '../../../generated/prisma/index.js';
 import {
   type ToolCalendarEvent,
   type ToolCalendarInfo,
@@ -22,6 +23,9 @@ import {
   type Context,
   requireRole,
   listOrgExchangeConnections,
+  orgExchangeConnectionScope,
+  pageArgs,
+  pageEnvelope,
   getAccessibleMemoryIds,
   sessionScopeFilter,
   SESSION_INCLUDE,
@@ -249,6 +253,22 @@ export const sessionQueries = {
       // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
       return listOrgExchangeConnections(ctx, resolvedOrgId);
+    },
+
+    /** #2213 — `exchangeConnections` as a page: the same admission, rows and order (one shared scope), counted and read in one snapshot. */
+    exchangeConnectionsPage: async (
+      _: unknown,
+      args: { orgId: string; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, args.orgId);
+      const { where, orderBy } = await orgExchangeConnectionScope(ctx, resolvedOrgId);
+      const { take, skip } = pageArgs(args);
+      const [total, items] = await ctx.db.$transaction([
+        ctx.db.exchangeConnection.count({ where }),
+        ctx.db.exchangeConnection.findMany({ where, orderBy, take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(items, total, skip);
     },
 
     exchangeMessages: async (

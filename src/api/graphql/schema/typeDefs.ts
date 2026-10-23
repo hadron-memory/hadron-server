@@ -7249,6 +7249,13 @@ export const typeDefs = `#graphql
     "#1747 — the live tickers of an App the caller participates in. An App the caller cannot reach reads as APP_NOT_FOUND (hrn:node:hadronmemory.com:specs:cor:agt:080:18)."
     tickers(appRef: String!): [Ticker!]!
 
+    """
+    #2213 — \`tickers\` as a page: the same App gate, rows and order, with the real total.
+    \`limit\` defaults to 20, 0 returns the count only, a negative limit is 0 and a limit
+    over 200 is served as 200 (never refused). \`offset\` below 0 is 0.
+    """
+    tickersPage(appRef: String!, limit: Int, offset: Int): TickerPage!
+
     "#1747 — one ticker by id or hrn:ticker: URN; null when it does not exist or the caller may not reach it."
     ticker(ref: String!): Ticker
 
@@ -7948,11 +7955,29 @@ export const typeDefs = `#graphql
     ): [DashboardWidgetPreset!]!
 
     """
+    #2213 — \`dashboardWidgetPresets\` as a page: the same owner scope and order, with the
+    real total. Empty for a non-user or impersonated caller. Sizes as \`tickersPage\`.
+    """
+    dashboardWidgetPresetsPage(
+      "Return only presets for this widget type. Omit for all of them."
+      type: DashboardWidgetType
+      limit: Int
+      offset: Int
+    ): DashboardWidgetPresetPage!
+
+    """
     Exchange connections for an org.
 
     Accepts the entity's ID or URN.
     """
     exchangeConnections(orgId: ID!): [ExchangeConnection!]!
+
+    """
+    #2213 — \`exchangeConnections\` as a page: the same admission (org ADMIN/OWNER,
+    platform admin) and FORBIDDEN refusal, the same rows and order, with the real
+    total. Sizes as \`tickersPage\`.
+    """
+    exchangeConnectionsPage(orgId: ID!, limit: Int, offset: Int): ExchangeConnectionPage!
 
     """
     Fetch one Slack connection by id (spec 043). Returns null when the row
@@ -12754,6 +12779,27 @@ export const typeDefs = `#graphql
     UNSUBSCRIBED
     WORKER_RETIRED
     TICKER_DELETED
+  }
+
+  "#2213 — one page of tickers; hasMore is whether rows remain past it."
+  type TickerPage {
+    items: [Ticker!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 — one page of an org's exchange connections."
+  type ExchangeConnectionPage {
+    items: [ExchangeConnection!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 — one page of the caller's saved widget presets."
+  type DashboardWidgetPresetPage {
+    items: [DashboardWidgetPreset!]!
+    total: Int!
+    hasMore: Boolean!
   }
 
   """
