@@ -7377,19 +7377,18 @@ export const typeDefs = `#graphql
     teamSpecSchema(apiVersion: String!, form: TeamSpecForm = SERVER): String!
     """
     Resolve a fully-qualified, \`hrn:<type>:\`-prefixed Hadron URN (legacy \`urn:\` scheme also accepted) to the ids
-    needed to reach its canonical page. Returns null when the URN is
-    unresolvable (not found) OR the caller lacks access. Unlike the dedicated
-    per-kind queries — which throw \`Forbidden\` on no-access — this query
-    deliberately collapses both not-found and no-access to null, so a
-    redirect resolver can 404 uniformly without disclosing which case it was.
+    needed to reach its canonical page. Missing or inaccessible targets normally return null.
+    Ambiguous legacy node references can instead refuse with extensions.code AmbiguousLegacyUrnError.
 
-    Per-kind access uses the SAME authorization rules as the dedicated
-    queries (memory/org/agent: org membership; app: org ADMIN; node:
-    memoryAccessFilter), only with the throw replaced by a null return.
+    Access is checked by kind: memory records use the memory-record read gate; nodes use the
+    readable-memory set; organizations require membership (or platform administration);
+    agents admit public visibility or owner/org access; Apps admit owner/org access;
+    workers use the shared worker-read gate. App runs require org access, and node
+    revisions use their captured memory (falling back to the current node's memory).
+    A retired worker still resolves. Dedicated queries can have different refusal shapes.
 
-    The \`hrn:<type>:\` prefix (legacy \`urn:<type>:\` also accepted) is the
-    dispatch key — bare URNs without a type prefix are ambiguous across kinds
-    (\`root:slug\` could be a memory or an agent) and resolve to null.
+    The type prefix is the dispatch key; an untyped root:slug is ambiguous across kinds
+    and returns null. The optional #data fragment is supported only for nodes and App runs.
     """
     resolveUrn(urn: String!): UrnResolution
 
@@ -7407,15 +7406,16 @@ export const typeDefs = `#graphql
     A bare id with no scheme prefix is treated as an AiServiceConfig id — the
     only URN-less resource kind.
 
-    Authorization (who may CALL this): the same visibility bar already
-    enforced on the underlying grant tables — a platform ADMIN/OWNER, an
-    ADMIN/OWNER of the resource's owning org, or (for a strict-owner memory)
-    the memory's principal. Everyone else gets FORBIDDEN, NOT a silent empty
-    result, so the command can't probe access it isn't allowed to audit.
+    Self-audits are allowed subject to resource visibility. Cross-subject audits require
+    platform administration, resource-org ADMIN/OWNER authority, or the applicable user-owner
+    authority (including a strict-owner memory's principal). A forbidden audit is FORBIDDEN.
+    Before that caller gate, unreadable memory/node/Agent resources are concealed as NOT_FOUND;
+    self-audits conceal any unreadable resource the same way. Impersonation is restricted to
+    the shared org and refuses identity-scoped or other-org resources with FORBIDDEN.
 
-    A subject with no access is a SUCCESS with an empty grants list (all
-    capabilities false, role null) — not NOT_FOUND. An unresolvable or
-    unknown resource ref is NOT_FOUND.
+    Once admitted, a subject with no access is a SUCCESS with an empty grants list
+    (all capabilities false, role null). Unknown subjects and unresolvable resource refs
+    are NOT_FOUND. This query's supported resource kinds are not every resolveUrn kind.
     """
     effectiveAccess(user: ID!, resource: ID!): EffectiveAccess!
 
@@ -9212,7 +9212,7 @@ export const typeDefs = `#graphql
 
     """
     #1709 — a host registers, or refreshes, which of its App's workers it can launch, as which model family, and in
-    which existing worktrees (hrn:node:hadronmemory.com:specs:cor:agt:070:01). A host key only: an App key holding
+    which worktrees it declares (hrn:node:hadronmemory.com:specs:cor:agt:070:01). The server validates their tokens, not filesystem existence. A host key only: an App key holding
     host:operate, which names the host; the request names none (hrn:node:hadronmemory.com:specs:cor:agt:070:04). Refreshing within the App's lapse count
     of poll intervals keeps it live. Refused HOST_KEY_REQUIRED for anyone else, APP_KEY_SCOPE_REQUIRED without the
     scope, APP_KEY_SESSION_BOUND with a session, BAD_HOST_REGISTRATION for a bad shape or a worker not of the App.
@@ -9368,8 +9368,9 @@ export const typeDefs = `#graphql
     OWNER-equivalent), the target a live member, PEER-OR-BELOW (an org ADMIN
     may not impersonate an org OWNER), never self. Returns the audit session
     and a short-TTL token (returned exactly once) whose requests run
-    READ-ONLY as the target, scoped to this one org: other orgs and all
-    personal-class resources stay invisible, and every mutation except
+    READ-ONLY as the target. Org-scoped reads are restricted to this one org;
+    personal/private memories and identity-based owner grants are excluded. Public-resource
+    read gates remain applicable. Every mutation except
     stopImpersonation is rejected. Every request re-validates the session
     row, so stopping it (or demoting the admin) kills the token immediately.
     """
@@ -9397,7 +9398,7 @@ export const typeDefs = `#graphql
     #806 — save a named widget configuration for the caller. 'name' is trimmed
     and must be 1-60 characters, unique among the caller's presets for that
     widget type; a duplicate is BAD_USER_INPUT. 'config' must be a JSON object
-    within the same 4KB budget as a placement's config. Requires an
+    within the same 4096 UTF-16 code-unit budget for serialized JSON as a placement's config. Requires an
     authenticated user.
     """
     createDashboardWidgetPreset(
@@ -9797,23 +9798,22 @@ export const typeDefs = `#graphql
 
     """
     #1641 — create a decision log at loc in a memory: needs management rights on the memory, or the
-    owner role in the App the memory belongs to (Holger's ruling, team chat #7790). Refused
+    owner role in its live, installed App for non-personal/non-private memories. Impersonation is refused. Refused
     in an encrypted memory (DECISION_LOG_ENCRYPTED), a git-mirrored one (DECISION_LOG_MIRRORED), a
-    system memory (DECISION_LOG_SYSTEM_MEMORY), an anonymous one (DECISION_LOG_ANONYMOUS_MEMORY), at an
-    occupied loc (DECISION_LOG_EXISTS), or inside a decision's subtree. Deciders are user ids, each able
+    system memory (DECISION_LOG_SYSTEM_MEMORY), an anonymous one (DECISION_LOG_ANONYMOUS_MEMORY), at a loc occupied by a live or deleted node at or beneath it (DECISION_LOG_EXISTS), or inside a decision's subtree. Deciders are user ids, each able
     to read the memory (DECISION_DECIDER_NOT_ELIGIBLE).
     """
     createDecisionLog(memoryRef: ID!, loc: String!, name: String, prefix: String, defaultDeciders: [ID!]!, eligibleDeciders: [ID!]): DecisionLog!
     "#1641 — replace a log's default (and, when given, other eligible) deciders, as an audited revision of the log. Existing decisions keep theirs. Needs management rights on the memory, or the owner role in its App."
     setDecisionLogDeciders(logRef: ID!, defaultDeciders: [ID!]!, eligibleDeciders: [ID!], expectedRevision: Int!, reason: String!): DecisionLog!
     """
-    #1641 — ask a decision in a log: the server issues the next code (DA, DB, …) and renders the
-    content. Any writer of the log's memory, agents included. Refusals: DECISION_INVALID (with JSON
+    #1641 — ask a decision in a log: the server issues the next code using the log prefix (DA, DB, … with default D) and renders the
+    content. Any writer of the log's memory, agents included, outside impersonation. Refusals: DECISION_INVALID (with JSON
     pointers), DECISION_RECOMMENDATION_MISSING, DECISION_TIER_TOO_LOW, DECISION_DECIDER_NOT_ELIGIBLE.
     """
     askDecision(logRef: ID!, input: AskDecisionInput!): Decision!
     """
-    #1641 — amend a decision. Before any answer, any writer; after one, a decider only. Urgency is a
+    #1641 — amend a writable decision. Memory write access is always required; before any answer, any writer; after one, a decider only. Urgency is a
     decider's to change; lowering the tier is a decider's, before an answer, never when it authorizes.
     Refusals: NODE_WRITE_CONFLICT, DECISION_PART_RENUMBER, DECISION_ANSWER_IMMUTABLE, DECISION_NOT_DECIDER.
     """
