@@ -47,9 +47,10 @@ async function entry(name: string, viewer = mia.id, roles?: Roles) {
 beforeEach(async () => {
   await cleanDb(db);
   const n = Math.floor(Math.random() * 1_000_000);
+  let seq = 0; // distinct per user: random github ids collided across the six fixtures
   org = await db.organization.create({ data: { name: 'Held', urn: `held-${n}.example` } });
   const user = (tag: string, extra: Record<string, unknown> = {}) =>
-    db.user.create({ data: { githubId: 700_000 + n + tag.length * 7 + Math.floor(Math.random() * 1000), githubUsername: `h-${tag}-${n}`, roles: ['READER'], ...extra } });
+    db.user.create({ data: { githubId: 700_000_000 + n * 10 + ++seq, githubUsername: `h-${tag}-${n}`, roles: ['READER'], ...extra } });
   orgAdmin = await user('admin');
   mia = await user('mia');
   coMember = await user('co');
