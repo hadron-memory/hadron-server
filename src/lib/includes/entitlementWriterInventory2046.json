@@ -11,13 +11,13 @@
  },
  "src/api/graphql/schema/resolvers.mutation.agent.ts :: agent.create": {
   "count": 1,
-  "status": "excluded",
-  "reason": "a brand-new Agent has no prior compile source or entitlement; a systemMemoryId of an existing memory is attached in the same create and validated by the shared owner assertion, and no earlier compile can have read the new id"
+  "status": "counterparty-pending",
+  "reason": "Fresh allocation cross-transaction read/URN invisibility and compile-wait pin passes; Xylon31257 closes only that premise. Supplied-existing-Memory promotion remains a distinct unclosed census condition. Prepared provisioning root is present, but do not infer complete source/counterparty qualification from new id alone."
  },
  "src/api/graphql/schema/resolvers.mutation.agent.ts :: agent.delete": {
   "count": 1,
-  "status": "excluded",
-  "reason": "hard-delete of a SOFT-DELETED tombstone at the reclaimed URN (createAgentCore, ~168); a tombstone holds no entitlement and a Worker's agent FK is Restrict, so a casting's agent cannot be removed here"
+  "status": "counterparty-pending",
+  "reason": "OPEN #2277 combined blocker per Vera31252/Xylon31257: actual createAgentCore standalone tombstone delete removes AgentOrgGrant while retaining system source/history. Requires fencing or deciding-read grant revalidation; fresh-Agent invisibility does not qualify old entitlement deletion."
  },
  "src/api/graphql/schema/resolvers.mutation.agent.ts :: agent.update": {
   "count": 3,
@@ -118,6 +118,16 @@
   "count": 1,
   "status": "fenced",
   "reason": "writeAgentBase runs inside setAgentBase fence"
+ },
+ "src/lib/agentClone/cloneAgent.ts :: agent.create": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "Dan checked cloneAgent attach (Xylon31345) folded into delivery as2aad4b5e: existing outer withAuthorizedTx fence:true covers create/reconcile/copy/audit and retries as a whole."
+ },
+ "src/lib/agentClone/cloneAgent.ts :: agent.delete": {
+  "count": 1,
+  "status": "fenced",
+  "reason": "cloneAgent claimUrn tombstone deletion runs inside the same checked outer prepared F-first transaction (2aad4b5e), never a standalone preamble."
  },
  "src/lib/bootPromptPointer.ts :: agent.update": {
   "count": 1,
