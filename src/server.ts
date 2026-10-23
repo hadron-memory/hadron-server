@@ -44,8 +44,9 @@ import {
   type ClaimResult,
   type ClaimedLoginState,
   type LoginProvider,
-  type PendingLoginState,
+  type NewPendingLogin,
 } from './auth/pendingLoginState.js';
+import { mintProviderNonce, nonceExpectation, recordNonceRefusal } from './auth/providerNonce.js';
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
@@ -311,11 +312,11 @@ export async function createServer(): Promise<Express> {
   const persistStateOrFail = async (
     res: express.Response,
     state: string,
-    provider: LoginProvider,
-    pending: PendingLoginState,
+    login: NewPendingLogin,
   ): Promise<boolean> => {
+    const { provider } = login;
     try {
-      await createPendingLoginState(state, provider, pending);
+      await createPendingLoginState(state, login);
       return true;
     } catch (err) {
       console.error(`[auth] ${provider} login start failed to persist state:`, err);
@@ -398,7 +399,7 @@ export async function createServer(): Promise<Express> {
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    if (!(await persistStateOrFail(res, state, 'github', { redirect, returnTo, clientState }))) {
+    if (!(await persistStateOrFail(res, state, { provider: 'github', data: { redirect, returnTo, clientState } }))) {
       return;
     }
     res.redirect(buildAuthUrl(state));
@@ -629,10 +630,12 @@ export async function createServer(): Promise<Express> {
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    if (!(await persistStateOrFail(res, state, 'google', { redirect, returnTo, clientState }))) {
+    // #2204: the OIDC nonce, independent of `state` and `client_state`; only its hash is stored.
+    const { nonce, nonceHash } = mintProviderNonce();
+    if (!(await persistStateOrFail(res, state, { provider: 'google', data: { redirect, returnTo, clientState, providerNonceHash: nonceHash } }))) {
       return;
     }
-    res.redirect(buildGoogleAuthUrl(state));
+    res.redirect(buildGoogleAuthUrl(state, nonce));
   });
 
   app.get('/auth/google/callback', async (req, res) => {
@@ -646,6 +649,15 @@ export async function createServer(): Promise<Express> {
     const pending = await claimStateOrFail(res, state, 'google');
     if (!pending) return;
 
+    // #2204: what the ID token's nonce must match. Null = a ceremony row with no nonce hash, refused before any
+    // exchange (the legacy skip never reaches passkey step-up).
+    const nonceExpected = nonceExpectation(pending);
+    if (!nonceExpected) {
+      recordNonceRefusal('google', 'ceremony_unbound');
+      failLoginCallback(res, 'google', 'verify_failed');
+      return;
+    }
+
     // Diagnostics phase marker — see the GitHub callback.
     let phase: LoginFailureReason = 'exchange_failed';
     try {
@@ -656,7 +668,7 @@ export async function createServer(): Promise<Express> {
       // signature against Google's JWKS) — never a bare decode.
       const idToken = await exchangeGoogleCode(code);
       phase = 'verify_failed';
-      const identity = await verifyGoogleIdToken(idToken);
+      const identity = await verifyGoogleIdToken(idToken, nonceExpected);
       phase = 'internal_error';
 
       // #1631 PR1b: a passkey ceremony's sign-in leg. Google was asked to re-authenticate (max_age=0, R154), so an
@@ -771,10 +783,12 @@ export async function createServer(): Promise<Express> {
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    if (!(await persistStateOrFail(res, state, 'apple', { redirect, returnTo, clientState }))) {
+    // #2204: see the Google start route.
+    const { nonce, nonceHash } = mintProviderNonce();
+    if (!(await persistStateOrFail(res, state, { provider: 'apple', data: { redirect, returnTo, clientState, providerNonceHash: nonceHash } }))) {
       return;
     }
-    res.redirect(buildAppleAuthUrl(state));
+    res.redirect(buildAppleAuthUrl(state, nonce));
   });
 
   // POST, not GET: Apple form_posts the result cross-site. The state lives in
@@ -802,6 +816,15 @@ export async function createServer(): Promise<Express> {
     const pending = await claimStateOrFail(res, state, 'apple');
     if (!pending) return;
 
+    // #2204: what the ID token's nonce must match. Null = a ceremony row with no nonce hash, refused before any
+    // exchange (the legacy skip never reaches passkey step-up).
+    const nonceExpected = nonceExpectation(pending);
+    if (!nonceExpected) {
+      recordNonceRefusal('apple', 'ceremony_unbound');
+      failLoginCallback(res, 'apple', 'verify_failed');
+      return;
+    }
+
     // Diagnostics phase marker — see the GitHub callback.
     let phase: LoginFailureReason = 'exchange_failed';
     try {
@@ -812,7 +835,7 @@ export async function createServer(): Promise<Express> {
       // signature against Apple's JWKS) — never a bare decode.
       const idToken = await exchangeAppleCode(code);
       phase = 'verify_failed';
-      const identity = await verifyAppleIdToken(idToken);
+      const identity = await verifyAppleIdToken(idToken, nonceExpected);
       phase = 'internal_error';
 
       // #1631 PR1b: a passkey ceremony's sign-in leg. Lookup by the Apple id only: no email link, no creation.

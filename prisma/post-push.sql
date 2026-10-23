@@ -708,6 +708,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- 20261021080000_fresh_sign_ins (pinned by src/lib/passkeys/freshSignIn1631.test.ts).
 \ir fresh-sign-in-invariants.sql
 
+-- #2204: OIDC nonce hash on pending logins. One source, shared verbatim with migration
+-- 20261023120000_pending_login_provider_nonce (pinned by src/auth/providerNonce.test.ts).
+\ir login-nonce-invariants.sql
+
 -- #1631 PR2: passkey registration lifecycle (cancel tokens). One source, shared verbatim with migration
 -- 20261022030000_passkey_revoke (pinned by src/lib/passkeys/cancel1631.test.ts).
 \ir passkey-registration-invariants.sql
