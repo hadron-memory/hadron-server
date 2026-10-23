@@ -840,7 +840,7 @@ describe('typed-once, coverage and ambiguity', () => {
     expect(f.acked).toHaveLength(1);
   });
 
-  it('reissuing an unresolved request keeps the receiver and composer guard: no retry while a draft is pending or the receiver changed', async () => {
+  it('reissuing an unresolved request keeps the receiver and composer guard: no retry while a draft is pending or the receiver identity is unknown', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK])];
     f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
     await go();
@@ -849,7 +849,7 @@ describe('typed-once, coverage and ambiguity', () => {
     expect(f.retries).toEqual([]);
     expect(log()).toContain('not reissued');
     f.screen = { source: 'screen', tail: CLAUDE_IDLE };
-    f.incarnation = 'inc-2';
+    f.incarnation = ''; // unknown is not proof that the old incarnation is gone
     await go();
     expect(f.retries).toEqual([]);
     expect(log()).toContain('another receiver');
@@ -1480,11 +1480,11 @@ describe('#2138: an ambiguous receipt is resolved on evidence, never on a timeou
     expect(receipt().state).toBe('ambiguous');
   });
 
-  it('(b) another receiver is not resolved, and no evidence is read', async () => {
+  it('(b) an unknown receiver is not resolved, and no evidence is read', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], timing)];
     await ambiguous();
     f.lastCheckedAt = iso(T0 + 60_000);
-    f.incarnation = 'inc-2';
+    f.incarnation = '';
     await go(at(T0 + 120_000));
     expect(f.acked).toEqual([]);
     expect(f.evidenceQueries).toEqual([]);
@@ -2429,11 +2429,14 @@ describe('#2138 — fresh ticks after two unreconciled cadences', () => {
     expect(current().coverage).toEqual(['T:1']);
     expect(log()).toContain('old request could not be retained');
   });
-  for (const guard of ['draft', 'incarnation', 'busy', 'before cadence', 'same tick', 'not accepted', 'missing incarnation', 'server check failed'] as const) {
+  for (const guard of ['draft', 'incomplete inventory', 'busy', 'before cadence', 'same tick', 'not accepted', 'missing incarnation', 'server check failed'] as const) {
     it(`holds a replacement with ${guard}`, async () => {
       await stuck();
       if (guard === 'draft') f.screen = {...f.screen, draft: 'human typing'};
-      if (guard === 'incarnation') f.incarnation = 'inc-2';
+      if (guard === 'incomplete inventory') {
+        f.incarnation = 'inc-2';
+        f.terminalReply = () => ({ ok: true, result: { hasNextPage: true, terminals: [{ handle: 'term_a', incarnationId: f.incarnation, worktreePath: dir, agentIdentity: 'claude' }] } });
+      }
       if (guard === 'missing incarnation') f.incarnation = '';
       if (guard === 'busy') { f.idle = false; f.screen = {source:'screen', tail:['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)']}; }
       if (guard === 'same tick') f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], T0 + 1_200_000), [], timing)];
@@ -2504,6 +2507,42 @@ describe('#2275 dead-receiver replacement', () => {
       if (guard === 'busy') { f.idle = false; f.screen = { source: 'screen', tail: ['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'] }; }
       if (guard === 'future-floor') f.wakes[0].deliverAfter = iso(Date.now() + 60_000);
       await go({ dry: guard === 'dry' });
+      expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
+    });
+  }
+  it('archives before replacement intent: archive failure leaves the old receipt and unrelated entries intact', async () => {
+    const prior = seed(); mkdirSync(join(dir, 'ticker-wake', `needs-person.json.${process.pid}.tmp`));
+    await go();
+    expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
+    expect(stored().unrelated).toMatchObject({ receiver: 'term_other#inc-other' });
+  });
+  it('retains new intent and the old archive if a confirmed replacement crashes before receipt persistence', async () => {
+    const prior = seed();
+    f.sendReply = () => { mkdirSync(`${receiptsFile()}.${process.pid}.tmp`); return JSON.stringify(CONFIRMED); };
+    await go();
+    expect(f.sent).toHaveLength(1); expect(f.acked).toEqual([]);
+    expect(stored()['w-ada']).toMatchObject({ state: 'ambiguous', receiver: 'term_a#inc-1', detail: 'send intent recorded before submission; outcome unknown' });
+    expect(Object.values(JSON.parse(readFileSync(join(dir, 'ticker-wake', 'needs-person.json'), 'utf8')))).toEqual([
+      expect.objectContaining({ ...prior, workerId: 'w-ada' }),
+    ]);
+    rmSync(`${receiptsFile()}.${process.pid}.tmp`, { recursive: true });
+    f.sendReply = null; await go();
+    expect(f.sent).toHaveLength(1); expect(f.acked).toEqual([]);
+    expect(stored().unrelated).toMatchObject({ receiver: 'term_other#inc-other' });
+  });
+  for (const change of ['old receiver returns', 'current replaced', 'inventory fails', 'draft appears'] as const) {
+    it(`revalidates before durable retirement when ${change}`, async () => {
+      const prior = seed(); let count = 0;
+      f.terminalReply = () => {
+        if (++count === 2) {
+          if (change === 'old receiver returns') f.extraTerminals = [{ handle: 'term_old', incarnationId: 'inc-old', worktreePath: dir }];
+          if (change === 'current replaced') f.incarnation = 'inc-2';
+          if (change === 'draft appears') f.screen.draft = 'human typing';
+          if (change === 'inventory fails') return { ok: false, error: { code: 'terminal_list_failed' } };
+        }
+        return inventory();
+      };
+      try { await go(); } catch { /* failed inventory aborts rather than writes */ }
       expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
     });
   }
