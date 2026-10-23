@@ -439,3 +439,14 @@ serially dropping its private probe databases. Cleanup now has the same bounded
 cleanup operations or production behavior change. The two repaired files pass
 60/60 together; these targeted results are not a replacement for a new full
 combined run. The first full run remains recorded as red, not retroactively green.
+
+Delivery1c6ddf0e's CI then exposed an independent1903 test assumption: its
+answer-parity case required the old bare-max query to choose the bad created_at
+walk after a populated roster was added. PG16 selected the healthy session
+activity index instead. The same file's dedicated skew/non-vacuity pin passed,
+as did its shipped-plan guards. The parity case now keeps all answer checks
+and the shipped no-WALK assertion without requiring the old query to be slow
+on every fixture. The separate bad-plan control is retained. Six file tests
+pass locally; production liveness SQL is unchanged. Historical CI remains red
+until the new head completes CI; the running full evidence snapshot is kept
+unchanged until its result is recorded.
