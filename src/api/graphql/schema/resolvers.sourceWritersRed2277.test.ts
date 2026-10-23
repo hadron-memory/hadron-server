@@ -20,7 +20,7 @@ let admin: { id: string };
 let orgId: string;
 const as = (): Context => ({ db, userId: admin.id, roles: [] });
 
-async function queuedOnFence(op: () => Promise<unknown>): Promise<boolean> {
+async function queuedOnFence(op: () => Promise<unknown>, probeWhileHeld?: () => Promise<void>): Promise<boolean> {
   let release!: () => void;
   const held = new Promise<void>((r) => { release = r; });
   let entered!: () => void;
@@ -31,6 +31,7 @@ async function queuedOnFence(op: () => Promise<unknown>): Promise<boolean> {
   running.catch(() => {});
   let queued = true;
   try { await waitForLockWaitersOfType(db, 'advisory', 1, 1_500); } catch { queued = false; }
+  await probeWhileHeld?.();
   release();
   await done;
   await running;
@@ -82,6 +83,36 @@ describe('#2277 Channel message producers in a SOURCE memory (Xylon #31534, Vera
     const { memory } = await sourceFixture('knowledge');
     const ch = await M.createChannel(null, { input: { memoryRef: memory.id, loc: 'chats:kmsg', name: 'K msg chat' } }, as());
     expect(await queuedOnFence(() => M.createChannelMessage(null, { channelRef: ch.id, body: 'hello' }, as()))).toBe(false);
+  });
+});
+
+describe('#2277 delta A pin: chat-session producers (chatWriteTx inTx runner) vs a Channel root in a SOURCE memory (Xylon #31627)', () => {
+  it('CHARACTERIZATION (green): updateChatTitle cannot reach a Channel root created in a system memory; the chat lookup answers not found', async () => {
+    // sendChatMessage/processChatResponse also refuse a system-class host earlier (validateChatScopeInvariants: scope private needs
+    // personal/knowledge, shared needs app). saveChatSummary/updateChatTitle/deleteChat do NOT validate scope, only entitlement;
+    // a Channel root is not entitled to the creator through chatLocFilter. Whether ANY chat root can live in a system memory is
+    // unproven, so the attach fences the shared runner under the same class contract regardless (cost-free outside system).
+    const { memory } = await sourceFixture('system');
+    await M.createChannel(null, { input: { memoryRef: memory.id, loc: 'chats:ttl', name: 'Ttl chat' } }, as());
+    await expect(M.updateChatTitle(null, { chatId: 'chats:ttl', title: 'renamed' }, as())).rejects.toThrow(/not found/);
+  });
+});
+
+describe('#2277 delta C: old-Agent entitlement deletion on tombstone reclaim (createAgentCore)', () => {
+  it('createAgent reclaiming a tombstoned Agent that holds an AgentOrgGrant queues behind a held F', async () => {
+    const other = await db.organization.create({ data: { id: generateId(), name: 'Other', urn: 'other2277.example' } });
+    const ghost = await db.agent.create({ data: { id: generateId(), name: 'ghost', urn: 'sw2277.example:ghost', organizationId: orgId, visibility: 'PUBLIC', deletedAt: new Date() } });
+    await db.agentOrgGrant.create({ data: { orgId: other.id, agentId: ghost.id, activatedAt: new Date(), createdBy: admin.id } });
+    // The #2273 base already fences the CREATE half (so the writer does queue), but the reclaim delete runs BEFORE it
+    // on the pooled client: while F is held the old Agent's grant must still exist. RED if it was already deleted.
+    let grantsWhileHeld = -1;
+    const queued = await queuedOnFence(
+      () => M.createAgent(null, { orgId, name: 'ghost' }, as()),
+      async () => { grantsWhileHeld = await db.agentOrgGrant.count({ where: { agentId: ghost.id } }); },
+    );
+    expect(queued).toBe(true);
+    expect(grantsWhileHeld).toBe(1);
+    expect(await db.agentOrgGrant.count({ where: { agentId: ghost.id } })).toBe(0);
   });
 });
 
