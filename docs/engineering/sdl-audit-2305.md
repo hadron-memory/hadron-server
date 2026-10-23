@@ -55,3 +55,12 @@ QA shape: SDL checks plus independent read-through per T1/scoped §10. No stack,
 ## Author validation
 
 32/32 enumeration tests pass; typecheck, SDL/template parsing, description-comment scan, enumeration scan, added-line citation check, SDL export and diff whitespace check pass. Live SDL mutants removing bedrock from the eligible-provider list and drive.read from the connection-scope list each fail at the intended coordinate. Baseline and edited parsed SDL are identical after stripping descriptions. Exactly 16 S5 descriptions change; the other 11 are verified in the ledger. Existing citation-baseline and comment-allowlist cleanup notices remain advisory and outside this slice.
+
+
+## Merge-main delta and review P3 disposition
+
+After the original four seats approved 35bddae0, main advanced to 3a45f77f with S1's checker and SDL changes. One registry insertion conflict was resolved by retaining BOTH main's HOST_OPERATION_TYPES/TASK_WARNING_CODES and S5's PROCESS_CREDENTIAL_PROVIDERS entries, with their live imports; neither side's checker logic or tests was removed. SDL merged automatically; S1 descriptions remain intact.
+
+The same delta qualifies Query.aiServiceConfig denial text: an unreadable owning Agent answers AGENT_NOT_FOUND, while other denied owner gates answer Forbidden. This is the existing resolveReadableAgentRef/rethrowAiConfigTyped behavior, not a new refusal. It closes Riana/Ruth P3-1. P3-2 is retained as an explicit limit: this checker detects eligible-provider omissions, not extra ineligible providers or removal/rewording of the promised-list pattern. Runtime key eligibility remains independently enforced; no security behavior is inferred from this omission-only guard.
+
+Baseline for the original 27-row source ledger remains952b8a96. Integration validation compares this head against new main3a45f77f after stripping descriptions. Current-head focused test counts supersede the historical32 in the original author evidence; no historical verdict is claimed as a current-head carry until the seat says so.
