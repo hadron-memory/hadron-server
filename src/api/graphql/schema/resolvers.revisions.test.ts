@@ -1,3 +1,5 @@
+import { withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 /**
  * Tests for chatbot revisions: snapshot, publish, restore, editor lock.
  */
@@ -460,4 +462,27 @@ describe('#1468 — minted specs in an agent system memory', () => {
     expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).deletedAt).not.toBeNull();
     expect((await db.memory.findUniqueOrThrow({ where: { id: systemMemory.id } })).deletedAt).not.toBeNull();
   });
+});
+
+
+it('restoreRevision refuses a key revoked while its prepared restore root waits', async () => {
+  const target = await db.node.findFirstOrThrow({ where: { memoryId: systemMemory.id, loc: 'prompts:hello:greet' } });
+  await resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
+  await db.node.update({ where: { id: target.id }, data: { content: 'Current content', revisionContentHash: revisionStateHashRefreshMarker() } });
+  const key = await db.userApiKey.create({ data: { userId: adminUser.id, keyHash: generateId(), keyPreview: 'restore', oauthScopes: [] } });
+  let entered!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const holder = withIncludeHistoryTransaction(db, async () => { entered(); await gate; });
+  await ready;
+  const pending = resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: 'revisions:rev-1' }, { ...adminCtx(), apiKeyId: key.id });
+  const result = pending.then((value: unknown) => ({ value }), (error: unknown) => ({ error }));
+  try {
+    await waitForLockWaitersOfType(db, 'advisory', 1, 750);
+    await db.userApiKey.update({ where: { id: key.id }, data: { revokedAt: new Date() } });
+  } finally { release(); await holder; }
+  expect(await result).toMatchObject({ error: { extensions: { code: 'FORBIDDEN' } } });
+  expect(await db.node.findUniqueOrThrow({ where: { id: target.id } })).toMatchObject({ content: 'Current content', deletedAt: null });
+  expect(await db.nodeRevision.count({ where: { nodeId: target.id } })).toBe(0);
 });

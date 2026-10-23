@@ -343,7 +343,8 @@ function approvalForSnapshot(node: NodeApprovalColumns | null, revNo: number) {
  * `nodeRevision.create`) so the cap is enforced in ONE place. After the insert,
  * any revisions beyond the newest `maxRevCount` for this node are deleted.
  *
- * `db` may be the base client or a transaction client (both satisfy the Pick).
+ * `db` must be the current prepared include-history transaction client. The
+ * structural Pick also admits pooled clients, which the runtime guard refuses.
  * The cap is read from the snapshot's memory — the memory the node lived in at
  * capture (#602); for a move that's the source memory, which is correct (the
  * pre-move history belonged there).
