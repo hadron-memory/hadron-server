@@ -2352,13 +2352,6 @@ export const memoryMutations = {
       // plaintext branch below leaves the App-scoped class untouched.
       if (suppliedKey && !memory.isEncrypted) {
         const key = suppliedKey;
-        const nodes = await ctx.db.node.findMany({
-          where: { memoryId: resolvedMemoryId, deletedAt: null },
-          // abstract encrypts alongside content since spec 031 — selecting only
-          // content+data here would leave abstracts plaintext on a memory marked
-          // encrypted (matches the encryptMemory fix below).
-          select: { id: true, content: true, abstract: true, data: true },
-        });
         await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
           const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
@@ -2370,6 +2363,17 @@ export const memoryMutations = {
               extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: resolvedMemoryId },
             });
           }
+          // The promotion may have waited behind a committed authoring write.
+          // Lock and read its current plaintext here, never encrypt values
+          // enumerated before the deciding fence. The Memory UPDATE lock also
+          // prevents a new child from slipping into this conversion/claim set.
+          await tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${resolvedMemoryId}
+            AND deleted_at IS NULL ORDER BY id FOR UPDATE`;
+          const nodes = await tx.node.findMany({
+            where: { memoryId: resolvedMemoryId, deletedAt: null },
+            select: { id: true, content: true, abstract: true, data: true },
+            orderBy: { id: 'asc' },
+          });
           for (const node of nodes) {
             const encrypted = encryptNodeFieldsWithKey(
               { content: node.content, abstract: node.abstract, data: node.data },
