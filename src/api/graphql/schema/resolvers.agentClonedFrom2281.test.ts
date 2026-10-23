@@ -7,6 +7,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { PrismaClient } from '../../../generated/prisma/index.js';
 import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -180,6 +181,25 @@ describe('Agent.clonedFromAgentRef', () => {
     const { app } = await createDbAppWithKey(db, `cf-imp-${n}`, orgA.id);
     await createDbAppAgent(db, app.id, personal.id);
     expect(await field(c, { db, appId: app.id, userId: stranger, roles: ['READER'], impersonation: imp })).toBeNull();
+  });
+
+  it('issues one SQL statement that groups and limits the audit identities in PostgreSQL', async () => {
+    const a = await source('sql', 'PUBLIC');
+    const c = await cloneRow(a.urn, a);
+    for (let i = 0; i < 5; i++) await addAudit(a, c);
+    const logged = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL, log: [{ emit: 'event', level: 'query' }] });
+    const sqls: string[] = [];
+    (logged as any).$on('query', (e: { query: string }) => sqls.push(e.query));
+    try {
+      const out = await field(c, { db: logged as never, userId: adminB, roles: ['READER'] });
+      expect(out).toBe(await emit(a));
+    } finally {
+      await logged.$disconnect();
+    }
+    const audit = sqls.filter((q) => q.includes('agent_clone_audits'));
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatch(/GROUP BY|DISTINCT/i);
+    expect(audit[0]).toMatch(/LIMIT/i);
   });
 
   it('makes no lookup for a row that is not a clone', async () => {
