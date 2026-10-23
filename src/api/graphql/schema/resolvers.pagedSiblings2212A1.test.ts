@@ -286,3 +286,26 @@ describe('usageEventsPage', () => {
     expect((await Q.usageEventsPage({}, { limit: 5000 }, c)).items).toHaveLength(200);
   });
 });
+
+describe('nodeRevisionsPage guards pinned by the §10 review', () => {
+  it('legacy NULL-memoryId snapshots of an unreadable node never appear on the page', async () => {
+    const hidden = await db.node.create({ data: { id: generateId(), memoryId: memB.id, loc: 'h', name: 'h' } });
+    await db.nodeRevision.createMany({ data: [
+      { id: generateId(), nodeId: hidden.id, memoryId: null, loc: 'h', name: 'h', tags: [], changes: [], revNo: 1, content: 'legacy-secret' },
+    ] });
+    const p = await Q.nodeRevisionsPage({}, { nodeRef: hidden.id }, asUser(member.id));
+    expect(p).toEqual({ items: [], total: 0, hasMore: false });
+  });
+
+  it('a locked encrypted memory page conceals content and approval fields', async () => {
+    const enc = await db.memory.create({ data: { id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:enc`, name: 'enc', class: 'knowledge', isEncrypted: true } });
+    const en = await db.node.create({ data: { id: generateId(), memoryId: enc.id, loc: 'e', name: 'e' } });
+    await db.nodeRevision.createMany({ data: [
+      { id: generateId(), nodeId: en.id, memoryId: enc.id, loc: 'e', name: 'e', tags: [], changes: [], revNo: 1, content: 'plain-leftover', approvedAt: new Date() },
+    ] });
+    const p = await Q.nodeRevisionsPage({}, { nodeRef: en.id }, asUser(member.id));
+    expect(p.total).toBe(1);
+    expect(p.items[0].content).toBeNull();
+    expect(p.items[0].approvedAt).toBeNull();
+  });
+});
