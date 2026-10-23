@@ -49,17 +49,26 @@ const MA = resolvers.Mutation as unknown as {
   acknowledgeAlarm: Resolver<{ eventId: string }, EventRow>;
   setWorkerAvailability: Resolver<{ input: Record<string, unknown> }, AvailabilityRow>;
   setModelFamilyAvailability: Resolver<{ input: Record<string, unknown> }, AvailabilityRow>;
+  setAgentTaskStallSchedule: Resolver<{ appRef: string; input: Record<string, unknown> }, StallScheduleView>;
 };
 const QA = resolvers.Query as unknown as {
   teamAvailability: Resolver<{ appRef: string }, { workers: AvailabilityRow[]; families: AvailabilityRow[] }>;
   teamRoster: Resolver<{ appRef: string }, { appId: string; asOf: Date; workers: RosterRow[] }>;
+  agentTaskStallSchedule: Resolver<{ appRef: string }, StallScheduleView>;
 };
+type StallScheduleView = Record<StallScheduleKey, number> & { updatedAt: Date | null };
 type RosterRow = import('../lib/agentTasks/roster.js').RosterEntry & {
   appUrn: string;
   currentTask?: import('../lib/agentTasks/rosterSummary.js').RosterTaskSummary | null;
   pausedUntil?: Date | null;
   checkStatus?: import('../lib/workerCheckStatus.js').WorkerCheckStatus | null;
 };
+/** The seven values of an App's stall schedule (cor:agt:050:14–:17, :10, 070:01, :02), in the order the tools render them. */
+const STALL_SCHEDULE_KEYS = [
+  'notStartedMinutes', 'noProgressMinutes', 'ownerReactionMinutes', 'assignmentMinutes',
+  'hostLapseCheckIns', 'sessionEndGraceMinutes', 'hostReportTimeoutMinutes',
+] as const;
+type StallScheduleKey = (typeof STALL_SCHEDULE_KEYS)[number];
 const T = agentTaskFieldResolvers.AgentTask;
 const E = agentTaskFieldResolvers.AgentTeamEvent;
 const WA = agentTaskAlarmFieldResolvers.WorkerAvailability;
@@ -74,12 +83,16 @@ export const AGENT_TASK_WRITE_TOOLS = [
   'hadron_task_park', 'hadron_task_make_ready',
   // #1706
   'hadron_alarm_ack', 'hadron_worker_availability_set', 'hadron_model_family_availability_set',
+  // #1926
+  'hadron_stall_schedule_set',
 ] as const;
 /** The read tools: actor-neutral, so they are listed in ACTOR_NEUTRAL_TOOLS. */
 export const AGENT_TASK_READ_TOOLS = [
   'hadron_task_get', 'hadron_task_list', 'hadron_team_events', 'hadron_team_availability',
   // #1707
   'hadron_team_roster',
+  // #1926
+  'hadron_stall_schedule_get',
 ] as const;
 
 function textResult(text: string, isError = false) {
@@ -207,6 +220,14 @@ async function renderAvailability(r: AvailabilityRow, kind: 'worker' | 'family',
   const inEffect = await F.inEffect(r as never, {}, ctx);
   return `- ${who}: ${r.state}${r.reason ? ` (${r.reason})` : ''}${r.until ? ` until ${r.until.toISOString()}` : ''}` +
     ` · ${inEffect ? 'in effect' : 'not in effect'} · set ${r.setAt.toISOString()} by ${setBy}`;
+}
+
+/** An App's stall schedule as text: the seven effective values, then when a manager last set any of them. */
+function renderStallSchedule(r: StallScheduleView): string {
+  return [
+    ...STALL_SCHEDULE_KEYS.map((k) => `${k}: ${r[k]}`),
+    `updatedAt: ${r.updatedAt ? r.updatedAt.toISOString() : 'never'}`,
+  ].join('\n');
 }
 
 const SESSION_WRITE = z.string().optional().describe(
@@ -499,6 +520,35 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       }),
   );
 
+  // ── #1926: the App's stall schedule ───────────────────────────────────
+
+  server.tool(
+    'hadron_stall_schedule_get',
+    'Read a team App\'s stall schedule: the effective value of each of its seven settings (cor:agt:050:14–:17 the four ' +
+      'stall windows in minutes, 070:01 the host-lapse count in check-ins, 050:10 the session-end grace in minutes, 070:02 ' +
+      'the host report timeout in minutes), with the default shown for a setting nobody has changed, and when it was last ' +
+      'set. Readers: the App\'s participants (cor:agt:050:21).',
+    SHAPE_HADRON_STALL_SCHEDULE_GET,
+    async ({ session, appRef }) =>
+      read(session, async (ctx) => textResult(renderStallSchedule(await QA.agentTaskStallSchedule({}, { appRef }, ctx)))),
+  );
+
+  server.tool(
+    'hadron_stall_schedule_set',
+    'Set a team App\'s stall schedule: whoever manages the App only (a bound worker never does, even through a person who ' +
+      'does). Pass only the settings to change: an omitted setting keeps its value; null returns that setting to the ' +
+      'platform default. Bounds are the server\'s and a value outside them is refused. Returns the effective values as ' +
+      'stored; a change applies to the platform\'s next evaluation, and nothing here restarts a host.',
+    SHAPE_HADRON_STALL_SCHEDULE_SET,
+    async ({ session, appRef, ...values }) => {
+      // Forward only what the caller sent: `key in input` is the resolver's keep-vs-reset test.
+      const input: Record<string, number | null> = {};
+      for (const k of STALL_SCHEDULE_KEYS) if (values[k] !== undefined) input[k] = values[k] as number | null;
+      return writeOther('hadron_stall_schedule_set', session, async (ctx) =>
+        `Set.\n\n${renderStallSchedule(await MA.setAgentTaskStallSchedule({}, { appRef, input }, ctx))}`);
+    },
+  );
+
   server.tool(
     'hadron_team_roster',
     'Read a team App\'s roster (plan design:agent-tasks §7.4): each worker that is not retired, with one derived state ' +
@@ -602,6 +652,22 @@ const SHAPE_HADRON_TEAM_EVENTS = {
 const SHAPE_HADRON_ALARM_ACK = { eventId: z.string().describe('The alarm event id.'), session: SESSION_WRITE };
 
 const SHAPE_HADRON_TEAM_AVAILABILITY = { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ };
+
+const stallValue = (what: string) => z.number().nullable().optional().describe(`${what}. Omit to keep; null for the platform default.`);
+
+const SHAPE_HADRON_STALL_SCHEDULE_GET = { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ };
+
+const SHAPE_HADRON_STALL_SCHEDULE_SET = {
+  appRef: z.string().describe('The team App (id or URN).'),
+  notStartedMinutes: stallValue('Minutes an assigned task may sit unstarted before it alarms (1 to 10080)'),
+  noProgressMinutes: stallValue('Minutes a started task may go without progress before it alarms (1 to 10080)'),
+  ownerReactionMinutes: stallValue('Minutes an owner has to react to an ended child task before it alarms (1 to 10080)'),
+  assignmentMinutes: stallValue('Minutes a queued task may go unassigned before it alarms (1 to 10080)'),
+  hostLapseCheckIns: stallValue('Missed check-ins before a host\'s registration lapses (2 to 10)'),
+  sessionEndGraceMinutes: stallValue('Grace before the platform ends a finished task\'s session (1 to 1440)'),
+  hostReportTimeoutMinutes: stallValue('Minutes a host has to report an operation it collected'),
+  session: SESSION_WRITE,
+};
 
 const SHAPE_HADRON_TEAM_ROSTER = { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ };
 

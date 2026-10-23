@@ -183,12 +183,13 @@ describe('hadron_stall_schedule_set', () => {
     const plain = await session({ userId: admin.id });
     const imp = authOf(admin.id, { impersonation: { sessionId: 's', actorUserId: admin.id, orgId: 'o', expiresAt: new Date('2099-01-01') } } as never);
     const asImp = text(await mcp(imp).callTool('hadron_stall_schedule_set', { appRef: app.id, noProgressMinutes: 5, session: plain.id }));
-    expect(['APP_MANAGER_REQUIRED', 'SESSION_NOT_BOUND', 'APP_NOT_FOUND']).toContain(code(asImp));
-    expect(code(asImp)).not.toBe('NO_ERROR');
+    // The caller-session gate refuses an impersonated principal's session before the resolver runs (and the
+    // resolver's own `actorManagesApp` refuses impersonation too), so the transport can only be stricter.
+    expect(code(asImp)).toBe('SESSION_NOT_BOUND');
 
     const key = authOf(undefined as never, { userId: undefined, appId: app.id, appKeyId, clientId: undefined } as never);
     const asKey = text(await mcp(key).callTool('hadron_stall_schedule_set', { appRef: app.id, noProgressMinutes: 5, session: plain.id }));
-    expect(code(asKey)).not.toBe('NO_ERROR');
+    expect(code(asKey)).toBe('SESSION_NOT_BOUND');
     expect(await row()).toBeNull();
   });
 });
