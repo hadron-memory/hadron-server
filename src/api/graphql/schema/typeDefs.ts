@@ -7378,7 +7378,7 @@ export const typeDefs = `#graphql
     """
     Resolve a fully-qualified, \`hrn:<type>:\`-prefixed Hadron URN (legacy \`urn:\` scheme also accepted) to the ids
     needed to reach its canonical page. Missing or inaccessible targets normally return null.
-    Ambiguous legacy node references can instead refuse with AMBIGUOUS_LEGACY_URN.
+    Ambiguous legacy node references can instead refuse with extensions.code AmbiguousLegacyUrnError.
 
     Access is checked by kind: memory records use the memory-record read gate; nodes use the
     readable-memory set; organizations require membership (or platform administration);
