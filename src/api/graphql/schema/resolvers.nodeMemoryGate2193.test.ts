@@ -214,6 +214,13 @@ describe('#2193 — other Node parents: Node.memory still answers as Query.memor
         expect(nodes.map((x) => x.id).sort(), `${who}: admitted nodes`).toEqual(Object.values(node).sort());
         for (const x of nodes) expect(x.memory?.id, `${who}: node ${x.id}`).toBe(x.memoryId);
       }
+      // Expected admission, stated up front and not read off the response: the
+      // org reader reads the ORGANIZATION-visible knowledge node and nothing in
+      // the app-owned working memory; the App member reads neither.
+      const ids = nodes.map((x) => x.id);
+      if (who === 'reader') expect(ids, 'reader: knowledge node admitted').toContain(node.know);
+      if (who === 'reader' || who === 'member' || who === 'stranger') expect(ids, `${who}: handoff denied`).not.toContain(node.handoff);
+      if (who === 'stranger') expect(ids, `${who}: knowledge node denied`).not.toContain(node.know);
       await memoryMatchesOracle(who, bearer, nodes);
     }
   });
@@ -246,7 +253,7 @@ describe('#2193 — other Node parents: Node.memory still answers as Query.memor
       const r = await post(bearer, 'query($r: ID!) { appRun(ref: $r) { entryNode { id memoryId memory { id } } } }', { r: run.id });
       expect(r.errors, `${who}: appRun`).toBeUndefined();
       const entry = r.data.appRun?.entryNode;
-      if (ADMITTED.includes(who)) {
+      if (ADMITTED.includes(who) || who === 'reader') {
         expect(entry, `${who}: entryNode`).toMatchObject({ id: node.know, memory: { id: mem.know } });
       }
       if (entry) await memoryMatchesOracle(who, bearer, [entry]);
