@@ -321,6 +321,7 @@ async function mountedMcp(supplied: string) {
     expect(listed.error).toBeUndefined();
     const names: string[] = listed.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toContain('hadron_find_nodes'); // mounted protocol really executed
+    // Negative tool-name inventory only: no MCP consumer is executed or invented here.
     expect(names).not.toContain('hadron_start_agent_session');
     expect(names).not.toContain('hadron_link_memory_to_user');
   } finally {
@@ -337,6 +338,8 @@ describe('#2108 request-operation key versus ambient cache and mounted MCP', () 
     const fixture = await anonymousWithHistory();
     const unrelated = await anonymousWithHistory();
     sessionKeyCache.set('unrelated-holder', unrelated.memoryId, parseDataKey(wrongKey));
+    // Deliberately synthetic: production setters verify encrypted holdings. Retention of this
+    // impossible warm plaintext holder is observed behavior, not a new custody contract.
     if (sameMemory) sessionKeyCache.set('stale-holder', fixture.memoryId, parseDataKey(wrongKey));
     const result = await request(linkQuery, { memory: fixture.memoryId, user: 'cache-promotion' }, key);
     expect(result.body.errors).toBeUndefined();
@@ -347,7 +350,7 @@ describe('#2108 request-operation key versus ambient cache and mounted MCP', () 
     expect(sessionKeyCache.refCount(unrelated.memoryId)).toBe(1);
     expect(sessionKeyCache.getByMemoryId(unrelated.memoryId)?.raw.equals(parseDataKey(wrongKey).raw)).toBe(true);
     sessionKeyCache.evict('stale-holder');
-    expect(sessionKeyCache.getByMemoryId(fixture.memoryId)).toBeNull();
+    expect(sessionKeyCache.getByMemoryId(fixture.memoryId) === null).toBe(true);
   });
 
   it('no-header promotion stays plaintext despite a same-memory warm key', async () => {
@@ -381,12 +384,12 @@ describe('#2108 request-operation key versus ambient cache and mounted MCP', () 
       await mountedMcp(wrongKey);
       expect(await provisioningSnapshot()).toEqual(before);
       expect(cached).not.toHaveBeenCalled();
-      expect(sessionKeyCache.getByMemoryId(fixture.memoryId)).toBeNull();
+      expect(sessionKeyCache.getByMemoryId(fixture.memoryId) === null).toBe(true);
     } finally { cached.mockRestore(); }
     await db.app.update({ where: { id: appId }, data: { identifyUserMethod: 'SECRET' } });
     const secretBefore = await provisioningSnapshot();
     const secret = await request(startQuery, { agent: agentId, user: 'after-mcp' });
-    expect(secret.body.errors).toBeDefined();
+    expect(secret.body.errors?.[0]?.extensions?.code).toBe('BAD_UNLOCK_INPUT');
     expect(await provisioningSnapshot()).toEqual(secretBefore);
     await db.app.update({ where: { id: appId }, data: { identifyUserMethod: 'USER_ID' } });
     const linked = await request(linkQuery, { memory: fixture.memoryId, user: 'after-mcp-plain' });
@@ -405,7 +408,7 @@ describe('#2108 request-operation key versus ambient cache and mounted MCP', () 
     expect(promoted.body.errors).toBeUndefined();
     expect(promoted.body.data?.linkMemoryToUser.id).toBe(fixture.memoryId);
     await expectPromotionKey(fixture);
-    expect(sessionKeyCache.getByMemoryId(fixture.memoryId)).toBeNull();
+    expect(sessionKeyCache.getByMemoryId(fixture.memoryId) === null).toBe(true);
     const fresh = await anonymousWithHistory();
     const plain = await request(linkQuery, { memory: fresh.memoryId, user: 'after-concurrent' });
     expect(plain.body.errors).toBeUndefined();
