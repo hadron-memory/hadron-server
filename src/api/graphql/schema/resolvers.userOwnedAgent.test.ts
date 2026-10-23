@@ -433,6 +433,8 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
   });
 
   it('the admin restores a definition revision too (#1841: the revision surface is pinned at both ends)', async () => {
+    // Restore rechecks the persisted principal inside its prepared transaction.
+    await db.user.update({ where: { id: otherId }, data: { roles: ['ADMIN'] } });
     const agent = await rogueAgent();
     const revision = await resolvers.Mutation.createRevision(null, { agentId: agent.id, description: 'to restore' }, admin());
     expect(revision.revisionLoc).toMatch(/^revisions:/);
