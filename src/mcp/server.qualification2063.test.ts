@@ -82,3 +82,63 @@ it.each(tools)('%s holds history exclusivity through its actual commit', async (
     expect(otherEntered).toBe(true);
   } finally { release(); hook.mockRestore(); }
 });
+
+// Evidence-only: the held #2258 compile closure is absent from delivery main.
+import { compileBootPrompt } from '../api/graphql/schema/compileBootPrompt.js';
+it.each(tools.flatMap((tool) => (['read', 'write', 'writer-first'] as const).map((phase) => ({ tool, phase }))))(
+  'actual MCP $tool versus compile $phase', async ({ tool, phase }) => {
+    await prepare(tool);
+    // A tombstone cannot enter compile's write phase. Its read-phase case
+    // must refuse; use a live unrelated source for the write-holder control.
+    const affected = !(tool === 'hadron_create_node' && phase === 'write');
+    await db.node.create({ data: { memoryId, loc: 'boot:source', role: 'boot-prompt', name: 'Source', content: affected ? '{{> part}}' : 'Control source' } });
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const transaction = db.$transaction.bind(db);
+    const compileDb = new Proxy(db, {
+      get(client, key, receiver) {
+        if (key !== '$transaction') return Reflect.get(client, key, receiver);
+        return (work: (tx: Prisma.TransactionClient) => Promise<unknown>, options: unknown) => transaction(async (tx) => {
+          const result = await work(tx); if (phase === 'write') { entered(); await gate; } return result;
+        }, options as never);
+      },
+    });
+    let restoreHook: (() => void) | undefined;
+    if (phase === 'writer-first') {
+      const hook = vi.spyOn(db, '$transaction').mockImplementation((async (work: (tx: Prisma.TransactionClient) => Promise<unknown>, options: unknown) => transaction(async (tx) => {
+        const result = await work(tx); entered(); await gate; return result;
+      }, options as never)) as typeof db.$transaction);
+      restoreHook = () => hook.mockRestore();
+    }
+    const compile = () => compileBootPrompt({ db: compileDb, userId, roles: ['ADMIN'] }, { kind: 'AGENT', agentId }, phase === 'read' ? { seams: { beforeAssemble: async () => { entered(); await gate; } } } : {});
+    const first: Promise<unknown> = phase === 'writer-first' ? write(tool) : compile();
+    const firstResult = first.then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await Promise.race([ready, firstResult.then((result) => { if ('error' in result) throw result.error; throw new Error('missing MCP/compile barrier'); })]);
+      const second: Promise<unknown> = phase === 'writer-first' ? compile() : write(tool);
+      const secondResult = second.then((value) => ({ value }), (error: unknown) => ({ error }));
+      try {
+        await waitForLockWaitersOfType(db, 'advisory', 1, 1000);
+        expect(await db.compiledPromptRevision.count()).toBe(0);
+      } finally { release(); await firstResult; await secondResult; }
+      const writer = await (phase === 'writer-first' ? firstResult : secondResult);
+      expect(writer).toHaveProperty('value');
+      if ('value' in writer) check(writer.value as string);
+      const compiled = await (phase === 'writer-first' ? secondResult : firstResult);
+      const refusal = tool === 'hadron_create_node' && phase === 'read' ? 'BOOT_PROMPT_INCLUDE_RETIRED'
+        : tool === 'hadron_move_node' && phase === 'writer-first' ? 'BOOT_PROMPT_INCLUDE_UNAVAILABLE' : null;
+      if (refusal) {
+        expect(compiled).toMatchObject({ error: { extensions: { code: refusal } } });
+        expect(await db.compiledPromptRevision.count()).toBe(0);
+      } else {
+        expect(compiled).toHaveProperty('value');
+        const receipt = await db.compiledPromptRevision.findFirstOrThrow();
+        const output = await db.node.findUniqueOrThrow({ where: { id: receipt.compiledNodeId } });
+        expect(output.content).toBe(!affected ? 'Control source' : phase !== 'writer-first' ? 'Before' : tool === 'hadron_create_parent_node' ? 'Section: Part' : 'After');
+        if (affected) expect(receipt.provenance).toMatchObject({ occurrences: [{}, { nodeId: sourceId, revNo: phase === 'writer-first' ? 2 : 1 }] });
+      }
+    } finally { release(); restoreHook?.(); }
+  },
+);

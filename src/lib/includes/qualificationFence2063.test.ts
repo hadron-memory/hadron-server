@@ -698,16 +698,18 @@ it.each(combinedSurfaces)(
   },
 );
 
-it.each((['clearNodeHistory', 'deleteNodeRevision'] as const).flatMap((surface) => (['read', 'write', 'writer-first'] as const).map((phase) => ({ surface, phase }))))(
+it.each((['clearNodeHistory', 'deleteNodeRevision', 'automaticPrune'] as const).flatMap((surface) => (['read', 'write', 'writer-first'] as const).map((phase) => ({ surface, phase }))))(
   'affected pinned include: $surface / $phase preserves one coherent compile or refuses', async ({ surface, phase }) => {
     const compile = await compileCounterparty();
     const agent = await db.agent.findUniqueOrThrow({ where: { id: compile.agentId } });
+    if (surface === 'automaticPrune') await db.memory.update({ where: { id: agent.systemMemoryId! }, data: { maxRevCount: 1 } });
     const part = await db.node.create({ data: { memoryId: agent.systemMemoryId!, loc: 'parts:pinned', name: 'Part', content: '# Current', revSeq: 2 } });
     const revision = await db.nodeRevision.create({ data: { nodeId: part.id, memoryId: part.memoryId, loc: part.loc, name: 'Part', content: '# Selected old text', revNo: 1 } });
     await db.node.updateMany({ where: { memoryId: part.memoryId, loc: 'boot:source' }, data: { content: '{{> parts:pinned rev=1}}' } });
     const remove = (database: typeof db) => surface === 'clearNodeHistory'
       ? resolvers.Mutation.clearNodeHistory(null, { nodeRef: part.id }, { ...ctx(), db: database })
-      : resolvers.Mutation.deleteNodeRevision(null, { revisionId: revision.id }, { ...ctx(), db: database });
+      : surface === 'deleteNodeRevision' ? resolvers.Mutation.deleteNodeRevision(null, { revisionId: revision.id }, { ...ctx(), db: database })
+        : resolvers.Mutation.updateNode(null, { input: { id: part.id, content: '# Updated after cap prune' } }, { ...ctx(), db: database });
     let entered!: () => void;
     let release!: () => void;
     const ready = new Promise<void>((resolve) => { entered = resolve; });
@@ -741,5 +743,48 @@ it.each((['clearNodeHistory', 'deleteNodeRevision'] as const).flatMap((surface) 
       expect(receipt.provenance).toMatchObject({ occurrences: [{}, { nodeId: part.id, revNo: 1 }] });
     }
     expect(await db.nodeRevision.findUnique({ where: { id: revision.id } })).toBeNull();
+  },
+);
+
+import { computeApprovalHash } from '../approvalHash.js';
+it.each((['approveNode', 'approveMemoryNodes'] as const).flatMap((surface) => (['read', 'write', 'writer-first'] as const).map((phase) => ({ surface, phase }))))(
+  'affected approved include: $surface / $phase selects one qualified revision', async ({ surface, phase }) => {
+    const compile = await compileCounterparty();
+    const agent = await db.agent.findUniqueOrThrow({ where: { id: compile.agentId } });
+    const part = await db.node.create({ data: { memoryId: agent.systemMemoryId!, loc: 'parts:approved', name: 'Part', content: 'After', revSeq: 2 } });
+    await db.nodeRevision.create({ data: { nodeId: part.id, memoryId: part.memoryId, loc: part.loc, name: 'Part', content: 'Before', revNo: 1,
+      approvedBy: userId, approvedAt: new Date(), approvalHash: computeApprovalHash({ title: 'Part', abstract: null, content: 'Before' }) } });
+    await db.node.updateMany({ where: { memoryId: part.memoryId, loc: 'boot:source' }, data: { content: '{{> parts:approved approved}}' } });
+    const approve = (database: typeof db) => surface === 'approveNode'
+      ? resolvers.Mutation.approveNode(null, { nodeRef: part.id }, { ...ctx(), db: database })
+      : resolvers.Mutation.approveMemoryNodes(null, { memoryRef: part.memoryId }, { ...ctx(), db: database });
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const transaction = db.$transaction.bind(db);
+    const heldDb = new Proxy(db, {
+      get(client, key, receiver) {
+        if (key !== '$transaction') return Reflect.get(client, key, receiver);
+        return (work: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<unknown>, options: unknown) => transaction(async (tx) => {
+          const result = await work(tx); entered(); await gate; return result;
+        }, options as never);
+      },
+    });
+    const first: Promise<unknown> = phase === 'writer-first' ? approve(heldDb) : compileBootPrompt({ ...ctx(), db: phase === 'write' ? heldDb : db }, compile.target,
+      phase === 'read' ? { seams: { beforeAssemble: async () => { entered(); await gate; } } } : {});
+    const firstResult = first.then((value) => ({ value }), (error: unknown) => ({ error }));
+    await Promise.race([ready, firstResult.then((result) => { if ('error' in result) throw result.error; throw new Error('missing approval/compile barrier'); })]);
+    const second: Promise<unknown> = phase === 'writer-first' ? compileBootPrompt(ctx(), compile.target) : approve(db);
+    const secondResult = second.then((value) => ({ value }), (error: unknown) => ({ error }));
+    try { await waitForLockWaitersOfType(db, 'advisory', 1, 1000); }
+    finally { release(); await firstResult; await secondResult; }
+    expect(await firstResult).toHaveProperty('value');
+    expect(await secondResult).toHaveProperty('value');
+    const receipt = await db.compiledPromptRevision.findFirstOrThrow();
+    const output = await db.node.findUniqueOrThrow({ where: { id: receipt.compiledNodeId } });
+    expect(output.content).toBe(phase === 'writer-first' ? 'After' : 'Before');
+    expect(receipt.provenance).toMatchObject({ occurrences: [{}, { nodeId: part.id, revNo: phase === 'writer-first' ? 2 : 1, selection: { approved: true } }] });
+    expect((await db.node.findUniqueOrThrow({ where: { id: part.id } })).approvedRevNo).toBe(2);
   },
 );
