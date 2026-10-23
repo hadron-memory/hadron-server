@@ -358,7 +358,42 @@ async function prepareWrite(ctx: Context, ref: string, kind: 'target' | 'comment
 
 /** Run `write` under the memory's authority lock, re-running the gate on the transaction. */
 function commentTx<T>(ctx: Context, memoryId: string, gate: Gate, write: (tx: Tx, txCtx: Context) => Promise<T>): Promise<T> {
-  return withAuthorizedMemoryTx(ctx, memoryId, [], (txCtx) => gateOf(gate)(txCtx, memoryId), write);
+  return sourceFencedMemoryTx(ctx, memoryId, (txCtx) => gateOf(gate)(txCtx, memoryId), write);
+}
+
+/** The memory's class changed between the fence decision and the memory lock; the writer re-decides. */
+class SourceFenceDrift extends Error {}
+
+/**
+ * #2277: a comment in a boot-prompt SOURCE memory (an Agent system memory or an install memory, both class 'system',
+ * cor:dmo:040:08) changes what a compile reads, so its writer takes the #2063 include-history fence F as the
+ * transaction's first statement. A comment elsewhere does not (an exclusive fence per comment would serialize every
+ * comment write). The class is read before the transaction to decide, then re-checked under the memory lock; a
+ * mismatch refuses before any write and the whole attempt is retried with a fresh decision.
+ */
+export async function sourceFencedMemoryTx<T>(
+  ctx: Context,
+  memoryId: string,
+  authorize: (txCtx: Context) => Promise<void>,
+  write: (tx: Tx, txCtx: Context) => Promise<T>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    const row = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { class: true } });
+    const fence = row?.class === 'system';
+    try {
+      return await withAuthorizedMemoryTx(ctx, memoryId, [], authorize, write, {
+        fence,
+        afterLock: async (tx) => {
+          const [locked] = await tx.$queryRaw<Array<{ class: string }>>`SELECT class FROM memories WHERE id = ${memoryId}`;
+          if (locked && (locked.class === 'system') !== fence) throw new SourceFenceDrift();
+        },
+      });
+    } catch (error) {
+      if (error instanceof SourceFenceDrift && attempt < 2) continue;
+      if (error instanceof SourceFenceDrift) throw new GraphQLError('The memory changed while the write waited; read again and retry.', { extensions: { code: 'NODE_WRITE_CONFLICT' } });
+      throw error;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -705,7 +740,7 @@ async function deleteCommentReadable(
   await mayDeleteComment(ctx, head.memoryId, authorKey, head.id);
   const key = await cachedKeyFor(ctx.db, head.memoryId);
   let vanished = false;
-  await withAuthorizedMemoryTx(ctx, head.memoryId, [],
+  await sourceFencedMemoryTx(ctx, head.memoryId,
     (txCtx) => mayDeleteComment(txCtx, head.memoryId, authorKey, head.id),
     async (tx, txCtx) => {
       const { addressed: row } = await lockInThread(tx, head.id, head.memoryId);
@@ -793,7 +828,7 @@ async function deleteOwnCommentWithoutAccess(
   if (meta?.authorKey !== authorKey) throw commentMissing();
   let view: CommentView;
   try {
-    view = await withAuthorizedMemoryTx(ctx, head.memoryId, [], async () => {
+    view = await sourceFencedMemoryTx(ctx, head.memoryId, async () => {
       // No access gate to re-run: authorship of the locked row below is the
       // whole gate, so there is nothing access-shaped to recheck here.
     }, async (tx, txCtx) => {
