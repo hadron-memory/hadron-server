@@ -764,10 +764,11 @@ model Memory {
   /// (CHECK chk_personal_visibility_user): `class IN ('personal','private')`
   /// ⇔ `userId IS NOT NULL`.
   userId                String? @map("user_id")
-  /// Legacy 005 Agent-pivot for personal memories. **Retained for
-  /// backward-compat queries** (008 R-3); not consulted by post-008
-  /// access-control, which uses `appId` directly. A future cleanup
-  /// spec may collapse it.
+  /// Agent pivot used by live access-control and memory classification.
+  /// With a calling App, legacy personal/private rows with appId NULL require
+  /// this Agent installed; agent-scoped AgentSubscription checks use this Agent too.
+  /// Marks per-user/session/anonymous holdings for exclusion from shared App/team
+  /// memory folds. Free-standing personal/private memories leave this and appId NULL.
   userMemoryOfAgentId   String? @map("user_memory_of_agent_id")
   /// #723 — the IDENTITY of an App's `shared` app-class memory: the Agent whose
   /// shared space this is, under `appId`. Set ONLY on that runtime memory (NULL
