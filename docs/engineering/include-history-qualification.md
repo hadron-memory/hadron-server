@@ -379,8 +379,15 @@ withAuthorizedTx root does not opt into F, but writeClone calls
 reconcileStampedSourceNodes, which reaches the prepared-client guard in
 ensureCurrentNodeRevisionInTransaction. The existing cloneAgentRaces test for
 raw-edited stamped sources fails with the prepared-client refusal. Seven other
-focused files pass; total339 pass/1 fail across8files. This is a new caller to
-disposition under #2277/#2046, not a reason to weaken the guard or silently add
-a new production family while Anne is analysis-only. Xylon/Marco/Dan notified.
+focused files pass; total339 pass/1 fail across8files. Xylon #31322 assigns this new caller under #2277/#2046 to Dan as a separate dependent F-first/prepared-client cut on #2273. Exact attach must be CHECKED before implementation, preserving authority/Channel/base-graph/row order, full retries and same-transaction reconcile/copy/audit rollback, and #2263 epoch once per holder. Anne retains integration/census and the named failing regression; the guard stays intact. Dependency/landing shape must produce an actually green delivery, not merely a separate PR.
 The merge is not a frozen or ready head; full validation is diagnostic until
 this caller joins an accepted boundary. No activation claim.
+
+At delivery4ec46816 GitHub CI completed: typecheck and all structural checks
+pass; shards2/3/4 pass. Shard1 fails ONLY the named cloneAgentRaces stamped
+source regression (218files/3799tests pass,1test fails,7skipped in that shard).
+[CI failure](https://github.com/hadron-memory/hadron-server/actions/runs/39890365186/job/120208378931).
+This confirms the local blocker, not a full green or freeze. Basil's dependent
+#2283 head71f9074f now contains this base and fixture fix; his reported full
+suite also has this single failure. His report is distinguished from Anne's
+own CI inspection and focused runs.
