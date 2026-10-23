@@ -16,6 +16,8 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
 const A = resolvers.Agent as any;
 const M = resolvers.Mutation as any;
 const field = (parent: unknown, c: Context): Promise<string | null> => A.clonedFromAgentRef(parent, {}, c);
+/** The source as `Agent.urn` emits it: the form the field must return. */
+const emit = (a: { urn: string }) => A.urn(a, {}, { db, roles: ['READER'] } as Context);
 const asUser = (userId: string): Context => ({ db, userId, roles: ['READER'] });
 
 let orgA: { id: string; urn: string };
@@ -64,7 +66,7 @@ describe('Agent.clonedFromAgentRef', () => {
   it('shows the source URN to a caller who can read a PUBLIC source', async () => {
     const src = await source('pub', 'PUBLIC');
     const c = await cloneRow(src.urn, src);
-    expect(await field(c, asUser(adminB))).toBe(src.urn);
+    expect(await field(c, asUser(adminB))).toBe(await emit(src));
   });
 
   it('is null for a non-clone, and an unreadable source is indistinguishable from it', async () => {
@@ -75,13 +77,13 @@ describe('Agent.clonedFromAgentRef', () => {
     expect(forOutsider).toBeNull();
     expect(forOutsider).toEqual(await field(nonClone, asUser(adminB)));
     // The source's own org member can read it.
-    expect(await field(clone, asUser(memberA))).toBe(src.urn);
+    expect(await field(clone, asUser(memberA))).toBe(await emit(src));
   });
 
   it('a source made non-public after the clone stops showing to a caller outside its org', async () => {
     const src = await source('flip', 'PUBLIC');
     const c = await cloneRow(src.urn, src);
-    expect(await field(c, asUser(adminB))).toBe(src.urn);
+    expect(await field(c, asUser(adminB))).toBe(await emit(src));
     await db.agent.update({ where: { id: src.id }, data: { visibility: 'PERSONAL', organizationId: null, ownerUserId: stranger } });
     expect(await field(c, asUser(adminB))).toBeNull();
   });
@@ -99,7 +101,7 @@ describe('Agent.clonedFromAgentRef', () => {
     const c = await cloneRow(src.urn, src);
     const now = `${orgA.urn}:renamed-v2`;
     await db.agent.update({ where: { id: src.id }, data: { urn: now, legacyUrn: src.urn } });
-    expect(await field(c, asUser(adminB))).toBe(now);
+    expect(await field(c, asUser(adminB))).toBe(await emit({ urn: now }));
   });
 
   it('a replacement Agent that took the old URN is never authorized or shown', async () => {
@@ -117,12 +119,38 @@ describe('Agent.clonedFromAgentRef', () => {
     expect(await field(await cloneRow(pub.urn), asUser(adminB))).toBeNull();
   });
 
-  it('two audit rows naming different sources fail closed', async () => {
-    const one = await source('amb1', 'PUBLIC');
-    const two = await source('amb2', 'PUBLIC');
-    const c = await cloneRow(one.urn, one);
-    await db.agentCloneAudit.create({ data: { id: generateId(), sourceAgentId: two.id, newAgentId: c.id, targetOrgId: orgB.id, nodeCount: 0, edgeCount: 0, skippedEdgeCount: 0, importCount: 0, linkCount: 0 } as never });
+  const addAudit = (src: { id: string }, c: { id: string }) =>
+    db.agentCloneAudit.create({ data: { id: generateId(), sourceAgentId: src.id, newAgentId: c.id, targetOrgId: orgB.id, nodeCount: 0, edgeCount: 0, skippedEdgeCount: 0, importCount: 0, linkCount: 0 } as never });
+
+  it.each([
+    ['A,B', ['a', 'b']],
+    ['A,A,B (a conflicting third row)', ['a', 'a', 'b']],
+    ['A,B,A', ['a', 'b', 'a']],
+    ['B,A,A', ['b', 'a', 'a']],
+  ])('audit rows %s name two sources: fail closed', async (_l, order) => {
+    const srcs = { a: await source('amba', 'PUBLIC'), b: await source('ambb', 'PUBLIC') };
+    const c = await cloneRow(srcs.a.urn);
+    for (const k of order) await addAudit(srcs[k as 'a' | 'b'], c);
     expect(await field(c, asUser(adminB))).toBeNull();
+  });
+
+  it('duplicate audit rows naming the SAME source are one identity and still resolve', async () => {
+    const a = await source('dup', 'PUBLIC');
+    const c = await cloneRow(a.urn, a);
+    await addAudit(a, c);
+    await addAudit(a, c);
+    expect(await field(c, asUser(adminB))).toBe(await emit(a));
+  });
+
+  it('equals the admitted source Agent.urn as emitted, through a rename', async () => {
+    const a = await source('canon', 'PUBLIC');
+    const c = await cloneRow(a.urn, a);
+    const renamed = `${orgA.urn}:canon-v2`;
+    await db.agent.update({ where: { id: a.id }, data: { urn: renamed } });
+    const fresh = await db.agent.findUniqueOrThrow({ where: { id: a.id } });
+    const origin = await field(c, asUser(adminB));
+    expect(origin).toBe(await A.urn(fresh, {}, asUser(adminB)));
+    expect(origin).not.toBe(await emit(a));
   });
 
   it('a pure App key reads a PUBLIC source but not an uninstalled private one', async () => {
@@ -130,21 +158,23 @@ describe('Agent.clonedFromAgentRef', () => {
     const priv = await source('q2', 'ORGANIZATION');
     const { app } = await createDbAppWithKey(db, `cf-app-${n}`, orgB.id);
     const ctx: Context = { db, appId: app.id, roles: ['READER'] };
-    expect(await field(await cloneRow(pub.urn, pub), ctx)).toBe(pub.urn);
+    expect(await field(await cloneRow(pub.urn, pub), ctx)).toBe(await emit(pub));
     expect(await field(await cloneRow(priv.urn, priv), ctx)).toBeNull();
   });
 
   it('makes no lookup for a row that is not a clone', async () => {
-    const spy = vi.spyOn(db.agentCloneAudit, 'findFirst');
+    const spy = vi.spyOn(db.agentCloneAudit, 'findMany');
     await field(await cloneRow(null), asUser(adminB));
     expect(spy).not.toHaveBeenCalled();
+    const a = await source('ctl', 'PUBLIC');
+    await field(await cloneRow(a.urn, a), asUser(adminB));
+    expect(spy).toHaveBeenCalledTimes(1);
     spy.mockRestore();
   });
 
   it('is populated on the cloneAgent return value for the cloner', async () => {
     const src = await source('mut', 'PUBLIC');
     const out = await M.cloneAgent(null, { source: src.id, target: orgB.id }, asUser(adminB));
-    expect(out.clonedFromAgentRef).toBe(src.urn);
-    expect(await field(out, asUser(adminB))).toBe(src.urn);
+    expect(await field(out, asUser(adminB))).toBe(await emit(src));
   });
 });
