@@ -1,6 +1,6 @@
 # #2277: comment writers and source-memory restoreNode under the include-history fence (analysis, red-first)
 
-Status: ANALYSIS + RED TESTS ONLY. No production change. Checked by Xylon before any implementation (task 01a1666ff79c7b19a8133e3638dd1f5d). Separate main-based cut; no edits to #2263 / #2258 / #2273.
+Status: IMPLEMENTED as the dependent draft #2283 (stacked on #2273, blocked on it landing), per the attach Xylon CHECKED in #31255. This document keeps the analysis; the tests below were red on main and pass with the change. Separate cut; no edits to #2263 / #2258 / #2273.
 
 ## Scope (Xylon #31226, Vera FIT #31196)
 Fence comment create / reply / edit / delete / thread-delete and `restoreNode` in a SOURCE memory (Agent system memory or install memory, cor:dmo:040:08). Do not exclude comment nodeType. Channel/chat, revisions:* classification, the createAgent pin and #2274 rename writers are out of scope here.
@@ -32,4 +32,4 @@ Fence only when the memory is a source: `class = 'system'` (agent system memory,
 - Primitive dependency (item 2 above).
 
 ## Red tests
-`src/api/graphql/schema/resolvers.commentSourceFence2277.test.ts`: for each writer above, real resolver, F held in an outer transaction, the writer must queue on the advisory lock. 8 cases RED on main (the writer commits while F is held: Anne's witness). 2 scope controls green.
+`src/api/graphql/schema/resolvers.commentSourceFence2277.test.ts`: for each writer above, real resolver, F held in an outer transaction, the writer must queue on the advisory lock. Red on main (the writer commits while F is held: Anne's witness); green with the change: every writer (including reopen and the no-current-read author delete), a reverse-order holder, the locked class-drift retry, and 2 non-source controls that must NOT queue.
