@@ -346,6 +346,50 @@ describe('#2200 — the escalation read', () => {
   });
 });
 
+describe('#2200 — two passes owning different rows of one ended alarm', () => {
+  it('the second pass does not wait on the first\'s row: it finishes while that row is held, and every row ends once', async () => {
+    const t = await task({ ownerWorkerId: ada.id, status: 'cancelled', cancelledAt: at('10:05') });
+    const e = await db.agentTeamEvent.create({
+      data: {
+        appId: app.id, taskId: t.id, type: 'stall.not-started', severity: 'alarm', episodeStart: at('09:50'), createdAt: at('09:55'),
+        chain: [{ workerId: ada.id }, { workerId: anne.id }, { workerId: rook.id }],
+      },
+    });
+    await db.agentTeamAlarmSchedule.createMany({
+      data: [
+        { eventId: e.id, chainIndex: 0, dueAt: at('09:55'), wokenAt: at('09:55') },
+        { eventId: e.id, chainIndex: 1, dueAt: at('10:00') },
+        { eventId: e.id, chainIndex: 2, dueAt: at('10:10') },
+      ],
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const held = new Promise<void>((r) => { locked = r; });
+    // Pass B: owns row 1 (as its SKIP LOCKED claim would) and is still mid-transaction.
+    const passB = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM agent_team_alarm_schedule WHERE event_id = ${e.id} AND chain_index = 1 FOR NO KEY UPDATE`;
+      locked();
+      await gate;
+      await tx.agentTeamAlarmSchedule.updateMany({ where: { eventId: e.id, chainIndex: 1, endedAt: null }, data: { endedAt: at('10:30') } });
+    });
+    await held;
+    // Pass A claims row 2, sees the alarm ended, and must close what it can without waiting on row 1.
+    const raced = await Promise.race([
+      wakeDueOwners(db, at('10:30')).then(() => 'done'),
+      new Promise((r) => setTimeout(() => r('blocked'), 3000)),
+    ]);
+    expect(raced).toBe('done');
+    expect((await rows(e.id))[2]).toMatchObject({ wokenAt: null, endedAt: at('10:30') });
+    release();
+    await passB;
+    const final = await rows(e.id);
+    expect(final[0]).toMatchObject({ wokenAt: at('09:55'), endedAt: null });
+    expect(final[1]).toMatchObject({ wokenAt: null, endedAt: at('10:30') });
+    expect(final[2]).toMatchObject({ wokenAt: null, endedAt: at('10:30') });
+  });
+});
+
 // ── 6. The roster clears at once ───────────────────────────────────────────
 
 describe('#2200 — the roster\'s "your move" follows the alarm\'s live episode', () => {

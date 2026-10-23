@@ -767,11 +767,22 @@ export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise
     if (endedEvents.size) {
       // The alarm's own episode is over: close EVERY row of it still unwoken (not only the due ones), so no later
       // owner up the chain is woken for a condition that is gone. Nothing else is written: the alarm, its chain and
-      // the rows already woken stay as they were.
-      await tx.agentTeamAlarmSchedule.updateMany({
-        where: { eventId: { in: [...endedEvents] }, wokenAt: null, endedAt: null },
-        data: { endedAt: now },
-      });
+      // the rows already woken stay as they were. The rows are taken SKIP LOCKED, never waited for: a row another
+      // pass holds is that pass's to stamp, and waiting on it while it waits on ours is a lock cycle (two passes
+      // owning different rows of one ended alarm).
+      const rows = await tx.$queryRaw<{ eventId: string; chainIndex: number }[]>`
+        SELECT event_id AS "eventId", chain_index AS "chainIndex"
+        FROM agent_team_alarm_schedule
+        WHERE event_id IN (${Prisma.join([...endedEvents])})
+          AND woken_at IS NULL AND ended_at IS NULL
+        ORDER BY event_id, chain_index
+        FOR NO KEY UPDATE SKIP LOCKED`;
+      for (const r of rows) {
+        await tx.agentTeamAlarmSchedule.updateMany({
+          where: { eventId: r.eventId, chainIndex: r.chainIndex, wokenAt: null, endedAt: null },
+          data: { endedAt: now },
+        });
+      }
     }
     let woken = 0;
     for (const d of due) {
