@@ -366,3 +366,21 @@ persists ADMIN in that one existing test. The full user-owned Agent file passes
 25/25, without production authorization changes. A focused `-t` invocation also
 hit the file's unrelated never-started Apollo teardown; the full file avoids
 that partial-run artifact. No final full-suite or readiness claim follows.
+
+### Current-main integration: new cloneAgent caller
+
+Main `3c17ddaa` brings #2272's caller-owned `cloneMemoryGraphInTx` extraction.
+The delivery wrapper retains F-first plus its fresh authorization callback and
+passes the refreshed readable-memory set into that helper. Main's embedding
+obligation stamps/tokens are preserved alongside the prepared writer roots.
+
+A newly exposed actual integration failure remains: cloneAgent's existing
+withAuthorizedTx root does not opt into F, but writeClone calls
+reconcileStampedSourceNodes, which reaches the prepared-client guard in
+ensureCurrentNodeRevisionInTransaction. The existing cloneAgentRaces test for
+raw-edited stamped sources fails with the prepared-client refusal. Seven other
+focused files pass; total339 pass/1 fail across8files. This is a new caller to
+disposition under #2277/#2046, not a reason to weaken the guard or silently add
+a new production family while Anne is analysis-only. Xylon/Marco/Dan notified.
+The merge is not a frozen or ready head; full validation is diagnostic until
+this caller joins an accepted boundary. No activation claim.

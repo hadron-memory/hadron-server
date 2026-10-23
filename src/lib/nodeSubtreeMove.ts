@@ -1,3 +1,4 @@
+import { resetEmbeddingObligations } from '../services/embedding/obligation.js';
 /**
  * moveNodeSubtree — rebase a node AND its loc-subtree, within one memory OR
  * across memories (#768 same-memory rename; #781 cross-memory relocation).
@@ -714,15 +715,7 @@ export async function moveNodeSubtree(
   // (nothing to rebuild — the vectors just stay deleted). Content is plaintext
   // here (encrypted memories are refused above).
   await tx.nodeEmbedding.deleteMany({ where: { nodeId: { in: movedIdList } } });
-  await tx.node.updateMany({
-    where: { id: { in: movedIdList } },
-    data: {
-      embeddingPendingAt: destVectorIndexEnabled ? new Date() : null,
-      embeddingFailedAt: null,
-      embeddingError: null,
-      embeddingAttempts: 0,
-    },
-  });
+  await resetEmbeddingObligations(tx, movedIdList, destVectorIndexEnabled);
 
   // PendingEdge rows follow their source node by FK (no memoryId column), but the
   // denormalized Memory.pendingEdgeCount does not — move the credit from the

@@ -3,6 +3,7 @@
  * through the real callback with GitHub's two HTTP calls stubbed; the email leg with the mail send stubbed.
  */
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { exportJWK, exportPKCS8, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'jose';
 import { createServer as httpServer, type Server } from 'node:http';
@@ -277,6 +278,8 @@ async function idpLeg(provider: 'google' | 'apple') {
   expect(r.status).toBe(303);
   const authorize = new URL(r.headers.get('location')!);
   const state = authorize.searchParams.get('state')!;
+  // The provider echoes the nonce it was sent (#2204); a test that sets `claims.<p>.nonce` itself overrides that.
+  if (!('nonce' in claims[provider])) claims[provider] = { ...claims[provider], nonce: authorize.searchParams.get('nonce')! };
   const cb = provider === 'google'
     ? await realFetch(`${base}/auth/google/callback?code=c&state=${state}`, { redirect: 'manual' })
     // Apple form_posts cross-site: no cookie.
@@ -286,6 +289,124 @@ async function idpLeg(provider: 'google' | 'apple') {
     });
   return { authorize, cb, cookie: cookieOf(r) };
 }
+
+describe('#2204 OIDC nonce on the ceremony legs', () => {
+  const stored = async (state: string) => (await db.pendingLoginState.findUniqueOrThrow({ where: { state } })).providerNonceHash;
+
+  it.each(['google', 'apple'] as const)('%s: the authorize URL carries an independent nonce and only its hash is stored', async (provider) => {
+    const r = await realFetch(`${base}/passkeys/sign-in/${provider}/start`, { method: 'POST', redirect: 'manual', headers: { origin: ORIGIN } });
+    const u = new URL(r.headers.get('location')!);
+    const nonce = u.searchParams.get('nonce')!;
+    expect(nonce).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const row = await db.pendingLoginState.findUniqueOrThrow({ where: { state: u.searchParams.get('state')! } });
+    expect(row.providerNonceHash).toBe(h(nonce));
+    expect(row.providerNonceHash).not.toBe(row.ceremonyNonceHash);
+    expect(nonce).not.toBe(u.searchParams.get('state'));
+    expect(nonce).not.toBe(cookieOf(r).split('=')[1]);
+  });
+
+  it('github has no ID token, so no nonce is sent or stored', async () => {
+    const s = await startGithub();
+    expect(await stored(s.state)).toBeNull();
+  });
+
+  it.each([
+    ['google', () => ({ sub: 'g-gina', auth_time: nowS() })],
+    ['apple', () => ({ sub: 'a-ari' })],
+  ] as const)('%s: a token with a missing, empty, non-string or other nonce records nothing', async (provider, base_) => {
+    await db.user.create({ data: { handle: 'fsi-n1', googleId: 'g-gina', appleId: 'a-ari', roles: [] } });
+    for (const bad of [undefined, '', 42, 'not-this-logins-nonce']) {
+      claims[provider] = { ...base_(), nonce: bad };
+      const { cb } = await idpLeg(provider);
+      expect(cb.status).toBe(500);
+      expect(cb.headers.get('set-cookie') ?? '').not.toMatch(/hadron_ceremony_leg/);
+    }
+    expect(await db.freshSignIn.count()).toBe(0);
+  });
+
+  it('another login\'s valid nonce is refused (a token replayed from a different attempt)', async () => {
+    await db.user.create({ data: { handle: 'fsi-n2', googleId: 'g-gina', roles: [] } });
+    const other = await realFetch(`${base}/passkeys/sign-in/google/start`, { method: 'POST', redirect: 'manual', headers: { origin: ORIGIN } });
+    claims.google = { sub: 'g-gina', auth_time: nowS(), nonce: new URL(other.headers.get('location')!).searchParams.get('nonce')! };
+    expect((await idpLeg('google')).cb.status).toBe(500);
+    expect(await db.freshSignIn.count()).toBe(0);
+  });
+
+  it('a ceremony row with no nonce hash is refused before any token exchange, never skipped', async () => {
+    await db.user.create({ data: { handle: 'fsi-n3', googleId: 'g-gina', roles: [] } });
+    const state = 'c'.repeat(32);
+    // The CHECK refuses the insert for a NEW google row; model a pre-deploy ceremony row by bypassing it.
+    await db.$executeRaw`ALTER TABLE pending_login_states DROP CONSTRAINT chk_pending_login_provider_nonce`;
+    try {
+      await db.pendingLoginState.create({ data: { state, provider: 'google', redirect: '/', ceremonyNonceHash: h('x'), providerNonceHash: null, expiresAt: new Date(Date.now() + 60_000) } });
+      claims.google = { sub: 'g-gina', auth_time: nowS() };
+      const exchanged = vi.fn();
+      const wrapped = globalThis.fetch;
+      vi.stubGlobal('fetch', async (i: string | URL | Request, init?: RequestInit) => {
+        if (String(i).includes('oauth2.googleapis.com')) exchanged();
+        return wrapped(i, init);
+      });
+      const cb = await realFetch(`${base}/auth/google/callback?code=c&state=${state}`, { redirect: 'manual' });
+      expect(cb.status).not.toBe(303);
+      expect(exchanged).not.toHaveBeenCalled();
+      expect(await db.freshSignIn.count()).toBe(0);
+    } finally {
+      await db.pendingLoginState.deleteMany();
+      for (const stmt of readFileSync('prisma/login-nonce-invariants.sql', 'utf8').split(/;\s*\n/).filter((x) => x.includes('ALTER TABLE'))) await db.$executeRawUnsafe(stmt);
+    }
+  });
+});
+
+describe('#2204 OIDC nonce on the ordinary login legs', () => {
+  const CLIENT_STATE = 'b'.repeat(64);
+  const start = async (provider: 'google' | 'apple') => {
+    const r = await realFetch(`${base}/auth/${provider}?client_state=${CLIENT_STATE}`, { redirect: 'manual' });
+    expect(r.status).toBe(302);
+    const u = new URL(r.headers.get('location')!);
+    return { nonce: u.searchParams.get('nonce')!, state: u.searchParams.get('state')! };
+  };
+  const finish = (provider: 'google' | 'apple', state: string) => provider === 'google'
+    ? realFetch(`${base}/auth/google/callback?code=c&state=${state}`, { redirect: 'manual' })
+    : realFetch(`${base}/auth/apple/callback`, {
+      method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `code=c&state=${state}`,
+    });
+
+  it.each(['google', 'apple'] as const)('%s: the start sends a nonce whose hash is stored, and a matching token signs in', async (provider) => {
+    const { nonce, state } = await start(provider);
+    expect((await db.pendingLoginState.findUniqueOrThrow({ where: { state } })).providerNonceHash).toBe(h(nonce));
+    claims[provider] = { sub: `${provider}-new`, email: `${provider}@example.test`, email_verified: true, nonce };
+    const cb = await finish(provider, state);
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get('location')).toContain('/auth/callback?code=');
+    expect(await db.user.count({ where: { email: `${provider}@example.test` } })).toBe(1);
+  });
+
+  it.each(['google', 'apple'] as const)('%s: a token without the nonce, or with another attempt\'s, creates no user and burns the state', async (provider) => {
+    const first = await start(provider);
+    const second = await start(provider);
+    for (const [st, nonce] of [[first.state, undefined], [second.state, first.nonce]] as const) {
+      claims[provider] = { sub: `${provider}-bad`, email: `${provider}-bad@example.test`, email_verified: true, nonce };
+      expect((await finish(provider, st)).status).toBe(500);
+      expect(await db.pendingLoginState.findUnique({ where: { state: st } })).toBeNull();
+    }
+    expect(await db.user.count({ where: { email: `${provider}-bad@example.test` } })).toBe(0);
+  });
+
+  it('a legacy row (no hash, minted before #2204) is the only one that signs in without a nonce', async () => {
+    await db.$executeRaw`ALTER TABLE pending_login_states DROP CONSTRAINT chk_pending_login_provider_nonce`;
+    try {
+      await db.pendingLoginState.create({ data: { state: 'l'.repeat(32), provider: 'google', redirect: '/', clientState: CLIENT_STATE, expiresAt: new Date(Date.now() + 60_000) } });
+      claims.google = { sub: 'g-legacy', email: 'legacy@example.test', email_verified: true };
+      expect((await finish('google', 'l'.repeat(32))).status).toBe(302);
+    } finally {
+      for (const stmt of readFileSync('prisma/login-nonce-invariants.sql', 'utf8').split(/;\s*\n/).filter((x) => x.includes('ALTER TABLE'))) await db.$executeRawUnsafe(stmt);
+    }
+    // A bound row never skips: the same token shape is refused.
+    const { state } = await start('google');
+    claims.google = { sub: 'g-legacy2', email: 'legacy2@example.test', email_verified: true };
+    expect((await finish('google', state)).status).toBe(500);
+  });
+});
 
 describe('Google leg (R154: re-authentication requested and verified)', () => {
   it('asks Google for max_age=0, and a fresh auth_time for a known Google id records a google row the browser confirms', async () => {

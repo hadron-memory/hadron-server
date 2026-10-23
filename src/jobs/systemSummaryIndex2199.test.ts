@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { stampEmbeddingObligation } from '../services/embedding/obligation.js';
 /**
  * #2199 (cor:rag:010:01 r17) — a `class = 'system'` memory is ALWAYS indexed by summary; the setting and the source
  * only add content passages. Non-system classes keep the opt-in rule untouched.
@@ -5,13 +7,13 @@
  * Hermetic: a stub embedder, the real pipeline (enqueue, embedNode, the drain), the real memory-config mutation and the
  * real findNodes scope. Nothing here calls a paid embedding endpoint.
  */
-import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import type { EmbeddingClient } from '../lib/embedding/index.js';
 import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../lib/embedding/index.js';
-import { embedNode, drainEmbeddingQueue } from './embedNodes.js';
+import { embedNode, drainEmbeddingQueue, embeddingDispatcher } from './embedNodes.js';
 import { enqueueNodeEmbedding, stampMemoryEmbeddingsBatch } from '../services/embedding/enqueue.js';
 import { embeddingKindsWanted, memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
 import { backfillSystemMemoryEmbeddings, parseBackfillArgs, parseCursor } from './backfillSystemMemoryEmbeddings.js';
@@ -45,7 +47,7 @@ async function memory({ cls, flag = false, source = 'abstract' }: MemOpts) {
   return id;
 }
 async function node(memoryId: string, loc: string, abstract: string | null, content = `content of ${loc}. `.repeat(8)) {
-  return db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, abstract, content, embeddingPendingAt: new Date() } });
+  return db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, abstract, content, embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date() } });
 }
 async function kinds(nodeId: string): Promise<{ abstract: number; chunk: number }> {
   const rows = await db.$queryRaw<{ kind: string; n: number }[]>`SELECT kind, count(*)::int AS n FROM node_embeddings WHERE node_id = ${nodeId} GROUP BY kind`;
@@ -59,6 +61,9 @@ beforeEach(async () => {
   orgId = (await db.organization.create({ data: { id: generateId(), name: 'idx-org', urn: 'idx2199' } })).id;
   admin = await db.user.create({ data: { githubId: 219901, githubUsername: 'idx-admin', handle: 'idx-admin', roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: orgId, userId: admin.id, role: 'ADMIN' } });
+});
+afterEach(async () => {
+  await vi.waitFor(() => expect(embeddingDispatcher(db).state()).toMatchObject({ active: 0, selecting: false, scheduled: false }));
 });
 afterAll(() => { resetEmbeddingClientForTests(); delete process.env.EMBEDDING_API_URL; });
 
@@ -132,11 +137,14 @@ describe('enqueue, drain and refresh', () => {
   it('a write to a system memory with the setting off is queued; the same write to a knowledge memory is not', async () => {
     const sys = await node(await memory({ cls: 'system', flag: false }), 'a', 'sum');
     await db.node.update({ where: { id: sys.id }, data: { embeddingPendingAt: null } });
-    await enqueueNodeEmbedding(db, { nodeId: sys.id, memoryId: sys.memoryId, plaintext: {} });
+    delete process.env.EMBEDDING_API_URL; // inspect the committed writer marker without starting a drain
+    const sysToken = await db.$transaction(tx => stampEmbeddingObligation(tx, sys.id, sys.memoryId));
+    await enqueueNodeEmbedding(db, { nodeId: sys.id, memoryId: sys.memoryId, workToken: sysToken, plaintext: {} });
     expect((await db.node.findUniqueOrThrow({ where: { id: sys.id } })).embeddingPendingAt).not.toBeNull();
     const k = await node(await memory({ cls: 'knowledge', flag: false }), 'a', 'sum');
     await db.node.update({ where: { id: k.id }, data: { embeddingPendingAt: null } });
-    await enqueueNodeEmbedding(db, { nodeId: k.id, memoryId: k.memoryId, plaintext: {} });
+    const kToken = await db.$transaction(tx => stampEmbeddingObligation(tx, k.id, k.memoryId));
+    await enqueueNodeEmbedding(db, { nodeId: k.id, memoryId: k.memoryId, workToken: kToken, plaintext: {} });
     expect((await db.node.findUniqueOrThrow({ where: { id: k.id } })).embeddingPendingAt).toBeNull();
   });
 
@@ -145,7 +153,7 @@ describe('enqueue, drain and refresh', () => {
     await drainEmbeddingQueue(db, { client: stub });
     expect(await kinds(n.id)).toMatchObject({ abstract: 1 });
     const before = await db.$queryRaw<{ v: string }[]>`SELECT embedding::text AS v FROM node_embeddings WHERE node_id = ${n.id}`;
-    await db.node.update({ where: { id: n.id }, data: { abstract: 'a much longer second summary', embeddingPendingAt: new Date() } });
+    await db.node.update({ where: { id: n.id }, data: { abstract: 'a much longer second summary', embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date() } });
     await drainEmbeddingQueue(db, { client: stub });
     const after = await db.$queryRaw<{ v: string }[]>`SELECT embedding::text AS v FROM node_embeddings WHERE node_id = ${n.id}`;
     expect(after[0]!.v).not.toBe(before[0]!.v);
@@ -280,10 +288,11 @@ describe('the bounded, resumable backfill', () => {
 
   it('idempotent: nothing is stamped twice; a node already embedded, queued, failed, deleted or abstract-less is left alone', async () => {
     const { m, ids } = await seed(5);
-    await db.node.update({ where: { id: ids[0]! }, data: { embeddingPendingAt: new Date() } }); // queued
+    await db.node.update({ where: { id: ids[0]! }, data: { embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date() } }); // queued
     await db.node.update({ where: { id: ids[1]! }, data: { embeddingFailedAt: new Date() } }); // failed
     await db.node.update({ where: { id: ids[2]! }, data: { deletedAt: new Date() } }); // deleted
-    await embedNode(db, ids[3]!); // already has its summary vector (drains as a system memory)
+    await db.$transaction(tx => stampEmbeddingObligation(tx, ids[3]!, m));
+    await embedNode(db, ids[3]!); // accepted obligation completed; marker cleared
     const first = await stampMemoryEmbeddingsBatch(db, m, { limit: 50 });
     expect(first.eligible).toBe(1); // only ids[4] qualifies, before the guarded write even runs
     expect(first.stamped).toBe(1);

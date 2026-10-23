@@ -170,6 +170,8 @@ describe('raw-SQL Node writers: the covered and the intentionally exempt (#2176 
   // Every `UPDATE nodes` in src/ bypasses the central stamp. Each listed one touches no authored field
   // (or is a delete), so leaving attribution alone is correct. A new one must be added HERE, with a reason.
   const EXEMPT: Record<string, string> = {
+    'src/services/embedding/enqueue.ts': 'internal4 backfill/retry change embedding obligation metadata only, never authored fields or attribution',
+    'src/services/embedding/obligation.ts': 'internal4 batch reset changes embedding obligation metadata only, never authored fields or attribution',
     'src/lib/channels.ts': 'wake-stamp strip on adopting a pre-Channel row (server repair) and the soft-delete tombstone move: no authored edit',
     'src/api/graphql/schema/resolvers.specCorpus.ts': 'mint columns only: operational, already stamps minted_by',
   };
