@@ -5,6 +5,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../../test/softPasskey.js';
 import { createSignIn } from '../../auth/signIn.js';
+import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { createCeremony } from './ceremony.js';
 import { confirmFreshSignIn, recordIdpSignIn, startEmailSignIn } from './freshSignIn.js';
 import { bindRevokeByIdp, bindRevokeByPasskey, finishRevoke } from './revoke.js';
@@ -167,6 +168,46 @@ describe('what a revocation does, and only for the owner', () => {
     expect(await finish(id, laptop)).not.toBeNull();
     const third = softPasskey(); await insertSoftPasskey(db, ana, third);
     expect(await finish(id, third)).toBeNull();
+  });
+
+  it('two finishes racing on one proved ceremony revoke exactly one target (consume UPDATE `consumed_at IS NULL`)', async () => {
+    const third = softPasskey(); const thirdId = await insertSoftPasskey(db, ana, third, { label: 'Tablet' });
+    const id = await ceremony();
+    expect(await byPasskey(id, phone)).not.toBeNull();
+    // Hold the owner's anchor so both finishes pass their unlocked pre-check and queue behind it; releasing it then
+    // serializes them, and only the consume UPDATE's `consumed_at IS NULL` can refuse the second.
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockTaken = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'user', id: ana }], 'exclusive');
+      locked();
+      await held;
+    });
+    await lockTaken;
+    const racers = Promise.all([finish(id, laptop), finish(id, third)]);
+    for (let i = 0; i < 200; i++) {
+      const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`;
+      if (Number(n) >= 2) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    release(); await holder;
+    const results = await racers;
+    expect(results.filter((r) => r !== null)).toHaveLength(1);
+    const revoked = [await rec(laptopId), await rec(thirdId)].filter((p) => p.revokedAt !== null);
+    expect(revoked).toHaveLength(1);
+    expect((await rec(phoneId)).revokedAt).toBeNull();
+  });
+
+  it('a bound ceremony aged past its TTL finishes nothing (consume UPDATE `expires_at`)', async () => {
+    const id = await ceremony();
+    expect(await byPasskey(id, phone)).not.toBeNull();
+    await db.$executeRaw`UPDATE passkey_ceremonies SET expires_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 second' WHERE id = ${id}`;
+    expect(await finish(id, laptop)).toBeNull();
+    expect((await rec(laptopId)).revokedAt).toBeNull();
+    expect((await db.passkeyCeremony.findUniqueOrThrow({ where: { id } })).consumedAt).toBeNull();
   });
 
   it('a deleted owner revokes nothing', async () => {
