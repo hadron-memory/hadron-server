@@ -548,7 +548,7 @@ it('encryption conversion rechecks a credential revoked after the flag-flip tran
 
 // Evidence-only combined tree: these imports and controls require held #2258.
 import { compileBootPrompt } from '../../api/graphql/schema/compileBootPrompt.js';
-const combinedSurfaces: QualificationSurface[] = ['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories', 'encryptMemory', 'updateTeamRole', 'deleteTeamRole', 'restoreNodeRevision', 'updateNode', 'updateNodeProperties', 'moveNode', 'cloneNode', 'mergeNodes', 'deleteNode', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'mergeMemories', 'specReplace'];
+const combinedSurfaces: QualificationSurface[] = ['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories', 'encryptMemory', 'updateTeamRole', 'deleteTeamRole', 'restoreNodeRevision', 'updateNode', 'updateNodeProperties', 'moveNode', 'cloneNode', 'mergeNodes', 'deleteNode', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'mergeMemories', 'specReplace', 'reserveSpecCitation'];
 async function compileCounterparty() {
   const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
   const system = await db.memory.create({ data: { class: 'system', organizationId: memory.organizationId, name: 'Compile system', urn: 'qualification-fence.example:compile-system' } });
