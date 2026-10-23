@@ -7675,6 +7675,11 @@ export const typeDefs = `#graphql
     Mutually exclusive with nodeId (BAD_USER_INPUT when both are passed).
     """
     usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, limit: Int, offset: Int): [UsageEvent!]!
+    """
+    #2212 - \`usageEvents\` as a page: the same READER gate, the same loc/nodeId rules and the same readable-memory
+    scope, ordered newest first with an id tiebreak, with the real total. Sizes as \`tickersPage\`.
+    """
+    usageEventsPage(type: String, memoryId: ID, nodeId: ID, loc: String, limit: Int, offset: Int): UsageEventPage!
 
     """
     Revision history for a node, most recent first.
@@ -7684,6 +7689,12 @@ export const typeDefs = `#graphql
     disclosure).
     """
     nodeRevisions(nodeRef: ID!, limit: Int): [NodeRevision!]!
+    """
+    #2212 - \`nodeRevisions\` as a page: the same access gate (a miss or an unreadable node is an empty page),
+    with the snapshot-memory gate applied before counting, so \`total\` and the pages hold only snapshots you
+    may read and never fall short near the limit. Newest first with an id tiebreak. Sizes as \`tickersPage\`.
+    """
+    nodeRevisionsPage(nodeRef: ID!, limit: Int, offset: Int): NodeRevisionPage!
     "#1591 — the tamper check: recompute the node's approval hash from its current title/abstract/content and compare it with the approval on record. A pure read; an encrypted memory needs its session key (SESSION_EXPIRED otherwise)."
     verifyNode(nodeRef: ID!): NodeIntegrityCheck!
     "#1632 — one signing request; null when unknown or when its node is not readable to the caller."
@@ -7795,6 +7806,11 @@ export const typeDefs = `#graphql
     filter is what narrows this to worker sessions.
     """
     sessions(type: String, repo: String, customerId: String, workerRef: String, limit: Int, offset: Int): [Session!]!
+    """
+    #2212 - \`sessions\` as a page: the same session scope and filters (a blank or unresolvable workerRef is
+    an empty page), newest first with an id tiebreak, with the real total. Sizes as \`tickersPage\`.
+    """
+    sessionsPage(type: String, repo: String, customerId: String, workerRef: String, limit: Int, offset: Int): SessionPage!
     session(id: ID!): Session
 
     """
@@ -12784,6 +12800,27 @@ export const typeDefs = `#graphql
   "#2213 — one page of tickers; hasMore is whether rows remain past it."
   type TickerPage {
     items: [Ticker!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2212 — one page of a node's revision snapshots, counted over the snapshots the caller may read."
+  type NodeRevisionPage {
+    items: [NodeRevision!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2212 — one page of sessions in the caller's session scope."
+  type SessionPage {
+    items: [Session!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2212 — one page of usage events in the caller's readable memories."
+  type UsageEventPage {
+    items: [UsageEvent!]!
     total: Int!
     hasMore: Boolean!
   }
