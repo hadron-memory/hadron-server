@@ -1011,7 +1011,7 @@ it('diagnostic: createAgent tombstone preamble deletes entitlement but retains s
   expect(await db.nodeRevision.count({ where: { nodeId: source.id } })).toBe(1);
 });
 
-it.each(['commentEdit', 'sourceRestore'] as const)('#2277 $surface advances the integrated #2263 epoch before queued account work', async (surface) => {
+it.each(['commentEdit', 'sourceRestore', 'cloneAgent'] as const)('#2277 %s advances the integrated #2263 epoch before queued account work', async (surface) => {
   const compile = await compileCounterparty();
   const agent = await db.agent.findUniqueOrThrow({ where: { id: compile.agentId } });
   const target = await db.node.create({ data: { memoryId: agent.systemMemoryId!, loc: 'epoch-target', name: 'Epoch target', content: 'Target', ...(surface === 'sourceRestore' ? { deletedAt: new Date() } : {}) } });
@@ -1025,7 +1025,8 @@ it.each(['commentEdit', 'sourceRestore'] as const)('#2277 $surface advances the 
   await ready;
   const writer = surface === 'commentEdit'
     ? resolvers.Mutation.editComment(null, { commentRef: comment!.id, body: 'After', expectedRevision: 1 }, ctx())
-    : resolvers.Mutation.restoreNode(null, { nodeRef: target.id }, ctx());
+    : surface === 'cloneAgent' ? resolvers.Mutation.cloneAgent(null, { source: agent.id, target: (await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).organizationId!, name: 'Epoch clone' }, ctx())
+      : resolvers.Mutation.restoreNode(null, { nodeRef: target.id }, ctx());
   const writerOutcome = writer.then((value: unknown) => ({ value }), (error: unknown) => ({ error }));
   let worked = false;
   let accountOutcome: Promise<unknown> | undefined;
@@ -1037,6 +1038,42 @@ it.each(['commentEdit', 'sourceRestore'] as const)('#2277 $surface advances the 
   expect(await writerOutcome).toHaveProperty('value');
   expect(isSerializationConflict(await accountOutcome)).toBe(true);
   expect(worked).toBe(false);
+  if (surface === 'cloneAgent') expect(await db.agentCloneAudit.count({ where: { sourceAgentId: agent.id } })).toBe(1);
   if (comment) expect((await db.node.findUniqueOrThrow({ where: { id: comment.id } })).content).toBe('After');
   else expect((await db.node.findUniqueOrThrow({ where: { id: target.id } })).deletedAt).toBeNull();
+});
+
+it.each(['read', 'write', 'writer-first'] as const)('cloneAgent / actual compile %s holds one outer boundary through commit', async (phase) => {
+  const compile = await compileCounterparty();
+  const agent = await db.agent.findUniqueOrThrow({ where: { id: compile.agentId } });
+  const memory = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId! } });
+  let entered!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const transaction = db.$transaction.bind(db);
+  const heldDb = new Proxy(db, {
+    get(client, key, receiver) {
+      if (key !== '$transaction') return Reflect.get(client, key, receiver);
+      return (work: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<unknown>, options: unknown) => transaction(async (tx) => {
+        const value = await work(tx); entered(); await gate; return value;
+      }, options as never);
+    },
+  });
+  const clone = (database: typeof db): Promise<unknown> => resolvers.Mutation.cloneAgent(null, { source: agent.id, target: memory.organizationId!, name: 'Fence clone' }, { ...ctx(), db: database });
+  const first: Promise<unknown> = phase === 'writer-first' ? clone(heldDb) : compileBootPrompt({ ...ctx(), db: phase === 'write' ? heldDb : db }, compile.target,
+    phase === 'read' ? { seams: { beforeAssemble: async () => { entered(); await gate; } } } : {});
+  const firstOutcome = first.then((value) => ({ value }), (error: unknown) => ({ error }));
+  await Promise.race([ready, firstOutcome.then((result) => { if ('error' in result) throw result.error; throw new Error('missing clone/compile barrier'); })]);
+  const second: Promise<unknown> = phase === 'writer-first' ? compileBootPrompt(ctx(), compile.target) : clone(db);
+  const secondOutcome = second.then((value) => ({ value }), (error: unknown) => ({ error }));
+  try { await waitForLockWaitersOfType(db, 'advisory', 1, 1000); }
+  finally { release(); await firstOutcome; await secondOutcome; }
+  expect(await firstOutcome).toHaveProperty('value');
+  expect(await secondOutcome).toHaveProperty('value');
+  const audit = await db.agentCloneAudit.findFirstOrThrow({ where: { sourceAgentId: agent.id } });
+  const copy = await db.agent.findUniqueOrThrow({ where: { id: audit.newAgentId } });
+  expect(copy.systemMemoryId).not.toBe(agent.systemMemoryId);
+  expect((await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId: copy.systemMemoryId!, loc: 'boot:source' } } })).content).toBe('Counterparty {{worker.name}}');
+  expect(await db.compiledPromptRevision.count()).toBe(1);
 });
