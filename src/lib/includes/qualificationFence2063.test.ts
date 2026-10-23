@@ -936,3 +936,81 @@ it.each(['channel-root', 'published-snapshot'] as const)(
     expect((await db.node.findUniqueOrThrow({ where: { id: result.nodeId } })).content).toBe('BeforeAfter');
   },
 );
+
+it('diagnostic: fresh createAgent system memory is invisible before its provisioning commit', async () => {
+  const compile = await compileCounterparty();
+  const ownAgent = await db.agent.findUniqueOrThrow({ where: { id: compile.agentId } });
+  const host = await db.memory.findUniqueOrThrow({ where: { id: ownAgent.systemMemoryId! } });
+  let entered!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let newMemoryId = '';
+  let newMemoryUrn = '';
+  let newAgentUrn = '';
+  const transaction = db.$transaction.bind(db);
+  const heldDb = new Proxy(db, {
+    get(client, key, receiver) {
+      if (key !== '$transaction') return Reflect.get(client, key, receiver);
+      return (work: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<unknown>, options: unknown) => transaction(async (tx) => {
+        const result = await work(tx) as { systemMemoryId: string; urn: string };
+        newMemoryId = result.systemMemoryId;
+        newAgentUrn = result.urn;
+        newMemoryUrn = (await tx.memory.findUniqueOrThrow({ where: { id: newMemoryId } })).urn;
+        // Fixture payload inside the same uncommitted provisioning transaction.
+        await tx.node.create({ data: { memoryId: newMemoryId, loc: 'part', name: 'Part', content: 'New source' } });
+        entered(); await gate; return result;
+      }, options as never);
+    },
+  });
+  const creating = resolvers.Mutation.createAgent(null, { orgId: host.organizationId!, name: 'Uncommitted source', visibility: 'PUBLIC' }, { ...ctx(), db: heldDb });
+  const outcome = creating.then((value) => ({ value }), (error: unknown) => ({ error }));
+  await Promise.race([ready, outcome.then((result) => { if ('error' in result) throw result.error; throw new Error('missing create barrier'); })]);
+  let compiling: ReturnType<typeof compileBootPrompt> | undefined;
+  let compiledBeforeCommit = false;
+  try {
+    expect(await resolvers.Query.memory(null, { ref: newMemoryId }, ctx())).toBeNull();
+    for (const urn of [`hrn:agent:${newAgentUrn}`, `hrn:mem:${newMemoryUrn}`, `hrn:node:${newMemoryUrn}:part`]) {
+      expect(await resolvers.Query.resolveUrn(null, { urn }, ctx())).toBeNull();
+    }
+    expect(await db.node.findFirst({ where: { memoryId: newMemoryId, loc: 'part' } })).toBeNull();
+    await db.node.updateMany({ where: { memoryId: host.id, loc: 'boot:source' }, data: { content: `{{> hrn:node:${newMemoryUrn}:part}}` } });
+    compiling = compileBootPrompt(ctx(), compile.target, { setPointer: false });
+    void compiling.then(() => { compiledBeforeCommit = true; }, () => { compiledBeforeCommit = true; });
+    await waitForLockWaitersOfType(db, 'advisory', 1, 1000);
+    expect(compiledBeforeCommit).toBe(false);
+  } finally { release(); await outcome; }
+  expect(await outcome).toHaveProperty('value');
+  const result = await compiling!;
+  expect((await db.node.findUniqueOrThrow({ where: { id: result.nodeId } })).content).toBe('New source');
+});
+
+it('diagnostic: createAgent tombstone preamble deletes entitlement but retains system source/history', async () => {
+  const host = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+  const system = await db.memory.create({ data: { class: 'system', organizationId: host.organizationId, urn: 'qualification-fence.example:reclaimed-agent-system', name: 'Retained system' } });
+  const old = await db.agent.create({ data: { organizationId: host.organizationId, systemMemoryId: system.id, urn: 'qualification-fence.example:reclaimed-agent', name: 'Reclaimed agent', deletedAt: new Date() } });
+  const source = await db.node.create({ data: { memoryId: system.id, loc: 'source', name: 'Source', content: 'Retained' } });
+  await db.nodeRevision.create({ data: { memoryId: system.id, nodeId: source.id, loc: source.loc, name: source.name, content: 'Retained history', revNo: 1 } });
+  await db.agentOrgGrant.create({ data: { orgId: host.organizationId!, agentId: old.id, activatedAt: new Date() } });
+  const stopped = new Error('diagnostic stop after actual preamble delete, before provisioning');
+  const observedDb = new Proxy(db, {
+    get(client, key, receiver) {
+      if (key !== 'agent') return Reflect.get(client, key, receiver);
+      return new Proxy(db.agent, {
+        get(delegate, method, delegateReceiver) {
+          if (method !== 'delete') return Reflect.get(delegate, method, delegateReceiver);
+          return async (args: Parameters<typeof db.agent.delete>[0]) => {
+            await db.agent.delete(args);
+            throw stopped;
+          };
+        },
+      });
+    },
+  });
+  await expect(resolvers.Mutation.createAgent(null, { orgId: host.organizationId!, name: 'Reclaimed agent' }, { ...ctx(), db: observedDb })).rejects.toBe(stopped);
+  expect(await db.agent.findUnique({ where: { id: old.id } })).toBeNull();
+  expect(await db.agentOrgGrant.count({ where: { agentId: old.id } })).toBe(0);
+  expect(await db.memory.findUnique({ where: { id: system.id } })).not.toBeNull();
+  expect(await db.node.findUnique({ where: { id: source.id } })).not.toBeNull();
+  expect(await db.nodeRevision.count({ where: { nodeId: source.id } })).toBe(1);
+});
