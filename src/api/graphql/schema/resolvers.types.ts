@@ -789,6 +789,9 @@ function readLivenessRowOnce(ctx: Context, id: string) {
  * all three fields, including sequential narrow-parent reads. Never mutate it.
  */
 const sessionSnapshots = new WeakMap<object, Map<string, ReturnType<typeof loadSessionSnapshot>>>();
+const fullSessionSnapshots = new WeakMap<object, WeakMap<object, ReturnType<typeof loadSessionSnapshot>>>();
+const hasSessionColumns = (s: SessionLivenessParent) => !!s.type && !!s.startedAt
+  && s.deletedAt !== undefined && s.expiresAt !== undefined && s.appId !== undefined;
 const sessionReadTimes = new WeakMap<object, Date>();
 function sessionReadTime(ctx: Context): Date {
   let now = sessionReadTimes.get(ctx);
@@ -797,7 +800,7 @@ function sessionReadTime(ctx: Context): Date {
 }
 async function loadSessionSnapshot(ctx: Context, s: SessionLivenessParent) {
   const now = sessionReadTime(ctx);
-  const row = s.type && s.startedAt && s.deletedAt !== undefined && s.expiresAt !== undefined && s.appId !== undefined
+  const row = hasSessionColumns(s)
     ? s
     : await readLivenessRowOnce(ctx, s.id);
   if (!row || !row.type || !row.startedAt) return null;
@@ -810,6 +813,16 @@ async function loadSessionSnapshot(ctx: Context, s: SessionLivenessParent) {
   return { row: session, lastEventAt, now };
 }
 function sessionSnapshot(ctx: Context, s: SessionLivenessParent) {
+  // A serial mutation may return a NEW full parent for the same id. Share a
+  // snapshot among that parent's fields, not across distinct mutation results.
+  // Preserve the historical id memo only for narrow fallback parents.
+  if (hasSessionColumns(s)) {
+    let parents = fullSessionSnapshots.get(ctx);
+    if (!parents) { parents = new WeakMap(); fullSessionSnapshots.set(ctx, parents); }
+    let snapshot = parents.get(s);
+    if (!snapshot) { snapshot = loadSessionSnapshot(ctx, s); parents.set(s, snapshot); }
+    return snapshot;
+  }
   let rows = sessionSnapshots.get(ctx);
   if (!rows) { rows = new Map(); sessionSnapshots.set(ctx, rows); }
   let snapshot = rows.get(s.id);

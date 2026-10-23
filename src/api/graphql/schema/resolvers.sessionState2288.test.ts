@@ -198,4 +198,19 @@ describe('#2288 Session.state', () => {
     expect(await validateSessionBinding(db, principal, open.id)).toBeNull();
     expect(await validateSessionBinding(db, principal, promised.id)).toMatchObject({ sessionId: promised.id });
   });
+  it('serial mutation fields describe their own fresh parent after endSession', async () => {
+    const row = await session();
+    const out = await server.executeOperation({ query: `mutation($id:ID!){
+      u:updateSession(id:$id,branch:"state-regression"){isLive state}
+      e:endSession(id:$id){isLive lapsesAt state endedAt}
+    }`, variables: { id: row.id } }, { contextValue: ctx() });
+    if (out.body.kind !== 'single') throw new Error('incremental response');
+    expect(out.body.singleResult.errors).toBeUndefined();
+    expect(out.body.singleResult.data).toMatchObject({
+      u: { isLive: true, state: 'LIVE' },
+      e: { isLive: false, lapsesAt: null, state: 'ENDED', endedAt: NOW.toISOString() },
+    });
+    expect((await db.session.findUniqueOrThrow({ where: { id: row.id } })).endedAt).toEqual(NOW);
+  });
+
 });
