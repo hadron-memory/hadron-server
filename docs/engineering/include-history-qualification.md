@@ -218,6 +218,11 @@ refusal. These gates cover the deciding cleanup transaction itself, including Ag
 
 ## Combined readiness: excluded raw writers are not waived
 
+| Combined-gate blocker | Open effect | Ownership / decision |
+| --- | --- | --- |
+| [#2274](https://github.com/hadron-memory/hadron-server/issues/2274) | Excluded address rewrites and raw target-namespace tombstone deletions with source/history cascades | Distinct rename/address follow-up; stable IDs do not waive source/provenance assessment. |
+| [#2277](https://github.com/hadron-memory/hadron-server/issues/2277) | Actual admitted unfenced comment writer plus separately labeled Channel/chat/recovery/snapshot/Agent-tombstone static candidates | Vera scoped FIT and Xylon disposition first. Anne analysis only; no new production families or admission narrowing authorized. |
+
 Xylon #31001 confirms the separate follow-up and keeps a blocker on every
 qualified-identity or served-text/provenance guarantee that depends on fencing
 these writers. Packaging does not establish their safety. The follow-up is [#2274](https://github.com/hadron-memory/hadron-server/issues/2274),
@@ -268,11 +273,12 @@ own them.
 | Agent URN-tombstone preamble (`createAgentCore`) | **Static identity/authority candidate:** this is an Agent deletion, not an included Node admission witness | Deletes old Agent and can cascade entitlement/identity rows; does not itself cascade system Memory | Standalone ctx.db.agent.delete before the prepared provisioning root. Not fenced or matrix-covered by #2263 (Basil #31171). The new provisioning root qualifies explicit Memory-history removal only. | Basil volunteered to take a separate #2046 follow-up if assigned; currently unowned. Not silently included in #2274 rename scope. |
 | Account owner-namespace merge/delete | Basil-owned account operation; no additional source-admission claim here | Surgical namespace tombstone reclaim, address/owner rewrites and account cascades | #2263 withAccountFenceTransaction in mergeUsers/deleteUser. Basil #31171 reports generic account-op stale-wait controls, **not per-door merge/delete rows**. | Basil-owned. Any extra per-door matrix is his lane; do not describe generic coverage as actual per-door evidence. |
 
-Xylon #31172 requires a separate #2046-linked source-writer/source-admission
-issue for these rows, distinguishing the actual comment witness from static
-candidates. Admitted unfenced writers remain explicit combined
+Xylon #31172 required a separate #2046-linked source-writer/source-admission
+issue for these rows. Marco filed [#2277](https://github.com/hadron-memory/hadron-server/issues/2277)
+in #31181, distinguishing the actual comment witness from static candidates. Admitted unfenced writers remain explicit combined
 #2258/#2263/#2273 blockers until they join the accepted protocol or an approved
-contract excludes them. Anne owns census/disposition analysis only. Vera's
+contract excludes them. Anne owns census/disposition analysis only. Marco #31181 has not assigned
+the Agent-tombstone preamble row pending FIT and disposition. Vera's
 scoped FIT was requested in #31178; production families and source admission
 remain unchanged pending that ruling. #2274 stays a distinct rename/address
 follow-up. The coherent ordered comment sample proves a missing participant,
