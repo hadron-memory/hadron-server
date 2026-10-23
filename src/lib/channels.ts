@@ -38,6 +38,7 @@ import { randomUUID } from 'node:crypto';
  * its own (#1194 is this change's draft ancestor).
  */
 
+import { refuseUnderDecisionLog } from './decisions/index.js';
 import { sessionKeyReleasedHint } from './sessionKeyCache.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
@@ -428,6 +429,9 @@ export async function ensureChannelWithRoot(
     await args.authorizeLockedHost?.(tx);
     await lockAncestorsForCreateMany(tx, args.memoryId, [args.loc, messagesLoc], { owns: 'channel' });
     await assertNoChannelOverlap(tx, args.memoryId, args.loc);
+    // #1728: raw Channel roots share the decision-log code-space guard.
+    // Check under the path locks before any root/structural/Channel writes.
+    await refuseUnderDecisionLog(tx, args.memoryId, args.loc, 'Channel creation');
     const restoreOrCreate = async (
       loc: string,
       create: () => Promise<{ id: string }>,
