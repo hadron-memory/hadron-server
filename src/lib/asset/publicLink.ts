@@ -8,8 +8,9 @@
  *   - the STORED opt-in (`Asset.publicLinkEnabled`): policy, never proof of publication;
  *   - WHO MAY SWITCH IT ({@link canManageAssetPublicLink}): the memory's manager, never a
  *     mere writer; strictly the owner in personal/private memory;
- *   - whether the anonymous route WOULD SERVE it ({@link assetIsPubliclyServable}): the stored
- *     opt-in AND the deployment gate AND the existing live/CLEAN/unencrypted checks.
+ *   - whether the anonymous route WOULD SERVE it: decided in `src/api/assetPublic.ts` (route) and the
+ *     Asset.publicUrl field: the stored opt-in AND the deployment gate AND the existing live/CLEAN/
+ *     unencrypted checks.
  *
  * The switch is inert, and refused, for session memory and encrypted memory (cor:dmo:060:15
  * Exceptions, Proposed). Worker working memory, system memory and install memory have no
@@ -28,7 +29,6 @@ import {
 import { withAuthorizedMemoryTx } from '../../api/graphql/schema/authorizedTx.js';
 import { canReadMemory } from '../../mcp/access-control.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
-import { isPublicHotlinkEnabled } from '../../api/assetPublic.js';
 import { logAssetEvent } from './audit.js';
 
 /** The Memory columns the manager decision reads. */
@@ -66,8 +66,15 @@ export async function canManageAssetPublicLink(ctx: Context, memory: PublicLinkM
   switch (memory.class) {
     case 'personal':
     case 'private':
-      // cor:acl:010:02 — strictly the owner; a platform admin never gets it.
-      return memory.userId === ctx.userId;
+      // cor:acl:010:02 — strictly the owner; a platform admin never gets it. The owner must also pass
+      // the memory read gate's App fold (008 isolation, #1719 R5a): ownership alone must not let a
+      // caller pinned to App A publish an asset in its owner's App B memory (Rico's P1 on #2287).
+      if (memory.userId !== ctx.userId) return false;
+      return canReadMemory(
+        ctx.db,
+        { userId: ctx.userId, appId: ctx.appId, roles: ctx.roles, organizationId: ctx.organizationId },
+        memory.id,
+      );
     case 'knowledge':
     case 'group': {
       try {
@@ -101,21 +108,6 @@ export async function canManageAssetPublicLink(ctx: Context, memory: PublicLinkM
       // system, and anything unclassified: no management contract, so no switch.
       return false;
   }
-}
-
-/** Would the anonymous route serve this asset right now? The one eligibility predicate. */
-export function assetIsPubliclyServable(
-  asset: Pick<Asset, 'publicLinkEnabled' | 'scanStatus' | 'deletedAt' | 'memoryId'>,
-  memory: Pick<PublicLinkMemory, 'isEncrypted' | 'deletedAt'> | null,
-): boolean {
-  return (
-    isPublicHotlinkEnabled() &&
-    asset.publicLinkEnabled &&
-    !asset.deletedAt &&
-    !!asset.memoryId &&
-    asset.scanStatus === 'CLEAN' &&
-    !!memory && !memory.deletedAt && !memory.isEncrypted
-  );
 }
 
 /** Lock the rows the manager decision reads, so a revocation queued behind us is seen or waits. */

@@ -13,6 +13,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { requestActorStorage } from '../requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { mountPublicAssetRoutes } from '../../api/assetPublic.js';
 import { setAssetPublicLink, canManageAssetPublicLink, PUBLIC_LINK_MEMORY_SELECT } from './publicLink.js';
@@ -343,5 +344,71 @@ describe('migration default', () => {
     const id = generateId();
     await db.asset.create({ data: { id, memoryId: knowledge.id, filename: 'f', mimeType: 'a/b', sizeBytes: 1, storageKey: `k-${id}` } });
     expect(await flagOf(id)).toBe(false);
+  });
+});
+
+describe('review findings on #2287', () => {
+  it('P1: a caller pinned to App A cannot publish an asset in its own App-B personal/private memory', async () => {
+    const appB = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'B', urn: `${org.urn}:b` } });
+    const agent = await db.agent.create({ data: { organizationId: org.id, name: 'agb', urn: `${org.urn}:agb`, visibility: 'ORGANIZATION' } });
+    for (const cls of ['personal', 'private'] as const) {
+      const mem = await db.memory.create({ data: { id: generateId(), class: cls, userId: u.owner.id, appId: appB.id, userMemoryOfAgentId: agent.id, urn: `${org.urn}:${cls}-b`, name: cls, organizationId: org.id } });
+      const id = await mkAsset(mem.id);
+      await expect(M.setAssetPublicLink({}, { assetRef: id, enabled: true }, ctxOf(u.owner.id, { appId: app.id }))).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      expect(await flagOf(id)).toBe(false);
+      expect(await audits(id)).toHaveLength(0);
+      const row = await db.memory.findUniqueOrThrow({ where: { id: mem.id }, select: PUBLIC_LINK_MEMORY_SELECT });
+      expect(await canManageAssetPublicLink(ctxOf(u.owner.id, { appId: app.id }), row)).toBe(false);
+    }
+  });
+
+  it('P2 (R113): a bound worker session of the App manager is refused on the team space', async () => {
+    const team = await db.memory.create({ data: { id: generateId(), class: 'app', appId: app.id, organizationId: org.id, urn: `${org.urn}:team2`, name: 'team2' } });
+    const id = await mkAsset(team.id);
+    await requestActorStorage.run({ workerId: generateId(), agentId: null }, async () => {
+      await expect(M.setAssetPublicLink({}, { assetRef: id, enabled: true }, ctxOf(u.appOwner.id))).rejects.toBeDefined();
+    });
+    expect(await flagOf(id)).toBe(false);
+    expect(await audits(id)).toHaveLength(0);
+  });
+
+  /** Hold `statements` uncommitted in one tx, run `during` while it is held, then commit it. */
+  async function heldWhile(statements: (tx: any) => Promise<void>, during: () => Promise<unknown>) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const holding = new Promise<void>((r) => { held = r; });
+    const blocker = db.$transaction(async (tx) => { await statements(tx); held(); await gate; });
+    await holding;
+    const call = during();
+    const settled = call.then(() => 'done', () => 'done');
+    // The call must be parked behind the held row lock, not decided from a stale read.
+    expect(await Promise.race([settled, new Promise((r) => setTimeout(() => r('waiting'), 400))])).toBe('waiting');
+    release();
+    await blocker;
+    return call;
+  }
+
+  it('P3: a demotion queued behind the manager lock wait is seen: the former manager is refused', async () => {
+    const id = await mkAsset(knowledge.id);
+    // The demoting tx holds the membership row; the switch call parks on its FOR SHARE, then must re-decide.
+    const outcome = heldWhile(
+      async (tx) => { await tx.$executeRaw`UPDATE org_members SET role = 'READER' WHERE organization_id = ${org.id} AND user_id = ${u.admin.id}`; },
+      () => M.setAssetPublicLink({}, { assetRef: id, enabled: true }, ctxOf(u.admin.id)),
+    );
+    await expect(outcome).rejects.toBeDefined();
+    expect(await flagOf(id)).toBe(false);
+    expect(await audits(id)).toHaveLength(0);
+  });
+
+  it('P3: an asset deleted while the call waits on its row lock is a missing asset, and nothing is audited', async () => {
+    const id = await mkAsset(knowledge.id);
+    const outcome = heldWhile(
+      async (tx) => { await tx.$executeRaw`UPDATE assets SET deleted_at = now() WHERE id = ${id}`; },
+      () => M.setAssetPublicLink({}, { assetRef: id, enabled: true }, ctxOf(u.admin.id)),
+    );
+    await expect(outcome).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(await flagOf(id)).toBe(false);
+    expect(await audits(id)).toHaveLength(0);
   });
 });
