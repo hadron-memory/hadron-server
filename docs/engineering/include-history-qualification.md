@@ -379,8 +379,37 @@ withAuthorizedTx root does not opt into F, but writeClone calls
 reconcileStampedSourceNodes, which reaches the prepared-client guard in
 ensureCurrentNodeRevisionInTransaction. The existing cloneAgentRaces test for
 raw-edited stamped sources fails with the prepared-client refusal. Seven other
-focused files pass; total339 pass/1 fail across8files. This is a new caller to
-disposition under #2277/#2046, not a reason to weaken the guard or silently add
-a new production family while Anne is analysis-only. Xylon/Marco/Dan notified.
+focused files pass; total339 pass/1 fail across8files. Xylon #31322 assigns this new caller under #2277/#2046 to Dan as a separate dependent F-first/prepared-client cut on #2273. Exact attach must be CHECKED before implementation, preserving authority/Channel/base-graph/row order, full retries and same-transaction reconcile/copy/audit rollback, and #2263 epoch once per holder. Anne retains integration/census and the named failing regression; the guard stays intact. Dependency/landing shape must produce an actually green delivery, not merely a separate PR.
 The merge is not a frozen or ready head; full validation is diagnostic until
 this caller joins an accepted boundary. No activation claim.
+
+At delivery4ec46816 GitHub CI completed: typecheck and all structural checks
+pass; shards2/3/4 pass. Shard1 fails ONLY the named cloneAgentRaces stamped
+source regression (218files/3799tests pass,1test fails,7skipped in that shard).
+[CI failure](https://github.com/hadron-memory/hadron-server/actions/runs/39890365186/job/120208378931).
+This confirms the local blocker, not a full green or freeze. Basil's dependent
+#2283 head71f9074f now contains this base and fixture fix; his reported full
+suite also has this single failure. His report is distinguished from Anne's
+own CI inspection and focused runs.
+
+### Checked cloneAgent fold-in (#31345)
+
+Xylon CHECKED the attach at T3/scoped §10/L6356294522 and selected direct fold-in
+so #2273's prerequisite does not land red. Dan's authored commit
+`20e6c0bfbcc9f9a6f651987094c2af4cc18faac9` is cherry-picked with source trailer
+as `2aad4b5e`, preserving author/Worker/coauthor trailers. The production hunk
+adds only `fence: true` to cloneAgent's existing outer authorized transaction.
+Existing beneath-F ordering, fresh full retries, reconcile/copy/audit rollback
+and timeout remain in place. The held-F pin is carried with the fix.
+
+The caller inventory/tripwire also follows the extracted delegated calls:
+cloneMemory's copy helper and cloneAgent's copy/reconcile helpers (three sites).
+It was red before adding the inventory rows, green afterward. Expanded delivery
+qualification/Agent clone/lock-order/inventory checks pass: nine files158 tests.
+Evidence-only actual cloneAgent versus compile read/write/inverse controls pass;
+its integrated account-epoch control changes from red (no F waiter) to green
+(stale queued SERIALIZABLE account refuses before work). The focused combined
+selection passes6 tests, including the two existing comment/restore epoch rows.
+These close the named local cloneAgent regression and add scoped integration
+evidence; full expanded #2273 CI/review and other #2274/#2277 dispositions are
+still required. No frozen-green, merge or activation claim follows.
