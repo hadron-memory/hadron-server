@@ -9431,7 +9431,9 @@ export const typeDefs = `#graphql
     Create a single node. Rejects with NodeLocConflictError when a live node
     already exists at (memoryId, loc) — creating is create-only (spec 039
     Phase 0 D1); a soft-deleted node at the target loc is resurrected.
-    'name' is required here and only here (D4).
+    'name' is required on creation, unlike updateNode. Target an explicit
+    memoryId, or use install to create in an App's Agent install memory;
+    supplying both targets is BAD_USER_INPUT.
     Include tags (#2040): content may carry {{> target settings}} tags. Writes
     that make a tag malformed refuse INVALID_INCLUDE; a tag the write adds or
     changes whose target is missing, deleted or not readable by the writer
@@ -9455,7 +9457,7 @@ export const typeDefs = `#graphql
     spec', 'hadron coding'), which is a closed-list exception on the audience
     ground.
 
-    STRENGTH: DILIGENCE. It guarantees a spec node was authored by the spec tool (#1152, and the corpus discipline resting on it). It does NOT claim a determined caller could not author one another way: the label is free to omit and a citation resolves without it. Specs are deliberately not treated as a security concern; the destructive half is closed by #1182/#1184, which made createNode mint-or-refuse and race-safe.
+    STRENGTH: DILIGENCE. This is the intended authoring door for spec tools (#1152); the server does not attest which client binary called it. A determined caller may omit the label, and a citation resolves without it. Specs are deliberately not treated as a security concern; the destructive half is closed by #1182/#1184, which made createNode mint-or-refuse and race-safe.
 
     Exempt from its OWN kind only — it is fully subject to every other kind and
     to Channel address protection, so it cannot forge a chat message.
@@ -9484,12 +9486,13 @@ export const typeDefs = `#graphql
     """
     renumberSpec(memoryRef: ID!, fromLoc: String!, toLoc: String!, dryRun: Boolean): SpecRenumberResult!
     """
-    #1591 — mint every unminted live node of a memory, at once. Each node is
+    #1591 — mint the unminted live nodes of a memory, at once, excluding
+    comment nodes and the decision role family. Each node is
     stamped with its current revision and that revision's approval hash
     (Node.mintStatus); a minted node's moves then record URN aliases. Refuses
     SPEC_CORPUS_MINT_BLOCKED while any blocker remains among the unminted
     nodes: a placeholder, an unresolved reference, a structural lint error over
-    the citation-shaped nodes (nodetype-info, tag-spec, serialization-leak,
+    spec-marked or citation-shaped nodes (nodetype-info, tag-spec, serialization-leak,
     duplicate-loc), a stale abstract once staleAbstractsBlock is true,
     NOT_APPROVED (the current revision is not approved), TAMPERED (approved
     text changed outside the revision system), or CITES_UNMINTED (an
@@ -9592,8 +9595,10 @@ export const typeDefs = `#graphql
 
     """
     Update an existing node. Identify it by 'id' (PK or fully-qualified node
-    URN) XOR the ('memoryId', 'loc') combo — supplying both selectors, or
-    neither, is an error (D2). Rejects with NODE_NOT_FOUND when the target
+    URN) XOR the ('memoryId', 'loc') combo, or by ('install', 'loc') for an
+    App's Agent install memory. Supplying install together with id or
+    memoryId is BAD_USER_INPUT; the ordinary selectors remain mutually
+    exclusive and one selector is required. Rejects with NODE_NOT_FOUND when the target
     does not exist; updateNode never creates and never moves (relocation is
     moveNode's job, D3). Every content field is optional — omitted fields are
     preserved ('name' included, D4; 'abstract' keeps its omit/null/string
@@ -9664,8 +9669,8 @@ export const typeDefs = `#graphql
     (validated against the memory schema when the collection is declared). The
     node's loc is auto-derived (<type>:<key ?? generated-id>) and hidden; pass
     'key' for a human-meaningful id (a single segment, no ':'), 'name' to
-    override the derived node name. 'id' and 'type' are reserved and cannot be
-    field names. Returns the flat object.
+    override the derived node name. Reserved object field names: id, type;
+    these cannot be supplied in fields. Returns the flat object.
     """
     createObject(memoryRef: String!, type: String!, fields: JSON!, key: String, name: String): JSON!
 
@@ -9755,10 +9760,13 @@ export const typeDefs = `#graphql
     """
     #1591 — approve the node's CURRENT revision: record who, when, and the
     approval hash of its title/abstract/content. Pass revision to approve only
-    if it is still the one you read (REVISION_MISMATCH otherwise). Any writer of
-    the memory may approve, the author included. Idempotent: an approved
+    if it is still the one you read (REVISION_MISMATCH otherwise). A memory
+    writer may approve ordinary nodes, the author included; placed boot prompts
+    also require their dedicated manager-as-self gate. Comments and
+    decision-family nodes are refused. Idempotent: an approved
     revision keeps its existing approval. Refuses NODE_IS_PLACEHOLDER, and
-    SESSION_EXPIRED on an encrypted memory without its session key.
+    ENCRYPTED_MEMORY_NOT_APPLICABLE on any encrypted memory, even with a
+    cached session key.
     """
     approveNode(nodeRef: ID!, revision: Int): NodeApprovalReceipt!
     """
@@ -9772,7 +9780,8 @@ export const typeDefs = `#graphql
 
     """
     #1606 — start a thread on a node (hrn:node:hadronmemory.com:specs:cor:dmo:110). Needs write access to the
-    target's memory. anchorRevision defaults to the target's current revision;
+    target's memory. Commentable classes: app, knowledge, personal, group, system;
+    private memories are not commentable. anchorRevision defaults to the target's current revision;
     an older one anchors there while its text is still retained. The anchor
     hash is computed by the server. Typed refusals: COMMENT_TARGET_NOT_FOUND,
     COMMENT_FORBIDDEN, COMMENT_TARGET_IS_COMMENT, COMMENT_MEMORY_NOT_COMMENTABLE,
@@ -9898,8 +9907,8 @@ export const typeDefs = `#graphql
     mergeMemories(input: MergeMemoriesInput!): Memory!
 
     """
-    Retired. Calls return REPLACE_SUBTREE_RETIRED without changing nodes or
-    edges. The field remains temporarily so existing clients get a clear
+    Retired. After the ordinary concealed-memory and write-access checks,
+    calls return REPLACE_SUBTREE_RETIRED without changing nodes or edges. The field remains temporarily so existing clients get a clear
     refusal rather than an unknown-field error.
     """
     replaceSubtree(ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
@@ -10319,15 +10328,18 @@ export const typeDefs = `#graphql
 
     # Memory management (org ADMIN)
     """
-    Create a memory in an organization. Accepts the entity's ID or URN
-    for orgId.
-
-    Defaults to knowledge-class with ORGANIZATION visibility. Pass
+    Create a free-standing memory. orgId accepts an organization's ID or URN.
+    With orgId, the default is knowledge-class with ORGANIZATION visibility;
+    knowledge/group creation requires the org's memory.create grant. Omitting
+    orgId (or passing null) creates a user-owned memory in the authenticated
+    caller's namespace and requires an explicit personal/private memoryClass.
+    The default knowledge class is refused without orgId. Pass
     memoryClass: group + visibility: GROUP for a group-class memory
     (023-app-shape US4; the caller is auto-added as the first owner),
     or memoryClass: personal | private for an owner-only memory the
-    caller owns (spec 034 — free-standing, no app/agent; the caller
-    must be a member of the org container). system- and app-class
+    caller owns (free-standing, no app/agent). An org-anchored personal/private
+    memory requires actual membership of that org container; the org-less
+    owner-only path requires no org membership. system- and app-class
     memories are NOT created here — they auto-provision via
     Agent.systemMemoryId / the App install path.
     """
@@ -10360,7 +10372,8 @@ export const typeDefs = `#graphql
       visibility: MemoryVisibility
       """
       'knowledge' (default), 'group', or the owner-only 'personal' /
-      'private' (spec 034). 'system' and 'app' are rejected — they
+      'private'. Without orgId, only personal/private are accepted; the
+      knowledge default is refused. 'system' and 'app' are rejected here and
       auto-provision via different code paths.
       """
       memoryClass: MemoryClass
@@ -10388,13 +10401,17 @@ export const typeDefs = `#graphql
 
     Unlike createMemory (which only makes free-standing memories), this scopes
     the new memory to an App. memoryClass accepts only the App-associable
-    classes: 'app', 'personal', or 'private' ('system'/'knowledge'/'group'
-    forbid an app_id). appRef/agentRef accept an ID, bare URN, or prefixed URN;
+    classes: 'app', 'knowledge', 'personal', or 'private'. This door rejects
+    'system' and 'group'; this is its allowlist, not a claim that the database
+    forbids app_id for every rejected class. appRef/agentRef accept an ID, bare URN, or prefixed URN;
     the Agent must be installed in the App.
 
-    Authorization is split by class: 'app' is shared deployment data and
-    requires org OWNER/ADMIN; 'personal'/'private' are the caller's OWN memory
-    and require only App membership (the caller becomes the owner).
+    Authorization is split by class: 'app'/'knowledge' are shared data and
+    require the App's user-owner or owning-org OWNER/ADMIN. Personal/private
+    require the caller's actual App membership (the caller becomes the owner),
+    with no platform-admin membership bypass; they are not yet supported for
+    a user-owned App. The install is rechecked as live and licensed in the
+    deciding transaction. Live name collisions are aliased to a free URN.
 
     Typed errors: UNSUPPORTED_MEMORY_CLASS, BAD_USER_INPUT (maxRevCount < 1),
     APP_UNINSTALLED, AGENT_NOT_INSTALLED, MEMORY_URN_CONFLICT, FORBIDDEN,
@@ -10481,8 +10498,10 @@ export const typeDefs = `#graphql
     the source's, cloning the memory into another organization. The clone's
     display name is derived from the target slug.
 
-    Copies the Memory row plus all live Nodes, Edges, and PendingEdges;
-    references to the source memory's URN inside node content/abstract
+    Copies the Memory row and its eligible live graph. Comment nodes,
+    compiled boot-prompt nodes and decision-family nodes are excluded;
+    derived INCLUDE edges are re-derived rather than copied. References to
+    the source memory's URN inside node content/abstract
     (canonical and legacy spellings) are rewritten to the clone's URN.
     Vector-index config carries over and the clone's nodes are stamped for
     re-embedding.
@@ -10500,8 +10519,8 @@ export const typeDefs = `#graphql
     nodes refuses with INCLUDE_CYCLE, at any chain length. Either refusal names
     only the authored tag and nothing is created.
 
-    Authorization: the SOURCE side mirrors deleteMemory (personal/private →
-    owner only; knowledge/group → source-org ADMIN). When \`targetUrn\` names a
+    Authorization: the SOURCE side requires (personal/private →
+    owner only; knowledge/group → source-org memory.clone grant). When \`targetUrn\` names a
     DIFFERENT org, the caller must additionally be a non-reader member of that
     target org. system/app-class sources and encrypted memories are rejected.
     """
@@ -10524,9 +10543,10 @@ export const typeDefs = `#graphql
     source intact; 'move' = true relocates it, soft-deleting the source subtree
     (its nodes, the source memory's touching edges, and its pending edges).
 
-    The new memory PRESERVES the source's class so an extract never widens who
-    can read the content: a member-restricted 'group' stays group, a
-    personal/private source stays owner-owned, knowledge stays knowledge.
+    The new memory PRESERVES the source's class: group stays group (the
+    caller is bootstrapped as its first owner), personal/private stays
+    owner-owned, and knowledge stays knowledge. Class preservation alone is
+    not a claim that the new memory has an identical membership audience.
     Governance/config (requiresLicense, chunk dials, revision cap, acceptsUploads)
     carries over from the source.
 
@@ -10535,8 +10555,10 @@ export const typeDefs = `#graphql
     org's memory.clone grant (an export) AND the destination org's memory.create
     (plus a non-reader membership for a cross-org drop); a personal/private
     extract instead requires the owner to be a member of the destination org.
-    'move' additionally requires source write access, and cannot target the
-    source root (that would empty the source — clone + deleteMemory instead).
+    'move' additionally requires source write access and must leave a live
+    node outside the extracted subtree; otherwise it would empty the source
+    (clone + deleteMemory instead). The guard uses node membership, not the
+    source memory's mutable name.
     Encrypted and system/app-class sources are rejected.
 
     Include tags (#2167; hrn:node:hadronmemory.com:specs:cor:dmo:150:04 and
@@ -10615,8 +10637,7 @@ export const typeDefs = `#graphql
 
     """
     Soft-delete an Agent and its owned system memory. Requires management
-    access to the readable Agent. Refuses removal of a minted corpus in its
-    system memory, and refuses while a live
+    access to the readable Agent. Refuses while a live
     App install or live parent Agent import references it, or a live Agent
     extends it as its base. AgentMemoryItem attachments do not block deletion.
 
@@ -10655,12 +10676,14 @@ export const typeDefs = `#graphql
 
     """
     #949 — re-own an Agent's class=system memory to the Agent's own owner
-    (org XOR user) and re-derive its URN as '<agent-urn>-system'.
+    (org XOR user). On an ownership repair, attempt the derived
+    '<agent-urn>-system' URN; if another live memory holds it, retain the
+    current URN. A changed URN records an alias. An already-consistent owner
+    pair returns without changing its URN.
 
     The recovery path for a system memory that ended up owned by a different
     tenant. Access to a memory follows the MEMORY's owner, so such a row puts
-    one tenant's Agent design (for a Team Agent: its 'roles:<role>'
-    definitions and name registers) inside another tenant's audience. System
+    one tenant's Agent design inside another tenant's audience. System
     memories are only ever created by Agent provisioning, so before this the
     only fix was to recreate the Agent.
 
@@ -11231,7 +11254,7 @@ export const typeDefs = `#graphql
     MEMORY_CONFIG_TEMPLATE_NOT_FOUND). The rules are validated as a whole,
     under a share lock, as createNodeRoleRule validates a new rule's
     references (NODE_NOT_FOUND for one you cannot read, NOT_A_TASK), and a
-    template rule whose task was deleted refuses the whole apply
+    template rule whose required task was deleted refuses the whole apply
     (NODE_ROLE_RULE_REF_BROKEN). All-or-nothing per memory.
 
     When the memory already has a rule for a role, a non-required template
@@ -12119,19 +12142,19 @@ export const typeDefs = `#graphql
       - UNAUTHENTICATED — no logged-in user in context.
       - FORBIDDEN — caller is not the Memory's principal. The
         caller-authority guard runs first and deliberately does not
-        differentiate between "memory doesn't exist", "memory is not
-        personal-class", and "caller isn't the principal" — all three
-        return FORBIDDEN so memory metadata isn't leaked to
-        non-principals.
+        differentiate between a missing/deleted memory and a memory the
+        caller does not own — both return FORBIDDEN before grantee lookup.
+        An owner of a wrong-class memory (for example private) can pass that
+        principal check and receive InvalidMemoryClassForShareError.
       - MemoryShareGranteeMissingError — granteeId doesn't resolve to
         an existing User. Only reachable when the caller passes the
         principal guard.
       - CrossOrgShareNotAllowedError — the grantee is not a member of an
         org-owned personal memory's org (the #778 audience rule above).
-      - InvalidMemoryClassForShareError / MemoryNotFoundForShareError —
-        defined on the controller for completeness; functionally
-        unreachable via this GraphQL mutation in v1 because the
-        caller-authority guard short-circuits to FORBIDDEN first.
+      - InvalidMemoryClassForShareError — the principal addressed a memory
+        whose class is not personal; private memories cannot be shared.
+      - MemoryNotFoundForShareError — retained controller-level lifecycle
+        refusal; the ordinary GraphQL principal precheck conceals absence.
     """
     createMemoryShare(
       memoryId: ID!

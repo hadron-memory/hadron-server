@@ -50,6 +50,8 @@
 import { parse, visit } from 'graphql';
 import { pathToFileURL } from 'node:url';
 import { typeDefs } from '../src/api/graphql/schema/typeDefs.js';
+import { RESERVED_OBJECT_KEYS } from '../src/lib/objectStore.js';
+import { COMMENTABLE_CLASSES } from '../src/lib/comments/index.js';
 import { CONNECTION_GRANT_SCOPES } from '../src/lib/emailOperationScopes.js';
 import { HOST_OPERATION_TYPES } from '../src/lib/hostOperations/types.js';
 import { TASK_WARNING_CODES } from '../src/api/graphql/schema/resolvers.taskWarnings.js';
@@ -89,6 +91,19 @@ import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions
  * which costs more than the drift it would have caught.
  */
 const WATCHED_SETS = [
+  {
+    name: 'RESERVED_OBJECT_KEYS', source: 'src/lib/objectStore.ts',
+    members: RESERVED_OBJECT_KEYS,
+    coordinates: ['Mutation.createObject'],
+    enumerationPattern: /reserved object field names:\s*([^;]+);/i,
+  },
+  {
+    // #2304: ordinary class names are checked only in this promised list.
+    name: 'COMMENTABLE_CLASSES', source: 'src/lib/comments/index.ts',
+    members: [...COMMENTABLE_CLASSES],
+    coordinates: ['Mutation.createComment'],
+    enumerationPattern: /commentable classes:\s*([^;]+);/i,
+  },
   {
     // #2303: names come from the live host registry; one surviving host is
     // still a promised supported-host list, not an incidental mention.
