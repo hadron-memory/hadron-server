@@ -4536,6 +4536,10 @@ model PendingLoginState {
   /// #1631 PR1b: SHA-256 of the ceremony browser cookie when this state is a passkey ceremony's sign-in leg.
   /// Such a state carries no return_to or client_state (CHECK), and its callback mints no session.
   ceremonyNonceHash String?  @map("ceremony_nonce_hash")
+  /// #2204: SHA-256 of the OIDC `nonce` sent to Google/Apple (binds the ID token to this attempt). NULL only for
+  /// GitHub and for rows minted before #2204; `chk_pending_login_provider_nonce` (NOT VALID) refuses a new
+  /// google/apple row without it. Distinct from `client_state` and `ceremony_nonce_hash`, which bind the browser.
+  providerNonceHash String?  @map("provider_nonce_hash")
   expiresAt         DateTime @map("expires_at")
   createdAt         DateTime @default(now()) @map("created_at")
 

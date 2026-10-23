@@ -19,6 +19,7 @@ import {
   SignJWT,
   type JWTVerifyGetKey,
 } from 'jose';
+import { enforceIdTokenNonce, type NonceExpectation } from './providerNonce.js';
 import { db } from '../integrations/db/client.js';
 import { generateUniqueHandle, isHandleTaken } from '../lib/userHandle.js';
 import { ensureUserPrincipal, RootNameTakenError } from '../lib/principal/mintPrincipal.js';
@@ -57,7 +58,7 @@ export function isAppleConfigured(): boolean {
  * `response_mode=form_post` is not a choice: Apple requires it whenever any
  * scope is requested, which is why /auth/apple/callback is a POST.
  */
-export function buildAppleAuthUrl(state: string): string {
+export function buildAppleAuthUrl(state: string, nonce: string): string {
   const params = new URLSearchParams({
     client_id: process.env.APPLE_CLIENT_ID!,
     redirect_uri: getAppleCallbackUrl(),
@@ -65,6 +66,8 @@ export function buildAppleAuthUrl(state: string): string {
     response_mode: 'form_post',
     scope: 'name email',
     state,
+    // #2204: echoed back inside the signed ID token; the callback compares its hash.
+    nonce,
   });
   return `${APPLE_AUTH_URL}?${params}`;
 }
@@ -139,6 +142,7 @@ function appleBool(v: unknown): boolean {
  */
 export async function verifyAppleIdToken(
   idToken: string,
+  expected: NonceExpectation,
   getKey?: JWTVerifyGetKey,
 ): Promise<AppleIdentity> {
   const key = getKey ?? (remoteJwks ??= createRemoteJWKSet(new URL(APPLE_JWKS_URL)));
@@ -146,6 +150,8 @@ export async function verifyAppleIdToken(
     issuer: APPLE_ISSUER,
     audience: process.env.APPLE_CLIENT_ID ?? '',
   });
+  // Refuse-always (Ruth, #2204): an Apple token without a nonce is refused, with no nonce_supported exception.
+  enforceIdTokenNonce('apple', payload.nonce, expected);
   if (typeof payload.sub !== 'string' || payload.sub === '') {
     throw new Error('Apple ID token missing sub claim');
   }
