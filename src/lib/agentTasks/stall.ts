@@ -345,16 +345,29 @@ const stopOf = (inputs: StallInputs, workerId: string | null | undefined): StopI
 /**
  * The alarms a task's state calls for at `now`, at most one per rule. Pure:
  * every evaluation of the same inputs names the same episodes.
+ *
+ * `episodesRunning` (#2200, R196) asks a different question of the same rules:
+ * not "is an alarm DUE now" but "does this episode's CONDITION still hold". It
+ * skips the two gates in `add` (the window having passed, and a #2022 stop
+ * holding the clock), because an alarm already raised stays running through
+ * both. It names a superset of the default's candidates with the same
+ * `episodeStart` for each; the rule bodies are not forked.
  */
-export function stallCandidates(inputs: StallInputs, windows: StallWindows, now: Date): StallCandidate[] {
+export function stallCandidates(
+  inputs: StallInputs,
+  windows: StallWindows,
+  now: Date,
+  options: { episodesRunning?: boolean } = {},
+): StallCandidate[] {
   const { task } = inputs;
   const assignee = assigneeOf(task);
   const out: StallCandidate[] = [];
+  const running = options.episodesRunning === true;
   const add = (rule: StallRule, episodeStart: Date, dueAt: Date, extra: Partial<StallCandidate> = {}, stopped: readonly StopInterval[] = []) => {
-    if (dueAt.getTime() > now.getTime()) return;
+    if (!running && dueAt.getTime() > now.getTime()) return;
     // #2022: while the stop exception holds, nothing is raised and nobody up the chain is woken (the Proposed
     // amendment to cor:agt:050:13); the episode carries on afterwards from the time it had counted.
-    if (heldAt(stopped, now)) return;
+    if (!running && heldAt(stopped, now)) return;
     out.push({
       rule, taskId: task.id, appId: task.appId, episodeStart, dueAt,
       windowMinutes: windows[RULE_WINDOW[rule]], assignee, ...extra,
@@ -658,11 +671,67 @@ export async function currentAlarmEpisodes(
   return out;
 }
 
+/** The alarm types the stall rules raise, each back to nothing else: only these can be classified as ended. */
+const STALL_ALARM_TYPES: ReadonlySet<string> = new Set(Object.values(STALL_EVENT_TYPE));
+/** A task row that can never move again, or raises no alarms (cor:agt:050:02): its alarms' episodes are over. */
+const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['finished', 'cancelled', 'backlog']);
+
+/**
+ * #2200 (R196) — which of these alarms' OWN episodes have ended: the condition that
+ * raised each no longer holds, so nothing up its chain should be woken for it.
+ * Positive proof only. An alarm is ended when its task, in a live and installed App,
+ *   - is in a terminal status (finished, cancelled, or parked to backlog), or
+ *   - is open, was actually loaded by the evaluator's own `loadStallInputs`, and the
+ *     alarm's episode key is not among `stallCandidates` in `episodesRunning` mode.
+ * Anything else is NOT ended: a task that is missing or sits in an uninstalled or
+ * deleted App, an open task `loadStallInputs` returned nothing for, an alarm with no
+ * episode start, or a type the stall rules do not raise. A #2022 stop never ends an
+ * alarm (the flagged mode ignores it). One loader serves every caller (the escalation
+ * and the roster), so the two cannot disagree. Returns the ended alarms' `alarmEpisodeKey`s.
+ */
+export async function endedAlarmEpisodes(
+  db: Db,
+  alarms: { taskId: string | null; type: string; episodeStart: Date | null }[],
+  now: Date,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  const subject = alarms.filter((a): a is { taskId: string; type: string; episodeStart: Date } =>
+    !!a.taskId && !!a.episodeStart && STALL_ALARM_TYPES.has(a.type));
+  const taskIds = [...new Set(subject.map((a) => a.taskId))];
+  if (taskIds.length === 0) return out;
+  const tasks = await db.agentTask.findMany({
+    where: { id: { in: taskIds }, app: { deletedAt: null, uninstalledAt: null } },
+    select: { id: true, status: true },
+  });
+  const statusOf = new Map(tasks.map((t) => [t.id, t.status]));
+  const openIds = tasks.filter((t) => OPEN_STATUSES.includes(t.status)).map((t) => t.id);
+  const inputs = openIds.length ? await loadStallInputs(db, { id: { in: openIds } }, now) : [];
+  const windows = await loadWindows(db, [...new Set(inputs.map((i) => i.task.appId))]);
+  const loaded = new Set(inputs.map((i) => i.task.id));
+  const running = new Set<string>();
+  for (const i of inputs) {
+    for (const c of stallCandidates(i, windows.get(i.task.appId) as StallWindows, now, { episodesRunning: true })) {
+      running.add(alarmEpisodeKey(c.taskId, STALL_EVENT_TYPE[c.rule], c.episodeStart));
+    }
+  }
+  for (const a of subject) {
+    const status = statusOf.get(a.taskId);
+    if (status === undefined) continue; // unknown: not found among live, installed Apps' tasks
+    const key = alarmEpisodeKey(a.taskId, a.type, a.episodeStart);
+    if (TERMINAL_STATUSES.has(status)) out.add(key);
+    else if (loaded.has(a.taskId) && !running.has(key)) out.add(key);
+  }
+  return out;
+}
+
 // ── Escalation ────────────────────────────────────────────────────────────
 
 /**
  * cor:agt:050:19 / :20 — wake every owner whose wake has fallen due on an
  * alarm that is still unacknowledged. Returns how many it woke.
+ *
+ * #2200 (R196): an alarm whose own episode has ended is closed instead
+ * (`ended_at` on all its unwoken rows) and wakes nobody; see `endedAlarmEpisodes`.
  *
  * The due rows are locked FOR NO KEY UPDATE (SKIP LOCKED, so a concurrent
  * pass takes the others), and their alarm FOR SHARE. `acknowledgeAlarm` holds
@@ -672,21 +741,43 @@ export async function currentAlarmEpisodes(
  */
 export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise<number> {
   return db.$transaction(async (tx) => {
-    const due = await tx.$queryRaw<{ eventId: string; chainIndex: number }[]>`
-      SELECT w.event_id AS "eventId", w.chain_index AS "chainIndex"
+    const due = await tx.$queryRaw<{ eventId: string; chainIndex: number; taskId: string | null; type: string; episodeStart: Date | null }[]>`
+      SELECT w.event_id AS "eventId", w.chain_index AS "chainIndex",
+             e.task_id AS "taskId", e.type, e.episode_start AS "episodeStart"
       FROM agent_team_alarm_schedule w
       JOIN agent_team_events e ON e.id = w.event_id
       WHERE w.woken_at IS NULL
+        AND w.ended_at IS NULL
         AND w.due_at <= ${toNaiveUtc(now)}::timestamp
         AND e.acknowledged_at IS NULL
       ORDER BY w.due_at, w.event_id, w.chain_index
       LIMIT 500
       FOR NO KEY UPDATE OF w SKIP LOCKED
       FOR SHARE OF e`;
+    if (due.length === 0) return 0;
+    // #2200: the batch's tasks, shared and in id order (the lock `raiseStallAlarm` takes, so no deadlock), BEFORE the
+    // episodes are read: a cancel, start or reassignment holds its task exclusively, so it committed before this read
+    // or waits until the batch is stamped. No stray stamp lands after a committed move.
+    const taskIds = [...new Set(due.map((d) => d.taskId).filter((t): t is string => !!t))].sort();
+    if (taskIds.length) await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id IN (${Prisma.join(taskIds)}) ORDER BY id FOR SHARE`;
+    const ended = await endedAlarmEpisodes(tx, due, now);
+    const endedEvents = new Set(
+      due.filter((d) => d.taskId && d.episodeStart && ended.has(alarmEpisodeKey(d.taskId, d.type, d.episodeStart))).map((d) => d.eventId),
+    );
+    if (endedEvents.size) {
+      // The alarm's own episode is over: close EVERY row of it still unwoken (not only the due ones), so no later
+      // owner up the chain is woken for a condition that is gone. Nothing else is written: the alarm, its chain and
+      // the rows already woken stay as they were.
+      await tx.agentTeamAlarmSchedule.updateMany({
+        where: { eventId: { in: [...endedEvents] }, wokenAt: null, endedAt: null },
+        data: { endedAt: now },
+      });
+    }
     let woken = 0;
     for (const d of due) {
+      if (endedEvents.has(d.eventId)) continue;
       const n = await tx.agentTeamAlarmSchedule.updateMany({
-        where: { eventId: d.eventId, chainIndex: d.chainIndex, wokenAt: null },
+        where: { eventId: d.eventId, chainIndex: d.chainIndex, wokenAt: null, endedAt: null },
         data: { wokenAt: now },
       });
       woken += n.count;
