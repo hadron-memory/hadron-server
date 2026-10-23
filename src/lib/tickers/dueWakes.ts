@@ -135,13 +135,14 @@ async function readableWorkers(
   only: string[] | null,
   after: string | null,
   take: number,
+  workerWhere?: Prisma.WorkerWhereInput,
 ) {
   const where: Prisma.WorkerWhereInput = {
     appId: app.id,
     retiredAt: null,
     ...(reader.manager ? {} : { heldByUserId: reader.userId ?? '__none__' }),
     ...(only ? { id: { in: only } } : {}),
-    ...(after ? { AND: [{ id: { gt: after } }] } : {}),
+    AND: [...(after ? [{ id: { gt: after } }] : []), ...(workerWhere ? [workerWhere] : [])],
   };
   return ctx.db.worker.findMany({
     where,
@@ -349,7 +350,10 @@ export async function computeDueWakes(args: {
    * budget lock). An App key's scope is checked here, under the App's authority anchor, so a revocation either
    * committed before this read or waits for it (N4, #1749).
    */
-  authorize?: (tx: Prisma.TransactionClient) => Promise<void>;
+  authorize?: (tx: Prisma.TransactionClient, workerIds: string[]) => Promise<void>;
+  /** App-key registration prefilter; the deciding authorize checks the whole selected page again. */
+  workerWhere?: Prisma.WorkerWhereInput;
+  onWorkersSelected?: (workerIds: string[]) => void;
 }): Promise<DueWakesResult> {
   const { ctx, app, reader, requester } = args;
   const now = args.now ?? new Date();
@@ -361,7 +365,8 @@ export async function computeDueWakes(args: {
     select: { tickerMinCadenceSeconds: true, tickerSelfSubscribeCadenceSeconds: true, wakeDailyBudget: true, sessionDormancyDays: true },
   });
 
-  const page = await readableWorkers(ctx, app, reader, args.workerIds ?? null, args.after ?? null, first + 1);
+  const page = await readableWorkers(ctx, app, reader, args.workerIds ?? null, args.after ?? null, first + 1, args.workerWhere);
+  args.onWorkersSelected?.(page.map(w => w.id));
   const hasMore = page.length > first;
   const workers = page.slice(0, first);
   const empty: DueWakesResult = { status: 'OK', withheld: 0, wakes: [], dormant: [], nextAfter: null, budgetNotice: null };
@@ -669,7 +674,7 @@ export async function computeDueWakes(args: {
         i.wake = rest;
         i.proof = signFor(i.workerId, rest);
       }
-      await args.authorize?.(tx);
+      await args.authorize?.(tx, page.map(w => w.id));
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + app.id}, 0))`;
       const used = (await tx.appWakeDay.findUnique({ where: { appId_day: { appId: app.id, day } } }))?.wakes ?? 0;
       const cutoff = toNaiveUtc(new Date(now.getTime() - WAKE_PROOF_MAX_AGE_MS));
