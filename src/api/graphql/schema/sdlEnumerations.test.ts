@@ -211,3 +211,16 @@ describe('#2302 coordinate-scoped ordinary-word sets', () => {
     expect(findPartialEnumerations(doc)).toEqual([]);
   });
 });
+
+// #2303: ordinary enum words are watched only at their owning description.
+describe('S3 live host/member description lists (#2303)', () => {
+  it('detects an omitted skill host at its input coordinate', () => {
+    expect(findPartialEnumerations('input SkillPlanInput { """Supported hosts: claudeSkill, futureSkill.""" host: String }')
+      .some(v => v.coord === 'SkillPlanInput.host' && v.missing.includes('codexSkill'))).toBe(true);
+  });
+  it('detects an omitted member role without watching incidental prose', () => {
+    expect(findPartialEnumerations('"""Roles: reader, writer.""" enum MemoryMemberRole { reader writer owner }')
+      .some(v => v.coord === 'MemoryMemberRole' && v.missing.includes('owner'))).toBe(true);
+    expect(findPartialEnumerations('"""The reader and writer share a document.""" type Other { id: ID }')).toEqual([]);
+  });
+});
