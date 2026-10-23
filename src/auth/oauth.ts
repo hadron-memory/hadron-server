@@ -363,6 +363,29 @@ function validateRedirectUris(
 /** Length cap for the optional `client_name` field. */
 const CLIENT_NAME_MAX_LENGTH = 200;
 
+/** #156: longest `client_name` an operator log line carries. */
+const LOGGED_CLIENT_NAME_MAX_LENGTH = 80;
+
+/**
+ * #156: the attacker-controlled DCR `client_name`, made safe for a log line.
+ * Control characters and Unicode line/paragraph separators are stripped
+ * BEFORE truncating, so a name carrying a newline cannot forge a second
+ * log line and the cap measures visible characters.
+ */
+function loggableClientName(name: string): string {
+  return name.replace(/[\p{Cc}\u2028\u2029]/gu, '').slice(0, LOGGED_CLIENT_NAME_MAX_LENGTH);
+}
+
+/**
+ * #156: one operator log line for a completed OAuth event, in the
+ * `[prefix] event, payload-object` shape `mcpLog` uses. Callers pass public
+ * identifiers only: never a code, its hash, a PKCE challenge, `state` or a
+ * redirect URI.
+ */
+function logOAuthEvent(event: 'dcr_registered' | 'authcode_minted', payload: Record<string, string>): void {
+  console.log(`[oauth] ${event}`, payload);
+}
+
 /**
  * RFC 7591 §3 — DCR registration handler. The endpoint is
  * unauthenticated by RFC; abuse is bounded by the two rate limiters
@@ -432,6 +455,7 @@ export async function handleClientRegistration(
     return;
   }
 
+  logOAuthEvent('dcr_registered', { client_id: clientId, client_name: loggableClientName(clientName), ip: req.ip ?? '' });
   res.status(201).json({
     client_id: clientId,
     client_name: clientName,
@@ -1166,6 +1190,9 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
     });
     return;
   }
+
+  // #156: logged only after the mint committed; the raw code never reaches a log.
+  logOAuthEvent('authcode_minted', { client_id: validated.clientId, user: userId.slice(0, 8), ip: req.ip ?? '' });
 
   // 7. Redirect with the RAW code (not the hash). Single-use; the
   // /token handler atomically claims it via updateMany-with-conditional.
