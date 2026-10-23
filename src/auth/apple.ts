@@ -1,4 +1,3 @@
-import { getProjectBaseUrl } from '../lib/baseUrl.js';
 // Issue #584 — Sign in with Apple, sibling of google.ts (#582). The linking
 // rules from findings:oidc-login-sub-is-identity-email-is-not apply verbatim;
 // where this module diverges from the Google one it's because Apple diverges
@@ -13,6 +12,7 @@ import { getProjectBaseUrl } from '../lib/baseUrl.js';
 //   - `email_verified` may arrive as the STRING "true" (documented Apple
 //     quirk); accepted here, deliberately NOT loosened in the Google verifier.
 
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 import {
   jwtVerify,
   createRemoteJWKSet,

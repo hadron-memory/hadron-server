@@ -1,4 +1,3 @@
-import { getProjectBaseUrl } from '../../lib/baseUrl.js';
 /**
  * Google OAuth 2.0 for GMAIL MAILBOX CONNECTIONS — the authorize-URL side
  * only.
@@ -14,6 +13,7 @@ import { getProjectBaseUrl } from '../../lib/baseUrl.js';
  * gmail.send are restricted scopes, and sharing a client would drag login
  * into restricted-scope verification (#581/#583). Never merge the two.
  */
+import { getProjectBaseUrl } from '../../lib/baseUrl.js';
 
 const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 

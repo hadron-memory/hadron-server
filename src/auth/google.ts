@@ -1,4 +1,3 @@
-import { getProjectBaseUrl } from '../lib/baseUrl.js';
 // Issue #581 — Sign-in-with-Google, the login/identity half of the Google
 // story. Near-verbatim sibling of github.ts, with two deliberate differences:
 //
@@ -11,6 +10,7 @@ import { getProjectBaseUrl } from '../lib/baseUrl.js';
 //     separate GCP project so login never enters restricted-scope
 //     verification.
 
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 import {
   jwtVerify,
   createRemoteJWKSet,

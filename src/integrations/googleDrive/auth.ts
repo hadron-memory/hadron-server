@@ -1,4 +1,3 @@
-import { getProjectBaseUrl } from '../../lib/baseUrl.js';
 /**
  * Google OAuth 2.0 for GOOGLE DRIVE CONNECTIONS — the authorize-URL side
  * only.
@@ -17,6 +16,7 @@ import { getProjectBaseUrl } from '../../lib/baseUrl.js';
  * possible shared-client-with-Gmail decision); adding it to any existing
  * client would re-open that client's verification.
  */
+import { getProjectBaseUrl } from '../../lib/baseUrl.js';
 
 const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 

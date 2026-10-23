@@ -1,4 +1,3 @@
-import { getProjectBaseUrl } from '../lib/baseUrl.js';
 /**
  * #1631 PR1b slice 2 (cor:aut:040:09): the passkey ceremony's sign-in legs, on the server origin.
  *
@@ -24,6 +23,7 @@ import { getProjectBaseUrl } from '../lib/baseUrl.js';
  * ceremony steps (PR2 register, PR3 revoke); the step that consumes clears the cookie with
  * {@link clearCeremonyBrowserCookie}.
  */
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 import { createHash, randomBytes } from 'node:crypto';
 import express, { type Express, type Request, type RequestHandler, type Response } from 'express';
 import rateLimit from 'express-rate-limit';

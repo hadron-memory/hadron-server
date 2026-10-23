@@ -1,4 +1,3 @@
-import { getProjectBaseUrl } from '../lib/baseUrl.js';
 /**
  * sendPasskeyRegistrationNotices — the post-commit sender for every passkey registration's email notice (#1631 PR2,
  * cor:aut:040:02). The registering transaction wrote the outbox row, so a passkey never exists without its notice.
@@ -8,6 +7,7 @@ import { getProjectBaseUrl } from '../lib/baseUrl.js';
  * claim it came from. A first passkey's cancel token (encrypted) is cleared at every terminal state. A user with no
  * email address, or a deployment with no mail sender, settles the notice as failed at once; the in-app notice remains.
  */
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 import { randomBytes } from 'node:crypto';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { isEmailSenderConfigured, sendPasskeyRegisteredNotice, type PasskeyNoticeContent } from '../auth/email.js';

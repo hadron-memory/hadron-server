@@ -1,4 +1,3 @@
-import { getProjectBaseUrl } from '../../lib/baseUrl.js';
 /**
  * Microsoft OAuth 2.0 — the AUTHORIZE-URL side only.
  *
@@ -11,6 +10,7 @@ import { getProjectBaseUrl } from '../../lib/baseUrl.js';
  * Hadron owns ONE multi-tenant Azure AD app. Users sign in with their
  * Microsoft account — no Azure Portal visit needed.
  */
+import { getProjectBaseUrl } from '../../lib/baseUrl.js';
 
 const AUTHORITY = 'https://login.microsoftonline.com/common/oauth2/v2.0';
 
