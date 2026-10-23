@@ -53,3 +53,8 @@ Emerson BLIND6361915425 at6acb0b3b requested one P2 and two P3s. All fixed toget
 - P3 drive export: explicitly state connection owner without App context versus App-context covering drive.read grant (resolvers.helpers.ts:3476-3515), without claiming external tool validation was executed.
 
 Prior reviews/QA are historical until the same holders give scoped deltas. Charles QA6361935866 reported an accidental full-suite invocation beyond the assigned static-only scope; this deviation is disclosed, not used to expand the authorized QA claim. No repeat broad run is requested. New-head validation remains the focused enumeration/SDL checks, typecheck and description-stripped topology comparison.
+
+
+## Main composition after the review fix
+
+Fix534bf912 could not receive pull_request CI because it conflicted with main. Plain merge (no rebase) of main3a45f77f resolves only the WATCHED_SETS insertion point in scripts/check-sdl-enumerations.mjs: retain both S3 entries (SKILL_HOSTS, MemoryMemberRole) and both S1 entries (HOST_OPERATION_TYPES, TASK_WARNING_CODES), with all four live imports. typeDefs.ts auto-merges; no overlapping description resolution. Composed S1+S3 focused checks41/41, registry10sets/38members, parser/hash/citation/loc/URN guards and description-stripped topology equality vs main pass. Exact completed typecheck/new CI reported on the pushed merge head. Prior receipts still need same-holder deltas covering this composition and the three-description fix.

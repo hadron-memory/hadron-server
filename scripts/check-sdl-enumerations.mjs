@@ -51,6 +51,8 @@ import { parse, visit } from 'graphql';
 import { pathToFileURL } from 'node:url';
 import { typeDefs } from '../src/api/graphql/schema/typeDefs.js';
 import { CONNECTION_GRANT_SCOPES } from '../src/lib/emailOperationScopes.js';
+import { HOST_OPERATION_TYPES } from '../src/lib/hostOperations/types.js';
+import { TASK_WARNING_CODES } from '../src/api/graphql/schema/resolvers.taskWarnings.js';
 import { EMAIL_PROVIDER_KEYS } from '../src/lib/emailClient.js';
 import { GOVERNED_ROLES } from '../src/lib/governedRole.js';
 import { SKILL_HOSTS } from '../src/lib/skilldoc/hosts.js';
@@ -100,6 +102,19 @@ const WATCHED_SETS = [
     // Owner references in the later protection rule cannot mask a missing
     // owner entry in the promised role list.
     enumerationPattern: /([\s\S]*?)(?:Subject to|$)/i,
+  },
+  {
+    // #2301: dotted host operation identifiers, imported from the dispatch table.
+    name: 'HOST_OPERATION_TYPES',
+    source: 'src/lib/hostOperations/types.ts',
+    members: HOST_OPERATION_TYPES,
+  },
+  {
+    // #2301: dotted warning identifiers are distinctive, not ordinary prose.
+    // This checks completeness only; it cannot verify the warning's authority or timing.
+    name: 'TASK_WARNING_CODES',
+    source: 'src/api/graphql/schema/resolvers.taskWarnings.ts',
+    members: TASK_WARNING_CODES,
   },
   {
     // #2302: ordinary words are admissible only at explicitly enumerating
