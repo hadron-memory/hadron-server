@@ -7435,9 +7435,10 @@ export const typeDefs = `#graphql
     raw: true selects stored content without include or variable resolution.
     Soft-deleted nodes do not resolve. Access uses the caller's readable-memory
     set. A denied or missing node returns null; an explicit memoryRef that is
-    missing or unreadable raises MEMORY_NOT_FOUND. A system-memory loc with no
-    local node may read through to an eligible inherited node, under its own
-    address; overrides and boot prompts are excluded.
+    missing or unreadable raises MEMORY_NOT_FOUND. When addressed in a system
+    memory by memoryRef or a full node URN, a loc with no local node may read
+    through to an eligible inherited node under its own address; overrides and
+    boot prompts are excluded. An unscoped bare loc does not search inheritance.
     """
     node(ref: ID!, memoryRef: ID, raw: Boolean): Node
 
@@ -8186,7 +8187,9 @@ export const typeDefs = `#graphql
 
     """
     Export a drive file through the connection's provider tool. Grant scope:
-    drive.read. The server delegates format conversion, binary-file refusal
+    drive.read is required for an App context's covering connection grant.
+    Without an App context, the caller must own the connection; org
+    administration alone does not grant access. The server delegates format conversion, binary-file refusal
     and size validation to that tool; it does not independently enforce those
     provider guarantees here. Returns the tool's content, MIME type and format.
     """
@@ -8304,8 +8307,10 @@ export const typeDefs = `#graphql
     including objectType, approvalState and minted. Nonempty memoryIds or
     memoryClasses are rejected with BAD_USER_INPUT: the App scope is authoritative.
     Unlike findNodes, system-node types are not excluded by default. Deleted
-    content remains subject to recovery authority; comments are excluded by
-    the content-only selection.
+    content remains subject to recovery authority. NodeFilter.contentScope
+    COMMENTS or ALL can select comments. When contentScope is omitted,
+    nodeType=comment selects COMMENTS; otherwise the default CONTENT excludes
+    comments. Filters on approvalState or minted always exclude comments.
     """
     appNodes(appRef: ID!, filter: NodeFilter, limit: Int): [Node!]!
 
