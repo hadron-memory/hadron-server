@@ -290,7 +290,7 @@ export const typeDefs = `#graphql
   """
   Spec 049 — the scope a search ran under (every result discloses it,
   D-2026-09-13-002). \`kind\`: scope | app | global | user-owned. \`source\`:
-  call | session | active-app | active-org. \`memoryUrns\` lists only the
+  call | session | active-app | active-org | trigger (a headless run snapshot). \`memoryUrns\` lists only the
   memories YOU may read; \`droppedCount\` is how many the scope lists that you
   may not — a count, never their names.
   """
@@ -1003,9 +1003,9 @@ export const typeDefs = `#graphql
   """
   Filter for the uniform users() list (#473). For a non-platform-admin caller
   'query' is REQUIRED (a blank/omitted query returns an empty page) and
-  matching is enumeration-safe per cor:acl:070:02: public identifiers
+  matching follows hrn:node:hadronmemory.com:specs:cor:acl:070:02: public identifiers
   (handle, githubUsername) match by substring, email by exact equality, and
-  name only where the viewer may see it (self/admin/co-member). Platform
+  name only for platform admins or live co-members of an organization. Platform
   ADMIN/OWNER may omit 'query' for the full user list.
   """
   input UserFilter {
@@ -1127,7 +1127,7 @@ export const typeDefs = `#graphql
     """Persisted Scope ID for a narrowed EXPORT. Omit for unscoped export; explicit null refuses. Membership is resolved afresh for each call."""
     scopeRef: ID
     """
-    Target host, named by its D12 declaration key verbatim: claudeSkill (the default) or codexSkill. One host per call; the plan reads that host's declaration and applies its limits, and the retired top-level skill/claudeSkill keys alias to claudeSkill only. An unknown host is refused with BAD_USER_INPUT naming the supported hosts, never judged as another host and never answered with an empty plan.
+    Target host, named by its D12 declaration key verbatim. Supported hosts: claudeSkill, codexSkill. Default: claudeSkill. One host per call; the plan reads that host's declaration and applies its limits, and the retired top-level skill/claudeSkill keys alias to claudeSkill only. An unknown host is refused with BAD_USER_INPUT naming the supported hosts, never judged as another host and never answered with an empty plan.
     """
     host: String
     """What the client found on disk. Empty for lint, which touches no disk."""
@@ -1487,7 +1487,8 @@ export const typeDefs = `#graphql
     #1450 — a server-recorded placeholder awaiting authored content, such as a
     RESERVED spec citation created by reserveSpecCitation. A placeholder may
     exist in any memory; it is never inferred from an empty body. Writing real
-    content through updateSpecNode clears it. Placeholders block minting.
+    nonblank content through the spec door or shared mirror write path clears
+    it. Placeholders block minting.
     """
     isPlaceholder: Boolean!
     isLink: Boolean!
@@ -3888,14 +3889,11 @@ export const typeDefs = `#graphql
     userMemoryOfAgentId: String
     anonymousExpiresAt: DateTime
     """
-    The App this memory is scoped to. REQUIRED for \`class='app'\`,
-    FORBIDDEN for \`class='system'\` (an agent's own definition is never
-    App-scoped), and OPTIONAL for \`knowledge\` / \`group\` / \`personal\` /
-    \`private\` — set when provisioned inside an App, NULL when the memory
-    is free-standing. Enforced by \`chk_memory_class_app_id\`. (034 relaxed
-    the personal case and #653 moved knowledge + group from forbidden to
-    optional; this said "required for app/personal, NULL otherwise" until
-    #1232.)
+    The App this memory is scoped to. Required for app-class memories.
+    A system-class Agent definition has no App; a system-class INSTALL MEMORY
+    has an App and isInstallMemory=true, including after its Agent link is
+    detached. Other classes (knowledge, group, personal, private) may be
+    App-scoped or free-standing. Enforced by chk_memory_class_app_id.
     """
     appId: ID
     "The linked App when the caller may read that App; a Memory read alone does not grant it."
@@ -3984,8 +3982,9 @@ export const typeDefs = `#graphql
   configured. OK: the node is live and you can read it; its id is given, and
   its URN too unless the node's memory has a legacy URN that cannot address it
   (#697), when the URN is null and the id is the ref to use. BROKEN: configured,
-  but the node was deleted, so operations relying on the rule are refused until
-  a manager repoints it (fail-closed). UNREADABLE: the node exists but you may
+  but its node or memory is gone, so operations relying on a procedural rule
+  are refused until a manager repoints it (fail-closed). Missing description
+  documentation instead reports NONE through descriptionNodeState. UNREADABLE: the node exists but you may
   not read it, so its URN and id are withheld.
   """
   enum NodeRoleRuleRefState {
@@ -5613,7 +5612,7 @@ export const typeDefs = `#graphql
     """
     Memory reference. Accepts the entity's ID (CUID / 32-char hex) or its
     URN (per spec 007 ID-or-URN dispatch). URN inputs MUST be fully
-    qualified (org:memory) per spec 022 — relative-form URNs are
+    qualified (hrn:mem:<root>:<memory>) per spec 022 — relative-form URNs are
     rejected as GraphQL errors with extensions.code "URN_NOT_QUALIFIED".
     """
     memoryId: String!
@@ -5677,7 +5676,7 @@ export const typeDefs = `#graphql
     """
     Memory reference. Accepts the entity's ID (CUID / 32-char hex) or its
     URN (per spec 007 ID-or-URN dispatch). URN inputs MUST be fully
-    qualified (org:memory) per spec 022 — relative-form URNs are
+    qualified (hrn:mem:<root>:<memory>) per spec 022 — relative-form URNs are
     rejected as GraphQL errors with extensions.code "URN_NOT_QUALIFIED".
     """
     memoryId: String
@@ -5735,7 +5734,7 @@ export const typeDefs = `#graphql
     """
     Optional optimistic-concurrency precondition (#937). When supplied, the
     update is applied only while the node's current live revision still equals
-    this positive integer. A mismatch refuses atomically with
+    this positive 32-bit integer. A mismatch refuses atomically with
     NODE_WRITE_CONFLICT; omitting it or passing null preserves last-write-wins
     compatibility.
     Read the baseline from Node.revision.
@@ -6354,11 +6353,12 @@ export const typeDefs = `#graphql
   enum SpecTextField { content abstract }
 
   """
-  Replace text in explicit unminted spec nodes of one memory. A dry run returns
+  Replace text in explicit unminted nodes of one memory. A dry run returns
   a plan; apply must present that exact plan and refuses if any selected row,
   protection, match, or mint state changed. A minted target node is refused,
-  even when other nodes in the memory are unminted. Generic replacement keeps
-  its governed-node protections.
+  even when other nodes in the memory are unminted. Other governed kinds and
+  protected addresses are skipped; ordinary nodes need not carry the spec role.
+  Generic replacement keeps its governed-node protections.
   """
   input SpecSearchReplaceInput {
     memoryRef: ID!
@@ -7431,12 +7431,16 @@ export const typeDefs = `#graphql
          collision is REJECTED with extensions.code AMBIGUOUS_NODE_LOC
          (listing the candidate memoryIds) rather than silently returning
          one (#335). An unprefixed 3+-segment ref whose first two segments
-         name a readable memory is treated as form 2 (a full URN); pass
+         name a live memory is treated as form 2 (a full URN); pass
          'memoryRef' to force loc interpretation.
 
-    raw: true skips Mustache template compilation. Soft-deleted nodes do not
-    resolve. Access: the caller's readable-memory set (same gate the old
-    queries used); denied and missing are both null.
+    raw: true selects stored content without include or variable resolution.
+    Soft-deleted nodes do not resolve. Access uses the caller's readable-memory
+    set. A denied or missing node returns null; an explicit memoryRef that is
+    missing or unreadable raises MEMORY_NOT_FOUND. When addressed in a system
+    memory by memoryRef or a full node URN, a loc with no local node may read
+    through to an eligible inherited node under its own address; overrides and
+    boot prompts are excluded. An unscoped bare loc does not search inheritance.
     """
     node(ref: ID!, memoryRef: ID, raw: Boolean): Node
 
@@ -8185,11 +8189,12 @@ export const typeDefs = `#graphql
     driveFile(connectionRef: ID!, fileId: ID!): DriveFile!
 
     """
-    Export a drive file as text: native documents convert (Docs export
-    natively to MARKDOWN; spreadsheets to TEXT as CSV; presentations to
-    TEXT), text files return verbatim. Binary files are refused (typed
-    validation error). Size-capped with a typed file_too_large — never
-    truncated. Grant scope: drive.read.
+    Export a drive file through the connection's provider tool. Grant scope:
+    drive.read is required for an App context's covering connection grant.
+    Without an App context, the caller must own the connection; org
+    administration alone does not grant access. The server delegates format conversion, binary-file refusal
+    and size validation to that tool; it does not independently enforce those
+    provider guarantees here. Returns the tool's content, MIME type and format.
     """
     driveFileExport(connectionRef: ID!, fileId: ID!, format: DriveExportFormat): DriveFileExport!
 
@@ -8294,19 +8299,20 @@ export const typeDefs = `#graphql
     agentSubscriptions(agentRef: ID!): [AgentSubscription!]!
 
     """
-    All nodes accessible by an App: the union of every installed agent's
-    system memory (read-only) and its knowledge memoryItems (#524).
+    Nodes in the App's current readable installed-Agent memory scope, with
+    eligible inherited system-memory nodes. Participants additionally receive
+    the App's team space; org-authorized readers do not gain that space merely
+    from org membership. Live access, link roles and App scoping constrain the
+    result; this is not every memory linked to any installed Agent.
 
-    Accepts the entity's ID or URN.
-
-    An optional NodeFilter pushes node-level predicates server-side — e.g.
-    filter: { isRunnable: true } to list the App's runnable task nodes (#525).
-    The App's memory scope is authoritative, so the filter's memory-scope
-    fields (memoryIds / memoryClasses) are rejected with BAD_USER_INPUT rather
-    than silently ignored — use findNodes for cross-memory scoping. Only
-    node-level predicates (nodeType, tags, isRunnable, role, locPrefix, createdBy,
-    updatedAfter/Before, includeDeleted) apply. Unlike findNodes, system-memory
-    nodes are NOT excluded by default.
+    Accepts the App's ID or fully qualified URN. NodeFilter narrows node fields,
+    including objectType, approvalState and minted. Nonempty memoryIds or
+    memoryClasses are rejected with BAD_USER_INPUT: the App scope is authoritative.
+    Unlike findNodes, system-node types are not excluded by default. Deleted
+    content remains subject to recovery authority. NodeFilter.contentScope
+    COMMENTS or ALL can select comments. When contentScope is omitted,
+    nodeType=comment selects COMMENTS; otherwise the default CONTENT excludes
+    comments. Filters on approvalState or minted always exclude comments.
     """
     appNodes(appRef: ID!, filter: NodeFilter, limit: Int): [Node!]!
 
