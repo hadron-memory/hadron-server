@@ -1,4 +1,5 @@
 {
+  "scripts/e2e/seed.ts :: ensureCurrentNodeRevisionInTransaction": 1,
   "src/api/graphql/schema/resolvers.decisions.ts :: ensureCurrentNodeRevisionInTransaction": 2,
   "src/api/graphql/schema/resolvers.mutation.memory.ts :: ensureCurrentNodeRevisionInTransaction": 1,
   "src/api/graphql/schema/resolvers.mutation.node.ts :: createNodeRevision": 5,
