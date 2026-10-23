@@ -7287,10 +7287,12 @@ export const typeDefs = `#graphql
     hostOperations(appRef: String!, hostId: String, status: HostOperationStatus, worker: String, first: Int, after: String): HostOperationPage!
 
     """
-    #1705 — a team App's agent tasks, newest first. Filters combine with AND;
+    #1705 — a team App's agent tasks, newest first. Party filters combine with the other selectors;
     owner / assignee name a party of the App (a ref naming nobody matches
-    nothing). queued: pending with no assignee. limit defaults to 50 (cap 200).
-    Readers: the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:050:21); a pure App key is refused.
+    nothing). queued selects pending tasks with no assignee; rootsOnly selects roots. These
+    take precedence over status and parentTaskId respectively. limit defaults to 50 (cap 200).
+    Readers: the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:050:21), or the App's own live key
+    without a session binding (#1755).
     An App you do not participate in answers APP_NOT_FOUND, exactly like an
     absent one.
     """
@@ -9151,6 +9153,7 @@ export const typeDefs = `#graphql
     S7 (#2023, R85) — isolate a worker until a time (default 2 hours, at most 7 days; a later time extends, an earlier one shortens).
     Only a person managing the App or holding the worker, acting as themselves; a worker session (even a manager's), an App key or an
     impersonation is refused with WORKER_ISOLATION_FORBIDDEN. Never touches the worker's own pause.
+    While S7 activation is off, setting an isolation is refused with WORKER_ISOLATION_UNAVAILABLE; clearing is unaffected.
     """
     isolateWorker(workerRef: String!, until: DateTime): WorkerWakeSettings!
     "S7 — lift an isolation (same audience). Clearing when none is set changes nothing."
@@ -9224,7 +9227,7 @@ export const typeDefs = `#graphql
     assignAgentTask(taskId: ID!, assignee: AgentTaskPartyInput!, closeSessionWhenDone: Boolean): AgentTask!
 
     """
-    #1705 — move a task to another assignee: the task's owner, or whoever
+    #1705 — move a task to another assignee: the task's owner, a worker the owner reports to, or whoever
     manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09). A started task stays started; the former
     assignee can no longer move it. Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (no assignee yet, or the same one),
@@ -9295,7 +9298,8 @@ export const typeDefs = `#graphql
     """
     #1706 — set a worker's availability for work (hrn:node:hadronmemory.com:specs:cor:agt:060:08): the worker
     itself, acting through its session, and only to UNAVAILABLE; the person
-    holding its name; or whoever manages the App. Writes availability.changed.
+    holding its name; or whoever manages the App. A worker another reports to directly may also clear only a
+    stall-rule unavailable mark (the stall rule must have set it), never set another worker unavailable. Writes availability.changed.
     Refusals: WORKER_NOT_FOUND, AVAILABILITY_NOT_PERMITTED, WORKER_RETIRED,
     BAD_USER_INPUT, SESSION_NOT_BOUND, APP_UNINSTALLED.
     """

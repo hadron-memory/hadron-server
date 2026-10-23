@@ -50,6 +50,8 @@ import { parse, visit } from 'graphql';
 import { pathToFileURL } from 'node:url';
 import { typeDefs } from '../src/api/graphql/schema/typeDefs.js';
 import { CONNECTION_GRANT_SCOPES } from '../src/lib/emailOperationScopes.js';
+import { HOST_OPERATION_TYPES } from '../src/lib/hostOperations/types.js';
+import { TASK_WARNING_CODES } from '../src/api/graphql/schema/resolvers.taskWarnings.js';
 import { EMAIL_PROVIDER_KEYS } from '../src/lib/emailClient.js';
 import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions/operators.js';
 
@@ -79,6 +81,19 @@ import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions
  * which costs more than the drift it would have caught.
  */
 const WATCHED_SETS = [
+  {
+    // #2301: dotted host operation identifiers, imported from the dispatch table.
+    name: 'HOST_OPERATION_TYPES',
+    source: 'src/lib/hostOperations/types.ts',
+    members: HOST_OPERATION_TYPES,
+  },
+  {
+    // #2301: dotted warning identifiers are distinctive, not ordinary prose.
+    // This checks completeness only; it cannot verify the warning's authority or timing.
+    name: 'TASK_WARNING_CODES',
+    source: 'src/api/graphql/schema/resolvers.taskWarnings.ts',
+    members: TASK_WARNING_CODES,
+  },
   {
     name: 'CONNECTION_GRANT_SCOPES',
     source: 'src/lib/emailOperationScopes.ts',

@@ -30,6 +30,12 @@ describe('#2301 SDL S1 audited claims', () => {
   it('states isolation is unavailable while its implementation switch is off', () => {
     expect(description('Mutation', 'isolateWorker')).toContain('WORKER_ISOLATION_UNAVAILABLE');
   });
+  it('the default enumeration registry detects omitted host operation types', () => {
+    const fixture = 'type Query { "worktree.create, worker.start" operations: String }';
+    expect(findPartialEnumerations(fixture)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ set: 'HOST_OPERATION_TYPES', missing: expect.arrayContaining(['worker.end']) }),
+    ]));
+  });
   it('the default enumeration registry detects omitted task-warning codes', () => {
     const fixture = 'type Query { "task.create.no-source, task.assign.assignee-busy" warnings: String }';
     expect(findPartialEnumerations(fixture)).toEqual(expect.arrayContaining([
