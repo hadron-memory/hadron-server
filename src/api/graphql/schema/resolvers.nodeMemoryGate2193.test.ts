@@ -362,10 +362,6 @@ describe('#2193 — App-key and session principals: Node.memory answers as Query
         expect(one.errors, `${who}: node(ref)`).toBeUndefined();
         if (one.data.node) served.push(one.data.node);
       }
-      // Stated up front: the handoff is visible to both (the parent's Node admission is
-      // unchanged), but only the Worker's own session reaches its working memory's RECORD.
-      // The bare App key reaches the installed Agent's memories, not the app-owned working
-      // memory, so its record is null where Query.memory also answers null.
       // Stated up front, per principal and node: what the Memory record must answer.
       // The bare App key reaches the installed Agent's own memories (system, knowledge) and not
       // the app-owned working memory. A session narrows it to the session's reach (cor:aut:020:02):
@@ -449,23 +445,34 @@ describe('#2193 — listed task and process nodes', () => {
 
 describe('#474 / #2193 — preload and no-preload twins over HTTP', () => {
   it('appNodes (truncated preload) and node(ref) (none) answer the same memory for the same principal', async () => {
-    for (const who of ['owner', 'admin', 'reader', 'member', 'stranger']) {
+    // Stated up front, per principal, before any response is read: the nodes appNodes must serve
+    // (the installed Agent's system and knowledge memories, never the app-owned working memory),
+    // or the refusal it must give. A principal whose list vanished fails here, not silently.
+    const expected: Record<string, { ids: string[] } | { refused: true }> = {
+      owner: { ids: [node.sys!, node.know!] }, admin: { ids: [node.sys!, node.know!] },
+      reader: { ids: [node.sys!, node.know!] }, member: { ids: [node.sys!, node.know!] }, stranger: { refused: true },
+    };
+    const q = 'query($a: ID!) { appNodes(appRef: $a) { id memory { id name description createdAt } } }';
+    for (const who of Object.keys(expected)) {
       const bearer = await keyFor(who);
-      const q = 'query($a: ID!) { appNodes(appRef: $a) { id memory { id name description createdAt } } }';
       const app = await post(bearer, q, { a: appId });
-      const preload = app.errors ? new Map() : new Map<string, any>(app.data.appNodes.map((x: any) => [x.id, x.memory]));
-      for (const id of Object.values(node)) {
-        if (!preload.has(id)) continue;
+      const want = expected[who]!;
+      if ('refused' in want) { expect(app.errors?.[0]?.extensions?.code, `${who}: appNodes refusal`).toBe('FORBIDDEN'); continue; }
+      expect(app.errors, `${who}: appNodes`).toBeUndefined();
+      const preload = new Map<string, any>(app.data.appNodes.map((x: any) => [x.id, x.memory]));
+      expect([...preload.keys()].sort(), `${who}: nodes served`).toEqual([...want.ids].sort());
+      for (const id of want.ids) {
         const one = await post(bearer, 'query($r: ID!) { node(ref: $r) { memory { id name description createdAt } } }', { r: id });
         expect(one.errors, `${who}: node(ref)`).toBeUndefined();
-        // Where node(ref) does not admit the node at all, the preloaded path must not
-        // hand out the record either: a list that admits a node node(ref) hides still
-        // answers its Memory as null.
+        // Where node(ref) does not admit the node at all, the preloaded path must not hand out
+        // the record either: a list that admits a node node(ref) hides still answers null.
         expect(preload.get(id), `${who}: twin of node ${id}`).toEqual(one.data.node ? one.data.node.memory : null);
       }
-      // Stated up front: appNodes serves the installed Agent's memories (system and knowledge),
-      // never the app-owned working memory; the admin is admitted to both of those.
-      if (who === 'admin') expect([...preload.keys()].sort(), 'admin: nodes served').toEqual([node.sys, node.know].sort());
+      // The reader's twins stay observable: the knowledge record in full, the system record null.
+      if (who === 'reader') {
+        expect(preload.get(node.know!), 'reader: knowledge record').toMatchObject({ id: mem.know, description: 'knowledge description' });
+        expect(preload.get(node.sys!), 'reader: system record').toBeNull();
+      }
     }
   });
 });
