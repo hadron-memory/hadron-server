@@ -450,3 +450,12 @@ on every fixture. The separate bad-plan control is retained. Six file tests
 pass locally; production liveness SQL is unchanged. Historical CI remains red
 until the new head completes CI; the running full evidence snapshot is kept
 unchanged until its result is recorded.
+
+Fresh-stack QA found one additional operational caller: scripts/e2e/seed.ts
+reconciled its approved/minted fixture Nodes through a plain transaction. That
+is a repository prerequisite defect, not an environment waiver. It now uses
+the shared withIncludeHistoryClientTransaction root without changing seed
+safety checks or fixture content. The caller inventory scans scripts as well
+as src and records this call (red before its row, green afterward). Inventory
+and prepared-fence controls pass21/21. Fresh-stack seed/startup QA must be rerun
+on the corrected head; those focused controls do not claim a seeded stack pass.

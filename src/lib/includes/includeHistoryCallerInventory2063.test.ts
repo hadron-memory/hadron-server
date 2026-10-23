@@ -35,5 +35,7 @@ it('requires explicit classification when a snapshot/reconcile/history-delete AP
     }
   }
   walk(join(root, 'src'));
+  // Operational fixture setup calls the same guarded history helpers.
+  walk(join(root, 'scripts'));
   expect(counts).toEqual(inventory);
 });
