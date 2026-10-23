@@ -148,6 +148,10 @@ export async function sweepAssetBytes(
       : null;
     let plainStorageKey: string;
     try {
+      // An encrypted memory with no cached key is deferred whatever shape its
+      // stored key has: decryptStorageKey passes a plaintext-shaped value
+      // through without needing the key, and a HEAD on that is not a check.
+      if (asset.memory?.isEncrypted && !sessionKey) throw new Error('no session key');
       plainStorageKey = decryptStorageKey(asset.storageKey, sessionKey);
     } catch {
       outcome.deferred += 1;

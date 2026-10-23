@@ -197,6 +197,19 @@ describe('sweepAssetBytes', () => {
     expect(summary.extra).toEqual({ total: MAX_EVENTS_PER_RUN + 3, unreported: 3 });
   });
 
+  it('defers an encrypted memory with no cached key even when the stored key looks like plaintext', async () => {
+    await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
+    const row = await seed(); // plaintext-shaped storageKey
+    headObjectMock.mockResolvedValue({ exists: false });
+
+    const out = await sweepAssetBytes({ now: NOW });
+
+    expect(out).toMatchObject({ examined: 1, deferred: 1, missing: 0 });
+    expect(headObjectMock).not.toHaveBeenCalled();
+    expect(captureMock).not.toHaveBeenCalled();
+    expect((await db.asset.findUniqueOrThrow({ where: { id: row.id } })).bytesCheckedAt).toEqual(NOW);
+  });
+
   it('defers an encrypted memory with no cached session key and rotates it', async () => {
     await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
     const row = await seed();
