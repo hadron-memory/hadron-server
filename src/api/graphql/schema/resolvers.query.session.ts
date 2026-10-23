@@ -232,7 +232,7 @@ export const sessionQueries = {
       return ctx.db.session.findMany({
         where,
         orderBy: { startedAt: 'desc' },
-        take: limit ?? 50,
+        take: limit ?? 20,
         skip: offset ?? 0,
         include: SESSION_INCLUDE,
       });
@@ -271,7 +271,7 @@ export const sessionQueries = {
       return ctx.db.usageEvent.findMany({
         where,
         orderBy: { createdAt: 'desc' },
-        take: args.limit ?? 50,
+        take: args.limit ?? 20,
         skip: args.offset ?? 0,
       });
     },
@@ -341,7 +341,7 @@ export const sessionQueries = {
         {
           // The tool caps top at 100 — clamp instead of surfacing a
           // validation error on a previously-unbounded GraphQL arg.
-          top: Math.max(1, Math.min(top ?? 25, 100)),
+          top: Math.max(1, Math.min(top ?? 20, 100)),
           unreadOnly: unreadOnly || !!normalizedFilter || undefined,
         },
       );
@@ -415,7 +415,7 @@ export const sessionQueries = {
           query: query ?? undefined,
           // The tool caps top at 100 — clamp instead of surfacing a
           // validation error (the exchangeMessages precedent).
-          top: Math.max(1, Math.min(top ?? 25, 100)),
+          top: Math.max(1, Math.min(top ?? 20, 100)),
         },
       );
       return events.map(mapToolCalendarEvent);
@@ -494,7 +494,7 @@ export const sessionQueries = {
         folderId: folderId ?? undefined,
         // The tool caps top at 100 — clamp instead of surfacing a
         // validation error (the exchangeMessages precedent).
-        top: Math.max(1, Math.min(top ?? (searching ? 25 : 50), 100)),
+        top: Math.max(1, Math.min(top ?? 20, 100)),
         pageToken: pageToken ?? undefined,
       };
       if (searching) {

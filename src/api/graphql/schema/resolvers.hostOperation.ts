@@ -212,7 +212,7 @@ export const hostOperationMutations = {
    * host's, in its own App.
    */
   collectHostOperations: async (_: unknown, a: { appRef: string; first?: number | null }, ctx: Context) => recordingRefusal(ctx, 'collect', null, async () => {
-    const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
+    const first = Math.min(Math.max(a.first ?? 20, 1), PAGE_MAX);
     return asHost(ctx, a.appRef, async (tx, app, host) => {
       const now = new Date();
       const out: Array<HostOperationRow & { launchGrant: string | null }> = [];
@@ -633,7 +633,7 @@ export const hostOperationQueries = {
       if (await wasEverHostKey(c)) {
         throw taskError('FORBIDDEN', "A host key reads its own host's operations by collecting them, not from the App's listing.");
       }
-      const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
+      const first = Math.min(Math.max(a.first ?? 20, 1), PAGE_MAX);
       const status = a.status ? a.status.toLowerCase() : null;
       if (status && !['issued', 'collected', 'succeeded', 'failed'].includes(status)) {
         throw badInput('status is ISSUED, COLLECTED, SUCCEEDED or FAILED.');
@@ -698,6 +698,6 @@ export async function appKeyHostUses(key: { id: string; appId: string }, a: { fi
   if (!app || !(await managesApp(ctx, app))) {
     throw taskError('FORBIDDEN', "Only whoever manages this App can read what its keys did.");
   }
-  const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
+  const first = Math.min(Math.max(a.first ?? 20, 1), PAGE_MAX);
   return ctx.db.hostKeyUse.findMany({ where: { appKeyId: key.id }, orderBy: [{ usedAt: 'desc' }, { id: 'desc' }], take: first });
 }

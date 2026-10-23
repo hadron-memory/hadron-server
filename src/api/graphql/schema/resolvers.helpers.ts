@@ -1985,10 +1985,10 @@ export function defaultAiConfigOf(
 // ── Uniform find-many surface (#473) — Spec: cor:api:120 ───────────────
 
 // Standard page bounds for the uniform `<entity>s(filter, orgId, limit,
-// offset)` list queries — matches the globalSearch idiom (default 50, cap
-// 200). `limit: 0` is preserved (an empty page with just `total` — the cheap
+// offset)` list queries — default 20 (#2211), cap
+// 200. `limit: 0` is preserved (an empty page with just `total` — the cheap
 // count, same contract as memoryNodes). Spec: cor:api:120:02.
-export const LIST_PAGE_DEFAULT = 50;
+export const LIST_PAGE_DEFAULT = 20;
 export const LIST_PAGE_MAX = 200;
 
 export function clampListTake(limit?: number | null): number {
@@ -2000,8 +2000,7 @@ export function clampListTake(limit?: number | null): number {
  * #2213 — size arguments of the `<field>Page` siblings (cor:api:120:04). An
  * omitted or null limit pages at 20; 0 is count-only (an empty page with the
  * real total); a negative limit is 0; a limit over 200 is served as 200, never a
- * refusal. A negative or omitted offset is 0. Distinct from `clampListTake`, whose
- * default of 50 the older `<entity>s` lists keep.
+ * refusal. A negative or omitted offset is 0. Same default as `clampListTake` since #2211.
  */
 export const PAGE_ARGS_DEFAULT = 20;
 export const PAGE_ARGS_MAX = 200;

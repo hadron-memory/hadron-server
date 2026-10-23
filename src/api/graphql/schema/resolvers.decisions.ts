@@ -1029,7 +1029,7 @@ export const decisionQueries = {
     },
     ctx: Context,
   ): Promise<{ items: DecisionView[]; total: number }> => {
-    const limit = Math.min(Math.max(args.limit ?? 50, 1), 200);
+    const limit = Math.min(Math.max(args.limit ?? 20, 1), 200);
     const offset = Math.max(args.offset ?? 0, 0);
     let where: Prisma.NodeWhereInput;
     if (args.awaitingMe) {

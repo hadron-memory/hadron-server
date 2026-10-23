@@ -1011,7 +1011,7 @@ export const nodeQueries = {
       const f = filter ?? {};
 
       // ── (spec 049 scope handling lives in the wrapper at the end of core) ──
-      const finalLimit = limit ?? 50;
+      const finalLimit = limit ?? 20;
       const off = offset ?? 0;
       // #497 — optional absolute relevance floor. Applied to the ranked scores
       // before paging (a NaN guard so a bad arg is simply ignored, never throws).
@@ -2177,7 +2177,7 @@ export const nodeQueries = {
           ...(accessibleMemoryIds !== null ? { memoryId: { in: accessibleMemoryIds } } : {}),
         },
         orderBy: { createdAt: 'desc' },
-        take: limit ?? 50,
+        take: limit ?? 20,
       });
     },
 
@@ -2188,7 +2188,7 @@ export const nodeQueries = {
       const revisions = await ctx.db.nodeRevision.findMany({
         where: { nodeId },
         orderBy: { createdAt: 'desc' },
-        take: limit ?? 50,
+        take: limit ?? 20,
       });
       // Drop snapshots captured while the node lived in a memory the caller
       // can't read. Legacy rows (memoryId NULL) fall back to the node's current
@@ -2479,7 +2479,7 @@ export const nodeQueries = {
           ],
         },
         orderBy: { loc: 'asc' },
-        take: limit ?? 500,
+        take: limit ?? 20,
         include: {
           outgoingEdges: { include: { target: true } },
           incomingEdges: { include: { source: true } },

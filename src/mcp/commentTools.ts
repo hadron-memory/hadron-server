@@ -330,7 +330,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
 const SHAPE_HADRON_LIST_COMMENTS = {
   targetRef: z.string().describe('The node whose discussion to read: its URN or id.'),
   state: z.array(z.enum(['OPEN', 'RESOLVED'])).optional().describe('Only threads in these states. Default: all.'),
-  limit: z.number().int().nonnegative().optional().describe('Threads per page (default 50, cap 200). Each thread returns up to 200 replies.'),
+  limit: z.number().int().nonnegative().optional().describe('Threads per page (default 20, cap 200). Each thread returns up to 200 replies.'),
   offset: z.number().int().nonnegative().optional().describe('Page offset.'),
 };
 

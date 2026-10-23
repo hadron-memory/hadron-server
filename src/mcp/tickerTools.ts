@@ -534,7 +534,7 @@ const SHAPE_HADRON_CLEAR_WORKER_ISOLATION = { workerRef, session: SESSION_WRITE 
 const SHAPE_HADRON_DUE_WAKES = {
   appRef: z.string().describe('The team App (id or URN).'),
   workerRefs: z.array(z.string()).optional().describe('Only these workers. Omit for every worker you may read.'),
-  first: z.number().int().optional().describe('Workers per page (default 100, max 200).'),
+  first: z.number().int().optional().describe('Workers per page (default 20, max 200).'),
   after: z.string().optional().describe('The previous page\'s endCursor.'),
   session: SESSION_READ,
 };
@@ -542,7 +542,7 @@ const SHAPE_HADRON_DUE_WAKES = {
 const SHAPE_HADRON_TEAM_CHAT_INBOX = {
   appRef: z.string().describe('The team App (id or URN).'),
   workerRefs: z.array(z.string()).optional().describe('Only these workers. Self mode: only your bound worker. Host mode: omit for workers registered on your host.'),
-  first: z.number().int().optional().describe('Workers per page (default 50, max 200).'),
+  first: z.number().int().optional().describe('Workers per page (default 20, max 200).'),
   after: z.string().optional().describe('The previous page\'s endCursor.'),
   session: z.string().optional().describe('Self: your own live bound worker session. Host key: omit session and use attention:deliver plus host:operate.'),
 };
