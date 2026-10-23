@@ -57,6 +57,7 @@ import { EMAIL_PROVIDER_KEYS } from '../src/lib/emailClient.js';
 import { GOVERNED_ROLES } from '../src/lib/governedRole.js';
 import { SKILL_HOSTS } from '../src/lib/skilldoc/hosts.js';
 import { MemoryMemberRole } from '../src/generated/prisma/index.js';
+import { AI_PROVIDER_ENDPOINTS, usesProcessCredential } from '../src/lib/aiEndpoint.js';
 import { WORK_KINDS } from '../src/lib/workRef.js';
 import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions/operators.js';
 
@@ -102,6 +103,15 @@ const WATCHED_SETS = [
     // Owner references in the later protection rule cannot mask a missing
     // owner entry in the promised role list.
     enumerationPattern: /([\s\S]*?)(?:Subject to|$)/i,
+  },
+  {
+    // #2305: derive this conditional subset from the actual runtime predicate,
+    // not a copied provider list. Provider words elsewhere are not evidence.
+    name: 'PROCESS_CREDENTIAL_PROVIDERS', source: 'src/lib/aiEndpoint.ts',
+    members: Object.keys(AI_PROVIDER_ENDPOINTS).filter(provider =>
+      usesProcessCredential({ provider, endpoint: null }, 'HADRON_SERVER')),
+    coordinates: ['Mutation.createAiServiceConfig'],
+    enumerationPattern: /process-credential providers:\s*([^;]+);/i,
   },
   {
     // #2301: dotted host operation identifiers, imported from the dispatch table.

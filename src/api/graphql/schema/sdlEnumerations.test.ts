@@ -224,3 +224,23 @@ describe('S3 live host/member description lists (#2303)', () => {
     expect(findPartialEnumerations('"""The reader and writer share a document.""" type Other { id: ID }')).toEqual([]);
   });
 });
+
+describe('#2305 process-credential provider list', () => {
+  const at = (text: string, field = 'createAiServiceConfig') =>
+    `type Mutation { """${text}""" ${field}: String }`;
+
+  it('detects an omitted eligible provider using the production predicate', () => {
+    expect(findPartialEnumerations(at('Eligible process-credential providers: openai, anthropic; no endpoint.')))
+      .toMatchObject([{ coord: 'Mutation.createAiServiceConfig', set: 'PROCESS_CREDENTIAL_PROVIDERS', missing: ['bedrock'] }]);
+  });
+
+  it('does not let a provider outside the promised list mask its omission', () => {
+    expect(findPartialEnumerations(at('Eligible process-credential providers: openai; bedrock and anthropic appear elsewhere.')))
+      .toMatchObject([{ set: 'PROCESS_CREDENTIAL_PROVIDERS', missing: ['anthropic', 'bedrock'] }]);
+  });
+
+  it('accepts the complete eligible list and ignores unrelated provider prose', () => {
+    expect(findPartialEnumerations(at('Eligible process-credential providers: bedrock, openai, anthropic; no endpoint.'))).toEqual([]);
+    expect(findPartialEnumerations(at('Only openai and anthropic examples.', 'other'))).toEqual([]);
+  });
+});

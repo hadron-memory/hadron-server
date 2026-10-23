@@ -7853,8 +7853,9 @@ export const typeDefs = `#graphql
     and searchUsers. Platform ADMIN/OWNER: every live user, filter.query
     optional. Everyone else: filter.query is REQUIRED (blank/omitted -> empty
     page) and matching is enumeration-safe per cor:acl:070:02 — handle /
-    githubUsername by substring, email by exact match, name only where the
-    viewer may see it (self/admin/co-member). Name-ascending order (id
+    githubUsername by substring, email by exact match, and name for platform
+    admins or users sharing one of the viewer's active org memberships.
+    Name-ascending order (id
     tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
     """
     users(filter: UserFilter, limit: Int, offset: Int): UsersPage!
@@ -8223,11 +8224,10 @@ export const typeDefs = `#graphql
     myApp: App
 
     """
-    The uniform single-agent read (#473) — the first top-level Agent query;
-    previously Agents were reachable only via Organization.agents /
-    App.agents nesting. Gate mirrors resolveUrn's agent branch: member of
-    the Agent's org or platform ADMIN/OWNER; denied throws Forbidden,
-    missing is null.
+    The uniform single-agent read. Uses the shared Agent read gate, including
+    PUBLIC visibility and owner-aware access to user-owned Agents. An absent
+    or unreadable Agent returns null; malformed or under-qualified refs remain
+    input errors. Nested fields keep their own exposure gates.
 
     'ref' accepts the entity's ID or URN.
     """
@@ -8364,8 +8364,7 @@ export const typeDefs = `#graphql
     025-oauth-for-mcp FR-004: list the calling User's API keys (active
     + revoked, createdAt DESC). Powers Phase 3's portal revocation UI
     (SC-006). Rejected with UNAUTHENTICATED for AppKey-resolved
-    callers (no user in context). PR-137 review delta D5 — Query
-    not present in PR 137.
+    callers (no user in context). Impersonation is refused with Forbidden.
     """
     myUserApiKeys: [UserApiKey!]!
 
@@ -8388,13 +8387,14 @@ export const typeDefs = `#graphql
     agentAIConfig(agentRef: ID!): AgentAIConfig
 
     """
-    The uniform single-config read (#473). 'ref' is the config's ID —
-    AiServiceConfig is the one URN-less entity (matching resolveUrn /
-    effectiveAccess dispatch). Masked: never returns key material, only
-    hasApiKey + apiKeyPreview (resolveAIConfig is the privileged decrypted
-    read). Auth mirrors the list: platform ADMIN/OWNER for
-    HADRON_SERVER-owned configs, org ADMIN of the owning org otherwise;
-    denied throws Forbidden, missing is null.
+    The uniform single-config read. 'ref' is the config's ID (not a URN).
+    Masked: never returns key material, only hasApiKey + apiKeyPreview
+    (resolveAIConfig is the privileged decrypted read). Auth mirrors the list:
+    platform ADMIN/OWNER for HADRON_SERVER; org ADMIN for ORGANIZATION;
+    the App/Agent's owner or owning-org ADMIN for APP/AGENT. User-owned
+    Apps and Agents use their strict owner-only credential gate, even for
+    platform admins. Denied throws Forbidden, except an unreadable owning
+    Agent answers AGENT_NOT_FOUND. A missing config returns null.
     """
     aiServiceConfig(ref: ID!): AiServiceConfig
 
@@ -8596,7 +8596,8 @@ export const typeDefs = `#graphql
     Same walk as resolveAIConfig (App -> Agent -> Org (of the App, else of
     the Agent) -> HadronServer), but returns ALL names instead of resolving
     one: configs are deduped by name with the innermost owner winning, so
-    each entry is the row resolveAIConfig would return for that name. Only
+    each entry is the row the resolution walk selects for that name; this
+    masked listing does not grant permission to decrypt it. Only
     the Agent named here contributes — sibling Agents installed in the same
     App are not consulted. Disabled configs are skipped. Never returns key
     material (hasApiKey + apiKeyPreview only).
@@ -9040,8 +9041,9 @@ export const typeDefs = `#graphql
     silently falls back to 'all'. Values are deduped; an unknown member is
     rejected by enum validation rather than dropped.
 
-    status is DEPRECATED in favour of statuses. Both are accepted for one
-    release; when both are given, statuses wins.
+    status is DEPRECATED in favour of statuses but remains accepted.
+    When statuses is non-null it wins, including an empty list; omitted or
+    null statuses falls back to status. No removal date is promised here.
 
     sortBy / sortDir (#833) order the whole result set server-side, so a client
     table is no longer limited to sorting the page it happens to hold.
@@ -9971,10 +9973,12 @@ export const typeDefs = `#graphql
 
     # Spec 042 Track B (#593) — user->App connection delegation. Owner-only.
     """
-    Grant an App install scoped access to a connection you OWN. scopes must be a
-    subset of {mail.read, mail.send, calendar.freebusy, calendar.read, drive.read};
-    expiresAt (ISO-8601) is optional and must be in the future. appRef is a PK or
-    App URN.
+    Grant an App install scoped access to a connection you OWN, using your own
+    user credential with no App context (no App-key or on-behalf-of-run path). scopes must
+    be a non-empty subset of {mail.read, mail.send, calendar.freebusy, calendar.read, drive.read};
+    duplicates are collapsed. expiresAt is optional; when supplied it must be
+    a future ISO-8601 timestamp with an explicit timezone. appRef is a PK or
+    App URN. A missing or unreadable connection answers NOT_FOUND.
     """
     createConnectionGrant(connectionRef: String!, appRef: String!, scopes: [String!]!, expiresAt: String): ConnectionGrant!
     "Revoke a connection grant you created (soft delete). Owner-only."
@@ -10109,7 +10113,8 @@ export const typeDefs = `#graphql
     session. For a rotation, pass endSession(resumeClaim: true) instead, which
     writes it with the handoff, before the end. Someone else's session answers
     as an absent one; an ended session refuses SESSION_ENDED; a session with no
-    worker refuses SESSION_NOT_WORKER_BOUND.
+    worker refuses SESSION_NOT_WORKER_BOUND. An App key without a user or an
+    impersonation caller receives the same absent-session answer.
     """
     createResumeClaim(sessionId: ID!): ResumeClaimReceipt!
     """
@@ -10165,8 +10170,10 @@ export const typeDefs = `#graphql
     Consolidate a duplicate account into a surviving user. Source-only
     identities and relationships move; duplicate role-bearing relationships
     preserve the strongest live entitlement. The source is soft-deleted.
-    Platform admin with an unbound user JWT only; API keys, Apps, impersonation
-    and session-bound callers refuse FORBIDDEN. The resulting merge is global;
+    Requires platform administration, both accounts' consent proof, and an
+    unbound user JWT; API keys, Apps, impersonation and session-bound callers
+    cannot authorize a merge. The platform-role and missing-proof checks run
+    before the credential-shape check. The resulting merge is global;
     organization administration does not authorize account consolidation. Both accounts must
     approve the exact ordered pair after fresh login, within 15 minutes.
     The proof is single-use, consumed atomically before transfers, and recorded
@@ -10181,7 +10188,8 @@ export const typeDefs = `#graphql
     alarms, tasks or Apps, which the caller may not be able to read) while
     either account is named in the owner chain of an unacknowledged agent-task
     alarm, whose sealed chain cannot follow a merge yet. Acknowledge
-    the alarms, then merge.
+    the alarms, then merge. A source account with an unrevoked passkey refuses
+    MERGE_SOURCE_HAS_PASSKEYS; revoke those passkeys before merging.
     """
     mergeUsers(input: MergeUsersInput!): User!
 
@@ -10199,7 +10207,9 @@ export const typeDefs = `#graphql
     A platform ADMIN/OWNER may name another user; userRef accepts the
     user's ID, handle, or hrn:user:<handle> URN. Any other caller naming a
     target receives the same FORBIDDEN error whether or not that user
-    exists (no user-enumeration oracle).
+    exists (no user-enumeration oracle). Deleting another user also requires
+    a reason of 1-500 Unicode code points after trimming (BAD_USER_INPUT
+    otherwise); this check follows target authorization.
 
     Org memberships auto-resolve: an org where the target is the only
     active OWNER but which still has OTHER active members BLOCKS deletion
@@ -10604,7 +10614,9 @@ export const typeDefs = `#graphql
     updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, registerDefaults: RegisterDefaultsInput): Agent!
 
     """
-    Soft-delete an Agent and its owned system memory. Refuses while a live
+    Soft-delete an Agent and its owned system memory. Requires management
+    access to the readable Agent. Refuses removal of a minted corpus in its
+    system memory, and refuses while a live
     App install or live parent Agent import references it, or a live Agent
     extends it as its base. AgentMemoryItem attachments do not block deletion.
 
@@ -11094,20 +11106,22 @@ export const typeDefs = `#graphql
 
     apiKey semantics: non-empty = encrypted at rest with a masked preview.
     Omitted is accepted only where a run may use the server's own
-    credential: a HADRON_SERVER config for openai, anthropic or bedrock at
-    their default host (no endpoint). Every ORGANIZATION, APP and AGENT
+    credential: a HADRON_SERVER config with no explicit endpoint.
+    Eligible process-credential providers: openai, anthropic, bedrock;
+    every other provider needs its own key. Every ORGANIZATION, APP and AGENT
     config needs its own key: the platform credential is platform spend
-    (#1390). Any other provider (glm, openai-compatible), and any config
-    with an endpoint, needs one too, because the SDK would otherwise send
-    the server's credential to a host that didn't issue it (#1389). All of
+    (#1390). Any config with an endpoint needs one too, because the SDK would
+    otherwise send the server's credential to a host that didn't issue it (#1389). All of
     these are refused with AiConfigValidationError. A host that checks no
     key takes any placeholder.
-    Name must be 1-64 lower-case [a-z0-9_-], unique per
-    owner. provider must be a known provider; params are validated per
-    provider.
+    Name is trimmed, must be 1-64 lower-case [a-z0-9_-] starting with a
+    letter or digit, and is unique per owner. provider must be a known
+    provider; params are validated per provider.
 
-    Auth: as aiServiceConfigs. ownerId accepts ID or URN
-    (HADRON_SERVER: ID only).
+    Auth: platform ADMIN/OWNER for HADRON_SERVER; org ADMIN for ORGANIZATION;
+    the App/Agent's strict owner or owning-org ADMIN for APP/AGENT. A platform
+    role does not bypass a user-owned App/Agent's credential gate.
+    ownerId accepts ID or URN (HADRON_SERVER: ID only).
     """
     createAiServiceConfig(
       ownerType: AiConfigOwnerType!
@@ -11128,11 +11142,13 @@ export const typeDefs = `#graphql
     036-ai-service-config: update a named AI config. All fields optional.
 
     apiKey semantics: omitted = keep the stored key; empty string =
-    clear it; non-empty = replace (encrypted, preview recomputed). The
-    RESULTING config is held to createAiServiceConfig's key rule, so
+    clear it (explicit null also clears); non-empty = replace (encrypted,
+    preview recomputed). The RESULTING config is held to createAiServiceConfig's key rule, so
     clearing the key of a config that needs one is refused.
 
-    Auth: admin rights on the owning entity (as aiServiceConfigs).
+    Auth: the same owner-aware credential gate as createAiServiceConfig;
+    managing a user-owned Agent through a platform role alone does not grant
+    access to its stored credential.
     """
     updateAiServiceConfig(
       id: ID!
@@ -11999,7 +12015,11 @@ export const typeDefs = `#graphql
     Agent's installationPolicy.memberRoles. Creating a new member is
     rejected if the App's current member count meets or exceeds the
     Agent's installationPolicy.maxMembers. Updating an existing member's
-    role does NOT trigger the maxMembers check.
+    role does NOT trigger the maxMembers check. The primary installed Agent
+    (the oldest AppAgent) supplies this policy; no installed Agent refuses
+    OrphanAppError. Only an App member manager may call this: the user-owner,
+    an owner-role AppMember, or owning-org ADMIN (including platform admins
+    for org-owned Apps). The manager gate runs before target-user lookup.
 
     Accepts the entity's ID or URN.
     """
@@ -12032,16 +12052,16 @@ export const typeDefs = `#graphql
 
     """
     023-app-shape US2 — user-level install. The currently-logged-in user
-    joins the App as an AppMember. NO OrgMember check (spec 023 FR-009)
-    so this works for B2C / consumer / therapy use cases where the
-    end-user is not in the App's operator org.
+    joins the App as an AppMember without requiring an OrgMember row.
+    App lifecycle checks run before the existing-member return and self-join
+    policy check.
 
     #1714: self-join is closed by default. It is open only when the App's
     primary Agent declares installation_policy.selfJoinRole, which must be
     one of its memberRoles and is never "owner"; the joiner gets that role.
-    Promotion to owner or any privileged role is ensureAppMember, by an App
-    manager. Idempotent — if the user is already an AppMember of the App,
-    the existing row is returned, before the gate is consulted.
+    Self-join never assigns owner. Explicit role changes use ensureAppMember,
+    by an App member manager. Idempotent — if the user is already an AppMember
+    of the App, the existing row is returned, before the gate is consulted.
 
     Error codes (GraphQLError extensions.code, Error.name style):
       - UNAUTHENTICATED — no logged-in user in context.
@@ -12319,8 +12339,11 @@ export const typeDefs = `#graphql
     025-oauth-for-mcp FR-004: mint a new user-scoped API key for the
     calling User. Returns the raw key exactly once (the server stores
     only the SHA-256 hash). Rejected with UNAUTHENTICATED for AppKey-
-    resolved callers (no user in context). Per Clarifications, label
-    is optional (portal defaults to a placeholder when omitted).
+    resolved callers (no user in context). Impersonation is refused; an
+    MCP-only OAuth credential cannot mint API keys. label is optional and
+    limited to 200 JavaScript string code units. Minting from a user API key
+    retains its minting-key ancestry and sign-in root; an ended sign-in root
+    refuses minting.
     """
     createUserApiKey(label: String): UserApiKeyCreateResult!
 

@@ -58,3 +58,8 @@ Prior reviews/QA are historical until the same holders give scoped deltas. Charl
 ## Main composition after the review fix
 
 Fix534bf912 could not receive pull_request CI because it conflicted with main. Plain merge (no rebase) of main3a45f77f resolves only the WATCHED_SETS insertion point in scripts/check-sdl-enumerations.mjs: retain both S3 entries (SKILL_HOSTS, MemoryMemberRole) and both S1 entries (HOST_OPERATION_TYPES, TASK_WARNING_CODES), with all four live imports. typeDefs.ts auto-merges; no overlapping description resolution. Composed S1+S3 focused checks41/41, registry10sets/38members, parser/hash/citation/loc/URN guards and description-stripped topology equality vs main pass. Exact completed typecheck/new CI reported on the pushed merge head. Prior receipts still need same-holder deltas covering this composition and the three-description fix.
+
+
+## S5 landing composition (ready call withdrawn)
+
+Ada32503 withdrew the prior ready call after S5 landed. Plain merge of main32a0b107 (no rebase) resolves two insertion conflicts: preserve all S3 host/member imports and entries alongside S5 AI_PROVIDER_ENDPOINTS/usesProcessCredential and PROCESS_CREDENTIAL_PROVIDERS; preserve both appended describe blocks in sdlEnumerations.test.ts. typeDefs auto-merges; no overlapping-description resolution. Both S1 and S3/S5 focused controls44/44 pass; registry11sets/41members passes and description-stripped SDL matches actualmain. Exact typecheck/newCI reported on pushed merge head; prior ready/receipts require same-holder scoped carry/delta again.
