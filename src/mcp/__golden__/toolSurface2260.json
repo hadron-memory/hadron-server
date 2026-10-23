@@ -125,6 +125,14 @@
    "f8193970bac4767006c82ec5105b5211dd6fe90df7cc01ed7ef1fdbeee456bf6"
   ],
   [
+   "hadron_stall_schedule_get",
+   "447f0dcef0a14dcca4474c9b19a53b55a4ea2eae5e89698138b632b1d54523d9"
+  ],
+  [
+   "hadron_stall_schedule_set",
+   "9c3943bd95138ebea07e955095294d2f6c89f5e5c70b0e0c363a5acab9fe4bbf"
+  ],
+  [
    "hadron_team_roster",
    "bdeb2b633bebc778574eafcadc86289d1a5b9f239e7c6ea7bff7025714b91767"
   ],
@@ -621,6 +629,14 @@
   [
    "hadron_team_availability",
    "f8193970bac4767006c82ec5105b5211dd6fe90df7cc01ed7ef1fdbeee456bf6"
+  ],
+  [
+   "hadron_stall_schedule_get",
+   "447f0dcef0a14dcca4474c9b19a53b55a4ea2eae5e89698138b632b1d54523d9"
+  ],
+  [
+   "hadron_stall_schedule_set",
+   "9c3943bd95138ebea07e955095294d2f6c89f5e5c70b0e0c363a5acab9fe4bbf"
   ],
   [
    "hadron_team_roster",
@@ -1121,6 +1137,14 @@
    "f8193970bac4767006c82ec5105b5211dd6fe90df7cc01ed7ef1fdbeee456bf6"
   ],
   [
+   "hadron_stall_schedule_get",
+   "447f0dcef0a14dcca4474c9b19a53b55a4ea2eae5e89698138b632b1d54523d9"
+  ],
+  [
+   "hadron_stall_schedule_set",
+   "9c3943bd95138ebea07e955095294d2f6c89f5e5c70b0e0c363a5acab9fe4bbf"
+  ],
+  [
    "hadron_team_roster",
    "bdeb2b633bebc778574eafcadc86289d1a5b9f239e7c6ea7bff7025714b91767"
   ],
@@ -1601,6 +1625,14 @@
   [
    "hadron_team_availability",
    "f8193970bac4767006c82ec5105b5211dd6fe90df7cc01ed7ef1fdbeee456bf6"
+  ],
+  [
+   "hadron_stall_schedule_get",
+   "447f0dcef0a14dcca4474c9b19a53b55a4ea2eae5e89698138b632b1d54523d9"
+  ],
+  [
+   "hadron_stall_schedule_set",
+   "9c3943bd95138ebea07e955095294d2f6c89f5e5c70b0e0c363a5acab9fe4bbf"
   ],
   [
    "hadron_team_roster",

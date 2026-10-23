@@ -2191,6 +2191,8 @@ export function createMcpServerInstance(
     'hadron_team_availability',
     // #1707 — the team roster read (its own optional session).
     'hadron_team_roster',
+    // #1926 — the stall schedule read (its own optional session).
+    'hadron_stall_schedule_get',
     // #1747 — ticker reads (each takes its own optional session; wake settings enforces the write rule itself).
     'hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get',
     // #2022 — the stop-signal list (its own optional session).
