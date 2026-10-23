@@ -135,6 +135,20 @@ describe('checkAssetRowObjects (#1140 slice B)', () => {
     expect(captureMessage).not.toHaveBeenCalled();
   });
 
+  it('does not alarm for a row that was purged between the list and the miss', async () => {
+    const purged = await seedAsset();
+    headObjectMock.mockImplementation(async () => {
+      await db.asset.delete({ where: { id: purged.id } });
+      return { exists: false };
+    });
+
+    const outcome = await checkAssetRowObjects({ db, now: NOW });
+
+    expect(outcome.vanished).toBe(1);
+    expect(outcome.missing).toBe(0);
+    expect(captureMessage).not.toHaveBeenCalled();
+  });
+
   it('skips and counts a row of an encrypted memory while no session key is cached, never alarming it', async () => {
     const encMemory = await db.memory.create({
       data: {

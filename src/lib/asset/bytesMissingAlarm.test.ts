@@ -5,6 +5,7 @@ vi.mock('@sentry/node', () => ({ captureMessage }));
 
 import {
   reportAssetBytesMissing,
+  reportAssetBytesMissingSummary,
   resetAssetBytesMissingDedupe,
   ASSET_BYTES_MISSING_TAG,
   DEDUPE_MAX_ENTRIES,
@@ -51,5 +52,16 @@ describe('reportAssetBytesMissing (#1140)', () => {
     // x0 was evicted, so it reports again; the newest is still deduped.
     expect(reportAssetBytesMissing({ assetId: 'x0', memoryId: 'm', source: 'restore' }, noon)).toBe(true);
     expect(reportAssetBytesMissing({ assetId: `x${DEDUPE_MAX_ENTRIES}`, memoryId: 'm', source: 'restore' }, noon)).toBe(false);
+  });
+});
+
+describe('reportAssetBytesMissingSummary (#1140)', () => {
+  it('fires one error-level count event with its own fingerprint and no asset ids', () => {
+    expect(reportAssetBytesMissingSummary({ suppressed: 7, source: 'sweep' })).toBe(true);
+    const [, ctx] = captureMessage.mock.calls[0];
+    expect(ctx.level).toBe('error');
+    expect(ctx.tags[ASSET_BYTES_MISSING_TAG]).toBe('true');
+    expect(ctx.fingerprint).toEqual(['asset.bytes_missing_summary']);
+    expect(ctx.extra).toEqual({ suppressed: 7 });
   });
 });

@@ -86,6 +86,7 @@ import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
+import { startAssetRowCheckLoop } from './jobs/checkAssetRowObjects.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
 import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startPendingEdgePromotionSweepLoop } from './jobs/promotePendingEdges.js';
@@ -1966,6 +1967,16 @@ export async function createServer(): Promise<Express> {
     process.env.DISABLE_ASSET_ORPHAN_SWEEP !== 'true'
   ) {
     startOrphanObjectReaperLoop(db);
+  }
+
+  // Background job (#1140): daily row-to-object check, the mirror of the orphan
+  // sweep. Reports (never deletes) an Asset row whose bytes are missing from
+  // the object store; one slice of the table per UTC day.
+  if (
+    process.env.NODE_ENV !== 'test' &&
+    process.env.DISABLE_ASSET_ROW_CHECK !== 'true'
+  ) {
+    startAssetRowCheckLoop(db);
   }
 
   // Background job (#930, narrowed by #1114): end sessions past `expiresAt`,

@@ -22,6 +22,9 @@ export const ASSET_BYTES_MISSING_TAG = 'asset.bytes_missing';
 /** Cap on remembered (asset, day) pairs; the oldest is forgotten past it. */
 export const DEDUPE_MAX_ENTRIES = 1000;
 
+/** Tag on the one-per-run event that counts what the per-run cap held back. */
+export const ASSET_BYTES_MISSING_SUMMARY_TAG = 'asset.bytes_missing_summary';
+
 export interface AssetBytesMissing {
   assetId: string;
   memoryId: string | null;
@@ -58,6 +61,25 @@ export function reportAssetBytesMissing(found: AssetBytesMissing, now: Date = ne
       tags: { [ASSET_BYTES_MISSING_TAG]: 'true', source: found.source },
       fingerprint: [ASSET_BYTES_MISSING_TAG, found.assetId],
       extra: { assetId: found.assetId, memoryId: found.memoryId },
+    });
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * One error-level event for a sweep run that found more missing assets than its
+ * per-run cap allows individual events for, so a bucket loss cannot flood Sentry.
+ * Carries a count only; the assets themselves are in the sweep's own log.
+ */
+export function reportAssetBytesMissingSummary(found: { suppressed: number; source: 'sweep' }): boolean {
+  try {
+    Sentry.captureMessage('Asset rows with no object in storage beyond the per-run event cap', {
+      level: 'error',
+      tags: { [ASSET_BYTES_MISSING_TAG]: 'true', [ASSET_BYTES_MISSING_SUMMARY_TAG]: 'true', source: found.source },
+      fingerprint: [ASSET_BYTES_MISSING_SUMMARY_TAG],
+      extra: { suppressed: found.suppressed },
     });
   } catch {
     return false;
