@@ -9362,8 +9362,9 @@ export const typeDefs = `#graphql
     OWNER-equivalent), the target a live member, PEER-OR-BELOW (an org ADMIN
     may not impersonate an org OWNER), never self. Returns the audit session
     and a short-TTL token (returned exactly once) whose requests run
-    READ-ONLY as the target, scoped to this one org: other orgs and all
-    personal/private and user-owned resources stay invisible, and every mutation except
+    READ-ONLY as the target. Org-scoped reads are restricted to this one org;
+    personal/private memories and identity-based owner grants are excluded. Public-resource
+    read gates remain applicable. Every mutation except
     stopImpersonation is rejected. Every request re-validates the session
     row, so stopping it (or demoting the admin) kills the token immediately.
     """
@@ -9391,7 +9392,7 @@ export const typeDefs = `#graphql
     #806 — save a named widget configuration for the caller. 'name' is trimmed
     and must be 1-60 characters, unique among the caller's presets for that
     widget type; a duplicate is BAD_USER_INPUT. 'config' must be a JSON object
-    within the same 4096-character JSON.stringify budget as a placement's config (not a byte limit). Requires an
+    within the same 4096 UTF-16 code-unit budget for serialized JSON as a placement's config. Requires an
     authenticated user.
     """
     createDashboardWidgetPreset(
