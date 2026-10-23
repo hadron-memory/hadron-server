@@ -32,4 +32,4 @@ Fence only when the memory is a source: `class = 'system'` (agent system memory,
 - Primitive dependency (item 2 above).
 
 ## Red tests
-`src/api/graphql/schema/resolvers.commentSourceFence2277.test.ts`: for each writer above, real resolver, F held in an outer transaction, the writer must queue on the advisory lock. 8 cases RED on main (the writer commits while F is held: Anne's witness). 2 scope controls green.
+`src/api/graphql/schema/resolvers.commentSourceFence2277.test.ts`: for each writer above, real resolver, F held in an outer transaction, the writer must queue on the advisory lock. Red on main (the writer commits while F is held: Anne's witness); green with the change: every writer (including reopen and the no-current-read author delete), a reverse-order holder, the locked class-drift retry, and 2 non-source controls that must NOT queue.
