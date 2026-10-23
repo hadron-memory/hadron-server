@@ -20,7 +20,7 @@ const M = resolvers.Mutation as any;
 let server: Server;
 let url: URL;
 const clients: Client[] = [];
-let user: { id: string; githubId: number; githubUsername: string };
+let user: { id: string; githubId: number | null; githubUsername: string | null };
 let other: { id: string };
 let appA: { id: string; urn: string; name: string };
 let appB: typeof appA;
@@ -64,7 +64,7 @@ beforeEach(async () => {
   await db.appAgent.createMany({ data: [appA, appB, hiddenApp].map(a => ({ appId: a.id, agentId })) });
 });
 async function mcp() {
-  const token = await signJwt({ sub: user.id, githubId: user.githubId, githubUsername: user.githubUsername, roles: ['READER'] });
+  const token = await signJwt({ sub: user.id, githubId: user.githubId!, githubUsername: user.githubUsername!, roles: ['READER'] });
   const c = new Client({ name: 'cross-app1597', version: '1' }); clients.push(c);
   await c.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
   return c;
@@ -85,7 +85,7 @@ describe('cross-App bare-name bind (#1597)', () => {
     const e = await refusal(start('iris'));
     expect(e.extensions.code).toBe('SESSION_WORKER_NAME_AMBIGUOUS');
     expect(e.extensions.candidates).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: a.id, name: a.name, urn: a.urn, role: 'server-engineer', app: expect.objectContaining({ id: appA.id, urn: appA.urn }), holder: null }),
+      expect.objectContaining({ id: a.id, name: a.name, urn: a.urn, role: 'server-engineer', app: expect.objectContaining({ id: appA.id, urn: `hrn:app:${appA.urn}` }), holder: null }),
       expect.objectContaining({ id: b.id, name: b.name, app: expect.objectContaining({ id: appB.id }), holder: expect.objectContaining({ id: other.id }) }),
     ]));
     expect(e.extensions.candidates).toHaveLength(2);
@@ -139,6 +139,35 @@ describe('cross-App bare-name bind (#1597)', () => {
     await worker(own); const a = await worker(appA);
     expect((await start('Iris')).workerId).toBe(a.id);
   });
+  it('App-membership alone admits org Apps but org READER alone does not', async () => {
+    await db.orgMember.updateMany({ where: { userId: user.id }, data: { role: 'READER' } });
+    await db.appMember.create({ data: { appId: appA.id, userId: user.id, role: 'reader' } });
+    const a = await worker(appA); await worker(appB);
+    expect((await start('Iris')).workerId).toBe(a.id);
+  });
+  it('includes a user-owned App for its owner and owner-role manager', async () => {
+    const own = await db.app.create({ data: { ownerUserId: other.id, name: 'Solo', urn: `solo-${generateId()}:team` } });
+    await db.appAgent.create({ data: { appId: own.id, agentId } });
+    await db.appMember.create({ data: { appId: own.id, userId: user.id, role: 'owner' } });
+    const w = await worker(own);
+    expect((await start('Iris')).workerId).toBe(w.id);
+  });
+  it('platform administrators retain the existing org-App bind audience', async () => {
+    const w = await worker(hiddenApp);
+    expect((await start('Iris', { ...ctx(), roles: ['ADMIN'] })).workerId).toBe(w.id);
+  });
+  it('does not enumerate through impersonation or a headless run', async () => {
+    const w = await worker(appA);
+    for (const extra of [{ impersonation: { orgId: (await db.app.findUniqueOrThrow({ where: { id: appA.id } })).organizationId! } }, { clientId: 'run:synthetic' }]) {
+      const e = await refusal(start('Iris', { ...ctx(), ...extra } as Context));
+      expect(e.extensions.code).toBe('WORKER_NOT_FOUND');
+      expect(JSON.stringify(e.extensions)).not.toContain(w.id);
+    }
+  });
+  it('propagates candidate-query failures instead of reporting no match', async () => {
+    vi.spyOn(db.app, 'findMany').mockRejectedValueOnce(new Error('candidate db unavailable'));
+    await expect(start('Iris')).rejects.toThrow('candidate db unavailable');
+  });
   it('actual MCP transport binds a unique name without selected App and returns briefing', async () => {
     const w = await worker(appA); await worker(hiddenApp);
     const c = await mcp();
@@ -147,6 +176,9 @@ describe('cross-App bare-name bind (#1597)', () => {
     expect(await db.session.count({ where: { workerId: w.id } })).toBe(1);
     const workerRead = text(await c.callTool({ name: 'hadron_get_worker', arguments: { workerRef: 'Iris' } }));
     expect(workerRead).toContain(w.id); // successful bind pins its App on this connection
+    await worker(appB); // the connection's selected App wins over new global ambiguity
+    const next = text(await c.callTool({ name: 'hadron_start_session', arguments: { description: 'same App', workerRef: 'Iris', force: true } }));
+    expect(next).toContain('Session started:'); expect(next).toContain(w.urn);
   });
   it('actual MCP ambiguity lists both candidates and binds nothing', async () => {
     const a = await worker(appA); const b = await worker(appB); const hidden = await worker(hiddenApp);

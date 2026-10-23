@@ -6541,12 +6541,15 @@ export const typeDefs = `#graphql
 
     - the worker's NAME ("Iris") — #990. Unique per App, case-insensitively,
       matched with the DATABASE's lower(), the expression
-      workers_app_name_uniq indexes. Requires App context (appRef, an App-key
-      credential, or an MCP active-App selection): a name means nothing without
-      one, so a nameless-App call refuses SESSION_WORKER_NAME_NEEDS_APP rather
-      than guessing across the caller's Apps. Gated on the STAFF READ GATE
-      before the lookup runs — resolving a name discloses roster membership,
-      which the id/URN forms never do.
+      workers_app_name_uniq indexes. With appRef, an App-key credential or an
+      MCP active-App selection, lookup stays within that App. With no App,
+      #1597 searches only live Apps the caller may bind into: exactly one
+      non-retired match binds; none refuses WORKER_NOT_FOUND; several refuse
+      SESSION_WORKER_NAME_AMBIGUOUS with candidates (worker id/URN, name, App,
+      role and holder). Nothing is bound on ambiguity: choose an id or URN.
+      Candidate discovery reuses App participation and user-owned-App holding
+      rules; it grants no new bind authority. The staff read gate precedes
+      name lookup (hrn:node:hadronmemory.com:specs:cor:agt:020:00).
 
       Which refusal you get depends on WHERE the denial happens, and clients
       should not assume one code covers both: a caller who supplied appRef has
