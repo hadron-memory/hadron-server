@@ -913,3 +913,26 @@ it('diagnostic: a foreign comment source can change while the compile fence is h
   expect((await db.node.findUniqueOrThrow({ where: { id: output.nodeId } })).content).toBe('Comment after');
   expect(await db.nodeRevision.count({ where: { nodeId: comment.id } })).toBe(0);
 });
+
+// Source-admission diagnostics only; these do not qualify the writer protocol.
+it.each(['channel-root', 'published-snapshot'] as const)(
+  'diagnostic: actual %s creation produces an admitted Agent-system source', async (surface) => {
+    const compile = await compileCounterparty();
+    const agent = await db.agent.findUniqueOrThrow({ where: { id: compile.agentId } });
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId! } });
+    let sourceId: string;
+    if (surface === 'channel-root') {
+      const channel = await resolvers.Mutation.createChannel(null, { input: { memoryRef: memory.id, loc: 'source-channel', name: 'Source channel' } }, ctx());
+      sourceId = channel.chatRootNodeId;
+    } else {
+      const revision = await resolvers.Mutation.createRevision(null, { agentId: agent.id, description: 'Actual snapshot writer' }, ctx());
+      sourceId = (await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId: memory.id, loc: revision.revisionLoc } } })).id;
+    }
+    const source = await db.node.findUniqueOrThrow({ where: { id: sourceId } });
+    await db.node.updateMany({ where: { memoryId: memory.id, loc: 'boot:source' }, data: { content: `Before{{> hrn:node:${memory.urn}:${source.loc}}}After` } });
+    const result = await compileBootPrompt(ctx(), compile.target, { setPointer: false });
+    const receipt = await db.compiledPromptRevision.findFirstOrThrow({ where: { compiledNodeId: result.nodeId } });
+    expect(receipt.provenance).toMatchObject({ occurrences: [{}, { nodeId: sourceId }] });
+    expect((await db.node.findUniqueOrThrow({ where: { id: result.nodeId } })).content).toBe('BeforeAfter');
+  },
+);
