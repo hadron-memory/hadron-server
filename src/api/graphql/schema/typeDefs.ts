@@ -4199,6 +4199,41 @@ export const typeDefs = `#graphql
     hasMore: Boolean!
   }
 
+  "#2246 - why an Agent is not ready to be offered; the values are the clone refusal's codes (hrn:node:hadronmemory.com:specs:cor:dmo:050:19)."
+  enum AgentOfferReasonCode {
+    AGENT_NOT_PUBLIC
+    AGENT_RETIRED
+    CLONE_LINKED_MEMORY_ENCRYPTED
+    CLONE_LINKED_MEMORY_UNREADABLE
+    CLONE_BASE_UNUSABLE
+    CLONE_IMPORT_UNUSABLE
+  }
+
+  "#2246 - the name of one blocking subject, shown only because you may read it. Nothing else about it is reachable."
+  type AgentOfferSubject {
+    name: String!
+  }
+
+  """
+  #2246 - one reason an Agent is not ready to be offered. count is every blocked subject; subjects are at
+  most 20 of the ones you may read; omittedByCap are readable ones past the cap; hiddenByAccess are ones
+  you may not read, never named. subjects + omittedByCap + hiddenByAccess = count.
+  """
+  type AgentOfferReason {
+    code: AgentOfferReasonCode!
+    count: Int!
+    subjects: [AgentOfferSubject!]!
+    omittedByCap: Int!
+    hiddenByAccess: Int!
+  }
+
+  "#2246 - whether another organisation could subscribe to, install and clone the Agent as it stands."
+  type AgentOfferReadiness {
+    ready: Boolean!
+    "Every reason that holds, in the clone refusal's order. Empty exactly when ready."
+    reasons: [AgentOfferReason!]!
+  }
+
   """
   The reusable definition a Builder creates and the marketplace can list.
   Agents are installed into runtime Apps through the AppAgent N:M join: an App
@@ -4252,6 +4287,15 @@ export const typeDefs = `#graphql
     keep paging. There is deliberately no total.
     """
     extendedBy(first: Int = 20, after: String): AgentExtensionPage!
+    """
+    #2246 (hrn:node:hadronmemory.com:specs:cor:dmo:050:19) - is this Agent ready to be offered to other
+    organisations: could an organisation with no relation to it subscribe to, install and clone it as it
+    stands, and if not, why. Readable only by whoever manages the Agent (hrn:node:hadronmemory.com:specs:cor:dmo:050:13); null for everyone
+    else, readers of a PUBLIC Agent included, and when the Agent is gone. A reason names a memory or Agent only
+    if you may read it; otherwise only the count shows. Answers for an outsider, so a non-PUBLIC Agent is not
+    ready even though its own manager can still clone it. Read-only; grants nothing.
+    """
+    offerReadiness: AgentOfferReadiness
     """
     #2281 - the URN of the Agent this one was cloned from (cloneAgent), as that Agent's current URN. Null when
     this is not a clone, when you cannot read the source, when the source was deleted, or when the clone's origin identity is not recorded: those cases are indistinguishable by design. Never an id or an object.
