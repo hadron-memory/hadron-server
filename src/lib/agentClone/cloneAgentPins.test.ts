@@ -55,9 +55,9 @@ describe('cloneAgent lock order', () => {
       'await licenseFor(txCtx, tx, target.orgId, imp.importedAgentId',
       'await writeAgentBase(',
       'await seams.afterCopy()',
-      'await listCopySetKeys(tx, plan.systemMemoryId)',
       'const read3 = await fingerprint(tx, plan)',
       'throw new CloneRetry()',
+      'heldNow(',
       'await tx.agentCloneAudit.create(',
     ]);
   });

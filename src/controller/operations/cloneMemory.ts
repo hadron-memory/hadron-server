@@ -141,7 +141,7 @@ export interface CloneMemoryInTxResult extends CloneMemoryResult {
   nodeIdMap: ReadonlyMap<string, string>;
   /** Live source edges not copied (soft-deleted or cross-org external targets). */
   skippedEdgeCount: number;
-  /** The ids of the source rows this copy actually read, sorted; compare with {@link listCopySetKeys}. */
+  /** The ids of the source rows this copy actually read, sorted; checked by `cloneAgent` against the source's live membership. */
   consumed: CopySetKeys;
 }
 
@@ -219,14 +219,6 @@ export async function reconcileStampedNodes<N extends { id: string; authorshipKi
 /** Reconcile the stamped nodes of a memory about to be cloned; see {@link reconcileStampedNodes}. */
 export async function reconcileStampedSourceNodes(tx: Prisma.TransactionClient, sourceMemoryId: string): Promise<void> {
   await reconcileStampedNodes(tx, sourceMemoryId, await tx.node.findMany({ where: { ...copyableNodeWhere(sourceMemoryId), authorshipKind: { not: null } } }));
-}
-
-/** The ids a clone of this memory would copy right now, with the copy's own predicates. */
-export async function listCopySetKeys(tx: Prisma.TransactionClient, sourceMemoryId: string): Promise<CopySetKeys> {
-  const nodeIds = (await tx.node.findMany({ where: copyableNodeWhere(sourceMemoryId), select: { id: true } })).map((n) => n.id).sort();
-  const edgeIds = (await tx.edge.findMany({ where: copyableEdgeWhere(nodeIds), select: { id: true } })).map((e) => e.id).sort();
-  const pendingEdgeIds = (await tx.pendingEdge.findMany({ where: copyablePendingEdgeWhere(nodeIds), select: { id: true } })).map((p) => p.id).sort();
-  return { nodeIds, edgeIds, pendingEdgeIds };
 }
 
 export async function cloneMemoryGraphInTx(

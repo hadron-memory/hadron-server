@@ -25,7 +25,7 @@ import type { Prisma } from '../../generated/prisma/index.js';
 import { requireOrgRole, requireReadableAgent, getAccessibleMemoryIds, type Context, AGENT_INCLUDE } from '../../api/graphql/schema/resolvers.helpers.js';
 import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
 import { AgentUrnTakenError } from '../../api/graphql/schema/resolvers.mutation.agent.js';
-import { cloneMemoryGraphInTx, listCopySetKeys, reconcileStampedSourceNodes } from '../../controller/operations/cloneMemory.js';
+import { cloneMemoryGraphInTx, reconcileStampedSourceNodes } from '../../controller/operations/cloneMemory.js';
 import { ensureAgentOrgGrant } from '../../controller/operations/ensureAgentOrgGrant.js';
 import { subscribeOrgToPublicAgentInTx } from '../../controller/operations/subscribeOrgToPublicAgent.js';
 import { backfillMemoryEmbeddings } from '../../services/embedding/enqueue.js';
@@ -126,7 +126,17 @@ async function fingerprint(tx: Prisma.TransactionClient, plan: Plan) {
          FROM agent_imports i WHERE i.parent_agent_id = ${plan.sourceId}) AS imports,
       (SELECT md5(coalesce(string_agg(jsonb_build_array(l.memory_id, l.role, l.xmin::text)::text, ',' ORDER BY l.memory_id), ''))
          FROM agent_memory_items l JOIN memories m ON m.id = l.memory_id
-         WHERE l.agent_id = ${plan.sourceId} AND l.deleted_at IS NULL AND m.deleted_at IS NULL) AS links`;
+         WHERE l.agent_id = ${plan.sourceId} AND l.deleted_at IS NULL AND m.deleted_at IS NULL) AS links,
+      -- Membership, read in THIS statement so it shares the hashes' snapshot (see the module doc).
+      (SELECT coalesce(string_agg(n.id, ',' ORDER BY n.id), '') FROM nodes n WHERE n.memory_id = ${plan.systemMemoryId} AND n.deleted_at IS NULL) AS node_ids,
+      (SELECT coalesce(string_agg(e.id, ',' ORDER BY e.id), '') FROM edges e JOIN nodes n ON n.id = e.source_id
+         WHERE n.memory_id = ${plan.systemMemoryId} AND e.deleted_at IS NULL) AS edge_ids,
+      (SELECT coalesce(string_agg(p.id, ',' ORDER BY p.id), '') FROM pending_edges p JOIN nodes n ON n.id = p.source_id
+         WHERE n.memory_id = ${plan.systemMemoryId} AND p.deleted_at IS NULL) AS pending_ids,
+      (SELECT coalesce(string_agg(l.id, ',' ORDER BY l.id), '') FROM agent_memory_items l JOIN memories m ON m.id = l.memory_id
+         WHERE l.agent_id = ${plan.sourceId} AND l.deleted_at IS NULL AND m.deleted_at IS NULL) AS link_ids,
+      (SELECT coalesce(string_agg(i.position || ':' || i.imported_agent_id, ',' ORDER BY i.position), '')
+         FROM agent_imports i WHERE i.parent_agent_id = ${plan.sourceId}) AS import_keys`;
   return row;
 }
 
@@ -299,7 +309,7 @@ async function writeClone(
 
   // R156: linked memories stay links, copied verbatim; they are not copied as knowledge.
   const links = await tx.agentMemoryItem.findMany({ where: { agentId: plan.sourceId, deletedAt: null, memory: { deletedAt: null } } });
-  const consumedLinks = links.map((l) => l.id).sort();
+  const consumedLinks = links.map((l) => l.id);
   for (const l of links) {
     await tx.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: l.memoryId, role: l.role, createdBy: actor } });
   }
@@ -323,15 +333,21 @@ async function writeClone(
   }
 
   await seams.afterCopy();
-  // Membership: what the separate copy reads consumed must be exactly what the source holds now. An
-  // endpoint hash cannot see a row that existed only while one of them ran (a raw insert then delete), but
-  // such a row is in the consumed set and not here, and a row removed and put back is here and not there.
-  const heldNow = await listCopySetKeys(tx, plan.systemMemoryId);
-  const linksNow = (await tx.agentMemoryItem.findMany({ where: { agentId: plan.sourceId, deletedAt: null, memory: { deletedAt: null } }, select: { id: true } })).map((l) => l.id).sort();
-  const importsNow = (await tx.agentImport.findMany({ where: { parentAgentId: plan.sourceId }, orderBy: { position: 'asc' }, select: { importedAgentId: true, position: true } })).map((i) => `${i.position}:${i.importedAgentId}`);
-  if (JSON.stringify([memoryCopy.consumed, consumedLinks, consumedImports]) !== JSON.stringify([heldNow, linksNow, importsNow])) throw new CloneRetry();
   const read3 = await fingerprint(tx, plan);
   if (JSON.stringify(read1) !== JSON.stringify(read3)) throw new CloneRetry();
+  // Membership. The copy reads each collection in its own statement, so a row that exists only while one of
+  // them runs (a raw insert, then a delete) is in no endpoint hash. It is in what the copy consumed, though,
+  // and absent from `read3`'s ids, which share a snapshot with the hash just compared. A row removed and put
+  // back differs in `xmin` instead, so containment is the whole check.
+  const heldNow = (key: string) => new Set((read3[key] ?? '').split(',').filter(Boolean));
+  const consumed: Array<[string[], Set<string>]> = [
+    [memoryCopy.consumed.nodeIds, heldNow('node_ids')],
+    [memoryCopy.consumed.edgeIds, heldNow('edge_ids')],
+    [memoryCopy.consumed.pendingEdgeIds, heldNow('pending_ids')],
+    [consumedLinks, heldNow('link_ids')],
+    [consumedImports, heldNow('import_keys')],
+  ];
+  if (consumed.some(([ids, held]) => ids.some((id) => !held.has(id)))) throw new CloneRetry();
 
   await tx.agentCloneAudit.create({
     data: {
