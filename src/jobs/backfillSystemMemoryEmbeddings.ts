@@ -23,7 +23,7 @@
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';
-import { stampMemoryEmbeddingsBatch } from '../services/embedding/enqueue.js';
+import { stampMemoryEmbeddingsBatch, publishEmbedWake } from '../services/embedding/enqueue.js';
 import { SYSTEM_MEMORY_CLASS } from '../lib/embedding/indexing.js';
 
 export const BACKFILL_STATEMENT_TIMEOUT_MS = 10_000;
@@ -129,6 +129,7 @@ export async function backfillSystemMemoryEmbeddings(
           limit: Math.min(batch, remaining), afterNodeId, dryRun: !apply,
         });
       }, { timeout: BACKFILL_STATEMENT_TIMEOUT_MS + 5_000 });
+      if (step.stamped > 0) void publishEmbedWake({}); // authoritative step committed
       row.inspected += step.inspected; row.eligible += step.eligible; row.stamped += step.stamped;
       remaining -= step.inspected;
       afterNodeId = step.nextAfterNodeId;

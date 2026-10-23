@@ -1247,7 +1247,10 @@ model Node {
   /// Set when this node needs (re-)embedding; cleared on success. The single
   /// work signal the embedding worker drains (FR-006/FR-007). Operational
   /// state only — intentionally NOT versioned on NodeRevision.
-  embeddingPendingAt  DateTime?           @map("embedding_pending_at")
+  embeddingPendingAt DateTime? @map("embedding_pending_at")
+  /// internal#4: opaque identity of one durable obligation; time only schedules it.
+  /// Operational, never copied into revisions or approval/authorship state.
+  embeddingWorkToken String?   @db.Uuid @map("embedding_work_token")
   /// Set when an embed attempt failed (record, not a work signal). Transient
   /// failures keep pending set for retry; permanent failures clear pending (FR-009).
   embeddingFailedAt   DateTime?           @map("embedding_failed_at")
