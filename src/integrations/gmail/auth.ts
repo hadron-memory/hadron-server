@@ -1,3 +1,4 @@
+import { getProjectBaseUrl } from '../../lib/baseUrl.js';
 /**
  * Google OAuth 2.0 for GMAIL MAILBOX CONNECTIONS — the authorize-URL side
  * only.
@@ -42,7 +43,7 @@ function getClientId(): string {
  * token exchange must pass the SAME value the authorize URL carried.
  */
 export function getGmailRedirectUri(): string {
-  const base = process.env.BASE_URL || 'http://localhost:4000';
+  const base = getProjectBaseUrl();
   return `${base}/auth/gmail/callback`;
 }
 

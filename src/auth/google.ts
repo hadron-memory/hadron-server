@@ -1,3 +1,4 @@
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 // Issue #581 — Sign-in-with-Google, the login/identity half of the Google
 // story. Near-verbatim sibling of github.ts, with two deliberate differences:
 //
@@ -249,7 +250,6 @@ function getGoogleCallbackUrl(): string {
   // producing `http://localhost:` — symmetric with github.ts. Behind
   // Cloudflare, BASE_URL (not per-request headers) MUST drive the redirect
   // URI (see findings:oauth-mcp-https-discovery-bug).
-  const base =
-    process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
+  const base = getProjectBaseUrl();
   return `${base}/auth/google/callback`;
 }

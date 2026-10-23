@@ -1,3 +1,4 @@
+import { getProjectBaseUrl } from '../../lib/baseUrl.js';
 /**
  * Google OAuth 2.0 for GOOGLE DRIVE CONNECTIONS — the authorize-URL side
  * only.
@@ -50,7 +51,7 @@ function getClientId(): string {
  * token exchange must pass the SAME value the authorize URL carried.
  */
 export function getGoogleDriveRedirectUri(): string {
-  const base = process.env.BASE_URL || 'http://localhost:4000';
+  const base = getProjectBaseUrl();
   return `${base}/auth/google-drive/callback`;
 }
 

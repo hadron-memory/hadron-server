@@ -1,3 +1,4 @@
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 /**
  * #1631 PR1b slice 2 (cor:aut:040:09): the passkey ceremony's sign-in legs, on the server origin.
  *
@@ -210,7 +211,7 @@ export function mountFreshSignInRoutes(
         const user = await db.user.findFirst({ where: { email, deletedAt: null }, select: { id: true, email: true } });
         if (user?.email) {
           const { token } = await startEmailSignIn(db, { userId: user.id, browserNonceHash });
-          const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
+          const baseUrl = getProjectBaseUrl();
           await sendCeremonySignInLink(user.email, `${baseUrl}${FRESH_SIGN_IN_EMAIL_VERIFY_PATH}?token=${token}`);
         }
       } catch (err) {

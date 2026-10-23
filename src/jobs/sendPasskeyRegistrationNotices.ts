@@ -1,3 +1,4 @@
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 /**
  * sendPasskeyRegistrationNotices — the post-commit sender for every passkey registration's email notice (#1631 PR2,
  * cor:aut:040:02). The registering transaction wrote the outbox row, so a passkey never exists without its notice.
@@ -60,7 +61,7 @@ export async function processPasskeyRegistrationNotices(
     const content: PasskeyNoticeContent = {
       kind: notice.kind as 'first' | 'later', label: notice.passkey.label, registeredAt: notice.passkey.registeredAt,
       ...(notice.kind === 'first' && notice.cancelTokenEnc ? {
-        cancelUrl: `${baseUrl()}${PASSKEY_CANCEL_PATH}?token=${decryptToken(notice.cancelTokenEnc)}`,
+        cancelUrl: `${getProjectBaseUrl()}${PASSKEY_CANCEL_PATH}?token=${decryptToken(notice.cancelTokenEnc)}`,
         windowEndsAt: notice.passkey.windowEndsAt ?? undefined,
       } : {}),
     };
@@ -79,11 +80,6 @@ export async function processPasskeyRegistrationNotices(
     terminal += sent.count;
   }
   return terminal;
-}
-
-/** The public base URL links in mail point at (same rule as the magic link). */
-function baseUrl(): string {
-  return process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
 }
 
 /** Start the recurring pass (every minute, first run after 30s). */

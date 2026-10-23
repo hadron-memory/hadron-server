@@ -1,3 +1,4 @@
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 // Issue #584 — Sign in with Apple, sibling of google.ts (#582). The linking
 // rules from findings:oidc-login-sub-is-identity-email-is-not apply verbatim;
 // where this module diverges from the Google one it's because Apple diverges
@@ -290,7 +291,6 @@ function getAppleCallbackUrl(): string {
   // redirect URI (see findings:oauth-mcp-https-discovery-bug). NOTE: Apple
   // refuses localhost/http return URLs at registration time, so real
   // round-trips in dev need a tunnel with BASE_URL set to its origin.
-  const base =
-    process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
+  const base = getProjectBaseUrl();
   return `${base}/auth/apple/callback`;
 }
