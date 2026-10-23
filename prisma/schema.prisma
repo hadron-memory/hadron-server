@@ -765,8 +765,8 @@ model Memory {
   /// ⇔ `userId IS NOT NULL`.
   userId                String? @map("user_id")
   /// Agent pivot used by live access-control and memory classification.
-  /// For legacy personal/private rows with appId NULL, checks that the calling
-  /// App has this Agent installed; also keys agent-scoped AgentSubscription checks.
+  /// With a calling App, legacy personal/private rows with appId NULL require
+  /// this Agent installed; agent-scoped AgentSubscription checks use this Agent too.
   /// Marks per-user/session/anonymous holdings for exclusion from shared App/team
   /// memory folds. Free-standing personal/private memories leave this and appId NULL.
   userMemoryOfAgentId   String? @map("user_memory_of_agent_id")
