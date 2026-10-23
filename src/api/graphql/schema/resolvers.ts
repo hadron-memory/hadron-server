@@ -56,6 +56,7 @@ import { memoryTransferMutations } from './resolvers.mutation.memoryTransfer.js'
 import { appMemoryMutations } from './resolvers.mutation.appMemory.js';
 import { orgMutations } from './resolvers.mutation.org.js';
 import { agentMutations } from './resolvers.mutation.agent.js';
+import { agentCloneMutations } from './resolvers.mutation.agentClone.js';
 import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
 import { bootPromptPointerFieldResolvers } from './resolvers.bootPromptPointer.js';
 import { bootPromptPointerMutations } from './resolvers.mutation.bootPromptPointer.js';
@@ -229,6 +230,7 @@ export const resolvers = {
     ...appMemoryMutations,
     ...orgMutations,
     ...agentMutations,
+    ...agentCloneMutations,
     ...workerMutations,
     ...bootPromptPointerMutations,
     ...compileBootPromptMutations,

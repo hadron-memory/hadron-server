@@ -708,6 +708,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- 20261021080000_fresh_sign_ins (pinned by src/lib/passkeys/freshSignIn1631.test.ts).
 \ir fresh-sign-in-invariants.sql
 
+-- #2204: OIDC nonce hash on pending logins. One source, shared verbatim with migration
+-- 20261023120000_pending_login_provider_nonce (pinned by src/auth/providerNonce.test.ts).
+\ir login-nonce-invariants.sql
+
 -- #1631 PR2: passkey registration lifecycle (cancel tokens). One source, shared verbatim with migration
 -- 20261022030000_passkey_revoke (pinned by src/lib/passkeys/cancel1631.test.ts).
 \ir passkey-registration-invariants.sql
@@ -748,6 +752,21 @@ DROP TRIGGER IF EXISTS user_deletion_audits_immutable ON user_deletion_audits;
 CREATE TRIGGER user_deletion_audits_immutable
   BEFORE UPDATE OR DELETE ON user_deletion_audits
   FOR EACH ROW EXECUTE FUNCTION hadron_user_deletion_audit_immutable();
+
+-- #2245 (R170.6): the Agent-clone audit is append-only and names exactly one target
+-- (Prisma can model neither; the migration carries the same statements).
+ALTER TABLE agent_clone_audits DROP CONSTRAINT IF EXISTS chk_agent_clone_audit_one_target;
+ALTER TABLE agent_clone_audits ADD CONSTRAINT chk_agent_clone_audit_one_target
+  CHECK ((target_org_id IS NOT NULL) <> (target_user_id IS NOT NULL));
+CREATE OR REPLACE FUNCTION hadron_agent_clone_audit_immutable() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'agent_clone_audits is append-only';
+END $$;
+DROP TRIGGER IF EXISTS agent_clone_audits_immutable ON agent_clone_audits;
+CREATE TRIGGER agent_clone_audits_immutable
+  BEFORE UPDATE OR DELETE ON agent_clone_audits
+  FOR EACH ROW EXECUTE FUNCTION hadron_agent_clone_audit_immutable();
 
 -- #1162: newly introduced typed Worker/session references fence hard deletion.
 \ir worker-reference-invariants.sql

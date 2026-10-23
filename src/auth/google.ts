@@ -15,6 +15,7 @@ import {
   createRemoteJWKSet,
   type JWTVerifyGetKey,
 } from 'jose';
+import { enforceIdTokenNonce, type NonceExpectation } from './providerNonce.js';
 import { db } from '../integrations/db/client.js';
 import { generateUniqueHandle, isHandleTaken } from '../lib/userHandle.js';
 import { ensureUserPrincipal, RootNameTakenError } from '../lib/principal/mintPrincipal.js';
@@ -41,13 +42,15 @@ const GOOGLE_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
  * Build the Google authorization redirect URL for the given state-CSRF token. `reauthenticate` (#1631 PR1b, R154)
  * asks Google for a fresh authentication with `max_age=0`; the callback must then check `auth_time`.
  */
-export function buildGoogleAuthUrl(state: string, opts: { reauthenticate?: boolean } = {}): string {
+export function buildGoogleAuthUrl(state: string, nonce: string, opts: { reauthenticate?: boolean } = {}): string {
   const params = new URLSearchParams({
     client_id: process.env.GOOGLE_CLIENT_ID!,
     redirect_uri: getGoogleCallbackUrl(),
     response_type: 'code',
     scope: 'openid email profile',
     state,
+    // #2204: echoed back inside the signed ID token; the callback compares its hash.
+    nonce,
   });
   if (opts.reauthenticate) params.set('max_age', '0');
   return `${GOOGLE_AUTH_URL}?${params}`;
@@ -90,6 +93,7 @@ let remoteJwks: JWTVerifyGetKey | undefined;
  */
 export async function verifyGoogleIdToken(
   idToken: string,
+  expected: NonceExpectation,
   getKey?: JWTVerifyGetKey,
 ): Promise<GoogleIdentity> {
   const key = getKey ?? (remoteJwks ??= createRemoteJWKSet(new URL(GOOGLE_JWKS_URL)));
@@ -99,6 +103,7 @@ export async function verifyGoogleIdToken(
     issuer: ['https://accounts.google.com', 'accounts.google.com'],
     audience: process.env.GOOGLE_CLIENT_ID ?? '',
   });
+  enforceIdTokenNonce('google', payload.nonce, expected);
   if (typeof payload.sub !== 'string' || payload.sub === '') {
     throw new Error('Google ID token missing sub claim');
   }
