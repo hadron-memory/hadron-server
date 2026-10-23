@@ -49,11 +49,13 @@ describe('cloneAgent lock order', () => {
   it('reads, copies, subscribes, validates, then audits, in that order', () => {
     const body = text.slice(text.indexOf('async function writeClone'));
     inOrder(body, [
+      'await reconcileStampedSourceNodes(tx, plan.systemMemoryId)',
       'const read1 = await fingerprint(tx, plan)',
       'await cloneMemoryGraphInTx(',
       'await licenseFor(txCtx, tx, target.orgId, imp.importedAgentId',
       'await writeAgentBase(',
-      'await afterCopy()',
+      'await seams.afterCopy()',
+      'await listCopySetKeys(tx, plan.systemMemoryId)',
       'const read3 = await fingerprint(tx, plan)',
       'throw new CloneRetry()',
       'await tx.agentCloneAudit.create(',

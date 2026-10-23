@@ -25,7 +25,7 @@ import type { Prisma } from '../../generated/prisma/index.js';
 import { requireOrgRole, requireReadableAgent, getAccessibleMemoryIds, type Context, AGENT_INCLUDE } from '../../api/graphql/schema/resolvers.helpers.js';
 import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
 import { AgentUrnTakenError } from '../../api/graphql/schema/resolvers.mutation.agent.js';
-import { cloneMemoryGraphInTx } from '../../controller/operations/cloneMemory.js';
+import { cloneMemoryGraphInTx, listCopySetKeys, reconcileStampedSourceNodes } from '../../controller/operations/cloneMemory.js';
 import { ensureAgentOrgGrant } from '../../controller/operations/ensureAgentOrgGrant.js';
 import { subscribeOrgToPublicAgentInTx } from '../../controller/operations/subscribeOrgToPublicAgent.js';
 import { backfillMemoryEmbeddings } from '../../services/embedding/enqueue.js';
@@ -144,8 +144,8 @@ function blockerError(blockers: Awaited<ReturnType<typeof cloneBlockers>>, ref: 
 
 export type CloneAgentInput = { source: string; target: string; name?: string | null; slug?: string | null };
 
-/** Test seam: awaited inside the transaction between the copy and the validation read; production passes none. */
-export type CloneAgentHooks = { afterCopy?: (attempt: number) => Promise<void> };
+/** Test seams, awaited inside the transaction after the baseline read and between the copy and the validation read; production passes none. */
+export type CloneAgentHooks = { afterBaseline?: (attempt: number) => Promise<void>; afterCopy?: (attempt: number) => Promise<void> };
 
 /** The mutation body; see the module doc. Returns the new Agent (a PERSONAL draft, R146). */
 export async function cloneAgent(ctx: Context, input: CloneAgentInput, hooks: CloneAgentHooks = {}) {
@@ -171,7 +171,7 @@ export async function cloneAgent(ctx: Context, input: CloneAgentInput, hooks: Cl
         ctx,
         anchors,
         (txCtx) => authorizeClone(txCtx, target.orgId, input.source, plan),
-        (tx, txCtx) => writeClone(ctx, txCtx, tx, target, plan, input, () => hooks.afterCopy?.(attempt)),
+        (tx, txCtx) => writeClone(ctx, txCtx, tx, target, plan, input, { afterBaseline: () => hooks.afterBaseline?.(attempt), afterCopy: () => hooks.afterCopy?.(attempt) }),
         {
           lockMode: 'exclusive',
           timeout: 120_000,
@@ -243,11 +243,14 @@ async function writeClone(
   target: { orgId: string; urn: string },
   plan: Plan,
   input: CloneAgentInput,
-  afterCopy: () => Promise<void> | undefined,
+  seams: { afterBaseline: () => Promise<void> | undefined; afterCopy: () => Promise<void> | undefined },
 ) {
   const actor = ctx.userId ?? ctx.clientId ?? null;
   const source = await tx.agent.findUniqueOrThrow({ where: { id: plan.sourceId } });
+  // The copy reconciles stamped source nodes (writes). Do it first so the baseline already includes it.
+  await reconcileStampedSourceNodes(tx, plan.systemMemoryId);
   const read1 = await fingerprint(tx, plan);
+  await seams.afterBaseline();
 
   // The target's URN is re-read under the org row's FOR SHARE lock: the pre-transaction read may predate a rename.
   const targetUrn = (await tx.organization.findUniqueOrThrow({ where: { id: target.orgId }, select: { urn: true } })).urn;
@@ -296,11 +299,13 @@ async function writeClone(
 
   // R156: linked memories stay links, copied verbatim; they are not copied as knowledge.
   const links = await tx.agentMemoryItem.findMany({ where: { agentId: plan.sourceId, deletedAt: null, memory: { deletedAt: null } } });
+  const consumedLinks = links.map((l) => l.id).sort();
   for (const l of links) {
     await tx.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: l.memoryId, role: l.role, createdBy: actor } });
   }
 
   const imports = await tx.agentImport.findMany({ where: { parentAgentId: plan.sourceId }, orderBy: { position: 'asc' } });
+  const consumedImports = imports.map((i) => `${i.position}:${i.importedAgentId}`);
   for (const imp of imports) {
     await licenseFor(txCtx, tx, target.orgId, imp.importedAgentId, actor, CLONE_BLOCKER_CODES.IMPORT_UNUSABLE);
     await tx.agentImport.create({
@@ -317,7 +322,14 @@ async function writeClone(
     await writeAgentBase(tx, { childId: agent.id, childRef: urn, baseId: source.extendsAgentId, baseRef: base.urn, createdBy: actor });
   }
 
-  await afterCopy();
+  await seams.afterCopy();
+  // Membership: what the separate copy reads consumed must be exactly what the source holds now. An
+  // endpoint hash cannot see a row that existed only while one of them ran (a raw insert then delete), but
+  // such a row is in the consumed set and not here, and a row removed and put back is here and not there.
+  const heldNow = await listCopySetKeys(tx, plan.systemMemoryId);
+  const linksNow = (await tx.agentMemoryItem.findMany({ where: { agentId: plan.sourceId, deletedAt: null, memory: { deletedAt: null } }, select: { id: true } })).map((l) => l.id).sort();
+  const importsNow = (await tx.agentImport.findMany({ where: { parentAgentId: plan.sourceId }, orderBy: { position: 'asc' }, select: { importedAgentId: true, position: true } })).map((i) => `${i.position}:${i.importedAgentId}`);
+  if (JSON.stringify([memoryCopy.consumed, consumedLinks, consumedImports]) !== JSON.stringify([heldNow, linksNow, importsNow])) throw new CloneRetry();
   const read3 = await fingerprint(tx, plan);
   if (JSON.stringify(read1) !== JSON.stringify(read3)) throw new CloneRetry();
 

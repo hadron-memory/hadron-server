@@ -319,3 +319,45 @@ describe('review of 00e3a4c9 (Andi, Cloe, Dara): the lock inversion, the stale t
     expect(await db.agent.count({ where: { id: out.id } })).toBe(1);
   });
 });
+
+describe('review of 5b81a478 (Andi, Cloe): reconciliation is not churn; consumed membership must be what is held', () => {
+  it('an authorship-stamped source that a raw writer changed clones, with its provenance cleared, in one attempt', async () => {
+    const src = await sourceAgent(orgA, 'PUBLIC');
+    const task = await db.node.create({ data: { id: generateId(), memoryId: src.memId, loc: 'author-task', name: 'task', nodeType: 'page', content: 't' } as never });
+    const stamped = await db.node.create({
+      data: {
+        id: generateId(), memoryId: src.memId, loc: 'stamped', name: 'stamped', nodeType: 'page', content: 'body',
+        authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 2, authoredAt: new Date('2026-09-26T20:00:00Z'),
+      } as never,
+    });
+    // A raw writer changes the stamped row without advancing its revision (#1323 drift).
+    await db.$executeRaw`UPDATE nodes SET content = 'drifted' WHERE id = ${stamped.id}`;
+    const attempts: number[] = [];
+    const out = await cloneAgent(ctxFor(adminB), { source: src.urn, target: orgB.urn }, { afterCopy: async (a) => { attempts.push(a); } });
+    expect(attempts).toEqual([0]);
+    const copy = await db.node.findFirstOrThrow({ where: { memoryId: out.systemMemoryId!, loc: 'stamped' } });
+    expect(copy).toMatchObject({ authorshipKind: null, authoredByTask: null, content: 'drifted' });
+    expect(await db.node.findUniqueOrThrow({ where: { id: stamped.id } })).toMatchObject({ authorshipKind: null });
+  });
+
+  it('a pending edge present only while the copy read is not in the held set: the clone retries and copies without it', async () => {
+    const src = await sourceAgent(orgA, 'PUBLIC');
+    const pid = generateId();
+    const out = await cloneAgent(ctxFor(adminB), { source: src.urn, target: orgB.urn }, {
+      afterBaseline: async (a) => { if (a === 0) await db.pendingEdge.create({ data: { id: pid, sourceId: src.nodes[0].id, targetId: 'ghost', name: 'transient' } }); },
+      afterCopy: async (a) => { if (a === 0) await db.pendingEdge.delete({ where: { id: pid } }); },
+    });
+    expect(await db.pendingEdge.count({ where: { source: { memoryId: out.systemMemoryId! } } })).toBe(0);
+  });
+
+  it('an import present only while the copy read is not kept: the clone retries and copies without it', async () => {
+    const src = await sourceAgent(orgA, 'PUBLIC');
+    const dep = await sourceAgent(orgA, 'PUBLIC', 'dep');
+    await db.agentOrgGrant.create({ data: { orgId: orgA.id, agentId: dep.id, activatedAt: new Date(Date.now() - 1000) } });
+    const out = await cloneAgent(ctxFor(adminB), { source: src.urn, target: orgB.urn }, {
+      afterBaseline: async (a) => { if (a === 0) await db.agentImport.create({ data: { parentAgentId: src.id, importedAgentId: dep.id, position: 1, agentOrgGrantOrgId: orgA.id, agentOrgGrantAgentId: dep.id } }); },
+      afterCopy: async (a) => { if (a === 0) await db.agentImport.deleteMany({ where: { parentAgentId: src.id } }); },
+    });
+    expect(await db.agentImport.count({ where: { parentAgentId: out.id } })).toBe(0);
+  });
+});

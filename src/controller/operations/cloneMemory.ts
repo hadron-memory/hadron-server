@@ -141,6 +141,15 @@ export interface CloneMemoryInTxResult extends CloneMemoryResult {
   nodeIdMap: ReadonlyMap<string, string>;
   /** Live source edges not copied (soft-deleted or cross-org external targets). */
   skippedEdgeCount: number;
+  /** The ids of the source rows this copy actually read, sorted; compare with {@link listCopySetKeys}. */
+  consumed: CopySetKeys;
+}
+
+/** The ids of the source rows a clone copies, sorted. */
+export interface CopySetKeys {
+  nodeIds: string[];
+  edgeIds: string[];
+  pendingEdgeIds: string[];
 }
 
 /**
@@ -168,6 +177,58 @@ export async function cloneMemoryGraph(
  * transaction, its locks and its timeout, and reads the node id map back. Behaviour is the
  * wrapper's, unchanged.
  */
+/** The source nodes a clone copies. */
+function copyableNodeWhere(memoryId: string): Prisma.NodeWhereInput {
+  return {
+    memoryId, deletedAt: null, nodeType: { notIn: [COMMENT_NODE_TYPE, COMPILED_BOOT_PROMPT_NODE_TYPE] },
+    // #1641 §3.2 — nor decisions or their logs: a copy would mint decisions
+    // no decision operation wrote, under codes that belong to the source log.
+    AND: [NOT_DECISION_FAMILY_WHERE],
+  };
+}
+
+/** Derived INCLUDE edges (#2040) are re-derived for the clones, not copied. */
+const copyableEdgeWhere = (nodeIds: string[]): Prisma.EdgeWhereInput =>
+  ({ deletedAt: null, sourceId: { in: nodeIds }, OR: [{ governedKind: null }, { governedKind: { not: 'INCLUDE' } }] });
+
+const copyablePendingEdgeWhere = (nodeIds: string[]): Prisma.PendingEdgeWhereInput =>
+  ({ deletedAt: null, sourceId: { in: nodeIds } });
+
+/**
+ * Reconcile every authorship-stamped source node with its revision state (a raw writer may have changed it
+ * without advancing the revision) and return the refetched rows. Idempotent: a second pass writes nothing.
+ * `cloneAgent` runs it BEFORE its source baseline, so these intentional writes are not read as source churn.
+ */
+export async function reconcileStampedNodes<N extends { id: string; authorshipKind: unknown }>(
+  tx: Prisma.TransactionClient,
+  sourceMemoryId: string,
+  selectedNodes: N[],
+): Promise<Map<string, N>> {
+  const refreshed = new Map<string, N>();
+  for (const n of selectedNodes.filter((n) => n.authorshipKind).sort((a, b) => a.id.localeCompare(b.id))) {
+    const rev = await ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: sourceMemoryId });
+    const current = rev == null ? null : await tx.node.findUnique({ where: { id: n.id } });
+    if (!current || current.deletedAt || current.memoryId !== sourceMemoryId) {
+      throw new Error('cloneMemory: a source node changed during the copy; retry.');
+    }
+    refreshed.set(n.id, current as unknown as N);
+  }
+  return refreshed;
+}
+
+/** Reconcile the stamped nodes of a memory about to be cloned; see {@link reconcileStampedNodes}. */
+export async function reconcileStampedSourceNodes(tx: Prisma.TransactionClient, sourceMemoryId: string): Promise<void> {
+  await reconcileStampedNodes(tx, sourceMemoryId, await tx.node.findMany({ where: { ...copyableNodeWhere(sourceMemoryId), authorshipKind: { not: null } } }));
+}
+
+/** The ids a clone of this memory would copy right now, with the copy's own predicates. */
+export async function listCopySetKeys(tx: Prisma.TransactionClient, sourceMemoryId: string): Promise<CopySetKeys> {
+  const nodeIds = (await tx.node.findMany({ where: copyableNodeWhere(sourceMemoryId), select: { id: true } })).map((n) => n.id).sort();
+  const edgeIds = (await tx.edge.findMany({ where: copyableEdgeWhere(nodeIds), select: { id: true } })).map((e) => e.id).sort();
+  const pendingEdgeIds = (await tx.pendingEdge.findMany({ where: copyablePendingEdgeWhere(nodeIds), select: { id: true } })).map((p) => p.id).sort();
+  return { nodeIds, edgeIds, pendingEdgeIds };
+}
+
 export async function cloneMemoryGraphInTx(
   tx: Prisma.TransactionClient,
   args: CloneMemoryArgs,
@@ -224,25 +285,13 @@ export async function cloneMemoryGraphInTx(
   // a clone starts without them (and a generic copy could not produce one,
   // cor:dmo:110:04). Their governed edges drop with them below, since an
   // edge is copied only from a cloned source.
-  const selectedNodes = await tx.node.findMany({
-    // #1641 §3.2 — nor decisions or their logs: a copy would mint decisions
-    // no decision operation wrote, under codes that belong to the source log.
-    where: { memoryId: source.id, deletedAt: null, nodeType: { notIn: [COMMENT_NODE_TYPE, COMPILED_BOOT_PROMPT_NODE_TYPE] }, AND: [NOT_DECISION_FAMILY_WHERE] },
-  });
+  const selectedNodes = await tx.node.findMany({ where: copyableNodeWhere(source.id) });
   // #2043 (cor:agt:040:11) — a worker session's copy never writes a boot prompt.
   await assertNoBootPromptRowsForWorkerSession(tx, source.id, 'clone');
   // A raw writer may have changed a stamped source without advancing its
   // revision. Reconcile and refetch stamped rows before the destination
   // insert can certify a stale claim against freshly copied content.
-  const refreshed = new Map<string, (typeof selectedNodes)[number]>();
-  for (const n of selectedNodes.filter((n) => n.authorshipKind).sort((a, b) => a.id.localeCompare(b.id))) {
-    const rev = await ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: source.id });
-    const current = rev == null ? null : await tx.node.findUnique({ where: { id: n.id } });
-    if (!current || current.deletedAt || current.memoryId !== source.id) {
-      throw new Error('cloneMemory: a source node changed during the copy; retry.');
-    }
-    refreshed.set(n.id, current);
-  }
+  const refreshed = await reconcileStampedNodes(tx, source.id, selectedNodes);
   const nodes = selectedNodes.map((n) => refreshed.get(n.id) ?? n);
 
   const idMap = new Map<string, string>();
@@ -335,10 +384,7 @@ export async function cloneMemoryGraphInTx(
   // targets on cross-org clones. Same-org clones keep prior behavior (the
   // source already exposed that edge within the same org).
   const isCrossOrg = args.targetOrganizationId !== source.organizationId;
-  const edges = await tx.edge.findMany({
-    // Derived INCLUDE edges (#2040) are re-derived for the clones, not copied.
-    where: { deletedAt: null, sourceId: { in: [...idMap.keys()] }, OR: [{ governedKind: null }, { governedKind: { not: 'INCLUDE' } }] },
-  });
+  const edges = await tx.edge.findMany({ where: copyableEdgeWhere([...idMap.keys()]) });
   // Targets not in the live-ID map are either soft-deleted internal
   // nodes (skip the edge) or external nodes (keep the original id).
   // Query only those — not every node id of the source memory — to
@@ -396,9 +442,7 @@ export async function cloneMemoryGraphInTx(
   // targetId is a free-form string (not a FK). Loc/URN-keyed references
   // are rewritten like content; explicitly marked stable-id work follows
   // the same internal-remap / cross-org-drop rules as materialized Edges.
-  const pendingEdges = await tx.pendingEdge.findMany({
-    where: { deletedAt: null, sourceId: { in: [...idMap.keys()] } },
-  });
+  const pendingEdges = await tx.pendingEdge.findMany({ where: copyablePendingEdgeWhere([...idMap.keys()]) });
   const unmappedStableTargetIds = [
     ...new Set(
       pendingEdges
@@ -487,5 +531,10 @@ export async function cloneMemoryGraphInTx(
     pendingEdgeCount: pendingRows.length,
     nodeIdMap: idMap,
     skippedEdgeCount: edges.length - edgeRows.length,
+    consumed: {
+      nodeIds: [...idMap.keys()].sort(),
+      edgeIds: edges.map((e) => e.id).sort(),
+      pendingEdgeIds: pendingEdges.map((p) => p.id).sort(),
+    },
   };
 }
