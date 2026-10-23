@@ -176,3 +176,38 @@ describe('does NOT fire on the cases that only look like one', () => {
     expect(violations('scopes must be a subset of ConnectionGrantScope.')).toEqual([]);
   });
 });
+
+describe('#2302 coordinate-scoped ordinary-word sets', () => {
+  it('detects the omitted decision family in Node.role using the live governed-role list', () => {
+    const doc = 'type Node { "Governed families: review, spec." role: String }';
+    expect(findPartialEnumerations(doc).filter(v => v.set === 'GOVERNED_ROLES')).toMatchObject([
+      { coord: 'Node.role', missing: ['decision'] },
+    ]);
+  });
+
+  it('detects a missing work kind at the worklog contract', () => {
+    const doc = 'type Query { "kind must be one of pr, issue, commit, branch." teamWorkItems: String }';
+    expect(findPartialEnumerations(doc).filter(v => v.set === 'WORK_KINDS')).toMatchObject([
+      { coord: 'Query.teamWorkItems', missing: ['repo'] },
+    ]);
+  });
+
+  it('does not let owner/repo examples hide an omitted repo kind', () => {
+    const doc = 'type Mutation { "Canonical owner/repo#N. kind must be one of pr, issue, commit, branch; ref is canonical." recordTeamWork: String }';
+    expect(findPartialEnumerations(doc).filter(v => v.set === 'WORK_KINDS')).toMatchObject([
+      { coord: 'Mutation.recordTeamWork', missing: ['repo'] },
+    ]);
+  });
+
+  it('checks a promised kind list even when reduced to one member', () => {
+    const doc = 'type Query { "kind must be one of pr." teamWorkItems: String }';
+    expect(findPartialEnumerations(doc).filter(v => v.set === 'WORK_KINDS')).toMatchObject([
+      { coord: 'Query.teamWorkItems', missing: ['issue', 'commit', 'branch', 'repo'] },
+    ]);
+  });
+
+  it('does not treat unrelated ordinary-word prose as either closed enumeration', () => {
+    const doc = 'type Query { "An issue, branch and commit can carry a review or spec." other: String }';
+    expect(findPartialEnumerations(doc)).toEqual([]);
+  });
+});
