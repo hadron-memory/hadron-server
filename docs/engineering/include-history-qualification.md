@@ -251,3 +251,25 @@ replacement refresh actor/credential and their source/target or planned-memory
 gates before reconciliation. New key-revoked-during-F controls leave clone,
 merge and bulk source/history/target unchanged. The pairwise compile/account
 matrix must include these actual entry classes in its next evidence hash.
+
+## Additional raw source classes awaiting a scope disposition
+
+These are census findings, not authorization to expand this delivery. They
+must receive ownership or a source-admission/atomicity disposition before the
+combined map can be called complete. #2274's rename scope does not implicitly
+own them.
+
+| Class | Deciding source effects | Evidence / current disposition |
+| --- | --- | --- |
+| Comment create/edit/delete/thread lifecycle | `Node.content`, `revSeq`, `deletedAt`; no NodeRevision by the comment contract | Actual diagnostic admits a licensed foreign Agent-system comment and commits its author's edit while target compile holds F. Same-org/user authority locks can hide the missing F. The ordered sample compiles coherent new text; it does not prove a mixed receipt. See [the finding](https://hadronmemory.com/app/u/hrn:node:hadronmemory.com:hadron-server:findings:comment-source-writer-outside-compile-fence). Production comment policy is unchanged. |
+| Channel creation/reuse/rename/deletion and message producers | `channels.ts` clears/restores root content and abstract, changes loc/liveness and creates structural nodes; chat producers create content-bearing message Nodes | Static census: Channels may be hosted in any memory class, including system, so default Team shared-memory placement alone cannot prove source inadmissibility. Channel/chat roots do not currently enter F. Needs admitted-source and ownership disposition. |
+| Recovery `restoreNode` | Restores `Node.deletedAt` and TARGET-deleted comment threads without a revision snapshot | Static census: source availability changes through a separate authorized transaction, outside the revision-restore root qualified here. Needs ownership/disposition; do not substitute restoreNodeRevision coverage for it. |
+| Published-agent snapshot creation | Creates ordinary `revisions:*` Nodes in Agent system memory, with payload in data and normally null content | Static census: raw availability/identity writer, distinct from the destructive restore transaction qualified here. Source-admission relevance needs a disposition even if the normal body is empty. |
+| Agent URN-tombstone preamble in createAgentCore | Deletes the old Agent before the prepared system-memory transaction; Agent-owned entitlement rows can cascade | Does not itself cascade the system Memory. The new provisioning gate qualifies its explicit Memory-history removal, not this earlier identity/authority deletion. Combined #2258/#2263 writer map needs a disposition. |
+
+Background embedding/usage fields and automation-version approval hashes are
+not Node text/revision qualification writes merely because their names contain
+`hash` or `approval`. Account owner-namespace merge runs inside its owning
+account boundary; its surgical tombstone cleanup and address rewrites remain
+part of that combined account/source census, not an extra unowned root inferred
+from the shared reclaim helper alone.
