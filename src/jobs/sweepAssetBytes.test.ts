@@ -76,6 +76,53 @@ beforeEach(async () => {
   });
 });
 
+describe('sweepAssetBytes: row changes while HEAD is in flight', () => {
+  it('does not alarm when a scan verdict BLOCKS the row and purges its bytes', async () => {
+    const row = await seed({ scanStatus: 'PENDING' });
+    headObjectMock.mockImplementation(async () => {
+      await db.asset.update({ where: { id: row.id }, data: { scanStatus: 'BLOCKED' } });
+      return { exists: false };
+    });
+
+    const out = await sweepAssetBytes({ now: NOW });
+
+    expect(out).toMatchObject({ missing: 0, changed: 1, reported: 0 });
+    expect(captureMock).not.toHaveBeenCalled();
+  });
+
+  it('does not alarm when the row is deleted while HEAD is in flight', async () => {
+    const row = await seed();
+    headObjectMock.mockImplementation(async () => {
+      await db.asset.delete({ where: { id: row.id } });
+      return { exists: false };
+    });
+
+    const out = await sweepAssetBytes({ now: NOW });
+
+    expect(out).toMatchObject({ missing: 0, changed: 1 });
+    expect(captureMock).not.toHaveBeenCalled();
+  });
+
+  it('does not alarm when the row is soft-deleted or re-keyed while HEAD is in flight', async () => {
+    const a = await seed();
+    const b = await seed();
+    headObjectMock.mockImplementation(async (key: string) => {
+      if (key.includes(a.id)) {
+        await db.asset.update({ where: { id: a.id }, data: { deletedAt: NOW } });
+      } else {
+        await db.asset.update({ where: { id: b.id }, data: { storageKey: 'sweep-org/bytes/other.pdf' } });
+      }
+      return { exists: false };
+    });
+
+    const out = await sweepAssetBytes({ now: NOW });
+
+    expect(out).toMatchObject({ missing: 0, changed: 2 });
+    expect(captureMock).not.toHaveBeenCalled();
+    expect((await db.asset.findUniqueOrThrow({ where: { id: b.id } })).bytesCheckedAt).toBeNull();
+  });
+});
+
 describe('sweepAssetBytes', () => {
   it('alarms a row whose object is missing and stays quiet for one that has it', async () => {
     const gone = await seed();

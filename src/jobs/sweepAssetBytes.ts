@@ -64,6 +64,8 @@ export interface AssetBytesSweepOutcome {
   reported: number;
   /** Encrypted memory with no cached session key; not examined, rotated. */
   deferred: number;
+  /** HEAD said missing, but the row had changed meanwhile (BLOCKED, deleted, replaced). */
+  changed: number;
 }
 
 /** Thrown when the store cannot answer; the run stops and nothing is concluded. */
@@ -80,6 +82,29 @@ export interface AssetBytesSweepOptions {
   batchSize?: number;
 }
 
+/**
+ * Is the row still one this sweep may alarm on, with the same key and memory it
+ * was selected under? Re-read AFTER the object-store call, because the selection
+ * is a detached snapshot and a BLOCKED verdict deliberately purges the object
+ * (scan.ts sets BLOCKED first, so the status is visible by the time HEAD sees
+ * the object gone). No transaction is held across the store call.
+ */
+async function stillEligible(
+  db: PrismaClient,
+  asset: { id: string; storageKey: string; memoryId: string | null },
+): Promise<boolean> {
+  const n = await db.asset.count({
+    where: {
+      id: asset.id,
+      storageKey: asset.storageKey,
+      memoryId: asset.memoryId,
+      deletedAt: null,
+      scanStatus: { in: ['CLEAN', 'PENDING'] },
+    },
+  });
+  return n > 0;
+}
+
 /** Examine one batch of rows, least-recently examined first. */
 export async function sweepAssetBytes(
   opts: AssetBytesSweepOptions = {},
@@ -93,6 +118,7 @@ export async function sweepAssetBytes(
     missing: 0,
     reported: 0,
     deferred: 0,
+    changed: 0,
   };
 
   const rows = await db.asset.findMany({
@@ -107,8 +133,12 @@ export async function sweepAssetBytes(
     include: { memory: { select: { id: true, isEncrypted: true } } },
   });
 
-  const stamp = (id: string) =>
-    db.asset.updateMany({ where: { id }, data: { bytesCheckedAt: now } });
+  // Guarded on the key so a row replaced under the same id is not stamped.
+  const stamp = (id: string, storageKey?: string) =>
+    db.asset.updateMany({
+      where: { id, ...(storageKey ? { storageKey } : {}) },
+      data: { bytesCheckedAt: now },
+    });
 
   for (const asset of rows) {
     outcome.examined += 1;
@@ -137,6 +167,11 @@ export async function sweepAssetBytes(
 
     if (exists) {
       outcome.present += 1;
+    } else if (!(await stillEligible(db, asset))) {
+      // The row changed while HEAD was in flight: a scan verdict BLOCKED it and
+      // purged its bytes on purpose, or it was deleted or replaced. The absence
+      // is expected, so it is neither counted nor alarmed.
+      outcome.changed += 1;
     } else {
       outcome.missing += 1;
       if (outcome.reported < MAX_EVENTS_PER_RUN) {
@@ -156,7 +191,7 @@ export async function sweepAssetBytes(
         reason: 'sweep: row has no object in storage',
       });
     }
-    await stamp(asset.id);
+    await stamp(asset.id, asset.storageKey);
   }
 
   if (outcome.missing > outcome.reported) {
@@ -178,8 +213,10 @@ export function startAssetBytesSweepLoop(
   intervalMs = 60 * 60 * 1000,
   initialDelayMs = 20 * 60 * 1000,
 ): NodeJS.Timeout {
+  let inFlight = false;
   const run = async () => {
-    if (!isObjectStoreConfigured()) return;
+    if (!isObjectStoreConfigured() || inFlight) return;
+    inFlight = true;
     try {
       const outcome = await sweepAssetBytes({ db });
       if (outcome.missing > 0 || outcome.deferred > 0) {
@@ -192,6 +229,8 @@ export function startAssetBytesSweepLoop(
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[janitor:asset-bytes] sweep failed:', err);
+    } finally {
+      inFlight = false;
     }
   };
 
