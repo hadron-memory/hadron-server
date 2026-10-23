@@ -101,6 +101,7 @@ export function getEmbeddingClient(): EmbeddingClient {
   const dim = readDim();
   const model = process.env.EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL;
   const provider = process.env.EMBEDDING_PROVIDER;
+  const queryTimeoutMs = readQueryTimeoutMs();
 
   if (backend === 'sagemaker') {
     const endpointName = process.env.EMBEDDING_SAGEMAKER_ENDPOINT_NAME;
@@ -153,6 +154,7 @@ export function getEmbeddingClient(): EmbeddingClient {
     cached = withMaxBatch(
       new SageMakerEmbeddingClient({
         endpointName,
+        queryTimeoutMs,
         region,
         model,
         dim,
@@ -180,6 +182,7 @@ export function getEmbeddingClient(): EmbeddingClient {
   cached = withMaxBatch(
     new HttpEmbeddingClient({
       url,
+      queryTimeoutMs,
       model,
       dim,
       provider: provider ?? DEFAULT_EMBEDDING_PROVIDER,
@@ -207,6 +210,18 @@ function readMaxBatch(): number {
     );
   }
   return max;
+}
+
+/** #439: read once when the lazy client factory first runs, not at boot.
+ * AbortSignal.timeout accepts at most 2^32-1 milliseconds in Node.
+ */
+function readQueryTimeoutMs(): number {
+  const raw = process.env.EMBEDDING_QUERY_TIMEOUT_MS;
+  const ms = raw === undefined ? 5000 : Number(raw);
+  if (!Number.isSafeInteger(ms) || ms <= 0 || ms > 4_294_967_295) {
+    throw new Error('Invalid EMBEDDING_QUERY_TIMEOUT_MS: must be a positive safe integer no greater than 4294967295 (default 5000).');
+  }
+  return ms;
 }
 
 function readDim(): number {
