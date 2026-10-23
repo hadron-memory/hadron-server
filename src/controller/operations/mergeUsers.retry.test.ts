@@ -26,7 +26,7 @@ function recordDelays(): number[] {
   return delays;
 }
 
-beforeEach(() => vi.mocked(mergeConsentAlreadyApplied).mockResolvedValue(false));
+beforeEach(() => { vi.mocked(mergeConsentAlreadyApplied).mockResolvedValue(false); });
 afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks(); });
 
 describe('mergeUsers retry timing', () => {
