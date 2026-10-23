@@ -95,6 +95,8 @@ const WATCHED_SETS = [
     coordinates: ['Query.teamWorkItems', 'Mutation.recordTeamWork'],
     // The canonical-ref examples also contain 'repo'; only the promised kind
     // list supplies membership evidence, not unrelated words in the same block.
+    // These curated lists end at the first period/semicolon; keep abbreviations
+    // with dots outside the list, or revise this capture with the description.
     enumerationPattern: /kind\s+must\s+be\s+one\s+of\s+([^.;]+)/i,
   },
   {

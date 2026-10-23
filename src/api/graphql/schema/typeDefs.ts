@@ -9999,8 +9999,8 @@ export const typeDefs = `#graphql
 
     """
     End a session, and — for a worker-bound one — write its closing handoff
-    (#1029). Closing a client's conversation does not call this operation or
-    end its worker session. Inactivity alone never ends a session; the reaper
+    (#1029). Ending a client's chat session does not end its worker session
+    or call this operation. Inactivity alone never ends a session; the reaper
     enforces a hard expiresAt promised at session start. Other explicit
     platform lifecycle operations can also end sessions.
 
@@ -11801,6 +11801,7 @@ export const typeDefs = `#graphql
 
     Error codes (extensions.code): TEAM_CHAT_BODY_TOO_LARGE,
     TEAM_CHAT_REPLY_NOT_FOUND, SESSION_NOT_FOUND, SESSION_ENDED,
+    SESSION_NOT_LIVE (dormant or ineligible for lapsed-session resume),
     SESSION_NOT_WORKER_BOUND, CHANNEL_HOST_NOT_WRITABLE, WORKER_RETIRED,
     SESSION_EXPIRED (encrypted team memory without an active session key),
     TEAM_AGENT_NOT_FOUND / TEAM_AGENT_AMBIGUOUS (first-post bootstrap could

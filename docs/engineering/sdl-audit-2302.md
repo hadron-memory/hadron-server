@@ -1,6 +1,6 @@
 # SDL audit S2 — #2302 (Refs #1246)
 
-Frozen population: `hrn:node:hadronmemory.com:hadron-dev-team-patrick:sdl-audit:1246-frozen-population`, scanned at `cef136bb`. Verification baseline: fresh main `d1c1fdb7`. The line number identifies the frozen description block; its preceding-symbol label is heuristic. Five labels are corrected below by inspecting the actual frozen block, not by silently substituting a different field. No entry is dropped or moved to another slice.
+Frozen population: `hrn:node:hadronmemory.com:hadron-dev-team-patrick:sdl-audit:1246-frozen-population`, scanned at `cef136bb`. Verification baseline: fresh main `d1c1fdb7`. File:line anchors are valid at that baseline only and drift as main changes. The line number identifies the frozen description block; its preceding-symbol label is heuristic. Five labels are corrected below by inspecting the actual frozen block, not by silently substituting a different field. No entry is dropped or moved to another slice.
 
 ## §10 and boundaries
 
