@@ -71,7 +71,7 @@ ALTER TABLE agent_task_stall_schedule ADD CONSTRAINT chk_agent_task_stall_schedu
 
 -- #2200: the escalation's due-row read, over the rows still open (neither woken
 -- nor ended). Prisma cannot model a partial index. Production builds it with
--- 20261023010100_alarm_schedule_open_due_idx (CONCURRENTLY, one statement, so it
+-- 20261023130100_alarm_schedule_open_due_idx (CONCURRENTLY, one statement, so it
 -- is not part of the migration copy of this file above this marker); push-managed
 -- databases get it here.
 -- INDEX-SECTION
