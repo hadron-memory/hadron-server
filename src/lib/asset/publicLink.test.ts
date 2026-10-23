@@ -381,9 +381,18 @@ describe('review findings on #2287', () => {
     const blocker = db.$transaction(async (tx) => { await statements(tx); held(); await gate; });
     await holding;
     const call = during();
-    const settled = call.then(() => 'done', () => 'done');
-    // The call must be parked behind the held row lock, not decided from a stale read.
-    expect(await Promise.race([settled, new Promise((r) => setTimeout(() => r('waiting'), 400))])).toBe('waiting');
+    call.catch(() => undefined);
+    // Barrier: PostgreSQL itself reports a backend parked on a lock, so the call provably reached the
+    // row lock (a slow request cannot pass this by merely not having finished yet).
+    let waiters = 0;
+    for (let i = 0; i < 100 && waiters === 0; i++) {
+      const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`
+        SELECT count(*) AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`;
+      waiters = Number(n);
+      if (waiters === 0) await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(waiters).toBeGreaterThan(0);
     release();
     await blocker;
     return call;
