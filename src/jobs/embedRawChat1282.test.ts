@@ -34,3 +34,16 @@ it.each([['record', 'records:invoice'], ['record', 'chats:example'], ['chat', 'c
   expect(await embedNode(db, 'n', undefined, client)).toBe('embedded');
   expect(client.embed).toHaveBeenCalledWith(['synthetic abstract'], 'document');
 });
+
+it('never clears a newer raw-turn obligation on behalf of a superseded prompt', async () => {
+  expect(await embedNode(db, 'n', { abstract: 'old' }, client, { workToken: '00000000-0000-4000-8000-000000000002' })).toBe('skipped');
+  expect(client.embed).not.toHaveBeenCalled(); expect(db.node.updateMany).not.toHaveBeenCalled();
+});
+it('clears an excluded future-dated marker without bypassing a normal node retry backoff', async () => {
+  row.embeddingPendingAt = new Date(Date.now() + 3600000);
+  expect(await embedNode(db, 'n', undefined, client)).toBe('skipped');
+  expect(db.node.updateMany).toHaveBeenCalled();
+  db.node.updateMany.mockClear(); row.nodeType = 'info';
+  expect(await embedNode(db, 'n', undefined, client)).toBe('skipped');
+  expect(db.node.updateMany).not.toHaveBeenCalled(); expect(client.embed).not.toHaveBeenCalled();
+});

@@ -1,3 +1,4 @@
+import { isRawChatNode } from '../../../services/embedding/rawChat.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #939 — createTeamChatMessage + teamChatMessages: the team-chat platform
@@ -185,6 +186,8 @@ describe('createTeamChatMessage — happy path + bootstrap', () => {
 
     const row = await db.node.findUnique({ where: { id: msg.nodeId } });
     expect(row!.nodeType).toBe('chat-message');
+    expect(isRawChatNode(row!)).toBe(true);
+    expect(isRawChatNode(root!)).toBe(false);
     expect(row!.seq).toBe(1);
     expect(row!.content).toBe('first!');
     expect(row!.createdBy).toBe(appMember.id);
