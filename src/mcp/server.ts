@@ -7213,9 +7213,16 @@ export function createMcpServerInstance(
           `(${result.skipCounts.governed} governed, ` +
           `${result.skipCounts.protectedAddress} protected address).`;
 
-        return textResult(
-          lines.length ? `${header}\n${coverage}\n${lines.join('\n')}` : `${header}\n${coverage}`,
-        );
+        // #2285: explain the existing aggregate skip, without inferring or
+        // exposing a selected node's kind or changing the resolver's gates.
+        const guidance: string[] = [];
+        if (result.nodesScanned === 0 && result.nodesSkipped > 0) {
+          guidance.push('Selected nodes were skipped before text scanning; 0 scanned does not mean those selected nodes were not found.');
+        }
+        if (result.skipCounts.governed > 0) {
+          guidance.push('Governed nodes require their own update door: tasks use hadron_update_task; reviews use hadron_update_review; specs use GraphQL updateSpecNode or the CLI hadron spec commands (no MCP spec door). Other governed kinds require their owning operation. Generic full-content node updates are not a workaround.');
+        }
+        return textResult([header, coverage, ...guidance, ...lines].join('\n'));
       } catch (e) {
         return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
       }
