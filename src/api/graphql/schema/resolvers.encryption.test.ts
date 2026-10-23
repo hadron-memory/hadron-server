@@ -725,7 +725,7 @@ describe('encryptMemory', () => {
 // ---------------------------------------------------------------------------
 
 describe('linkMemoryToUser with encryption', () => {
-  it('does not replace a competing promotion key after its live-node scan', async () => {
+  it('does not replace a competing promotion key committed before its deciding fence', async () => {
     const anon = await resolvers.Mutation.startAgentSession(
       {}, { agentId: agent.id }, appCtx(plaintextApp.id),
     );
@@ -740,15 +740,17 @@ describe('linkMemoryToUser with encryption', () => {
     const rivalContent = encryptNodeFieldsWithKey(
       { content: 'competing private draft' }, parseDataKey(rivalKey),
     ).content;
-    const originalFindMany = db.node.findMany.bind(db.node);
+    const originalAgent = db.agent.findUniqueOrThrow.bind(db.agent);
     let intervened = false;
-    const scan = vi.spyOn(db.node, 'findMany').mockImplementation((async (args: any) => {
-      const rows = await originalFindMany(args);
-      if (!intervened && args?.where?.memoryId === anon.memoryId && args?.select?.content === true) {
+    const scan = vi.spyOn(db.agent, 'findUniqueOrThrow').mockImplementation((async (args: any) => {
+      const row = await originalAgent(args);
+      // User provisioning has committed before this final Agent lookup; the
+      // rival wins before promotion takes its deciding fence/Memory row lock.
+      const owner = !intervened && args?.where?.id === agent.id ? await db.user.findFirst({
+        where: { externalAppId: plaintextApp.id, externalId: 'claimant' },
+      }) : null;
+      if (owner) {
         intervened = true;
-        const owner = await db.user.findFirstOrThrow({
-          where: { externalAppId: plaintextApp.id, externalId: 'claimant' },
-        });
         await db.node.update({ where: { id: node.id }, data: { content: rivalContent } });
         await db.memory.update({
           where: { id: anon.memoryId! },
@@ -758,8 +760,8 @@ describe('linkMemoryToUser with encryption', () => {
           },
         });
       }
-      return rows;
-    }) as typeof db.node.findMany);
+      return row;
+    }) as typeof db.agent.findUniqueOrThrow);
     try {
       await expect(withTestOperationKey(generateDataKey().raw.toString('base64'), (appCtx(plaintextApp.id)).appId, () => resolvers.Mutation.linkMemoryToUser(
         {}, { memoryId: anon.memoryId!, externalUserId: 'claimant' },
