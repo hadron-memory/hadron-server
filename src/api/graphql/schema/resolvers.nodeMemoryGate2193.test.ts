@@ -17,6 +17,7 @@ import { createServer } from '../../../server.js';
 import { mintUserApiKey } from '../../../middleware/auth.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 import { MEMORY_INCLUDE } from './resolvers.helpers.js';
@@ -187,6 +188,96 @@ describe('#2193 — controls that keep their memory', () => {
       { i: { memoryId: mem.know, loc: `notes:new-${n}`, name: 'new' } });
     expect(r.errors).toBeUndefined();
     expect(r.data.createNode.memory).toEqual({ id: mem.know, name: 'Know' });
+  });
+});
+
+describe('#2193 — other Node parents: Node.memory still answers as Query.memory', () => {
+  async function allBearers(): Promise<Array<[string, string]>> {
+    const out: Array<[string, string]> = [];
+    for (const who of ['owner', 'admin', 'reader', 'member', 'stranger']) out.push([who, await keyFor(who)]);
+    return out;
+  }
+  const memoryMatchesOracle = async (who: string, bearer: string, nodes: Array<{ id: string; memoryId: string; memory: { id: string } | null }>) => {
+    for (const x of nodes) expect(x.memory?.id ?? null, `${who}: node ${x.id}`).toBe(await oracle(bearer, x.memoryId));
+  };
+
+  // Who the fixtures admit. The org owner and admin read every memory of the org;
+  // the others are admitted by the oracle, never assumed.
+  const ADMITTED = ['owner', 'admin'];
+
+  it('nodeBatch, for every principal', async () => {
+    for (const [who, bearer] of await allBearers()) {
+      const r = await post(bearer, 'query($r: [ID!]) { nodeBatch(refs: $r) { nodes { id memoryId memory { id } } } }', { r: Object.values(node) });
+      expect(r.errors, `${who}: nodeBatch`).toBeUndefined();
+      const nodes = r.data.nodeBatch.nodes as Array<{ id: string; memoryId: string; memory: { id: string } | null }>;
+      if (ADMITTED.includes(who)) {
+        expect(nodes.map((x) => x.id).sort(), `${who}: admitted nodes`).toEqual(Object.values(node).sort());
+        for (const x of nodes) expect(x.memory?.id, `${who}: node ${x.id}`).toBe(x.memoryId);
+      }
+      // Expected admission, stated up front and not read off the response: the
+      // org reader reads the ORGANIZATION-visible knowledge node and nothing in
+      // the app-owned working memory; the App member reads neither.
+      const ids = nodes.map((x) => x.id);
+      if (who === 'reader') expect(ids, 'reader: knowledge node admitted').toContain(node.know);
+      if (who === 'reader' || who === 'member' || who === 'stranger') expect(ids, `${who}: handoff denied`).not.toContain(node.handoff);
+      if (who === 'stranger') expect(ids, `${who}: knowledge node denied`).not.toContain(node.know);
+      await memoryMatchesOracle(who, bearer, nodes);
+    }
+  });
+
+  it('Edge.source and Edge.target, for every principal', async () => {
+    // A cross-memory edge, so the two endpoints sit under different record gates.
+    await db.edge.create({ data: { memoryId: mem.know!, sourceId: node.know!, targetId: node.handoff!, loc: `edges:e-${n}` } });
+    for (const [who, bearer] of await allBearers()) {
+      const r = await post(bearer, 'query($o: ID) { edges(orgId: $o, limit: 50) { items { loc source { id memoryId memory { id } } target { id memoryId memory { id } } } } }', { o: org.id });
+      expect(r.errors, `${who}: edges`).toBeUndefined();
+      const items = r.data.edges.items as Array<{ loc: string; source: any; target: any }>;
+      const e = items.find((x) => x.loc === `edges:e-${n}`);
+      if (ADMITTED.includes(who)) {
+        // Both endpoints are served, each with its own full Memory record.
+        expect(e, `${who}: the edge`).toBeDefined();
+        expect(e!.source, `${who}: source`).toMatchObject({ id: node.know, memory: { id: mem.know } });
+        expect(e!.target, `${who}: target`).toMatchObject({ id: node.handoff, memory: { id: mem.work } });
+      }
+      if (who === 'reader') {
+        // Stated up front: the org reader sees the edge and its knowledge-node
+        // source with that memory's record; the target sits in the working
+        // memory the reader may not read (nodeBatch pins the same denial).
+        expect(e, 'reader: the edge').toBeDefined();
+        expect(e!.source, 'reader: source').toMatchObject({ id: node.know, memory: { id: mem.know } });
+        expect(e!.target, 'reader: target').toBeNull();
+      }
+      if (e) await memoryMatchesOracle(who, bearer, [e.source, e.target].filter(Boolean));
+    }
+  });
+
+  it('AppRun.entryNode, for every principal', async () => {
+    const admin = await keyFor('admin');
+    const urn = (await post(admin, 'query($r: ID!) { node(ref: $r) { urn } }', { r: node.know })).data.node.urn as string;
+    const run = await db.appRun.create({
+      data: { id: generateId(), organizationId: org.id, appId, triggerKind: 'MANUAL', entryNodeUrn: urn, status: 'RUNNING' },
+    });
+    for (const [who, bearer] of await allBearers()) {
+      const r = await post(bearer, 'query($r: ID!) { appRun(ref: $r) { entryNode { id memoryId memory { id } } } }', { r: run.id });
+      expect(r.errors, `${who}: appRun`).toBeUndefined();
+      const entry = r.data.appRun?.entryNode;
+      if (ADMITTED.includes(who) || who === 'reader') {
+        expect(entry, `${who}: entryNode`).toMatchObject({ id: node.know, memory: { id: mem.know } });
+      }
+      if (entry) await memoryMatchesOracle(who, bearer, [entry]);
+    }
+  });
+
+  it('a soft-deleted memory reads null over the wire where the parent still admits the node', async () => {
+    const admin = await keyFor('admin');
+    const before = await post(admin, CONTINUITY, { w: workerId, a: appId });
+    expect(before.data.worker.continuity.handoff.memory).toMatchObject({ id: mem.work });
+    await db.memory.update({ where: { id: mem.work }, data: { deletedAt: new Date() } });
+    const after = await post(admin, CONTINUITY, { w: workerId, a: appId });
+    expect(after.errors).toBeUndefined();
+    expect(after.data.worker.continuity.handoff).toMatchObject({ id: node.handoff });
+    expect(after.data.worker.continuity.handoff.memory).toBeNull();
+    expect(await oracle(admin, mem.work)).toBeNull();
   });
 });
 
