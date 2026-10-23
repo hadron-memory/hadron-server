@@ -413,3 +413,29 @@ selection passes6 tests, including the two existing comment/restore epoch rows.
 These close the named local cloneAgent regression and add scoped integration
 evidence; full expanded #2273 CI/review and other #2274/#2277 dispositions are
 still required. No frozen-green, merge or activation claim follows.
+
+### Full-composition diagnostic and test-only repairs
+
+The full evidence run on65dbe133 finished with879/882 files passing and16047
+passing tests,3 failing tests,1 expected failure and7 skips. It found missing
+cloneAgent create/delete rows in the held entitlement inventory, two empty
+vector-result assertions, and a dbWorkers teardown hook timeout. Census-only
+evidence commitd35a00ab adds the checked fenced cloneAgent sites and corrects
+the stale old-Agent tombstone exclusion to counterparty-pending; the fresh
+allocation pin remains distinct from unclosed supplied-Memory promotion.
+
+The vector failures reproduce on unchanged main3c17ddaa with1500 deleted
+vectors left in the HNSW graph and a forced approximate plan. Exactly the same
+two assertions fail; the identical fixture with an exact plan passes10/10.
+The test file now uses the established exact query handle for exact scope/rank
+assertions, leaving production search and expected outputs unchanged. A new
+adversarial pin checks HNSW versus exact plans with EXPLAIN, and asserts the
+content and comment scopes after the dead-graph warmup. Removing the exact
+handle kills that pin. See findings:vector-test-exact-assertion-hnsw-plan-flip.
+
+The dbWorkers failure was the live-PG afterAll default10-second hook cap while
+serially dropping its private probe databases. Cleanup now has the same bounded
+60-second budget already used by that suite's setup and live-PG tests. No
+cleanup operations or production behavior change. The two repaired files pass
+60/60 together; these targeted results are not a replacement for a new full
+combined run. The first full run remains recorded as red, not retroactively green.
