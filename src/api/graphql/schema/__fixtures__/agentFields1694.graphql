@@ -1,0 +1,45 @@
+# Portal src/lib/server/queries.ts AGENT_FIELDS at 9a2bc674530624549d9e932c252d5bcdb3401253.
+# Verbatim selection pinned for server#1694; refresh deliberately when the portal fragment changes.
+
+  fragment AgentFields on Agent {
+    id
+    organizationId
+    urn
+    name
+    description
+    systemPrompt
+    systemMemoryId
+    visibility
+    type
+    surfaces
+    # #1241: systemPrompt is shared by chat and Worker briefing. The server
+    # binds name/role placeholders for each Worker; the named individual is
+    # the Worker, not this reusable role Agent.
+    personaRole
+    properties
+    # 036-ai-service-config: hasAiApiKey is the server shim for "the agent's
+    # 'default' config has a key" — kept for the Chat-tab readiness gate (any
+    # member can read it; the registry list itself is org-ADMIN gated).
+    hasAiApiKey
+    memoryItems {
+      id
+      role
+      memory { id urn name organizationId visibility }
+    }
+    # 008-agent-installation: declarative knobs + installation count.
+    memoryProvisioning { appMemory }
+    installationPolicy { maxMembers memberRoles }
+    imports {
+      parentAgentId
+      importedAgentId
+      # description + persona fields feed the Bundled agents grid's Role and
+      # Description columns (#713) — without them an import-sourced row rendered
+      # an em dash even when the imported agent had values (PR #714 review).
+      importedAgent { id urn name description personaRole }
+      position
+      required
+      createdAt
+    }
+    appCount
+    createdAt
+  }
