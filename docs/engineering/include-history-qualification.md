@@ -391,3 +391,25 @@ This confirms the local blocker, not a full green or freeze. Basil's dependent
 #2283 head71f9074f now contains this base and fixture fix; his reported full
 suite also has this single failure. His report is distinguished from Anne's
 own CI inspection and focused runs.
+
+### Checked cloneAgent fold-in (#31345)
+
+Xylon CHECKED the attach at T3/scoped §10/L6356294522 and selected direct fold-in
+so #2273's prerequisite does not land red. Dan's authored commit
+`20e6c0bfbcc9f9a6f651987094c2af4cc18faac9` is cherry-picked with source trailer
+as `2aad4b5e`, preserving author/Worker/coauthor trailers. The production hunk
+adds only `fence: true` to cloneAgent's existing outer authorized transaction.
+Existing beneath-F ordering, fresh full retries, reconcile/copy/audit rollback
+and timeout remain in place. The held-F pin is carried with the fix.
+
+The caller inventory/tripwire also follows the extracted delegated calls:
+cloneMemory's copy helper and cloneAgent's copy/reconcile helpers (three sites).
+It was red before adding the inventory rows, green afterward. Expanded delivery
+qualification/Agent clone/lock-order/inventory checks pass: nine files158 tests.
+Evidence-only actual cloneAgent versus compile read/write/inverse controls pass;
+its integrated account-epoch control changes from red (no F waiter) to green
+(stale queued SERIALIZABLE account refuses before work). The focused combined
+selection passes6 tests, including the two existing comment/restore epoch rows.
+These close the named local cloneAgent regression and add scoped integration
+evidence; full expanded #2273 CI/review and other #2274/#2277 dispositions are
+still required. No frozen-green, merge or activation claim follows.
