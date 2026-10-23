@@ -964,7 +964,7 @@ it('diagnostic: fresh createAgent system memory is invisible before its provisio
     },
   });
   const creating = resolvers.Mutation.createAgent(null, { orgId: host.organizationId!, name: 'Uncommitted source', visibility: 'PUBLIC' }, { ...ctx(), db: heldDb });
-  const outcome = creating.then((value) => ({ value }), (error: unknown) => ({ error }));
+  const outcome: Promise<{ value: unknown } | { error: unknown }> = creating.then((value: unknown) => ({ value }), (error: unknown) => ({ error }));
   await Promise.race([ready, outcome.then((result) => { if ('error' in result) throw result.error; throw new Error('missing create barrier'); })]);
   let compiling: ReturnType<typeof compileBootPrompt> | undefined;
   let compiledBeforeCommit = false;
