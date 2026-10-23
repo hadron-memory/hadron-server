@@ -3122,3 +3122,59 @@ it('Git sync retains history exclusivity through its actual deciding commit', as
     expect(otherEntered).toBe(true);
   } finally { release(); hook.mockRestore(); }
 });
+
+// Evidence-only: requires the held #2258 compile implementation.
+import { compileBootPrompt } from '../../api/graphql/schema/compileBootPrompt.js';
+it.each(['read', 'write', 'writer-first'] as const)('actual affected-source compile and Git sync: %s', async (phase) => {
+  const source = await db.node.create({ data: { memoryId: dbGraphId, loc: 'boundary', name: 'Boundary', content: 'Before' } });
+  const path = join(mockSources, 'test-org', 'test/repo', 'boundary');
+  mkdirSync(path, { recursive: true });
+  writeNodeFiles(path, { name: 'Boundary' }, 'After');
+  const user = await db.user.create({ data: { handle: 'git-compile-admin', roles: ['ADMIN'] } });
+  await db.memory.update({ where: { id: dbGraphId }, data: { class: 'system' } });
+  const agent = await db.agent.create({ data: { organizationId: dbOrgId, systemMemoryId: dbGraphId, urn: 'test-org:compile-agent', name: 'Compile' } });
+  await db.node.create({ data: { memoryId: dbGraphId, loc: 'boot:source', role: 'boot-prompt', name: 'Source', content: '{{> boundary}}' } });
+  let entered!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const transaction = db.$transaction.bind(db);
+  const compileDb = new Proxy(db, {
+    get(client, key, receiver) {
+      if (key !== '$transaction') return Reflect.get(client, key, receiver);
+      return (work: (tx: Prisma.TransactionClient) => Promise<unknown>, options: unknown) => transaction(async (tx) => {
+        const result = await work(tx);
+        if (phase === 'write') { entered(); await gate; }
+        return result;
+      }, options as never);
+    },
+  });
+  let restoreHook: (() => void) | undefined;
+  if (phase === 'writer-first') {
+    const hook = vi.spyOn(db, '$transaction').mockImplementation((async (work: (tx: Prisma.TransactionClient) => Promise<unknown>, options: unknown) => transaction(async (tx) => {
+      const result = await work(tx); entered(); await gate; return result;
+    }, options as never)) as typeof db.$transaction);
+    restoreHook = () => hook.mockRestore();
+  }
+  const compile = () => compileBootPrompt({ db: compileDb, userId: user.id, roles: ['ADMIN'] }, { kind: 'AGENT', agentId: agent.id }, phase === 'read' ? { seams: { beforeAssemble: async () => { entered(); await gate; } } } : {});
+  const first: Promise<unknown> = phase === 'writer-first' ? syncGraphFromGithub(makeGraph()) : compile();
+  const firstResult = first.then((value) => ({ value }), (error: unknown) => ({ error }));
+  try {
+    await Promise.race([ready, firstResult.then((result) => { if ('error' in result) throw result.error; throw new Error('missing combined Git/compile barrier'); })]);
+    const second: Promise<unknown> = phase === 'writer-first' ? compile() : syncGraphFromGithub(makeGraph());
+    const secondResult = second.then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      // The write-phase compiler holds the output Memory row. Git's standalone
+      // syncStatus prelude queues there before its deciding F-first transaction.
+      await waitForLockWaitersOfType(db, phase === 'write' ? 'transactionid' : 'advisory', 1, 1500);
+      expect(await db.compiledPromptRevision.count()).toBe(0);
+    } finally { release(); await firstResult; await secondResult; }
+    expect(await firstResult).toHaveProperty('value');
+    expect(await secondResult).toHaveProperty('value');
+    const receipt = await db.compiledPromptRevision.findFirstOrThrow();
+    const output = await db.node.findUniqueOrThrow({ where: { id: receipt.compiledNodeId } });
+    expect(output.content).toBe(phase === 'writer-first' ? 'After' : 'Before');
+    expect(receipt.provenance).toMatchObject({ occurrences: [{}, { nodeId: source.id, revNo: phase === 'writer-first' ? 2 : 1 }] });
+    expect((await db.node.findUniqueOrThrow({ where: { id: source.id } })).content).toBe('After');
+  } finally { release(); restoreHook?.(); }
+});

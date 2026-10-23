@@ -148,3 +148,56 @@ it('legacy controller retains the prepared fence through its actual commit', asy
     expect(counterpartyEntered).toBe(true);
   } finally { release(); hook.mockRestore(); }
 });
+
+// Evidence-only: requires the held #2258 compile implementation.
+import { compileBootPrompt } from '../../api/graphql/schema/compileBootPrompt.js';
+it.each(['read', 'write', 'writer-first'] as const)('actual affected-source compile and legacy controller: %s', async (phase) => {
+  const source = await createNode({ memoryId, loc: 'source', name: 'Source', content: 'Before' });
+  const write = () => createNode({ memoryId, loc: 'source', name: 'Source', content: 'After' });
+  const dbOrgId = (await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).organizationId;
+  const user = await db.user.create({ data: { handle: 'legacy-compile-admin', roles: ['ADMIN'] } });
+  await db.memory.update({ where: { id: memoryId }, data: { class: 'system' } });
+  const agent = await db.agent.create({ data: { organizationId: dbOrgId, systemMemoryId: memoryId, urn: 'test-org:compile-agent', name: 'Compile' } });
+  await db.node.create({ data: { memoryId: memoryId, loc: 'boot:source', role: 'boot-prompt', name: 'Source', content: '{{> source}}' } });
+  let entered!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const transaction = db.$transaction.bind(db);
+  const compileDb = new Proxy(db, {
+    get(client, key, receiver) {
+      if (key !== '$transaction') return Reflect.get(client, key, receiver);
+      return (work: (tx: Prisma.TransactionClient) => Promise<unknown>, options: unknown) => transaction(async (tx) => {
+        const result = await work(tx);
+        if (phase === 'write') { entered(); await gate; }
+        return result;
+      }, options as never);
+    },
+  });
+  let restoreHook: (() => void) | undefined;
+  if (phase === 'writer-first') {
+    const hook = vi.spyOn(db, '$transaction').mockImplementation((async (work: (tx: Prisma.TransactionClient) => Promise<unknown>, options: unknown) => transaction(async (tx) => {
+      const result = await work(tx); entered(); await gate; return result;
+    }, options as never)) as typeof db.$transaction);
+    restoreHook = () => hook.mockRestore();
+  }
+  const compile = () => compileBootPrompt({ db: compileDb, userId: user.id, roles: ['ADMIN'] }, { kind: 'AGENT', agentId: agent.id }, phase === 'read' ? { seams: { beforeAssemble: async () => { entered(); await gate; } } } : {});
+  const first: Promise<unknown> = phase === 'writer-first' ? write() : compile();
+  const firstResult = first.then((value) => ({ value }), (error: unknown) => ({ error }));
+  try {
+    await Promise.race([ready, firstResult.then((result) => { if ('error' in result) throw result.error; throw new Error('missing combined legacy/compile barrier'); })]);
+    const second: Promise<unknown> = phase === 'writer-first' ? compile() : write();
+    const secondResult = second.then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1, 1500);
+      expect(await db.compiledPromptRevision.count()).toBe(0);
+    } finally { release(); await firstResult; await secondResult; }
+    expect(await firstResult).toHaveProperty('value');
+    expect(await secondResult).toHaveProperty('value');
+    const receipt = await db.compiledPromptRevision.findFirstOrThrow();
+    const output = await db.node.findUniqueOrThrow({ where: { id: receipt.compiledNodeId } });
+    expect(output.content).toBe(phase === 'writer-first' ? 'After' : 'Before');
+    expect(receipt.provenance).toMatchObject({ occurrences: [{}, { nodeId: source.id, revNo: phase === 'writer-first' ? 2 : 1 }] });
+    expect((await db.node.findUniqueOrThrow({ where: { id: source.id } })).content).toBe('After');
+  } finally { release(); restoreHook?.(); }
+});
