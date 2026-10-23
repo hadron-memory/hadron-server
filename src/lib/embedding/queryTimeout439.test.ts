@@ -63,8 +63,8 @@ describe('query timeout factory configuration #439', () => {
     resetEmbeddingClientForTests();
     expect(await getEmbeddingClient().embed(['original'], 'query')).toEqual([[0.1]]);
     expect(timeout).toHaveBeenCalledWith(raw === undefined ? 5000 : 37);
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body).input).toEqual(['search_query: original']);
-    expect(fetchMock.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).input).toEqual(['search_query: original']);
+    expect(fetchMock.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
   });
   it.each(['0', '-1', '1.5', 'NaN', 'Infinity', '9007199254740992', '4294967296', ''])('refuses invalid configuration %j', raw => {
     vi.stubEnv('EMBEDDING_BACKEND', 'http'); vi.stubEnv('EMBEDDING_API_URL', 'http://synthetic.invalid'); vi.stubEnv('EMBEDDING_QUERY_TIMEOUT_MS', raw);
