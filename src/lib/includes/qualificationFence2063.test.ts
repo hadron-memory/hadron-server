@@ -15,7 +15,7 @@ import { finishRevoke, bindRevokeByIdp } from '../passkeys/revoke.js';
 import { createCeremony } from '../passkeys/ceremony.js';
 import { confirmFreshSignIn, recordIdpSignIn } from '../passkeys/freshSignIn.js';
 
-import { createNodeRevision, buildNodeRevisionSnapshot } from '../nodeRevisionSnapshot.js';
+import { createNodeRevision, buildNodeRevisionSnapshot, revisionStateHashRefreshMarker } from '../nodeRevisionSnapshot.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 let userId: string;
@@ -134,7 +134,7 @@ it('snapshot helpers reject a pooled client, raw/manual-lock transaction, and es
   expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
 });
 
-type QualificationSurface = 'mergeMemories' | 'extractCopy' | 'extractMove' | 'cloneMemory' | 'updateNode' | 'updateNodeProperties' | 'moveNode' | 'cloneNode' | 'mergeNodes' | 'deleteNode' | 'searchReplaceInNodes' | 'restoreNodeRevision' | 'updateTeamRole' | 'deleteTeamRole' | 'encryptMemory' | 'cleanupAnonymousMemories' | 'deleteMemory' | 'approveNode' | 'approveMemoryNodes' | 'requestNodeSignature' | 'withdrawSigningRequest' | 'deleteNodeRevision' | 'clearNodeHistory' | 'cancelFirstPasskey' | 'endWindowEarly' | 'finishRevoke';
+type QualificationSurface = 'specReplace' | 'mergeMemories' | 'extractCopy' | 'extractMove' | 'cloneMemory' | 'updateNode' | 'updateNodeProperties' | 'moveNode' | 'cloneNode' | 'mergeNodes' | 'deleteNode' | 'searchReplaceInNodes' | 'restoreNodeRevision' | 'updateTeamRole' | 'deleteTeamRole' | 'encryptMemory' | 'cleanupAnonymousMemories' | 'deleteMemory' | 'approveNode' | 'approveMemoryNodes' | 'requestNodeSignature' | 'withdrawSigningRequest' | 'deleteNodeRevision' | 'clearNodeHistory' | 'cancelFirstPasskey' | 'endWindowEarly' | 'finishRevoke';
 async function qualificationAct(surface: QualificationSurface): Promise<{
   run: (database: typeof db) => Promise<unknown>;
   check: (value: unknown) => void;
@@ -185,6 +185,13 @@ async function qualificationAct(surface: QualificationSurface): Promise<{
     };
   }
   const node = await db.node.create({ data: { memoryId, loc: 'inverse', name: 'Inverse', content: '# Inverse' } });
+  if (surface === 'specReplace') {
+    await db.memory.update({ where: { id: memoryId }, data: { corpusDraft: true } });
+    await db.node.update({ where: { id: node.id }, data: { role: 'spec', revisionContentHash: revisionStateHashRefreshMarker() } });
+    const input = { memoryRef: memoryId, nodeIds: [node.id], oldText: 'Inverse', newText: 'Spec', fields: ['content'], dryRun: true };
+    const preview = await resolvers.Mutation.searchReplaceInSpecNodes(null, { input } as never, ctx());
+    return { run: (database) => resolvers.Mutation.searchReplaceInSpecNodes(null, { input: { ...input, dryRun: false, expectedPlan: preview.plan } } as never, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ nodesChanged: 1 }) };
+  }
   if (surface === 'mergeMemories') {
     const source = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
     const target = await db.memory.create({ data: { organizationId: source.organizationId, class: 'knowledge', urn: 'qualification-fence.example:merged-memory', name: 'Target' } });
@@ -225,7 +232,7 @@ async function qualificationAct(surface: QualificationSurface): Promise<{
     : { run: (database) => resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, { ...ctx(), db: database }), check: (value) => expect(value).toBe(1) };
 }
 
-it.each<QualificationSurface>(['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories', 'encryptMemory', 'updateTeamRole', 'deleteTeamRole', 'restoreNodeRevision', 'updateNode', 'updateNodeProperties', 'moveNode', 'cloneNode', 'mergeNodes', 'deleteNode', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'mergeMemories'])(
+it.each<QualificationSurface>(['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories', 'encryptMemory', 'updateTeamRole', 'deleteTeamRole', 'restoreNodeRevision', 'updateNode', 'updateNodeProperties', 'moveNode', 'cloneNode', 'mergeNodes', 'deleteNode', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'mergeMemories', 'specReplace'])(
   '%s holds the fence through its actual deciding write and commit (inverse order)', async (surface) => {
     const act = await qualificationAct(surface);
     let entered!: () => void;
@@ -339,7 +346,7 @@ it('anonymous cleanup waits before taking any cascading memory/node lock', async
 });
 
 
-it.each<QualificationSurface>(['updateNode', 'updateNodeProperties', 'moveNode', 'cloneNode', 'mergeNodes', 'deleteNode', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'mergeMemories'])(
+it.each<QualificationSurface>(['updateNode', 'updateNodeProperties', 'moveNode', 'cloneNode', 'mergeNodes', 'deleteNode', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'mergeMemories', 'specReplace'])(
   '%s waits on the history fence before its actual snapshot/source row locks', async (surface) => {
     const act = await qualificationAct(surface);
     let entered!: () => void;
