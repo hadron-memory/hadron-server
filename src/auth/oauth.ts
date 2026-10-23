@@ -1192,7 +1192,9 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
   }
 
   // #156: logged only after the mint committed; the raw code never reaches a log.
-  logOAuthEvent('authcode_minted', { client_id: validated.clientId, user: userId.slice(0, 8), ip: req.ip ?? '' });
+  // `user` is the id's random tail: ids are UUIDv7, so the leading characters are
+  // a millisecond timestamp shared by every user created in the same minute.
+  logOAuthEvent('authcode_minted', { client_id: validated.clientId, user: userId.slice(-8), ip: req.ip ?? '' });
 
   // 7. Redirect with the RAW code (not the hash). Single-use; the
   // /token handler atomically claims it via updateMany-with-conditional.

@@ -131,9 +131,10 @@ async function getAuthorize(
  */
 async function startConsentFlow(
   query?: string,
+  opts: { cookie?: string | null } = {},
 ): Promise<{ csrfToken: string; csrfCookieValue: string; grantProof: string; html: string }> {
   const q = query ?? buildAuthorizeQuery();
-  const res = await getAuthorize(q);
+  const res = await getAuthorize(q, opts);
   expect(res.status).toBe(200);
   const html = await res.text();
 
@@ -620,19 +621,19 @@ describe('POST /oauth/authorize — #156 authcode_minted log line', () => {
   const CHALLENGE = 'a'.repeat(43);
   const mintLines = (spy: { mock: { calls: unknown[][] } }) =>
     spy.mock.calls.filter((call) => call[0] === '[oauth] authcode_minted');
-  async function approve(decision = 'approve') {
-    const { csrfToken, csrfCookieValue, grantProof } = await startConsentFlow();
+  async function approve(decision = 'approve', cookie?: string) {
+    const { csrfToken, csrfCookieValue, grantProof } = await startConsentFlow(undefined, { cookie });
     return postAuthorize(
       {
         _csrf: csrfToken, decision, client_id: testClientId, redirect_uri: REGISTERED_REDIRECT,
         code_challenge: CHALLENGE, code_challenge_method: 'S256', resource: RESOURCE_URL, scope: 'mcp',
         state: 'opaque-state-value', grant_proof: grantProof,
       },
-      { csrfCookieValue },
+      { csrfCookieValue, cookie },
     );
   }
 
-  it('logs one line with client_id, an 8-char user prefix and ip; never code, hash, challenge, state or redirect', async () => {
+  it('logs one line with client_id, the 8-char user id tail and ip; never code, hash, challenge, state or redirect', async () => {
     const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const res = await approve();
     expect(res.status).toBe(302);
@@ -640,12 +641,26 @@ describe('POST /oauth/authorize — #156 authcode_minted log line', () => {
     const lines = mintLines(spy);
     expect(lines).toHaveLength(1);
     const [, payload] = lines[0] as [string, Record<string, unknown>];
-    expect(payload).toEqual({ client_id: testClientId, user: testUser.id.slice(0, 8), ip: expect.any(String) });
+    expect(payload).toEqual({ client_id: testClientId, user: testUser.id.slice(-8), ip: expect.any(String) });
     const logged = JSON.stringify(lines);
     const { codeHash } = await db.authCode.findFirstOrThrow();
     for (const secret of [rawCode, codeHash, CHALLENGE, 'opaque-state-value', REGISTERED_REDIRECT, testUser.id]) {
       expect(logged).not.toContain(secret);
     }
+  });
+
+  it('distinguishes two users whose UUIDv7 ids share the timestamp prefix', async () => {
+    // Same leading 8 characters, as for any two users created in the same minute.
+    const other = await db.user.create({
+      data: { id: testUser.id.slice(0, 8) + generateId().slice(8), handle: 'bob', githubUsername: 'bob', roles: ['CONTRIBUTOR'] },
+    });
+    const otherCookie = `hadron_token=${await signJwt({ sub: other.id, roles: ['CONTRIBUTOR'] })}`;
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect((await approve()).status).toBe(302);
+    expect((await approve('approve', otherCookie)).status).toBe(302);
+    const users = mintLines(spy).map((call) => (call[1] as Record<string, unknown>).user);
+    expect(users).toEqual([testUser.id.slice(-8), other.id.slice(-8)]);
+    expect(users[0]).not.toBe(users[1]);
   });
 
   it('logs nothing when consent is denied (no code minted)', async () => {
