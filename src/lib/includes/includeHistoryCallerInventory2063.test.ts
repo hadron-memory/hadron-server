@@ -17,12 +17,12 @@ it('requires explicit classification when a snapshot/reconcile/history-delete AP
         if (entry.name !== 'generated' && name !== 'src/test') walk(file);
       } else if (name.endsWith('.ts') && !name.endsWith('.test.ts')) {
         const text = readFileSync(file, 'utf8');
-        if (!/createNodeRevision|ensureCurrentNodeRevisionInTransaction|reconcileNodeWithIncludeHistory|withReconciledNodeRead|nodeRevision/.test(text)) continue;
+        if (!/createNodeRevision|ensureCurrentNodeRevisionInTransaction|reconcileNodeWithIncludeHistory|withReconciledNodeRead|nodeRevision|reconcileStampedSourceNodes|cloneMemoryGraphInTx/.test(text)) continue;
         const tree = ts.createSourceFile(name, text, ts.ScriptTarget.Latest, true);
         function visit(node: ts.Node) {
           if (ts.isCallExpression(node)) {
             const callee = node.expression.getText(tree);
-            if (['createNodeRevision', 'ensureCurrentNodeRevisionInTransaction', 'reconcileNodeWithIncludeHistory', 'withReconciledNodeRead'].includes(callee)
+            if (['createNodeRevision', 'ensureCurrentNodeRevisionInTransaction', 'reconcileNodeWithIncludeHistory', 'withReconciledNodeRead', 'reconcileStampedSourceNodes', 'cloneMemoryGraphInTx'].includes(callee)
               || /\.nodeRevision\.(delete|deleteMany)$/.test(callee)) {
               const key = `${name} :: ${callee}`;
               counts[key] = (counts[key] ?? 0) + 1;
