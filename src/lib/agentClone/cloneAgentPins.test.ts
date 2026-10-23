@@ -61,6 +61,15 @@ describe('cloneAgent lock order', () => {
       'await tx.agentCloneAudit.create(',
     ]);
   });
+  it('reads the endpoint hashes and the membership ids in ONE statement, so they share a snapshot', () => {
+    const fn = text.slice(text.indexOf('async function fingerprint'), text.indexOf('/** The first blocker'));
+    expect(fn.split('tx.$queryRaw').length - 1).toBe(1);
+    for (const col of ['AS nodes', 'AS edges', 'AS pending', 'AS node_ids', 'AS edge_ids', 'AS pending_ids', 'AS link_ids', 'AS import_keys']) expect(fn, col).toContain(col);
+  });
+  it('checks the consumed membership against the final fingerprint, after comparing its hashes', () => {
+    const body = text.slice(text.indexOf('async function writeClone'));
+    inOrder(body, ['const read3 = await fingerprint(tx, plan)', 'JSON.stringify(read1) !== JSON.stringify(read3)', "heldNow('node_ids')", "heldNow('import_keys')", 'throw new CloneRetry()']);
+  });
   it('re-classifies after a subscribe and requires LICENSED', () => {
     const body = text.slice(text.indexOf('async function licenseFor'));
     inOrder(body, ['classifyOrgAgentLicense(tx, orgId, agentId)', 'subscribeOrgToPublicAgentInTx(', "classifyOrgAgentLicense(tx, orgId, agentId)) !== 'LICENSED'"]);
