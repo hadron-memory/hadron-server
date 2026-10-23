@@ -158,6 +158,9 @@ describe('#2193 — Node.memory agrees with Query.memory for every principal and
       if (!app.errors) nodes.push(...app.data.appNodes);
       const cont = await post(bearer, CONTINUITY, { w: workerId, a: appId });
       const handoff = cont.data?.worker?.continuity?.handoff;
+      // Stated up front, before pooling: the handoff stays visible to the admin, the App member
+      // and the impersonated admin, so a lost continuity response cannot pass as "no nodes".
+      if (['admin', 'member', 'impersonated admin'].includes(who)) expect(handoff, `${who}: handoff admitted`).toMatchObject({ id: node.handoff });
       if (handoff) nodes.push(handoff);
       for (const id of Object.values(node)) {
         const one = await post(bearer, 'query($r: ID!) { node(ref: $r) { id memoryId memory { id } } }', { r: id });
