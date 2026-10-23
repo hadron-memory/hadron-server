@@ -13557,6 +13557,31 @@ export const typeDefs = `#graphql
     pausedUntil: DateTime
     "The worker's top open assignment you can read, for display only. STARTED before PENDING, then oldest assignment (null last), creation time and id. Null when none is readable; ending a session does not clear an assignment."
     currentTask: TeamRosterTaskSummary
+    """
+    #2223 — the person holding this worker's name (hrn:node:hadronmemory.com:specs:cor:agt:020:09), or null:
+    nobody holds it, the holder is deleted, or the reader fails the worker working-state gate (the same gate
+    as Worker.heldByUserId, which is narrower than the roster's audience).
+    """
+    heldBy: WorkerHolder
+    "When the current hold was taken. Null exactly when heldBy is; masked the same way."
+    heldAt: DateTime
+  }
+
+  """
+  #2223 — a sanitized identity for the person holding a worker's name. A closed projection, never User:
+  User's default-resolved tail (policy, identityProvider, externalId, githubId, roles, maxReferrals) must
+  not come along (hrn:node:hadronmemory.com:specs:cor:acl:110:01). The same four fields as ReleasedFromUser.
+  """
+  type WorkerHolder {
+    id: ID!
+    handle: String
+    "Canonical hrn:user:<handle> URN (hrn:node:hadronmemory.com:specs:cor:urn:010:01). Null for a handle-less user."
+    urn: String
+    """
+    Behind the #384 gate, as User.name: the holder, a platform admin, or a co-member of one of their orgs.
+    Null both when withheld and when unset, so a masked name cannot be told from an unnamed user.
+    """
+    name: String
   }
 
   "#1707 — the team roster of one App."

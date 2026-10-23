@@ -2377,6 +2377,13 @@ export const workerFieldResolvers = {
     name: async (u: { id: string; name?: string | null }, _args: unknown, ctx: Context) =>
       (await canSeeUserPersonalFields(ctx, u.id)) ? (u.name ?? null) : null,
   },
+  /**
+   * #2223 — `heldBy` on the roster. The producer (the roster leaf) has already put `name` through the shared
+   * #384 gate in bulk, so only the derived URN is resolved here.
+   */
+  WorkerHolder: {
+    urn: (u: { handle?: string | null }) => userUrn(u.handle),
+  },
   Worker: {
     /**
      * Scalar App identity for cross-App worker pages (#1344). Unlike
