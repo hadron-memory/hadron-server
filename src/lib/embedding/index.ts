@@ -213,13 +213,13 @@ function readMaxBatch(): number {
 }
 
 /** #439: read once when the lazy client factory first runs, not at boot.
- * AbortSignal.timeout accepts at most 2^32-1 milliseconds in Node.
+ * Node timers above 2^31-1 overflow to 1ms even though AbortSignal accepts them.
  */
 function readQueryTimeoutMs(): number {
   const raw = process.env.EMBEDDING_QUERY_TIMEOUT_MS;
   const ms = raw === undefined ? 5000 : Number(raw);
-  if (!Number.isSafeInteger(ms) || ms <= 0 || ms > 4_294_967_295) {
-    throw new Error('Invalid EMBEDDING_QUERY_TIMEOUT_MS: must be a positive safe integer no greater than 4294967295 (default 5000).');
+  if (!Number.isSafeInteger(ms) || ms <= 0 || ms > 2_147_483_647) {
+    throw new Error('Invalid EMBEDDING_QUERY_TIMEOUT_MS: must be a positive safe integer no greater than 2147483647 (default 5000).');
   }
   return ms;
 }
