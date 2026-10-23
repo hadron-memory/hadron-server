@@ -4199,7 +4199,7 @@ export const typeDefs = `#graphql
     hasMore: Boolean!
   }
 
-  "#2246 - why an Agent is not ready to be offered; the values are the clone refusal's codes (cor:dmo:050:19)."
+  "#2246 - why an Agent is not ready to be offered; the values are the clone refusal's codes (hrn:node:hadronmemory.com:specs:cor:dmo:050:19)."
   enum AgentOfferReasonCode {
     AGENT_NOT_PUBLIC
     AGENT_RETIRED
@@ -4290,7 +4290,7 @@ export const typeDefs = `#graphql
     """
     #2246 (hrn:node:hadronmemory.com:specs:cor:dmo:050:19) - is this Agent ready to be offered to other
     organisations: could an organisation with no relation to it subscribe to, install and clone it as it
-    stands, and if not, why. Readable only by whoever manages the Agent (cor:dmo:050:13); null for everyone
+    stands, and if not, why. Readable only by whoever manages the Agent (hrn:node:hadronmemory.com:specs:cor:dmo:050:13); null for everyone
     else, readers of a PUBLIC Agent included, and when the Agent is gone. A reason names a memory or Agent only
     if you may read it; otherwise only the count shows. Answers for an outsider, so a non-PUBLIC Agent is not
     ready even though its own manager can still clone it. Read-only; grants nothing.
