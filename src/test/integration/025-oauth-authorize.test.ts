@@ -21,7 +21,7 @@
  *     open-redirect mitigation must re-validate, not trust the form).
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createHash } from 'node:crypto';
@@ -609,6 +609,70 @@ describe('POST /oauth/authorize — decision=approve mints AuthCode', () => {
     const url = new URL(res.headers.get('location')!);
     expect(url.searchParams.has('code')).toBe(true);
     expect(url.searchParams.has('state')).toBe(false);
+  });
+});
+
+// ── #156: one operator log line per minted AuthCode ──────────────────
+
+describe('POST /oauth/authorize — #156 authcode_minted log line', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+  // The grant proof binds the challenge startConsentFlow's default query carries.
+  const CHALLENGE = 'a'.repeat(43);
+  const mintLines = (spy: { mock: { calls: unknown[][] } }) =>
+    spy.mock.calls.filter((call) => call[0] === '[oauth] authcode_minted');
+  async function approve(decision = 'approve') {
+    const { csrfToken, csrfCookieValue, grantProof } = await startConsentFlow();
+    return postAuthorize(
+      {
+        _csrf: csrfToken, decision, client_id: testClientId, redirect_uri: REGISTERED_REDIRECT,
+        code_challenge: CHALLENGE, code_challenge_method: 'S256', resource: RESOURCE_URL, scope: 'mcp',
+        state: 'opaque-state-value', grant_proof: grantProof,
+      },
+      { csrfCookieValue },
+    );
+  }
+
+  it('logs one line with client_id, an 8-char user prefix and ip; never code, hash, challenge, state or redirect', async () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const res = await approve();
+    expect(res.status).toBe(302);
+    const rawCode = new URL(res.headers.get('location')!).searchParams.get('code')!;
+    const lines = mintLines(spy);
+    expect(lines).toHaveLength(1);
+    const [, payload] = lines[0] as [string, Record<string, unknown>];
+    expect(payload).toEqual({ client_id: testClientId, user: testUser.id.slice(0, 8), ip: expect.any(String) });
+    const logged = JSON.stringify(lines);
+    const { codeHash } = await db.authCode.findFirstOrThrow();
+    for (const secret of [rawCode, codeHash, CHALLENGE, 'opaque-state-value', REGISTERED_REDIRECT, testUser.id]) {
+      expect(logged).not.toContain(secret);
+    }
+  });
+
+  it('logs nothing when consent is denied (no code minted)', async () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect((await approve('deny')).status).toBe(302);
+    expect(await db.authCode.count()).toBe(0);
+    expect(mintLines(spy)).toHaveLength(0);
+  });
+
+  it('logs nothing when an ended sign-in is refused (401, no code minted)', async () => {
+    const { createSignIn } = await import('../../auth/signIn.js');
+    const si = await db.$transaction((tx) => createSignIn(tx, { userId: testUser.id, method: 'email', passkeyId: null }));
+    const jwt = await signJwt({ sub: testUser.id, roles: ['CONTRIBUTOR'], sid: si.id });
+    const { csrfToken, csrfCookieValue, grantProof } = await startConsentFlow();
+    await db.signIn.update({ where: { id: si.id }, data: { endedAt: new Date(), endReason: 'passkey-cancelled' } });
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const res = await postAuthorize(
+      {
+        _csrf: csrfToken, decision: 'approve', client_id: testClientId, redirect_uri: REGISTERED_REDIRECT,
+        code_challenge: CHALLENGE, code_challenge_method: 'S256', resource: RESOURCE_URL, scope: 'mcp',
+        state: 'opaque-state-value', grant_proof: grantProof,
+      },
+      { csrfCookieValue, cookie: `hadron_token=${jwt}` },
+    );
+    expect(res.status).toBe(401);
+    expect(await db.authCode.count()).toBe(0);
+    expect(mintLines(spy)).toHaveLength(0);
   });
 });
 
