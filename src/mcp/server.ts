@@ -6047,7 +6047,7 @@ export function createMcpServerInstance(
       const createSeq =
         seq !== undefined
           ? seq
-          : existing == null
+          : existing == null && !loc.includes(':')
             ? await nextSiblingSeq(db, memoryId, loc)
             : null;
 
@@ -6313,8 +6313,13 @@ export function createMcpServerInstance(
           const revivedPendingAt = pre?.deletedAt
             ? pendingAtForRevival(pre.embeddingPendingAt, memoryIsVectorIndexed(indexed!))
             : undefined;
+          // #443: nested siblings already share the held immediate-parent key.
+          // Allocate on this writing transaction only after that wait.
+          const nestedSeq = seq === undefined && existing == null && loc.includes(':')
+            ? await nextSiblingSeq(tx, memoryId, loc) : null;
           const written = await tx.node.upsert({
             ...upsertArgs,
+            create: { ...upsertArgs.create, ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
             // Resurrect (#543) on the authoritative row, not the stale probe: a
             // tombstone that appeared after it would otherwise stay flagged
             // deleted while taking the new content.
