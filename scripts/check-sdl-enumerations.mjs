@@ -53,6 +53,8 @@ import { typeDefs } from '../src/api/graphql/schema/typeDefs.js';
 import { CONNECTION_GRANT_SCOPES } from '../src/lib/emailOperationScopes.js';
 import { EMAIL_PROVIDER_KEYS } from '../src/lib/emailClient.js';
 import { GOVERNED_ROLES } from '../src/lib/governedRole.js';
+import { SKILL_HOSTS } from '../src/lib/skilldoc/hosts.js';
+import { MemoryMemberRole } from '../src/generated/prisma/index.js';
 import { WORK_KINDS } from '../src/lib/workRef.js';
 import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions/operators.js';
 
@@ -84,6 +86,21 @@ import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions
  * which costs more than the drift it would have caught.
  */
 const WATCHED_SETS = [
+  {
+    // #2303: names come from the live host registry; one surviving host is
+    // still a promised supported-host list, not an incidental mention.
+    name: 'SKILL_HOSTS', source: 'src/lib/skilldoc/hosts.ts',
+    members: SKILL_HOSTS.map(host => host.key),
+    coordinates: ['SkillPlanInput.host'],
+    enumerationPattern: /supported hosts:\s*([^.;]+)/i,
+  },
+  {
+    name: 'MemoryMemberRole', source: 'prisma/schema.prisma',
+    members: Object.values(MemoryMemberRole), coordinates: ['MemoryMemberRole'],
+    // Owner references in the later protection rule cannot mask a missing
+    // owner entry in the promised role list.
+    enumerationPattern: /([\s\S]*?)(?:Subject to|$)/i,
+  },
   {
     // #2302: ordinary words are admissible only at explicitly enumerating
     // coordinates. Never scan unrelated prose for review/spec/issue/branch.
