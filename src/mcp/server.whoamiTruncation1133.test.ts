@@ -173,8 +173,8 @@ describe('#1598 — caller-scoped whoami filters', () => {
     const wb = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: b.id, agentId: agent.id, name: 'Anne', slug: 'anne' } });
     const many = await makeSessions(user.id, 12);
     await db.session.updateMany({ where: { id: { in: many.map(s => s.id) } }, data: { appId: a.id, workerId: wa.id } });
-    const old = await db.session.create({ data: { userId: user.id, appId: b.id, workerId: wb.id, startedAt: new Date(Date.now() - 60 * 60_000) } });
-    await db.session.create({ data: { userId: outsider.id, appId: foreign.id } });
+    const old = await db.session.create({ data: { id: generateId(), userId: user.id, appId: b.id, workerId: wb.id, startedAt: new Date(Date.now() - 60 * 60_000) } });
+    await db.session.create({ data: { id: generateId(), userId: outsider.id, appId: foreign.id } });
     return { a, b, foreign, wa, wb, many, old };
   }
 
@@ -202,7 +202,7 @@ describe('#1598 — caller-scoped whoami filters', () => {
       expect(out).toContain(old.id);
     }
     const ambiguous = await server.callTool('hadron_whoami', { workerRef: 'anne' });
-    expect(ambiguous.isError).toBe(true);
+    expect(ambiguous).toMatchObject({ isError: true });
     expect(JSON.stringify(ambiguous)).toContain('ambiguous_ref');
     const selected = await server.callToolText('hadron_whoami', { app: b.id, workerRef: 'Anne' });
     expect(selected).toContain(old.id);
@@ -221,7 +221,7 @@ describe('#1598 — caller-scoped whoami filters', () => {
     expect(hidden).toContain('No matching session');
     const hybrid = await createTestableMcpServer({ ...auth(), appId: foreign.id }).callToolText('hadron_whoami', { app: b.id });
     expect(hybrid).toContain(old.id);
-    const impersonated = await createTestableMcpServer({ ...auth(), impersonation: { adminUserId: outsider.id, orgId: 'support' } } as AuthContext)
+    const impersonated = await createTestableMcpServer({ ...auth(), impersonation: { sessionId: 'support', actorUserId: outsider.id, orgId: 'support', expiresAt: new Date(Date.now() + 60_000) } })
       .callToolText('hadron_whoami', { app: b.id });
     expect(impersonated).toContain('Not available in an impersonation');
     expect(impersonated).not.toContain(old.id);
@@ -233,14 +233,59 @@ describe('#1598 — caller-scoped whoami filters', () => {
     const server = createTestableMcpServer(auth());
     expect(await server.callToolText('hadron_whoami', { app: b.id })).toContain('No matching session');
     expect(await server.callToolText('hadron_whoami', { app: b.id, includeEnded: true })).toContain(old.id);
-    const own = await db.session.create({ data: { appId: b.id } });
-    const privateMemory = await db.memory.create({ data: { userId: user.id, class: 'private', name: 'Private', urn: 'whoami-filters.example:private' } });
-    const hidden = await db.session.create({ data: { appId: b.id, memoryId: privateMemory.id } });
+    const own = await db.session.create({ data: { id: generateId(), appId: b.id } });
+    const privateMemory = await db.memory.create({ data: { organizationId: b.organizationId, userId: user.id, class: 'private', name: 'Private', urn: 'whoami-filters.example:private' } });
+    const hidden = await db.session.create({ data: { id: generateId(), appId: b.id, memoryId: privateMemory.id } });
     const appAuth: AuthContext = { appId: b.id, roles: [], clientId: 'app:whoami-filter' };
     const appOnly = await createTestableMcpServer(appAuth).callToolText('hadron_whoami', { app: b.id, limit: 1 });
     expect(appOnly).toContain('1 session(s):');
     expect(appOnly).toContain(own.id);
     expect(appOnly).not.toContain(hidden.id);
     expect(appOnly).not.toContain(old.id);
+    const { WORKER_SIGNATURE_DEFAULTS } = await import('../lib/workerSignature.js');
+    const template = await db.worker.findFirstOrThrow({ where: { appId: b.id } });
+    const visibleWorker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: b.id, agentId: template.agentId, name: 'Visible', slug: 'needle' } });
+    const hiddenWorker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: b.id, agentId: template.agentId, name: 'Needle', slug: 'hidden' } });
+    await db.session.update({ where: { id: own.id }, data: { workerId: visibleWorker.id } });
+    await db.session.update({ where: { id: hidden.id }, data: { workerId: hiddenWorker.id } });
+    // An inaccessible name claimant must not turn the visible slug into ambiguity.
+    const resolved = await createTestableMcpServer(appAuth).callToolText('hadron_whoami', { workerRef: 'needle' });
+    expect(resolved).toContain(own.id);
+    expect(resolved).not.toContain('ambiguous_ref');
+    const hiddenResult = await createTestableMcpServer(appAuth).callToolText('hadron_whoami', { workerRef: hiddenWorker.id });
+    expect(hiddenResult).toBe(await createTestableMcpServer(appAuth).callToolText('hadron_whoami', { workerRef: generateId() }));
+    const bound = await createTestableMcpServer({ ...appAuth, sessionId: hidden.id }).callToolText('hadron_whoami', { workerRef: hiddenWorker.id });
+    expect(bound).toContain(hidden.id);
+    expect(bound).not.toContain(own.id);
+  });
+});
+
+// Additional controls for the complete-set resolver and canonical alias paths.
+describe('#1598 — filters do not resolve from a capped page', () => {
+  it('finds an older App and worker beyond fifty newer authorized sessions', async () => {
+    const org = await db.organization.create({ data: { name: 'Complete', urn: 'whoami-complete.example' } });
+    const a = await db.app.create({ data: { organizationId: org.id, name: 'A', urn: 'whoami-complete.example:a' } });
+    const b = await db.app.create({ data: { organizationId: org.id, name: 'B', urn: 'whoami-complete.example:b' } });
+    const agent = await db.agent.create({ data: { organizationId: org.id, name: 'Worker', urn: 'whoami-complete.example:agent' } });
+    const { WORKER_SIGNATURE_DEFAULTS } = await import('../lib/workerSignature.js');
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: b.id, agentId: agent.id, name: 'Older worker', slug: 'older-worker' } });
+    const recent = await makeSessions(user.id, 55);
+    await db.session.updateMany({ where: { id: { in: recent.map(s => s.id) } }, data: { appId: a.id } });
+    const old = await db.session.create({ data: { id: generateId(), userId: user.id, appId: b.id, workerId: worker.id, startedAt: new Date(Date.now() - 120 * 60_000) } });
+    const server = createTestableMcpServer(auth());
+    for (const filter of [{ app: b.id }, { workerRef: worker.id }, { workerRef: 'older-worker' }]) {
+      const out = await server.callToolText('hadron_whoami', { ...filter, limit: 50 });
+      expect(out).toContain(old.id);
+      expect(out).toContain('1 session(s):');
+      expect(out).not.toContain('TRUNCATED');
+    }
+    const foreign = await db.app.create({ data: { organizationId: org.id, name: 'Foreign', urn: 'whoami-complete.example:foreign' } });
+    await db.urnAlias.create({ data: { reason: 'RENAME', entityType: 'APP', entityId: foreign.id, urn: 'whoami-complete.example:old' } });
+    await db.urnAlias.create({ data: { reason: 'RENAME', entityType: 'APP', entityId: b.id, urn: 'whoami-complete.example:old' } });
+    for (const filter of [{ app: 'hrn:app:whoami-complete.example:old' }, { workerRef: 'hrn:worker:whoami-complete.example:old:older-worker' }]) {
+      expect(await server.callToolText('hadron_whoami', filter)).toContain(old.id);
+    }
+    await db.urnAlias.create({ data: { reason: 'RENAME', entityType: 'APP', entityId: a.id, urn: 'whoami-complete.example:old' } });
+    expect(await server.callTool('hadron_whoami', { app: 'hrn:app:whoami-complete.example:old' })).toMatchObject({ isError: true });
   });
 });
