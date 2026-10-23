@@ -312,3 +312,20 @@ and migration inspection, not yet a live cascade diagnostic. New-Agent
 precommit non-includability still requires Vera's cross-transaction read,
 include and URN-resolution pin; it does not by itself qualify deletion of the
 old Agent's entitlement graph before the provisioning transaction.
+
+Evidence-only Agent diagnostics now pin the fresh allocation case: while the
+actual createAgent provisioning transaction is held before commit, another
+client's Memory query and Agent/Memory/Node resolveUrn return null; an actual
+compile including a fixture Node in that new memory waits on the advisory fence
+and only returns its text after commit. The fixture payload is inserted inside
+the same provisioning transaction, not claimed as production-created content.
+This does not cover promotion of an already-existing supplied Memory.
+
+A separate diagnostic runs the actual createAgent raw tombstone Agent delete
+and deliberately stops immediately afterward, before provisioning. The old
+Agent and AgentOrgGrant are gone; its system Memory, source Node and retained
+NodeRevision survive. Thus the old entitlement mutation commits independently
+of subsequent provisioning. This is not a claim that new-Agent invisibility
+qualifies old entitlement deletion. Five diagnostics (including the earlier
+comment witness and two source-admission cases) pass together; these are
+non-acceptance evidence, not five new qualified writer surfaces.
