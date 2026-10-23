@@ -1484,10 +1484,10 @@ export const typeDefs = `#graphql
     """
     inheritedFrom: InheritedFrom
     """
-    #1450 — true for a RESERVED spec citation that has no spec written yet (a
-    placeholder in a draft corpus, created by reserveSpecCitation). Set only by
-    the server, never inferred from an empty body; writing real content through
-    updateSpecNode clears it. Minting refuses while any remain.
+    #1450 — a server-recorded placeholder awaiting authored content, such as a
+    RESERVED spec citation created by reserveSpecCitation. A placeholder may
+    exist in any memory; it is never inferred from an empty body. Writing real
+    content through updateSpecNode clears it. Placeholders block minting.
     """
     isPlaceholder: Boolean!
     isLink: Boolean!
@@ -2738,7 +2738,7 @@ export const typeDefs = `#graphql
     Empty for legacy rows.
     """
     changes: [String!]!
-    "Reserved (#620): User id that approved this revision. No write surface yet."
+    "User id recorded by per-node approval for this revision; null when no user approval was recorded."
     approvedBy: String
     "approvedBy resolved to public identifiers (handle + URN), like editedByUser."
     approvedByUser: NodeRevisionEditor
@@ -6292,10 +6292,11 @@ export const typeDefs = `#graphql
   enum SpecTextField { content abstract }
 
   """
-  Replace text in explicit nodes of one DRAFT spec corpus. A dry run returns
-  plan; apply must present that exact plan and refuses if any selected row,
-  protection, match, or corpus state changed. Minted corpora are never edited
-  through this door. Generic replacement keeps its governed-node protections.
+  Replace text in explicit unminted spec nodes of one memory. A dry run returns
+  a plan; apply must present that exact plan and refuses if any selected row,
+  protection, match, or mint state changed. A minted target node is refused,
+  even when other nodes in the memory are unminted. Generic replacement keeps
+  its governed-node protections.
   """
   input SpecSearchReplaceInput {
     memoryRef: ID!
@@ -7166,7 +7167,7 @@ export const typeDefs = `#graphql
   type SpecCorpusMintReport {
     memoryId: ID!
     dryRun: Boolean!
-    "True when this call minted the corpus."
+    "True when this call stamped nodes in its mint scope; false for a dry run or an empty scope."
     minted: Boolean!
     blockers: [SpecMintFinding!]!
     staleAbstracts: [SpecMintFinding!]!
