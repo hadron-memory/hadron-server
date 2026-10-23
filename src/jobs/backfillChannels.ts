@@ -13,11 +13,11 @@
  *
  * Roots in SOFT-DELETED memories are swept too (a restored memory must come
  * back protected), and tombstoned roots get TOMBSTONED rows: the address
- * stays reserved and a restore brings the row back with it. Apps that never
- * posted get their default Channel created (eager D-006) in their team-space
- * memory — resolved by the canonical team-space resolver, then the Team
- * Agent locator when several qualify; an App that stays ambiguous is
- * reported, not guessed.
+ * stays reserved to it, and a Channel created there adopts it and starts
+ * clean (#1257, #1226). Apps that never posted get their default Channel
+ * created (eager D-006) in their team-space memory — resolved by the
+ * canonical team-space resolver, then the Team Agent locator when several
+ * qualify; an App that stays ambiguous is reported, not guessed.
  *
  * Encrypted roots: `messageCount` sits inside the encrypted `data` blob and
  * no session key is available to a job, so the watermark is MAX(seq) alone
