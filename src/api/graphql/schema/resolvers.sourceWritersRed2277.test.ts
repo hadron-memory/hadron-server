@@ -71,6 +71,20 @@ describe('#2277 Channel-root writer in a SOURCE memory (task 01a166f9...)', () =
   });
 });
 
+describe('#2277 Channel message producers in a SOURCE memory (Xylon #31534, Vera #31542: any Node write in a source memory)', () => {
+  it('createChannelMessage (appendChatMessage: message Node + root data) queues behind a held F', async () => {
+    const { memory } = await sourceFixture('system');
+    const ch = await M.createChannel(null, { input: { memoryRef: memory.id, loc: 'chats:msg', name: 'Msg chat' } }, as());
+    expect(await queuedOnFence(() => M.createChannelMessage(null, { channelRef: ch.id, body: 'hello' }, as()))).toBe(true);
+  });
+
+  it('scope control: createChannelMessage in a knowledge memory does not queue', async () => {
+    const { memory } = await sourceFixture('knowledge');
+    const ch = await M.createChannel(null, { input: { memoryRef: memory.id, loc: 'chats:kmsg', name: 'K msg chat' } }, as());
+    expect(await queuedOnFence(() => M.createChannelMessage(null, { channelRef: ch.id, body: 'hello' }, as()))).toBe(false);
+  });
+});
+
 describe('#2277 revisions:* creation writer (task 01a166f96535723293fe86497d6f72f9)', () => {
   it('createRevision (inserts revisions:rev-N in the Agent system memory) queues behind a held F', async () => {
     const { agent } = await sourceFixture('system');
