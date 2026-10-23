@@ -134,7 +134,7 @@ it('snapshot helpers reject a pooled client, raw/manual-lock transaction, and es
   expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
 });
 
-type QualificationSurface = 'specReplace' | 'mergeMemories' | 'extractCopy' | 'extractMove' | 'cloneMemory' | 'updateNode' | 'updateNodeProperties' | 'moveNode' | 'cloneNode' | 'mergeNodes' | 'deleteNode' | 'searchReplaceInNodes' | 'restoreNodeRevision' | 'updateTeamRole' | 'deleteTeamRole' | 'encryptMemory' | 'cleanupAnonymousMemories' | 'deleteMemory' | 'approveNode' | 'approveMemoryNodes' | 'requestNodeSignature' | 'withdrawSigningRequest' | 'deleteNodeRevision' | 'clearNodeHistory' | 'cancelFirstPasskey' | 'endWindowEarly' | 'finishRevoke';
+type QualificationSurface = 'reserveSpecCitation' | 'specReplace' | 'mergeMemories' | 'extractCopy' | 'extractMove' | 'cloneMemory' | 'updateNode' | 'updateNodeProperties' | 'moveNode' | 'cloneNode' | 'mergeNodes' | 'deleteNode' | 'searchReplaceInNodes' | 'restoreNodeRevision' | 'updateTeamRole' | 'deleteTeamRole' | 'encryptMemory' | 'cleanupAnonymousMemories' | 'deleteMemory' | 'approveNode' | 'approveMemoryNodes' | 'requestNodeSignature' | 'withdrawSigningRequest' | 'deleteNodeRevision' | 'clearNodeHistory' | 'cancelFirstPasskey' | 'endWindowEarly' | 'finishRevoke';
 async function qualificationAct(surface: QualificationSurface): Promise<{
   run: (database: typeof db) => Promise<unknown>;
   check: (value: unknown) => void;
@@ -185,6 +185,10 @@ async function qualificationAct(surface: QualificationSurface): Promise<{
     };
   }
   const node = await db.node.create({ data: { memoryId, loc: 'inverse', name: 'Inverse', content: '# Inverse' } });
+  if (surface === 'reserveSpecCitation') {
+    await db.memory.update({ where: { id: memoryId }, data: { corpusDraft: true } });
+    return { run: (database) => resolvers.Mutation.reserveSpecCitation(null, { memoryRef: memoryId, loc: 'pas:010:01' }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ isPlaceholder: true }) };
+  }
   if (surface === 'specReplace') {
     await db.memory.update({ where: { id: memoryId }, data: { corpusDraft: true } });
     await db.node.update({ where: { id: node.id }, data: { role: 'spec', revisionContentHash: revisionStateHashRefreshMarker() } });
@@ -232,7 +236,7 @@ async function qualificationAct(surface: QualificationSurface): Promise<{
     : { run: (database) => resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, { ...ctx(), db: database }), check: (value) => expect(value).toBe(1) };
 }
 
-it.each<QualificationSurface>(['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories', 'encryptMemory', 'updateTeamRole', 'deleteTeamRole', 'restoreNodeRevision', 'updateNode', 'updateNodeProperties', 'moveNode', 'cloneNode', 'mergeNodes', 'deleteNode', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'mergeMemories', 'specReplace'])(
+it.each<QualificationSurface>(['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories', 'encryptMemory', 'updateTeamRole', 'deleteTeamRole', 'restoreNodeRevision', 'updateNode', 'updateNodeProperties', 'moveNode', 'cloneNode', 'mergeNodes', 'deleteNode', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'mergeMemories', 'specReplace', 'reserveSpecCitation'])(
   '%s holds the fence through its actual deciding write and commit (inverse order)', async (surface) => {
     const act = await qualificationAct(surface);
     let entered!: () => void;
@@ -274,9 +278,10 @@ it.each<QualificationSurface>(['approveNode', 'approveMemoryNodes', 'requestNode
   },
 );
 
-it.each(['updateNode', 'deleteNode', 'approveNode', 'clearNodeHistory', 'encryptMemory', 'restoreNodeRevision', 'cloneNode', 'mergeNodes', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove'] as const)(
+it.each(['updateNode', 'deleteNode', 'approveNode', 'clearNodeHistory', 'encryptMemory', 'restoreNodeRevision', 'cloneNode', 'mergeNodes', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'reserveSpecCitation'] as const)(
   '%s refuses a credential revoked while waiting on the history fence without changing source or history', async (surface) => {
     const node = await db.node.create({ data: { memoryId, loc: 'revoked-writer', name: 'Original', content: '# Original' } });
+    if (surface === 'reserveSpecCitation') await db.memory.update({ where: { id: memoryId }, data: { corpusDraft: true } });
     if (surface === 'encryptMemory') await db.memory.update({ where: { id: memoryId }, data: { class: 'private', userId } });
     const key = await db.userApiKey.create({ data: { userId, keyHash: `qualification-${surface}`, keyPreview: 'test', oauthScopes: [] } });
     const snapshot = surface === 'restoreNodeRevision' ? await db.nodeRevision.create({ data: { nodeId: node.id, memoryId, loc: node.loc, name: 'History', content: '# History', revNo: 0 } }) : null;
@@ -294,6 +299,7 @@ it.each(['updateNode', 'deleteNode', 'approveNode', 'clearNodeHistory', 'encrypt
         : surface === 'approveNode' ? resolvers.Mutation.approveNode(null, { nodeRef: node.id }, context)
           : surface === 'clearNodeHistory' ? resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, context)
             : surface === 'restoreNodeRevision' ? resolvers.Mutation.restoreNodeRevision(null, { revisionId: snapshot!.id }, context)
+              : surface === 'reserveSpecCitation' ? resolvers.Mutation.reserveSpecCitation(null, { memoryRef: memoryId, loc: 'pas:revoked' }, context)
               : surface === 'cloneMemory' ? resolvers.Mutation.cloneMemory(null, { ref: memoryId, targetUrn: 'qualification-fence.example::revoked-memory' }, context)
                 : surface === 'extractCopy' || surface === 'extractMove' ? resolvers.Mutation.extractParentNodeToMemory(null, { parentRef: node.id, targetUrn: 'qualification-fence.example::revoked-extract', move: surface === 'extractMove' }, context)
                   : surface === 'cloneNode' ? resolvers.Mutation.cloneNode(null, { sourceRef: node.id, targetUrn: 'hrn:node:qualification-fence.example:mem:revoked-clone' }, context)
@@ -314,6 +320,7 @@ it.each(['updateNode', 'deleteNode', 'approveNode', 'clearNodeHistory', 'encrypt
     if (surface === 'encryptMemory') expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).isEncrypted).toBe(false);
     if (mergeTarget) expect((await db.node.findUniqueOrThrow({ where: { id: mergeTarget.id } })).content).toBe('# Target');
     if (surface === 'cloneNode') expect(await db.node.findFirst({ where: { memoryId, loc: 'revoked-clone' } })).toBeNull();
+    if (surface === 'reserveSpecCitation') expect(await db.node.findFirst({ where: { memoryId, loc: 'pas:revoked' } })).toBeNull();
     if (surface === 'cloneMemory') expect(await db.memory.findUnique({ where: { urn: 'qualification-fence.example:revoked-memory' } })).toBeNull();
     if (surface === 'extractCopy' || surface === 'extractMove') expect(await db.memory.findUnique({ where: { urn: 'qualification-fence.example:revoked-extract' } })).toBeNull();
   },
@@ -346,7 +353,7 @@ it('anonymous cleanup waits before taking any cascading memory/node lock', async
 });
 
 
-it.each<QualificationSurface>(['updateNode', 'updateNodeProperties', 'moveNode', 'cloneNode', 'mergeNodes', 'deleteNode', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'mergeMemories', 'specReplace'])(
+it.each<QualificationSurface>(['updateNode', 'updateNodeProperties', 'moveNode', 'cloneNode', 'mergeNodes', 'deleteNode', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'mergeMemories', 'specReplace', 'reserveSpecCitation'])(
   '%s waits on the history fence before its actual snapshot/source row locks', async (surface) => {
     const act = await qualificationAct(surface);
     let entered!: () => void;

@@ -1,6 +1,7 @@
 import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
 import { liveTxContext } from './authorizedTx.js';
+import { lockAgentDefinitionAuthority } from '../../../lib/auth/managedSystemMemory.js';
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { mirrorNodeMoveToGit, type MovedNodeRef } from '../../../integrations/github/mirrorNodeMove.js';
@@ -81,6 +82,9 @@ export const specCorpusMutations = {
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
     const effects: Array<() => void> = [];
     const reserved = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+      await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [memoryId]);
+      const fresh = await liveTxContext(ctx, tx);
+      await concealUnreadableDenial(fresh, memoryId, memoryRef, () => requireMemoryWriteAccess(fresh, memoryId));
       // (@codex P1/P2s, PR #1452) Never REVIVE a deleted node as a placeholder.
       // A revival keeps everything attached to the row (text, payload, edges,
       // vectors, provenance, revision history), and each of those surfaced a
@@ -123,7 +127,7 @@ export const specCorpusMutations = {
           llmModel: null, aiAgent: null, isLink: false, objectType: null,
           edges: [],
         },
-        withoutRequestCaches(ctx, tx),
+        fresh,
         'create',
         {
           ownsKind: 'spec',
@@ -1072,6 +1076,7 @@ async function rewriteWithRetry(
     // then read the settled revSeq and plan from that.
     await withIncludeHistoryTransaction(ctx.db, async (history) => {
       const tx = includeHistoryClient(history);
+      await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [corpus.id]);
       const fresh = await liveTxContext(ctx, tx);
       await concealUnreadableDenial(fresh, corpus.id, corpus.id, () => requireMemoryWriteAccess(fresh, corpus.id));
       return reconcileNodeWithIncludeHistory(history, node!.id, { expectedMemoryId: corpus.id });
