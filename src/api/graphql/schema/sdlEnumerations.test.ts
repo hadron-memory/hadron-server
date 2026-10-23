@@ -232,3 +232,23 @@ describe('#2305 process-credential provider list', () => {
     expect(findPartialEnumerations(at('Only openai and anthropic examples.', 'other'))).toEqual([]);
   });
 });
+
+describe('#2304 commentable-class list', () => {
+  const at = (text: string, field = 'createComment') =>
+    `type Mutation { """${text}""" ${field}: String }`;
+
+  it('catches an omitted commentable class from the live class set', () => {
+    expect(findPartialEnumerations(at('Commentable classes: app, knowledge, personal, group; no private.')))
+      .toMatchObject([{ coord: 'Mutation.createComment', set: 'COMMENTABLE_CLASSES', missing: ['system'] }]);
+  });
+
+  it('does not let classes outside the promised list mask omissions', () => {
+    expect(findPartialEnumerations(at('Commentable classes: app; system, knowledge, personal and group appear elsewhere.')))
+      .toMatchObject([{ set: 'COMMENTABLE_CLASSES', missing: ['knowledge', 'personal', 'group', 'system'] }]);
+  });
+
+  it('accepts the complete list and ignores unrelated ordinary class words', () => {
+    expect(findPartialEnumerations(at('Commentable classes: app, knowledge, personal, group, system; private is refused.'))).toEqual([]);
+    expect(findPartialEnumerations(at('An app has personal and group data.', 'other'))).toEqual([]);
+  });
+});
