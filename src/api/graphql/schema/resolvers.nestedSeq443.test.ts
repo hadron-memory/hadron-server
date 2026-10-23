@@ -67,3 +67,10 @@ for(const surface of ['graphql','mcp']) {
   expect((await db.node.findUniqueOrThrow({where:{loc_memoryId:{memoryId,loc:'parent:next'}}})).seq).toBe(2);
  },15000);
 }
+
+it('reserveSpecCitation reuses its existing transaction and parent locks for nested allocation #443', async () => {
+ const reserved=await (resolvers.Mutation as any).reserveSpecCitation(null,{memoryRef:memoryId,loc:'parent:reserved'},ctx());
+ const id=reserved.id ?? reserved.node?.id;
+ const row=id ? await db.node.findUnique({where:{id}}) : await db.node.findUnique({where:{loc_memoryId:{memoryId,loc:'parent:reserved'}}});
+ expect(row?.seq).toBe(2);
+});
