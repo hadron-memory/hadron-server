@@ -160,18 +160,15 @@ describe('#1005 — the active App is pinned at session start', () => {
     expect(read).not.toContain('No App context');
   });
 
-  it('a bare NAME workerRef still requires App scope (#990 — a name is App-scoped)', async () => {
-    // Deliberately NOT relaxed: a name is unique only within an App, so
-    // resolving one across the caller's Apps could name several workers. The
-    // caller gets the actionable envelope instead of a guess.
+  it('a unique authorized bare NAME binds and pins its App (#1597)', async () => {
     const srv = coldServer();
     const out = await srv.callToolText('hadron_start_session', {
       description: 'by name',
       workerRef: 'Iris',
     });
-    expect(out).toContain('multiple_apps_resolved');
-    expect(out).toContain('hadron_set_active_app');
-    expect(await db.session.count()).toBe(0);
+    expect(out).toContain('Session started:');
+    expect(out).not.toContain('multiple_apps_resolved');
+    expect(await db.session.count({ where: { workerId: worker.id, appId: app.id } })).toBe(1);
   });
 });
 
