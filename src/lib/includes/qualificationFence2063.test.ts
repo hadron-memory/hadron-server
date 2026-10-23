@@ -855,9 +855,8 @@ it.each((['approveNode', 'approveMemoryNodes'] as const).flatMap((surface) => ([
   },
 );
 
-// Diagnostic only: this records an unowned source-writer class, not an
-// acceptance control or authorization to alter comment policy in #2273.
-it('diagnostic: a foreign comment source can change while the compile fence is held', async () => {
+// Combined evidence after Basil #2277: actual foreign source writer and compile.
+it.each(['read', 'write', 'writer-first'] as const)('actual foreign comment edit / compile %s preserves text and provenance', async (phase) => {
   const compile = await compileCounterparty();
   const ownAgent = await db.agent.findUniqueOrThrow({ where: { id: compile.agentId } });
   const ownMemory = await db.memory.findUniqueOrThrow({ where: { id: ownAgent.systemMemoryId! } });
@@ -882,35 +881,32 @@ it('diagnostic: a foreign comment source can change while the compile fence is h
   let release!: () => void;
   const ready = new Promise<void>((resolve) => { entered = resolve; });
   const gate = new Promise<void>((resolve) => { release = resolve; });
-  const holder = compileBootPrompt(ctx(), compile.target, { setPointer: false, seams: { beforeAssemble: async () => { entered(); await gate; } } });
-  const heldOutcome = holder.then((value) => ({ value }), (error: unknown) => ({ error }));
-  await Promise.race([ready, heldOutcome.then((result) => { if ('error' in result) throw result.error; throw new Error('missing comment-source compile barrier'); })]);
-  let resolveFirst!: (sql: string) => void;
-  const firstSql = new Promise<string>((resolve) => { resolveFirst = resolve; });
   const transaction = db.$transaction.bind(db);
-  const observedDb = new Proxy(db, {
+  const heldDb = new Proxy(db, {
     get(client, key, receiver) {
       if (key !== '$transaction') return Reflect.get(client, key, receiver);
-      return (work: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<unknown>, options: unknown) => transaction((tx) => work(new Proxy(tx, {
-        get(inner, method, innerReceiver) {
-          if (method !== '$queryRaw' && method !== '$executeRaw') return Reflect.get(inner, method, innerReceiver);
-          return (strings: TemplateStringsArray, ...values: unknown[]) => {
-            resolveFirst(strings.join('?'));
-            return (inner[method] as (...args: unknown[]) => unknown).call(inner, strings, ...values);
-          };
-        },
-      })), options as never);
+      return (work: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<unknown>, options: unknown) => transaction(async (tx) => {
+        const value = await work(tx); entered(); await gate; return value;
+      }, options as never);
     },
   });
-  const editing = resolvers.Mutation.editComment(null, { commentRef: comment.id, body: 'Comment after', expectedRevision: 1 }, { ...authorCtx, db: observedDb });
-  const editOutcome = editing.then((value: unknown) => ({ value }), (error: unknown) => ({ error }));
-  try {
-    expect(await firstSql).not.toContain('pg_advisory_xact_lock(2063, 1772)');
-    expect(await editOutcome).toHaveProperty('value');
-    expect((await db.node.findUniqueOrThrow({ where: { id: comment.id } })).content).toBe('Comment after');
-  } finally { release(); await heldOutcome; await editOutcome; }
-  const output = await holder;
-  expect((await db.node.findUniqueOrThrow({ where: { id: output.nodeId } })).content).toBe('Comment after');
+  const edit = (database: typeof db) => resolvers.Mutation.editComment(null, { commentRef: comment.id, body: 'Comment after', expectedRevision: 1 }, { ...authorCtx, db: database });
+  const first: Promise<unknown> = phase === 'writer-first' ? edit(heldDb) : compileBootPrompt({ ...ctx(), db: phase === 'write' ? heldDb : db }, compile.target,
+    { setPointer: false, ...(phase === 'read' ? { seams: { beforeAssemble: async () => { entered(); await gate; } } } : {}) });
+  const firstOutcome = first.then((value) => ({ value }), (error: unknown) => ({ error }));
+  await Promise.race([ready, firstOutcome.then((result) => { if ('error' in result) throw result.error; throw new Error('missing actual comment/compile phase barrier'); })]);
+  const second: Promise<unknown> = phase === 'writer-first' ? compileBootPrompt(ctx(), compile.target, { setPointer: false }) : edit(db);
+  const secondOutcome = second.then((value) => ({ value }), (error: unknown) => ({ error }));
+  try { await waitForLockWaitersOfType(db, 'advisory', 1, 1000); }
+  finally { release(); await firstOutcome; await secondOutcome; }
+  expect(await firstOutcome).toHaveProperty('value');
+  expect(await secondOutcome).toHaveProperty('value');
+  const receipt = await db.compiledPromptRevision.findFirstOrThrow({ where: { compiledNodeId: initial.nodeId }, orderBy: { compiledRevNo: 'desc' } });
+  const output = await db.node.findUniqueOrThrow({ where: { id: receipt.compiledNodeId } });
+  const text = output.content!;
+  expect(text).toBe(phase === 'writer-first' ? 'Comment after' : 'Comment before');
+  expect(receipt.provenance).toMatchObject({ occurrences: [{}, { nodeId: comment.id, revNo: text === 'Comment before' ? 1 : 2, hash: createHash('sha256').update(text).digest('hex') }] });
+  expect((await db.node.findUniqueOrThrow({ where: { id: comment.id } })).content).toBe('Comment after');
   expect(await db.nodeRevision.count({ where: { nodeId: comment.id } })).toBe(0);
 });
 
@@ -1013,4 +1009,34 @@ it('diagnostic: createAgent tombstone preamble deletes entitlement but retains s
   expect(await db.memory.findUnique({ where: { id: system.id } })).not.toBeNull();
   expect(await db.node.findUnique({ where: { id: source.id } })).not.toBeNull();
   expect(await db.nodeRevision.count({ where: { nodeId: source.id } })).toBe(1);
+});
+
+it.each(['commentEdit', 'sourceRestore'] as const)('#2277 $surface advances the integrated #2263 epoch before queued account work', async (surface) => {
+  const compile = await compileCounterparty();
+  const agent = await db.agent.findUniqueOrThrow({ where: { id: compile.agentId } });
+  const target = await db.node.create({ data: { memoryId: agent.systemMemoryId!, loc: 'epoch-target', name: 'Epoch target', content: 'Target', ...(surface === 'sourceRestore' ? { deletedAt: new Date() } : {}) } });
+  const comment = surface === 'commentEdit' ? await resolvers.Mutation.createComment(null, { targetRef: target.id, body: 'Before' }, ctx()) : null;
+  let entered!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const blocker = withIncludeHistoryTransaction(db, async () => { entered(); await gate; throw new Error('rollback staging holder'); });
+  const blockedOutcome = blocker.catch(() => undefined);
+  await ready;
+  const writer = surface === 'commentEdit'
+    ? resolvers.Mutation.editComment(null, { commentRef: comment!.id, body: 'After', expectedRevision: 1 }, ctx())
+    : resolvers.Mutation.restoreNode(null, { nodeRef: target.id }, ctx());
+  const writerOutcome = writer.then((value: unknown) => ({ value }), (error: unknown) => ({ error }));
+  let worked = false;
+  let accountOutcome: Promise<unknown> | undefined;
+  try {
+    await waitForLockWaitersOfType(db, 'advisory', 1, 1000);
+    accountOutcome = withAccountFenceTransaction(db, async () => { worked = true; }).then(() => null, (error: unknown) => error);
+    await waitForLockWaitersOfType(db, 'advisory', 2, 1000);
+  } finally { release(); await blockedOutcome; await writerOutcome; await accountOutcome; }
+  expect(await writerOutcome).toHaveProperty('value');
+  expect(isSerializationConflict(await accountOutcome)).toBe(true);
+  expect(worked).toBe(false);
+  if (comment) expect((await db.node.findUniqueOrThrow({ where: { id: comment.id } })).content).toBe('After');
+  else expect((await db.node.findUniqueOrThrow({ where: { id: target.id } })).deletedAt).toBeNull();
 });
