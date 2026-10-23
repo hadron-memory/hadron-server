@@ -13,8 +13,9 @@
  *
  * ## What it checks
  *
- * For each registered set below: any description that spells out **two or more**
- * of its members must spell out **all** of them.
+ * For each registered set below: a description in its scope that spells out
+ * **two or more** members must spell out **all** of them. A curated pattern
+ * promising a closed list is checked even with fewer surviving members.
  *
  * ## Why that rule, and not a stricter one
  *
@@ -53,6 +54,8 @@ import { CONNECTION_GRANT_SCOPES } from '../src/lib/emailOperationScopes.js';
 import { HOST_OPERATION_TYPES } from '../src/lib/hostOperations/types.js';
 import { TASK_WARNING_CODES } from '../src/api/graphql/schema/resolvers.taskWarnings.js';
 import { EMAIL_PROVIDER_KEYS } from '../src/lib/emailClient.js';
+import { GOVERNED_ROLES } from '../src/lib/governedRole.js';
+import { WORK_KINDS } from '../src/lib/workRef.js';
 import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions/operators.js';
 
 /**
@@ -76,7 +79,9 @@ import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions
  * **The admission criterion is therefore DISTINCTIVE members**: values that do
  * not occur as ordinary words in English prose about the schema.
  * `mail.read` / `drive.read` qualify; `memory` / `issue` never can. A set that
- * fails this test is not covered by any mechanism, and that is the honest
+ * fails this test cannot be watched globally. An explicit coordinate allowlist
+ * may watch a description that promises a closed enumeration, without treating
+ * unrelated prose as a list. Without that scoping it is not covered, and that is the honest
  * outcome — a gate with 154 false positives is one everybody learns to ignore,
  * which costs more than the drift it would have caught.
  */
@@ -93,6 +98,21 @@ const WATCHED_SETS = [
     name: 'TASK_WARNING_CODES',
     source: 'src/api/graphql/schema/resolvers.taskWarnings.ts',
     members: TASK_WARNING_CODES,
+  },
+  {
+    // #2302: ordinary words are admissible only at explicitly enumerating
+    // coordinates. Never scan unrelated prose for review/spec/issue/branch.
+    name: 'GOVERNED_ROLES', source: 'src/lib/governedRole.ts', members: GOVERNED_ROLES,
+    coordinates: ['Node.role', 'CreateNodeInput.role'],
+  },
+  {
+    name: 'WORK_KINDS', source: 'src/lib/workRef.ts', members: WORK_KINDS,
+    coordinates: ['Query.teamWorkItems', 'Mutation.recordTeamWork'],
+    // The canonical-ref examples also contain 'repo'; only the promised kind
+    // list supplies membership evidence, not unrelated words in the same block.
+    // These curated lists end at the first period/semicolon; keep abbreviations
+    // with dots outside the list, or revise this capture with the description.
+    enumerationPattern: /kind\s+must\s+be\s+one\s+of\s+([^.;]+)/i,
   },
   {
     name: 'CONNECTION_GRANT_SCOPES',
@@ -280,9 +300,13 @@ export function findPartialEnumerations(sdl, sets = WATCHED_SETS) {
   const violations = [];
   for (const set of sets) {
     for (const { coord, text } of descriptions) {
-      const present = set.members.filter((m) => spellsOut(text, m));
-      // Fewer than two is a mention, not an enumeration — see the docstring.
-      if (present.length < 2) continue;
+      if (set.coordinates && !set.coordinates.includes(coord)) continue;
+      const enumeration = set.enumerationPattern ? set.enumerationPattern.exec(text)?.[1] : text;
+      if (enumeration === undefined) continue;
+      const present = set.members.filter((m) => spellsOut(enumeration, m));
+      // Without a promised-list pattern, fewer than two is a mention, not
+      // an enumeration. A scoped explicit list remains checkable with one.
+      if (present.length < 2 && !set.enumerationPattern) continue;
       const missing = set.members.filter((m) => !present.includes(m));
       if (missing.length > 0) {
         violations.push({ coord, set: set.name, present, missing, text });
