@@ -201,30 +201,39 @@ describe('#2193 — other Node parents: Node.memory still answers as Query.memor
     for (const x of nodes) expect(x.memory?.id ?? null, `${who}: node ${x.id}`).toBe(await oracle(bearer, x.memoryId));
   };
 
+  // Who the fixtures admit. The org owner and admin read every memory of the org;
+  // the others are admitted by the oracle, never assumed.
+  const ADMITTED = ['owner', 'admin'];
+
   it('nodeBatch, for every principal', async () => {
-    let compared = 0;
     for (const [who, bearer] of await allBearers()) {
       const r = await post(bearer, 'query($r: [ID!]) { nodeBatch(refs: $r) { nodes { id memoryId memory { id } } } }', { r: Object.values(node) });
-      const nodes = r.data?.nodeBatch?.nodes ?? [];
+      expect(r.errors, `${who}: nodeBatch`).toBeUndefined();
+      const nodes = r.data.nodeBatch.nodes as Array<{ id: string; memoryId: string; memory: { id: string } | null }>;
+      if (ADMITTED.includes(who)) {
+        expect(nodes.map((x) => x.id).sort(), `${who}: admitted nodes`).toEqual(Object.values(node).sort());
+        for (const x of nodes) expect(x.memory?.id, `${who}: node ${x.id}`).toBe(x.memoryId);
+      }
       await memoryMatchesOracle(who, bearer, nodes);
-      compared += nodes.length;
     }
-    expect(compared).toBeGreaterThan(0);
   });
 
   it('Edge.source and Edge.target, for every principal', async () => {
     // A cross-memory edge, so the two endpoints sit under different record gates.
     await db.edge.create({ data: { memoryId: mem.know!, sourceId: node.know!, targetId: node.handoff!, loc: `edges:e-${n}` } });
-    let compared = 0;
     for (const [who, bearer] of await allBearers()) {
-      const r = await post(bearer, 'query($o: ID) { edges(orgId: $o, limit: 50) { items { source { id memoryId memory { id } } target { id memoryId memory { id } } } } }', { o: org.id });
-      for (const e of r.data?.edges?.items ?? []) {
-        const ends = [e.source, e.target].filter(Boolean);
-        await memoryMatchesOracle(who, bearer, ends);
-        compared += ends.length;
+      const r = await post(bearer, 'query($o: ID) { edges(orgId: $o, limit: 50) { items { loc source { id memoryId memory { id } } target { id memoryId memory { id } } } } }', { o: org.id });
+      expect(r.errors, `${who}: edges`).toBeUndefined();
+      const items = r.data.edges.items as Array<{ loc: string; source: any; target: any }>;
+      const e = items.find((x) => x.loc === `edges:e-${n}`);
+      if (ADMITTED.includes(who)) {
+        // Both endpoints are served, each with its own full Memory record.
+        expect(e, `${who}: the edge`).toBeDefined();
+        expect(e!.source, `${who}: source`).toMatchObject({ id: node.know, memory: { id: mem.know } });
+        expect(e!.target, `${who}: target`).toMatchObject({ id: node.handoff, memory: { id: mem.work } });
       }
+      if (e) await memoryMatchesOracle(who, bearer, [e.source, e.target].filter(Boolean));
     }
-    expect(compared).toBeGreaterThan(0);
   });
 
   it('AppRun.entryNode, for every principal', async () => {
@@ -233,15 +242,15 @@ describe('#2193 — other Node parents: Node.memory still answers as Query.memor
     const run = await db.appRun.create({
       data: { id: generateId(), organizationId: org.id, appId, triggerKind: 'MANUAL', entryNodeUrn: urn, status: 'RUNNING' },
     });
-    let compared = 0;
     for (const [who, bearer] of await allBearers()) {
       const r = await post(bearer, 'query($r: ID!) { appRun(ref: $r) { entryNode { id memoryId memory { id } } } }', { r: run.id });
-      const entry = r.data?.appRun?.entryNode;
-      if (!entry) continue;
-      await memoryMatchesOracle(who, bearer, [entry]);
-      compared++;
+      expect(r.errors, `${who}: appRun`).toBeUndefined();
+      const entry = r.data.appRun?.entryNode;
+      if (ADMITTED.includes(who)) {
+        expect(entry, `${who}: entryNode`).toMatchObject({ id: node.know, memory: { id: mem.know } });
+      }
+      if (entry) await memoryMatchesOracle(who, bearer, [entry]);
     }
-    expect(compared).toBeGreaterThan(0);
   });
 
   it('a soft-deleted memory reads null over the wire where the parent still admits the node', async () => {
