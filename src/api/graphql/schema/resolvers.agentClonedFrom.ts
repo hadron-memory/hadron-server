@@ -20,10 +20,10 @@ export async function resolveClonedFromAgentRef(
 ): Promise<string | null> {
   const ref = parent.clonedFromAgentRef;
   if (!ref) return null;
-  const audit = await ctx.db.agentCloneAudit.findFirst({
-    where: { newAgentId: parent.id }, orderBy: { createdAt: 'asc' }, select: { sourceAgentId: true },
-  });
-  if (!audit) return null;
+  // Missing or ambiguous identity fails closed: exactly one distinct recorded source, or null.
+  const audits = await ctx.db.agentCloneAudit.findMany({ where: { newAgentId: parent.id }, select: { sourceAgentId: true }, take: 2 });
+  if (audits.length === 0 || (audits.length === 2 && audits[0].sourceAgentId !== audits[1].sourceAgentId)) return null;
+  const audit = audits[0];
   const source = await ctx.db.agent.findUnique({
     where: { id: audit.sourceAgentId },
     select: { id: true, urn: true, deletedAt: true, visibility: true, organizationId: true, ownerUserId: true },

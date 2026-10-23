@@ -117,6 +117,14 @@ describe('Agent.clonedFromAgentRef', () => {
     expect(await field(await cloneRow(pub.urn), asUser(adminB))).toBeNull();
   });
 
+  it('two audit rows naming different sources fail closed', async () => {
+    const one = await source('amb1', 'PUBLIC');
+    const two = await source('amb2', 'PUBLIC');
+    const c = await cloneRow(one.urn, one);
+    await db.agentCloneAudit.create({ data: { id: generateId(), sourceAgentId: two.id, newAgentId: c.id, targetOrgId: orgB.id, nodeCount: 0, edgeCount: 0, skippedEdgeCount: 0, importCount: 0, linkCount: 0 } as never });
+    expect(await field(c, asUser(adminB))).toBeNull();
+  });
+
   it('a pure App key reads a PUBLIC source but not an uninstalled private one', async () => {
     const pub = await source('p2', 'PUBLIC');
     const priv = await source('q2', 'ORGANIZATION');
