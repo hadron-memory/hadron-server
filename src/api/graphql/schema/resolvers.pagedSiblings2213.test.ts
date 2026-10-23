@@ -69,7 +69,7 @@ describe('tickersPage', () => {
     for (let i = 0; i < n; i++) {
       rows.push({
         id: generateId(), appId, name: `T${String(i).padStart(3, '0')}`, slug: `t${String(i).padStart(3, '0')}`,
-        cadenceSeconds: 600, createdAt, ...over,
+        cadenceSeconds: 600, ownerUserId: member.id, createdAt, ...over,
       });
     }
     await db.ticker.createMany({ data: rows });
@@ -144,7 +144,7 @@ describe('tickersPage', () => {
     await seedTickers(app.id, 3);
     await seedTickers(otherApp.id, 4);
     await db.ticker.createMany({
-      data: ['D0', 'D1'].map((n) => ({ id: generateId(), appId: app.id, name: n, slug: n.toLowerCase(), cadenceSeconds: 600, deletedAt: new Date() })),
+      data: ['D0', 'D1'].map((n) => ({ id: generateId(), appId: app.id, name: n, slug: n.toLowerCase(), cadenceSeconds: 600, ownerUserId: member.id, deletedAt: new Date() })),
     });
     const p = await Q.tickersPage({}, { appRef: app.id, limit: 100 }, ctx(member.id));
     expect(p.total).toBe(3);
@@ -233,13 +233,13 @@ describe('dashboardWidgetPresetsPage', () => {
 
   it('count and page share the type filter and the owner scope', async () => {
     await seedPresets(user.id, 3, 'USAGE_ACTIVITY', 'A');
-    await seedPresets(user.id, 2, 'RECENT_NODES', 'B');
+    await seedPresets(user.id, 2, 'MEMORY_STATS', 'B');
     await seedPresets(other.id, 4, 'USAGE_ACTIVITY', 'C');
     const all = await Q.dashboardWidgetPresetsPage({}, { limit: 50 }, ctx(user.id));
     expect(all.total).toBe(5);
-    const typed = await Q.dashboardWidgetPresetsPage({}, { type: 'RECENT_NODES', limit: 50 }, ctx(user.id));
+    const typed = await Q.dashboardWidgetPresetsPage({}, { type: 'MEMORY_STATS', limit: 50 }, ctx(user.id));
     expect(typed.total).toBe(2);
-    expect(typed.items.every((p: { userId: string; type: string }) => p.userId === user.id && p.type === 'RECENT_NODES')).toBe(true);
+    expect(typed.items.every((p: { userId: string; type: string }) => p.userId === user.id && p.type === 'MEMORY_STATS')).toBe(true);
   });
 
   it('no user, or an impersonated caller, gets the empty page', async () => {

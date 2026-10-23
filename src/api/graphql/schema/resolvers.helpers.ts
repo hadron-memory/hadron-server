@@ -1997,6 +1997,29 @@ export function clampListTake(limit?: number | null): number {
 }
 
 /**
+ * #2213 — size arguments of the `<field>Page` siblings (cor:api:120:04). An
+ * omitted or null limit pages at 20; 0 is count-only (an empty page with the
+ * real total); a negative limit is 0; a limit over 200 is served as 200, never a
+ * refusal. A negative or omitted offset is 0. Distinct from `clampListTake`, whose
+ * default of 50 the older `<entity>s` lists keep.
+ */
+export const PAGE_ARGS_DEFAULT = 20;
+export const PAGE_ARGS_MAX = 200;
+
+export function pageArgs(args: { limit?: number | null; offset?: number | null }): { take: number; skip: number } {
+  const limit = args.limit ?? PAGE_ARGS_DEFAULT;
+  return {
+    take: Math.min(PAGE_ARGS_MAX, Math.max(0, limit)),
+    skip: Math.max(0, args.offset ?? 0),
+  };
+}
+
+/** `{ items, total, hasMore }`: hasMore is whether rows remain past this page. */
+export function pageEnvelope<T>(items: T[], total: number, skip: number) {
+  return { items, total, hasMore: skip + items.length < total };
+}
+
+/**
  * cor:api:100:01 — resolve the caller's organization scope for a uniform
  * find-many query.
  *
@@ -3365,13 +3388,24 @@ export function deriveChatTitle(
  * return the same rows in the same order.
  */
 export async function listOrgExchangeConnections(ctx: Context, orgId: string) {
+  const scope = await orgExchangeConnectionScope(ctx, orgId);
+  return ctx.db.exchangeConnection.findMany(scope);
+}
+
+/**
+ * The admission and the row scope of `listOrgExchangeConnections`, built once so
+ * the list and `Query.exchangeConnectionsPage` (#2213) can never disagree about
+ * who sees which rows. Refuses before returning a scope, so a count or a page
+ * built from it is never read for a denied caller.
+ */
+export async function orgExchangeConnectionScope(ctx: Context, orgId: string) {
   await requireOrgRole(ctx, orgId, 'ADMIN');
-  return ctx.db.exchangeConnection.findMany({
+  return {
     where: { organizationId: orgId, deletedAt: null },
     // The id tiebreak makes rows created in the same millisecond come back in
     // one order on every read, so the two surfaces agree row for row.
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-  });
+    orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }],
+  };
 }
 
 /**
