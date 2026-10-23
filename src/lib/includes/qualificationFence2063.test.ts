@@ -854,3 +854,62 @@ it.each((['approveNode', 'approveMemoryNodes'] as const).flatMap((surface) => ([
     expect((await db.node.findUniqueOrThrow({ where: { id: part.id } })).approvedRevNo).toBe(2);
   },
 );
+
+// Diagnostic only: this records an unowned source-writer class, not an
+// acceptance control or authorization to alter comment policy in #2273.
+it('diagnostic: a foreign comment source can change while the compile fence is held', async () => {
+  const compile = await compileCounterparty();
+  const ownAgent = await db.agent.findUniqueOrThrow({ where: { id: compile.agentId } });
+  const ownMemory = await db.memory.findUniqueOrThrow({ where: { id: ownAgent.systemMemoryId! } });
+  const foreignOrg = await db.organization.create({ data: { urn: 'comment-source.example', name: 'Foreign source' } });
+  const author = await db.user.create({ data: { handle: 'comment-source-author', roles: ['READER'] } });
+  await db.orgMember.createMany({ data: [
+    { organizationId: foreignOrg.id, userId: author.id, role: 'ADMIN' },
+    { organizationId: foreignOrg.id, userId, role: 'READER' },
+  ] });
+  const memory = await db.memory.create({ data: { class: 'system', organizationId: foreignOrg.id, urn: 'comment-source.example:system', name: 'System' } });
+  const agent = await db.agent.create({ data: { organizationId: foreignOrg.id, systemMemoryId: memory.id, urn: 'comment-source.example:agent', name: 'Foreign', visibility: 'PUBLIC' } });
+  await db.agentOrgGrant.create({ data: { orgId: ownMemory.organizationId!, agentId: agent.id, activatedAt: new Date() } });
+  const target = await db.node.create({ data: { memoryId: memory.id, loc: 'target', name: 'Target', content: 'Target' } });
+  const authorCtx: Context = { db, userId: author.id, roles: ['READER'] };
+  const comment = await resolvers.Mutation.createComment(null, { targetRef: target.id, body: 'Comment before' }, authorCtx);
+  const node = await db.node.findUniqueOrThrow({ where: { id: comment.id } });
+  await db.node.updateMany({ where: { memoryId: ownAgent.systemMemoryId!, loc: 'boot:source' }, data: { content: `{{> hrn:node:${memory.urn}:${node.loc}}}` } });
+  // First establish that this is an actually admitted source.
+  const initial = await compileBootPrompt(ctx(), compile.target, { setPointer: false });
+  expect((await db.node.findUniqueOrThrow({ where: { id: initial.nodeId } })).content).toBe('Comment before');
+  let entered!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const holder = compileBootPrompt(ctx(), compile.target, { setPointer: false, seams: { beforeAssemble: async () => { entered(); await gate; } } });
+  const heldOutcome = holder.then((value) => ({ value }), (error: unknown) => ({ error }));
+  await Promise.race([ready, heldOutcome.then((result) => { if ('error' in result) throw result.error; throw new Error('missing comment-source compile barrier'); })]);
+  let resolveFirst!: (sql: string) => void;
+  const firstSql = new Promise<string>((resolve) => { resolveFirst = resolve; });
+  const transaction = db.$transaction.bind(db);
+  const observedDb = new Proxy(db, {
+    get(client, key, receiver) {
+      if (key !== '$transaction') return Reflect.get(client, key, receiver);
+      return (work: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<unknown>, options: unknown) => transaction((tx) => work(new Proxy(tx, {
+        get(inner, method, innerReceiver) {
+          if (method !== '$queryRaw' && method !== '$executeRaw') return Reflect.get(inner, method, innerReceiver);
+          return (strings: TemplateStringsArray, ...values: unknown[]) => {
+            resolveFirst(strings.join('?'));
+            return (inner[method] as (...args: unknown[]) => unknown).call(inner, strings, ...values);
+          };
+        },
+      })), options as never);
+    },
+  });
+  const editing = resolvers.Mutation.editComment(null, { commentRef: comment.id, body: 'Comment after', expectedRevision: 1 }, { ...authorCtx, db: observedDb });
+  const editOutcome = editing.then((value: unknown) => ({ value }), (error: unknown) => ({ error }));
+  try {
+    expect(await firstSql).not.toContain('pg_advisory_xact_lock(2063, 1772)');
+    expect(await editOutcome).toHaveProperty('value');
+    expect((await db.node.findUniqueOrThrow({ where: { id: comment.id } })).content).toBe('Comment after');
+  } finally { release(); await heldOutcome; await editOutcome; }
+  const output = await holder;
+  expect((await db.node.findUniqueOrThrow({ where: { id: output.nodeId } })).content).toBe('Comment after');
+  expect(await db.nodeRevision.count({ where: { nodeId: comment.id } })).toBe(0);
+});
