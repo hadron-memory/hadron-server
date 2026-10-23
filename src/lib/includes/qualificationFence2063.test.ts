@@ -683,3 +683,49 @@ it.each(combinedSurfaces)(
     expect(await db.organization.count({ where: { urn: 'qualification-account-first' } })).toBe(1);
   },
 );
+
+it.each((['clearNodeHistory', 'deleteNodeRevision'] as const).flatMap((surface) => (['read', 'write', 'writer-first'] as const).map((phase) => ({ surface, phase }))))(
+  'affected pinned include: $surface / $phase preserves one coherent compile or refuses', async ({ surface, phase }) => {
+    const compile = await compileCounterparty();
+    const agent = await db.agent.findUniqueOrThrow({ where: { id: compile.agentId } });
+    const part = await db.node.create({ data: { memoryId: agent.systemMemoryId!, loc: 'parts:pinned', name: 'Part', content: '# Current', revSeq: 2 } });
+    const revision = await db.nodeRevision.create({ data: { nodeId: part.id, memoryId: part.memoryId, loc: part.loc, name: 'Part', content: '# Selected old text', revNo: 1 } });
+    await db.node.updateMany({ where: { memoryId: part.memoryId, loc: 'boot:source' }, data: { content: '{{> parts:pinned rev=1}}' } });
+    const remove = (database: typeof db) => surface === 'clearNodeHistory'
+      ? resolvers.Mutation.clearNodeHistory(null, { nodeRef: part.id }, { ...ctx(), db: database })
+      : resolvers.Mutation.deleteNodeRevision(null, { revisionId: revision.id }, { ...ctx(), db: database });
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const transaction = db.$transaction.bind(db);
+    const heldDb = new Proxy(db, {
+      get(client, property, receiver) {
+        if (property !== '$transaction') return Reflect.get(client, property, receiver);
+        return (work: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<unknown>, options: unknown) => transaction(async (tx) => {
+          const result = await work(tx); entered(); await gate; return result;
+        }, options as never);
+      },
+    });
+    const first = phase === 'writer-first' ? remove(heldDb) : compileBootPrompt({ ...ctx(), db: phase === 'write' ? heldDb : db }, compile.target,
+      phase === 'read' ? { seams: { beforeAssemble: async () => { entered(); await gate; } } } : {});
+    const firstResult = first.then((value) => ({ value }), (error: unknown) => ({ error }));
+    await Promise.race([ready, firstResult.then((result) => { if ('error' in result) throw result.error; throw new Error('missing phase barrier'); })]);
+    const second = phase === 'writer-first' ? compileBootPrompt(ctx(), compile.target) : remove(db);
+    const secondResult = second.then((value) => ({ value }), (error: unknown) => ({ error }));
+    try { await waitForLockWaitersOfType(db, 'advisory', 1, 750); }
+    finally { release(); await firstResult; await secondResult; }
+    expect(await firstResult).toHaveProperty('value');
+    if (phase === 'writer-first') {
+      expect(await secondResult).toMatchObject({ error: { extensions: { code: 'BOOT_PROMPT_INCLUDE_UNAVAILABLE' } } });
+      expect(await db.compiledPromptRevision.count()).toBe(0);
+    } else {
+      expect(await secondResult).toHaveProperty('value');
+      const receipt = await db.compiledPromptRevision.findFirstOrThrow();
+      const compiled = await db.node.findUniqueOrThrow({ where: { id: receipt.compiledNodeId } });
+      expect(compiled.content).toBe('# Selected old text');
+      expect(receipt.provenance).toMatchObject({ occurrences: [{}, { nodeId: part.id, revNo: 1 }] });
+    }
+    expect(await db.nodeRevision.findUnique({ where: { id: revision.id } })).toBeNull();
+  },
+);
