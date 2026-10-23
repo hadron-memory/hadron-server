@@ -19,11 +19,13 @@ for(const selector of ['id','urn','prefix'])for(const dryRun of [true,false]){
   const node=await db.node.create({data:{id:generateId(),memoryId,loc:'task',name:'task',content:'cat stays',isRunnable:true,role:'role-task'}});
   const selection=selector==='prefix'?{memoryUrns:['hrn:mem:guidance2285:memory'],prefix:'task'}:{nodeUrns:[selector==='id'?node.id:'hrn:node:guidance2285:memory:task']};
   const text=await server().callToolText('hadron_replace_text',{...selection,oldText:'cat',newText:'dog',fields:['content'],dryRun});
+  expect(text).toMatch(/^Coverage:/m);
   expect(text).toContain('Coverage: 1 selected; 0 scanned; 1 skipped/protected (1 governed, 0 protected address).');
   expect(text).toContain('Selected nodes were skipped before text scanning');
   expect(text).toContain('not found');
-  expect(text).toContain('hadron_update_task');expect(text).toContain('hadron_update_review');expect(text).toContain('updateSpecNode');
+  expect(text).toContain('hadron_update_task');expect(text).toContain('hadron_update_review');expect(text).toContain('CLI hadron spec');
   expect(text).not.toContain('--content-file');
+  expect(text).not.toContain('updateSpecNode');
   expect((await db.node.findUniqueOrThrow({where:{id:node.id}})).content).toBe('cat stays');
   expect(await db.nodeRevision.count({where:{nodeId:node.id}})).toBe(0);
  });

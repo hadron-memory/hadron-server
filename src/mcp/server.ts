@@ -7220,7 +7220,7 @@ export function createMcpServerInstance(
           guidance.push('Selected nodes were skipped before text scanning; 0 scanned does not mean those selected nodes were not found.');
         }
         if (result.skipCounts.governed > 0) {
-          guidance.push('Governed nodes require their own update door: tasks use hadron_update_task; reviews use hadron_update_review; specs use GraphQL updateSpecNode or the CLI hadron spec commands (no MCP spec door). Other governed kinds require their owning operation. Generic full-content node updates are not a workaround.');
+          guidance.push('Governed nodes require their own update door: tasks use hadron_update_task; reviews use hadron_update_review; specs use the CLI hadron spec commands (no MCP spec door). Other governed kinds require their owning operation. Generic full-content node updates are not a workaround.');
         }
         return textResult([header, coverage, ...guidance, ...lines].join('\n'));
       } catch (e) {
