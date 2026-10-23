@@ -6681,12 +6681,34 @@ export const typeDefs = `#graphql
     it. A deliberate, temporary posture; see src/api/assetPublic.ts. Do
     not present it in a UI as though it were access-controlled.
 
-    Null when the server has no BASE_URL configured (no canonical
-    origin to build an absolute URL from), when the asset is not
-    CLEAN, or when its memory is encrypted — encrypted memories are
-    never hotlinkable, since an anonymous request holds no session key.
+    Null unless the asset would be served right now: its per-asset
+    switch (publicLinkEnabled) is on, the deployment switch is on, and it is
+    CLEAN in a live unencrypted memory. Also null when the server has no
+    BASE_URL configured (no canonical origin to build an absolute URL from)
+    even though it would be served, so null is NEVER proof the switch is off.
     """
     publicUrl:   String
+    """
+    #1667 — the per-asset public-link opt-in. STORED POLICY, not
+    proof of publication: the anonymous link also needs the deployment switch
+    (publicLinkAvailable) and a live, CLEAN asset in an unencrypted memory.
+    Every asset starts false. Reading it grants no Asset read right.
+    """
+    publicLinkEnabled: Boolean!
+    """
+    Whether THE CALLER may switch this asset's public link right now: the
+    memory's manager under the shared class-manager predicate, never a mere
+    writer, and strictly the owner in a personal or private memory. False in a
+    session's memory and in an encrypted memory. Not a download capability.
+    """
+    canManagePublicLink: Boolean!
+    """
+    Whether this deployment serves public links at all
+    (ASSET_PUBLIC_HOTLINK_ENABLED). Independent of the stored opt-in, of who is
+    asking, of the scan state and of whether a canonical origin is configured.
+    Hide the switch when false; never infer this from publicUrl.
+    """
+    publicLinkAvailable: Boolean!
   }
 
   enum UploadIntent {
@@ -9883,6 +9905,12 @@ export const typeDefs = `#graphql
     beginAssetUpload(input: BeginAssetUploadInput!): BeginAssetUploadResult!
     completeAssetUpload(input: CompleteAssetUploadInput!): Asset!
     setAgentAssetUploadEnabled(input: SetAgentAssetUploadEnabledInput!): App!
+    """
+    #1667 — switch an asset's anonymous public link on or off. Only whoever
+    manages the asset's memory; a refused request changes
+    nothing. Returns the asset.
+    """
+    setAssetPublicLink(assetRef: ID!, enabled: Boolean!): Asset!
     softDeleteAsset(assetId: ID!): Asset!
     restoreAsset(assetId: ID!): Asset!
 

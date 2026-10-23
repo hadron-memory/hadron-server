@@ -21,7 +21,8 @@ export type AssetOperation =
   | 'purged'
   | 'orphan-reaped'
   | 'orphan-skipped'
-  | 'scan-flipped';
+  | 'scan-flipped'
+  | 'public-link-set';
 
 export interface AssetAuditEvent {
   operation: AssetOperation;

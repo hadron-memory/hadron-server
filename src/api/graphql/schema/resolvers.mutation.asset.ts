@@ -13,6 +13,7 @@ import {
 import { setAgentAssetUploadEnabled, SetAssetEnabledError } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
 import { AssetUploadError } from '../../../controller/operations/beginAssetUpload.js';
 import { softDeleteAsset } from '../../../controller/operations/softDeleteAsset.js';
+import { setAssetPublicLink } from '../../../lib/asset/publicLink.js';
 import { restoreAsset } from '../../../controller/operations/restoreAsset.js';
 import {
   type Context,
@@ -130,6 +131,12 @@ export const assetMutations = {
         isOrgAdminFor,
       );
     },
+
+    setAssetPublicLink: async (
+      _: unknown,
+      { assetRef, enabled }: { assetRef: string; enabled: boolean },
+      ctx: Context,
+    ) => setAssetPublicLink(ctx, assetRef, enabled),
 
     softDeleteAsset: async (
       _: unknown,

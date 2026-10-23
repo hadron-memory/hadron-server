@@ -48,7 +48,8 @@ import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
-import { publicAssetUrl } from '../../assetPublic.js';
+import { publicAssetUrl, isPublicHotlinkEnabled } from '../../assetPublic.js';
+import { canManageAssetPublicLink, PUBLIC_LINK_MEMORY_SELECT } from '../../../lib/asset/publicLink.js';
 import {
   canSeeUserPersonalFields,
   canSeeOrgMemberRole,
@@ -1263,7 +1264,7 @@ export const typeResolvers = {
     // an anonymous request holds no session key to decrypt the
     // storage key with).
     publicUrl: async (
-      a: { id: string; memoryId: string | null; scanStatus: string; deletedAt: Date | null },
+      a: { id: string; memoryId: string | null; scanStatus: string; deletedAt: Date | null; publicLinkEnabled: boolean },
       _: unknown,
       ctx: Context,
     ) => {
@@ -1275,7 +1276,21 @@ export const typeResolvers = {
       // Soft-deleted memory: the route 404s these, so offering the link
       // would be offering a dead one.
       if (!memory || memory.deletedAt || memory.isEncrypted) return null;
+      // #1667: the per-asset opt-in. OFF (the default) serves nothing.
+      if (!a.publicLinkEnabled) return null;
       return publicAssetUrl(a.id);
+    },
+    // #1667 — exactly the deployment switch; see the SDL doc.
+    publicLinkAvailable: () => isPublicHotlinkEnabled(),
+    // #1667 — the caller's current manager capability for this asset's memory.
+    canManagePublicLink: async (
+      a: { memoryId: string | null; deletedAt: Date | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (a.deletedAt || !a.memoryId || !ctx.userId || ctx.impersonation) return false;
+      const memory = await ctx.db.memory.findUnique({ where: { id: a.memoryId }, select: PUBLIC_LINK_MEMORY_SELECT });
+      return memory ? canManageAssetPublicLink(ctx, memory) : false;
     },
   },
   Memory: {
