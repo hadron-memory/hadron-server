@@ -239,6 +239,14 @@ describe('#2193 — other Node parents: Node.memory still answers as Query.memor
         expect(e!.source, `${who}: source`).toMatchObject({ id: node.know, memory: { id: mem.know } });
         expect(e!.target, `${who}: target`).toMatchObject({ id: node.handoff, memory: { id: mem.work } });
       }
+      if (who === 'reader') {
+        // Stated up front: the org reader sees the edge and its knowledge-node
+        // source with that memory's record; the target sits in the working
+        // memory the reader may not read (nodeBatch pins the same denial).
+        expect(e, 'reader: the edge').toBeDefined();
+        expect(e!.source, 'reader: source').toMatchObject({ id: node.know, memory: { id: mem.know } });
+        expect(e!.target, 'reader: target').toBeNull();
+      }
       if (e) await memoryMatchesOracle(who, bearer, [e.source, e.target].filter(Boolean));
     }
   });
