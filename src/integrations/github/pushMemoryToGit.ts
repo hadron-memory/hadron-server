@@ -135,9 +135,12 @@ async function pushMemoryToGitUnderLock(
     return { nodeCount: 0, error: `Git setup failed: ${(err as Error).message}` };
   }
 
-  // 4. Load all nodes with edges
+  // 4. Load all LIVE nodes with edges. A soft-deleted node is a tombstone, not
+  // content: exporting it re-published deleted text on every full push (#425).
+  // This only stops new writes — pruning files already in the repo is a
+  // separate, gated change.
   const nodes = await db.node.findMany({
-    where: { memoryId, nodeType: { not: 'data' } },
+    where: { memoryId, nodeType: { not: 'data' }, deletedAt: null },
     include: {
       outgoingEdges: { include: { target: true } },
     },

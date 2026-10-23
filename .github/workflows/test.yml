@@ -28,6 +28,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # These regressions use node:test and are deliberately excluded from Vitest.
+  # Their fixtures stub stack commands; no Docker, database or install is needed.
+  node-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run disposable-stack Node regressions
+        run: node --test scripts/e2e/*.test.mjs
+
   test-shard:
     runs-on: ubuntu-latest
     # GH default job timeout is 6 hours — a hung vitest worker or
@@ -92,14 +105,16 @@ jobs:
         run: pnpm test --shard=${{ matrix.shard }}/${{ strategy.job-total }}
 
   # Aggregation gate: a single stable check named `test` that passes iff every
-  # shard passed. Keep THIS as the required status check on `main` (matrix jobs
-  # report as `test-shard (1..4)` and don't need to be individually required).
+  # shard and the Node regressions passed. Keep THIS as the required status check
+  # on `main` (individual jobs don't need to be separately required).
   test:
-    needs: [test-shard]
+    needs: [test-shard, node-regressions]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Require all shards to pass
+      - name: Require all test jobs to pass
         run: |
           echo "test-shard aggregate result: ${{ needs.test-shard.result }}"
           test "${{ needs.test-shard.result }}" = "success"
+          echo "node-regressions result: ${{ needs.node-regressions.result }}"
+          test "${{ needs.node-regressions.result }}" = "success"

@@ -6541,12 +6541,15 @@ export const typeDefs = `#graphql
 
     - the worker's NAME ("Iris") — #990. Unique per App, case-insensitively,
       matched with the DATABASE's lower(), the expression
-      workers_app_name_uniq indexes. Requires App context (appRef, an App-key
-      credential, or an MCP active-App selection): a name means nothing without
-      one, so a nameless-App call refuses SESSION_WORKER_NAME_NEEDS_APP rather
-      than guessing across the caller's Apps. Gated on the STAFF READ GATE
-      before the lookup runs — resolving a name discloses roster membership,
-      which the id/URN forms never do.
+      workers_app_name_uniq indexes. With appRef, an App-key credential or an
+      MCP active-App selection, lookup stays within that App. With no App,
+      #1597 searches only live Apps the caller may bind into: exactly one
+      non-retired match binds; none refuses WORKER_NOT_FOUND; several refuse
+      SESSION_WORKER_NAME_AMBIGUOUS with candidates (worker id/URN, name, App,
+      role and holder). Nothing is bound on ambiguity: choose an id or URN.
+      Candidate discovery reuses App participation and user-owned-App holding
+      rules; it grants no new bind authority. The staff read gate precedes
+      name lookup (hrn:node:hadronmemory.com:specs:cor:agt:020:00).
 
       Which refusal you get depends on WHERE the denial happens, and clients
       should not assume one code covers both: a caller who supplied appRef has
@@ -13557,6 +13560,31 @@ export const typeDefs = `#graphql
     pausedUntil: DateTime
     "The worker's top open assignment you can read, for display only. STARTED before PENDING, then oldest assignment (null last), creation time and id. Null when none is readable; ending a session does not clear an assignment."
     currentTask: TeamRosterTaskSummary
+    """
+    #2223 — the person holding this worker's name (hrn:node:hadronmemory.com:specs:cor:agt:020:09), or null:
+    nobody holds it, the holder is deleted, or the reader fails the worker working-state gate (the same gate
+    as Worker.heldByUserId, which is narrower than the roster's audience).
+    """
+    heldBy: WorkerHolder
+    "When the current hold was taken. Null exactly when heldBy is; masked the same way."
+    heldAt: DateTime
+  }
+
+  """
+  #2223 — a sanitized identity for the person holding a worker's name. A closed projection, never User:
+  User's default-resolved tail (policy, identityProvider, externalId, githubId, roles, maxReferrals) must
+  not come along (hrn:node:hadronmemory.com:specs:cor:acl:110:01). The same four fields as ReleasedFromUser.
+  """
+  type WorkerHolder {
+    id: ID!
+    handle: String
+    "Canonical hrn:user:<handle> URN (hrn:node:hadronmemory.com:specs:cor:urn:010:01). Null for a handle-less user."
+    urn: String
+    """
+    Behind the #384 gate, as User.name: the holder, a platform admin, or a co-member of one of their orgs.
+    Null both when withheld and when unset, so a masked name cannot be told from an unnamed user.
+    """
+    name: String
   }
 
   "#1707 — the team roster of one App."

@@ -85,6 +85,25 @@ export function parseIncludeTags(content: string): IncludeTag[] {
   return locateIncludeTags(content).map(({ index: _index, ...tag }) => tag);
 }
 
+/**
+ * The include-shaped text that `locateIncludeTags` skips because it is written
+ * as code, with each span's offset (#2135). Same `maskCode`, so the splice and
+ * the renderer cannot disagree about what is code. Never throws.
+ */
+export function locateLiteralIncludeTags(content: string): Array<{ index: number; raw: string }> {
+  if (!content.includes('{{>')) return [];
+  const masked = maskCode(content);
+  const active: Array<[number, number]> = [...masked.matchAll(TAG)].map(m => [m.index!, m.index! + m[0].length]);
+  const literal: Array<{ index: number; raw: string }> = [];
+  for (const m of content.matchAll(TAG)) {
+    const start = m.index!;
+    const end = start + m[0].length;
+    if (active.some(([a, b]) => start < b && a < end)) continue;
+    literal.push({ index: start, raw: m[0] });
+  }
+  return literal;
+}
+
 /** `parseIncludeTags` with each tag's offset in `content`, for the reader that splices resolved text in (#2041). */
 export function locateIncludeTags(content: string): Array<IncludeTag & { index: number }> {
   if (!content.includes('{{>')) return [];
