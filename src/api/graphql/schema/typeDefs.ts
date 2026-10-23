@@ -4254,8 +4254,7 @@ export const typeDefs = `#graphql
     extendedBy(first: Int = 20, after: String): AgentExtensionPage!
     """
     #2281 - the URN of the Agent this one was cloned from (cloneAgent), as that Agent's current URN. Null when
-    this is not a clone, when you cannot read the source, when the source was deleted, or when it no longer
-    resolves: those cases are indistinguishable by design. Never an id or an object.
+    this is not a clone, when you cannot read the source, when the source was deleted, or when the clone's origin identity is not recorded: those cases are indistinguishable by design. Never an id or an object.
     """
     clonedFromAgentRef: String
     """
