@@ -1,4 +1,4 @@
-import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
@@ -472,13 +472,19 @@ export const appMutations = {
           await assertNoWorkers(ctx.db, existing.id, appUrn, 'reclaim');
           // #1468 — the delete cascades the App's memories: refused while one
           // is a stamped corpus still holding a spec.
-          await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+          await withAuthorizedTx(ctx, [
+            ...(resolvedOrgId ? [{ kind: 'org' as const, id: resolvedOrgId }] : []),
+            ...(ownerUserId ? [{ kind: 'user' as const, id: ownerUserId }] : []),
+          ], async (fresh) => {
+            if (resolvedOrgId) await requireOrgRole(fresh, resolvedOrgId, 'ADMIN');
+            else if (fresh.userId !== ownerUserId) throw authorizationDenied();
+          }, async (tx) => {
             await assertNoInstallMemories(tx, existing.id, appUrn);
             await detachAppOwnerMemories(tx, [existing.id]);
             const doomed = await tx.memory.findMany({ where: { appId: existing.id }, select: { id: true } });
             await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
             await tx.app.delete({ where: { id: existing.id } });
-          });
+          }, { fence: true });
         } else {
           throw new Error(`An app with URN "${appUrn}" already exists`);
         }
@@ -674,13 +680,14 @@ export const appMutations = {
               // castings and recycle their permanently-reserved names.
               await assertNoWorkers(ctx.db, depCollision.id, depUrn, 'reclaim');
               // #1468 — same cascade rule as the parent App branch.
-              await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+              await withAuthorizedTx(ctx, [{ kind: 'org', id: resolvedOrgId }],
+                (fresh) => requireOrgRole(fresh, resolvedOrgId, 'ADMIN'), async (tx) => {
                 await assertNoInstallMemories(tx, depCollision.id, depUrn);
                 await detachAppOwnerMemories(tx, [depCollision.id]);
                 const doomed = await tx.memory.findMany({ where: { appId: depCollision.id }, select: { id: true } });
                 await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
                 await tx.app.delete({ where: { id: depCollision.id } });
-              });
+              }, { fence: true });
             } else {
               depUrn = `${depUrn}:${imp.importedAgentId.slice(-8)}`;
             }

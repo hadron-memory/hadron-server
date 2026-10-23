@@ -1,4 +1,3 @@
-import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { refuseLegacyBaseUrl, requireEndpointFor, requireKeyFor, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
@@ -109,7 +108,7 @@ export class AgentUrnTakenError extends GraphQLError {
  * Owner-resolved inputs for {@link createAgentCore}: exactly one of
  * `organizationId` / `ownerUserId` is set (spec 047 XOR), and `namespace` is
  * the matching URN owner atom (org URN or the user's bare handle). The caller
- * is responsible for AUTHORIZATION — the core only creates.
+ * supplies its authorization callback; the core hosts its fresh transaction gate.
  */
 export interface CreateAgentCoreInput {
   organizationId: string | null;
@@ -125,10 +124,12 @@ export interface CreateAgentCoreInput {
   personaRole?: string | null;
   /** #2138 §3.5: false = every worker cast from this Agent counts as having a task. Default true. */
   usesTasks?: boolean | null;
+  /** Re-run the caller's policy inside the prepared provisioning transaction. */
+  authorize?: (fresh: Context) => Promise<void>;
 }
 
 /**
- * The authorization-free core of createAgent: URN compose + reclaim, type/
+ * The caller-authorized core of createAgent: URN compose + reclaim, type/
  * visibility defaults, and the one transaction that provisions the system
  * memory alongside the Agent row. (Extracted for #935; the Worker re-cut of
  * #974 removed its persona-minting caller, so createAgent is its one caller
@@ -206,7 +207,10 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // the dropped `type` column) and its `visibility` is always NULL
   // (chk_memory_visibility_class forbids a non-null visibility on
   // class='system'); agent visibility does not sync onto it.
-  const createdAgent = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+  const createdAgent = await withAuthorizedTx(ctx, [
+    ...(resolvedOrgId ? [{ kind: 'org' as const, id: resolvedOrgId }] : []),
+    ...(ownerUserId ? [{ kind: 'user' as const, id: ownerUserId }] : []),
+  ], async (fresh) => { await input.authorize?.(fresh); }, async (tx) => {
     let resolvedSystemMemoryId: string;
     if (systemMemoryId) {
       const target = await tx.memory.findUniqueOrThrow({ where: { id: systemMemoryId } });
@@ -290,7 +294,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       },
       include: AGENT_INCLUDE,
     });
-  }).catch((e: unknown) => {
+  }, { fence: true }).catch((e: unknown) => {
     // #935: under CONCURRENT creates the pre-check above races — the loser
     // surfaces as P2002 on the agent (or derived system-memory) urn unique
     // instead. Map it to the same typed refusal the pre-check throws, so
@@ -460,6 +464,10 @@ export const agentMutations = {
       // #935: authorization + owner resolution above, provisioning in the
       // shared core.
       return createAgentCore(ctx, {
+        authorize: async (fresh) => {
+          if (resolvedOrgId) await requireOrgRole(fresh, resolvedOrgId, 'ADMIN');
+          else if (fresh.userId !== ownerUserId) throw authorizationDenied();
+        },
         organizationId: resolvedOrgId,
         ownerUserId,
         namespace,
@@ -1062,6 +1070,15 @@ export const agentMutations = {
       const { id } = await resolveAgentRef(ctx.db, agentRef);
       const result = await repairAgentSystemMemoryOwner(ctx.db, id, {
         actorId: ctx.userId ?? ctx.clientId ?? null,
+        authorize: (tx, selected) => withAuthorizedTx(ctx, [
+          { kind: 'agent', id: selected.id },
+          ...(selected.organizationId ? [{ kind: 'org' as const, id: selected.organizationId }] : []),
+          ...(selected.ownerUserId ? [{ kind: 'user' as const, id: selected.ownerUserId }] : []),
+        ], async (fresh) => {
+          if (!(fresh.roles?.includes('ADMIN') || fresh.roles?.includes('OWNER')) || fresh.impersonation) {
+            throw authorizationDenied('Repairing an agent system memory requires a platform administrator.');
+          }
+        }, async () => {}, { preparedTransaction: tx }),
       });
       if (result.urnNote) console.warn('[repairAgentSystemMemory]', result.urnNote);
       return ctx.db.agent.findUniqueOrThrow({ where: { id }, include: AGENT_INCLUDE });

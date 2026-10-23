@@ -20,8 +20,10 @@ import { createNodeRevision, buildNodeRevisionSnapshot, revisionStateHashRefresh
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 let userId: string;
 let memoryId: string;
-const ctx = (): Context => ({ db, userId, roles: ['ADMIN'] });
+let presentedKeyId: string | undefined;
+const ctx = (): Context => ({ db, userId, roles: ['ADMIN'], ...(presentedKeyId ? { apiKeyId: presentedKeyId } : {}) });
 beforeEach(async () => {
+  presentedKeyId = undefined;
   await cleanDb(db);
   vi.stubEnv('PASSKEY_RP_ID', 'qualification.example');
   userId = (await db.user.create({ data: { handle: 'qualification-admin', roles: ['ADMIN'] } })).id;
@@ -134,11 +136,43 @@ it('snapshot helpers reject a pooled client, raw/manual-lock transaction, and es
   expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
 });
 
-type QualificationSurface = 'reserveSpecCitation' | 'specReplace' | 'mergeMemories' | 'extractCopy' | 'extractMove' | 'cloneMemory' | 'updateNode' | 'updateNodeProperties' | 'moveNode' | 'cloneNode' | 'mergeNodes' | 'deleteNode' | 'searchReplaceInNodes' | 'restoreNodeRevision' | 'updateTeamRole' | 'deleteTeamRole' | 'encryptMemory' | 'cleanupAnonymousMemories' | 'deleteMemory' | 'approveNode' | 'approveMemoryNodes' | 'requestNodeSignature' | 'withdrawSigningRequest' | 'deleteNodeRevision' | 'clearNodeHistory' | 'cancelFirstPasskey' | 'endWindowEarly' | 'finishRevoke';
+type QualificationSurface = 'createAgentMemoryReclaim' | 'createMemoryInAppReclaim' | 'repairMemoryReclaim' | 'createMemoryReclaim' | 'cloneMemoryReclaim' | 'extractReclaim' | 'createAppReclaim' | 'reserveSpecCitation' | 'specReplace' | 'mergeMemories' | 'extractCopy' | 'extractMove' | 'cloneMemory' | 'updateNode' | 'updateNodeProperties' | 'moveNode' | 'cloneNode' | 'mergeNodes' | 'deleteNode' | 'searchReplaceInNodes' | 'restoreNodeRevision' | 'updateTeamRole' | 'deleteTeamRole' | 'encryptMemory' | 'cleanupAnonymousMemories' | 'deleteMemory' | 'approveNode' | 'approveMemoryNodes' | 'requestNodeSignature' | 'withdrawSigningRequest' | 'deleteNodeRevision' | 'clearNodeHistory' | 'cancelFirstPasskey' | 'endWindowEarly' | 'finishRevoke';
 async function qualificationAct(surface: QualificationSurface): Promise<{
   run: (database: typeof db) => Promise<unknown>;
   check: (value: unknown) => void;
 }> {
+  if (surface === 'createMemoryReclaim' || surface === 'createAppReclaim' || surface === 'createAgentMemoryReclaim' || surface === 'createMemoryInAppReclaim' || surface === 'repairMemoryReclaim') {
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const old = await db.node.create({ data: { memoryId, loc: 'reclaimed-source', name: 'Old', content: '# Old retained source' } });
+    await db.nodeRevision.create({ data: { nodeId: old.id, memoryId, loc: old.loc, name: old.name, content: '# Old history', revNo: 0 } });
+    if (surface === 'createAgentMemoryReclaim') {
+      await db.memory.update({ where: { id: memoryId }, data: { urn: 'qualification-fence.example:reclaimed-agent-system', deletedAt: new Date() } });
+      return { run: (database) => resolvers.Mutation.createAgent(null, { orgId: memory.organizationId!, name: 'Reclaimed agent' }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ urn: 'qualification-fence.example:reclaimed-agent' }) };
+    }
+    if (surface === 'createMemoryInAppReclaim') {
+      await db.memory.update({ where: { id: memoryId }, data: { deletedAt: new Date() } });
+      const agent = await db.agent.create({ data: { organizationId: memory.organizationId, name: 'Installed', urn: 'qualification-fence.example:installed' } });
+      const app = await db.app.create({ data: { organizationId: memory.organizationId, name: 'Installed', urn: 'qualification-fence.example:installed-app' } });
+      await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+      await db.agentOrgGrant.create({ data: { orgId: memory.organizationId!, agentId: agent.id, activatedAt: new Date() } });
+      return { run: (database) => resolvers.Mutation.createMemoryInApp(null, { appRef: app.id, agentRef: agent.id, memoryClass: 'app', name: 'mem' }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ urn: 'qualification-fence.example:mem' }) };
+    }
+    if (surface === 'repairMemoryReclaim') {
+      await db.memory.update({ where: { id: memoryId }, data: { urn: 'qualification-fence.example:repair-agent-system', deletedAt: new Date() } });
+      const org = await db.organization.create({ data: { urn: 'foreign-qualification.example', name: 'Foreign' } });
+      const foreign = await db.memory.create({ data: { organizationId: org.id, class: 'system', urn: 'foreign-qualification.example:repair-source', name: 'Mismatched' } });
+      const agent = await db.agent.create({ data: { organizationId: memory.organizationId, systemMemoryId: foreign.id, name: 'Repair', urn: 'qualification-fence.example:repair-agent' } });
+      return { run: (database) => resolvers.Mutation.repairAgentSystemMemory(null, { agentRef: agent.id }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ urn: agent.urn }) };
+    }
+    if (surface === 'createMemoryReclaim') {
+      await db.memory.update({ where: { id: memoryId }, data: { deletedAt: new Date() } });
+      return { run: (database) => resolvers.Mutation.createMemory(null, { orgId: memory.organizationId!, name: 'mem' }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ urn: 'qualification-fence.example:mem' }) };
+    }
+    const app = await db.app.create({ data: { organizationId: memory.organizationId, name: 'Reclaimed app', urn: 'qualification-fence.example:reclaimed-app', deletedAt: new Date() } });
+    await db.memory.update({ where: { id: memoryId }, data: { class: 'app', appId: app.id } });
+    const agent = await db.agent.create({ data: { organizationId: memory.organizationId, name: 'Installer', urn: 'qualification-fence.example:installer' } });
+    return { run: (database) => resolvers.Mutation.createApp(null, { orgRef: memory.organizationId!, agentRef: agent.id, name: 'Reclaimed app' }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ urn: 'qualification-fence.example:reclaimed-app' }) };
+  }
   if (surface === 'updateTeamRole' || surface === 'deleteTeamRole') {
     const memory = await db.memory.update({ where: { id: memoryId }, data: { class: 'system' } });
     const agent = await db.agent.create({ data: { organizationId: memory.organizationId, systemMemoryId: memory.id, name: 'Team', urn: 'qualification-fence.example:role-agent' } });
@@ -185,6 +219,12 @@ async function qualificationAct(surface: QualificationSurface): Promise<{
     };
   }
   const node = await db.node.create({ data: { memoryId, loc: 'inverse', name: 'Inverse', content: '# Inverse' } });
+  if (surface === 'cloneMemoryReclaim' || surface === 'extractReclaim') {
+    const source = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const target = await db.memory.create({ data: { organizationId: source.organizationId, class: 'knowledge', name: 'Tombstone', urn: `qualification-fence.example:${surface === 'cloneMemoryReclaim' ? 'copy' : 'extracted'}`, deletedAt: new Date() } });
+    const old = await db.node.create({ data: { memoryId: target.id, loc: 'old', name: 'Old', content: '# Retained old source' } });
+    await db.nodeRevision.create({ data: { nodeId: old.id, memoryId: target.id, loc: old.loc, name: old.name, content: '# Retained old history', revNo: 0 } });
+  }
   if (surface === 'reserveSpecCitation') {
     await db.memory.update({ where: { id: memoryId }, data: { corpusDraft: true } });
     return { run: (database) => resolvers.Mutation.reserveSpecCitation(null, { memoryRef: memoryId, loc: 'pas:010:01' }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ isPlaceholder: true }) };
@@ -202,11 +242,11 @@ async function qualificationAct(surface: QualificationSurface): Promise<{
     await db.node.create({ data: { memoryId: target.id, loc: node.loc, name: 'Target', content: '# Target' } });
     return { run: (database) => resolvers.Mutation.mergeMemories(null, { input: { source: memoryId, target: target.id, include: ['CONTENT'], deleteSourceMem: true } }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ id: target.id }) };
   }
-  if (surface === 'extractCopy' || surface === 'extractMove') {
+  if (surface === 'extractCopy' || surface === 'extractMove' || surface === 'extractReclaim') {
     if (surface === 'extractMove') await db.node.create({ data: { memoryId, loc: 'survivor', name: 'Survivor', content: '# Stays' } });
     return { run: (database) => resolvers.Mutation.extractParentNodeToMemory(null, { parentRef: node.id, targetUrn: 'qualification-fence.example::extracted', move: surface === 'extractMove' }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ urn: 'qualification-fence.example:extracted' }) };
   }
-  if (surface === 'cloneMemory') return { run: (database) => resolvers.Mutation.cloneMemory(null, { ref: memoryId, targetUrn: 'qualification-fence.example::copy' }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ urn: 'qualification-fence.example:copy' }) };
+  if (surface === 'cloneMemory' || surface === 'cloneMemoryReclaim') return { run: (database) => resolvers.Mutation.cloneMemory(null, { ref: memoryId, targetUrn: 'qualification-fence.example::copy' }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ urn: 'qualification-fence.example:copy' }) };
   if (surface === 'updateNode') return { run: (database) => resolvers.Mutation.updateNode(null, { input: { id: node.id, content: '# Changed' } }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ id: node.id, content: '# Changed' }) };
   if (surface === 'updateNodeProperties') return { run: (database) => resolvers.Mutation.updateNodeProperties(null, { nodeRef: node.id, properties: { checked: true } }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ id: node.id, properties: { checked: true } }) };
   if (surface === 'moveNode' || surface === 'cloneNode') return { run: (database) => resolvers.Mutation[surface](null, { sourceRef: node.id, targetUrn: 'hrn:node:qualification-fence.example:mem:relocated' }, { ...ctx(), db: database }), check: (value) => expect(value).toMatchObject({ loc: 'relocated', content: '# Inverse' }) };
@@ -236,7 +276,7 @@ async function qualificationAct(surface: QualificationSurface): Promise<{
     : { run: (database) => resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, { ...ctx(), db: database }), check: (value) => expect(value).toBe(1) };
 }
 
-it.each<QualificationSurface>(['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories', 'encryptMemory', 'updateTeamRole', 'deleteTeamRole', 'restoreNodeRevision', 'updateNode', 'updateNodeProperties', 'moveNode', 'cloneNode', 'mergeNodes', 'deleteNode', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'mergeMemories', 'specReplace', 'reserveSpecCitation'])(
+it.each<QualificationSurface>(['approveNode', 'approveMemoryNodes', 'requestNodeSignature', 'withdrawSigningRequest', 'deleteNodeRevision', 'clearNodeHistory', 'cancelFirstPasskey', 'endWindowEarly', 'finishRevoke', 'deleteMemory', 'cleanupAnonymousMemories', 'encryptMemory', 'updateTeamRole', 'deleteTeamRole', 'restoreNodeRevision', 'updateNode', 'updateNodeProperties', 'moveNode', 'cloneNode', 'mergeNodes', 'deleteNode', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'mergeMemories', 'specReplace', 'reserveSpecCitation', 'createMemoryReclaim', 'cloneMemoryReclaim', 'extractReclaim', 'createAppReclaim', 'createAgentMemoryReclaim', 'createMemoryInAppReclaim', 'repairMemoryReclaim'])(
   '%s holds the fence through its actual deciding write and commit (inverse order)', async (surface) => {
     const act = await qualificationAct(surface);
     let entered!: () => void;
@@ -353,7 +393,7 @@ it('anonymous cleanup waits before taking any cascading memory/node lock', async
 });
 
 
-it.each<QualificationSurface>(['updateNode', 'updateNodeProperties', 'moveNode', 'cloneNode', 'mergeNodes', 'deleteNode', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'mergeMemories', 'specReplace', 'reserveSpecCitation'])(
+it.each<QualificationSurface>(['updateNode', 'updateNodeProperties', 'moveNode', 'cloneNode', 'mergeNodes', 'deleteNode', 'searchReplaceInNodes', 'cloneMemory', 'extractCopy', 'extractMove', 'mergeMemories', 'specReplace', 'reserveSpecCitation', 'createMemoryReclaim', 'cloneMemoryReclaim', 'extractReclaim', 'createAppReclaim', 'createAgentMemoryReclaim', 'createMemoryInAppReclaim', 'repairMemoryReclaim'])(
   '%s waits on the history fence before its actual snapshot/source row locks', async (surface) => {
     const act = await qualificationAct(surface);
     let entered!: () => void;
@@ -545,3 +585,29 @@ it('encryption conversion rechecks a credential revoked after the flag-flip tran
   expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content).toBe('# Plaintext');
   expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
 });
+
+
+it.each(['createMemoryReclaim', 'cloneMemoryReclaim', 'extractReclaim', 'createAppReclaim', 'createAgentMemoryReclaim', 'createMemoryInAppReclaim', 'repairMemoryReclaim'] as const)(
+  '%s refuses a revoked credential before destroying retained history', async (surface) => {
+    const act = await qualificationAct(surface);
+    const nodes = await db.node.findMany({ select: { id: true, memoryId: true, content: true }, orderBy: { id: 'asc' } });
+    const history = await db.nodeRevision.findMany({ select: { id: true, nodeId: true, content: true }, orderBy: { id: 'asc' } });
+    const key = await db.userApiKey.create({ data: { userId, keyHash: generateId(), keyPreview: 'reclaim', oauthScopes: [] } });
+    presentedKeyId = key.id;
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const holder = withIncludeHistoryTransaction(db, async () => { entered(); await gate; });
+    await ready;
+    const pending = act.run(db);
+    const result = pending.then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1, 1000);
+      await db.userApiKey.update({ where: { id: key.id }, data: { revokedAt: new Date() } });
+    } finally { release(); await holder; }
+    expect(await result).toMatchObject({ error: { extensions: { code: 'FORBIDDEN' } } });
+    expect(await db.node.findMany({ where: { id: { in: nodes.map((row) => row.id) } }, select: { id: true, memoryId: true, content: true }, orderBy: { id: 'asc' } })).toEqual(nodes);
+    expect(await db.nodeRevision.findMany({ where: { id: { in: history.map((row) => row.id) } }, select: { id: true, nodeId: true, content: true }, orderBy: { id: 'asc' } })).toEqual(history);
+  },
+);

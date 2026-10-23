@@ -170,10 +170,32 @@ merge cleanup takes source UPDATE and target NO KEY UPDATE on first acquisition.
 A real key revocation between committed merge batches stops the next batch and
 preserves the partial receipt (250 relocated, one remaining, source retained).
 
+Encrypted anonymous promotion now locks and reads current live Node values
+inside its deciding transaction. A red-first queued-writer regression showed
+that the earlier pre-fence scan overwrote a committed content/abstract/data
+edit; the fixed conversion preserves that edit and the existing exact-App
+completion policy. The competing-promotion-key refusal remains covered.
+
+Direct legacy-controller and Git sync boundary tests cover both waiting before
+source rows and exclusivity through actual commit. Direct MCP closures cover
+parent update, node update, tombstone resurrection and move. Combined tests
+also check actual affected-source compile text/provenance in both orders,
+including typed refusal for retired or moved-away includes. Git's standalone
+syncStatus metadata update can queue on the compiler's output Memory row
+before Git reaches its F-first deciding source/history transaction; that
+prelude is classified separately in the control.
+
+Explicit memory/App reclamation now rechecks the exact presented credential
+and current creation/export policy before destroying retained history. Seven
+red-first controls showed that a later fresh gate could refuse only after an
+earlier cleanup had committed. The dependency-App control revokes between
+parent creation and dependency cleanup and preserves all retained data on
+refusal. These gates cover the deciding cleanup transaction itself, including Agent system-memory creation, App-scoped memory creation, and privileged system-memory repair. Repair refuses a changed owner, pointer or URN read set before removing a tombstone.
+
 ## Evidence and remaining gates
 
-- Current delivery controls: qualification73, role40 (including two red-first
-  App-wait refusals), restore/provenance38, encryption104 pass locally. Test
+- Current delivery controls: qualification94, role40 (including two red-first
+  App-wait refusals), restore/provenance38, encryption105 pass locally. Test
   counts overlap; they are never summed as unique controls.
 - Scoped combined predecessor `badc7f00` composes exact held heads #2263
   `417253fd043c7910db73dc138facccde5cd2c73a`, #2258
