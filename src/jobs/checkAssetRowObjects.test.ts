@@ -172,6 +172,29 @@ describe('checkAssetRowObjects (#1140 slice B)', () => {
     expect(captureMessage).not.toHaveBeenCalled();
   });
 
+  it('skips a plaintext-shaped leftover key in a locked encrypted memory instead of probing it', async () => {
+    const encMemory = await db.memory.create({
+      data: {
+        class: 'knowledge',
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:enc-leftover`,
+        name: 'enc-leftover-memory',
+        visibility: 'ORGANIZATION',
+        isEncrypted: true,
+      },
+    });
+    await seedAsset({ memoryId: encMemory.id });
+    headObjectMock.mockResolvedValue({ exists: false });
+
+    const outcome = await checkAssetRowObjects({ db, now: NOW });
+
+    expect(outcome.skippedEncrypted).toBe(1);
+    expect(outcome.checked).toBe(0);
+    expect(headObjectMock).not.toHaveBeenCalled();
+    expect(captureMessage).not.toHaveBeenCalled();
+  });
+
   it('caps the events per run and summarises the remainder as one count event', async () => {
     for (let i = 0; i < 5; i += 1) await seedAsset();
     headObjectMock.mockResolvedValue({ exists: false });
@@ -186,6 +209,17 @@ describe('checkAssetRowObjects (#1140 slice B)', () => {
     expect(summary[0][1].level).toBe('error');
   });
 
+  it('never checks more than batchSize rows in one run, whatever the ids look like', async () => {
+    for (let i = 0; i < 5; i += 1) await seedAsset();
+
+    for (let day = 0; day < 6; day += 1) {
+      headObjectMock.mockClear();
+      const outcome = await checkAssetRowObjects({ db, now: new Date(NOW.getTime() + day * DAY), batchSize: 2 });
+      expect(outcome.checked).toBeLessThanOrEqual(2);
+      expect(headObjectMock.mock.calls.length).toBeLessThanOrEqual(2);
+    }
+  });
+
   it('covers every row exactly once over consecutive days when the batch bound is smaller than the table', async () => {
     const seeded = await Promise.all(Array.from({ length: 7 }, () => seedAsset()));
     const seen = new Map<string, number>();
@@ -194,7 +228,7 @@ describe('checkAssetRowObjects (#1140 slice B)', () => {
       return { exists: true };
     });
 
-    // 7 rows at 3 per run is 3 slices; the clock picks the slice, so a restart cannot reset it.
+    // 7 rows at 3 per run is 3 windows; the clock picks the window, so a restart cannot reset it.
     const slices = 3;
     let total = 0;
     for (let day = 0; day < slices; day += 1) {

@@ -28,19 +28,18 @@
  *     out of the window or blocked while the run was in flight, that is the
  *     janitor or a memory delete doing its job, not an inconsistency.
  *
- * **Bounded runs without stored state.** A run checks about `batchSize` rows (the
- * hash split is uniform, so a slice varies a little around it). The eligible ids are split into `ceil(count / batchSize)` slices by a stable
- * hash of the id, and the UTC day picks the slice, so every row is checked once
- * per cycle. The position comes from the clock, not from a cursor, so a restart
- * (every deploy) cannot send the sweep back to the start and starve the later
- * rows, and no column or table is needed. When the table grows past a slice
- * boundary the split reshuffles once; a row may then wait one extra cycle.
+ * **Bounded runs without stored state.** A run checks at most `batchSize` rows. The
+ * eligible ids are sorted, cut into `ceil(count / batchSize)` consecutive windows,
+ * and the UTC day picks the window, so every row is checked once per cycle. The
+ * position comes from the clock, not from a cursor, so a restart (every deploy)
+ * cannot send the sweep back to the start and starve the later rows, and no column
+ * or table is needed. When rows are added or removed the windows shift, so a row may
+ * wait one extra cycle or be checked twice in one; never more than `batchSize` a run.
  *
  * Run by hand with:
  *   tsx src/jobs/checkAssetRowObjects.ts
  */
 
-import { createHash } from 'node:crypto';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { db as defaultDb } from '../integrations/db/client.js';
 import { headObject, isObjectStoreConfigured } from '../integrations/r2/client.js';
@@ -57,7 +56,7 @@ const DEFAULT_MAX_EVENTS = 50;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Rows loaded per query when resolving a slice's ids to rows. */
+/** Rows loaded per query when resolving a window's ids to rows. */
 const LOAD_CHUNK = 500;
 
 export interface AssetRowCheckOutcome {
@@ -71,7 +70,7 @@ export interface AssetRowCheckOutcome {
   vanished: number;
   /** Missing rows past `maxEvents`, counted in the one summary event. */
   suppressed: number;
-  /** Slice this run covered, and how many slices make a cycle. */
+  /** Window this run covered, and how many windows make a cycle. */
   slice: number;
   slices: number;
 }
@@ -87,16 +86,10 @@ export class AssetRowCheckAbortedError extends Error {
 export interface AssetRowCheckOptions {
   db?: PrismaClient;
   now?: Date;
-  /** Rows per run. Defaults to `ASSET_ROW_CHECK_BATCH`, then 2000. */
+  /** Most rows checked per run. Defaults to `ASSET_ROW_CHECK_BATCH`, then 2000. */
   batchSize?: number;
   /** Individual alarm events per run. Defaults to 50. */
   maxEvents?: number;
-}
-
-/** Stable, uniform bucket for an id; unlike `hashtext`, identical on every host. */
-function bucketOf(id: string, buckets: number): number {
-  const digest = createHash('sha256').update(id).digest();
-  return digest.readUInt32BE(0) % buckets;
 }
 
 const intFromEnv = (name: string, fallback: number): number => {
@@ -128,7 +121,7 @@ export async function checkAssetRowObjects(opts: AssetRowCheckOptions = {}): Pro
     const rows = await db.asset.findMany({ where: eligible, select: { id: true }, orderBy: { id: 'asc' } });
     outcome.slices = Math.max(1, Math.ceil(rows.length / batchSize));
     outcome.slice = Math.floor(now.getTime() / DAY_MS) % outcome.slices;
-    ids = rows.map((r) => r.id).filter((id) => bucketOf(id, outcome.slices) === outcome.slice);
+    ids = rows.map((r) => r.id).slice(outcome.slice * batchSize, (outcome.slice + 1) * batchSize);
   } catch (err) {
     throw new AssetRowCheckAbortedError('asset lookup failed — aborting the row check', err);
   }
@@ -146,10 +139,19 @@ export async function checkAssetRowObjects(opts: AssetRowCheckOptions = {}): Pro
     }
 
     for (const row of rows) {
-      if (!row.memory) continue;
+      if (!row.memory) {
+        outcome.vanished += 1;
+        continue;
+      }
+      // Decided from the memory's state, not from the key's shape: a locked memory can hold a
+      // plaintext-shaped leftover key, which decryptStorageKey would pass through unchanged.
+      const sessionKey = row.memory.isEncrypted ? sessionKeyCache.getByMemoryId(row.memory.id) : null;
+      if (row.memory.isEncrypted && !sessionKey) {
+        outcome.skippedEncrypted += 1;
+        continue;
+      }
       let plainKey: string;
       try {
-        const sessionKey = row.memory.isEncrypted ? sessionKeyCache.getByMemoryId(row.memory.id) : null;
         plainKey = decryptStorageKey(row.storageKey, sessionKey);
       } catch {
         outcome.skippedEncrypted += 1;
@@ -192,7 +194,7 @@ export async function checkAssetRowObjects(opts: AssetRowCheckOptions = {}): Pro
 
 /**
  * Run the row check on an interval for the server's lifetime. Daily, like the
- * orphan sweep: the slice is picked by the UTC day, so the interval must stay a day.
+ * orphan sweep: the window is picked by the UTC day, so the interval must stay a day.
  * No-ops when asset storage is unconfigured, so a deployment without it stays quiet.
  */
 export function startAssetRowCheckLoop(
@@ -207,7 +209,7 @@ export function startAssetRowCheckLoop(
       if (o.missing > 0 || o.skippedEncrypted > 0 || o.vanished > 0) {
         // eslint-disable-next-line no-console
         console.log(
-          `[janitor:row-check] slice ${o.slice + 1}/${o.slices}: checked ${o.checked}, missing ${o.missing}` +
+          `[janitor:row-check] window ${o.slice + 1}/${o.slices}: checked ${o.checked}, missing ${o.missing}` +
             ` (${o.suppressed} beyond the event cap), skipped encrypted ${o.skippedEncrypted}, vanished mid-run ${o.vanished}`,
         );
       }
