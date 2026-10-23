@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../src/lib/includes/includeHistoryFence.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../src/lib/workerSignature.js';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
@@ -119,7 +120,7 @@ async function seed() {
       const n = await node(specsId, loc, { name, content, role: 'spec.rule', revSeq: 1,
         approvedRevNo: 1, approvedBy: owner, approvedAt: date, approvalHash,
         mintedAt: date, mintedBy: owner, mintedRevNo: 1, mintedHash: approvalHash });
-      await db.$transaction(tx => ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: specsId }));
+      await withIncludeHistoryClientTransaction(db, tx => ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: specsId }));
     }
   }
   // Org-less strict-owner fixtures, including both free-standing classes.
