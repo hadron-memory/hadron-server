@@ -2802,7 +2802,8 @@ export const ORG_INCLUDE = {
     orderBy: { name: 'asc' as const },
   },
   subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
-  exchangeConnections: { where: { deletedAt: null }, orderBy: { createdAt: 'asc' as const } },
+  // No exchangeConnections here: Organization.exchangeConnections resolves
+  // through listOrgExchangeConnections, never from an eager row (hadron-internal#18).
 };
 
 // #980: `worker: true` eager-loads the bound Worker so `Session.worker`
@@ -3356,6 +3357,36 @@ export function deriveChatTitle(
 // the AI-config lib and this resolver layer share one implementation.
 
 /**
+ * An org's live exchange connections, for whoever may manage them: org ADMIN or
+ * OWNER, or a platform admin, under `requireOrgRole` (impersonation included).
+ * The ONE list predicate: `Query.exchangeConnections` refuses with its
+ * FORBIDDEN, and `Organization.exchangeConnections` masks that refusal to `[]`
+ * (hadron-internal#18), so the two surfaces always admit the same callers and
+ * return the same rows in the same order.
+ */
+export async function listOrgExchangeConnections(ctx: Context, orgId: string) {
+  await requireOrgRole(ctx, orgId, 'ADMIN');
+  return ctx.db.exchangeConnection.findMany({
+    where: { organizationId: orgId, deletedAt: null },
+    // The id tiebreak makes rows created in the same millisecond come back in
+    // one order on every read, so the two surfaces agree row for row.
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+}
+
+/**
+ * `requireEmailConnection`'s answer for a missing or deleted connection. The
+ * message is unchanged for the operation surfaces; a caller that must answer
+ * absence like denial (hadron-internal#18) can tell it apart by type.
+ */
+export class ConnectionNotFoundError extends Error {
+  constructor() {
+    super('Connection not found');
+    this.name = 'ConnectionNotFoundError';
+  }
+}
+
+/**
  * Load an email connection and enforce the shared access gate for a MAIL/
  * CALENDAR OPERATION. The ONE place connection-operation authorization lives —
  * never hand-roll a per-resolver connection gate. Connection MANAGEMENT (list,
@@ -3421,7 +3452,7 @@ export async function requireEmailConnection(
   });
   // Soft-deleted / non-existent connections fail first (before any auth
   // branch) so absence and denial stay indistinguishable.
-  if (!connection) throw new Error('Connection not found');
+  if (!connection) throw new ConnectionNotFoundError();
 
   if (ctx.appId) {
     // App / headless-run context — a covering grant is mandatory (fail-closed),

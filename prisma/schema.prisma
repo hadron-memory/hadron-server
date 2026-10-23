@@ -1405,6 +1405,8 @@ model Node {
   pendingEdges             PendingEdge[]
   usageEvents              UsageEvent[]
   revisions                NodeRevision[]
+  /// #2046 (S9): the immutable provenance of each compiled revision of this node.
+  compiledPromptRevisions  CompiledPromptRevision[]
   /// #1606 — present iff `nodeType = 'comment'` (deferred DB trigger).
   commentMeta              CommentMeta?                  @relation("CommentMetaNode")
   /// #1606 — the comments (top-level and replies) whose target is this node.
@@ -1760,6 +1762,12 @@ model Session {
   /// could not be classified. A worker's family is its live bound session's.
   /// A matching input only, never an authorization input: it is self-declared.
   family            String?
+  /// #2252 — when `llmModel` was last SELF-REPORTED (start, resume, or an
+  /// updateSession carrying a model; a repeat of the same model counts). Null
+  /// for a session that never reported, including every row from before this
+  /// column: no historical backfill. Not `updated_at`, which unrelated writes
+  /// move. Describes a self-report, not verified detection.
+  modelReportedAt   DateTime?         @map("model_reported_at")
   /// #1709 (cor:agt:070:08; Holger via Vera #10773) — a host-launched session:
   /// the host that started it, the `worker.start` operation, the task it was
   /// launched for (none for a manager's start without one), and who issued the
@@ -2551,6 +2559,37 @@ model EmailVerificationToken {
 
   @@index([email])
   @@map("email_verification_tokens")
+}
+
+/// #2046 (S9, R38): the immutable provenance of ONE compiled boot-prompt
+/// revision, written by the compile in the same transaction as that revision.
+/// Keyed by the revision, not the node: a recompile inserts a new row and never
+/// rewrites an older one (an UPDATE is refused at the SQL layer). It records
+/// what the compile selected (the root source and every include or replacing
+/// node, each as {nodeId, revNo, hash} with its effective selection settings and
+/// its place in the expansion), never copied source text, names or titles. The
+/// live compiled-from edge is a derived index of the LATEST compile; this row,
+/// read through readCompiledRevision, is the authority for a given revision.
+/// Operational state: excluded from revisions, approval and content hashes.
+model CompiledPromptRevision {
+  compiledNodeId  String   @map("compiled_node_id")
+  compiledRevNo   Int      @map("compiled_rev_no")
+  /// SHA-256 hex of the compiled text this revision holds.
+  contentHash     String   @map("content_hash")
+  /// AGENT | APP_AGENT | WORKER: the target this revision was compiled for.
+  targetKind      String   @map("target_kind")
+  targetAgentId   String   @map("target_agent_id")
+  targetAppId     String?  @map("target_app_id")
+  targetWorkerId  String?  @map("target_worker_id")
+  /// CompiledProvenance (src/lib/bootCompile/provenance.ts).
+  provenance      Json
+  occurrenceCount Int      @map("occurrence_count")
+  compiledBy      String?  @map("compiled_by")
+  createdAt       DateTime @default(now()) @map("created_at")
+  compiledNode    Node     @relation(fields: [compiledNodeId], references: [id], onDelete: Cascade)
+
+  @@id([compiledNodeId, compiledRevNo])
+  @@map("compiled_prompt_revisions")
 }
 
 /// A versioned snapshot of a Node's content. Written every time a
@@ -5473,8 +5512,9 @@ model AgentTask {
   resultSummary        String?   @map("result_summary")
   resultEvidence       String?   @map("result_evidence")
   tags                 String[]  @default([])
-  /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). Stored only in T1.
-  closeSessionWhenDone Boolean   @default(true) @map("close_session_when_done")
+  /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). False unless the assigner asks (R182, #2249): the
+  /// default only reaches a raw insert, since every create path writes the resolved value.
+  closeSessionWhenDone Boolean   @default(false) @map("close_session_when_done")
   /// The latest assignment, by hand or by the matcher, in the #1610 actor shape.
   assignedAt           DateTime? @map("assigned_at")
   assignedBy           String?   @map("assigned_by")

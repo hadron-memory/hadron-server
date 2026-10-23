@@ -884,7 +884,7 @@ export async function createRootTaskForRun(
   const source = optionalText(input.source, TASK_SOURCE_MAX, 'source');
   const tags = normalizeTags(input.tags);
   const startBy = parseStartBy(input.startBy);
-  const closeSessionWhenDone = input.closeSessionWhenDone ?? true;
+  const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
   const now = new Date();
   const evActor: EventActor = { userId: null, workerId: null, agentId: null, runId: run.id };
   const lockedAssignee = await partyWorkerForLock(principal, app.id, input.assignee);
@@ -951,7 +951,7 @@ export const agentTaskMutations = {
     const source = optionalText(input.source, TASK_SOURCE_MAX, 'source');
     const tags = normalizeTags(input.tags);
     const startBy = parseStartBy(input.startBy);
-    const closeSessionWhenDone = input.closeSessionWhenDone ?? true;
+    const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
     // #1754: backlog or pending — and a backlog task carries no assignee.
     const status = normalizeCreateStatus(input.status);
     if (status === 'backlog' && input.assignee) {

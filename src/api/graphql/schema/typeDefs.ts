@@ -2208,6 +2208,10 @@ export const typeDefs = `#graphql
     skippedDecisionCount: Int!
     "#1641 — the first 50 of those, by loc."
     skippedDecisions: [String!]!
+    "#2043 — boot prompts in this Agent system or App install memory that this caller may not approve: only the Agent's or App's manager approves them, as themselves, never through a worker session."
+    skippedBootPromptCount: Int!
+    "#2043 — the first 50 of those, by loc."
+    skippedBootPrompts: [String!]!
     "#1607 — unminted nodes of this memory with open discussion: a warning, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Ordered by loc."
     unresolvedFeedback: [UnresolvedFeedback!]!
   }
@@ -4804,6 +4808,23 @@ export const typeDefs = `#graphql
     authorization input.
     """
     family: String
+    """
+    #2252 — the model this worker's binding last reported: its newest open session's, the same fold, gate and
+    lifecycle as family. Null when unbound, when the binding reported none (an older session's is never
+    inherited), or on the same read gate as hasLiveSession. Self-declared: advisory, never authorization.
+    """
+    model: String
+    """
+    #2252 — when model was self-reported (a bind, a resume or an updateSession carrying a model; a repeat of the
+    same model counts). Null when the session never reported one. A report time, not verified detection.
+    """
+    modelReportedAt: DateTime
+    """
+    #2252 (R189) — the coarse tier of model from the platform's one model-to-tier mapping: high (opus-class),
+    mid (sonnet-class), low (haiku-class); null when the model is unmapped (no guessed equivalence for another
+    family). Advisory: a coordinator's reading aid, never an authorization or routing input in this slice.
+    """
+    tier: String
     """
     hadron-cli#487 — when this worker was last DRIVEN, over every session it has
     ever had. Null for a worker nobody has ever bound, and that null is the
@@ -9146,7 +9167,7 @@ export const typeDefs = `#graphql
     #1705 — assign a task with no assignee — a queued task (pending) or a BACKLOG task: the
     task's owner, a worker the owner reports to, or whoever manages the App
     (hrn:node:hadronmemory.com:specs:cor:agt:050:09). closeSessionWhenDone, when
-    given, replaces the task's value. Assigning a BACKLOG task moves it to
+    given, replaces the task's value; omitted, the stored value is kept. Assigning a BACKLOG task moves it to
     pending (hrn:node:hadronmemory.com:specs:cor:agt:050:02, #1754). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (already assigned: use
     reassignAgentTask), TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND, APP_UNINSTALLED.
@@ -10416,15 +10437,20 @@ export const typeDefs = `#graphql
 
     Include tags (#2167; hrn:node:hadronmemory.com:specs:cor:dmo:150:04 and
     hrn:node:hadronmemory.com:specs:cor:dmo:150:06): every tag in every copied node
-    counts as added and is resolved where it lands in the new memory. Content
-    is copied verbatim, so a relative tag to a node in the subtree resolves
-    only when the new slug equals the parent's loc. Otherwise, or when the tag
-    names a node left behind, it refuses with INCLUDE_TARGET_UNAVAILABLE. A tag
-    that closes a cycle refuses with INCLUDE_CYCLE. Either refusal names only
-    the authored tag, and nothing is created or moved.
+    counts as added and is resolved where it lands in the new memory. First, a
+    tag naming a copied node is rewritten to that node's rebased loc (a URN tag
+    to the source memory becomes the new memory's URN); only the target
+    changes, and a rewritten node loses its contentHash and authorship. A tag
+    naming anything else stays as written, so a relative tag naming a node
+    left behind refuses with INCLUDE_TARGET_UNAVAILABLE (a URN tag to a memory
+    the copier can read passes unchanged). A relative tag outside the subtree
+    whose loc equals a rebased loc also refuses (R188), and is never rewritten. A tag that closes a cycle refuses
+    with INCLUDE_CYCLE. Either refusal names the tag as it stands in the copy,
+    and nothing is created or moved.
 
-    v1 limitation: node content is copied verbatim — because both the slug and
-    node locs change, URN references among the moved nodes WILL break; and
+    v1 limitation: apart from include tags, node content is copied verbatim —
+    because both the slug and node locs change, other URN references among the
+    moved nodes WILL break; and
     unresolved PendingEdges within the subtree are dropped.
     """
     extractParentNodeToMemory(parentRef: ID!, targetUrn: String!, move: Boolean = false): Memory!
@@ -13518,7 +13544,7 @@ export const typeDefs = `#graphql
     requirements: AgentTaskRequirementsInput
     startBy: DateTime
     tags: [String!]
-    "Defaults to true (hrn:node:hadronmemory.com:specs:cor:agt:050:10)."
+    "Defaults to false: the assignee's session ends only when whoever assigns the task asks (hrn:node:hadronmemory.com:specs:cor:agt:050:10)."
     closeSessionWhenDone: Boolean
     """
     #1754 — PENDING (the default) or BACKLOG

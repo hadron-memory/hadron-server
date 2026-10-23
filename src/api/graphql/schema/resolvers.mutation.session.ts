@@ -65,7 +65,7 @@ import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
-import { deleteToolConnection, type ToolCalendarEvent } from '../../../lib/emailClient.js';
+import { deleteToolConnection, runEmailOperation, type ToolCalendarEvent } from '../../../lib/emailClient.js';
 import {
   loadLastEventBySession,
   mostRecentlyActive,
@@ -88,6 +88,8 @@ import {
   SESSION_INCLUDE,
   mapToolCalendarEvent,
   runOwnedEmailOperation,
+  requireEmailConnection,
+  ConnectionNotFoundError,
   type SessionInput,
   type UsageEventInput,
 } from './resolvers.helpers.js';
@@ -104,6 +106,7 @@ import {
 } from '../../../lib/resumeClaims.js';
 import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx } from '../../../lib/teamAttention.js';
 import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 
@@ -488,9 +491,10 @@ function modelFamilyRefresh(
   explicitFamily: string | null,
   llmModel: string | null | undefined,
   storedTool: string | null,
-): { llmModel?: string; family?: string } {
+): { llmModel?: string; modelReportedAt?: Date; family?: string } {
   const family = explicitFamily ?? (llmModel != null ? deriveFamily({ llmModel, tool: storedTool }) : null);
-  return { ...(llmModel != null ? { llmModel } : {}), ...(family != null ? { family } : {}) };
+  // #2252: a supplied model IS a report, so it stamps the time (a repeat of the same model refreshes it).
+  return { ...(llmModel != null ? { llmModel, modelReportedAt: new Date() } : {}), ...(family != null ? { family } : {}) };
 }
 
 // ── #1956: resume claims ───────────────────────────────────────────────────
@@ -1434,6 +1438,8 @@ export const sessionMutations = {
           customerId: input.customerId,
           language: input.language,
           llmModel: input.llmModel,
+          // #2252: a model given at bind is a report.
+          modelReportedAt: input.llmModel != null ? new Date() : null,
           parentSessionId: input.parentSessionId,
           prevSessionId: input.prevSessionId ?? supersedes[0]?.id ?? derivedPrevSessionId,
           // #928 coding-session provenance.
@@ -2452,22 +2458,49 @@ export const sessionMutations = {
       return true;
     },
 
+    /**
+     * Probe the owner's connection and record the outcome (hadron-internal#18).
+     * The gate runs first and alone: a denied, missing or deleted connection is
+     * the same typed FORBIDDEN, with no provider call and no write. The probe's
+     * own error, typed by the email client, reaches the caller unchanged. Each
+     * status write re-runs the gate under the connection fence that delete and
+     * grant revocation take, so authority lost during the probe writes nothing.
+     */
     testExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const operation = 'list-messages';
+      let connection: Awaited<ReturnType<typeof requireEmailConnection>>;
       try {
-        await runOwnedEmailOperation(ctx, id, 'list-messages', { top: 1 });
-        await ctx.db.exchangeConnection.update({
-          where: { id },
-          data: { syncStatus: 'OK', lastError: null, lastSyncAt: new Date() },
-        });
-        return true;
-      } catch (err: unknown) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        await ctx.db.exchangeConnection.update({
-          where: { id },
-          data: { syncStatus: 'ERROR', lastError: errMsg },
-        });
-        throw new Error(`Exchange connection test failed: ${errMsg}`);
+        connection = await requireEmailConnection(ctx, id, operation);
+      } catch (err) {
+        if (err instanceof ConnectionNotFoundError) throw authorizationDenied();
+        throw err;
       }
+      const recordStatus = async (data: { syncStatus: 'OK' | 'ERROR'; lastError: string | null; lastSyncAt?: Date }) => {
+        try {
+          await withAuthorizedTx(
+            ctx,
+            [{ kind: 'connection', id: connection.id }],
+            async (txCtx) => { await requireEmailConnection(txCtx, connection.id, operation); },
+            (tx) => tx.exchangeConnection.updateMany({ where: { id: connection.id, deletedAt: null }, data }),
+            { afterLock: async (tx) => {
+              await tx.$queryRaw`SELECT id FROM exchange_connections WHERE id = ${connection.id} FOR UPDATE`;
+            } },
+          );
+        } catch (err) {
+          // Authority lost during the probe: record nothing. Anything else is a fault.
+          if (err instanceof ConnectionNotFoundError) return;
+          if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') return;
+          throw err;
+        }
+      };
+      try {
+        await runEmailOperation(connection.provider, operation, { top: 1, connectionId: connection.toolConnectionId });
+      } catch (err: unknown) {
+        await recordStatus({ syncStatus: 'ERROR', lastError: err instanceof Error ? err.message : String(err) });
+        throw err;
+      }
+      await recordStatus({ syncStatus: 'OK', lastError: null, lastSyncAt: new Date() });
+      return true;
     },
 
     exchangeReply: async (

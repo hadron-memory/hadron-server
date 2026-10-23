@@ -238,7 +238,7 @@ describe('cor:agt:060:06 — a queued task goes to the matching worker free for 
     const [ev] = await db.agentTeamEvent.findMany({ where: { taskId: t.id } });
     expect(ev).toMatchObject({
       type: 'assignment.matched', subjectWorkerId: baloo.id, actorUserId: null, actorWorkerId: null,
-      payload: { assignee: { workerId: baloo.id }, family: 'codex', closeSessionWhenDone: true },
+      payload: { assignee: { workerId: baloo.id }, family: 'codex', closeSessionWhenDone: false }, // the stored value, the default since #2249
       createdAt: at('11:01'),
     });
   });

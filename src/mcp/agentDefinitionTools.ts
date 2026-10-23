@@ -113,12 +113,11 @@ async function systemMemoryUrn(db: PrismaClient, agentId: string): Promise<strin
 
 export function registerAgentDefinitionTools(server: McpServer, deps: { db: PrismaClient; auth: AuthContext }): void {
   const { db, auth } = deps;
-  const agentRef = z.string().min(1).describe('The Agent: its ID or fully-qualified URN (hrn:agent:<root>:<slug>).');
 
   server.tool(
     'hadron_agent_tasks',
     "List an Agent's tasks (cor:dmo:050:15): every runnable node in its effective system memory, across its base chain, and every task the tasks index (Agent.tasksIndexRef) of an Agent in the chain lists, each once. A task an index lists carries that edge's name as its Trigger; a task no index lists has none. A base's task keeps its own URN and says which Agent it is inherited from. Readable by whoever may read the Agent's system memory. Returns the same list as GraphQL agentTaskList. To act on a task, follow the Trigger that matches your situation and read the task by its URN; for an inherited one, read it at its 'Read through' address (the same loc in this Agent's own system memory), since you may be able to read the Agent and not its base.",
-    { agentRef },
+    SHAPE_HADRON_AGENT_TASKS,
     async ({ agentRef: ref }) => {
       try {
         const { id } = await resolveAgentRef(db, ref);
@@ -140,7 +139,7 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
   server.tool(
     'hadron_agent_processes',
     "List an Agent's processes (cor:dmo:050:16): the ones it starts or owns, listed in its processes index (Agent.processesIndexRef) with each edge's Trigger, then the ones it's involved in, derived from stage edges (named 'stage …') to one of its tasks, which carry no trigger. Each is listed once, with its Kind. Same gate as hadron_agent_tasks; returns the same list as GraphQL agentProcessList. A base's process the Agent inherits says 'Inherited from' and gives a 'Read through' address in this Agent's own system memory.",
-    { agentRef },
+    SHAPE_HADRON_AGENT_PROCESSES,
     async ({ agentRef: ref }) => {
       try {
         const { id } = await resolveAgentRef(db, ref);
@@ -161,11 +160,6 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
     },
   );
 
-  const indexRef = (which: 'tasks' | 'processes', spec: string) => z.string().min(1).nullable().optional().describe(
-    `The ${which}-index node (${spec}): its ID or fully-qualified URN. Omit it to leave the pointer as it is; ` +
-    'null clears it. The node must be live and readable to you, or the call is refused as NODE_NOT_FOUND.',
-  );
-
   /** A pointer as the caller may see it: the node's URN when its memory is readable to them, else the bare id GraphQL returns. */
   const pointer = async (nodeId: string | null): Promise<string> => {
     if (!nodeId) return 'none';
@@ -177,10 +171,7 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
   server.tool(
     'hadron_agent_set_base',
     "Set, change or clear an Agent's base (cor:dmo:050:14): the one Agent it extends and inherits from (Agent.extendsAgentId). Pass the base's ID or URN to set or change it, or null to clear it. Only whoever manages the Agent may change its base; managing the base is not enough. Refusals, in this order: for the Agent you're changing, AGENT_NOT_FOUND when it doesn't exist, is retired, or is one you can't read (an Agent you can't read is never confirmed to exist), and FORBIDDEN when you can read it but don't manage it; for the base, AGENT_NOT_FOUND when it doesn't exist, is retired, or is one you hold no licence to; then AGENT_ORG_GRANT_REQUIRED, AGENT_ORG_GRANT_INACTIVE or AGENT_SUBSCRIPTION_REQUIRED (extending another organisation's Agent needs the grant a cross-organisation include needs); then AGENT_BASE_CYCLE (an Agent can't extend itself or an Agent that extends it) and AGENT_BASE_CHAIN_TOO_LONG (at most 4 Agents in a chain, counting every Agent that already extends this one). The same mutation as GraphQL setAgentBase. Read what it now inherits with hadron_agent_tasks / hadron_agent_processes.",
-    {
-      agentRef: agentRef.describe('The Agent whose base to change (the child): its ID or fully-qualified URN (hrn:agent:<root>:<slug>).'),
-      baseRef: z.string().min(1).nullable().describe('The base Agent: its ID or fully-qualified URN. null clears the base. Required, so leaving it out never clears one by accident.'),
-    },
+    SHAPE_HADRON_AGENT_SET_BASE,
     async ({ agentRef: ref, baseRef }) => {
       try {
         const agent = await M.setAgentBase({}, { ref, baseRef }, contextOf(db, auth));
@@ -200,11 +191,7 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
   server.tool(
     'hadron_agent_set_index_refs',
     "Set or clear an Agent's tasks-index and processes-index pointers (cor:dmo:050:15, :16; Agent.tasksIndexRef and Agent.processesIndexRef). The index node's incoming edges, named for their trigger, are what hadron_agent_tasks and hadron_agent_processes list as Triggers. Each pointer has three states: omit it to leave it as it is, pass null to clear it, or pass a node's ID or URN to set it. Only whoever manages the Agent may change them. Refusals: AGENT_NOT_FOUND when the Agent doesn't exist, is retired, or is one you can't read, FORBIDDEN when you can read it but don't manage it, and NODE_NOT_FOUND for an index node that doesn't exist or that you can't read. The same mutation as GraphQL setAgentIndexRefs.",
-    {
-      agentRef,
-      tasksIndexRef: indexRef('tasks', 'cor:dmo:050:15'),
-      processesIndexRef: indexRef('processes', 'cor:dmo:050:16'),
-    },
+    SHAPE_HADRON_AGENT_SET_INDEX_REFS,
     async ({ agentRef: ref, tasksIndexRef, processesIndexRef }) => {
       try {
         // Only what the caller passed: an omitted pointer stays omitted, so the
@@ -225,3 +212,30 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
     },
   );
 }
+
+const agentRef = z.string().min(1).describe('The Agent: its ID or fully-qualified URN (hrn:agent:<root>:<slug>).');
+
+const indexRef = (which: 'tasks' | 'processes', spec: string) => z.string().min(1).nullable().optional().describe(
+  `The ${which}-index node (${spec}): its ID or fully-qualified URN. Omit it to leave the pointer as it is; ` +
+  'null clears it. The node must be live and readable to you, or the call is refused as NODE_NOT_FOUND.',
+);
+
+// ── #2260: parameter shapes, built ONCE per process ──────────────────────────
+// A shape is pure data (no session state: moved here only because nothing in it resolves to a
+// function- or block-scoped binding, so `tsc` rejects one that captures `auth` or any other
+// per-session value). Every MCP session registers these same objects instead of rebuilding ~15 MB.
+
+const SHAPE_HADRON_AGENT_TASKS = { agentRef };
+
+const SHAPE_HADRON_AGENT_PROCESSES = { agentRef };
+
+const SHAPE_HADRON_AGENT_SET_BASE = {
+  agentRef: agentRef.describe('The Agent whose base to change (the child): its ID or fully-qualified URN (hrn:agent:<root>:<slug>).'),
+  baseRef: z.string().min(1).nullable().describe('The base Agent: its ID or fully-qualified URN. null clears the base. Required, so leaving it out never clears one by accident.'),
+};
+
+const SHAPE_HADRON_AGENT_SET_INDEX_REFS = {
+  agentRef,
+  tasksIndexRef: indexRef('tasks', 'cor:dmo:050:15'),
+  processesIndexRef: indexRef('processes', 'cor:dmo:050:16'),
+};

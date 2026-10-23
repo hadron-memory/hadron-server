@@ -23,7 +23,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { NO_INSTALL_AUDIENCE, installMemoryAudience, isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
 import { lockAgentDefinitionAuthority } from '../../../lib/auth/managedSystemMemory.js';
 import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
@@ -250,6 +250,55 @@ async function lockInstallAuthority(tx: Prisma.TransactionClient, ctx: Context, 
     }
   }
   return true;
+}
+
+/**
+ * #2043 (Dara's P2-1 on #2235) — the authority anchors {@link lockInstallAuthority} takes for this
+ * memory, for a door whose transaction opens with `withAuthorizedMemoryTx`: passed as its
+ * `otherAnchors`, they are acquired in the SAME ordered call as the memory/org anchors, so App and
+ * Agent come first (anchor kind order) exactly as the revokers take them, and the in-gate
+ * `lockInstallAuthority` is then a no-op re-acquire. For a live Agent's own system memory, the anchors
+ * lockAgentDefinitionAuthority takes (#2206 parity). Empty for any other memory. A plain read of the
+ * identity, no lock.
+ */
+export async function memoryAuthorityAnchors(
+  db: Pick<PrismaClient, 'memory' | 'app' | 'agent'>,
+  ctx: Pick<Context, 'userId'>,
+  memoryId: string,
+): Promise<AuthorityAnchor[]> {
+  const memory = await db.memory.findUnique({
+    where: { id: memoryId },
+    select: { class: true, appId: true, installOfAgentId: true, isInstallMemory: true },
+  });
+  if (!memory) return [];
+  if (!isInstallMemoryRow(memory)) {
+    // #2206 parity: a live Agent's own system memory takes the anchors lockAgentDefinitionAuthority takes (the Agent,
+    // its tenant, the actor), so an approval's deciding gate is ordered after a transfer or demotion that won.
+    if (memory.class !== 'system') return [];
+    const agents = await db.agent.findMany({
+      where: { systemMemoryId: memoryId, deletedAt: null },
+      select: { id: true, organizationId: true, ownerUserId: true },
+    });
+    if (agents.length === 0) return [];
+    return [
+      ...agents.flatMap((agent) => [
+        { kind: 'agent' as const, id: agent.id },
+        ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+        ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+      ]),
+      ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+    ];
+  }
+  if (!memory.appId) return [];
+  const app = await db.app.findUnique({ where: { id: memory.appId }, select: { organizationId: true, ownerUserId: true } });
+  if (!app) return [];
+  return [
+    { kind: 'app', id: memory.appId },
+    ...(memory.installOfAgentId ? [{ kind: 'agent' as const, id: memory.installOfAgentId }] : []),
+    ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+    ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+  ];
 }
 
 /**
