@@ -88,7 +88,8 @@ import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
 import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startPendingEdgePromotionSweepLoop } from './jobs/promotePendingEdges.js';
-import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
+import { startEmbeddingWorkerLoop, startEmbeddingBusListener, stopEmbeddingWorker, assertEmbeddingObligationsReconciled } from './jobs/embedNodes.js';
+import { stopEmbeddingPublisher } from './services/embedding/enqueue.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
 import {
@@ -1994,11 +1995,16 @@ export async function createServer(): Promise<Express> {
   // tests (which drive embedNode/drainEmbeddingQueue directly). Warns if any
   // memory is vector-indexed but no embedding endpoint is configured.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_EMBED_WORKER !== 'true') {
-    startEmbeddingWorkerLoop(db);
+    // No legacy timestamp-only work may slip into the new token worker. Serving writes
+    // remains available with explicit pending status if operator reconciliation is needed.
+    let embeddingReady = false;
+    try { await assertEmbeddingObligationsReconciled(db); embeddingReady = true; }
+    catch (error) { console.error('[embed-worker] admission stays closed:', error); }
+    if (embeddingReady) startEmbeddingWorkerLoop(db);
     // Same-process bus listener (spec 039): near-instant retries + backfill
     // drains via embed.wake.v1. No-op (null) when NATS_URL is unset — the
     // sweep loop above is the standalone fallback (D-2026-06-17-004).
-    startEmbeddingBusListener(db).catch((err) => {
+    if (embeddingReady) startEmbeddingBusListener(db).catch((err) => {
       // A subscribe/consumer failure (broker auth, incompatible durable)
       // must not become an unhandled rejection that can take boot down —
       // the sweep loop above keeps draining regardless (PR-489 review,
@@ -2066,5 +2072,8 @@ export async function createServer(): Promise<Express> {
   // sentryApolloPlugin instead. No-op when SENTRY_DSN is unset.
   Sentry.setupExpressErrorHandler(app);
 
+  app.locals.stopEmbeddingWorker = () => Promise.all([
+    stopEmbeddingWorker(db), stopEmbeddingPublisher(),
+  ]).then(results => results.every(Boolean));
   return app;
 }

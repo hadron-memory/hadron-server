@@ -1247,7 +1247,10 @@ model Node {
   /// Set when this node needs (re-)embedding; cleared on success. The single
   /// work signal the embedding worker drains (FR-006/FR-007). Operational
   /// state only — intentionally NOT versioned on NodeRevision.
-  embeddingPendingAt  DateTime?           @map("embedding_pending_at")
+  embeddingPendingAt DateTime? @map("embedding_pending_at")
+  /// internal#4: opaque identity of one durable obligation; time only schedules it.
+  /// Operational, never copied into revisions or approval/authorship state.
+  embeddingWorkToken String?   @db.Uuid @map("embedding_work_token")
   /// Set when an embed attempt failed (record, not a work signal). Transient
   /// failures keep pending set for retry; permanent failures clear pending (FR-009).
   embeddingFailedAt   DateTime?           @map("embedding_failed_at")
@@ -1762,6 +1765,12 @@ model Session {
   /// could not be classified. A worker's family is its live bound session's.
   /// A matching input only, never an authorization input: it is self-declared.
   family            String?
+  /// #2252 — when `llmModel` was last SELF-REPORTED (start, resume, or an
+  /// updateSession carrying a model; a repeat of the same model counts). Null
+  /// for a session that never reported, including every row from before this
+  /// column: no historical backfill. Not `updated_at`, which unrelated writes
+  /// move. Describes a self-report, not verified detection.
+  modelReportedAt   DateTime?         @map("model_reported_at")
   /// #1709 (cor:agt:070:08; Holger via Vera #10773) — a host-launched session:
   /// the host that started it, the `worker.start` operation, the task it was
   /// launched for (none for a manager's start without one), and who issued the

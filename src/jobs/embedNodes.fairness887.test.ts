@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /**
  * #887 Slice 1 — per-memory round-robin fairness in the embedding drain.
  *
@@ -27,12 +28,13 @@
  * embedNodes.bus.test.ts.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import type { EmbeddingClient } from '../lib/embedding/client.js';
-import { drainEmbeddingQueue, handleEmbedWake } from './embedNodes.js';
+import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../lib/embedding/index.js';
+import { drainEmbeddingQueue, handleEmbedWake, embeddingDispatcher } from './embedNodes.js';
 
 const DIM = 768;
 
@@ -43,9 +45,8 @@ function oneHot(i: number): number[] {
 }
 
 /**
- * Probe client: records every abstract in embed order. The call sequence IS
- * the observable selection order (the drain embeds selected nodes
- * sequentially), so "served in the first batch" is "call index < batchSize".
+ * Probe client records endpoint texts and counts. Admission order is observed
+ * separately: concurrent DB reads can reorder the two pipelines' provider arrivals.
  */
 function probeClient(opts: { failAbstracts?: Set<string> } = {}): {
   client: EmbeddingClient;
@@ -71,6 +72,7 @@ function probeClient(opts: { failAbstracts?: Set<string> } = {}): {
 }
 
 let orgId: string;
+let admittedIds: string[] = [];
 
 async function makeMemory(suffix: string, vectorIndexEnabled = true): Promise<string> {
   const m = await db.memory.create({
@@ -104,7 +106,7 @@ async function makeDueNode(memoryId: string, loc: string, stamp: Date): Promise<
       name: loc,
       content: `body of ${loc}`,
       abstract,
-      embeddingPendingAt: stamp,
+      embeddingPendingAt: stamp, embeddingWorkToken: randomUUID(),
     },
   });
   return { id: n.id, memoryId, loc, abstract };
@@ -124,6 +126,14 @@ function callIndexesForMemory(calls: string[], nodes: DueNode[], memoryId: strin
 }
 
 beforeEach(async () => {
+  admittedIds = [];
+  const read = db.node.findUnique.bind(db.node);
+  vi.spyOn(db.node, 'findUnique').mockImplementation(((args: any) => {
+    // Observe the first DB operation of an admitted pipeline, before async DB
+    // completion can reorder provider arrivals. Forward the real query unchanged.
+    if (args.select?.memory && args.select?.embeddingWorkToken) admittedIds.push(args.where.id);
+    return read(args);
+  }) as typeof db.node.findUnique);
   await cleanDb(db);
   process.env.EMBEDDING_API_URL = 'http://stub.local/api/embed';
   const org = await db.organization.create({
@@ -132,7 +142,14 @@ beforeEach(async () => {
   orgId = org.id;
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await vi.waitFor(() => {
+    const state = embeddingDispatcher(db).state();
+    expect(state.active).toBe(0);
+    expect(state.selecting || state.scheduled).toBe(false);
+  });
+  resetEmbeddingClientForTests();
+  vi.restoreAllMocks();
   delete process.env.EMBEDDING_API_URL;
 });
 
@@ -236,7 +253,7 @@ describe('#887 Slice 1 — the convoy (red on global FIFO)', () => {
     // The first min(M, B) = 3 selections belong to 3 DISTINCT memories (on
     // main they are a0,a1,a2 — all memory A).
     const firstThreeMems = new Set(
-      [0, 1, 2].map((i) => nodes.find((n) => n.abstract === calls[i])?.memoryId),
+      [0, 1, 2].map((i) => nodes.find((n) => n.id === admittedIds[i])?.memoryId),
     );
     expect(firstThreeMems.size).toBe(3);
 
@@ -251,8 +268,8 @@ describe('#887 Slice 1 — the convoy (red on global FIFO)', () => {
     // restricted to that memory's abstracts follows ascending stamp order
     // (each loc's suffix is its position in that memory's stamp sequence).
     for (const [memId, prefix] of [[memA, 'a'], [memB, 'b'], [memC, 'c']] as const) {
-      const served = callIndexesForMemory(calls, nodes, memId)
-        .map((i) => nodes.find((n) => n.abstract === calls[i])!.loc);
+      const served = admittedIds.map(id => nodes.find(n => n.id === id))
+        .filter(n => n?.memoryId === memId).map(n => n!.loc);
       const suffixes = served.map((loc) => Number(loc.slice(prefix.length)));
       expect(
         suffixes.every((s, k) => k === 0 || suffixes[k - 1] < s),
@@ -273,10 +290,12 @@ describe('#887 Slice 1 — the convoy (red on global FIFO)', () => {
     const bNode = await makeDueNode(memB, 'b-fresh', new Date());
 
     const { client, calls } = probeClient();
+    setEmbeddingClientForTests(client);
     await handleEmbedWake(db, {}, client);
+    await vi.waitFor(() => expect(calls).toContain(bNode.abstract));
 
     expect(calls.indexOf(bNode.abstract)).toBeGreaterThanOrEqual(0);
-    expect(calls.indexOf(bNode.abstract)).toBeLessThan(25);
+    expect(admittedIds.indexOf(bNode.id)).toBeLessThan(25);
   });
 });
 
@@ -296,8 +315,10 @@ describe('#887 Slice 1 — parity controls (green before and after)', () => {
     const { client, calls } = probeClient();
     const r = await drainEmbeddingQueue(db, { batchSize: 10, client });
     expect(r.embedded).toBe(7);
-    expect(calls).toEqual(['abstract of a0', 'abstract of a1', 'abstract of a2', 'abstract of a3',
-      'abstract of a4', 'abstract of a5', 'abstract of a6']);
+    const byId = new Map((await db.node.findMany({ where: { id: { in: admittedIds } }, select: { id: true, abstract: true } })).map(n => [n.id, n.abstract]));
+    const ordered = ['abstract of a0', 'abstract of a1', 'abstract of a2', 'abstract of a3', 'abstract of a4', 'abstract of a5', 'abstract of a6'];
+    expect(admittedIds.map(id => byId.get(id))).toEqual(ordered);
+    expect([...calls].sort()).toEqual([...ordered].sort());
   });
 
   it('same-stamp ties within a memory resolve deterministically by node id', async () => {
@@ -309,7 +330,8 @@ describe('#887 Slice 1 — parity controls (green before and after)', () => {
 
     const { client, calls } = probeClient();
     await drainEmbeddingQueue(db, { batchSize: 10, client });
-    expect(calls).toEqual(expected);
+    expect(admittedIds).toEqual([...nodes].sort((x, y) => x.id < y.id ? -1 : 1).map(n => n.id));
+    expect([...calls].sort()).toEqual([...expected].sort());
   });
 
   it('never selects a FUTURE-dated backoff retry to manufacture fairness', async () => {
@@ -390,7 +412,7 @@ describe('#887 Slice 1 — parity controls (green before and after)', () => {
         // flight — the upsert's captured-stamp guard must refuse to write.
         await db.node.update({
           where: { id: bNode.id },
-          data: { embeddingPendingAt: new Date() },
+          data: { embeddingPendingAt: new Date(), embeddingWorkToken: randomUUID() },
         });
         return texts.map(() => oneHot(next++));
       },
@@ -404,7 +426,7 @@ describe('#887 Slice 1 — parity controls (green before and after)', () => {
     expect(row.embeddingPendingAt).not.toBeNull(); // fresh stamp owns the node
   });
 
-  it("an unindexed memory's due node is skipped, cleared, and does not block others", async () => {
+  it("an unindexed memory's due node is excluded without an admitted pipeline", async () => {
     const memPlain = await makeMemory('plain', false);
     const memB = await makeMemory('b');
     const plainNode = await makeDueNode(memPlain, 'p0', new Date(Date.now() - 3_600_000));
@@ -412,15 +434,15 @@ describe('#887 Slice 1 — parity controls (green before and after)', () => {
 
     const { client, calls } = probeClient();
     const r = await drainEmbeddingQueue(db, { batchSize: 5, client });
-    expect(r.skipped).toBe(1);
+    expect(r.skipped).toBe(0);
     expect(r.embedded).toBe(1);
     expect(calls).not.toContain(plainNode.abstract);
     expect(calls).toContain(bNode.abstract);
     const row = await db.node.findUniqueOrThrow({ where: { id: plainNode.id } });
-    expect(row.embeddingPendingAt).toBeNull(); // cleared, not re-selected forever
+    expect(row.embeddingPendingAt).not.toBeNull(); // excluded in SQL; no pipeline or marker mutation
   });
 
-  it('a soft-deleted due node is a parity skip (marker retained) and does not block others', async () => {
+  it('a soft-deleted due node is excluded (marker retained) and does not block others', async () => {
     const memA = await makeMemory('a');
     const memB = await makeMemory('b');
     const gone = await makeDueNode(memA, 'gone', new Date(Date.now() - 3_600_000));
@@ -429,7 +451,7 @@ describe('#887 Slice 1 — parity controls (green before and after)', () => {
 
     const { client, calls } = probeClient();
     const r = await drainEmbeddingQueue(db, { batchSize: 5, client });
-    expect(r.skipped).toBe(1);
+    expect(r.skipped).toBe(0);
     expect(r.embedded).toBe(1);
     expect(calls).toContain(bNode.abstract);
     const row = await db.node.findUniqueOrThrow({ where: { id: gone.id } });

@@ -1191,6 +1191,7 @@ export const memoryMutations = {
           where: { memoryId: id },
           data: {
             embeddingPendingAt: null,
+            embeddingWorkToken: null,
             embeddingFailedAt: null,
             embeddingError: null,
             embeddingAttempts: 0,

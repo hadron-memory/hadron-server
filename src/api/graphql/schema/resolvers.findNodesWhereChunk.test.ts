@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /**
  * #719 — `where` honored on chunk-granularity passages (Codex review on the
  * vector/hybrid PR). A `contentChunks` memory returns passages; a passage whose
@@ -41,7 +42,7 @@ let bId: string;
 async function seedChunkNode(loc: string, content: string, properties: Record<string, unknown>) {
   const id = generateId();
   await db.node.create({
-    data: { id, memoryId: memId, loc, name: loc, content, properties, embeddingPendingAt: new Date() } as any,
+    data: { id, memoryId: memId, loc, name: loc, content, properties, embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date() } as any,
   });
   expect(await embedNode(db, id)).toBe('embedded');
   return id;

@@ -13,7 +13,7 @@
 // (`roles:<role>` nodes, `data.names`), read at CASTING time — and only when
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
-import { normalizeFamily } from '../../../lib/agentTasks/family.js';
+import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { GraphQLError } from 'graphql';
@@ -1766,6 +1766,8 @@ export const workerQueries = {
           lastActiveAt: null,
           bound: false,
           bindingFamily: null,
+          bindingModel: null,
+          modelReportedAt: null,
         },
       })),
     };
@@ -1856,11 +1858,26 @@ export const workerQueries = {
  * lapsed but open session keeps its family; only an end, or a newer bind,
  * clears or replaces it (#1723 review, Diego P2-2).
  */
+/** The #2252 fields' shared read: masked to null on the family gate, else the activity row of the one fold. */
+async function bindingModelOf(
+  ctx: Context,
+  worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+  info?: { operation?: { operation?: string } },
+): Promise<WorkerActivity | null> {
+  if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+  if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity;
+  const activity = await loadAppWorkerActivity(ctx, worker.appId, { memoize: info?.operation?.operation === 'query' });
+  return activity.get(worker.id) ?? null;
+}
+
 export type WorkerActivity = {
   hasLiveSession: boolean;
   lastActiveAt: Date | null;
   bound: boolean;
   bindingFamily: string | null;
+  /** #2252: the newest open session's reported model, its report time, and the tier derived from it. */
+  bindingModel: string | null;
+  modelReportedAt: Date | null;
 };
 
 /**
@@ -1880,7 +1897,7 @@ async function queryWorkerActivity(
   now: Date,
 ): Promise<Map<string, WorkerActivity>> {
   const rows = await ctx.db.$queryRaw<
-    { workerId: string; live: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null }[]
+    { workerId: string; live: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null; bindingModel: string | null; modelReportedAt: Date | null }[]
   >(workerActivitySql(scope, now));
   return new Map<string, WorkerActivity>(
     rows.map((row) => [
@@ -1890,6 +1907,8 @@ async function queryWorkerActivity(
         lastActiveAt: row.lastActiveAt,
         bound: row.bound,
         bindingFamily: normalizeFamily(row.bindingFamily),
+        bindingModel: row.bindingModel,
+        modelReportedAt: row.modelReportedAt,
       },
     ]),
   );
@@ -1948,6 +1967,13 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
            bool_or(s.ended_at IS NULL) AS "bound",
            (array_agg(s.family ORDER BY s.started_at DESC, s.id DESC)
               FILTER (WHERE s.ended_at IS NULL))[1] AS "bindingFamily",
+           -- #2252: the model and its report time come from the SAME newest open
+           -- session as the family (same ordering), so a newer bind that reported
+           -- none does not inherit an older one's, and the two never mix sessions.
+           (array_agg(s.llm_model ORDER BY s.started_at DESC, s.id DESC)
+              FILTER (WHERE s.ended_at IS NULL))[1] AS "bindingModel",
+           (array_agg(s.model_reported_at ORDER BY s.started_at DESC, s.id DESC)
+              FILTER (WHERE s.ended_at IS NULL))[1] AS "modelReportedAt",
            max(LEAST(GREATEST(
              s.started_at,
              -- The reaper advances updated_at while setting auto_expired_at.
@@ -2622,6 +2648,27 @@ export const workerFieldResolvers = {
       });
       return activity.get(worker.id)?.bindingFamily ?? null;
     },
+    /** #2252 — the model its binding last reported (the newest open session's; same gate and fold as `family`). Self-declared; never authorization. */
+    model: async (
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string | null> => (await bindingModelOf(ctx, worker, info))?.bindingModel ?? null,
+    /** #2252 — when that model was self-reported; null when the session never reported one. */
+    modelReportedAt: async (
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<Date | null> => (await bindingModelOf(ctx, worker, info))?.modelReportedAt ?? null,
+    /** #2252 / R189 — the coarse tier of `model` from the server's one mapping; null when unmapped. Advisory only. */
+    tier: async (
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string | null> => tierOf((await bindingModelOf(ctx, worker, info))?.bindingModel),
     /**
      * hadron-cli#487 — when this worker was last DRIVEN, across every session
      * it has ever had; null for a worker nobody has ever bound.

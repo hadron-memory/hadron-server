@@ -4807,6 +4807,23 @@ export const typeDefs = `#graphql
     """
     family: String
     """
+    #2252 — the model this worker's binding last reported: its newest open session's, the same fold, gate and
+    lifecycle as family. Null when unbound, when the binding reported none (an older session's is never
+    inherited), or on the same read gate as hasLiveSession. Self-declared: advisory, never authorization.
+    """
+    model: String
+    """
+    #2252 — when model was self-reported (a bind, a resume or an updateSession carrying a model; a repeat of the
+    same model counts). Null when the session never reported one. A report time, not verified detection.
+    """
+    modelReportedAt: DateTime
+    """
+    #2252 (R189) — the coarse tier of model from the platform's one model-to-tier mapping: high (opus-class),
+    mid (sonnet-class), low (haiku-class); null when the model is unmapped (no guessed equivalence for another
+    family). Advisory: a coordinator's reading aid, never an authorization or routing input in this slice.
+    """
+    tier: String
+    """
     hadron-cli#487 — when this worker was last DRIVEN, over every session it has
     ever had. Null for a worker nobody has ever bound, and that null is the
     point: a casting nobody picked up renders identically to one worked

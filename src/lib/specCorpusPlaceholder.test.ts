@@ -624,7 +624,7 @@ describe('a placeholder over a tombstone is indistinguishable from a fresh one (
     'deletedAt', 'deletedBy', 'revSeq', 'revisionContentHash', 'lastAccessedAt',
     // Embedding-queue bookkeeping, not authored content: with no content there
     // is nothing to embed, so a stale pending stamp only means an empty pass.
-    'embeddingPendingAt',
+    'embeddingPendingAt', 'embeddingWorkToken',
   ]);
 
   it('inherits nothing from the deleted spec: every other column matches a fresh reservation', async () => {

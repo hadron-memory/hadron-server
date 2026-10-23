@@ -9,6 +9,8 @@ import { ensureCurrentNodeRevisionInTransaction, jsonOrDbNull } from '../../lib/
 import { carryGovernedSignals } from '../../lib/governedSignals.js';
 import { carryNodeAuthorship, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { computeContentHash } from '../../lib/contentHash.js';
+import { resetEmbeddingObligations } from '../../services/embedding/obligation.js';
+import { memoryIsVectorIndexed } from '../../lib/embedding/indexing.js';
 import {
   pendingEdgeStableTargetId,
   pendingEdgeStableTargetKey,
@@ -356,6 +358,7 @@ export async function cloneMemoryGraphInTx(
   });
   if (nodeRows.length > 0) {
     await tx.node.createMany({ data: nodeRows });
+    await resetEmbeddingObligations(tx, nodeRows.map(row => row.id!), memoryIsVectorIndexed(source));
   }
 
   // ── Edges ──────────────────────────────────────────────────────────

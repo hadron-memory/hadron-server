@@ -1,3 +1,4 @@
+import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, withSyncCaller } from '../../lib/bootPrompt.js';
 import { currentActor } from '../../lib/requestActor.js';
 import { assertIncludesWritable, prospectiveNodeId, includeRefusalText, storedIncludeTags, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
@@ -32,7 +33,7 @@ import { serializeTags } from '../db/provider.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { execGit } from './execGit.js';
 import { validateMemorySource } from '../../lib/gitSource.js';
-import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
+import { wakeEmbeddingQueue } from '../../services/embedding/enqueue.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
 import { Prisma, type Memory, type Node, type Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
@@ -428,16 +429,10 @@ const syncGraphFromGithubAsSystem = async (
     });
 
     // 4. Upsert all nodes and edges into the database (transactional)
-    // Spec 033 T029 — defer embedding enqueue until after the transaction
-    // commits. The plaintext was loaded from the filesystem by
-    // loadNodeFromFs (FR-013 reconcile already ran), so it's safe to use
-    // as in-closure plaintext for the prompt-drain embed — matching the
-    // GraphQL / MCP write paths so encrypted memories embed correctly at
-    // write time without a session key (FR-027).
-    const pendingEmbeds: Array<{
-      nodeId: string;
-      plaintext: { content: string | null; abstract: string | null };
-    }> = [];
+    // Git sync refuses encrypted memories under its authority transaction. Stamp
+    // ordinary obligations with each accepted write, then issue ONE post-commit
+    // wake: no second plaintext/job list grows with the import size.
+    let embeddingWakeNeeded = false;
     // #1061 — accumulated INSIDE the transaction (that is where the surviving
     // row ids are known) but declared outside it so the refs survive the commit
     // and can be returned to the caller.
@@ -519,7 +514,8 @@ const syncGraphFromGithubAsSystem = async (
     for (;;) {
     // Every accumulator restarts with the attempt: a rolled-back attempt
     // wrote nothing, so nothing it reported is true.
-    for (const acc of [pendingEmbeds, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedInvalidIncludes, deferredLateRows, heldMoves]) {
+    embeddingWakeNeeded = false;
+    for (const acc of [writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedInvalidIncludes, deferredLateRows, heldMoves]) {
       acc.length = 0;
     }
     pendingSourceMemories = [];
@@ -1237,10 +1233,8 @@ const syncGraphFromGithubAsSystem = async (
         writtenNodes.push({ id: rowId, loc, memoryId: graph.id });
         locToRowId.set(loc, rowId);
         if (node.id && !idSettled(node.id)) fileIdToRowId.set(node.id, rowId);
-        pendingEmbeds.push({
-          nodeId: rowId,
-          plaintext: { content: node.content ?? null, abstract: node.abstract ?? null },
-        });
+        const embeddingToken = await stampEmbeddingObligation(tx, rowId, graph.id);
+        if (embeddingToken) embeddingWakeNeeded = true;
 
       }
 
@@ -1614,17 +1608,8 @@ const syncGraphFromGithubAsSystem = async (
       },
     }).catch(() => {});
 
-    // 6. Spec 033 T029 — enqueue embedding for each upserted node now that
-    // the transaction has committed. Fire-and-forget; enqueueNodeEmbedding
-    // is a no-op when the memory isn't vector-indexed and is internally
-    // catch-all so it can never break the sync.
-    for (const e of pendingEmbeds) {
-      void enqueueNodeEmbedding(db, {
-        nodeId: e.nodeId,
-        memoryId: graph.id,
-        plaintext: e.plaintext,
-      });
-    }
+    // The transaction is visible before any local selector or optional broker wake.
+    if (embeddingWakeNeeded) wakeEmbeddingQueue(db);
 
     if (skippedProtected.length > 0) {
       console.warn(`Sync of "${graphName}": skipped ${skippedProtected.length} file(s) under a Channel's address: ${skippedProtected.join(', ')}`);
