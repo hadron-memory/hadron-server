@@ -342,3 +342,45 @@ not production expansion. Basil's checked task covers comments/source restore
 only and uses the #2273 primitive as a dependency. No competing helper or epoch
 implementation; actual compile both orders and integrated #2263 epoch evidence
 remain required. #2274 remains separately open.
+
+### Dependent comment/source-restore integration evidence
+
+Basil's checked cut `576f24c2` is composed only on the evidence branch, stacked
+on #2273; it is not part of the #2273 delivery. It uses the shared prepared
+primitive, class-system scope with locked drift refusal/retry, and uniform
+resolve/reopen. The earlier unfenced comment diagnostic remains historical
+red evidence; on this composition it is replaced by actual foreign-comment
+edit versus compile read/write holders and inverse order. These assert exact
+Before/After output, source revision and selected-text hash in stored provenance,
+with no comment NodeRevision history. Two integrated #2263 controls additionally
+show comment edit and source restore advance the epoch: a SERIALIZABLE account
+attempt queued behind either writer fails stale before account work executes.
+This does not qualify every comment door against actual compile or complete
+Basil's whole QA. Channel-root creation, snapshot creation and old-Agent grant
+deletion remain separate open #2277 blockers; #2274 remains open.
+
+Basil's reported definition-restore failure on #2273 reproduced locally. The
+fixture claimed ADMIN only in Context while the persisted user remained READER;
+the fresh in-transaction authority gate correctly refused. Delivery `2976f653`
+persists ADMIN in that one existing test. The full user-owned Agent file passes
+25/25, without production authorization changes. A focused `-t` invocation also
+hit the file's unrelated never-started Apollo teardown; the full file avoids
+that partial-run artifact. No final full-suite or readiness claim follows.
+
+### Current-main integration: new cloneAgent caller
+
+Main `3c17ddaa` brings #2272's caller-owned `cloneMemoryGraphInTx` extraction.
+The delivery wrapper retains F-first plus its fresh authorization callback and
+passes the refreshed readable-memory set into that helper. Main's embedding
+obligation stamps/tokens are preserved alongside the prepared writer roots.
+
+A newly exposed actual integration failure remains: cloneAgent's existing
+withAuthorizedTx root does not opt into F, but writeClone calls
+reconcileStampedSourceNodes, which reaches the prepared-client guard in
+ensureCurrentNodeRevisionInTransaction. The existing cloneAgentRaces test for
+raw-edited stamped sources fails with the prepared-client refusal. Seven other
+focused files pass; total339 pass/1 fail across8files. This is a new caller to
+disposition under #2277/#2046, not a reason to weaken the guard or silently add
+a new production family while Anne is analysis-only. Xylon/Marco/Dan notified.
+The merge is not a frozen or ready head; full validation is diagnostic until
+this caller joins an accepted boundary. No activation claim.

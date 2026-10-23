@@ -1,4 +1,5 @@
 import { withAuthorizedMemoryTx } from './authorizedTx.js';
+import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 /**
  * #1294: the spec-only bulk door. Selection is explicit and belongs to one
  * draft corpus. Apply locks that corpus and every selected row, rebuilds the
@@ -396,6 +397,9 @@ export async function searchReplaceInSpecNodes(
         data.revisionContentHash = revisionStateHashRefreshMarker();
         Object.assign(data, clearNodeAuthorship());
         await tx.node.update({ where: { id: node.raw.id }, data });
+        if (node.contentChanged || node.abstractChanged) {
+          node.raw.embeddingWorkToken = await stampEmbeddingObligation(tx, node.raw.id, memoryId);
+        }
         // #2040 — a content rewrite re-checks its include tags inside the batch.
         if (node.contentChanged) {
           const text = node.plaintext.content;
@@ -427,6 +431,7 @@ export async function searchReplaceInSpecNodes(
     if (node.contentChanged || node.abstractChanged) {
       void enqueueNodeEmbedding(ctx.db, {
         nodeId: node.raw.id,
+        workToken: node.raw.embeddingWorkToken,
         memoryId,
         plaintext: node.plaintext,
       });
