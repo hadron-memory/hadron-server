@@ -213,6 +213,14 @@
    "206909b367147402c15fa6eb030e632356a3fa6e16f54a72963f4629eab6cc6c"
   ],
   [
+   "hadron_web_poll_list",
+   "729a3600006b5b3a302043a2cd6b06fd7b5a44eb7cd64a9eadcec69cf97dc63c"
+  ],
+  [
+   "hadron_web_poll_cancel",
+   "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
+  ],
+  [
    "hadron_preview_automation",
    "23706da4ebb3d62b5f4d97d6203d0c7bb0085180ccd2bac4d3875858169b02d8"
   ],
@@ -717,6 +725,14 @@
   [
    "hadron_stop_signal_list",
    "206909b367147402c15fa6eb030e632356a3fa6e16f54a72963f4629eab6cc6c"
+  ],
+  [
+   "hadron_web_poll_list",
+   "729a3600006b5b3a302043a2cd6b06fd7b5a44eb7cd64a9eadcec69cf97dc63c"
+  ],
+  [
+   "hadron_web_poll_cancel",
+   "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
   ],
   [
    "hadron_preview_automation",
@@ -1225,6 +1241,14 @@
    "206909b367147402c15fa6eb030e632356a3fa6e16f54a72963f4629eab6cc6c"
   ],
   [
+   "hadron_web_poll_list",
+   "729a3600006b5b3a302043a2cd6b06fd7b5a44eb7cd64a9eadcec69cf97dc63c"
+  ],
+  [
+   "hadron_web_poll_cancel",
+   "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
+  ],
+  [
    "hadron_preview_automation",
    "23706da4ebb3d62b5f4d97d6203d0c7bb0085180ccd2bac4d3875858169b02d8"
   ],
@@ -1713,6 +1737,14 @@
   [
    "hadron_stop_signal_list",
    "206909b367147402c15fa6eb030e632356a3fa6e16f54a72963f4629eab6cc6c"
+  ],
+  [
+   "hadron_web_poll_list",
+   "729a3600006b5b3a302043a2cd6b06fd7b5a44eb7cd64a9eadcec69cf97dc63c"
+  ],
+  [
+   "hadron_web_poll_cancel",
+   "3db72c050879a9f76722bb50920a98ae381d88fc4943eac02260251180041fe4"
   ],
   [
    "hadron_preview_automation",

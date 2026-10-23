@@ -79,6 +79,7 @@ import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
 import { registerTickerTools } from './tickerTools.js';
 import { registerStopSignalTools } from './stopSignalTools.js';
+import { registerWebPollTools } from './webPollTools.js';
 import { openThreadCounts, type CommentCounts } from '../lib/comments/summary.js';
 import { loadSignatureStatuses, type NodeSignatureStatusView } from '../lib/signing/status.js';
 import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
@@ -2198,6 +2199,8 @@ export function createMcpServerInstance(
     'hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get',
     // #2022 — the stop-signal list (its own optional session).
     'hadron_stop_signal_list',
+    // #1562 — the page-monitor watch list (acts as the connection's user; writes nothing).
+    'hadron_web_poll_list',
     // Per-connection selections and key handling: nothing authored.
     'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
     'hadron_unlock_memory', 'hadron_lock_memory',
@@ -3462,6 +3465,7 @@ export function createMcpServerInstance(
   registerAgentTaskTools(server, { db, auth });
   registerTickerTools(server, { db, auth });
   registerStopSignalTools(server, { db, auth });
+  registerWebPollTools(server, { db, auth });
   registerAutomationPinTools(server, { db, auth });
   // #1892 — an Agent's task and process lists (cor:dmo:050:15, :16).
   registerAgentDefinitionTools(server, { db, auth });
