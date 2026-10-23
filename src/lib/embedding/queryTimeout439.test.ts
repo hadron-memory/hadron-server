@@ -66,7 +66,7 @@ describe('query timeout factory configuration #439', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).input).toEqual(['search_query: original']);
     expect(fetchMock.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
   });
-  it.each(['0', '-1', '1.5', 'NaN', 'Infinity', '9007199254740992', '4294967296', ''])('refuses invalid configuration %j', raw => {
+  it.each(['0', '-1', '1.5', 'NaN', 'Infinity', '9007199254740992', '2147483648', '4294967295', '4294967296', ''])('refuses invalid configuration %j', raw => {
     vi.stubEnv('EMBEDDING_BACKEND', 'http'); vi.stubEnv('EMBEDDING_API_URL', 'http://synthetic.invalid'); vi.stubEnv('EMBEDDING_QUERY_TIMEOUT_MS', raw);
     resetEmbeddingClientForTests(); expect(() => getEmbeddingClient()).toThrow(/EMBEDDING_QUERY_TIMEOUT_MS/);
   });
@@ -84,4 +84,34 @@ it('the SageMaker factory carries the selected query timeout to the installed SD
   timeout.mockClear(); send.mockClear();
   expect(await getEmbeddingClient().embed(['document'], 'document')).toEqual([[0.1]]);
   expect(timeout).not.toHaveBeenCalled(); expect(send.mock.calls[0]).toHaveLength(1);
+});
+
+it('the maximum configured deadline works without a 1ms timer overflow', async () => {
+  vi.stubEnv('EMBEDDING_BACKEND', 'http'); vi.stubEnv('EMBEDDING_API_URL', 'http://synthetic.invalid');
+  vi.stubEnv('EMBEDDING_DIM', '1'); vi.stubEnv('EMBEDDING_QUERY_TIMEOUT_MS', '2147483647');
+  const fetchImpl: typeof fetch = async (_url, init) => new Promise((resolve, reject) => {
+    const signal = init?.signal;
+    const onAbort = () => { clearTimeout(timer); reject(signal?.reason); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(new Response('[[0.1]]', { status: 200 })); }, 20);
+    if (signal?.aborted) onAbort(); else signal?.addEventListener('abort', onAbort, { once: true });
+  });
+  vi.stubGlobal('fetch', fetchImpl); resetEmbeddingClientForTests();
+  expect(await getEmbeddingClient().embed(['original'], 'query')).toEqual([[0.1]]);
+});
+
+it('an injected lazy SageMaker body retains the timeout message (defensive body-catch control)', async () => {
+  // Installed SDK drains inside send; this injected shape exercises the separate
+  // defensive body-read catch without claiming it is the installed runtime path.
+  const sdk = { send: vi.fn(async (_command: unknown, options: { abortSignal: AbortSignal }) => ({
+    Body: { transformToString: async () => new Promise((_resolve, reject) => {
+      const signal = options.abortSignal;
+      if (signal.aborted) reject(signal.reason);
+      else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }) },
+  })) };
+  const client = new SageMakerEmbeddingClient({ endpointName: 'synthetic', region: 'us-east-1', model: 'synthetic', dim: 1, sdkClient: sdk as never, queryTimeoutMs: 30 });
+  await expect(client.embed(['query'], 'query')).rejects.toMatchObject({
+    name: 'EmbeddingRequestError', retryable: true,
+    message: 'EMBEDDING_REQUEST_FAILED: query embed timed out after 30ms',
+  });
 });
