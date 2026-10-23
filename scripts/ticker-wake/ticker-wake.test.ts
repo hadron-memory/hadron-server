@@ -67,6 +67,7 @@ interface Fake {
   subscribersError: string | null;
   /** Terminals listed besides term_a. */
   extraTerminals: any[];
+  terminalReply?: () => unknown;
   /** #2161: each worker's sessions as the server lists them, newest first. */
   sessions: Record<string, Array<{ id: string; workerId: string; appId: string; endedAt: string | null }>>;
   sessionsError: string | null;
@@ -148,6 +149,7 @@ function fake(): Fake {
     }
     if (argv[0] === 'orca' && argv[1] === 'terminal') {
       if (argv[2] === 'list') {
+        if (f.terminalReply) return out(f.terminalReply());
         return out({ ok: true, result: { terminals: [{ handle: 'term_a', incarnationId: f.incarnation, worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }, ...f.extraTerminals] } });
       }
       if (argv[2] === 'wait') return out({ ok: f.idle, result: { wait: { satisfied: f.idle } }, error: f.idle ? undefined : { code: 'timeout' } });
@@ -2443,4 +2445,72 @@ describe('#2138 — fresh ticks after two unreconciled cadences', () => {
       expect(current().state).toBe('ambiguous');
     });
   }
+});
+
+
+describe('#2275 dead-receiver replacement', () => {
+  const old = () => ({ state: 'ambiguous', coverage: ['T:1'], receiver: 'term_old#inc-old',
+    at: Date.now() - 60_000, detail: 'accepted, turn start not confirmed (input_accepted)',
+    text: 'old notification', handle: 'term_old', requestId: 'old-request', checkedBefore: null });
+  const stored = () => JSON.parse(readFileSync(receiptsFile(), 'utf8'));
+  const inventory = () => ({ ok: true, result: { terminals: [{ handle: 'term_a', incarnationId: f.incarnation,
+    worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }, ...f.extraTerminals] } });
+  function seed(prior = old()) {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': prior, unrelated: {
+      state: 'sent', coverage: ['U:9'], receiver: 'term_other#inc-other', at: 1 } }));
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+    return prior;
+  }
+  it('replaces an absent accepted-but-unconfirmed receiver without acknowledging old delivery or unrelated state', async () => {
+    const prior = seed();
+    await go();
+    expect(f.sent).toHaveLength(1); expect(f.retries).toEqual([]); expect(f.acked).toEqual([]);
+    expect(stored()['w-ada']).toMatchObject({ state: 'ambiguous', receiver: 'term_a#inc-1', handle: 'term_a' });
+    expect(stored().unrelated).toMatchObject({ receiver: 'term_other#inc-other' });
+    const archive = Object.values(JSON.parse(readFileSync(join(dir, 'ticker-wake', 'needs-person.json'), 'utf8')));
+    expect(archive).toEqual([expect.objectContaining({ ...prior, workerId: 'w-ada' })]);
+  });
+  it('keeps a still-present prior incarnation held even when it cannot currently accept input', async () => {
+    const prior = seed();
+    f.extraTerminals = [{ handle: 'term_old', incarnationId: 'inc-old', worktreePath: dir, connected: false, writable: false }];
+    await go();
+    expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
+  });
+  it('recognizes a reused handle only with a known different incarnation', async () => {
+    seed({ ...old(), handle: 'term_a', receiver: 'term_a#inc-old' });
+    await go();
+    expect(f.sent).toHaveLength(1); expect(f.acked).toEqual([]);
+    expect(stored()['w-ada'].receiver).toBe('term_a#inc-1');
+  });
+  for (const kind of ['failed', 'partial', 'unknown-old', 'unknown-current', 'unknown-row'] as const) {
+    it(`holds replacement on ${kind} inventory/identity`, async () => {
+      const prior = seed();
+      if (kind === 'failed') f.terminalReply = () => ({ ok: false, error: { code: 'terminal_list_failed' } });
+      if (kind === 'partial') f.terminalReply = () => ({ ...inventory(), result: { ...inventory().result, hasNextPage: true } });
+      if (kind === 'unknown-old') { prior.receiver = 'term_old#'; writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': prior })); }
+      if (kind === 'unknown-current') f.incarnation = '';
+      if (kind === 'unknown-row') f.extraTerminals = [{ incarnationId: 'inc-old', worktreePath: dir }];
+      try { await go(); } catch { /* an unreadable inventory may stop the whole pass */ }
+      expect(f.sent).toEqual([]); expect(f.retries).toEqual([]); expect(f.acked).toEqual([]);
+      expect(stored()['w-ada']).toEqual(prior);
+    });
+  }
+  for (const guard of ['draft', 'busy', 'future-floor', 'dry'] as const) {
+    it(`keeps replacement behind the normal ${guard} send gate`, async () => {
+      const prior = seed();
+      if (guard === 'draft') f.screen.draft = 'human work';
+      if (guard === 'busy') { f.idle = false; f.screen = { source: 'screen', tail: ['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'] }; }
+      if (guard === 'future-floor') f.wakes[0].deliverAfter = iso(Date.now() + 60_000);
+      await go({ dry: guard === 'dry' });
+      expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
+    });
+  }
+  it('does not retire the old receipt when replacement intent cannot be saved', async () => {
+    const prior = seed(); mkdirSync(`${receiptsFile()}.${process.pid}.tmp`);
+    await go();
+    expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
+    expect(stored().unrelated).toMatchObject({ receiver: 'term_other#inc-other' });
+  });
 });
