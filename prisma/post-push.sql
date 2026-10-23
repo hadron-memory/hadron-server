@@ -20,9 +20,11 @@ ALTER TABLE memories
   ADD CONSTRAINT chk_personal_visibility_user
   CHECK ((class IN ('personal', 'private')) = (user_id IS NOT NULL));
 
--- 008-agent-installation, relaxed by 034-memory-class-access and #653: app_id
--- is REQUIRED for class='app'; FORBIDDEN for class='system' (an agent's own
--- definition is never app-scoped); OPTIONAL for knowledge/group/personal/private
+-- 008-agent-installation, 034-memory-class-access, #653 and #2064:
+-- app_id is REQUIRED for class='app'; class='system' has app_id NULL for an
+-- Agent's own system memory, or app_id set with is_install_memory=true for an
+-- App's install memory. Other classes have is_install_memory=false and no
+-- install_of_agent_id. app_id is OPTIONAL for knowledge/group/personal/private
 -- (set when provisioned inside an app — the (app, user) scope for personal;
 -- NULL when free-standing). #653 moved knowledge + group from FORBIDDEN to
 -- OPTIONAL so those shared memory classes can be attached to an App.
@@ -48,9 +50,11 @@ ALTER TABLE memories
   ADD CONSTRAINT chk_memory_shared_agent_scope
   CHECK (shared_memory_of_agent_id IS NULL OR (class = 'app' AND app_id IS NOT NULL));
 
--- #2044 (S7): an App's INSTALL MEMORY is a class='system' row with BOTH app_id
--- and install_of_agent_id set (cor:agt:040:06); the CHECK above carries the
--- all-or-nothing pair. ONE live install memory per (App, Agent); a soft-deleted
+-- #2044 (S7): an App's INSTALL MEMORY is class='system', app_id set and
+-- is_install_memory=true. install_of_agent_id identifies the Agent while
+-- present; erasure may detach it to NULL without erasing the retained memory
+-- (hrn:node:hadronmemory.com:specs:cor:dmo:060:01). ONE live install memory per
+-- (App, Agent); a soft-deleted
 -- one never blocks its replacement (Prisma cannot model the WHERE). Synced with
 -- the 20261019090000 migration and src/test/globalSetup.ts.
 CREATE UNIQUE INDEX IF NOT EXISTS memories_install_memory_live_uniq

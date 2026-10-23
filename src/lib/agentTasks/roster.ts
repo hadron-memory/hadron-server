@@ -35,7 +35,7 @@ import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { tierOf, type ModelTier } from './family.js';
 import type { AvailabilityRecord } from './availability.js';
 import { loadWorkerWorkStates, type WorkerWorkState } from './matcher.js';
-import { loadStallInputs, unreactedChildren } from './stall.js';
+import { alarmEpisodeKey, endedAlarmEpisodes, loadStallInputs, unreactedChildren } from './stall.js';
 
 export const ROSTER_STATES = [
   'YOUR_MOVE', 'UNAVAILABLE', 'WAITING', 'WORKING', 'ASSIGNED_NOT_STARTED', 'AVAILABLE', 'NO_FAMILY', 'NOT_LAUNCHABLE',
@@ -105,17 +105,22 @@ export function rosterState(f: {
 }
 
 /** The woken wakes on unacknowledged alarms in an App, per worker owner, nearest first. */
-async function loadWokenAlarms(db: Db, appId: string): Promise<Map<string, string[]>> {
-  const rows = await db.$queryRaw<{ eventId: string; workerId: string | null }[]>`
-    SELECT e.id AS "eventId", e.chain -> s.chain_index ->> 'workerId' AS "workerId"
+async function loadWokenAlarms(db: Db, appId: string, now: Date): Promise<Map<string, string[]>> {
+  const rows = await db.$queryRaw<{ eventId: string; workerId: string | null; taskId: string | null; type: string; episodeStart: Date | null }[]>`
+    SELECT e.id AS "eventId", e.chain -> s.chain_index ->> 'workerId' AS "workerId",
+           e.task_id AS "taskId", e.type, e.episode_start AS "episodeStart"
     FROM agent_team_events e
     JOIN agent_team_alarm_schedule s ON s.event_id = e.id
     WHERE e.app_id = ${appId} AND e.severity = 'alarm' AND e.acknowledged_at IS NULL
       AND s.woken_at IS NOT NULL
     ORDER BY e.created_at, e.id`;
+  // #2200 (R196): an alarm whose own episode has ended is no longer anyone's move, from that instant: classified
+  // live here, never from the escalation's `ended_at`, which waits for a pass.
+  const ended = await endedAlarmEpisodes(db, rows, now);
   const out = new Map<string, string[]>();
   for (const r of rows) {
     if (!r.workerId) continue;
+    if (r.taskId && r.episodeStart && ended.has(alarmEpisodeKey(r.taskId, r.type, r.episodeStart))) continue;
     const list = out.get(r.workerId) ?? [];
     if (!list.includes(r.eventId)) list.push(r.eventId);
     out.set(r.workerId, list);
@@ -137,7 +142,7 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
     // A parent assigned to a PERSON still has worker-owned children whose end is
     // that worker's move (#1831), so person-assigned parents are read too.
     loadStallInputs(db, { appId, OR: [{ assigneeWorkerId: { not: null } }, { assigneeUserId: { not: null } }] }, now),
-    loadWokenAlarms(db, appId),
+    loadWokenAlarms(db, appId, now),
     // #1726: every worker of the App, retired too, so a claim on a retired one resolves.
     db.worker.findMany({ where: { appId }, select: { id: true, name: true, slug: true, retiredAt: true, reportsToWorkerId: true } }),
   ]);
