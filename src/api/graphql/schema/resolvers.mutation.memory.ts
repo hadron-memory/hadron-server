@@ -1,3 +1,4 @@
+import { lockAgentDefinitionAuthority } from '../../../lib/auth/managedSystemMemory.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
@@ -674,28 +675,31 @@ export const memoryMutations = {
       // - org-anchored personal/private: require ACTUAL membership of the org
       //   *container* — the memory is theirs, not the org's, but it lives in the
       //   org's namespace.
-      if (userOwned) {
-        // Owner is the authenticated caller (verified above); no org, no
-        // membership to check. The memory is theirs outright.
-      } else if (isUserOwned) {
-        // NOT requireOrgRole, whose global ADMIN/OWNER bypass would let a
-        // platform admin create a personal/private memory in an org they don't
-        // belong to.
-        const orgMembership = await ctx.db.orgMember.findFirst({
-          where: { organizationId: resolvedOrgId!, userId: ctx.userId!, ...LIVE_ORG_MEMBERSHIP },
-        });
-        if (!orgMembership) {
-          throw new GraphQLError(
-            'You must be a member of the organization to create a personal/private memory in it.',
-            { extensions: { code: 'FORBIDDEN' } },
-          );
+      const authorizeMemoryCreation = async (gateCtx: Context) => {
+        if (userOwned) {
+          // Owner is the authenticated caller (verified above); no org, no
+          // membership to check. The memory is theirs outright.
+        } else if (isUserOwned) {
+          // NOT requireOrgRole, whose global ADMIN/OWNER bypass would let a
+          // platform admin create a personal/private memory in an org they don't
+          // belong to.
+          const orgMembership = await gateCtx.db.orgMember.findFirst({
+            where: { organizationId: resolvedOrgId!, userId: gateCtx.userId!, ...LIVE_ORG_MEMBERSHIP },
+          });
+          if (!orgMembership) {
+            throw new GraphQLError(
+              'You must be a member of the organization to create a personal/private memory in it.',
+              { extensions: { code: 'FORBIDDEN' } },
+            );
+          }
+        } else {
+          // Grant-model gate (design:grant-model P2a): role bundle union
+          // individual grants. Behavior-equivalent to the former
+          // requireOrgRole(ADMIN) until a memory.create grant row exists.
+          await requireOrgAction(gateCtx, resolvedOrgId!, 'memory.create');
         }
-      } else {
-        // Grant-model gate (design:grant-model P2a): role bundle union
-        // individual grants. Behavior-equivalent to the former
-        // requireOrgRole(ADMIN) until a memory.create grant row exists.
-        await requireOrgAction(ctx, resolvedOrgId!, 'memory.create');
-      }
+      };
+      await authorizeMemoryCreation(ctx);
       // 023-app-shape US4: group-class memories must carry GROUP
       // visibility (enforced by the chk_memory_group_visibility CHECK
       // constraint at the DB level; we surface a clearer error at the
@@ -740,7 +744,12 @@ export const memoryMutations = {
       if (existing) {
         if (existing.deletedAt) {
           // #1468 — refused for a stamped corpus still holding a spec.
-          await withIncludeHistoryClientTransaction(ctx.db, (tx) => reclaimTombstonedMemory(tx, existing.id));
+          await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+            await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [existing.id]);
+            const fresh = await liveTxContext(ctx, tx);
+            await authorizeMemoryCreation(fresh);
+            await reclaimTombstonedMemory(tx, existing.id);
+          });
         } else {
           throw new Error(`A memory with URN "${memoryUrn}" already exists`);
         }
@@ -1527,7 +1536,17 @@ export const memoryMutations = {
       if (existing) {
         if (existing.deletedAt) {
           // #1468 — refused for a stamped corpus still holding a spec.
-          await withIncludeHistoryClientTransaction(ctx.db, (tx) => reclaimTombstonedMemory(tx, existing.id));
+          await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+            await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [source.id, existing.id]);
+            const fresh = await liveTxContext(ctx, tx);
+            const current = await tx.memory.findUniqueOrThrow({ where: { id: source.id } });
+            await authorizeCloneSource(fresh, current);
+            await authorizeCloneTarget(fresh, current);
+            if (current.deletedAt || current.class !== source.class || current.isEncrypted || current.urn !== source.urn) {
+              throw new GraphQLError('Memory clone scope changed while reclaiming; retry.', { extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
+            }
+            await reclaimTombstonedMemory(tx, existing.id);
+          });
         } else {
           throw new Error(`A memory with URN "${newUrn}" already exists`);
         }
@@ -1761,7 +1780,17 @@ export const memoryMutations = {
       if (existing) {
         if (existing.deletedAt) {
           // #1468 — refused for a stamped corpus still holding a spec.
-          await withIncludeHistoryClientTransaction(ctx.db, (tx) => reclaimTombstonedMemory(tx, existing.id));
+          await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+            await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [source.id, existing.id]);
+            const fresh = await liveTxContext(ctx, tx);
+            const current = await tx.memory.findUniqueOrThrow({ where: { id: source.id } });
+            if (!(await canReadMemory(fresh.db, fresh, current.id))) throw new GraphQLError(`Node not found: "${parentRef}"`, { extensions: { code: 'NODE_NOT_FOUND', ref: parentRef } });
+            await authorizeExtract(fresh, current);
+            if (current.deletedAt || current.class !== source.class || current.isEncrypted || current.urn !== source.urn) {
+              throw new GraphQLError('Memory extract scope changed while reclaiming; retry.', { extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
+            }
+            await reclaimTombstonedMemory(tx, existing.id);
+          });
         } else {
           throw new Error(`A memory with URN "${newUrn}" already exists`);
         }

@@ -1,4 +1,3 @@
-import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 /**
  * App-scoped memory mutations — add a memory to an App.
  *
@@ -164,6 +163,7 @@ async function withAppMemoryAuthorityTx<T>(
   agentId: string,
   klass: AppMemoryClass,
   write: (tx: Prisma.TransactionClient, txCtx: Context) => Promise<T>,
+  options: { fence?: boolean } = {},
 ): Promise<T> {
   return withAuthorizedTx(
     ctx,
@@ -185,6 +185,7 @@ async function withAppMemoryAuthorityTx<T>(
       }
     },
     write,
+    options,
   );
 }
 
@@ -275,7 +276,8 @@ export const appMemoryMutations = {
       select: { id: true },
     });
     // #1468 — refused for a stamped corpus still holding a spec.
-    if (tombstone) await withIncludeHistoryClientTransaction(ctx.db, (tx) => reclaimTombstonedMemory(tx, tombstone.id));
+    if (tombstone) await withAppMemoryAuthorityTx(ctx, app, agent.id, klass,
+      (tx) => reclaimTombstonedMemory(tx, tombstone.id), { fence: true });
     // A LIVE collision on a name-addressable app-mem slug now DETERMINISTICALLY
     // aliases (`<slug>-<agent>`) via mintLocalSlug — replacing the pre-v2 hard
     // MEMORY_URN_CONFLICT — so two apps/agents in one org can each name a memory
