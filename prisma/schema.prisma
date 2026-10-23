@@ -1130,29 +1130,30 @@ model Asset {
 /// `baragaun.com:secureid:auth:tokens`) and **not stored**. `id` is
 /// optional in YAML; the server assigns it on import if missing.
 ///
-/// **Node types** define the node's role in the memory:
-///   - `info` (default)  — living knowledge: specs, guides, facts.
-///                         Shown in tree, normal search priority.
-///   - `abstract`        — condensed knowledge: summaries, TL;DRs,
-///                         paper abstracts. Highest search priority.
-///                         May be the only representation if the source
-///                         is archived.
-///   - `reference`       — external source: papers, URLs, legislation,
-///                         books. Carries metadata (DOI, ISBN, URL) in
-///                         `data`.
-///   - `record`          — immutable history: chat messages, session
-///                         logs. Hidden in tree by default, low search
-///                         priority.
-///   - `system`          — agent configuration: conversation designs,
-///                         stages, prompt templates, partials. Hidden
-///                         in tree, excluded from search.
+/// **Node types** — the authoritative canonical list for ordinary nodes:
+///   - `abstract`        — agent-generated summaries (chat summaries,
+///                         topic abstracts); searched first by retrieval flows.
+///   - `chat`            — chat session and message nodes.
+///   - `data`            — the structured payload is the artifact, with no
+///                         human-authored content body.
+///   - `info` (default)  — reference content: articles, guides, extracted facts;
+///                         the default for user-authored knowledge.
+///   - `prompt`          — system prompt content for an LLM call.
+///   - `record`          — append-mostly stored data: user profiles, session
+///                         logs, append-only event logs.
+///   - `reference`       — external sources or cross-memory pointers: papers,
+///                         URLs, legislation, asset references.
+///   - `system`          — agent-internal configuration: conversation designs,
+///                         stages, topics; typically in an Agent's system
+///                         memory and hidden from end-user search.
+/// `comment` is platform-reserved for governed feedback (see `commentMeta`);
+/// the canonical ordinary-node list is not a closed set of stored values.
 /// (The earlier `asset` node-type was promoted to its own Asset table
 /// in spec 004-asset-upload.)
 ///
-/// **Column type is `String` (not enum)** because the running schema
-/// pre-dates the formalization; the intended-values list above is the
-/// contract — tightening to a Prisma enum is reserved for a future
-/// cleanup spec.
+/// **Column type is free-form `String` (not enum)** to preserve extensibility
+/// for third-party agents and apps: no Prisma enum or DB CHECK constraint.
+/// Hadron core does not special-case non-canonical third-party values.
 ///
 /// **Chat-root `data.scope`** (spec 017, 2026-05-12) — chat-root nodes
 /// (loc `chats:<id>`, depth 2, nodeType `record`) carry a `scope` field
