@@ -20,6 +20,7 @@ import {
   createLocalJWKSet,
   type JWTVerifyGetKey,
 } from 'jose';
+import { mintProviderNonce } from './providerNonce.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import {
@@ -29,6 +30,9 @@ import {
   googleReauthenticatedSince,
   type GoogleIdentity,
 } from './google.js';
+
+// Pre-#2204 rows carry no nonce hash; the nonce paths have their own tests in providerNonce.test.ts.
+const LEGACY = { legacyUnbound: true } as const;
 
 const CLIENT_ID = 'test-client-id.apps.googleusercontent.com';
 
@@ -41,8 +45,14 @@ afterEach(() => {
 });
 
 describe('buildGoogleAuthUrl', () => {
+  it('#2204: sends the nonce it is given, and requires one', () => {
+    expect(new URL(buildGoogleAuthUrl('s', 'nonce-xyz')).searchParams.get('nonce')).toBe('nonce-xyz');
+    // @ts-expect-error — the nonce is a required argument, there is no default
+    expect(() => buildGoogleAuthUrl('s')).not.toThrow();
+  });
+
   it('carries login-only scopes, no offline access, and the state', () => {
-    const url = new URL(buildGoogleAuthUrl('state-abc'));
+    const url = new URL(buildGoogleAuthUrl('state-abc', 'n'));
     expect(url.origin + url.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
     expect(url.searchParams.get('client_id')).toBe(CLIENT_ID);
     expect(url.searchParams.get('response_type')).toBe('code');
@@ -55,13 +65,13 @@ describe('buildGoogleAuthUrl', () => {
   });
 
   it('#1631: asks for re-authentication (max_age=0) only on the ceremony leg', () => {
-    expect(new URL(buildGoogleAuthUrl('s')).searchParams.get('max_age')).toBeNull();
-    expect(new URL(buildGoogleAuthUrl('s', { reauthenticate: true })).searchParams.get('max_age')).toBe('0');
+    expect(new URL(buildGoogleAuthUrl('s', 'n')).searchParams.get('max_age')).toBeNull();
+    expect(new URL(buildGoogleAuthUrl('s', 'n', { reauthenticate: true })).searchParams.get('max_age')).toBe('0');
   });
 
   it('derives redirect_uri from BASE_URL, not per-request headers', () => {
     vi.stubEnv('BASE_URL', 'https://hadron.example.com');
-    const url = new URL(buildGoogleAuthUrl('s'));
+    const url = new URL(buildGoogleAuthUrl('s', 'n'));
     expect(url.searchParams.get('redirect_uri')).toBe(
       'https://hadron.example.com/auth/google/callback',
     );
@@ -70,7 +80,7 @@ describe('buildGoogleAuthUrl', () => {
   it('falls back to localhost:PORT when BASE_URL is unset or empty', () => {
     vi.stubEnv('BASE_URL', '');
     vi.stubEnv('PORT', '4123');
-    const url = new URL(buildGoogleAuthUrl('s'));
+    const url = new URL(buildGoogleAuthUrl('s', 'n'));
     expect(url.searchParams.get('redirect_uri')).toBe(
       'http://localhost:4123/auth/google/callback',
     );
@@ -113,7 +123,7 @@ describe('verifyGoogleIdToken', () => {
       name: 'Ada Lovelace',
       picture: 'https://lh3.googleusercontent.com/a/pic',
     });
-    expect(await verifyGoogleIdToken(token, getKey)).toEqual({
+    expect(await verifyGoogleIdToken(token, LEGACY, getKey)).toEqual({
       sub: '110248495921238986420',
       email: 'ada@example.com',
       emailVerified: true,
@@ -124,33 +134,33 @@ describe('verifyGoogleIdToken', () => {
   });
 
   it('#1631: reads auth_time, and ignores a non-numeric one', async () => {
-    expect((await verifyGoogleIdToken(await mintIdToken({ sub: '42', auth_time: 1_700_000_000 }), getKey)).authTime).toBe(1_700_000_000);
-    expect((await verifyGoogleIdToken(await mintIdToken({ sub: '42', auth_time: '1700000000' }), getKey)).authTime).toBeNull();
+    expect((await verifyGoogleIdToken(await mintIdToken({ sub: '42', auth_time: 1_700_000_000 }), LEGACY, getKey)).authTime).toBe(1_700_000_000);
+    expect((await verifyGoogleIdToken(await mintIdToken({ sub: '42', auth_time: '1700000000' }), LEGACY, getKey)).authTime).toBeNull();
   });
 
   it('accepts the bare accounts.google.com issuer form', async () => {
     const token = await mintIdToken({ sub: '42' }, { issuer: 'accounts.google.com' });
-    expect((await verifyGoogleIdToken(token, getKey)).sub).toBe('42');
+    expect((await verifyGoogleIdToken(token, LEGACY, getKey)).sub).toBe('42');
   });
 
   it('rejects a token for a different audience (another OAuth client)', async () => {
     const token = await mintIdToken({ sub: '42' }, { audience: 'other-client' });
-    await expect(verifyGoogleIdToken(token, getKey)).rejects.toThrow();
+    await expect(verifyGoogleIdToken(token, LEGACY, getKey)).rejects.toThrow();
   });
 
   it('rejects a token from a different issuer', async () => {
     const token = await mintIdToken({ sub: '42' }, { issuer: 'https://evil.example' });
-    await expect(verifyGoogleIdToken(token, getKey)).rejects.toThrow();
+    await expect(verifyGoogleIdToken(token, LEGACY, getKey)).rejects.toThrow();
   });
 
   it('rejects a token signed by a different key', async () => {
     const token = await mintIdToken({ sub: '42' }, { key: wrongKey });
-    await expect(verifyGoogleIdToken(token, getKey)).rejects.toThrow();
+    await expect(verifyGoogleIdToken(token, LEGACY, getKey)).rejects.toThrow();
   });
 
   it('rejects a token without a sub claim', async () => {
     const token = await mintIdToken({ email: 'ada@example.com' });
-    await expect(verifyGoogleIdToken(token, getKey)).rejects.toThrow(/sub/);
+    await expect(verifyGoogleIdToken(token, LEGACY, getKey)).rejects.toThrow(/sub/);
   });
 
   it('lowercases the email claim (parity with the magic-link flow)', async () => {
@@ -162,7 +172,7 @@ describe('verifyGoogleIdToken', () => {
       email: 'Ada@Example.COM',
       email_verified: true,
     });
-    const identity = await verifyGoogleIdToken(token, getKey);
+    const identity = await verifyGoogleIdToken(token, LEGACY, getKey);
     expect(identity.email).toBe('ada@example.com');
   });
 
@@ -173,8 +183,38 @@ describe('verifyGoogleIdToken', () => {
       email: 'ada@example.com',
       email_verified: 'true',
     });
-    const identity = await verifyGoogleIdToken(token, getKey);
+    const identity = await verifyGoogleIdToken(token, LEGACY, getKey);
     expect(identity.emailVerified).toBe(false);
+  });
+
+  describe('#2204 nonce', () => {
+    const { nonce, nonceHash } = mintProviderNonce();
+    const bound = { bound: nonceHash };
+    beforeEach(() => vi.spyOn(console, 'warn').mockImplementation(() => undefined));
+    afterEach(() => vi.restoreAllMocks());
+
+    it('accepts a token whose nonce hashes to the stored value', async () => {
+      expect((await verifyGoogleIdToken(await mintIdToken({ sub: '42', nonce }), bound, getKey)).sub).toBe('42');
+    });
+
+    it.each([
+      ['missing', undefined],
+      ['empty', ''],
+      ['not a string', 42],
+      ['another attempt\'s', mintProviderNonce().nonce],
+    ])('refuses a %s nonce on a bound row with a fixed message', async (_c, claim) => {
+      const token = await mintIdToken({ sub: '42', nonce: claim });
+      const err = await verifyGoogleIdToken(token, bound, getKey).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe('ID token nonce missing or mismatched');
+      expect((err as Error).message).not.toContain(token);
+    });
+
+    it('still refuses a wrong signature, issuer or audience when the nonce is right', async () => {
+      await expect(verifyGoogleIdToken(await mintIdToken({ sub: '42', nonce }, { key: wrongKey }), bound, getKey)).rejects.toThrow();
+      await expect(verifyGoogleIdToken(await mintIdToken({ sub: '42', nonce }, { audience: 'other' }), bound, getKey)).rejects.toThrow();
+      await expect(verifyGoogleIdToken(await mintIdToken({ sub: '42', nonce }, { issuer: 'https://evil.example' }), bound, getKey)).rejects.toThrow();
+    });
   });
 });
 
