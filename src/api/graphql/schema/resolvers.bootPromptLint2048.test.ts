@@ -320,5 +320,5 @@ describe('#2048 S11a replace-text lints every changed boot source or says it did
     expect(text).not.toContain('Lint warnings not checked');
     const all = await callMountedTool('hadron_replace_text', { nodeUrns: ordinary.map(n => `hrn:node:${memoryUrn}:${n.loc}`), fields: ['content'], oldText: 'REPLACE_ME', newText: 'DONE', dryRun: false });
     expect(all).toContain('Lint warnings not checked for 1 of 101 changed node(s)');
-  });
+  }, 60_000); // 121 seeded nodes and two mounted MCP sessions: well past the 5s default on a CI runner
 });
