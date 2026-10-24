@@ -50,7 +50,9 @@ export const appQueries = {
       // answer the same empty page, so the filter is no existence oracle.
       // Only "this ref names nothing" is swallowed; a database error is not.
       let agentClause: Record<string, unknown> = {};
-      if (f.agentId) {
+      // Omitted and null skip the filter; an explicit value, including the empty
+      // string, must resolve or answer the empty page.
+      if (f.agentId != null) {
         let target: { id: string } | null = null;
         try {
           const { id } = await resolveAgentRef(ctx.db, f.agentId);

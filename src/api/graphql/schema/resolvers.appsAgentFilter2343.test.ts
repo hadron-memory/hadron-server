@@ -111,6 +111,35 @@ describe('Query.apps(filter.agentId)', () => {
     expect(malformed).toEqual(unreadable);
   });
 
+  it('an explicit empty or blank agentId is a malformed ref, not an omitted filter', async () => {
+    const unreadable = await resolvers.Query.apps(null, { filter: { agentId: agentS } }, asMember());
+    for (const blank of ['', '   ']) {
+      expect(await resolvers.Query.apps(null, { filter: { agentId: blank } }, asMember())).toEqual(unreadable);
+      expect(await resolvers.Query.apps(null, { filter: { ownedByMe: true, agentId: blank } }, asMember())).toEqual(unreadable);
+    }
+    expect(unreadable).toEqual(EMPTY);
+  });
+
+  it('an ambiguous legacy URN answers the same empty page', async () => {
+    const org = await db.organization.findUniqueOrThrow({ where: { id: orgO }, select: { urn: true } });
+    const legacy = `${org.urn}:legacy-${generateId()}`;
+    await seedAgent(orgO, { legacyUrn: legacy });
+    await seedAgent(orgO, { legacyUrn: legacy });
+    const res = await resolvers.Query.apps(null, { filter: { agentId: `hrn:agent:${legacy}` } }, asMember());
+    expect(res).toEqual(EMPTY);
+  });
+
+  it('does not swallow a database error while resolving the agent', async () => {
+    const broken = new Proxy(db, {
+      get: (target, key) => (key === 'agent'
+        ? { findFirst: () => { throw new Error('boom'); }, findUnique: () => { throw new Error('boom'); }, findMany: () => { throw new Error('boom'); } }
+        : Reflect.get(target, key)),
+    });
+    await expect(
+      resolvers.Query.apps(null, { filter: { agentId: agentG } }, { db: broken, userId: member, roles: ['READER'] } as Context),
+    ).rejects.toThrow('boom');
+  });
+
   it('scopes to the org with orgId, and a non-member of that org gets an empty page', async () => {
     const scoped = await resolvers.Query.apps(null, { orgId: orgO, filter: { agentId: agentG } }, asMember());
     expect(ids(scoped)).toEqual([a1, a3].sort());
