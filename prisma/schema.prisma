@@ -1118,6 +1118,10 @@ model Asset {
   /// Soft-delete marker. Janitor sweeps R2 object + hard-deletes
   /// after 24h.
   deletedAt     DateTime?       @map("deleted_at")
+  /// #1667, cor:dmo:060:15 — the per-asset public-link opt-in. STORED POLICY, not
+  /// proof of publication: the anonymous hotlink also needs the deployment gate
+  /// and the existing eligibility checks. Every asset starts OFF.
+  publicLinkEnabled Boolean     @default(false) @map("public_link_enabled")
 
   memory Memory? @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
@@ -6404,4 +6408,21 @@ model AgentCloneAudit {
 
   @@index([sourceAgentId])
   @@map("agent_clone_audits")
+}
+
+/// #1667, cor:dmo:060:15 — append-only record of every successful per-asset
+/// public-link switch call: who, when, to what. Written in the SAME transaction
+/// as the flag. Deliberately NO foreign keys: the record must outlive the asset
+/// row (the janitor hard-deletes assets) and the actor.
+model AssetPublicLinkAudit {
+  id                String   @id @map("id")
+  assetId           String   @map("asset_id")
+  memoryId          String   @map("memory_id")
+  actorUserId       String   @map("actor_user_id")
+  enabled           Boolean
+  previouslyEnabled Boolean  @map("previously_enabled")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([assetId, createdAt])
+  @@map("asset_public_link_audits")
 }

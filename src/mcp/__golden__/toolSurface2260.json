@@ -61,6 +61,10 @@
    "9ae33556abc21a2755a2db6d1a37a8c4ae4fc8c41bf81c969b8a75c4ec220bc2"
   ],
   [
+   "hadron_set_asset_public_link",
+   "cd95850d79d846b61ef1c0a109f8d69f5dc020b8bd4248bbe70d13fa45c61f4a"
+  ],
+  [
    "hadron_task_create",
    "c0d99c72c1cf3756a37fea80b03937753e1f5aeb0cc68c8c5cf64e62cc484ad0"
   ],
@@ -565,6 +569,10 @@
   [
    "hadron_reopen_comment_thread",
    "9ae33556abc21a2755a2db6d1a37a8c4ae4fc8c41bf81c969b8a75c4ec220bc2"
+  ],
+  [
+   "hadron_set_asset_public_link",
+   "cd95850d79d846b61ef1c0a109f8d69f5dc020b8bd4248bbe70d13fa45c61f4a"
   ],
   [
    "hadron_task_create",
@@ -1073,6 +1081,10 @@
    "9ae33556abc21a2755a2db6d1a37a8c4ae4fc8c41bf81c969b8a75c4ec220bc2"
   ],
   [
+   "hadron_set_asset_public_link",
+   "cd95850d79d846b61ef1c0a109f8d69f5dc020b8bd4248bbe70d13fa45c61f4a"
+  ],
+  [
    "hadron_task_create",
    "c0d99c72c1cf3756a37fea80b03937753e1f5aeb0cc68c8c5cf64e62cc484ad0"
   ],
@@ -1561,6 +1573,10 @@
   [
    "hadron_reopen_comment_thread",
    "9ae33556abc21a2755a2db6d1a37a8c4ae4fc8c41bf81c969b8a75c4ec220bc2"
+  ],
+  [
+   "hadron_set_asset_public_link",
+   "cd95850d79d846b61ef1c0a109f8d69f5dc020b8bd4248bbe70d13fa45c61f4a"
   ],
   [
    "hadron_task_create",
