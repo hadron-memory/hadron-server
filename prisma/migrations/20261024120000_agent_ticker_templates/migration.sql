@@ -1,4 +1,38 @@
-Failed to load config file "/home/orca/orca/workspaces/hadron-server/bob" as a TypeScript/JavaScript module. Error: PrismaConfigEnvError: Missing required environment variable: DATABASE_URL
+-- AlterTable
+ALTER TABLE "tickers" ADD COLUMN     "generated_for_worker_id" TEXT,
+ADD COLUMN     "source_template_id" TEXT,
+ADD COLUMN     "source_template_revision" INTEGER;
+
+-- CreateTable
+CREATE TABLE "agent_ticker_templates" (
+    "id" TEXT NOT NULL,
+    "agent_id" TEXT NOT NULL,
+    "revision" INTEGER NOT NULL DEFAULT 1,
+    "shape_version" INTEGER NOT NULL DEFAULT 1,
+    "name" TEXT NOT NULL,
+    "cadence_seconds" INTEGER NOT NULL,
+    "quiet_hours" JSONB,
+    "relevance" TEXT NOT NULL DEFAULT 'ALL',
+    "reasons" TEXT[] DEFAULT ARRAY['read-team-channel']::TEXT[],
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "created_by" TEXT,
+    "updated_at" TIMESTAMP(3),
+    "updated_by" TEXT,
+    "deleted_at" TIMESTAMP(3),
+    "deleted_by" TEXT,
+
+    CONSTRAINT "agent_ticker_templates_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateIndex
+CREATE INDEX "agent_ticker_templates_agent_id_deleted_at_idx" ON "agent_ticker_templates"("agent_id", "deleted_at");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "tickers_generated_uniq" ON "tickers"("generated_for_worker_id", "source_template_id");
+
+-- AddForeignKey
+ALTER TABLE "agent_ticker_templates" ADD CONSTRAINT "agent_ticker_templates_agent_id_fkey" FOREIGN KEY ("agent_id") REFERENCES "agents"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
 
 -- #2024 (S8, cor:agt:080:33): the database facts Prisma's schema language cannot model for Agent ticker
 -- templates and the tickers generated from them. Source of truth; the migration carries a byte-identical
