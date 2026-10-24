@@ -30,6 +30,16 @@ const codeOf = async (p: Promise<unknown>) => {
   }
 };
 
+/** Poll until some backend is blocked on an advisory lock: the competing operation has reached its wait. */
+async function waitForAnchorWaiter(): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    const [{ n }] = await db.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
+    if (n > 0) return;
+    await sleep(25);
+  }
+  throw new Error('no backend reached the anchor wait');
+}
+
 /** Hold the source's authority anchor on a second connection, run `inside`, then commit after `ms`. */
 async function holdAnchor(mode: 'shared' | 'exclusive', inside: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<void>, ms: number) {
   let release!: () => void;
@@ -43,7 +53,10 @@ async function holdAnchor(mode: 'shared' | 'exclusive', inside: (tx: Parameters<
     await gate;
   });
   await ready;
-  return { release, done, after: async () => { await sleep(ms); release(); await done; } };
+  // `ms` is extra settling time on top of the observed wait (the expiry test needs wall-clock to pass).
+  return { release, done, after: async () => {
+    try { await waitForAnchorWaiter(); await sleep(ms); } finally { release(); await done; }
+  } };
 }
 
 beforeEach(async () => {
@@ -62,7 +75,7 @@ describe.each(['admin', 'target'] as const)('a start committed while the merge w
         id, organizationId: org.id, expiresAt: new Date(Date.now() + HOUR),
         adminUserId: role === 'admin' ? source.id : other.id, targetUserId: role === 'admin' ? other.id : source.id,
       } });
-    }, 400);
+    }, 50);
     const merging = startMerge();
     await hold.after();
     await merging;
@@ -134,6 +147,31 @@ describe('actor-only writers around a merge', () => {
     await resolvers.Mutation.stopImpersonation(null, { id: s.id }, byOther);
     await resolvers.Mutation.stopImpersonation(null, { id: s.id }, asSource());
     expect((await rowOf(s.id)).endedBy).toBe(other.id);
+  });
+});
+
+describe('the platform-key stop fallback ender', () => {
+  it('is coordinated with the merge: a fallback ender merged away before the write is refused, never stamped', async () => {
+    const session = await db.impersonationSession.create({ data: {
+      id: generateId(), organizationId: org.id, adminUserId: source.id, targetUserId: other.id,
+      expiresAt: new Date(Date.now() - 1000), // expired-unstamped: the history a merge leaves unstamped
+    } });
+    const hold = await holdAnchor('exclusive', async (tx) => {
+      await tx.user.update({ where: { id: source.id }, data: { deletedAt: new Date() } });
+    }, 50);
+    const stopping = codeOf(resolvers.Mutation.stopImpersonation(null, { id: session.id }, { db, roles: ['ADMIN'] }));
+    await hold.after();
+    expect(await stopping).not.toBe('NO_ERROR');
+    expect(await rowOf(session.id)).toMatchObject({ endedAt: null, endedBy: null });
+  });
+
+  it('still records the session admin as ender when it is live', async () => {
+    const session = await db.impersonationSession.create({ data: {
+      id: generateId(), organizationId: org.id, adminUserId: other.id, targetUserId: third.id, expiresAt: new Date(Date.now() + HOUR),
+    } });
+    await resolvers.Mutation.stopImpersonation(null, { id: session.id }, { db, roles: ['ADMIN'] });
+    expect(await rowOf(session.id)).toMatchObject({ endedBy: other.id });
+    expect((await rowOf(session.id)).endedAt).toBeInstanceOf(Date);
   });
 });
 

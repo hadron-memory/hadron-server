@@ -44,18 +44,25 @@ const badInput = (message: string) =>
  * existing `ended_by = source` to the survivor, so a stop that a merged-away account lands afterwards would
  * stamp a deleted account. The stop therefore takes the ender's shared authority anchor (the one a merge holds
  * exclusively) and re-reads the ender as live under it, at READ COMMITTED so the read after the wait sees the
- * merge. `endedBy` null (a key-authenticated platform admin) writes the session's own admin and takes no anchor.
+ * merge. `endedBy` null (a key-authenticated platform admin) writes the session's own admin, which takes the same anchor and live check.
  * Idempotent: only a still-open session is written.
  */
 async function endSessionAs(ctx: Context, sessionId: string, endedBy: string | null): Promise<void> {
   await ctx.db.$transaction(async (tx) => {
+    // A key-authenticated platform admin records the session's own admin, so that User.id is the ender and takes
+    // the same anchor. The admin is read, locked, then re-read: a merge that committed while the anchor was awaited
+    // moved it, and the lock must be on the value that gets written.
     let ender = endedBy;
-    if (ender) {
-      await lockAuthorityAnchors(tx, [{ kind: 'user', id: ender }], 'shared');
-      const live = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${ender} AND deleted_at IS NULL FOR SHARE`;
+    for (let attempt = 0; ; attempt++) {
+      const candidate = ender ?? (await tx.impersonationSession.findUnique({ where: { id: sessionId }, select: { adminUserId: true } }))?.adminUserId ?? null;
+      if (!candidate) return; // no such session: nothing to end
+      await lockAuthorityAnchors(tx, [{ kind: 'user', id: candidate }], 'shared');
+      const live = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${candidate} AND deleted_at IS NULL FOR SHARE`;
       if (live.length === 0) throw forbidden();
-    } else {
-      ender = (await tx.impersonationSession.findUnique({ where: { id: sessionId }, select: { adminUserId: true } }))?.adminUserId ?? null;
+      if (endedBy) { ender = candidate; break; }
+      const again = (await tx.impersonationSession.findUnique({ where: { id: sessionId }, select: { adminUserId: true } }))?.adminUserId;
+      if (again === candidate) { ender = candidate; break; }
+      if (attempt >= 2) throw forbidden();
     }
     await tx.impersonationSession.updateMany({
       where: { id: sessionId, endedAt: null },
