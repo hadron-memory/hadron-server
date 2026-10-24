@@ -1,3 +1,4 @@
+import { mcpRequestSessionContext } from './requestSession.js';
 /**
  * #1747 — tickers on the MCP surface (cor:agt:080; plan
  * hrn:node:hadronmemory.com:hadron-server:design:named-heartbeats §6.2): list,
@@ -137,10 +138,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     appKeyId: auth.appKeyId ?? undefined,
-    // An App key's session state is the current request's (the transport refreshes it per request); anyone else's is
-    // the connection's, as before.
-    sessionId: (auth.requestSession ? auth.requestSession.sessionId : auth.sessionId) ?? undefined,
-    sessionBindingRefused: auth.requestSession ? auth.requestSession.refused : auth.sessionBindingRefused,
+    ...mcpRequestSessionContext(auth),
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
     impersonation: auth.impersonation,
@@ -406,7 +404,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     SHAPE_HADRON_TEAM_CHAT_INBOX,
     async ({ session, ...rest }) =>
       readWakes(session, async (ctx) => {
-        const page = await Q.deliveryBatches({}, rest, session ? { ...ctx, sessionId: session, sessionBindingRefused: false } : ctx);
+        const page = await Q.deliveryBatches({}, rest, session ? { ...ctx, sessionId: session } : ctx);
         return JSON.stringify({
           batches: (page.batches as Row[]).map((b) => ({
             id: b.id,
@@ -433,7 +431,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     SHAPE_HADRON_TEAM_CHAT_INBOX_ACK,
     async ({ session, batchIds, through }) => {
       const ack = async (ctx: Context) => {
-        const r = await M.acknowledgeDeliveryBatches({}, { batchIds, through }, session ? { ...ctx, sessionId: session, sessionBindingRefused: false } : ctx);
+        const r = await M.acknowledgeDeliveryBatches({}, { batchIds, through }, session ? { ...ctx, sessionId: session } : ctx);
         return `Acknowledged ${r.acknowledged}${r.unchanged ? ` (${r.unchanged} already delivered)` : ''}.`;
       };
       // A host key acts as itself and names no session; anyone else is a write and needs a session, like hadron_ack_wakes.

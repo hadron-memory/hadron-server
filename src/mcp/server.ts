@@ -1,3 +1,4 @@
+import { mcpRequestSessionContext } from './requestSession.js';
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
 import { stampEmbeddingObligation } from '../services/embedding/obligation.js';
@@ -10774,8 +10775,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         userId: auth.userId ?? undefined,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
-        sessionId: auth.sessionId ?? undefined,
-        sessionBindingRefused: auth.sessionBindingRefused,
+        ...mcpRequestSessionContext(auth),
         roles: auth.roles as Context['roles'],
         organizationId: auth.organizationId ?? undefined,
       };
@@ -11726,11 +11726,10 @@ async function handleKnownMcpSession(
     // Credential resolution re-reads the live user after the liveness check
     // above. A demotion between those reads must win before tool dispatch.
     active.auth.roles = presented.roles ?? [];
-    // An App key carries no session of its own across requests: THIS request's header (valid, or named and refused)
-    // is what the wake tools' session-bound refusal reads, not the one the transport opened with (#1749, N5).
-    if (active.auth.appKeyId) {
-      active.auth.requestSession = { sessionId: presented.sessionId, refused: presented.sessionBindingRefused === true };
-    }
+    // #2123: every principal's session-sensitive consumers receive THIS
+    // request's binding result, under the same credential/request lock through
+    // dispatch. Keep initialization refusal and retained actor state intact.
+    active.auth.requestSession = { sessionId: presented.sessionId, refused: presented.sessionBindingRefused === true };
     await publishConnectionActor(sessionId, presented, req.headers['x-hadron-session'] !== undefined);
     await active.transport.handleRequest(req, res, req.body);
   } finally {

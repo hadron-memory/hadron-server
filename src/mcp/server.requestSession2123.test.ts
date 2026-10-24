@@ -1,5 +1,5 @@
 /** #2123: real mounted MCP requests, synthetic credentials and private test DB. */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createServer } from '../server.js';
@@ -7,6 +7,7 @@ import { signJwt } from '../auth/jwt.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
+import { APP_KEY_PREFIX, hashAppKey } from '../middleware/auth.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 
 let server: Server;
@@ -15,6 +16,7 @@ let token: string;
 let workerId: string;
 let appId: string;
 let userId: string;
+let agentId: string;
 const opened: Array<{ id: string; token: string }> = [];
 
 beforeAll(async () => {
@@ -45,7 +47,8 @@ beforeEach(async () => {
   appId = app.id;
   await db.appMember.create({ data: { appId, userId, role: 'owner' } });
   const agent = await db.agent.create({ data: { name: 'Engineer', urn: `${org.urn}:engineer`, organizationId: org.id, visibility: 'ORGANIZATION' } });
-  await db.appAgent.create({ data: { appId, agentId: agent.id } });
+  agentId = agent.id;
+  await db.appAgent.create({ data: { appId, agentId } });
   workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: agent.id,
     name: 'Fixture', slug: 'fixture', heldByUserId: userId, heldAt: new Date() } })).id;
   token = await signJwt({ sub: userId, githubId: 2123001, githubUsername: `session-${suffix}`, roles: ['READER'] });
@@ -78,8 +81,8 @@ async function call(transport: string, name: string, args: Record<string, unknow
   const body = JSON.parse(raw.split('\n').find(line => line.startsWith('data:'))?.slice(5) ?? raw);
   return { status: response.status, result: body.result, text: body.result?.content?.[0]?.text ?? '' };
 }
-const edit = (transport: string, signature: string, session?: string) =>
-  call(transport, 'hadron_update_worker', { workerRef: workerId, signature, promptOverride: signature }, session);
+const edit = (transport: string, signature: string, session?: string, namedSession?: string) =>
+  call(transport, 'hadron_update_worker', { workerRef: workerId, signature, promptOverride: signature, ...(namedSession ? { session: namedSession } : {}) }, session);
 
 
 describe('#2123 request-local session refusal', () => {
@@ -91,6 +94,159 @@ describe('#2123 request-local session refusal', () => {
     const denied = await edit(transport, 'must not commit', generateId());
     expect(denied.status).toBe(200);
     expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({ signature: 'human manager control', promptOverride: 'human manager control' });
-    expect(denied.result?.isError).toBe(true);
+    expect(denied.text).toBe('Error: You are not authorized to manage workers in this App.');
   });
+
+  it.each(['initial bound', 'late bound', 'bound then omitted', 'initial invalid then omitted', 'initial invalid then valid', 'bound then plain header'])(
+    '%s cannot become an unbound human-manager edit', async scenario => {
+      const bound = await db.session.create({ data: { id: generateId(), appId, userId, workerId, agentId } });
+      const plain = await db.session.create({ data: { id: generateId(), appId, userId } });
+      const initial = scenario.startsWith('initial invalid') ? generateId() : scenario === 'late bound' ? undefined : bound.id;
+      const transport = await open(initial);
+      const current = scenario === 'initial bound' || scenario === 'late bound' ? bound.id
+        : scenario === 'initial invalid then valid' || scenario === 'bound then plain header' ? plain.id : undefined;
+      const before = await db.worker.findUniqueOrThrow({ where: { id: workerId } });
+      const denied = await edit(transport, 'must not commit', current);
+      expect(denied.status).toBe(200);
+      expect(denied.text).toBe('Error: You are not authorized to manage workers in this App.');
+      expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({
+        signature: before.signature, promptOverride: before.promptOverride, trailer: before.trailer,
+      });
+    },
+  );
+
+
+  it.each(['task', 'ticker', 'stop'] as const)('%s write honors late and sticky invalid headers while authorized controls write', async kind => {
+    const plain = await db.session.create({ data: { id: generateId(), appId, userId } });
+    const transport = await open();
+    const run = async (name: string, header?: string, connection = transport) => {
+      if (kind === 'task') return call(connection, 'hadron_task_create', { appRef: appId, title: name, session: plain.id }, header);
+      if (kind === 'ticker') return call(connection, 'hadron_ticker_create', { appRef: appId, name, cadenceSeconds: 600, session: plain.id }, header);
+      // A synthetic already-recorded signal exercises lift without enabling
+      // the unavailable notice lane or claiming a set-signal activation.
+      const signal = await db.teamStopSignal.create({ data: { id: generateId(), appId, level: 'pause-dispatch', scope: 'worker',
+        targetWorkerId: workerId, setAt: new Date(), setByUserId: userId } });
+      return call(connection, 'hadron_stop_signal_lift', { appRef: appId, id: signal.id, session: plain.id }, header);
+    };
+    const count = () => kind === 'task' ? db.agentTask.count() : kind === 'ticker' ? db.ticker.count()
+      : db.teamStopSignal.count({ where: { endedAt: { not: null } } });
+    const allowed = await run('Control');
+    expect(allowed.result?.isError).not.toBe(true);
+    expect(await count()).toBe(1);
+    const denied = await run('Late invalid', generateId());
+    expect(denied.text).toMatch(/^\[session_not_bound\]/);
+    expect(await count()).toBe(1);
+    const sticky = await open(generateId());
+    const deniedSticky = await run('Sticky invalid', plain.id, sticky);
+    expect(deniedSticky.text).toMatch(/^\[session_not_bound\]/);
+    expect(await count()).toBe(1);
+    expect((await run('Clean again')).result?.isError).not.toBe(true);
+    expect(await count()).toBe(2);
+  });
+
+  it.each(['unknown', 'foreign', 'expired', 'dormant'] as const)('%s late session is refused by every write consumer', async state => {
+    const other = await db.user.create({ data: { githubId: 2123002, githubUsername: 'foreign-session', roles: ['READER'] } });
+    const old = new Date(Date.now() - 400 * 86400000);
+    const bad = state === 'unknown' ? generateId() : (await db.session.create({ data: {
+      id: generateId(), appId, userId: state === 'foreign' ? other.id : userId,
+      ...(state === 'expired' ? { expiresAt: new Date(0) } : {}),
+      ...(state === 'dormant' ? { startedAt: old, updatedAt: old, expiresAt: null } : {}),
+    } })).id;
+    const plain = await db.session.create({ data: { id: generateId(), appId, userId } });
+    const transport = await open();
+    expect((await edit(transport, 'denied', bad)).text).toBe('Error: You are not authorized to manage workers in this App.');
+    expect((await call(transport, 'hadron_task_create', { appRef: appId, title: 'denied', session: plain.id }, bad)).text).toMatch(/^\[session_not_bound\]/);
+    expect((await call(transport, 'hadron_ticker_create', { appRef: appId, name: 'denied', cadenceSeconds: 600, session: plain.id }, bad)).text).toMatch(/^\[session_not_bound\]/);
+    const signal = await db.teamStopSignal.create({ data: { id: generateId(), appId, level: 'pause-dispatch', scope: 'worker', targetWorkerId: workerId, setAt: new Date(), setByUserId: userId } });
+    expect((await call(transport, 'hadron_stop_signal_lift', { appRef: appId, id: signal.id, session: plain.id }, bad)).text).toMatch(/^\[session_not_bound\]/);
+    expect(await db.agentTask.count()).toBe(0);
+    expect(await db.ticker.count()).toBe(0);
+    expect((await db.teamStopSignal.findUniqueOrThrow({ where: { id: signal.id } })).endedAt).toBeNull();
+    expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).promptOverride).toBeNull();
+  });
+
+  it('App-key request-local N5 and sticky initialization refusal hold across task and ticker reads', async () => {
+    const raw = `${APP_KEY_PREFIX}${generateId()}${generateId()}`;
+    const key = await db.appKey.create({ data: { id: generateId(), appId, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4) } });
+    await db.appKeyScope.create({ data: { id: generateId(), appKeyId: key.id, scope: 'attention:deliver', grantedByUserId: userId } });
+    const plain = await db.session.create({ data: { id: generateId(), appId } });
+    for (const tool of ['hadron_task_list', 'hadron_due_wakes']) {
+      const connection = await open(undefined, raw);
+      const invoke = (header?: string, transport = connection) => call(transport, tool, { appRef: appId }, header, raw);
+      expect((await invoke()).result?.isError).not.toBe(true);
+      expect((await invoke(plain.id)).text).toMatch(/^\[app_key_session_bound\]/);
+      expect((await invoke(generateId())).text).toMatch(/^\[app_key_session_bound\]/);
+      expect((await invoke()).result?.isError).not.toBe(true); // only INITIAL refusal is sticky
+      const sticky = await open(generateId(), raw);
+      expect((await invoke(undefined, sticky)).text).toMatch(/^\[app_key_session_bound\]/);
+      expect((await invoke(plain.id, sticky)).text).toMatch(/^\[app_key_session_bound\]/);
+    }
+  });
+
+
+  it('self inbox cannot clear a late or initial refusal through its validated session argument', async () => {
+    const bound = await db.session.create({ data: { id: generateId(), appId, userId, workerId, agentId } });
+    const clean = await open();
+    const args = { appRef: appId, session: bound.id };
+    const allowed = await call(clean, 'hadron_team_chat_inbox', args);
+    expect(allowed.status).toBe(200);
+    expect(JSON.parse(allowed.text).batches).toEqual([]);
+    const denied = await call(clean, 'hadron_team_chat_inbox', args, generateId());
+    expect(denied.result?.isError).toBe(true);
+    expect(denied.text).toMatch(/^\[session_(not_found|not_live)\]/);
+    const sticky = await open(generateId());
+    const deniedSticky = await call(sticky, 'hadron_team_chat_inbox', args, bound.id);
+    expect(deniedSticky.result?.isError).toBe(true);
+    expect(deniedSticky.text).toMatch(/^\[session_(not_found|not_live)\]/);
+  });
+
+  it('queued requests keep their own bearer/header decision through real dispatch', async () => {
+    const plain = await db.session.create({ data: { id: generateId(), appId, userId } });
+    const other = await db.user.create({ data: { githubId: 2123003, githubUsername: 'other-principal', roles: ['READER'] } });
+    const otherToken = await signJwt({ sub: other.id, githubId: 2123003, githubUsername: 'other-principal', roles: ['READER'] });
+    const transport = await open();
+    const badHeader = generateId();
+    let release!: () => void;
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    let blocked = false;
+    const original = db.session.updateMany.bind(db.session);
+    // The real first tool is suspended in heartbeat, after request auth was
+    // refreshed and before it builds its management Context. SQL is retained.
+    const heartbeat = vi.spyOn(db.session, 'updateMany').mockImplementation((async (args: any) => {
+      if (!blocked && args.where.id === plain.id) {
+        blocked = true;
+        await hold;
+      }
+      return original(args);
+    }) as typeof db.session.updateMany);
+    let arrivals = 0;
+    const observe = (request: import('node:http').IncomingMessage) => {
+      if (request.headers['mcp-session-id'] === transport &&
+          (request.headers['x-hadron-session'] === badHeader || request.headers.authorization === `Bearer ${otherToken}`)) arrivals++;
+    };
+    server.prependListener('request', observe);
+    const first = edit(transport, 'first own request', undefined, plain.id);
+    let second: ReturnType<typeof edit> | undefined;
+    let foreign: ReturnType<typeof call> | undefined;
+    try {
+      await vi.waitFor(() => expect(blocked).toBe(true), { timeout: 3000, interval: 10 });
+      second = edit(transport, 'late invalid must not commit', badHeader, plain.id);
+      foreign = call(transport, 'hadron_update_worker', { workerRef: workerId, signature: 'foreign must not commit' }, undefined, otherToken);
+      await vi.waitFor(() => expect(arrivals).toBe(2), { timeout: 3000, interval: 10 });
+      release();
+      expect((await first).text).toMatch(/^Updated/);
+      expect((await second).text).toBe('Error: You are not authorized to manage workers in this App.');
+      expect((await foreign).status).toBe(404);
+      expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({ signature: 'first own request', promptOverride: 'first own request' });
+      // A late invalid request is not an INITIAL refusal and cannot poison
+      // the following clean request on this same authenticated transport.
+      expect((await edit(transport, 'clean next request')).text).toMatch(/^Updated/);
+    } finally {
+      release();
+      await Promise.allSettled([first, ...(second ? [second] : []), ...(foreign ? [foreign] : [])]);
+      heartbeat.mockRestore();
+      server.removeListener('request', observe);
+    }
+  });
+
 });
