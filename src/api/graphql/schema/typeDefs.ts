@@ -4449,6 +4449,11 @@ export const typeDefs = `#graphql
     """
     orgGrants: [AgentOrgGrant!]!
     createdAt: DateTime!
+
+    "#2024 — the tickers this Agent declares. Casting a worker from it creates them for the worker (a snapshot: later edits reach only future casts). Readable by anyone who can read the Agent."
+    tickerTemplates: [AgentTickerTemplate!]!
+    "#2024 — whether the caller may create, change or delete this Agent's ticker templates (the Agent ADMIN door, the same as editing the Agent). Null when it cannot be decided."
+    viewerMayEditTickerTemplates: Boolean
   }
 
   """
@@ -5093,6 +5098,22 @@ export const typeDefs = `#graphql
     prompt: String
     "Whether the agent's systemPrompt binds {{name}} — a nameless template silently produces workers whose prompt never names them. Null when the agent has no template."
     hasNamePlaceholder: Boolean
+    "#2024 — the tickers this cast would create, each at its effective cadence (the larger of the template's and the App's floor). Non-reserving: nothing is written or held, so a later cast may differ if the App changes. Empty when the Agent declares none."
+    tickers: [CastPreviewTicker!]!
+  }
+
+  "#2024 — one ticker a cast would create from an Agent ticker template."
+  type CastPreviewTicker {
+    "The generated name: the template name, a middle dot, then the worker name."
+    name: String!
+    templateId: ID!
+    templateRevision: Int!
+    "What the template asks for."
+    requestedCadenceSeconds: Int!
+    "What the ticker gets: the larger of the requested cadence and the App's floor."
+    effectiveCadenceSeconds: Int!
+    relevance: TickerRelevance!
+    reasons: [TickerReason!]!
   }
 
   """
@@ -8964,6 +8985,12 @@ export const typeDefs = `#graphql
     be gone at cast time — by design; the cast's uniqueness constraint
     remains the only allocation primitive.
     """
+    """
+    #2024 — the live ticker templates of an Agent, by name. Anyone who can read the Agent. An Agent the caller cannot read answers
+    as absent (AGENT_NOT_FOUND).
+    """
+    agentTickerTemplates(agentRef: String!): [AgentTickerTemplate!]!
+
     castWorkerPreview(
       appRef: ID!
       agentRef: ID
@@ -9254,6 +9281,22 @@ export const typeDefs = `#graphql
     TICKER_LIMIT_REACHED, TICKER_QUIET_HOURS_INVALID, APP_NOT_FOUND, APP_UNINSTALLED.
     """
     createTicker(appRef: String!, input: TickerInput!): Ticker!
+
+    """
+    #2024 — declare a ticker on an Agent. Whoever may edit the Agent (ADMIN on it); an App manager is not thereby an Agent editor.
+    Affects only FUTURE casts. Refusals: TICKER_TEMPLATE_NAME_TAKEN, TICKER_TEMPLATE_LIMIT_REACHED, TICKER_CADENCE_OUT_OF_RANGE,
+    TICKER_QUIET_HOURS_INVALID, BAD_USER_INPUT (reasons), AGENT_NOT_FOUND, FORBIDDEN.
+    """
+    createAgentTickerTemplate(agentRef: String!, input: AgentTickerTemplateInput!): AgentTickerTemplate!
+
+    """
+    #2024 — change a template; absent fields are unchanged. expectedRevision must be the revision you read, else
+    TICKER_TEMPLATE_REVISION_MISMATCH and nothing is written. Affects only future casts.
+    """
+    updateAgentTickerTemplate(id: ID!, expectedRevision: Int!, input: AgentTickerTemplatePatch!): AgentTickerTemplate!
+
+    "#2024 — remove a template (it stays as history; its name may be reused). expectedRevision as for update. Tickers already generated from it are untouched."
+    deleteAgentTickerTemplate(id: ID!, expectedRevision: Int!): Boolean!
 
     "#1747 — change a ticker. Its owner, the holder of its owning worker, or whoever manages the App. The slug never changes."
     updateTicker(ref: String!, input: TickerPatch!): Ticker!
@@ -13088,6 +13131,49 @@ export const typeDefs = `#graphql
   #1747 — a named wake schedule owned by one team App (hrn:node:hadronmemory.com:specs:cor:agt:080:01). Its URN is hrn:ticker:ROOT:APP-SLUG:SLUG,
   computed from the App and the permanent slug. Ticks are computed, not stored; nothing reads a ticker until due wakes ship.
   """
+  """
+  #2024 — one ticker an Agent declares. Casting a worker from the Agent into an App creates the worker's tickers from the live
+  templates and subscribes it, in the cast's own transaction. A SNAPSHOT: a later edit or removal reaches only future casts;
+  existing workers and tickers are untouched. Identity is the id, never the name or the position. The cadence is the requested
+  one; the cast raises it to the App's floor. Reasons are never empty.
+  """
+  type AgentTickerTemplate {
+    id: ID!
+    agent: Agent!
+    "Counts edits; an update or delete must name the revision it saw, and a stale one is refused with TICKER_TEMPLATE_REVISION_MISMATCH."
+    revision: Int!
+    "The shape of this record. Only 1 exists."
+    shapeVersion: Int!
+    name: String!
+    cadenceSeconds: Int!
+    "A timezone and weekly windows; null when none."
+    quietHours: JSON
+    relevance: TickerRelevance!
+    reasons: [TickerReason!]!
+    createdAt: DateTime!
+    updatedAt: DateTime
+  }
+
+  input AgentTickerTemplateInput {
+    name: String!
+    cadenceSeconds: Int!
+    quietHours: JSON
+    relevance: TickerRelevance
+    "Absent = [READ_TEAM_CHANNEL]; an empty list is refused."
+    reasons: [TickerReason!]
+  }
+
+  "Absent fields are unchanged. Use clearQuietHours to remove the quiet hours."
+  input AgentTickerTemplatePatch {
+    name: String
+    cadenceSeconds: Int
+    quietHours: JSON
+    clearQuietHours: Boolean
+    relevance: TickerRelevance
+    "An empty list is refused."
+    reasons: [TickerReason!]
+  }
+
   type Ticker {
     id: ID!
     "The canonical URN. Null when it cannot be composed."

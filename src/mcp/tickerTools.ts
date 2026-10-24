@@ -23,7 +23,7 @@ import { GraphQLError } from 'graphql';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import { tickerFieldResolvers } from '../api/graphql/schema/resolvers.ticker.js';
+import { reasonEnum, tickerFieldResolvers } from '../api/graphql/schema/resolvers.ticker.js';
 import { type AuthContext, validateSessionBinding } from '../middleware/auth.js';
 import { runAsActor } from '../lib/requestActor.js';
 import { UrnNotQualifiedError } from '../lib/urn.js';
@@ -36,12 +36,16 @@ const Q = resolvers.Query as unknown as {
   tickers: Resolver<{ appRef: string }, Row[]>;
   ticker: Resolver<{ ref: string }, Row | null>;
   workerWakeSettings: Resolver<{ workerRef: string }, Row>;
+  agentTickerTemplates: Resolver<{ agentRef: string }, Row[]>;
   dueWakes: Resolver<{ appRef: string; workerRefs?: string[]; first?: number; after?: string }, Row>;
   deliveryBatches: Resolver<{ appRef: string; workerRefs?: string[]; first?: number; after?: string }, Row>;
 };
 const M = resolvers.Mutation as unknown as {
   setAppDeliverySettings: Resolver<{ appRef: string; input: unknown }, Row>;
   setTeamPause: Resolver<{ appRef: string; paused: boolean }, Row>;
+  createAgentTickerTemplate: Resolver<{ agentRef: string; input: Row }, Row>;
+  updateAgentTickerTemplate: Resolver<{ id: string; expectedRevision: number; input: Row }, Row>;
+  deleteAgentTickerTemplate: Resolver<{ id: string; expectedRevision: number }, boolean>;
   createTicker: Resolver<{ appRef: string; input: Row }, Row>;
   updateTicker: Resolver<{ ref: string; input: Row }, Row>;
   deleteTicker: Resolver<{ ref: string }, boolean>;
@@ -68,7 +72,7 @@ export const TICKER_WRITE_TOOLS = [
  * optional `session`. `hadron_worker_wake_settings` is a read until it is given
  * something to set, and then enforces the write rule itself.
  */
-export const TICKER_READ_TOOLS = ['hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get', 'hadron_team_chat_inbox'] as const;
+export const TICKER_READ_TOOLS = ['hadron_ticker_list', 'hadron_agent_ticker_template_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get', 'hadron_team_chat_inbox'] as const;
 
 function textResult(text: string, isError = false) {
   return { ...(isError ? { isError: true as const } : {}), content: [{ type: 'text' as const, text }] };
@@ -440,6 +444,57 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     },
   );
 
+  // #2024 (S8): an Agent's ticker templates. Thin over the same resolvers GraphQL serves: reading is reading the
+  // Agent, writing is editing it (the Agent ADMIN door), and an edit reaches only future casts. These are a person's
+  // edits to an Agent, not a worker's acts, so they take no worker session of their own.
+  const renderTemplate = (t: Row): string => {
+    const quiet = t.quietHours ? ` · quiet hours ${t.quietHours.timezone} (${t.quietHours.windows.length} window${t.quietHours.windows.length === 1 ? '' : 's'})` : '';
+    const reasons = (t.reasons as string[]).map((x) => x.toLowerCase().replace(/_/g, '-')).join('+');
+    return `- ${t.name} · id ${t.id} · revision ${t.revision} · every ${t.cadenceSeconds}s (raised to the App floor at cast) · relevance ${t.relevance} · reasons ${reasons}${quiet}`;
+  };
+  async function plain(fn: (ctx: Context) => Promise<string>) {
+    try {
+      return textResult(await fn(ctxOf()));
+    } catch (e) {
+      return refusal(e);
+    }
+  }
+  server.tool(
+    'hadron_agent_ticker_template_list',
+    'List the ticker templates an Agent declares (#2024). Casting a worker from the Agent creates these tickers for the worker ' +
+      'and subscribes it; a template edit reaches only FUTURE casts. Readable by anyone who can read the Agent.',
+    SHAPE_HADRON_AGENT_TICKER_TEMPLATE_LIST,
+    async ({ agentRef }) => plain(async (ctx) => {
+      const rows = await Q.agentTickerTemplates({}, { agentRef }, ctx);
+      if (!rows.length) return 'No ticker templates.';
+      return `${rows.length} template${rows.length === 1 ? '' : 's'}:\n\n${rows.map(renderTemplate).join('\n')}`;
+    }),
+  );
+  server.tool(
+    'hadron_agent_ticker_template_create',
+    'Declare a ticker on an Agent (#2024). Whoever may edit the Agent (ADMIN on it); an App manager is not thereby an Agent editor. ' +
+      'Affects only future casts. The cast raises a cadence below the App floor to the floor; it never refuses for that.',
+    SHAPE_HADRON_AGENT_TICKER_TEMPLATE_CREATE,
+    async ({ agentRef, ...input }) => plain(async (ctx) => `Created.\n${renderTemplate(await M.createAgentTickerTemplate({}, { agentRef, input: toGraphqlTemplate(input) }, ctx))}`),
+  );
+  server.tool(
+    'hadron_agent_ticker_template_update',
+    'Change an Agent ticker template (#2024). Omitted fields are unchanged. Pass expectedRevision from the list; a stale one is ' +
+      'refused (ticker_template_revision_mismatch) and nothing is written. Affects only future casts.',
+    SHAPE_HADRON_AGENT_TICKER_TEMPLATE_UPDATE,
+    async ({ id, expectedRevision, ...input }) => plain(async (ctx) => `Updated.\n${renderTemplate(await M.updateAgentTickerTemplate({}, { id, expectedRevision, input: toGraphqlTemplate(input) }, ctx))}`),
+  );
+  server.tool(
+    'hadron_agent_ticker_template_delete',
+    'Remove an Agent ticker template (#2024); it stays as history and its name may be reused. Pass expectedRevision from the list. ' +
+      'Tickers already generated from it are untouched; only future casts omit it.',
+    SHAPE_HADRON_AGENT_TICKER_TEMPLATE_DELETE,
+    async ({ id, expectedRevision }) => plain(async (ctx) => {
+      await M.deleteAgentTickerTemplate({}, { id, expectedRevision }, ctx);
+      return 'Deleted.';
+    }),
+  );
+
   server.tool(
     'hadron_ack_wakes',
     'Record that wakes were delivered (cor:agt:080:16, :17). Pass the proofs hadron_due_wakes gave you, after delivering the ' +
@@ -550,5 +605,38 @@ const SHAPE_HADRON_TEAM_CHAT_INBOX_ACK = {
   through: z.array(z.object({ channelId: z.string(), seq: z.number().int() })).optional().describe('Partial acknowledgement of a single batch.'),
   session: z.string().optional().describe('Self: required, the same live bound worker session that received the batch. Host key: omit session and use the receiving key.'),
 };
+
+const SHAPE_HADRON_AGENT_TICKER_TEMPLATE_LIST = { agentRef: z.string().describe('The Agent: its id or hrn:agent: URN.') };
+
+const SHAPE_HADRON_AGENT_TICKER_TEMPLATE_CREATE = {
+  agentRef: z.string().describe('The Agent: its id or hrn:agent: URN.'),
+  name: z.string().describe('Unique among the Agent\'s live templates, ignoring case. A generated ticker is named "<this name> \u00b7 <worker name>".'),
+  cadenceSeconds: z.number().int().describe('Requested cadence, 1..86400. The cast raises it to the App\'s own floor.'),
+  quietHours: quietHours.optional(),
+  relevance: z.enum(['ALL', 'MENTIONS']).optional().describe('Default ALL.'),
+  reasons: z.array(z.enum(['read-team-channel', 'every-tick', 'live-check'])).min(1).optional().describe('Why it fires. Default [read-team-channel]. Never empty. A heartbeat is a second template with every-tick.'),
+};
+
+const SHAPE_HADRON_AGENT_TICKER_TEMPLATE_UPDATE = {
+  id: z.string().describe('The template id (never its name).'),
+  expectedRevision: z.number().int().describe('The revision you read; a stale one is refused and nothing is written.'),
+  name: z.string().optional(),
+  cadenceSeconds: z.number().int().optional(),
+  quietHours: quietHours.optional(),
+  clearQuietHours: z.boolean().optional(),
+  relevance: z.enum(['ALL', 'MENTIONS']).optional(),
+  reasons: z.array(z.enum(['read-team-channel', 'every-tick', 'live-check'])).min(1).optional(),
+};
+
+const SHAPE_HADRON_AGENT_TICKER_TEMPLATE_DELETE = {
+  id: z.string().describe('The template id (never its name).'),
+  expectedRevision: z.number().int().describe('The revision you read; a stale one is refused and nothing is written.'),
+};
+
+/** The tool spells reasons in kebab-case; GraphQL spells them in capitals. */
+function toGraphqlTemplate(input: Row): Row {
+  const { reasons, ...rest } = input;
+  return reasons === undefined ? rest : { ...rest, reasons: (reasons as string[]).map((r) => reasonEnum(r)) };
+}
 
 const SHAPE_HADRON_ACK_WAKES = { proofs: z.array(z.string()).describe('Wake proofs from hadron_due_wakes.'), session: SESSION_WRITE };

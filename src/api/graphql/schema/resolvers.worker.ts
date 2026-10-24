@@ -21,9 +21,9 @@ import { WORKER_SIGNATURE_DEFAULTS, normalizeWorkerSignature, withWorkerSignatur
 import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
 import {
   GeneratedNameTooLongError, GeneratedTickerLimitError, GeneratedTickerNameTakenError,
-  endGeneratedTickersForWorker, instantiateAgentTickerTemplates,
+  endGeneratedTickersForWorker, instantiateAgentTickerTemplates, planGeneratedTickers,
 } from '../../../lib/tickers/agentTickerTemplates.js';
-import { lockAppTickers } from './resolvers.ticker.js';
+import { lockAppTickers, reasonEnum } from './resolvers.ticker.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
@@ -62,7 +62,7 @@ import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
-import { miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
+import { deletePristineGeneratedTickers, miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -1680,6 +1680,7 @@ export const workerMutations = {
         const current = await tx.worker.findUnique({ where: { id: worker.id } });
         if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
         if (await miscastHasReferences(tx, current)) throw refuse();
+        await deletePristineGeneratedTickers(tx, worker.id);
         await tx.session.deleteMany({ where: { workerId: worker.id } });
         await tx.worker.delete({ where: { id: worker.id } });
         if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
@@ -1939,6 +1940,15 @@ export const workerQueries = {
     const boundOverride = override ? applyPlatformVariables(override, values) : override;
     const prompt = bound && boundOverride ? `${bound}\n\n${boundOverride}` : (boundOverride ?? bound);
 
+    // #2024 (S8): the tickers this cast would create, validated by the cast's own planner. Non-reserving: it reads
+    // what is committed now, takes no lock and writes nothing, so a cast may still differ if the App changes.
+    let tickers;
+    try {
+      tickers = await planGeneratedTickers(ctx.db as unknown as Prisma.TransactionClient, { appId, agentId: agent.id, workerName: name });
+    } catch (e) {
+      throw generatedTickerRefusal(e) ?? e;
+    }
+
     return {
       name,
       role: workerRole,
@@ -1946,6 +1956,15 @@ export const workerQueries = {
       agentName: agent.name,
       prompt,
       hasNamePlaceholder: template ? templateBindsName(template) : null,
+      tickers: tickers.map((t) => ({
+        name: t.name,
+        templateId: t.templateId,
+        templateRevision: t.templateRevision,
+        requestedCadenceSeconds: t.requestedCadenceSeconds,
+        effectiveCadenceSeconds: t.effectiveCadenceSeconds,
+        relevance: t.relevance,
+        reasons: t.reasons.map(reasonEnum),
+      })),
     };
   },
 };

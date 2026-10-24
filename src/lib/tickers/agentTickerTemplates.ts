@@ -95,7 +95,7 @@ export type PlannedTicker = {
  * What a cast would create for this Agent in this App, without writing anything: the live templates, each with
  * its generated name and its effective cadence, the larger of the template's and the App's floor (a below-floor
  * template is clamped, not refused, R92). Refuses the whole plan when the App's live cap cannot take every ticker
- * (aggregate, so a cast never lands part of its set). The caller holds the App ticker lock when it will write;
+ * (aggregate, so a cast never lands part of its set) or a generated name is already a live ticker's. The caller holds the App ticker lock when it will write;
  * the preview reads without it and so shows what a cast would do now.
  *
  * Reasons are not re-validated here: a template is validated when written and the CHECK keeps it so.
@@ -108,7 +108,7 @@ export async function planGeneratedTickers(
   const settings = await tx.app.findUniqueOrThrow({ where: { id: args.appId }, select: { tickerMinCadenceSeconds: true, tickerLiveCap: true } });
   const live = await tx.ticker.count({ where: { appId: args.appId, deletedAt: null } });
   if (live + templates.length > settings.tickerLiveCap) throw new GeneratedTickerLimitError(live, templates.length, settings.tickerLiveCap);
-  return templates.map((t) => ({
+  const plans = templates.map((t) => ({
     templateId: t.id,
     templateRevision: t.revision,
     name: generatedTickerName(t.name, args.workerName),
@@ -118,6 +118,18 @@ export async function planGeneratedTickers(
     relevance: t.relevance,
     reasons: t.reasons,
   }));
+  // Names are unique among the App's live tickers, ignoring case: against what exists and among the plans.
+  const seen = new Set<string>();
+  for (const plan of plans) {
+    const key = plan.name.toLowerCase();
+    const clash = seen.has(key) || (await tx.ticker.findFirst({
+      where: { appId: args.appId, deletedAt: null, name: { equals: plan.name, mode: 'insensitive' } },
+      select: { id: true },
+    })) !== null;
+    if (clash) throw new GeneratedTickerNameTakenError(plan.name);
+    seen.add(key);
+  }
+  return plans;
 }
 
 /**
@@ -144,11 +156,6 @@ export async function instantiateAgentTickerTemplates(
   const actor = currentActor();
   const made: Array<{ tickerId: string; subscriptionId: string; plan: PlannedTicker }> = [];
   for (const plan of plans) {
-    const clash = await tx.ticker.findFirst({
-      where: { appId: args.appId, deletedAt: null, name: { equals: plan.name, mode: 'insensitive' } },
-      select: { id: true },
-    });
-    if (clash) throw new GeneratedTickerNameTakenError(plan.name);
     const slug = await nextFreeTickerSlug(tx, args.appId, plan.name);
     const stamp = {
       createdBy: args.createdBy, createdByWorkerId: actor.workerId, createdByAgentId: actor.agentId,
