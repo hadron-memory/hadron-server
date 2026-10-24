@@ -980,6 +980,14 @@ export const typeDefs = `#graphql
     user context) get an empty page. Powers the portal's "My apps".
     """
     ownedByMe: Boolean
+    """
+    #2343 — restricts the list to Apps that install this Agent (the AppAgent
+    join; an App has no separate primary-agent column to match). Accepts an ID
+    or a fully-qualified URN. The Agent must be one the caller can read: an
+    unreadable, deleted, unresolvable or nonexistent Agent yields an empty page,
+    never a not-found or forbidden error. Combines with ownedByMe and orgId.
+    """
+    agentId: ID
   }
 
   """
