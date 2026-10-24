@@ -1,0 +1,118 @@
+# Frozen portal NodeFind and NodeFields, a8874b86; #2372 compatibility fixture.
+
+  
+  fragment NodeFields on Node {
+    id
+    memoryId
+    memory { id urn name appId }
+    nodeType
+    objectType
+    loc
+    name
+    alias
+    description
+    abstract
+    content
+    tokens
+    tags
+    seq
+    data
+    ownerRepo
+    isRunnable
+    role
+    createdAt
+    updatedAt
+    outgoingEdges {
+      id
+      name
+      loc
+      isRunnable
+      target { id loc name description tags memory { id urn } }
+    }
+    incomingEdges {
+      id
+      name
+      loc
+      isRunnable
+      source { id loc name description tags memory { id urn } }
+    }
+  }
+
+  query NodeFind(
+    $query: String
+    $mode: FindNodesMode
+    $sort: NodeSort
+    $granularity: SearchGranularity
+    $fields: [NodeField!]
+    $memoryIds: [ID!]
+    $createdBy: String
+    $updatedAfter: String
+    $updatedBefore: String
+    $includeDeleted: Boolean
+    $objectType: String
+    $where: NodeWhereInput
+    $approvalState: NodeApprovalState
+    $minted: Boolean
+    $contentScope: NodeContentScope
+    $sortProperty: NodePropertySort
+    $limit: Int
+  ) {
+    findNodes(
+      query: $query
+      mode: $mode
+      sort: $sort
+      sortProperty: $sortProperty
+      granularity: $granularity
+      fields: $fields
+      limit: $limit
+      filter: {
+        memoryIds: $memoryIds
+        createdBy: $createdBy
+        updatedAfter: $updatedAfter
+        updatedBefore: $updatedBefore
+        includeDeleted: $includeDeleted
+        objectType: $objectType
+        where: $where
+        approvalState: $approvalState
+        minted: $minted
+        contentScope: $contentScope
+      }
+    ) {
+      hits {
+        node {
+          ...NodeFields
+          commentSummary { openThreads }
+          asComment {
+            id
+            isTopLevel
+            state
+            anchorRevision
+            deleted
+            author {
+              kind
+              user { id handle name urn }
+              agent { id handle name urn }
+              worker { id handle name urn }
+              app { id handle name urn }
+            }
+            target { id name nodeType revSeq urn }
+          }
+        }
+        score
+        vector {
+          similarity
+          model
+          abstractStale
+          source
+        }
+      }
+      passages {
+        parentNodeId
+        text
+        score
+      }
+      total
+      reason
+      degraded
+    }
+  }
