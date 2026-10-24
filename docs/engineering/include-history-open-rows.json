@@ -1,0 +1,88 @@
+{
+  "scope": "Bounded #2273 review freeze only; not combined-safety, merge or exposure readiness",
+  "disposition": "https://github.com/hadron-memory/hadron-server/issues/2274#issuecomment-6377403277",
+  "mainBaseline": "2bdefcd2de44f2755352cee5e9a346fde1835cf7",
+  "includedCheckedCaller": "Dan cloneAgent 2aad4b5e (source20e6c0bf), CHECKED6356294522",
+  "openRows": [
+    {
+      "id": "2274-namespace-address",
+      "family": "owner-handle, organization and Memory URN/alias/trigger rewrites",
+      "status": "GAPS",
+      "owner": "Basil",
+      "reference": "01a16b44b6d3734d9716e10078ff9102",
+      "blocksCombinedReadiness": true
+    },
+    {
+      "id": "2274-tombstone-cascade",
+      "family": "target-namespace Agent/Memory tombstone source/history/entitlement cascades",
+      "status": "GAPS",
+      "owner": "Basil",
+      "reference": "01a16b44b6d3734d9716e10078ff9102",
+      "blocksCombinedReadiness": true
+    },
+    {
+      "id": "2277-comment-restore",
+      "family": "comment lifecycle and source restoreNode",
+      "status": "CHECKED-dependent",
+      "owner": "Basil",
+      "reference": "#2283@8b2ddeed",
+      "blocksCombinedReadiness": true
+    },
+    {
+      "id": "2277-channel",
+      "family": "Channel root/reuse/rename/delete and message/default producers",
+      "status": "GAPS",
+      "owner": "Basil",
+      "reference": "01a16b299df37e39a5b89488d0d3aa78",
+      "blocksCombinedReadiness": true
+    },
+    {
+      "id": "2277-revision-create",
+      "family": "revisions:* creation including parent upsert",
+      "status": "GAPS",
+      "owner": "Basil",
+      "reference": "01a16b299b917cee9bf3fc63f4980e28",
+      "blocksCombinedReadiness": true
+    },
+    {
+      "id": "2277-old-agent-grants",
+      "family": "old-Agent entitlement deletion on reclaim",
+      "status": "GAPS",
+      "owner": "Basil",
+      "reference": "01a16b2999057c4ba325529ccaaa26c4",
+      "blocksCombinedReadiness": true
+    },
+    {
+      "id": "2277-memory-promotion",
+      "family": "supplied existing-Memory source promotion",
+      "status": "GAPS",
+      "owner": "Basil",
+      "reference": "01a16b44b89f79e28e8c9ab2ca92c542",
+      "blocksCombinedReadiness": true
+    },
+    {
+      "id": "2263-fleet",
+      "family": "account epoch mixed-fleet/restart/rollback/availability",
+      "status": "ops-held",
+      "owner": "Basil/Hugo",
+      "reference": "#2263@417253fd",
+      "blocksCombinedReadiness": true
+    },
+    {
+      "id": "2258-final-qa",
+      "family": "worker-session/impersonation/run/three-target transport rollback, owner/grant freshness",
+      "status": "acceptance-debt",
+      "owner": "Marco/QA",
+      "reference": "#2258@c65e694a",
+      "blocksCombinedReadiness": true
+    },
+    {
+      "id": "2258-pool",
+      "family": "deterministic sanitized pool-exhaustion deadline/no-write evidence",
+      "status": "analysis-open",
+      "owner": "Basil",
+      "reference": "01a16b44ba417c6e982068dc921315d0",
+      "blocksCombinedReadiness": true
+    }
+  ]
+}

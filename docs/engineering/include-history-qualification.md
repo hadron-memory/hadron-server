@@ -6,6 +6,14 @@ Task `01a162c0c99d712e86ee947880f7d99f` covers every approval door (including
 T3 + §10/L (6258713506, 6328649240, 6329058749). Existing #2263 and #2258
 remain held; composing them for development does not approve either.
 
+## Current bounded review cut — 2026-10-24
+
+Xylon disposition [6377403277](https://github.com/hadron-memory/hadron-server/issues/2274#issuecomment-6377403277) permits a **bounded source-review freeze**, without waiting for implementations that depend on this primitive to land first. It does not grant merge, combined-safety, compile exposure, stack or rollout readiness. Refresh baseline: main `2bdefcd2`; Dan checked cloneAgent migration `2aad4b5e` remains in the actual delivery. The held #2258/#2263 and #2283 composition stays evidence-only.
+
+Machine-readable retained blockers: `include-history-open-rows.json`. All listed rows still block combined readiness: namespace/address/alias/trigger changes and tombstone cascades (#2274); Channel/message/default producers, revision creation/parent upsert, old-Agent grant deletion and supplied-Memory promotion (#2277); comment/restore #2283 integrated QA; #2263 fleet/restart/rollback; #2258 final actual caller/transport/freshness acceptance and pool robustness analysis. None is silently excluded or implemented by this refresh. Pure reads and proved fresh-uncommitted allocation retain only their stated narrow exclusions.
+
+Landing order: bounded qualification/history primitive and checked Dan caller first under original T3/final-security/seed-startup/integrated-QA gates; separately CHECKED dependent writer cuts afterward; complete actual composition before combined readiness. Analysis may proceed now. Every proposed new implementation still needs its own CHECKED attach. Marco owns named QA allocation; real stack remains held by human pause #13670, with non-stack preparation assigned to Cooper. Older sections below are dated evidence, not evidence that a newer tree ran their checks.
+
 ## Integrated source baseline
 
 - Current main `00c20188` includes #2235 approval placement and #2129 unchanged
