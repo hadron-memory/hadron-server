@@ -208,6 +208,21 @@ async function provisionAppSharedMemory(
   }
 }
 
+
+/**
+ * #2403: an App's session timeout stamps every session's expiry, which cor:agt:020:03 makes a promise, so a
+ * non-positive ceiling would be past before the session began. Refuses it with BAD_USER_INPUT; null/omitted
+ * passes (the caller keeps or defaults it). No floor or cap: a range is a product ruling. Callers run it after
+ * their access gate and before any write, so it adds no oracle.
+ */
+function assertPositiveSessionTimeout(seconds: number | null | undefined): void {
+  if (seconds != null && seconds <= 0) {
+    throw new GraphQLError('sessionTimeoutSeconds must be a positive number of seconds.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+}
+
 export const appMutations = {
     regenerateAppKey: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
@@ -350,6 +365,8 @@ export const appMutations = {
         // `@handle:slug` couldn't be resolved from the emitted bare URN.
         namespace = handle;
       }
+      // #2403: after the org ADMIN / authenticated-user gate, before any write or agent lookup.
+      assertPositiveSessionTimeout(sessionTimeoutSeconds);
       // URN format matches memories and agents: "{namespace}:{slug}" — the
       // namespace is an org domain OR the bare user handle for a user-owned App.
       // #574: shared slugify.
@@ -794,6 +811,8 @@ export const appMutations = {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }
+      // #2403: after the access gate, before any write.
+      assertPositiveSessionTimeout(sessionTimeoutSeconds);
       // URN updates: accept a new slug and rebuild the full URN against the
       // app's current org.
       let newUrn: string | undefined;
