@@ -358,6 +358,16 @@ async function runMergeTxn(
       },
     });
 
+    // #708: the source's handle was just replaced by a random placeholder, so its original name is dead.
+    // Tombstone the #692 pool principal (name reserved forever; the user→principal link stays). Only an
+    // active one is touched, so a retry or an already-released principal keeps its original releasedAt.
+    if (source.principalId) {
+      await tx.principal.updateMany({
+        where: { id: source.principalId, status: 'active' },
+        data: { status: 'released', releasedAt: new Date() },
+      });
+    }
+
     await tx.user.update({
       where: { id: targetUserId },
       data: {
