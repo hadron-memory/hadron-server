@@ -199,7 +199,7 @@ export const appQueries = {
     // `id desc` tiebreaker on createdAt ties (cuid is monotonic-ish so
     // this is effectively a fingerprint); guarantees deterministic
     // ordering regardless of millisecond ties.
-    myUserApiKeys: async (_: unknown, __: unknown, ctx: Context) => {
+    myUserApiKeys: async (_: unknown, { includeHidden }: { includeHidden?: boolean } = {}, ctx: Context) => {
       if (!ctx.userId) {
         throw new GraphQLError(
           'myUserApiKeys requires a user-scoped credential.',
@@ -211,7 +211,8 @@ export const appQueries = {
       // identity-scoped — never part of a shared-org support view.
       if (ctx.impersonation) throw new Error('Forbidden');
       return ctx.db.userApiKey.findMany({
-        where: { userId: ctx.userId },
+        // #2298: keys the owner hid stay out of the default list.
+        where: { userId: ctx.userId, ...(includeHidden ? {} : { hiddenAt: null }) },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       });
     },

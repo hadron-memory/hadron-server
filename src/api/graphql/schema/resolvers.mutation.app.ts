@@ -1519,6 +1519,58 @@ export const appMutations = {
       return row;
     },
 
+    // #2298: hide (or unhide) one of the caller's own REVOKED keys in the default
+    // list. Display state only. Authority, anchor and lock are revokeUserApiKey's:
+    // the shared exclusive user anchor serializes hide against revoke, so a hidden
+    // ACTIVE key cannot occur, and the `{ id, userId }` scope collapses unknown and
+    // foreign ids to NOT_FOUND. Idempotent: the first hiddenAt is kept.
+    setUserApiKeyHidden: async (
+      _: unknown,
+      { id, hidden }: { id: string; hidden: boolean },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new GraphQLError(
+          'setUserApiKeyHidden requires a user-scoped credential; AppKey callers cannot hide user keys.',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+      const row = await withAuthorizedTx(
+        ctx,
+        [{ kind: 'user', id: ctx.userId }],
+        async (txCtx) => {
+          if (txCtx.userId !== ctx.userId || txCtx.impersonation) {
+            throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+          }
+        },
+        async (tx) => {
+          // Guarded on the consumed state, so a repeat keeps the original stamp.
+          if (hidden) {
+            await tx.userApiKey.updateMany({
+              where: { id, userId: ctx.userId, revokedAt: { not: null }, hiddenAt: null },
+              data: { hiddenAt: new Date() },
+            });
+          } else {
+            await tx.userApiKey.updateMany({
+              where: { id, userId: ctx.userId, hiddenAt: { not: null } },
+              data: { hiddenAt: null },
+            });
+          }
+          return tx.userApiKey.findFirst({ where: { id, userId: ctx.userId } });
+        },
+        { lockMode: 'exclusive' },
+      );
+      if (!row) {
+        throw new GraphQLError(`UserApiKey ${id} not found.`, { extensions: { code: 'NOT_FOUND' } });
+      }
+      if (hidden && !row.revokedAt) {
+        throw new GraphQLError('Only a revoked API key can be hidden; revoke it first.', {
+          extensions: { code: 'BAD_USER_INPUT', reason: 'KEY_ACTIVE' },
+        });
+      }
+      return row;
+    },
+
     // 005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's
     // AgentSubscription. ADMIN/OWNER of the Agent's owning org only.
     // Side effect: if the user's personal Memory of the Agent has zero
