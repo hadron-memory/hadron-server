@@ -3,6 +3,7 @@ import 'dotenv/config';
 import './lib/automation/config.js';
 import { createServer } from './server.js';
 import { controller } from './controller/controller.js';
+import { db } from './integrations/db/client.js';
 
 const port = Number(process.env.PORT ?? 4000);
 
@@ -29,8 +30,16 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => 
     httpServer.close(error => resolve(!error));
   });
   const deadline = setTimeout(() => process.exit(1), 10_000);
-  void Promise.all([requestsDrained, app.locals.stopEmbeddingWorker?.()]).then(
-    results => { clearTimeout(deadline); process.exit(results.every(Boolean) ? 0 : 1); },
-    () => { clearTimeout(deadline); process.exit(1); },
-  );
+  // #446: disconnect only after HTTP and the worker have settled; keep the
+  // same deadline active through disconnect, and preserve the drain exit code.
+  void Promise.allSettled([requestsDrained, app.locals.stopEmbeddingWorker?.()]).then(async results => {
+    const exitCode = results.every(result => result.status === 'fulfilled' && result.value) ? 0 : 1;
+    try {
+      await db.$disconnect();
+    } catch {
+      console.error('Prisma disconnect failed during shutdown.');
+    }
+    clearTimeout(deadline);
+    process.exit(exitCode);
+  });
 });
