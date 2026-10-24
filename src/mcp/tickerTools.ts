@@ -404,7 +404,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     SHAPE_HADRON_TEAM_CHAT_INBOX,
     async ({ session, ...rest }) =>
       readWakes(session, async (ctx) => {
-        const page = await Q.deliveryBatches({}, rest, session ? { ...ctx, sessionId: session } : ctx);
+        const page = await Q.deliveryBatches({}, rest, session ? { ...ctx, sessionId: session, sessionBindingRefused: false } : ctx);
         return JSON.stringify({
           batches: (page.batches as Row[]).map((b) => ({
             id: b.id,
@@ -431,7 +431,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     SHAPE_HADRON_TEAM_CHAT_INBOX_ACK,
     async ({ session, batchIds, through }) => {
       const ack = async (ctx: Context) => {
-        const r = await M.acknowledgeDeliveryBatches({}, { batchIds, through }, session ? { ...ctx, sessionId: session } : ctx);
+        const r = await M.acknowledgeDeliveryBatches({}, { batchIds, through }, session ? { ...ctx, sessionId: session, sessionBindingRefused: false } : ctx);
         return `Acknowledged ${r.acknowledged}${r.unchanged ? ` (${r.unchanged} already delivered)` : ''}.`;
       };
       // A host key acts as itself and names no session; anyone else is a write and needs a session, like hadron_ack_wakes.

@@ -184,11 +184,11 @@ describe('#2123 request-local session refusal', () => {
   });
 
 
-  it('self inbox cannot clear a late or initial refusal through its validated session argument', async () => {
+  it('self inbox header-only calls preserve late and initial refusal', async () => {
     const bound = await db.session.create({ data: { id: generateId(), appId, userId, workerId, agentId } });
     const clean = await open();
-    const args = { appRef: appId, session: bound.id };
-    const allowed = await call(clean, 'hadron_team_chat_inbox', args);
+    const args = { appRef: appId };
+    const allowed = await call(clean, 'hadron_team_chat_inbox', args, bound.id);
     expect(allowed.status).toBe(200);
     expect(JSON.parse(allowed.text).batches).toEqual([]);
     const denied = await call(clean, 'hadron_team_chat_inbox', args, generateId());
@@ -198,6 +198,15 @@ describe('#2123 request-local session refusal', () => {
     const deniedSticky = await call(sticky, 'hadron_team_chat_inbox', args, bound.id);
     expect(deniedSticky.result?.isError).toBe(true);
     expect(deniedSticky.text).toMatch(/^\[session_(not_found|not_live)\]/);
+  });
+
+  it('self inbox preserves the existing explicit validated-body override of ambient refusal', async () => {
+    const bound = await db.session.create({ data: { id: generateId(), appId, userId, workerId, agentId } });
+    const connection = await open(generateId());
+    const result = await call(connection, 'hadron_team_chat_inbox', { appRef: appId, session: bound.id });
+    expect(result.status).toBe(200);
+    expect(result.result?.isError).not.toBe(true);
+    expect(JSON.parse(result.text).batches).toEqual([]);
   });
 
   it('queued requests keep their own bearer/header decision through real dispatch', async () => {
