@@ -10710,6 +10710,11 @@ export const typeDefs = `#graphql
     App install or live parent Agent import references it, or a live Agent
     extends it as its base. AgentMemoryItem attachments do not block deletion.
 
+    Also refused with DECISION_CONTAINED (#1641) while the Agent's system memory holds a decision or a
+    decision log: removing the memory would remove them, so the Agent is kept. This guard is live
+    whether or not minted-corpus permanence is enforced; the separate minted-corpus refusal applies only
+    when that enforcement is on.
+
     See hrn:node:hadronmemory.com:specs:cor:dmo:050:14.
 
     Accepts the entity's ID or URN.
