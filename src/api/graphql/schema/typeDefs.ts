@@ -3483,6 +3483,11 @@ export const typeDefs = `#graphql
     lastUsedAt: DateTime
     revokedAt: DateTime
     """
+    #2298: when the owner hid this revoked key from their default list; null when
+    visible. Display state only: it never affects validity, revocation or lineage.
+    """
+    hiddenAt: DateTime
+    """
     Issuance identity: portal for direct sign-in issuance, or oauth:<client_id>
     for OAuth issuance. A key minted by a key inherits that credential's
     issuance identity. Powers source labels in the revocation UI.
@@ -8409,7 +8414,10 @@ export const typeDefs = `#graphql
     (SC-006). Rejected with UNAUTHENTICATED for AppKey-resolved
     callers (no user in context). Impersonation is refused with Forbidden.
     """
-    myUserApiKeys: [UserApiKey!]!
+    myUserApiKeys(
+      "#2298: include keys the owner hid with setUserApiKeyHidden. Default false."
+      includeHidden: Boolean = false
+    ): [UserApiKey!]!
 
     """
     #1631 PR3: the caller's own passkey records, revoked ones included, newest first. Only the
@@ -12463,6 +12471,15 @@ export const typeDefs = `#graphql
     UNAUTHENTICATED for AppKey-resolved callers.
     """
     revokeUserApiKey(id: ID!): UserApiKey!
+
+    """
+    #2298: hide (or unhide) one of the caller's own REVOKED API keys in the default
+    myUserApiKeys list. Hiding an active key is refused with BAD_USER_INPUT,
+    reason KEY_ACTIVE, and changes nothing. Idempotent: the first hiddenAt is kept.
+    Touches no validity, revocation time, lineage or descendant. Same authority as
+    revokeUserApiKey (own user only; unknown and foreign ids are NOT_FOUND).
+    """
+    setUserApiKeyHidden(id: ID!, hidden: Boolean!): UserApiKey!
 
     """
     005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's
