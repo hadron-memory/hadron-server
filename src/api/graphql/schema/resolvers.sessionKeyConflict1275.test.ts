@@ -100,10 +100,20 @@ describe('startAgentSession post-commit key registration (#1275)', () => {
 
 describe('keyVerifier writer inventory (#1275 unreachability premise)', () => {
   // The argument that `set` cannot conflict needs a memory's verifier never to
-  // change under a resident cache entry. That holds while ONLY these two sites
-  // write one: a SECRET user memory's birth (new memory id, so no cache entry
-  // can exist) and encryption enable. A third writer, or a rekey, voids the
-  // premise: add it here deliberately and re-argue the conflict.
+  // change under a resident cache entry. It holds because every writer installs
+  // a verifier only on a memory that is NOT yet encrypted (is_encrypted = false,
+  // verifier absent), and a key is cached only for an encrypted memory, so no
+  // entry can predate the write. The three writers:
+  //   1. SECRET user-memory birth (session.ts): a brand-new memory id.
+  //   2. Anonymous-memory promotion (memory.ts linkMemoryToUser, RAW SQL
+  //      `key_verifier = ...`): its claim statement requires
+  //      `is_encrypted = false AND key_verifier IS NULL`, so it is set-once.
+  //   3. Encryption enable (memory.ts encryptMemory, Prisma updateMany on
+  //      `isEncrypted: false`).
+  // A fourth writer, in either spelling, or a rekey, voids the premise: add it
+  // here deliberately and re-argue the conflict. Both the Prisma property and
+  // the SQL column are scanned, because a raw-SQL write does not spell the
+  // property name (Dorian, LOCAL review of #2397).
   function sources(dir: string): string[] {
     return readdirSync(dir).flatMap((n) => {
       const p = join(dir, n);
@@ -111,14 +121,26 @@ describe('keyVerifier writer inventory (#1275 unreachability premise)', () => {
       return /\.ts$/.test(n) && !/\.test\.ts$/.test(n) ? [p] : [];
     });
   }
+  const readSources = () => sources('src').map((p) => [p, readFileSync(p, 'utf8')] as const);
 
-  it('only memory birth (session.ts) and encryption enable (memory.ts) assign keyVerifier', () => {
-    const hits = sources('src').flatMap((p) => readFileSync(p, 'utf8').split('\n')
-      .filter((l) => /\bkeyVerifier\s*:\s*(makeKeyVerifier\(|null\b|parsedKey)/.test(l))
-      .map((l) => `${p}: ${l.trim()}`));
+  it('only birth, promotion and encryption enable assign a verifier (Prisma property or SQL column)', () => {
+    const prismaWrite = /\bkeyVerifier\s*:\s*(makeKeyVerifier\(|null\b|parsedKey)/;
+    const sqlWrite = /\bkey_verifier\s*=(?!=)/;
+    const hits = readSources().flatMap(([p, text]) => text.split('\n')
+      .filter((l) => prismaWrite.test(l) || sqlWrite.test(l))
+      .map((l) => `${p}: ${l.trim().replace(/\s+/g, ' ')}`));
     expect(hits.sort()).toEqual([
       'src/api/graphql/schema/resolvers.mutation.memory.ts: keyVerifier: makeKeyVerifier(key),',
+      'src/api/graphql/schema/resolvers.mutation.memory.ts: key_verifier = ${makeKeyVerifier(key)}, class = \'private\', user_id = ${user.id},',
       'src/api/graphql/schema/resolvers.mutation.session.ts: keyVerifier: parsedKey ? makeKeyVerifier(parsedKey) : null,',
     ]);
+  });
+
+  it('the raw-SQL promotion writer is set-once: its claim requires no existing verifier and no encryption', () => {
+    const text = readFileSync('src/api/graphql/schema/resolvers.mutation.memory.ts', 'utf8');
+    const start = text.indexOf('key_verifier = ${makeKeyVerifier(key)}');
+    expect(start).toBeGreaterThan(0);
+    const stmt = text.slice(start, text.indexOf('`;', start));
+    expect(stmt).toContain('is_encrypted = false AND key_verifier IS NULL');
   });
 });
