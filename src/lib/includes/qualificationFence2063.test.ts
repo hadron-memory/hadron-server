@@ -661,7 +661,7 @@ it.each(['cloneNode', 'mergeNodes'] as const)(
     const pending = surface === 'cloneNode'
       ? resolvers.Mutation.cloneNode(null, { sourceRef: source.id, targetMemoryRef: targetMemory.id }, ctx())
       : resolvers.Mutation.mergeNodes(null, { input: { source: source.id, target: target.id, include: ['CONTENT'], deleteSource: true } }, ctx());
-    const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }));
+    const outcome = pending.then((value: unknown) => ({ value }), (error: unknown) => ({ error }));
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1, 1000);
       // Clone loses source readability; merge retains read but loses source write.
