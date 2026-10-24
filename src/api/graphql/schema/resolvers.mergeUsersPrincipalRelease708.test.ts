@@ -82,4 +82,25 @@ describe('mergeUsers — source principal release (#708)', () => {
     expect(after.status).toBe('released');
     expect(after.releasedAt?.toISOString()).toBe(releasedAt.toISOString());
   });
+
+  it('rolls the release back with the merge when a later write fails', async () => {
+    const before = await principalOf(source.id);
+    const targetBefore = await principalOf(target.id);
+    // The final user_merges insert runs after the release; fault it to force the whole transaction to abort.
+    const faulty = db.$extends({
+      query: { userMerge: { create: () => { throw new Error('injected fault after release'); } } },
+    }) as unknown as typeof db;
+
+    await expect(mergeUsers(faulty, { sourceUserId: source.id, targetUserId: target.id }))
+      .rejects.toThrow('injected fault after release');
+
+    const after = await principalOf(source.id);
+    expect(after.user.principalId).toBe(before.user.principalId);
+    expect(after.user.handle).toBe('pr-source');
+    expect(after.principal?.status).toBe('active');
+    expect(after.principal?.releasedAt).toBeNull();
+    expect(after.principal?.name).toBe('pr-source');
+    expect((await principalOf(target.id)).principal).toEqual(targetBefore.principal);
+    expect(await db.userMerge.count({ where: { sourceUserId: source.id } })).toBe(0);
+  });
 });
