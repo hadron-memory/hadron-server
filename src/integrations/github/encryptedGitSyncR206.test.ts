@@ -166,6 +166,18 @@ describe('R206: encrypted memories never sync to Git', () => {
     expect(vi.mocked(execGit)).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['no key', undefined],
+    ['a request key', true],
+  ])('refuses an explicit sync of an encrypted memory with NO source, with %s, with the typed code', async (_label, keyed) => {
+    await db.memory.update({ where: { id: memoryId }, data: { source: null } });
+    const run = () => M.syncMemory({}, { id: memoryId }, ctx());
+    const rejects = expect(keyed ? requestKeyStorage.run(new Map([[memoryId, key]]), run) : run())
+      .rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_GIT_SYNC_UNAVAILABLE' } });
+    await rejects;
+    expect(vi.mocked(execGit)).not.toHaveBeenCalled();
+  });
+
   it('records an observable typed skip for the configured mirror event, not a silent null', async () => {
     await handleNodeWrittenForGit(db, { nodeId, memoryId, ownerRepo: '', clientId: null } as never);
     expect(warning).toHaveBeenCalledWith(expect.stringMatching(CODE));

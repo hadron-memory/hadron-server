@@ -354,6 +354,14 @@ const syncGraphFromGithubAsSystem = async (
     // user-owned memory has no org — surface it as an error so an explicit
     // syncMemory call gets a meaningful message rather than a silent no-op
     // (startup's batch loop guards on `organization` before calling).
+    // R206 / cor:sec:040:05: an explicit sync of an encrypted memory fails loudly
+    // with the typed code BEFORE the DB-only and no-organization no-ops, so a
+    // memory with no source (or no org) never reads as a healthy sync. The row
+    // is left untouched: there is nothing to mark ERROR on a memory that has no
+    // sync to fail.
+    if ((await db.memory.findUnique({ where: { id: graph.id }, select: { isEncrypted: true } }))?.isEncrypted) {
+      return { error: ENCRYPTED_GIT_SYNC_MESSAGE, errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE };
+    }
     if (!graph.organization) {
       return { error: 'Memory has no organization (user-owned memories are not git-synced)' };
     }
