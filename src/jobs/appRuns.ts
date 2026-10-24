@@ -38,6 +38,7 @@ import {
   NoToolSupportError,
   ToolDeniedError,
   ToolExecutionError,
+  partialUsageOf,
   type LlmResult,
   type LlmObjectResult,
   type LlmToolLoopResult,
@@ -851,6 +852,44 @@ async function executeAppRunInner(
       const budget = (await db.appRun.findUniqueOrThrow({ where: { id: runId }, select: { budgetTokens: true } }))
         .budgetTokens;
       const maxTokens = budget != null ? { maxTokens: Math.max(1, Math.min(budget, 32_000)) } : {};
+      // Counts tokens the provider has billed against this run: the run's budget
+      // and spend, both daily quotas and one usage event. Used once per hop on
+      // success, and once for the completed steps of a REJECTED tool-loop call (#862).
+      const chargeUsage = async (tokensIn: number, tokensOut: number, provider: string, model: string) => {
+        const spent = tokensIn + tokensOut;
+        await db.appRun.updateMany({
+          where: { id: runId },
+          data: {
+            // The DECREMENT is clamped so the remaining budget never goes
+            // negative...
+            budgetTokens: { decrement: Math.min(spent, budget ?? spent) },
+            // ...but the #832 spend counter is NOT: it must stay truthful when a
+            // hop overshoots the remaining budget, which is precisely the run an
+            // operator is auditing. Same statement, so the two can't diverge.
+            tokensSpent: { increment: spent },
+          },
+        });
+        // Recorded even into overage — tokens are already spent at the provider;
+        // the NEXT launch gate is the enforcement point (PR-493 Codex P2).
+        await recordQuotaUsage(db, 'app', run.appId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_APP, spent);
+        await recordQuotaUsage(db, 'org', run.organizationId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_ORG, spent);
+        // One usage event per hop — a failed flow still shows what it spent.
+        // Spec 046: recordLlmUsage enriches with attribution (user + org),
+        // the cost snapshot, and BYOK classification; it is throw-safe.
+        await recordLlmUsage(db, {
+          type: 'app-run',
+          nodeLoc: cur,
+          appId: run.appId,
+          userId: run.userId ?? null,
+          organizationId: run.organizationId,
+          provider,
+          model,
+          tokensIn,
+          tokensOut,
+          keyOwnerType: resolved.ownerType,
+          createdBy: run.userId ?? null,
+        });
+      };
       let result: LlmResult;
       let extracted: Record<string, unknown> | null = null;
       let toolCalls: LlmToolLoopResult['toolCalls'] | null = null;
@@ -918,15 +957,23 @@ async function executeAppRunInner(
           });
         }
       } catch (err) {
-        // #832 KNOWN GAP (PR #854 review, Codex P1): every return below skips
-        // the token accounting under it. For the tool-loop terminals the
-        // provider HAS already generated and billed the tool-call response,
-        // but `generateWithTools` discards the accumulated usage when a tool
-        // throws — it rethrows `fatal` without reading `out.totalUsage`, which
-        // the aborted SDK call never produced. So the tokens are not available
-        // here to count. `AppRun.tokensSpent` documents the under-report
-        // rather than inventing a number; closing it needs the tool loop to
-        // surface partial usage on the error.
+        // #862: a rejected tool-loop call carries the usage of the steps the SDK
+        // reported complete (`partialUsage`); the provider billed them, so they are
+        // counted here, once, BEFORE any exit below (terminal, transient reset or
+        // refusal). The step that failed is unavailable and is not counted; a
+        // rejection with no completed step counts nothing (unknown is not zero).
+        // Only measured steps become known: this closes #832's gap for those paths.
+        const partial = partialUsageOf(err);
+        if (partial) {
+          // An accounting fault must not replace the failure being classified below
+          // (terminal code, transient reset): log it and carry on. A charge is never
+          // retried here, so what was persisted is not counted twice.
+          try {
+            await chargeUsage(partial.tokensIn, partial.tokensOut, resolved.config.provider, resolved.config.model);
+          } catch (chargeErr) {
+            console.error(`[appRuns] run ${runId}: usage of the completed steps was not fully recorded:`, chargeErr instanceof Error ? chargeErr.message : chargeErr);
+          }
+        }
         // Tool-loop terminal errors (plan-tools D-TL-6) — never retried:
         if (err instanceof AutomationPinError) return fail(err.code, err.message);
         if (err instanceof AuthorFailError) {
@@ -960,38 +1007,7 @@ async function executeAppRunInner(
       // Live decrement: run budget + daily token counters, per hop — the
       // kill switch stays truthful across a multi-call flow.
       const spent = result.tokensIn + result.tokensOut;
-      await db.appRun.updateMany({
-        where: { id: runId },
-        data: {
-          // The DECREMENT is clamped so the remaining budget never goes
-          // negative...
-          budgetTokens: { decrement: Math.min(spent, budget ?? spent) },
-          // ...but the #832 spend counter is NOT: it must stay truthful when a
-          // hop overshoots the remaining budget, which is precisely the run an
-          // operator is auditing. Same statement, so the two can't diverge.
-          tokensSpent: { increment: spent },
-        },
-      });
-      // Recorded even into overage — tokens are already spent at the provider;
-      // the NEXT launch gate is the enforcement point (PR-493 Codex P2).
-      await recordQuotaUsage(db, 'app', run.appId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_APP, spent);
-      await recordQuotaUsage(db, 'org', run.organizationId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_ORG, spent);
-      // One usage event per hop — a failed flow still shows what it spent.
-      // Spec 046: recordLlmUsage enriches with attribution (user + org),
-      // the cost snapshot, and BYOK classification; it is throw-safe.
-      await recordLlmUsage(db, {
-        type: 'app-run',
-        nodeLoc: cur,
-        appId: run.appId,
-        userId: run.userId ?? null,
-        organizationId: run.organizationId,
-        provider: result.provider,
-        model: result.model,
-        tokensIn: result.tokensIn,
-        tokensOut: result.tokensOut,
-        keyOwnerType: resolved.ownerType,
-        createdBy: run.userId ?? null,
-      });
+      await chargeUsage(result.tokensIn, result.tokensOut, result.provider, result.model);
 
       if (Date.now() >= deadline) {
         await db.appRun.updateMany({

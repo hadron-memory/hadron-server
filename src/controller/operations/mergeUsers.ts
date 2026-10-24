@@ -7,6 +7,45 @@ import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js'
 import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { waitForSerializationRetry } from '../../lib/serializableRetry.js';
 
+// Non-conflicting ownership, attribution, credential, and history links. An optional third element names a
+// lineage column: rows that carry one stay put (see the #1897 note in mergeUsers).
+export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | readonly [string, string, string]> = [
+  ['memories', 'user_id'],
+  ['sessions', 'user_id'],
+  ['usage_events', 'user_id'],
+  ['org_member_invitations', 'recipient_user_id'],
+  ['user_invitation_activations', 'user_id'],
+  ['exchange_connections', 'user_id'],
+  ['connection_grants', 'granted_by_user_id'],
+  ['principal_grants', 'principal_id'],
+  ['user_api_keys', 'user_id', 'origin_sign_in_id'],
+  ['auth_codes', 'user_id', 'sign_in_id'],
+  ['auth_handoff_codes', 'user_id', 'sign_in_id'],
+  ['app_runs', 'user_id'],
+  ['agent_schedules', 'user_id'],
+  ['agent_webhooks', 'user_id'],
+  ['assets', 'uploaded_by'],
+  ['agents', 'editor_lock_user_id'],
+  // #1591: the approval of record on the live node (no FK, so nothing
+  // else would carry it). The revision-row copy is rewritten above.
+  ['nodes', 'approved_by'],
+  ['nodes', 'minted_by'],
+  // #1705: a task's owner and assignee are authorization identities
+  // (cor:agt:050:08/:09), so they follow the merged person.
+  // agent_team_events' actor / acknowledger ids are deliberately NOT
+  // here: the stream is append-only (a trigger refuses the UPDATE), and
+  // an event is a sealed record of who acted at the time — the
+  // automation_versions precedent (#1696).
+  ['agent_tasks', 'owner_user_id'],
+  ['tickers', 'owner_user_id'],
+  ['agent_tasks', 'assignee_user_id'],
+  // #1706: who last set an availability record (mutable rows, not the
+  // append-only stream). An alarm's `chain` is sealed JSON on the stream,
+  // like the actor ids above, and is not rewritten.
+  ['worker_availability', 'set_by_user_id'],
+  ['model_family_availability', 'set_by_user_id'],
+];
+
 /**
  * Tables whose audit actor columns carry User.id values in normal writes.
  * All four audit actor column names are covered, including Organization's
@@ -604,7 +643,7 @@ async function runMergeTxn(
     // tagged template cannot bind (Postgres parameters are values, not
     // identifiers). They stay `$executeRawUnsafe`, and it is safe: every
     // identifier comes from a compile-time-constant allowlist in THIS file
-    // (`directReferences` / `AUDIT_USER_COLUMNS`) — never user input — while the
+    // (`DIRECT_USER_REFERENCES` / `AUDIT_USER_COLUMNS`) — never user input — while the
     // two user ids are still passed as bound parameters ($1 = target, $2 =
     // source), not interpolated. See #665.
     const runWithIds = (sql: string) => tx.$executeRawUnsafe(sql, targetUserId, sourceUserId);
@@ -625,43 +664,7 @@ async function runMergeTxn(
     // Non-conflicting ownership, attribution, credential, and history links.
     // An optional third element names a lineage column: rows that carry one stay
     // put (see the #1897 note above).
-    const directReferences: ReadonlyArray<readonly [string, string] | readonly [string, string, string]> = [
-      ['memories', 'user_id'],
-      ['sessions', 'user_id'],
-      ['usage_events', 'user_id'],
-      ['org_member_invitations', 'recipient_user_id'],
-      ['user_invitation_activations', 'user_id'],
-      ['exchange_connections', 'user_id'],
-      ['connection_grants', 'granted_by_user_id'],
-      ['principal_grants', 'principal_id'],
-      ['user_api_keys', 'user_id', 'origin_sign_in_id'],
-      ['auth_codes', 'user_id', 'sign_in_id'],
-      ['auth_handoff_codes', 'user_id', 'sign_in_id'],
-      ['app_runs', 'user_id'],
-      ['agent_schedules', 'user_id'],
-      ['agent_webhooks', 'user_id'],
-      ['assets', 'uploaded_by'],
-      ['agents', 'editor_lock_user_id'],
-      // #1591: the approval of record on the live node (no FK, so nothing
-      // else would carry it). The revision-row copy is rewritten above.
-      ['nodes', 'approved_by'],
-      ['nodes', 'minted_by'],
-      // #1705: a task's owner and assignee are authorization identities
-      // (cor:agt:050:08/:09), so they follow the merged person.
-      // agent_team_events' actor / acknowledger ids are deliberately NOT
-      // here: the stream is append-only (a trigger refuses the UPDATE), and
-      // an event is a sealed record of who acted at the time — the
-      // automation_versions precedent (#1696).
-      ['agent_tasks', 'owner_user_id'],
-      ['tickers', 'owner_user_id'],
-      ['agent_tasks', 'assignee_user_id'],
-      // #1706: who last set an availability record (mutable rows, not the
-      // append-only stream). An alarm's `chain` is sealed JSON on the stream,
-      // like the actor ids above, and is not rewritten.
-      ['worker_availability', 'set_by_user_id'],
-      ['model_family_availability', 'set_by_user_id'],
-    ];
-    for (const [table, column, lineage] of directReferences) {
+    for (const [table, column, lineage] of DIRECT_USER_REFERENCES) {
       const unlineaged = lineage ? ` AND "${lineage}" IS NULL` : '';
       await runWithIds(`UPDATE "${table}" SET "${column}" = $1 WHERE "${column}" = $2${unlineaged}`);
     }
