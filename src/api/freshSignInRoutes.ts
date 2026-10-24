@@ -23,6 +23,7 @@
  * ceremony steps (PR2 register, PR3 revoke); the step that consumes clears the cookie with
  * {@link clearCeremonyBrowserCookie}.
  */
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 import { createHash, randomBytes } from 'node:crypto';
 import express, { type Express, type Request, type RequestHandler, type Response } from 'express';
 import rateLimit from 'express-rate-limit';
@@ -32,6 +33,7 @@ import { buildAuthUrl } from '../auth/github.js';
 import { buildGoogleAuthUrl } from '../auth/google.js';
 import { buildAppleAuthUrl, isAppleConfigured } from '../auth/apple.js';
 import { EMAIL_MAX_LENGTH, sendCeremonySignInLink } from '../auth/email.js';
+import { mintProviderNonce } from '../auth/providerNonce.js';
 import { createPendingLoginState, LOGIN_STATE_TTL_MS, type LoginProvider } from '../auth/pendingLoginState.js';
 import {
   confirmFreshSignIn, FRESH_SIGN_IN_LEG_TTL_SECONDS, recordIdpSignIn, startEmailSignIn, sweepFreshSignIns,
@@ -136,15 +138,15 @@ export async function completeCeremonyLeg(
   res.status(303).set(PAGE_HEADERS).location(FRESH_SIGN_IN_CONFIRM_PATH).end();
 }
 
-const PROVIDERS: Record<LoginProvider, { configured: () => boolean; url: (state: string) => string }> = {
+const PROVIDERS: Record<LoginProvider, { configured: () => boolean; url: (state: string, nonce: string) => string }> = {
   github: { configured: () => !!process.env.GITHUB_OAUTH_APP_CLIENT_ID, url: (s) => buildAuthUrl(s) },
   google: {
     configured: () => !!process.env.GOOGLE_CLIENT_ID && !!process.env.GOOGLE_CLIENT_SECRET,
     // R154: Google supports re-authentication, so request it; the callback checks auth_time.
-    url: (s) => buildGoogleAuthUrl(s, { reauthenticate: true }),
+    url: (s, nonce) => buildGoogleAuthUrl(s, nonce, { reauthenticate: true }),
   },
   // GitHub and Apple offer no re-authentication request: a silent provider session is accepted (R154 known limit).
-  apple: { configured: isAppleConfigured, url: (s) => buildAppleAuthUrl(s) },
+  apple: { configured: isAppleConfigured, url: (s, nonce) => buildAppleAuthUrl(s, nonce) },
 };
 
 async function sweep(): Promise<void> {
@@ -175,8 +177,12 @@ export function mountFreshSignInRoutes(
       const ceremonyNonceHash = issueCeremonyBrowser(req, res);
       rememberNextPage(req, res, (req.body as { next?: unknown } | undefined)?.next);
       const state = randomBytes(16).toString('hex');
-      await createPendingLoginState(state, provider, { redirect: '/', ceremonyNonceHash });
-      res.status(303).set('Cache-Control', 'no-store').location(PROVIDERS[provider].url(state)).end();
+      // #2204: Google and Apple get an OIDC nonce on this leg too (GitHub has no ID token).
+      const { nonce, nonceHash } = mintProviderNonce();
+      await createPendingLoginState(state, provider === 'github'
+        ? { provider, data: { redirect: '/', ceremonyNonceHash } }
+        : { provider, data: { redirect: '/', ceremonyNonceHash, providerNonceHash: nonceHash } });
+      res.status(303).set('Cache-Control', 'no-store').location(PROVIDERS[provider].url(state, nonce)).end();
     } catch (err) {
       Sentry.captureException(err);
       res.removeHeader('Set-Cookie');
@@ -205,7 +211,7 @@ export function mountFreshSignInRoutes(
         const user = await db.user.findFirst({ where: { email, deletedAt: null }, select: { id: true, email: true } });
         if (user?.email) {
           const { token } = await startEmailSignIn(db, { userId: user.id, browserNonceHash });
-          const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
+          const baseUrl = getProjectBaseUrl();
           await sendCeremonySignInLink(user.email, `${baseUrl}${FRESH_SIGN_IN_EMAIL_VERIFY_PATH}?token=${token}`);
         }
       } catch (err) {

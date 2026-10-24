@@ -1,3 +1,4 @@
+import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { currentActor } from '../../../lib/requestActor.js';
 import { foreignEdgeMemoryIds } from '../../../lib/foreignEdgeMemories.js';
@@ -871,8 +872,10 @@ async function writeNodeCoreRaw(
       // list: with no explicit seq it inherits max(sibling seq)+1 and lands at
       // the end. Create-only; an explicit input.seq always wins; an unordered /
       // empty sibling list leaves seq null (nextSiblingSeq returns null).
+      // #443: roots retain the old behavior; nested allocation waits for the
+      // existing parent lock inside the writing transaction below.
       const seqForCreate =
-        existing == null && input.seq == null
+        existing == null && input.seq == null && !input.loc.includes(':')
           ? await nextSiblingSeq(ctx.db, input.memoryId, input.loc)
           : undefined;
 
@@ -944,6 +947,7 @@ async function writeNodeCoreRaw(
       const readableForIncludes = typeof input.content === 'string' && input.content.includes('{{>')
         ? await getAccessibleMemoryIds(ctx)
         : null;
+      let writeEmbeddingWorkToken: string | null = null;
       // #2041 S2b — `storedPlaintext` is the includer's plaintext from the row
       // this write locked and revalidated, before its update; null for a create
       // or a resurrected tombstone, whose old text is not the includer's.
@@ -952,6 +956,7 @@ async function writeNodeCoreRaw(
         writtenNode: T,
         storedPlaintext: string | null,
       ): Promise<T> {
+        writeEmbeddingWorkToken = await stampEmbeddingObligation(tx, writtenNode.id, writtenNode.memoryId);
         if (input.content !== undefined) {
           const stored = { storedPlaintext };
           const tags = await assertIncludesWritable(tx, writtenNode, input.content, readableForIncludes, undefined, stored);
@@ -1597,8 +1602,13 @@ async function writeNodeCoreRaw(
             if (authoritative) {
               await assertNoMintedSpecUnmark(tx, input.memoryId, [markerChange(authoritative.id)], 'overwrite');
             }
+            // #443: the existing ancestor set includes the immediate parent.
+            // READ COMMITTED now sees the prior parent's holder commit.
+            const nestedSeq = existing == null && input.seq == null && input.loc.includes(':')
+              ? await nextSiblingSeq(tx, input.memoryId, input.loc) : null;
             const upserted = await tx.node.upsert({
               ...upsertArgs,
+              create: { ...upsertArgs.create, ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
               update: {
                 ...upsertArgs.update,
                 // #1326 — this arm OVERWRITES an existing row. For a copy
@@ -1738,6 +1748,7 @@ async function writeNodeCoreRaw(
         // so the prompt-drain embeds correctly on encrypted memories (FR-027).
         void enqueueNodeEmbedding(pooledDb, {
           nodeId: finalNode.id,
+          workToken: writeEmbeddingWorkToken,
           memoryId: input.memoryId,
           plaintext: { content: finalNode.content, abstract: finalNode.abstract },
         });
@@ -3006,6 +3017,9 @@ export const nodeMutations = {
 
           Object.assign(data, clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
+          if (p.contentChanged || p.abstractChanged) {
+            raw.embeddingWorkToken = await stampEmbeddingObligation(tx, raw.id, raw.memoryId);
+          }
           // #2040 — a replace that rewrites content re-checks its include tags; a
           // refusal throws and rolls the whole batch back with it.
           if (p.contentChanged) {
@@ -3032,6 +3046,7 @@ export const nodeMutations = {
         if (p.contentChanged || p.abstractChanged) {
           void enqueueNodeEmbedding(ctx.db, {
             nodeId: p.raw.id,
+            workToken: p.raw.embeddingWorkToken,
             memoryId: p.raw.memoryId,
             plaintext: { content: p.plaintext.content, abstract: p.plaintext.abstract },
           });
@@ -4050,6 +4065,7 @@ export const nodeMutations = {
       let changed: Record<string, unknown>;
       let abstractChanged: boolean;
       let contentChanged: boolean;
+      let mergedWorkToken: string | null = null;
       try {
         ({ changed, abstractChanged, contentChanged } = mergeNodeFields(
           {
@@ -4243,6 +4259,7 @@ export const nodeMutations = {
               ...placeholderFillPatch(lockedTarget, 'content' in changed ? changed.content : undefined),
             },
           });
+          if (contentChanged || abstractChanged) mergedWorkToken = await stampEmbeddingObligation(tx, target.id, target.memoryId);
           // #2040 — the folded plaintext is re-checked for include tags (a merge
           // can combine two nodes' tags into a cycle); a refusal rolls it back.
           if ('content' in changed) {
@@ -4437,6 +4454,7 @@ export const nodeMutations = {
       if (contentChanged || abstractChanged) {
         void enqueueNodeEmbedding(ctx.db, {
           nodeId: finalNode.id,
+          workToken: mergedWorkToken,
           memoryId: target.memoryId,
           plaintext: { content: finalNode.content, abstract: finalNode.abstract },
         });
@@ -4783,6 +4801,7 @@ export const nodeMutations = {
           const tags = await assertIncludesWritable(tx, current, text, readable, undefined, stored);
           await syncDerivedIncludesEdges(tx, current, tags, readable, stored);
         }
+        restored.embeddingWorkToken = await stampEmbeddingObligation(tx, restored.id, restored.memoryId);
         return { restored, restoredPlaintext: plaintextFields, destinationEncrypted: selectedDestination.isEncrypted };
       });
       // 033 — re-embed the restored content (revision snapshots are plaintext on
@@ -4790,6 +4809,7 @@ export const nodeMutations = {
       // #206 permanent-fail path).
       void enqueueNodeEmbedding(ctx.db, {
         nodeId: restored.id,
+        workToken: restored.embeddingWorkToken,
         memoryId: restored.memoryId,
         plaintext: { content: restoredPlaintext.content, abstract: restoredPlaintext.abstract },
       });

@@ -162,6 +162,9 @@ export type WorkerWorkState = {
   live: boolean;
   /** The binding's family (its newest open session's); null when unbound or it reported none. */
   bindingFamily: string | null;
+  /** Advisory model metadata from that same binding; never a matching input. */
+  bindingModel: string | null;
+  modelReportedAt: Date | null;
   lastActiveAt: Date | null;
   /** Families a live host registration can launch it as. */
   launchableFamilies: string[];
@@ -265,7 +268,10 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
     const bindingFamily = bound ? a?.bindingFamily ?? null : null;
     const launchableFamilies = launchable.get(w.id) ?? [];
     return {
-      ...w, usesTasks: w.agent.usesTasks, bound, live, bindingFamily, launchableFamilies, lastActiveAt: a?.lastActiveAt ?? null, endingSession: ending.has(w.id),
+      ...w, usesTasks: w.agent.usesTasks, bound, live, bindingFamily,
+      bindingModel: bound ? a?.bindingModel ?? null : null,
+      modelReportedAt: bound ? a?.modelReportedAt ?? null : null,
+      launchableFamilies, lastActiveAt: a?.lastActiveAt ?? null, endingSession: ending.has(w.id),
       families: familiesOf({ bound, bindingFamily, launchableFamilies }),
     };
   });

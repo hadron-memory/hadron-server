@@ -1124,10 +1124,11 @@ describe('#1754 — backlog and the stall rules (cor:agt:050:02, :17)', () => {
     expect(await alarms('assignment.unassignable')).toHaveLength(2);
   });
 
-  it('parking an alarmed task raises nothing NEW and leaves the wake schedule to fire (#1790 Xylon P2-3)', async () => {
-    // The episode's currency at delivery is T5's re-check (pinned: escalation
-    // continues after the task moves) — parking deliberately changes nothing
-    // about an open episode or its schedule rows, only stops NEW alarms.
+  it('parking an alarmed task raises nothing NEW and closes the alarm\'s unwoken rows (#1790 Xylon P2-3; #2200)', async () => {
+    // #2200 (R196) replaced the earlier reading, "parking leaves the schedule to fire": a parked task is a terminal
+    // row for the alarm (a backlog task raises no alarms, 050:02), so the episode is over and the escalation closes
+    // the alarm's unwoken rows (`ended_at`) instead of waking the owners above. Pinned in full in
+    // endedAlarmEpisodes2200.test.ts.
     const root = await task({
       ownerWorkerId: liam.id, status: 'started', startedAt: at('07:00'),
       assigneeWorkerId: anne.id, assignedAt: at('07:00'), createdAt: at('07:00'),
@@ -1140,9 +1141,10 @@ describe('#1754 — backlog and the stall rules (cor:agt:050:02, :17)', () => {
     expect(a).toBeTruthy();
     expect(await wakes(a.id)).toHaveLength(3); // ada (child owner), liam (root owner), then the App manager (#1761)
     await db.agentTask.update({ where: { id: child.id }, data: { status: 'backlog' } });
-    // Row 1 fell due at 09:01; the 09:10 pass wakes it, and raises nothing new.
-    expect(await tick('09:10')).toEqual({ raised: 0, woken: 1, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0 });
+    // Row 1 fell due at 09:01; the 09:10 pass closes it (nobody is woken) and raises nothing new.
+    expect(await tick('09:10')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0 });
     expect(await alarms('assignment.unassignable')).toHaveLength(1);
-    expect((await wakes(a.id))[1].wokenAt).toEqual(at('09:10'));
+    expect((await wakes(a.id))[1]).toMatchObject({ wokenAt: null, endedAt: at('09:10') });
+    expect((await wakes(a.id))[2]).toMatchObject({ wokenAt: null, endedAt: at('09:10') });
   });
 });

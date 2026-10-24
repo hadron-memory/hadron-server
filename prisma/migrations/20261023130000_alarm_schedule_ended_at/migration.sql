@@ -1,4 +1,8 @@
--- #2162: the 'resetting' availability mark (cor:agt:050:27). The file below is the current stall invariants, verbatim.
+-- #2200 (R196): an alarm whose own episode ended stops escalating. The escalation closes
+-- such a row by stamping ended_at instead of waking an owner for a condition that is gone.
+-- Additive and nullable: existing rows keep NULL and drain through the first passes after deploy.
+-- The partial index that serves the escalation read is the next migration (CONCURRENTLY).
+ALTER TABLE agent_team_alarm_schedule ADD COLUMN ended_at TIMESTAMP(3);
 
 -- #1706 (Task Management T2): stall alarms, their wakes, availability for work,
 -- and per-App stall windows.
@@ -16,10 +20,11 @@ ALTER TABLE agent_team_events ADD CONSTRAINT chk_agent_team_events_episode CHECK
 );
 
 -- cor:agt:050:19 — a wake is one owner of the alarm's chain; it is woken no
--- earlier than it falls due.
+-- earlier than it falls due. #2200 (R196): a row whose alarm's own episode
+-- ended is closed (ended_at), and a row is woken or ended, never both.
 ALTER TABLE agent_team_alarm_schedule DROP CONSTRAINT IF EXISTS chk_agent_team_alarm_schedule_shape;
 ALTER TABLE agent_team_alarm_schedule ADD CONSTRAINT chk_agent_team_alarm_schedule_shape CHECK (
-  chain_index >= 0 AND (woken_at IS NULL OR woken_at >= due_at)
+  chain_index >= 0 AND (woken_at IS NULL OR woken_at >= due_at) AND (ended_at IS NULL OR woken_at IS NULL)
 );
 
 -- cor:agt:060:02 — available or unavailable; a reason only when unavailable
@@ -33,16 +38,12 @@ ALTER TABLE worker_availability DROP CONSTRAINT IF EXISTS chk_worker_availabilit
 ALTER TABLE worker_availability ADD CONSTRAINT chk_worker_availability_shape CHECK (
   CASE state
     WHEN 'available' THEN reason IS NULL AND until IS NULL
-    WHEN 'unavailable' THEN reason IS NOT NULL AND reason IN ('stalled', 'out-of-tokens', 'host-down', 'other', 'resetting')
+    WHEN 'unavailable' THEN reason IS NOT NULL AND reason IN ('stalled', 'out-of-tokens', 'host-down', 'other')
     ELSE false
   END AND
-  set_by IN ('worker', 'holder', 'app-manager', 'reports-to', 'stall-rule', 'host', 'lapse', 'context-reset') AND
+  set_by IN ('worker', 'holder', 'app-manager', 'reports-to', 'stall-rule', 'host', 'lapse') AND
   ((set_by = 'host') = (set_by_host_id IS NOT NULL)) AND
-  (set_by <> 'host' OR state = 'available' OR reason IN ('out-of-tokens', 'host-down')) AND
-  -- #2162 (cor:agt:050:27): only the platform's reset writes `resetting`, an unavailable mark it sets is always that,
-  -- and only that mark ends on activity after the old agent stopped. The reset may also write the mark's release.
-  ((reason IS NOT DISTINCT FROM 'resetting') = (set_by = 'context-reset' AND state = 'unavailable')) AND
-  (clears_on_activity_after IS NULL OR reason = 'resetting')
+  (set_by <> 'host' OR state = 'available' OR reason IN ('out-of-tokens', 'host-down'))
 );
 
 -- cor:agt:060:03 — the same state / reason shape per App and model family; a
@@ -73,3 +74,4 @@ ALTER TABLE agent_task_stall_schedule ADD CONSTRAINT chk_agent_task_stall_schedu
   (session_end_grace_minutes IS NULL OR session_end_grace_minutes BETWEEN 1 AND 1440) AND
   (host_report_timeout_minutes IS NULL OR host_report_timeout_minutes BETWEEN 5 AND 1440)
 );
+

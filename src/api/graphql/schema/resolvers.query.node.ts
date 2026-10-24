@@ -36,6 +36,7 @@ import type { LexicalField, BrowseSort, NodeSqlFilter } from '../../../lib/retri
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { decryptReadableRevisions } from '../../../lib/nodeRevisionRead.js';
+import { Prisma } from '../../../generated/prisma/index.js';
 import { sortSiblings } from '../../../lib/siblingOrder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import {
@@ -78,6 +79,8 @@ import {
   isOwnerOrOrgMember,
   canReadMemoryRecord,
   getAccessibleMemoryIds,
+  pageArgs,
+  pageEnvelope,
   memoryAccessFilter,
   isMemoryReadableCached,
   loadMemoryUrn,
@@ -130,6 +133,46 @@ export interface FindNodesArgs {
   orgId?: string | null;
   limit?: number | null;
   offset?: number | null;
+}
+
+/**
+ * The admission shared by `nodeRevisions` and `nodeRevisionsPage` (#2212 A1): READER, a node ref that
+ * resolves for the caller (a genuine miss collapses to the empty answer; a malformed ref propagates), a
+ * live node, read on its CURRENT memory (#602) and no concealed comment history (#1663). `null` is the
+ * empty answer. `canRead` is the per-snapshot memory gate; `accessible` (null = unrestricted) is the set
+ * it tests, for callers that push it into SQL.
+ */
+async function nodeRevisionsScope(ctx: Context, nodeRef: string) {
+  requireRole(ctx, 'READER');
+  // cor:api:140 / 007-entity-id-or-urn: nodeRef may be an ID or a fully-
+  // qualified node URN. A genuine miss collapses to [] (no existence
+  // disclosure); a malformed / unqualified URN propagates — mirrors
+  // memoryUsageSummary / resolveReadableMemoryId.
+  let nodeId: string;
+  try {
+    ({ id: nodeId } = await resolveNodeRefForCaller(ctx, nodeRef));
+  } catch (e) {
+    if (e instanceof NodeNotFoundError) return null;
+    throw e;
+  }
+  // Access control (#602): this resolver previously had NO gate — any
+  // authenticated caller could read any tenant's node revision history.
+  const node = await ctx.db.node.findUnique({ where: { id: nodeId }, select: { memoryId: true } });
+  if (!node) return null;
+  // Full accessible-memory set for the principal (null = unrestricted).
+  // getAccessibleMemoryIds encodes the principal + memory-class rules
+  // (spec 034). We gate the node's CURRENT memory AND each snapshot's
+  // memory: a node MOVED across memories keeps its stable id (moveNode),
+  // so its history can hold snapshots captured while it lived in a memory
+  // the caller can't read (#602 / Codex P1) — gating the current memory
+  // alone would leak those.
+  const accessible = await getAccessibleMemoryIds(ctx);
+  const canRead = (memId: string) => accessible === null || accessible.includes(memId);
+  // No read on the current memory ⇒ empty (no existence disclosure, matching memoryUsageSummary).
+  if (!canRead(node.memoryId)) return null;
+  // #1663 — a comment stub's history is for memory managers.
+  if (await isConcealedCommentHistory(ctx, nodeId)) return null;
+  return { nodeId, memoryId: node.memoryId, accessible, canRead };
 }
 
 export const nodeQueries = {
@@ -2139,40 +2182,9 @@ export const nodeQueries = {
     },
 
     nodeRevisions: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
-      requireRole(ctx, 'READER');
-      // cor:api:140 / 007-entity-id-or-urn: nodeRef may be an ID or a fully-
-      // qualified node URN. A genuine miss collapses to [] (no existence
-      // disclosure); a malformed / unqualified URN propagates — mirrors
-      // memoryUsageSummary / resolveReadableMemoryId.
-      let nodeId: string;
-      try {
-        ({ id: nodeId } = await resolveNodeRefForCaller(ctx, nodeRef));
-      } catch (e) {
-        if (e instanceof NodeNotFoundError) return [];
-        throw e;
-      }
-      // Access control (#602): this resolver previously had NO gate — any
-      // authenticated caller could read any tenant's node revision history.
-      const node = await ctx.db.node.findUnique({
-        where: { id: nodeId },
-        select: { memoryId: true },
-      });
-      if (!node) return [];
-      // Full accessible-memory set for the principal (null = unrestricted).
-      // getAccessibleMemoryIds encodes the principal + memory-class rules
-      // (spec 034). We gate the node's CURRENT memory AND each snapshot's
-      // memory: a node MOVED across memories keeps its stable id (moveNode),
-      // so its history can hold snapshots captured while it lived in a memory
-      // the caller can't read (#602 / Codex P1) — gating the current memory
-      // alone would leak those.
-      const accessible = await getAccessibleMemoryIds(ctx);
-      const canRead = (memId: string) => accessible === null || accessible.includes(memId);
-      // No read on the current memory ⇒ [] (no existence disclosure, matching
-      // memoryUsageSummary).
-      if (!canRead(node.memoryId)) return [];
-      // #1663 — a comment stub's history is for memory managers.
-      if (await isConcealedCommentHistory(ctx, nodeId)) return [];
-
+      const scope = await nodeRevisionsScope(ctx, nodeRef);
+      if (!scope) return [];
+      const { nodeId, memoryId, canRead } = scope;
       const revisions = await ctx.db.nodeRevision.findMany({
         where: { nodeId },
         orderBy: { createdAt: 'desc' },
@@ -2184,8 +2196,33 @@ export const nodeQueries = {
       // node spanning inaccessible memories may under-return near the limit —
       // safe, never over-returns.)
       return decryptReadableRevisions(
-        ctx.db, revisions.filter((v) => canRead(v.memoryId ?? node.memoryId)), node.memoryId,
+        ctx.db, revisions.filter((v) => canRead(v.memoryId ?? memoryId)), memoryId,
       );
+    },
+
+    /**
+     * #2212 A1 — `nodeRevisions` as a page. Same admission (one shared `nodeRevisionsScope`), but the
+     * per-snapshot memory gate is in the SQL `where`, so `total` counts only snapshots the caller may read
+     * and the page does not under-return. Legacy rows (memoryId NULL) fall back to the node's memory,
+     * already authorized by the scope. Decryption runs on the returned page only.
+     */
+    nodeRevisionsPage: async (
+      _: unknown,
+      args: { nodeRef: string; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const { take, skip } = pageArgs(args);
+      const scope = await nodeRevisionsScope(ctx, args.nodeRef);
+      if (!scope) return pageEnvelope([], 0, skip);
+      const { nodeId, memoryId, accessible } = scope;
+      const where: Prisma.NodeRevisionWhereInput = accessible === null
+        ? { nodeId }
+        : { nodeId, OR: [{ memoryId: { in: accessible } }, { memoryId: null }] };
+      const [total, rows] = await ctx.db.$transaction([
+        ctx.db.nodeRevision.count({ where }),
+        ctx.db.nodeRevision.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(await decryptReadableRevisions(ctx.db, rows, memoryId), total, skip);
     },
 
     // #617 (Display) — a single snapshot by id, so the portal doesn't filter

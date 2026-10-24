@@ -158,12 +158,14 @@ describe('teamRoster — each state on its own (plan §7.4)', () => {
   });
 
   it('YOUR_MOVE only for an owner already woken: a higher owner not yet due is not', async () => {
+    // #2200: the alarm's episode start is the task's assignment, to the millisecond (the key the live classification reads).
+    const assignedAt = ago(30);
     const t = await db.agentTask.create({
-      data: { appId: app.id, title: 'Review', ownerWorkerId: w.Anne.id, assigneeWorkerId: w.Rook.id, assignedAt: ago(30), createdAt: ago(30) },
+      data: { appId: app.id, title: 'Review', ownerWorkerId: w.Anne.id, assigneeWorkerId: w.Rook.id, assignedAt, createdAt: assignedAt },
     });
     const alarm = await db.agentTeamEvent.create({
       data: {
-        appId: app.id, taskId: t.id, type: 'stall.not-started', severity: 'alarm', episodeStart: ago(30),
+        appId: app.id, taskId: t.id, type: 'stall.not-started', severity: 'alarm', episodeStart: assignedAt,
         chain: [{ workerId: w.Anne.id }, { workerId: w.Kit.id }], payload: { windowMinutes: 15 },
       },
     });

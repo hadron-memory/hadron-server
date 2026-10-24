@@ -49,7 +49,7 @@ beforeEach(async () => {
 
 describe('the invariants file', () => {
   it('the migration carries a byte-identical copy, and post-push includes it', () => {
-    const migration = readFileSync(new URL('../../../prisma/migrations/20261022100000_context_reset/migration.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261024100000_context_reset/migration.sql', import.meta.url), 'utf8');
     expect(migration.endsWith(`\n${SOURCE}`)).toBe(true);
     const post = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
     expect(post).toContain('\\ir context-reset-invariants.sql');

@@ -27,7 +27,7 @@
  */
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
-import type { Context } from './resolvers.helpers.js';
+import { type Context, pageArgs, pageEnvelope } from './resolvers.helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { isPlainObject } from '../../../lib/objectStore.js';
 import {
@@ -364,6 +364,22 @@ export const dashboardQueries = {
       where: { userId: ctx.userId, ...(type ? { type: type as never } : {}) },
       orderBy: [{ name: 'asc' }, { id: 'asc' }],
     });
+  },
+
+  /** #2213 — `dashboardWidgetPresets` as a page: the same identity scope and order, counted and read in one snapshot. */
+  dashboardWidgetPresetsPage: async (
+    _: unknown,
+    args: { type?: string | null; limit?: number | null; offset?: number | null },
+    ctx: Context,
+  ) => {
+    if (!ctx.userId || ctx.impersonation) return { items: [], total: 0, hasMore: false };
+    const where = { userId: ctx.userId, ...(args.type ? { type: args.type as never } : {}) };
+    const { take, skip } = pageArgs(args);
+    const [total, items] = await ctx.db.$transaction([
+      ctx.db.dashboardWidgetPreset.count({ where }),
+      ctx.db.dashboardWidgetPreset.findMany({ where, orderBy: [{ name: 'asc' }, { id: 'asc' }], take, skip }),
+    ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+    return pageEnvelope(items, total, skip);
   },
 };
 
