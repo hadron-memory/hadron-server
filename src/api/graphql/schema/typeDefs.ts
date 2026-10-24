@@ -11370,8 +11370,10 @@ export const typeDefs = `#graphql
 
     """
     Spec 049 Phase 4 — soft-delete a Channel AND its chat root together (the
-    protection holds while either exists, so the address stays reserved and a
-    restore brings both back). Host memory write access required. An App's
+    protection holds while either exists). There is no restore: creating a
+    Channel at the same address adopts it and starts clean, so the old
+    transcript does not come back (#1257, #1226). Host memory write access
+    required. An App's
     default Channel is unlinked from the App. ref: its id or its address
     (\`Channel.chatRootUrn\`, #1171).
     """
