@@ -38,25 +38,42 @@ export type AppManagerCaller = {
   roles?: readonly string[];
 };
 
+/** The caller fields the identity-only part of the predicate reads. */
+type ManagerIdentity = Pick<AppManagerCaller, 'userId' | 'impersonation' | 'roles'>;
+type ManagedApp = { id: string; organizationId: string | null; ownerUserId: string | null };
+
+/**
+ * The decision a caller's identity and the App's ownership class settle without
+ * a query: a boolean, or the lookups still needed (`orgId` is the org whose
+ * ADMIN/OWNER arm to ask, null when the App has none; the owner-role arm is
+ * always asked). One fold shared by {@link managesApp} and
+ * {@link managesAppBatch}, so the two cannot drift.
+ */
+function planManagesApp(caller: ManagerIdentity, app: ManagedApp): boolean | { orgId: string | null } {
+  if (!caller.userId || caller.impersonation) return false;
+  // Branch on the ownership CLASS first (findings:org-xor-owner-null-comparison-bypass).
+  if (app.ownerUserId !== null && caller.userId === app.ownerUserId) return true;
+  if (app.ownerUserId === null && app.organizationId !== null) {
+    if (caller.roles?.includes('ADMIN') || caller.roles?.includes('OWNER')) return true;
+    return { orgId: app.organizationId };
+  }
+  return { orgId: null };
+}
+
 /**
  * Does the caller manage this App (cor:acl:010:01, #7790)? Pass a transaction
  * client in `ctx.db` to evaluate under the caller's transaction (#1713 review,
  * Diego P2-A); the task writes also hold the caller's AppMember row FOR SHARE
  * there, so a demotion can't commit between this check and the write.
  */
-export async function managesApp(
-  ctx: AppManagerCaller,
-  app: { id: string; organizationId: string | null; ownerUserId: string | null },
-): Promise<boolean> {
-  if (!ctx.userId || ctx.impersonation) return false;
-  // Branch on the ownership CLASS first (findings:org-xor-owner-null-comparison-bypass).
-  if (app.ownerUserId !== null && ctx.userId === app.ownerUserId) return true;
-  if (app.ownerUserId === null && app.organizationId !== null) {
-    if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
+export async function managesApp(ctx: AppManagerCaller, app: ManagedApp): Promise<boolean> {
+  const plan = planManagesApp(ctx, app);
+  if (typeof plan === 'boolean') return plan;
+  if (plan.orgId !== null) {
     const admin = await ctx.db.orgMember.findFirst({
       where: {
-        organizationId: app.organizationId,
-        userId: ctx.userId,
+        organizationId: plan.orgId,
+        userId: ctx.userId!,
         ...LIVE_ORG_MEMBERSHIP,
         role: { in: ['ADMIN', 'OWNER'] },
       },
@@ -65,10 +82,46 @@ export async function managesApp(
     if (admin) return true;
   }
   const owner = await ctx.db.appMember.findUnique({
-    where: { appId_userId: { appId: app.id, userId: ctx.userId } },
+    where: { appId_userId: { appId: app.id, userId: ctx.userId! } },
     select: { role: true },
   });
   return owner?.role === 'owner';
+}
+
+/**
+ * {@link managesApp} for many Apps at once (#2109, `App.viewerManages`): the
+ * same {@link planManagesApp} fold, with the two membership lookups batched into
+ * one query each instead of one pair per App. Read-only, for a read-time fact;
+ * the write paths keep {@link managesApp} and their held anchors.
+ */
+export async function managesAppBatch(ctx: AppManagerCaller, apps: readonly ManagedApp[]): Promise<Map<string, boolean>> {
+  const result = new Map<string, boolean>();
+  const pending: Array<{ app: ManagedApp; orgId: string | null }> = [];
+  for (const app of apps) {
+    const plan = planManagesApp(ctx, app);
+    if (typeof plan === 'boolean') result.set(app.id, plan);
+    else pending.push({ app, orgId: plan.orgId });
+  }
+  if (pending.length === 0) return result;
+  const orgIds = [...new Set(pending.flatMap((p) => (p.orgId !== null ? [p.orgId] : [])))];
+  const [admins, owners] = await Promise.all([
+    orgIds.length === 0
+      ? Promise.resolve([] as Array<{ organizationId: string }>)
+      : ctx.db.orgMember.findMany({
+          where: { organizationId: { in: orgIds }, userId: ctx.userId!, ...LIVE_ORG_MEMBERSHIP, role: { in: ['ADMIN', 'OWNER'] } },
+          select: { organizationId: true },
+        }),
+    ctx.db.appMember.findMany({
+      where: { appId: { in: pending.map((p) => p.app.id) }, userId: ctx.userId!, role: 'owner' },
+      select: { appId: true },
+    }),
+  ]);
+  const adminOrgs = new Set(admins.map((a) => a.organizationId));
+  const ownedApps = new Set(owners.map((o) => o.appId));
+  for (const { app, orgId } of pending) {
+    result.set(app.id, (orgId !== null && adminOrgs.has(orgId)) || ownedApps.has(app.id));
+  }
+  return result;
 }
 
 /**

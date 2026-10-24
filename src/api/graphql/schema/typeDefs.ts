@@ -2869,6 +2869,16 @@ export const typeDefs = `#graphql
     urn: String!
     "#2138: when the whole team was paused (setTeamPause), or null. Separate from every worker's own pause."
     teamPausedAt: DateTime
+    """
+    #2109 — whether the current caller manages this App: its owner, an owner-role
+    member, a live ADMIN or OWNER of its organization, or a platform admin for an
+    organization-owned App. A known fact for an App the caller can read, so false
+    is an answer and not a refusal. False for an App key, an impersonated
+    session, a headless run and a request bound to a worker session. This is not
+    permission to perform every task or worker operation: each operation checks
+    its own authority.
+    """
+    viewerManages: Boolean!
     "Spec 049 Phase 4: the App's default Channel — the row its team chat became (null until provisioned)."
     defaultChannel: Channel
     "App-layer action-policy link (cor:acl:040:02, #510). Null = no restriction. Org-admin-authored via updateApp."

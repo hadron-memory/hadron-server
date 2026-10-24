@@ -13,6 +13,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { requestActorStorage, emptyActor } from '../../../lib/requestActor.js';
+import { managesApp, managesAppBatch } from '../../../lib/auth/appManagement.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 
@@ -115,10 +116,11 @@ describe('App.viewerManages — the shared predicate, read as a caller-scoped fa
   });
 
   it('is false, not an error, for principals that are not the direct user', async () => {
-    // Pure App key (no user): the parent App read is the existing admission; here use a user-less list via appId.
-    const key = await gql('query($r: ID!) { app(ref: $r) { id viewerManages } }', { db, appId: orgApp, roles: ['READER'] } as Context, { r: orgApp });
+    // Pure App key (no user): the list read is the existing admission; the fact is false.
+    const key = await gql(LIST, { db, appId: orgApp, roles: ['READER'] } as Context);
     expect(key.errors).toBeUndefined();
-    expect(key.data?.app.viewerManages).toBe(false);
+    expect(key.data?.apps.items.length).toBeGreaterThan(0);
+    for (const item of key.data?.apps.items ?? []) expect(item.viewerManages).toBe(false);
 
     // An AppRun carrying its on-behalf-of user: that user manages the App directly, the run does not.
     const run = await gql(LIST, ctxFor(orgAdmin, { appId: orgApp, clientId: `run:${generateId()}` }));
@@ -140,12 +142,14 @@ describe('App.viewerManages — the shared predicate, read as a caller-scoped fa
     for (const item of res.data?.apps.items ?? []) expect(item.viewerManages).toBe(false);
   });
 
-  it('parent admission is unchanged: a foreign or missing App is concealed, never answered false', async () => {
-    const foreign = await gql('query($r: ID!) { app(ref: $r) { id viewerManages } }', ctxFor(orgMember), { r: foreignApp });
-    expect(foreign.errors).toBeUndefined();
-    expect(foreign.data?.app ?? null).toBeNull();
-    const missing = await gql('query($r: ID!) { app(ref: $r) { id viewerManages } }', ctxFor(orgMember), { r: generateId() });
-    expect(missing.data?.app ?? null).toBeNull();
+  it('parent admission is unchanged: selecting the field changes neither the concealment nor the error of a foreign or missing App', async () => {
+    for (const ref of [foreignApp, generateId()]) {
+      const without = await gql('query($r: ID!) { app(ref: $r) { id } }', ctxFor(orgMember), { r: ref });
+      const withField = await gql('query($r: ID!) { app(ref: $r) { id viewerManages } }', ctxFor(orgMember), { r: ref });
+      expect(withField.data?.app ?? null).toBeNull();
+      expect(withField.data).toEqual(without.data);
+      expect(withField.errors?.map((e) => e.message)).toEqual(without.errors?.map((e) => e.message));
+    }
   });
 });
 
@@ -204,5 +208,19 @@ describe('App.viewerManages — freshness and isolation', () => {
     expect(res.data?.apps.items.length).toBeGreaterThan(12);
     // The field adds at most the roles read plus one batch per membership table.
     expect(calls.length - baselineCalls).toBeLessThanOrEqual(3);
+  });
+});
+
+describe('the shared fold: managesApp and managesAppBatch agree on every ownership class', () => {
+  it('a platform ADMIN never manages a user-owned App, and the single and batch forms give the same answers', async () => {
+    const apps = await db.app.findMany({ select: { id: true, organizationId: true, ownerUserId: true } });
+    for (const [userId, roles] of [[platformAdmin, ['ADMIN']], [orgAdmin, ['READER']], [appOwnerRole, ['READER']], [userOwner, ['READER']], [stranger, ['READER']]] as const) {
+      const caller = { db, userId, roles };
+      const batch = await managesAppBatch(caller, apps);
+      for (const app of apps) expect(batch.get(app.id), `${userId} on ${app.id}`).toBe(await managesApp(caller, app));
+    }
+    const userOwned = apps.find((a) => a.id === userApp)!;
+    expect(await managesApp({ db, userId: platformAdmin, roles: ['ADMIN'] }, userOwned)).toBe(false);
+    expect((await managesAppBatch({ db, userId: platformAdmin, roles: ['ADMIN'] }, [userOwned])).get(userApp)).toBe(false);
   });
 });

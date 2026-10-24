@@ -6,6 +6,7 @@ import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { loadViewerManages } from './resolvers.appViewerManages.js';
 import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
@@ -1545,6 +1546,8 @@ export const typeResolvers = {
     },
   },
   App: {
+    /** #2109 — whether the caller manages this App; the shared managesApp predicate as a read-time fact. */
+    viewerManages: (a: { id: string }, _: unknown, ctx: Context) => loadViewerManages(ctx, a.id),
     /**
      * Spec 049 Phase 4 — the App's default Channel, gated on its HOST MEMORY
      * like `App.sharedMemory`: `Query.app` admits an org member who is not an
