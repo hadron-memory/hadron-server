@@ -21,7 +21,7 @@ import { join } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
 import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
-import { prepareWriteBranch } from './gitBranch.js';
+import { prepareWriteBranch, unpublishedCommitCount } from './gitBranch.js';
 import { execGit } from './execGit.js';
 import { sourceNamesRepo, validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
@@ -239,20 +239,26 @@ export async function withMirrorCheckout(
         await execGit(['add', '-A'], { cwd: localPath });
         const { stdout } = await execGit(['status', '--porcelain'], { cwd: localPath });
         if (!stdout.trim()) {
-          await restoreRemote(localPath, memory.source);
-          return 'no-changes';
+          // #2308: a clean tree is not "nothing to publish": a failed push leaves
+          // its commit on the write branch, and the retry sees a clean tree. Push
+          // when the branch carries unpublished commits; a throw here (unknown
+          // ahead state) lands in the catch below as 'failed', never 'no-changes'.
+          if ((await unpublishedCommitCount(localPath, branch, memory.readBranch ?? undefined)) === 0) {
+            await restoreRemote(localPath, memory.source);
+            return 'no-changes';
+          }
+        } else {
+          const gitEnv = {
+            ...process.env,
+            GIT_AUTHOR_NAME: memory.organization.name,
+            GIT_AUTHOR_EMAIL: `hadron@${memory.organization.urn}`,
+            GIT_COMMITTER_NAME: memory.organization.name,
+            GIT_COMMITTER_EMAIL: `hadron@${memory.organization.urn}`,
+          };
+          await execGit([
+            'commit', '-m', `${commitSubject}\n\n[hadron-server]`,
+          ], { cwd: localPath, env: gitEnv });
         }
-
-        const gitEnv = {
-          ...process.env,
-          GIT_AUTHOR_NAME: memory.organization.name,
-          GIT_AUTHOR_EMAIL: `hadron@${memory.organization.urn}`,
-          GIT_COMMITTER_NAME: memory.organization.name,
-          GIT_COMMITTER_EMAIL: `hadron@${memory.organization.urn}`,
-        };
-        await execGit([
-          'commit', '-m', `${commitSubject}\n\n[hadron-server]`,
-        ], { cwd: localPath, env: gitEnv });
 
         try {
           // `-u` sets upstream tracking so the branch isn't left tracking-less —
