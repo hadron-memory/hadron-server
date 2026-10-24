@@ -1,4 +1,6 @@
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
+import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
+import { isWorkerResetting } from '../../../lib/contextReset/contextReset.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { storedIncludeTags, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
@@ -36,7 +38,7 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { resolveWorkerIdByNameGated, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
+import { resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -489,9 +491,10 @@ function modelFamilyRefresh(
   explicitFamily: string | null,
   llmModel: string | null | undefined,
   storedTool: string | null,
-): { llmModel?: string; family?: string } {
+): { llmModel?: string; modelReportedAt?: Date; family?: string } {
   const family = explicitFamily ?? (llmModel != null ? deriveFamily({ llmModel, tool: storedTool }) : null);
-  return { ...(llmModel != null ? { llmModel } : {}), ...(family != null ? { family } : {}) };
+  // #2252: a supplied model IS a report, so it stamps the time (a repeat of the same model refreshes it).
+  return { ...(llmModel != null ? { llmModel, modelReportedAt: new Date() } : {}), ...(family != null ? { family } : {}) };
 }
 
 // ── #1956: resume claims ───────────────────────────────────────────────────
@@ -729,57 +732,63 @@ export const sessionMutations = {
             throw workerRefNotFound(workerRef);
           }
         } else {
-          // NAME (#990). A name is unique only WITHIN an App, so this form
-          // needs App context — which a bare-name caller always has, since it
-          // comes from an App key, an explicit appRef, or an MCP active-App
-          // selection. Without one there is nothing to scope the lookup to, and
-          // guessing across the caller's Apps would resolve one name to
-          // several workers.
+          // #1597: only a bare NAME with no App context searches the caller's
+          // bind-authorized Apps. ID/URN failures and selected-App misses never
+          // fall through here. A unique identity still runs every bind gate below.
           if (appId === null) {
-            throw new GraphQLError(
-              `workerRef "${workerRef}" is a worker name, which is only unique within an App — pass appRef (or select an App), or use the worker's id or URN.`,
-              { extensions: { code: 'SESSION_WORKER_NAME_NEEDS_APP', workerRef } },
-            );
-          }
-          // App lifecycle, checked here and not only at the gate (PR #996
-          // review, Copilot). When `appId` came from `appRef` these were
-          // already enforced above, and the worker-DERIVED path enforces them
-          // below — but when it came from `ctx.appId` (an MCP active-App
-          // SELECTION or an App key) this is the only lifecycle check before
-          // `session.create`. A stale selection pointing at an uninstalled App
-          // must not be able to resolve a name and open a session there.
-          //
-          // This stays HERE rather than inside the shared resolver (#1015):
-          // uninstall bars starting a session, but not READING the roster —
-          // Worker rows outlive their App's uninstall — so the two callers
-          // genuinely differ, and only on this point.
-          const lifecycle = await ctx.db.app.findUnique({
-            where: { id: appId },
-            select: { uninstalledAt: true },
-          });
-          if (lifecycle?.uninstalledAt) {
-            throw new GraphQLError('Cannot start a session in an uninstalled App.', {
-              extensions: { code: 'APP_UNINSTALLED', appId },
+            const candidates = await resolveWorkerBindCandidatesByName(ctx, workerRef);
+            if (candidates.length === 0) throw workerRefNotFound(workerRef);
+            if (candidates.length > 1) {
+              const lines = candidates.map(c =>
+                `${c.name} — ${c.urn ?? c.id}; App ${c.app.name} (${c.app.urn}); role ${c.role ?? 'unset'}; ` +
+                `holder ${c.holder?.handle ?? c.holder?.githubUsername ?? c.holder?.id ?? 'unheld'}`);
+              throw new GraphQLError(
+                `Worker name "${workerRef}" is ambiguous. Choose a worker id or URN:\n${lines.join('\n')}`,
+                { extensions: { code: 'SESSION_WORKER_NAME_AMBIGUOUS', candidates } },
+              );
+            }
+            resolvedWorkerId = candidates[0].id;
+          } else {
+            // App lifecycle, checked here and not only at the gate (PR #996
+            // review, Copilot). When `appId` came from `appRef` these were
+            // already enforced above, and the worker-DERIVED path enforces them
+            // below — but when it came from `ctx.appId` (an MCP active-App
+            // SELECTION or an App key) this is the only lifecycle check before
+            // `session.create`. A stale selection pointing at an uninstalled App
+            // must not be able to resolve a name and open a session there.
+            //
+            // This stays HERE rather than inside the shared resolver (#1015):
+            // uninstall bars starting a session, but not READING the roster —
+            // Worker rows outlive their App's uninstall — so the two callers
+            // genuinely differ, and only on this point.
+            const lifecycle = await ctx.db.app.findUnique({
+              where: { id: appId },
+              select: { uninstalledAt: true },
             });
+            if (lifecycle?.uninstalledAt) {
+              throw new GraphQLError('Cannot start a session in an uninstalled App.', {
+                extensions: { code: 'APP_UNINSTALLED', appId },
+              });
+            }
+            // The staff read gate runs BEFORE the lookup, not after, and a denial
+            // is reported as WORKER_NOT_FOUND — the shared
+            // `resolveWorkerIdByNameGated` owns that ordering (#1015) so this
+            // resolver and `Query.worker` cannot drift on it. A missing App, a
+            // soft-deleted App, a refused caller and an absent name all return
+            // null there and collapse into the one refusal below.
+            //
+            // In practice a caller who reached here via `appRef` has ALREADY
+            // cleared `isAppParticipant` above, the same predicate that gate
+            // uses, so an outsider is refused FORBIDDEN before any name is looked
+            // up. The gate is therefore defense in depth, not the only barrier —
+            // and deliberately so: `appId` can also arrive from an App-key
+            // credential (which skips that membership branch), so the name branch
+            // must be self-sufficient rather than relying on an ordering above it
+            // that a later change could reshuffle.
+            const byName = await resolveWorkerIdByNameGated(ctx, appId, workerRef);
+            if (!byName) throw workerRefNotFound(workerRef);
+            resolvedWorkerId = byName;
           }
-          // The staff read gate runs BEFORE the lookup, not after, and a denial
-          // is reported as WORKER_NOT_FOUND — the shared
-          // `resolveWorkerIdByNameGated` owns that ordering (#1015) so this
-          // resolver and `Query.worker` cannot drift on it. A missing App, a
-          // soft-deleted App, a refused caller and an absent name all return
-          // null there and collapse into the one refusal below.
-          //
-          // In practice a caller who reached here via `appRef` has ALREADY
-          // cleared `isAppParticipant` above, the same predicate that gate
-          // uses, so an outsider is refused FORBIDDEN before any name is looked
-          // up. The gate is therefore defense in depth, not the only barrier —
-          // and deliberately so: `appId` can also arrive from an App-key
-          // credential (which skips that membership branch), so the name branch
-          // must be self-sufficient rather than relying on an ordering above it
-          // that a later change could reshuffle.
-          const byName = await resolveWorkerIdByNameGated(ctx, appId, workerRef);
-          if (!byName) throw workerRefNotFound(workerRef);
-          resolvedWorkerId = byName;
         }
         const worker = await ctx.db.worker.findUnique({
           where: { id: resolvedWorkerId },
@@ -1215,6 +1224,19 @@ export const sessionMutations = {
             SELECT status FROM host_operations WHERE id = ${launch.grant.operationId} FOR SHARE`;
           if (op?.status !== 'collected') throw launchGrantInvalid();
         }
+        // #2162 (cor:agt:050:27 §4, R118): the per-worker assignment lock, before the worker row, the order every task
+        // write and a context reset's claim take it in. A worker under a `resetting` mark takes no new session, force
+        // included: its reset is fenced on the session it has, and a rebind would strand it. (Resuming that same open
+        // session is not a bind; it does not come here.)
+        if (workerId) {
+          await lockWorkersForAssignment(tx, [workerId]);
+          if (appId && (await isWorkerResetting(tx, workerId, appId, new Date()))) {
+            throw new GraphQLError(
+              'This worker is resetting its context: its relaunched agent resumes the session it has. Clear its availability to cancel the reset.',
+              { extensions: { code: 'WORKER_RESETTING', workerId } },
+            );
+          }
+        }
         if (workerId) {
           const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; held_at: Date | null; retired_at: Date | null }>>`
             SELECT name, held_by_user_id, held_at, retired_at FROM workers WHERE id = ${workerId} FOR UPDATE`;
@@ -1422,6 +1444,8 @@ export const sessionMutations = {
           customerId: input.customerId,
           language: input.language,
           llmModel: input.llmModel,
+          // #2252: a model given at bind is a report.
+          modelReportedAt: input.llmModel != null ? new Date() : null,
           parentSessionId: input.parentSessionId,
           prevSessionId: input.prevSessionId ?? supersedes[0]?.id ?? derivedPrevSessionId,
           // #928 coding-session provenance.

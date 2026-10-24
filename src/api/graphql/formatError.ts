@@ -29,6 +29,7 @@ import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
 import { AmbiguousLegacyUrnError } from '../../lib/entityRef/errors.js';
 import { EntityNotFoundError } from '../../lib/entityRef/entityNotFound.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
+import { QueryTooComplexError } from './admissionComplexity.js';
 
 interface ClientErrorMapping {
   matches: (err: unknown) => boolean;
@@ -59,6 +60,13 @@ function mapping<E>(
 }
 
 const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
+  // hadron-internal#3 L4: an over-limit operation is the caller's, not a fault. The refusal already carries its fixed
+  // text and `extensions` (code, limit, max, http status), so nothing is added.
+  mapping(
+    (err): err is QueryTooComplexError => err instanceof QueryTooComplexError,
+    () => ({}),
+    { silenceInSentry: true },
+  ),
   // Spec 022: surface UrnNotQualifiedError with a stable error code so external
   // callers can branch on it programmatically.
   mapping(

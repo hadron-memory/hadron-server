@@ -44,8 +44,9 @@ import {
   type ClaimResult,
   type ClaimedLoginState,
   type LoginProvider,
-  type PendingLoginState,
+  type NewPendingLogin,
 } from './auth/pendingLoginState.js';
+import { mintProviderNonce, nonceExpectation, recordNonceRefusal } from './auth/providerNonce.js';
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
@@ -68,6 +69,7 @@ import { taskWarningsPlugin } from './api/graphql/taskWarningsPlugin.js';
 import { requireOrgRole, requireSessionWriteAccess } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
 import { querySourceCap, readGraphqlAdmissionConfig } from './api/graphql/admission.js';
+import { complexityAdmissionPlugin } from './api/graphql/admissionComplexity.js';
 import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
 import {
   formatGraphQLError,
@@ -79,16 +81,18 @@ import { generateUniqueHandle, isHandleTaken } from './lib/userHandle.js';
 import { ensureUserPrincipal, RootNameTakenError } from './lib/principal/mintPrincipal.js';
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
-import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
+import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
+import { startAssetBytesSweepLoop } from './jobs/sweepAssetBytes.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
 import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startPendingEdgePromotionSweepLoop } from './jobs/promotePendingEdges.js';
-import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
+import { startEmbeddingWorkerLoop, startEmbeddingBusListener, stopEmbeddingWorker, assertEmbeddingObligationsReconciled } from './jobs/embedNodes.js';
+import { stopEmbeddingPublisher } from './services/embedding/enqueue.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
 import {
@@ -310,11 +314,11 @@ export async function createServer(): Promise<Express> {
   const persistStateOrFail = async (
     res: express.Response,
     state: string,
-    provider: LoginProvider,
-    pending: PendingLoginState,
+    login: NewPendingLogin,
   ): Promise<boolean> => {
+    const { provider } = login;
     try {
-      await createPendingLoginState(state, provider, pending);
+      await createPendingLoginState(state, login);
       return true;
     } catch (err) {
       console.error(`[auth] ${provider} login start failed to persist state:`, err);
@@ -397,7 +401,7 @@ export async function createServer(): Promise<Express> {
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    if (!(await persistStateOrFail(res, state, 'github', { redirect, returnTo, clientState }))) {
+    if (!(await persistStateOrFail(res, state, { provider: 'github', data: { redirect, returnTo, clientState } }))) {
       return;
     }
     res.redirect(buildAuthUrl(state));
@@ -628,10 +632,12 @@ export async function createServer(): Promise<Express> {
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    if (!(await persistStateOrFail(res, state, 'google', { redirect, returnTo, clientState }))) {
+    // #2204: the OIDC nonce, independent of `state` and `client_state`; only its hash is stored.
+    const { nonce, nonceHash } = mintProviderNonce();
+    if (!(await persistStateOrFail(res, state, { provider: 'google', data: { redirect, returnTo, clientState, providerNonceHash: nonceHash } }))) {
       return;
     }
-    res.redirect(buildGoogleAuthUrl(state));
+    res.redirect(buildGoogleAuthUrl(state, nonce));
   });
 
   app.get('/auth/google/callback', async (req, res) => {
@@ -645,6 +651,15 @@ export async function createServer(): Promise<Express> {
     const pending = await claimStateOrFail(res, state, 'google');
     if (!pending) return;
 
+    // #2204: what the ID token's nonce must match. Null = a ceremony row with no nonce hash, refused before any
+    // exchange (the legacy skip never reaches passkey step-up).
+    const nonceExpected = nonceExpectation(pending);
+    if (!nonceExpected) {
+      recordNonceRefusal('google', 'ceremony_unbound');
+      failLoginCallback(res, 'google', 'verify_failed');
+      return;
+    }
+
     // Diagnostics phase marker — see the GitHub callback.
     let phase: LoginFailureReason = 'exchange_failed';
     try {
@@ -655,7 +670,7 @@ export async function createServer(): Promise<Express> {
       // signature against Google's JWKS) — never a bare decode.
       const idToken = await exchangeGoogleCode(code);
       phase = 'verify_failed';
-      const identity = await verifyGoogleIdToken(idToken);
+      const identity = await verifyGoogleIdToken(idToken, nonceExpected);
       phase = 'internal_error';
 
       // #1631 PR1b: a passkey ceremony's sign-in leg. Google was asked to re-authenticate (max_age=0, R154), so an
@@ -770,10 +785,12 @@ export async function createServer(): Promise<Express> {
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    if (!(await persistStateOrFail(res, state, 'apple', { redirect, returnTo, clientState }))) {
+    // #2204: see the Google start route.
+    const { nonce, nonceHash } = mintProviderNonce();
+    if (!(await persistStateOrFail(res, state, { provider: 'apple', data: { redirect, returnTo, clientState, providerNonceHash: nonceHash } }))) {
       return;
     }
-    res.redirect(buildAppleAuthUrl(state));
+    res.redirect(buildAppleAuthUrl(state, nonce));
   });
 
   // POST, not GET: Apple form_posts the result cross-site. The state lives in
@@ -801,6 +818,15 @@ export async function createServer(): Promise<Express> {
     const pending = await claimStateOrFail(res, state, 'apple');
     if (!pending) return;
 
+    // #2204: what the ID token's nonce must match. Null = a ceremony row with no nonce hash, refused before any
+    // exchange (the legacy skip never reaches passkey step-up).
+    const nonceExpected = nonceExpectation(pending);
+    if (!nonceExpected) {
+      recordNonceRefusal('apple', 'ceremony_unbound');
+      failLoginCallback(res, 'apple', 'verify_failed');
+      return;
+    }
+
     // Diagnostics phase marker — see the GitHub callback.
     let phase: LoginFailureReason = 'exchange_failed';
     try {
@@ -811,7 +837,7 @@ export async function createServer(): Promise<Express> {
       // signature against Apple's JWKS) — never a bare decode.
       const idToken = await exchangeAppleCode(code);
       phase = 'verify_failed';
-      const identity = await verifyAppleIdToken(idToken);
+      const identity = await verifyAppleIdToken(idToken, nonceExpected);
       phase = 'internal_error';
 
       // #1631 PR1b: a passkey ceremony's sign-in leg. Lookup by the Apple id only: no email link, no creation.
@@ -1203,12 +1229,18 @@ export async function createServer(): Promise<Express> {
   // hadron-internal#3 L1-L3: fleet-wide bounds on every client-supplied document,
   // read here so a malformed value refuses boot.
   const admission = readGraphqlAdmissionConfig();
+  // The effective L4 configuration, on one line, so ops can confirm the mode a deploy actually booted with.
+  console.log(JSON.stringify({
+    event: 'graphql.admission.config', mode: admission.complexityMode, maxDepth: admission.maxDepth,
+    maxCost: admission.maxCost, listFactor: admission.listFactor, maxQueryBytes: admission.maxQueryBytes,
+    maxTokens: admission.maxTokens, maxSelections: admission.maxSelections,
+  }));
   const apollo = new ApolloServer({
     // #2087: concealed errors must not depend on the deployment's NODE_ENV.
     includeStacktraceInErrorResponses: false,
     typeDefs,
     resolvers: deploymentResolvers,
-    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin],
+    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, complexityAdmissionPlugin(admission)],
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.
     formatError: formatGraphQLError,
@@ -1944,12 +1976,28 @@ export async function createServer(): Promise<Express> {
     startOrphanObjectReaperLoop(db);
   }
 
+  // Background job (#1140): hourly bounded sweep for Asset rows whose bytes are
+  // missing from object storage — the mirror of the orphan sweep. Read-only
+  // against the store; raises the `asset.bytes_missing` alarm.
+  if (
+    process.env.NODE_ENV !== 'test' &&
+    process.env.DISABLE_ASSET_BYTES_SWEEP !== 'true'
+  ) {
+    startAssetBytesSweepLoop(db);
+  }
+
   // Background job (#930, narrowed by #1114): end sessions past `expiresAt`,
   // stamping `autoExpiredAt`. Inactivity no longer ends anything — liveness is
   // derived at read time — so this loop honours the hard-expiry promise and
   // nothing else.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_SESSION_REAPER !== 'true') {
     startSessionReaperLoop(db);
+  }
+
+  // #2261 — idle eviction of MCP transports. Its own timer on purpose: DISABLE_SESSION_REAPER must not also
+  // switch off the bound on what the process holds in memory (the #2259 leak).
+  if (process.env.NODE_ENV !== 'test') {
+    startMcpTransportSweepLoop();
   }
 
   // #1706 — agent-task stall evaluator: the four stall rules, owner-chain
@@ -1988,11 +2036,16 @@ export async function createServer(): Promise<Express> {
   // tests (which drive embedNode/drainEmbeddingQueue directly). Warns if any
   // memory is vector-indexed but no embedding endpoint is configured.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_EMBED_WORKER !== 'true') {
-    startEmbeddingWorkerLoop(db);
+    // No legacy timestamp-only work may slip into the new token worker. Serving writes
+    // remains available with explicit pending status if operator reconciliation is needed.
+    let embeddingReady = false;
+    try { await assertEmbeddingObligationsReconciled(db); embeddingReady = true; }
+    catch (error) { console.error('[embed-worker] admission stays closed:', error); }
+    if (embeddingReady) startEmbeddingWorkerLoop(db);
     // Same-process bus listener (spec 039): near-instant retries + backfill
     // drains via embed.wake.v1. No-op (null) when NATS_URL is unset — the
     // sweep loop above is the standalone fallback (D-2026-06-17-004).
-    startEmbeddingBusListener(db).catch((err) => {
+    if (embeddingReady) startEmbeddingBusListener(db).catch((err) => {
       // A subscribe/consumer failure (broker auth, incompatible durable)
       // must not become an unhandled rejection that can take boot down —
       // the sweep loop above keeps draining regardless (PR-489 review,
@@ -2060,5 +2113,8 @@ export async function createServer(): Promise<Express> {
   // sentryApolloPlugin instead. No-op when SENTRY_DSN is unset.
   Sentry.setupExpressErrorHandler(app);
 
+  app.locals.stopEmbeddingWorker = () => Promise.all([
+    stopEmbeddingWorker(db), stopEmbeddingPublisher(),
+  ]).then(results => results.every(Boolean));
   return app;
 }

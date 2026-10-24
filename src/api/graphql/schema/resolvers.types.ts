@@ -1,11 +1,13 @@
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
+import { lintWarningPage, lintWarningPageForNodeId } from '../../../lib/bootPromptLint.js';
 import { sharedOrganizations } from './sharedOrganizations.js';
 import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { loadViewerManages } from './resolvers.appViewerManages.js';
 import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
@@ -48,7 +50,8 @@ import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
-import { publicAssetUrl } from '../../assetPublic.js';
+import { publicAssetUrl, isPublicHotlinkEnabled } from '../../assetPublic.js';
+import { canManageAssetPublicLink, PUBLIC_LINK_MEMORY_SELECT } from '../../../lib/asset/publicLink.js';
 import {
   canSeeUserPersonalFields,
   canSeeOrgMemberRole,
@@ -95,7 +98,7 @@ import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
 import { WORKLOG_LOC } from './resolvers.teamWork.js';
 import { corpusMintStateOf } from '../../../lib/specCorpus.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
-import { isSessionLive, loadLastEventBySession, sessionLapsesAt } from '../../../lib/sessionActivity.js';
+import { isSessionLive, loadLastEventBySession, sessionLapsesAt, sessionState, DEFAULT_SESSION_DORMANCY_DAYS } from '../../../lib/sessionActivity.js';
 import type { SessionType } from '../../../generated/prisma/index.js';
 import { hasBoundAppSession, strictSessionMemoryFilter } from '../../../lib/auth/sessionPrivacy.js';
 
@@ -745,6 +748,7 @@ async function flushValidationBatch(
 /** The Session parent shape the liveness fields read; partial on a narrow select. */
 type SessionLivenessParent = {
   id: string;
+  appId?: string | null;
   type?: SessionType;
   startedAt?: Date;
   updatedAt?: Date | null;
@@ -773,41 +777,87 @@ function readLivenessRowOnce(ctx: Context, id: string) {
   if (!read) {
     read = ctx.db.session.findUnique({
       where: { id },
-      select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true, expiresAt: true },
+      select: { id: true, appId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true, expiresAt: true },
     });
     perRequest.set(id, read);
   }
   return read as Promise<{
-    id: string; type: SessionType; startedAt: Date; updatedAt: Date | null;
+    id: string; appId: string | null; type: SessionType; startedAt: Date; updatedAt: Date | null;
     autoExpiredAt: Date | null; endedAt: Date | null; deletedAt: Date | null; expiresAt: Date | null;
   } | null>;
 }
 
 /**
- * The liveness inputs for one Session row, or null when it can be live under
- * no reading: ended, or soft-deleted (Codex-worker P2 on #1547 — the bind gate
- * and Worker.hasLiveSession both exclude a deleted row, and the per-session
- * fields must agree with them). Uses the parent's columns when the parent
- * carried them, and one memoized point read per request otherwise.
+ * #2288: retain terminal evidence and memoize one row/activity snapshot for
+ * all three fields, including sequential narrow-parent reads. Never mutate it.
  */
-async function sessionLivenessRow(
-  ctx: Context,
-  s: SessionLivenessParent,
-): Promise<{ id: string; type: SessionType; startedAt: Date; updatedAt: Date | null; autoExpiredAt: Date | null; endedAt: Date | null; expiresAt: Date | null } | null> {
-  const row = s.type && s.startedAt && s.deletedAt !== undefined && s.expiresAt !== undefined
+const sessionSnapshots = new WeakMap<object, Map<string, ReturnType<typeof loadSessionSnapshot>>>();
+const fullSessionSnapshots = new WeakMap<object, WeakMap<object, ReturnType<typeof loadSessionSnapshot>>>();
+const hasSessionColumns = (s: SessionLivenessParent) => !!s.type && !!s.startedAt
+  && s.deletedAt !== undefined && s.expiresAt !== undefined && s.appId !== undefined;
+const sessionReadTimes = new WeakMap<object, Date>();
+function sessionReadTime(ctx: Context): Date {
+  let now = sessionReadTimes.get(ctx);
+  if (!now) { now = new Date(); sessionReadTimes.set(ctx, now); }
+  return now;
+}
+async function loadSessionSnapshot(ctx: Context, s: SessionLivenessParent) {
+  const now = sessionReadTime(ctx);
+  const row = hasSessionColumns(s)
     ? s
     : await readLivenessRowOnce(ctx, s.id);
   if (!row || !row.type || !row.startedAt) return null;
-  if (row.endedAt || row.deletedAt) return null;
-  return {
-    id: row.id,
-    type: row.type,
-    startedAt: row.startedAt,
-    updatedAt: row.updatedAt ?? null,
-    autoExpiredAt: row.autoExpiredAt ?? null,
-    endedAt: row.endedAt ?? null,
-    expiresAt: row.expiresAt ?? null,
+  const session = {
+    id: row.id, appId: row.appId ?? null, type: row.type, startedAt: row.startedAt,
+    updatedAt: row.updatedAt ?? null, autoExpiredAt: row.autoExpiredAt ?? null,
+    endedAt: row.endedAt ?? null, deletedAt: row.deletedAt ?? null, expiresAt: row.expiresAt ?? null,
   };
+  const lastEventAt = session.endedAt || session.deletedAt ? null : await lastEventAtBatched(ctx, row.id);
+  return { row: session, lastEventAt, now };
+}
+function sessionSnapshot(ctx: Context, s: SessionLivenessParent) {
+  // A serial mutation may return a NEW full parent for the same id. Share a
+  // snapshot among that parent's fields, not across distinct mutation results.
+  // Preserve the historical id memo only for narrow fallback parents.
+  if (hasSessionColumns(s)) {
+    let parents = fullSessionSnapshots.get(ctx);
+    if (!parents) { parents = new WeakMap(); fullSessionSnapshots.set(ctx, parents); }
+    let snapshot = parents.get(s);
+    if (!snapshot) { snapshot = loadSessionSnapshot(ctx, s); parents.set(s, snapshot); }
+    return snapshot;
+  }
+  let rows = sessionSnapshots.get(ctx);
+  if (!rows) { rows = new Map(); sessionSnapshots.set(ctx, rows); }
+  let snapshot = rows.get(s.id);
+  if (!snapshot) { snapshot = loadSessionSnapshot(ctx, s); rows.set(s.id, snapshot); }
+  return snapshot;
+}
+
+/** Read each session's OWN App policy, batched and memoized for the request. */
+const dormancyPolicies = new WeakMap<object, Map<string, Promise<number>>>();
+const dormancyPolicyBatches = new WeakMap<object, { ids: Set<string>; result: Promise<Map<string, number>> }>();
+function sessionDormancyDays(ctx: Context, appId: string | null): Promise<number> {
+  if (!appId) return Promise.resolve(DEFAULT_SESSION_DORMANCY_DAYS);
+  let cache = dormancyPolicies.get(ctx);
+  if (!cache) { cache = new Map(); dormancyPolicies.set(ctx, cache); }
+  let policy = cache.get(appId);
+  if (!policy) {
+    let batch = dormancyPolicyBatches.get(ctx);
+    if (!batch) {
+      const ids = new Set<string>();
+      const result = Promise.resolve().then(async () => {
+        dormancyPolicyBatches.delete(ctx);
+        const rows = await ctx.db.app.findMany({ where: { id: { in: [...ids] } }, select: { id: true, sessionDormancyDays: true } });
+        return new Map(rows.map(row => [row.id, row.sessionDormancyDays]));
+      });
+      batch = { ids, result };
+      dormancyPolicyBatches.set(ctx, batch);
+    }
+    batch.ids.add(appId);
+    policy = batch.result.then(rows => rows.get(appId) ?? DEFAULT_SESSION_DORMANCY_DAYS);
+    cache.set(appId, policy);
+  }
+  return policy;
 }
 
 /**
@@ -847,7 +897,18 @@ export const typeResolvers = {
     hasApiKey: (s: { apiKeyEncrypted?: string | null }) => s.apiKeyEncrypted != null,
     from: (s: { fromAddress: string }) => s.fromAddress,
   },
+  NodeApprovalReceipt: {
+    /** #2048 — the same warnings as Node.lintWarnings, for the node just approved; approving never blocked on them. */
+    lintWarnings: (r: { nodeId: string }, args: { first?: number | null; after?: string | null }, ctx: Context) =>
+      lintWarningPageForNodeId(ctx, r.nodeId, args),
+  },
   Node: {
+    /** #2048 — link lint, computed on read from the stored source and the caller's own reads; null when unavailable. */
+    lintWarnings: (
+      n: { id: string; memoryId: string; content: string | null; role?: string | null; nodeType?: string | null },
+      args: { first?: number | null; after?: string | null },
+      ctx: Context,
+    ) => lintWarningPage(ctx, n, args),
     /**
      * #2041 — the one place a node's include tags resolve for a reader
      * (cor:dmo:150:03), so every path that reaches `Node.content` is covered
@@ -1263,7 +1324,7 @@ export const typeResolvers = {
     // an anonymous request holds no session key to decrypt the
     // storage key with).
     publicUrl: async (
-      a: { id: string; memoryId: string | null; scanStatus: string; deletedAt: Date | null },
+      a: { id: string; memoryId: string | null; scanStatus: string; deletedAt: Date | null; publicLinkEnabled: boolean },
       _: unknown,
       ctx: Context,
     ) => {
@@ -1275,10 +1336,29 @@ export const typeResolvers = {
       // Soft-deleted memory: the route 404s these, so offering the link
       // would be offering a dead one.
       if (!memory || memory.deletedAt || memory.isEncrypted) return null;
+      // #1667: the per-asset opt-in. OFF (the default) serves nothing.
+      if (!a.publicLinkEnabled) return null;
       return publicAssetUrl(a.id);
+    },
+    // #1667 — exactly the deployment switch; see the SDL doc.
+    publicLinkAvailable: () => isPublicHotlinkEnabled(),
+    // #1667 — the caller's current manager capability for this asset's memory.
+    canManagePublicLink: async (
+      a: { memoryId: string | null; deletedAt: Date | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (a.deletedAt || !a.memoryId || !ctx.userId || ctx.impersonation) return false;
+      const memory = await ctx.db.memory.findUnique({ where: { id: a.memoryId }, select: PUBLIC_LINK_MEMORY_SELECT });
+      return memory ? canManageAssetPublicLink(ctx, memory) : false;
     },
   },
   Memory: {
+    // A nested Memory parent is not independent authorization to expose per-file locs.
+    lastSyncReport: async (m: { id: string }, _: unknown, ctx: Context) => {
+      const record = await loadReadableMemoryRecord(ctx, m.id) as { lastSyncReport: string | null } | null;
+      return record?.lastSyncReport ?? null;
+    },
     // #1448, derived from the nodes since #1591 (corpusMintStateOf): DRAFT
     // while no live node is minted; corpusMintedAt is the latest node mint.
     corpusMintedAt: async (m: { id: string }, _: unknown, ctx: Context) =>
@@ -1478,6 +1558,8 @@ export const typeResolvers = {
     },
   },
   App: {
+    /** #2109 — whether the caller manages this App; the shared managesApp predicate as a read-time fact. */
+    viewerManages: (a: { id: string }, _: unknown, ctx: Context) => loadViewerManages(ctx, a.id),
     /**
      * Spec 049 Phase 4 — the App's default Channel, gated on its HOST MEMORY
      * like `App.sharedMemory`: `Query.app` admits an org member who is not an
@@ -1935,20 +2017,20 @@ export const typeResolvers = {
      * per request, so a session list costs one grouped query, not one per row.
      */
     isLive: async (s: SessionLivenessParent, _: unknown, ctx: Context) => {
-      const row = await sessionLivenessRow(ctx, s);
-      if (!row) return false;
-      const lastEventAt = await lastEventAtBatched(ctx, row.id);
-      return isSessionLive(row, lastEventAt, new Date());
+      const snapshot = await sessionSnapshot(ctx, s);
+      if (!snapshot || snapshot.row.endedAt || snapshot.row.deletedAt) return false;
+      return isSessionLive(snapshot.row, snapshot.lastEventAt, snapshot.now);
     },
-    /**
-     * #1617: the deadline beside `isLive` — when this session lapses unless
-     * driven first, bounded by its promised hard expiry (#1036). Idle lapse
-     * is inclusive; expiry is exclusive at equality (cor:agt:020:03).
-     */
+    /** Same deadline/output as before; shared snapshot and clock with state. */
     lapsesAt: async (s: SessionLivenessParent, _: unknown, ctx: Context) => {
-      const row = await sessionLivenessRow(ctx, s);
-      if (!row) return null;
-      return sessionLapsesAt(row, await lastEventAtBatched(ctx, row.id));
+      const snapshot = await sessionSnapshot(ctx, s);
+      if (!snapshot || snapshot.row.endedAt || snapshot.row.deletedAt) return null;
+      return sessionLapsesAt(snapshot.row, snapshot.lastEventAt);
+    },
+    state: async (s: SessionLivenessParent, _: unknown, ctx: Context) => {
+      const snapshot = await sessionSnapshot(ctx, s);
+      if (!snapshot) return 'ENDED';
+      return sessionState(snapshot.row, snapshot.lastEventAt, await sessionDormancyDays(ctx, snapshot.row.appId), snapshot.now);
     },
     /**
      * #980: the bound Worker, nested — prefers the eager row SESSION_INCLUDE

@@ -34,8 +34,10 @@ export interface AuthContext {
    */
   sessionBindingRefused?: boolean;
   /**
-   * An MCP transport keeps the context it opened with. For an App key, the session state of the CURRENT request
-   * (refreshed by the transport before each dispatch): the wake tools read this, not `sessionId` above (#1749, N5).
+   * An MCP transport keeps its initialization context. The transport refreshes
+   * this binding result for BOTH principal shapes before each dispatch under
+   * its request lock. Session-sensitive tools use mcpRequestSessionContext,
+   * preserving initialization refusal without changing retained attribution.
    */
   requestSession?: { sessionId?: string; refused: boolean };
   // Current User-row roles for ordinary user principals. HTTP auth resolves

@@ -432,7 +432,7 @@ describe('single-node restore', () => {
     expect(await pending).toBeInstanceOf(Error);
     expect((await db.node.findUniqueOrThrow({ where: { id: retained.id } })).deletedAt).toEqual(retained.deletedAt);
   });
-  it('keeps encrypted metadata inspectable but requires the request key before restoring and mirroring plaintext', async () => {
+  it('keeps encrypted metadata inspectable and requires the request key to restore, but never mirrors the restore to Git (R206)', async () => {
     const key = parseDataKey(Buffer.alloc(32, 37).toString('base64'));
     const stored = encryptNodeFieldsWithKey({ content: 'retained secret' }, key);
     const retained = await node('encrypted', { content: stored.content });
@@ -446,7 +446,7 @@ describe('single-node restore', () => {
     await requestKeyStorage.run(new Map([[memoryId, key]]), async () => {
       const out = await M.restoreNode({}, { nodeRef: retained.id }, ctx());
       expect(out.content).toBe('retained secret');
-      expect(vi.mocked(writeNodeToGit)).toHaveBeenCalledWith(expect.objectContaining({ content: 'retained secret', mirrorRevSeq: out.revSeq }), '', undefined, memoryId);
+      expect(vi.mocked(writeNodeToGit)).not.toHaveBeenCalled();
     });
     expect((await db.node.findUniqueOrThrow({ where: { id: retained.id } })).content).toBe(stored.content);
   });

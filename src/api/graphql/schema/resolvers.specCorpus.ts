@@ -1,9 +1,14 @@
+import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
+import { liveTxContext } from './authorizedTx.js';
+import { liveCaller } from '../../../lib/tickers/liveCaller.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 // Draft spec corpora (#1447): the server-owned spec-corpus operations.
 //
 // #1450 — reserveSpecCitation. Contract:
 // https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862 §4.
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
+import { inMintScope, inMintScopeSql } from '../../../lib/mintScope.js';
 import { mirrorNodeMoveToGit, type MovedNodeRef } from '../../../integrations/github/mirrorNodeMove.js';
 import type { Context } from './resolvers.js';
 import { nodeMoveOps, writeNodeCore } from './resolvers.mutation.node.js';
@@ -23,12 +28,12 @@ import {
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { legacyMemoryUrnToCanonical, normalizeUrnForLookup, parseUrnInput } from '../../../lib/urn.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
-import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
-import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
+import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../../lib/nodeSubtreeLock.js';
+import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../../../lib/tombstoneArchive.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
 import { pendingEdgeStableTargetId } from '../../../lib/pendingEdgePromotion.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
-import { editorFromAuth, ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
+import { editorFromAuth, reconcileNodeWithIncludeHistory } from '../../../lib/nodeRevisionSnapshot.js';
 import { mayMintNodes } from './resolvers.nodeApproval.js';
 import { approvalHoldsFor, checkNodeIntegrity, loadApprovedSnapshots } from '../../../lib/nodeApproval.js';
 import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
@@ -46,6 +51,11 @@ import {
   rewriteCorpusReferences,
   type ScannedField,
 } from '../../../lib/specReferences.js';
+
+// Draft spec corpora (#1447): the server-owned spec-corpus operations.
+//
+// #1450 — reserveSpecCitation. Contract:
+// https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862 §4.
 
 export const specCorpusMutations = {
   /**
@@ -75,80 +85,102 @@ export const specCorpusMutations = {
     // unauthorized caller must not contend for this tenant's locks, and no
     // archive-time error may reveal that a tombstone exists at the loc.
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
-    const effects: Array<() => void> = [];
-    const reserved = await ctx.db.$transaction(async (tx) => {
-      // (@codex P1/P2s, PR #1452) Never REVIVE a deleted node as a placeholder.
-      // A revival keeps everything attached to the row (text, payload, edges,
-      // vectors, provenance, revision history), and each of those surfaced a
-      // leak in turn. Archive the tombstone at `<loc>__deleted-<id>` instead,
-      // the convention a move that overwrites a live target already uses, so
-      // the placeholder is a FRESH node and the deleted spec keeps its own
-      // identity and history on its still-deleted row.
-      // (@codex P2, PR #1452) Take the address locks FIRST, in the global
-      // order every create/move/overwrite at this loc uses (ancestors, then the
-      // loc itself), before touching the tombstone's row. Row-locking the
-      // tombstone first would invert against a concurrent writer that holds
-      // these advisory locks and waits on that row: a deadlock instead of a
-      // typed loc conflict. writeNodeCore's own acquisition below is then a
-      // re-entrant no-op.
-      // (Chip's QA, PR #1452) The edge-endpoint memory key first, as every edge
-      // writer takes it before its address locks: an in-flight edge naming the
-      // tombstone then commits before the archive lists edges, and a later one
-      // revalidates the endpoint under this key and finds it gone.
-      await lockEdgeEndpointMemories(tx, [memoryId]);
-      await acquireLockSet(tx, [
-        ...ancestorLocs(loc).map((ancestor) => ({ memoryId, loc: ancestor })),
-        { memoryId, loc },
-      ]);
-      const tombstone = await tx.node.findFirst({
-        where: { memoryId, loc, deletedAt: { not: null } },
-        select: { id: true },
+    let completed;
+    try {
+      completed = await withArchivePlanRetries(async (timeout) => {
+        const effects: Array<() => void> = [];
+        const reserved = await ctx.db.$transaction(async (tx) => {
+          let txCtx = withoutRequestCaches(ctx, tx);
+          const authorizeAttempt = async () => {
+            const current = await liveCaller(ctx, tx);
+            if (!current) throw authorizationDenied();
+            txCtx = current;
+            await concealUnreadableDenial(txCtx, memoryId, memoryRef, () => requireMemoryWriteAccess(txCtx, memoryId));
+          };
+          await authorizeAttempt();
+          // (@codex P1/P2s, PR #1452) Never REVIVE a deleted node as a placeholder.
+          // A revival keeps everything attached to the row (text, payload, edges,
+          // vectors, provenance, revision history), and each of those surfaced a
+          // leak in turn. Archive the tombstone at `<loc>__deleted-<id>` instead,
+          // the convention a move that overwrites a live target already uses, so
+          // the placeholder is a FRESH node and the deleted spec keeps its own
+          // identity and history on its still-deleted row.
+          // (@codex P2, PR #1452) Take the address locks FIRST, in the global
+          // order every create/move/overwrite at this loc uses (ancestors, then the
+          // loc itself), before touching the tombstone's row. Row-locking the
+          // tombstone first would invert against a concurrent writer that holds
+          // these advisory locks and waits on that row: a deadlock instead of a
+          // typed loc conflict. writeNodeCore's own acquisition below is then a
+          // re-entrant no-op.
+          // (Chip's QA, PR #1452) The edge-endpoint memory key first, as every edge
+          // writer takes it before its address locks: an in-flight edge naming the
+          // tombstone then commits before the archive lists edges, and a later one
+          // revalidates the endpoint under this key and finds it gone.
+          await lockEdgeEndpointMemories(tx, [memoryId]);
+          const archivePlan = await discoverArchivePlan(tx, memoryId, loc);
+          await acquireLockSet(tx, [
+            ...archivePlan.descendantLocs.map(loc => ({ memoryId, loc })),
+            ...ancestorLocs(loc).map((ancestor) => ({ memoryId, loc: ancestor })),
+            { memoryId, loc },
+          ]);
+          await lockAncestorsForCreate(tx, memoryId, loc, { op: 'create' });
+          await authorizeAttempt();
+          await validateArchivePlan(tx, archivePlan);
+          const tombstone = await tx.node.findFirst({
+            where: { memoryId, loc, deletedAt: { not: null } },
+            select: { id: true },
+          });
+          // (@codex P2, PR #1452) The tombstone's edges go with it: their derived
+          // locs would otherwise collide with the placeholder's once it is filled.
+          if (tombstone) await archiveTombstone(tx, { id: tombstone.id, loc, memoryId }, archivePlan);
+          const node = await writeNodeCore(
+            {
+              memoryId, loc, name: name?.trim() || loc, role: 'spec', nodeType: 'info',
+              // Every authored field is stated, not omitted, so the placeholder is
+              // empty by construction rather than by relying on a fresh row. The
+              // test that pins this compares a reservation over a tombstone to a
+              // fresh one column by column.
+              content: null, abstract: null, description: null, contentType: null,
+              alias: null, tags: [], data: null, properties: null,
+              llmModel: null, aiAgent: null, isLink: false, objectType: null,
+              edges: [],
+            },
+            txCtx,
+            'create',
+            {
+              ownsKind: 'spec',
+              governedContext: 'node-write',
+              concealUnreadable: { entity: 'memory', ref: memoryRef },
+              transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
+            },
+          );
+          // Git provenance is not a node-input field, so it is reset here, in the
+          // same write that marks the placeholder (@codex P2, PR #1452): a revived
+          // git-synced tombstone would otherwise keep the deleted body's hash and
+          // stay owned by the old repo, where sync's cleanup could delete it.
+          await tx.node.update({
+            where: { id: node.id },
+            data: { isPlaceholder: true, contentHash: null, ownerRepo: null },
+            select: { id: true },
+          });
+          // (@codex P1, PR #1452) Soft deletion keeps a node's vectors, and vector
+          // search only checks the node's own deleted_at. A revived tombstone would
+          // therefore let the placeholder rank for, and chunk search return, the
+          // deleted spec's text. A placeholder has no content, so it has no vectors.
+          await tx.nodeEmbedding.deleteMany({ where: { nodeId: node.id } });
+          // The node as the create door built it (relations included), now marked.
+          // …with the values this transaction just reset, not the ones read
+          // before it (@codex P2, PR #1452): Node.ownerRepo is client-visible.
+          return { ...node, isPlaceholder: true, contentHash: null, ownerRepo: null };
+        }, { timeout });
+        return { reserved, effects };
       });
-      // (@codex P2, PR #1452) The tombstone's edges go with it: their derived
-      // locs would otherwise collide with the placeholder's once it is filled.
-      if (tombstone) await archiveTombstone(tx, { id: tombstone.id, loc, memoryId });
-      const node = await writeNodeCore(
-        {
-          memoryId, loc, name: name?.trim() || loc, role: 'spec', nodeType: 'info',
-          // Every authored field is stated, not omitted, so the placeholder is
-          // empty by construction rather than by relying on a fresh row. The
-          // test that pins this compares a reservation over a tombstone to a
-          // fresh one column by column.
-          content: null, abstract: null, description: null, contentType: null,
-          alias: null, tags: [], data: null, properties: null,
-          llmModel: null, aiAgent: null, isLink: false, objectType: null,
-          edges: [],
-        },
-        withoutRequestCaches(ctx, tx),
-        'create',
-        {
-          ownsKind: 'spec',
-          governedContext: 'node-write',
-          concealUnreadable: { entity: 'memory', ref: memoryRef },
-          transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
-        },
-      );
-      // Git provenance is not a node-input field, so it is reset here, in the
-      // same write that marks the placeholder (@codex P2, PR #1452): a revived
-      // git-synced tombstone would otherwise keep the deleted body's hash and
-      // stay owned by the old repo, where sync's cleanup could delete it.
-      await tx.node.update({
-        where: { id: node.id },
-        data: { isPlaceholder: true, contentHash: null, ownerRepo: null },
-        select: { id: true },
-      });
-      // (@codex P1, PR #1452) Soft deletion keeps a node's vectors, and vector
-      // search only checks the node's own deleted_at. A revived tombstone would
-      // therefore let the placeholder rank for, and chunk search return, the
-      // deleted spec's text. A placeholder has no content, so it has no vectors.
-      await tx.nodeEmbedding.deleteMany({ where: { nodeId: node.id } });
-      // The node as the create door built it (relations included), now marked.
-      // …with the values this transaction just reset, not the ones read
-      // before it (@codex P2, PR #1452): Node.ownerRepo is client-visible.
-      return { ...node, isPlaceholder: true, contentHash: null, ownerRepo: null };
-    }, { timeout: 120_000 });
-    for (const effect of effects) effect();
-    return reserved;
+    } catch (error) {
+      if (error instanceof ArchivePlanExhaustedError) throw new GraphQLError(error.message, { extensions: { code: 'CONFLICT' } });
+      throw error;
+    }
+    for (const effect of completed.effects) effect();
+    return completed.reserved;
   },
 };
 
@@ -1066,9 +1098,12 @@ async function rewriteWithRetry(
     // the value read here, and a refused write rolls the reconcile back too, so
     // every retry would conflict again. Commit the reconcile on its own first,
     // then read the settled revSeq and plan from that.
-    await ctx.db.$transaction((tx) =>
-      ensureCurrentNodeRevisionInTransaction(tx, node!.id, { expectedMemoryId: corpus.id }),
-    );
+    await withIncludeHistoryTransaction(ctx.db, async (history) => {
+      const tx = includeHistoryClient(history);
+      const fresh = await liveTxContext(ctx, tx);
+      await concealUnreadableDenial(fresh, corpus.id, corpus.id, () => requireMemoryWriteAccess(fresh, corpus.id));
+      return reconcileNodeWithIncludeHistory(history, node!.id, { expectedMemoryId: corpus.id });
+    }, { timeoutMs: 5_000, maxWaitMs: 2_000 });
     node = await loadCorpusNode(ctx.db, corpus.id, initial.id);
     if (!node) return null; // deleted or moved out meanwhile: nothing left to rewrite
     const plan = planRewrite(node, corpus.pattern, fromLoc, toLoc, accept, corpus.urn);
@@ -1124,6 +1159,10 @@ type MintReport = {
   mintedCount: number;
   /** #1591 — the locs this call minted, or would mint on a dry run, by loc. */
   mintLocs: string[];
+  /** #1612 — the minted nodes in scope again (edited since, or no recorded revision), by loc. */
+  remintLocs: string[];
+  /** #1612 — how many of the stamped nodes were re-mints; a subset of mintedCount. */
+  remintedCount: number;
   /** #1607 — nodes in scope with open discussion: a warning, never a blocker (cor:dmo:110:07). */
   unresolvedFeedback: UnresolvedFeedbackRow[];
 };
@@ -1167,11 +1206,13 @@ async function fenceCorpusForMint(tx: Prisma.TransactionClient, memoryId: string
 }
 
 /**
- * #1591 — mint every unminted live node of a memory, once, after its checks.
+ * #1591 — mint every live node of a memory in the mint scope, after its checks.
  * `mintMemoryNodes` and the older `mintSpecCorpus` are this one operation.
  *
- * Scope (Holger's #1447 round-3 ruling 2b): the memory's live nodes with no
- * `mintedAt`. Findings are reported only for those nodes; a node minted
+ * Scope (Holger's #1447 round-3 ruling 2b, widened by #1612, cor:dmo:120:06):
+ * the memory's live nodes with no `mintedAt`, plus minted nodes with no
+ * recorded revision or changed since ({@link inMintScope}); a re-mint keeps the
+ * first mint's time and minter and advances the revision and hash. Findings are reported only for those nodes; a node minted
  * earlier neither blocks nor is linted again, so an existing corpus's legacy
  * issues cannot block minting its new specs. The scans still read the whole
  * memory, because a new spec's citation of a minted one must resolve.
@@ -1223,10 +1264,10 @@ async function mintMemoryNodes(
       select: {
         id: true, loc: true, nodeType: true, tags: true, role: true, isPlaceholder: true, revSeq: true,
         name: true, description: true, abstract: true, content: true, abstractOriginHash: true,
-        mintedAt: true, approvedRevNo: true, contentRevSeq: true, approvalHash: true,
+        mintedAt: true, mintedRevNo: true, approvedRevNo: true, contentRevSeq: true, approvalHash: true,
       },
     });
-    const inScope = nodes.filter((n) => n.mintedAt === null);
+    const inScope = nodes.filter(inMintScope);
     const inScopeIds = new Set(inScope.map((n) => n.id));
     const inScopeLocs = new Set(inScope.map((n) => n.loc));
     // The lint scope is exactly the CLI's (`lintSelects`, hadron-cli #708;
@@ -1310,7 +1351,7 @@ async function mintMemoryNodes(
     const foreignTargets = await tx.edge.findMany({
       where: {
         deletedAt: null,
-        source: { memoryId: id, deletedAt: null, mintedAt: null },
+        source: { memoryId: id, deletedAt: null, id: { in: [...inScopeIds] } },
         target: { memoryId: { not: id }, deletedAt: null, isPlaceholder: false, mintedAt: null },
       },
       select: {
@@ -1345,11 +1386,13 @@ async function mintMemoryNodes(
       .sort(([a], [b]) => (a === null ? 1 : b === null ? -1 : a.localeCompare(b)))
       .map(([decider, questions]) => ({ decider, questions }));
 
-    const mintLocs = inScope.map((n) => n.loc);
+    // New nodes and re-mints are reported apart; mintedCount counts both.
+    const mintLocs = inScope.filter((n) => n.mintedAt === null).map((n) => n.loc);
+    const remintLocs = inScope.filter((n) => n.mintedAt !== null).map((n) => n.loc);
     const report: MintReport = {
       memoryId: id, dryRun, minted: false, blockers,
       staleAbstracts, staleAbstractsBlock: STALE_ABSTRACT_BLOCKS_MINT, openQuestions,
-      mintedCount: 0, mintLocs,
+      mintedCount: 0, remintedCount: 0, mintLocs, remintLocs,
       unresolvedFeedback: (await unresolvedFeedbackOf(tx, inScope)).map((f) => ({ ...f, memoryId: id })),
     };
     if (dryRun) return report;
@@ -1376,12 +1419,12 @@ async function mintMemoryNodes(
     const ids = [...inScopeIds];
     const mintedCount = await tx.$executeRaw`
       UPDATE nodes SET
-        minted_at = ${now},
-        minted_by = ${minter.userId ?? null},
-        minted_by_info = ${minter.userId ? null : minter.info ?? 'unknown'},
+        minted_at = COALESCE(minted_at, ${now}),
+        minted_by = CASE WHEN minted_at IS NULL THEN ${minter.userId ?? null}::text ELSE minted_by END,
+        minted_by_info = CASE WHEN minted_at IS NULL THEN ${minter.userId ? null : minter.info ?? 'unknown'}::text ELSE minted_by_info END,
         minted_rev_no = rev_seq,
         minted_hash = approval_hash
-      WHERE memory_id = ${id} AND deleted_at IS NULL AND minted_at IS NULL
+      WHERE memory_id = ${id} AND deleted_at IS NULL AND ${inMintScopeSql}
         AND id = ANY(${ids}::text[]) AND approved_rev_no >= content_rev_seq AND approval_hash IS NOT NULL`;
     if (mintedCount !== ids.length) {
       // Unreachable under the fence; refuse rather than mint a partial set.
@@ -1393,7 +1436,7 @@ async function mintMemoryNodes(
       where: { id },
       data: { corpusDraft: false, corpusMintedAt: now, corpusMintedBy: ctx.userId ?? ctx.clientId ?? null },
     });
-    return { ...report, minted: true, mintedCount };
+    return { ...report, minted: true, mintedCount, remintedCount: remintLocs.length };
   }, { timeout: 120_000 });
 }
 

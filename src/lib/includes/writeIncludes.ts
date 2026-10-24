@@ -1,6 +1,6 @@
 import { GraphQLError } from 'graphql';
-import { splitNodeUrn } from '@hadron-memory/urn-lib-js';
 import type { Prisma } from '../../generated/prisma/index.js';
+import { includeUrnTarget } from './includeUrnTarget.js';
 import { generateId } from '../id.js';
 import { decryptNodeFields } from '../nodeCrypto.js';
 import { sessionKeyCache } from '../sessionKeyCache.js';
@@ -42,16 +42,17 @@ async function resolveTarget(
 ): Promise<Resolved | null> {
   let memoryId = from.memoryId;
   let loc = tag.target;
+  let targetId: string | undefined;
   if (tag.kind === 'urn') {
-    const parts = splitNodeUrn(tag.target);
-    const mem = await tx.memory.findUnique({ where: { urn: parts.memoryUrn }, select: { id: true } });
-    if (!mem) return null;
-    memoryId = mem.id;
-    loc = parts.loc;
+    const target = await includeUrnTarget(tx, tag.target);
+    if (!target) return null;
+    memoryId = target.memoryId;
+    loc = target.loc;
+    targetId = target.id;
   }
   if (readable !== null && !readable.includes(memoryId)) return null;
   const node = await tx.node.findFirst({
-    where: { memoryId, loc, deletedAt: null },
+    where: { ...(targetId ? { id: targetId } : { loc }), memoryId, deletedAt: null, memory: { deletedAt: null } },
     select: { id: true, memoryId: true, loc: true, content: true, memory: { select: { id: true, isEncrypted: true } } },
   });
   if (overlay && memoryId === overlay.memoryId && overlay.contents.has(loc)) {
@@ -120,16 +121,16 @@ async function targetIdOf(
 ): Promise<string | null> {
   let memoryId = from.memoryId;
   let loc = tag.target;
+  let targetId: string | undefined;
   if (tag.kind === 'urn') {
-    let parts: ReturnType<typeof splitNodeUrn>;
-    try { parts = splitNodeUrn(tag.target); } catch { return null; }
-    const mem = await tx.memory.findUnique({ where: { urn: parts.memoryUrn }, select: { id: true } });
-    if (!mem) return null;
-    memoryId = mem.id;
-    loc = parts.loc;
+    const target = await includeUrnTarget(tx, tag.target);
+    if (!target) return null;
+    memoryId = target.memoryId;
+    loc = target.loc;
+    targetId = target.id;
   }
   if (readable !== null && !readable.includes(memoryId)) return null;
-  const node = await tx.node.findFirst({ where: { memoryId, loc, deletedAt: null }, select: { id: true } });
+  const node = await tx.node.findFirst({ where: { ...(targetId ? { id: targetId } : { loc }), memoryId, deletedAt: null, memory: { deletedAt: null } }, select: { id: true } });
   return node?.id ?? null;
 }
 

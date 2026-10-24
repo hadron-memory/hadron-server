@@ -3,12 +3,13 @@ import 'dotenv/config';
 import './lib/automation/config.js';
 import { createServer } from './server.js';
 import { controller } from './controller/controller.js';
+import { db } from './integrations/db/client.js';
 
 const port = Number(process.env.PORT ?? 4000);
 
 const app = await createServer();
 
-app.listen(port, () => {
+const httpServer = app.listen(port, () => {
   console.log(`hadron-server listening on http://localhost:${port}`);
   console.log(`GraphQL: http://localhost:${port}/graphql`);
   console.log(`MCP:     http://localhost:${port}/mcp`);
@@ -16,5 +17,29 @@ app.listen(port, () => {
   // Sync graphs in the background (non-blocking)
   controller.startup().catch((err) => {
     console.error('Startup graph sync failed:', err);
+  });
+});
+
+// internal#4: close admission before graceful process exit. This is a lifecycle hook,
+// not a deployment/fencing action; rollout still requires the operator's cohort boundary.
+let shuttingDown = false;
+for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const requestsDrained = new Promise<boolean>(resolve => {
+    httpServer.close(error => resolve(!error));
+  });
+  const deadline = setTimeout(() => process.exit(1), 10_000);
+  // #446: disconnect only after HTTP and the worker have settled; keep the
+  // same deadline active through disconnect, and preserve the drain exit code.
+  void Promise.allSettled([requestsDrained, app.locals.stopEmbeddingWorker?.()]).then(async results => {
+    const exitCode = results.every(result => result.status === 'fulfilled' && result.value) ? 0 : 1;
+    try {
+      await db.$disconnect();
+    } catch {
+      console.error('Prisma disconnect failed during shutdown.');
+    }
+    clearTimeout(deadline);
+    process.exit(exitCode);
   });
 });

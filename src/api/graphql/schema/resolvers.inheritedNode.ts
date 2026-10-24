@@ -62,6 +62,8 @@ const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: a
   outgoingEdges: (_value, parent, ctx) => inheritedEdges(parent, ctx, 'out'),
   incomingEdges: (_value, parent, ctx) => inheritedEdges(parent, ctx, 'in'),
   moveLinkWarnings: none,
+  // #2048: an inherited boot prompt's link state belongs to the base owner; the child never gets it computed here.
+  lintWarnings: none,
   authorship: none,
   createdByWorker: none,
   createdByAgent: none,

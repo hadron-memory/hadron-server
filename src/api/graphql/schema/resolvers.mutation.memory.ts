@@ -1191,6 +1191,7 @@ export const memoryMutations = {
           where: { memoryId: id },
           data: {
             embeddingPendingAt: null,
+            embeddingWorkToken: null,
             embeddingFailedAt: null,
             embeddingError: null,
             embeddingAttempts: 0,
@@ -2184,6 +2185,7 @@ export const memoryMutations = {
 
       const { pushMemoryToGit: push } = await import('../../../integrations/github/pushMemoryToGit.js');
       const result = await push(id);
+      if (result.errorCode) throw new GraphQLError(result.error ?? result.errorCode, { extensions: { code: result.errorCode } });
       if (result.error) throw new Error(result.error);
       return true;
     },
@@ -2274,13 +2276,10 @@ export const memoryMutations = {
       // plaintext branch below leaves the App-scoped class untouched.
       if (suppliedKey && !memory.isEncrypted) {
         const key = suppliedKey;
-        const nodes = await ctx.db.node.findMany({
-          where: { memoryId: resolvedMemoryId, deletedAt: null },
-          // abstract encrypts alongside content since spec 031 — selecting only
-          // content+data here would leave abstracts plaintext on a memory marked
-          // encrypted (matches the encryptMemory fix below).
-          select: { id: true, content: true, abstract: true, data: true },
-        });
+        // #1346: reconciliation adds per-row work to this atomic conversion.
+        // Match the bulk node writers' explicit processing budget instead of
+        // inheriting Prisma's five-second default. This is not a node limit
+        // or an end-to-end latency guarantee (completion runs after commit).
         await ctx.db.$transaction(async (tx) => {
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
           const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
@@ -2292,7 +2291,40 @@ export const memoryMutations = {
               extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: resolvedMemoryId },
             });
           }
-          for (const node of nodes) {
+          // #1346: Memory precedes Node locks (#1776). Read the deciding
+          // live set only after that fence, then lock every row in id order.
+          // Values read before the fence can overwrite a committed late edit.
+          const nodes = await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT id FROM nodes
+            WHERE memory_id = ${resolvedMemoryId} AND deleted_at IS NULL
+            ORDER BY id FOR UPDATE
+          `;
+          for (const candidate of nodes) {
+            const before = await tx.node.findUniqueOrThrow({ where: { id: candidate.id } });
+            const revision = await ensureCurrentNodeRevisionInTransaction(tx, candidate.id, {
+              expectedMemoryId: resolvedMemoryId,
+            });
+            const node = await tx.node.findUniqueOrThrow({ where: { id: candidate.id } });
+            // As in encryptMemory (#1435), reconciliation creates a snapshot
+            // of raw plaintext drift. Encrypt it before the flag flips in this
+            // transaction, even if the later history completion is interrupted.
+            if (revision != null && revision > before.revSeq) {
+              const reconciled = await tx.nodeRevision.findFirst({
+                where: { nodeId: node.id, memoryId: resolvedMemoryId,
+                  revNo: revision - 1, editedByInfo: RECONCILE_EDITOR_INFO },
+              });
+              if (reconciled) {
+                const encryptedRevision = encryptNodeFieldsWithKey(
+                  { content: reconciled.content, abstract: reconciled.abstract, data: reconciled.data }, key,
+                );
+                await tx.nodeRevision.update({
+                  where: { id: reconciled.id },
+                  data: { content: encryptedRevision.content ?? null,
+                    abstract: encryptedRevision.abstract ?? null,
+                    data: (encryptedRevision.data ?? null) as InputJsonValue },
+                });
+              }
+            }
             const encrypted = encryptNodeFieldsWithKey(
               { content: node.content, abstract: node.abstract, data: node.data },
               key,
@@ -2320,10 +2352,12 @@ export const memoryMutations = {
           });
           // A second promotion may have read the same anonymous row and
           // supplied a different key. Claim the flag and verifier together;
-          // if another writer won after our pre-transaction scan, roll back
-          // every stale Node rewrite and alias in this transaction.
+          // if another writer won, roll back every Node rewrite, reconcile,
+          // and alias in this transaction.
           // Evaluate expiry in the claim statement, not against an application
           // clock or the transaction's start time (a lock wait can outlive it).
+          // R206: this flip is serialized against an in-flight Git mirror's KEY SHARE
+          // fence by the memory row FOR UPDATE this transaction took on entry.
           const claimed = await tx.$executeRaw`
             UPDATE memories SET urn = ${newUrn}, created_by = ${user.id},
               anonymous_expires_at = NULL, is_encrypted = true,
@@ -2345,7 +2379,7 @@ export const memoryMutations = {
           // transaction, so an interrupted completion pass below cannot leave
           // a live or copied hash behind. Who/when/revision stay.
           await endApprovalsOnEncryptedEntry(tx, { memoryId: resolvedMemoryId });
-        });
+        }, { timeout: 120_000 });
         // Promotion's live-node rewrite does not cover tombstones or prior
         // snapshots. Reuse the bounded completion pass under the verifier we
         // just installed. The owning App can recover an interrupted pass by

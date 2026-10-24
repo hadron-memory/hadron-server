@@ -13,7 +13,7 @@
 // (`roles:<role>` nodes, `data.names`), read at CASTING time — and only when
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
-import { normalizeFamily } from '../../../lib/agentTasks/family.js';
+import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { GraphQLError } from 'graphql';
@@ -59,6 +59,7 @@ import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
@@ -462,6 +463,70 @@ export async function resolveWorkerIdByName(
     WHERE app_id = ${appId} AND lower(name) = lower(${trimmed})
     LIMIT 1`;
   return rows[0]?.id ?? null;
+}
+
+/** #1597: authorized, live-App NAME discovery for a bind with no App context.
+ * Reuses the participation set and point gate (hrn:node:hadronmemory.com:specs:cor:agt:020:00).
+ * No name query runs for a denied App; hold/liveness decisions remain with startSession.
+ */
+export async function resolveWorkerBindCandidatesByName(ctx: Context, name: string) {
+  if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return [];
+  const participant = await participantAppWhere(ctx.db, ctx, { includeMemberships: true });
+  // The existing point gate admits platform administrators to live org Apps,
+  // never to another person's user-owned App merely by platform role.
+  const apps = await ctx.db.app.findMany({
+    where: {
+      deletedAt: null, uninstalledAt: null,
+      OR: [
+        ...(participant ? [participant] : []),
+        ...(isPlatformAdmin(ctx) ? [{ organizationId: { not: null }, organization: { is: { deletedAt: null } } }] : []),
+      ],
+    },
+    select: { id: true, name: true, urn: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+    orderBy: [{ urn: 'asc' }, { id: 'asc' }],
+  });
+  // #2346: one set-oriented query narrows the reachable Apps to those with a
+  // live worker of this name, judged by the database's lower() (the expression
+  // `workers_app_name_uniq` indexes, as `resolveWorkerIdByName`). This is an
+  // internal discovery step only: the read gate below still runs for every App
+  // that matched before anything is returned, so a denied App stays
+  // indistinguishable from an absent name and nothing is capped or sampled.
+  const trimmed = name.trim();
+  if (trimmed === '' || apps.length === 0) return [];
+  const matched = await ctx.db.$queryRaw<{ app_id: string }[]>`
+    SELECT app_id FROM workers
+    WHERE app_id = ANY(${apps.map((a) => a.id)}::text[])
+      AND lower(name) = lower(${trimmed})
+      AND retired_at IS NULL`;
+  const matchedAppIds = new Set(matched.map((r) => r.app_id));
+  const candidates = [];
+  for (const app of apps) {
+    if (!matchedAppIds.has(app.id)) continue;
+    try {
+      await requireWorkerReadAccess(ctx, app);
+    } catch (e) {
+      if (!(e instanceof GraphQLError && e.extensions.code === 'FORBIDDEN')) throw e;
+      continue;
+    }
+    const id = await resolveWorkerIdByName(ctx.db, app.id, name);
+    if (!id) continue;
+    const row = await ctx.db.worker.findFirst({
+      where: { id, appId: app.id, retiredAt: null },
+      select: { id: true, name: true, slug: true, role: true,
+        heldBy: { select: { id: true, handle: true, githubUsername: true } } },
+    });
+    if (!row) continue;
+    // #1764 restricts taking an unheld name, not rebinding one already held
+    // by this caller. Holds survive role changes: omitting that identity could
+    // silently choose and claim a different same-name worker (#1597 P2-1).
+    if (app.ownerUserId !== null && app.ownerUserId !== ctx.userId &&
+        row.heldBy?.id !== ctx.userId && !(await managesApp(ctx, app))) continue;
+    let urn: string | null = null;
+    try { urn = composeWorkerUrn(normalizeUrnForLookup(app.urn), row.slug); } catch { /* legacy unaddressable App: use worker id */ }
+    candidates.push({ id: row.id, name: row.name, urn, role: row.role,
+      app: { id: app.id, name: app.name, urn: safeCanonicalUrn('app', app.urn) }, holder: row.heldBy });
+  }
+  return candidates;
 }
 
 /**
@@ -1766,6 +1831,8 @@ export const workerQueries = {
           lastActiveAt: null,
           bound: false,
           bindingFamily: null,
+          bindingModel: null,
+          modelReportedAt: null,
         },
       })),
     };
@@ -1856,11 +1923,26 @@ export const workerQueries = {
  * lapsed but open session keeps its family; only an end, or a newer bind,
  * clears or replaces it (#1723 review, Diego P2-2).
  */
+/** The #2252 fields' shared read: masked to null on the family gate, else the activity row of the one fold. */
+async function bindingModelOf(
+  ctx: Context,
+  worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+  info?: { operation?: { operation?: string } },
+): Promise<WorkerActivity | null> {
+  if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+  if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity;
+  const activity = await loadAppWorkerActivity(ctx, worker.appId, { memoize: info?.operation?.operation === 'query' });
+  return activity.get(worker.id) ?? null;
+}
+
 export type WorkerActivity = {
   hasLiveSession: boolean;
   lastActiveAt: Date | null;
   bound: boolean;
   bindingFamily: string | null;
+  /** #2252: the newest open session's reported model, its report time, and the tier derived from it. */
+  bindingModel: string | null;
+  modelReportedAt: Date | null;
 };
 
 /**
@@ -1880,7 +1962,7 @@ async function queryWorkerActivity(
   now: Date,
 ): Promise<Map<string, WorkerActivity>> {
   const rows = await ctx.db.$queryRaw<
-    { workerId: string; live: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null }[]
+    { workerId: string; live: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null; bindingModel: string | null; modelReportedAt: Date | null }[]
   >(workerActivitySql(scope, now));
   return new Map<string, WorkerActivity>(
     rows.map((row) => [
@@ -1890,6 +1972,8 @@ async function queryWorkerActivity(
         lastActiveAt: row.lastActiveAt,
         bound: row.bound,
         bindingFamily: normalizeFamily(row.bindingFamily),
+        bindingModel: row.bindingModel,
+        modelReportedAt: row.modelReportedAt,
       },
     ]),
   );
@@ -1948,6 +2032,13 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
            bool_or(s.ended_at IS NULL) AS "bound",
            (array_agg(s.family ORDER BY s.started_at DESC, s.id DESC)
               FILTER (WHERE s.ended_at IS NULL))[1] AS "bindingFamily",
+           -- #2252: the model and its report time come from the SAME newest open
+           -- session as the family (same ordering), so a newer bind that reported
+           -- none does not inherit an older one's, and the two never mix sessions.
+           (array_agg(s.llm_model ORDER BY s.started_at DESC, s.id DESC)
+              FILTER (WHERE s.ended_at IS NULL))[1] AS "bindingModel",
+           (array_agg(s.model_reported_at ORDER BY s.started_at DESC, s.id DESC)
+              FILTER (WHERE s.ended_at IS NULL))[1] AS "modelReportedAt",
            max(LEAST(GREATEST(
              s.started_at,
              -- The reaper advances updated_at while setting auto_expired_at.
@@ -2351,6 +2442,13 @@ export const workerFieldResolvers = {
     name: async (u: { id: string; name?: string | null }, _args: unknown, ctx: Context) =>
       (await canSeeUserPersonalFields(ctx, u.id)) ? (u.name ?? null) : null,
   },
+  /**
+   * #2223 — `heldBy` on the roster. The producer (the roster leaf) has already put `name` through the shared
+   * #384 gate in bulk, so only the derived URN is resolved here.
+   */
+  WorkerHolder: {
+    urn: (u: { handle?: string | null }) => userUrn(u.handle),
+  },
   Worker: {
     /**
      * Scalar App identity for cross-App worker pages (#1344). Unlike
@@ -2622,6 +2720,27 @@ export const workerFieldResolvers = {
       });
       return activity.get(worker.id)?.bindingFamily ?? null;
     },
+    /** #2252 — the model its binding last reported (the newest open session's; same gate and fold as `family`). Self-declared; never authorization. */
+    model: async (
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string | null> => (await bindingModelOf(ctx, worker, info))?.bindingModel ?? null,
+    /** #2252 — when that model was self-reported; null when the session never reported one. */
+    modelReportedAt: async (
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<Date | null> => (await bindingModelOf(ctx, worker, info))?.modelReportedAt ?? null,
+    /** #2252 / R189 — the coarse tier of `model` from the server's one mapping; null when unmapped. Advisory only. */
+    tier: async (
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string | null> => tierOf((await bindingModelOf(ctx, worker, info))?.bindingModel),
     /**
      * hadron-cli#487 — when this worker was last DRIVEN, across every session
      * it has ever had; null for a worker nobody has ever bound.

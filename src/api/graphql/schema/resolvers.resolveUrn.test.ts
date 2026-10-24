@@ -9,12 +9,16 @@
  * never disclosed.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { buildNodeRevisionSnapshot, createNodeRevision } from '../../../lib/nodeRevisionSnapshot.js';
+import { buildNodeRevisionSnapshot, createNodeRevision, editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
 import { resolvers, type Context } from './resolvers.js';
+
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
+  writeNodeToGit: vi.fn().mockResolvedValue(undefined),
+}));
 
 const ORG_URN = 'urnres-org';
 const MEM_URN = `${ORG_URN}:mem`;
@@ -461,5 +465,50 @@ describe('Query.resolveUrn — the memory gate matches Query.memory (#1104)', ()
         await resolvers.Query.resolveUrn({}, { urn: `urn:memory:${m.urn}` }, ctx),
       ).toEqual({ kind: 'memory', id: m.id });
     }
+  });
+});
+
+/**
+ * #2330 — a noderev URN of a RETRACTED comment stub resolves only for memory
+ * managers (`isConcealedCommentHistory`, resolvers.comments.ts, #1663; the
+ * resolveUrn branch is resolvers.query.node.ts `case 'noderev'`). The
+ * comments suite pins nodeRevision(s) but not this address of the same history.
+ */
+describe('Query.resolveUrn — noderev of a retracted comment (#1663, #2330)', () => {
+  const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
+
+  async function seedStubRevision() {
+    const reader = await db.user.create({
+      data: { id: generateId(), githubId: 7303, githubUsername: 'urnres-reader', roles: [] },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: org.id, userId: reader.id, role: 'READER' },
+    });
+    const c = await M.createComment!(null, { targetRef: node.id, body: 'secret words' }, memberCtx());
+    // A revision as the comment path wrote them before #1721 (it writes none now).
+    const row = await db.node.findUniqueOrThrow({ where: { id: c.id } });
+    await createNodeRevision(
+      db,
+      buildNodeRevisionSnapshot(row, editorFromAuth({ userId: member.id }), { revLabel: 'edit', changes: ['content'] }),
+    );
+    const urn = `hrn:noderev:${MEM_URN}:${row.loc}:r${(await db.nodeRevision.findFirstOrThrow({ where: { nodeId: c.id } })).revNo}`;
+    return { reader, c, urn };
+  }
+
+  it('resolves for a reader while the comment is unretracted', async () => {
+    const { reader, urn } = await seedStubRevision();
+    const ctx: Context = { db, userId: reader.id, roles: ['READER'] };
+    expect(await resolvers.Query.resolveUrn({}, { urn }, ctx)).toMatchObject({ kind: 'noderev' });
+  });
+
+  it('after retraction: null for a reader with memory read access, still resolves for a manager', async () => {
+    const { reader, c, urn } = await seedStubRevision();
+    // A reply keeps the stub when its parent is deleted (retractedAt is set).
+    await M.replyToComment!(null, { commentRef: c.id, body: 'keeps the stub' }, memberCtx());
+    await M.deleteComment!(null, { commentRef: c.id, expectedRevision: 2 }, memberCtx());
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).content).toBeNull();
+    const readerCtx: Context = { db, userId: reader.id, roles: ['READER'] };
+    expect(await resolvers.Query.resolveUrn({}, { urn }, readerCtx)).toBeNull();
+    expect(await resolvers.Query.resolveUrn({}, { urn }, memberCtx())).toMatchObject({ kind: 'noderev' });
   });
 });

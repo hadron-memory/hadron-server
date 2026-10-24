@@ -131,6 +131,8 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/signin-invariants.sql', import.meta.url), 'utf8'));
   // #1631 PR1b slice 2 — fresh sign-ins bound to the ceremony browser.
   await client.query(readFileSync(new URL('../../prisma/fresh-sign-in-invariants.sql', import.meta.url), 'utf8'));
+  // #2204 — OIDC nonce hash on pending logins.
+  await client.query(readFileSync(new URL('../../prisma/login-nonce-invariants.sql', import.meta.url), 'utf8'));
   // #1631 PR2 — passkey registration lifecycle (cancel tokens).
   await client.query(readFileSync(new URL('../../prisma/passkey-registration-invariants.sql', import.meta.url), 'utf8'));
   // #1897 slice B1 — pending email sign-ins (depend on sign_ins).

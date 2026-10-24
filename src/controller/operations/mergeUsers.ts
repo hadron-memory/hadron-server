@@ -4,6 +4,8 @@ import { lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
 import { consumeUserMergeConsent, mergeConsentAlreadyApplied } from '../../lib/userMergeConsent.js';
 import { Prisma, type PrismaClient, type User } from '../../generated/prisma/index.js';
 import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js';
+import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
+import { waitForSerializationRetry } from '../../lib/serializableRetry.js';
 
 /**
  * Tables whose audit actor columns carry User.id values in normal writes.
@@ -101,7 +103,7 @@ class MergeRaceError extends Error {
 }
 
 /**
- * How many times the SERIALIZABLE merge is re-run after a serialization abort
+ * How many times the SERIALIZABLE merge is re-run (three retries, four total attempts) after a serialization abort
  * (P2034) or a {@link MergeRaceError}. The body touches only the database, so
  * a bounded re-run is safe (conventions:count-then-act-serializable-txn, as in
  * deleteUserAccount).
@@ -239,7 +241,10 @@ export async function mergeUsers(
     } catch (e) {
       const serialization = isSerializationAbort(e);
       aborted ||= serialization;
-      if ((e instanceof MergeRaceError || serialization) && attempt <= MERGE_RETRIES) continue;
+      if ((e instanceof MergeRaceError || serialization) && attempt <= MERGE_RETRIES) {
+        await waitForSerializationRetry(attempt);
+        continue;
+      }
       // #1770 (cor:api:010:02): after losing a race, if the winner was a merge
       // of this very proof, say so with a typed refusal; never surface the raw
       // 40001 or the tombstoned source the re-run meets.
@@ -353,6 +358,10 @@ async function runMergeTxn(
         linkedAt: null,
       },
     });
+
+    // #708: the source's handle was just replaced by a random placeholder, so its original name is dead.
+    // Tombstone the #692 pool principal (name reserved forever; the user→principal link stays).
+    if (source.principalId) await releasePrincipal(tx, source.principalId);
 
     await tx.user.update({
       where: { id: targetUserId },

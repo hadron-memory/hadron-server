@@ -5,7 +5,7 @@ import { stringify } from 'yaml';
 import { GRAPHS_PATH } from '../../config.js';
 import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
-import { prepareWriteBranch } from './gitBranch.js';
+import { prepareWriteBranch, unpublishedCommitCount } from './gitBranch.js';
 import { execGit } from './execGit.js';
 import { validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
 import { deserializeTags } from '../db/provider.js';
@@ -16,12 +16,25 @@ import {
   orphanedLegacyPaths,
 } from './nodeFrontmatter.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
-import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
+import { withMirrorCheckoutLock, EncryptedMemoryFenceError } from './mirrorCheckoutLock.js';
+import { ENCRYPTED_GIT_SYNC_MESSAGE, ENCRYPTED_GIT_SYNC_UNAVAILABLE, logEncryptedGitSyncRefusal } from './encryptedGitSync.js';
 
 function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
   const slug = memoryUrn.includes(':') ? memoryUrn.split(':').slice(1).join(':') : memoryUrn;
   return join(GRAPHS_PATH, orgUrn, slug);
 }
+
+export interface PushResult {
+  nodeCount: number;
+  error?: string;
+  /** R206: set when an encrypted memory refused the push, whatever key the caller holds. */
+  errorCode?: typeof ENCRYPTED_GIT_SYNC_UNAVAILABLE;
+}
+
+const encryptedRefusal = (memoryId: string): PushResult => {
+  logEncryptedGitSyncRefusal('[pushMemoryToGit]', memoryId);
+  return { nodeCount: 0, error: ENCRYPTED_GIT_SYNC_MESSAGE, errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE };
+};
 
 /**
  * Push all nodes in a memory to its git repo as frontmatter markdown files.
@@ -31,13 +44,14 @@ function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
  */
 export async function pushMemoryToGit(
   memoryId: string,
-): Promise<{ nodeCount: number; error?: string }> {
+): Promise<PushResult> {
   // A manual full push uses the same clone as incremental Node/Edge mirrors.
   // Hold their cross-process checkout lock through the entire push, including
   // the final remote-URL restoration.
   try {
-    return await withMirrorCheckoutLock(memoryId, () => pushMemoryToGitUnderLock(memoryId));
+    return await withMirrorCheckoutLock(memoryId, () => pushMemoryToGitUnderLock(memoryId), { fenceEncryption: true });
   } catch (err) {
+    if (err instanceof EncryptedMemoryFenceError) return encryptedRefusal(memoryId);
     console.error('[pushMemoryToGit] Checkout lock failed:', err);
     return { nodeCount: 0, error: `Git checkout lock failed: ${String(err)}` };
   }
@@ -45,7 +59,7 @@ export async function pushMemoryToGit(
 
 async function pushMemoryToGitUnderLock(
   memoryId: string,
-): Promise<{ nodeCount: number; error?: string }> {
+): Promise<PushResult> {
   // 1. Load memory + org
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
@@ -53,6 +67,9 @@ async function pushMemoryToGitUnderLock(
   });
 
   if (!memory) return { nodeCount: 0, error: 'Memory not found' };
+  // R206 / cor:sec:040:05: refuse before any Git setup or file rendering,
+  // whatever key the caller holds. Re-checked in the node-load snapshot below.
+  if (memory.isEncrypted) return encryptedRefusal(memoryId);
   if (!memory.source) return { nodeCount: 0, error: 'Memory has no git source configured' };
   // #561 — re-validate the STORED value; see the note in syncGraphFromGithub.
   // This path needs it most: it clones with the RAW source when the org has no
@@ -135,14 +152,30 @@ async function pushMemoryToGitUnderLock(
     return { nodeCount: 0, error: `Git setup failed: ${(err as Error).message}` };
   }
 
-  // 4. Load all nodes with edges
-  const nodes = await db.node.findMany({
-    where: { memoryId, nodeType: { not: 'data' } },
-    include: {
-      outgoingEdges: { include: { target: true } },
-    },
-    orderBy: { loc: 'asc' },
-  });
+  // 4. Load all LIVE nodes with edges. A soft-deleted node is a tombstone, not
+  // content: exporting it re-published deleted text on every full push (#425).
+  // This only stops new writes — pruning files already in the repo is a
+  // separate, gated change.
+  // The checkout lock above holds a KEY SHARE fence on the Memory row for this
+  // whole push, so a conversion (row FOR UPDATE) cannot commit between this
+  // check and the final push; one that committed earlier is refused here, at
+  // the last boundary before any file is rendered (R206).
+  const snapshot = await db.$transaction(async (tx) => {
+    const live = await tx.memory.findUnique({ where: { id: memoryId }, select: { isEncrypted: true } });
+    if (!live || live.isEncrypted) return null;
+    return tx.node.findMany({
+      where: { memoryId, nodeType: { not: 'data' }, deletedAt: null },
+      include: {
+        outgoingEdges: { include: { target: true } },
+      },
+      orderBy: { loc: 'asc' },
+    });
+  }, { isolationLevel: 'RepeatableRead' });
+  if (!snapshot) {
+    await restoreRemote(localPath, memory.source);
+    return encryptedRefusal(memoryId);
+  }
+  const nodes = snapshot;
 
   // 5. Write each node as a self-contained frontmatter markdown file. A node
   // — leaf or parent — is `<...loc>.md` (children live in the sibling
@@ -211,21 +244,26 @@ async function pushMemoryToGitUnderLock(
     await execGit(['add', '-A'], { cwd: localPath });
     const { stdout } = await execGit(['status', '--porcelain'], { cwd: localPath });
     if (!stdout.trim()) {
-      await restoreRemote(localPath, memory.source);
-      return { nodeCount: nodes.length, error: undefined };
+      // #2308: a clean tree is not "nothing to publish" (see withMirrorCheckout):
+      // an earlier failed push leaves its commit on the write branch. An unknown
+      // ahead state throws into the catch below, never a silent success.
+      if ((await unpublishedCommitCount(localPath, branch, memory.readBranch ?? undefined)) === 0) {
+        await restoreRemote(localPath, memory.source);
+        return { nodeCount: nodes.length, error: undefined };
+      }
+    } else {
+      const gitEnv = {
+        ...process.env,
+        GIT_AUTHOR_NAME: org.name,
+        GIT_AUTHOR_EMAIL: `hadron@${org.urn}`,
+        GIT_COMMITTER_NAME: org.name,
+        GIT_COMMITTER_EMAIL: `hadron@${org.urn}`,
+      };
+
+      await execGit([
+        'commit', '-m', `Push ${nodes.length} nodes from Hadron\n\n[hadron-server pushMemoryToGit]`,
+      ], { cwd: localPath, env: gitEnv });
     }
-
-    const gitEnv = {
-      ...process.env,
-      GIT_AUTHOR_NAME: org.name,
-      GIT_AUTHOR_EMAIL: `hadron@${org.urn}`,
-      GIT_COMMITTER_NAME: org.name,
-      GIT_COMMITTER_EMAIL: `hadron@${org.urn}`,
-    };
-
-    await execGit([
-      'commit', '-m', `Push ${nodes.length} nodes from Hadron\n\n[hadron-server pushMemoryToGit]`,
-    ], { cwd: localPath, env: gitEnv });
 
     if (token) {
       const tokenUrl = toHttpsUrl(memory.source, token);

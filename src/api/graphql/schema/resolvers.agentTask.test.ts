@@ -134,7 +134,7 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
     expect(t.ownerUserId).toBe(member.id);
     expect(t.ownerWorkerId).toBeNull();
     expect(t.status).toBe('pending');
-    expect(t.closeSessionWhenDone).toBe(true);
+    expect(t.closeSessionWhenDone).toBe(false); // #2249 / R182: the session ends only when the assigner asks
     const ev = await events(t.id);
     // #1707: a task created with no assignee enters the queue.
     expect(ev.map((e) => e.type)).toEqual(['task.created', 'assignment.queued']);
