@@ -292,3 +292,34 @@ and a Codex terminal, against a shim or an isolated S1 server; see the PR receip
 for the head it names and does not carry to later heads by itself.
 Verified by the 63 fake-runner and contract tests (the contract tests build the schema from the real typeDefs); live-host rollout
 evidence is separate.
+
+### A prior receiver that is provably gone (#2275 partial slice)
+
+An ambiguous receipt for another receiver stops holding the worker only when a
+successful, complete current terminal inventory proves that the prior
+handle/incarnation is absent. Completeness requires Orca `result.hostScope`:
+at least one legible covered host, with any omitted hosts restricted to
+`runtime:` peers (which own separate control planes). Missing scope or an omitted
+local/SSH/unknown host holds, even if all returned terminal rows look valid.
+A reused handle needs a known different incarnation. Failed or partial lists,
+unknown identities, and a still-present
+old incarnation (even disconnected or unwritable) remain held.
+
+Before replacement, the script checks the inventory and current incarnation
+again and applies the normal composer, draft, timing and idle rules. It keeps
+the old request in `needs-person.json`, then atomically saves normal unresolved
+send intent for the current receiver. A crash or failed write keeps an
+ambiguous receipt; unrelated workers' receipts are preserved. It neither
+replays the old request ID against the new receiver nor acknowledges a wake,
+task, or chat read merely because the local receiver changed.
+
+This is **at-least-once notification recovery**: an accepted old prompt may
+have executed before its terminal died. The replacement may name unacknowledged
+work again; it is not an exactly-once claim. The worker still reads the server
+cursor and current task state. Only confirmation of the new send can support
+the normal acknowledgement path.
+
+This slice does not change family derivation, relaunch scripts, existing host
+receipt files, same-receiver never-accepted recovery, or escalation. Tests use
+synthetic mocked hosts; deployment and any existing-state remediation remain
+separate host-manager actions.
