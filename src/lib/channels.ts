@@ -387,6 +387,12 @@ export async function ensureChannelWithRoot(
     hostLabel?: string;
     /** Recheck an API caller's write grant after transfer serialization. */
     authorizeLockedHost?: (tx: Prisma.TransactionClient) => Promise<void>;
+    /**
+     * #2277: the transaction to run in, when the caller must open it itself — a Channel root in a boot-prompt SOURCE memory
+     * takes the #2063 include-history fence first and re-decides write authority on the transaction client. Defaults to a
+     * plain `db.$transaction`.
+     */
+    run?: <R>(fn: (tx: Prisma.TransactionClient) => Promise<R>) => Promise<R>;
   },
 ): Promise<{ channel: ChannelRow; rootId: string }> {
   const memory = await db.memory.findFirst({
@@ -408,7 +414,8 @@ export async function ensureChannelWithRoot(
     ),
   );
   const messagesLoc = `${args.loc}:messages`;
-  return db.$transaction(async (tx) => {
+  const run = args.run ?? (<R>(fn: (tx: Prisma.TransactionClient) => Promise<R>) => db.$transaction(fn));
+  return run(async (tx) => {
     // The Channel OWNS this address: it passes the gate every generic writer is
     // refused by. The lock set always includes `args.loc` itself (the
     // `:messages` child's parent), so a concurrent generic write of the root

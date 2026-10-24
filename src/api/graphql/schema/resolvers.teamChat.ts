@@ -34,7 +34,8 @@ import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { generateId } from '../../../lib/id.js';
-import { appendChatMessage } from '../../../lib/chatRoot.js';
+import { appendChatMessage, type ChatTxRunner } from '../../../lib/chatRoot.js';
+import { sourceFencedMemoryTx } from './resolvers.comments.js';
 import { lockStampAuthority, wakeStampsFor } from '../../../lib/tickers/postStamp.js';
 import { deriveEdgeLoc, sanitizeLocAtom } from '../../../lib/edgeLoc.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -985,6 +986,14 @@ async function postToChannelRoot(
   const messageId = generateId();
   const createdBy = opts.system ? null : (ctx.userId ?? null);
   let messageLoc: string | null = null;
+  // #2277: a Channel in a boot-prompt SOURCE memory takes the include-history fence F first and decides the post
+  // authority again on the transaction client (a revoked writer that waited on F is refused). A platform notice has
+  // no principal and a notice target is an App team space, never a source memory.
+  const hostIsSource = !opts.system
+    && (await ctx.db.memory.findUnique({ where: { id: root.memoryId }, select: { class: true } }))?.class === 'system';
+  const sourceTx: ChatTxRunner = (fn) => sourceFencedMemoryTx(
+    ctx, root.memoryId, (txCtx) => requireChannelPostAccess(txCtx, app, root.memoryId), (tx) => fn(tx),
+  );
   const { seq, inserted: createdAt } = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
     // The Channel is re-checked LIVE under the lock (Copilot on PR #1169):
     // deleteChannel takes this same key, so a delete that committed between
@@ -1150,7 +1159,7 @@ async function postToChannelRoot(
       });
     }
     return row.createdAt;
-  }, { asChannel: true });
+  }, { asChannel: true, ...(hostIsSource && !opts.system ? { inTx: sourceTx } : {}) });
 
   // #1061 — a chat message IS a node, so posting one is a write on the team's
   // shared chat memory. This was one of the largest blind spots in the old

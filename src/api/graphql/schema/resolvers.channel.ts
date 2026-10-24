@@ -27,6 +27,7 @@ import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../../lib/
 import { lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { validateLoc } from '../../../lib/validateLoc.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
+import { sourceFencedMemoryTx } from './resolvers.comments.js';
 
 /**
  * A Channel row as a field resolver may receive it: the `channels` page
@@ -134,8 +135,15 @@ export const channelMutations = {
     // The overlap check (LOC_OVERLAPS_CHANNEL) and the live-occupant check
     // (LOC_OCCUPIED) live in the core, under the ancestor lock — a preflight
     // here is a decision two concurrent creates can both get wrong.
+    // #2277: a root in a boot-prompt SOURCE memory takes the include-history fence F first, then the write
+    // authority is decided again on the transaction client (a revoked admin that waited on F is refused).
     const { channel } = await ensureChannelWithRoot(ctx.db, {
       memoryId,
+      run: (fn) => sourceFencedMemoryTx(
+        ctx, memoryId,
+        (txCtx) => concealUnreadableDenial(txCtx, memoryId, memoryRef, () => requireMemoryWriteAccess(txCtx, memoryId)),
+        (tx) => fn(tx),
+      ),
       loc,
       name,
       description: input.description ?? null,
@@ -171,7 +179,8 @@ export const channelMutations = {
     if (ctx.impersonation) throw new Error('Forbidden');
     const row = await writableChannel(ctx, ref);
     const now = new Date();
-    await ctx.db.$transaction(async (tx) => {
+    // #2277: F first in a SOURCE memory, then the write authority is decided on the transaction client.
+    await sourceFencedMemoryTx(ctx, row.memoryId, (txCtx) => requireMemoryWriteAccess(txCtx, row.memoryId), async (tx) => {
       // Reuse and delete serialize on the host memory. The explicit
       // incarnation token distinguishes reuse from ordinary posts/metadata
       // updates while the stable Channel and root ids stay the same.
