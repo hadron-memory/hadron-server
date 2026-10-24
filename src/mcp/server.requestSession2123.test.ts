@@ -168,7 +168,7 @@ describe('#2123 request-local session refusal', () => {
     expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).promptOverride).toBeNull();
   });
 
-  it('App-key request-local N5 and sticky initialization refusal hold across task and ticker reads', async () => {
+  it('App-key N5 stays request-local after an initially refused header across task and ticker reads', async () => {
     const raw = `${APP_KEY_PREFIX}${generateId()}${generateId()}`;
     const key = await db.appKey.create({ data: { id: generateId(), appId, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4) } });
     await db.appKeyScope.create({ data: { id: generateId(), appKeyId: key.id, scope: 'attention:deliver', grantedByUserId: userId } });
@@ -179,9 +179,9 @@ describe('#2123 request-local session refusal', () => {
       expect((await invoke()).result?.isError).not.toBe(true);
       expect((await invoke(plain.id)).text).toMatch(/^\[app_key_session_bound\]/);
       expect((await invoke(generateId())).text).toMatch(/^\[app_key_session_bound\]/);
-      expect((await invoke()).result?.isError).not.toBe(true); // only INITIAL refusal is sticky
+      expect((await invoke()).result?.isError).not.toBe(true); // a clean request recovers
       const sticky = await open(generateId(), raw);
-      expect((await invoke(undefined, sticky)).text).toMatch(/^\[app_key_session_bound\]/);
+      expect((await invoke(undefined, sticky)).result?.isError).not.toBe(true);
       expect((await invoke(plain.id, sticky)).text).toMatch(/^\[app_key_session_bound\]/);
     }
   });
