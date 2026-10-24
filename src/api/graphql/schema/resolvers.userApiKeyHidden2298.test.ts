@@ -49,6 +49,12 @@ describe('setUserApiKeyHidden (#2298)', () => {
     expect((await db.userApiKey.findUniqueOrThrow({ where: { id: k.id } })).hiddenAt).toBeNull();
   });
 
+  it('a foreign unhide of a HIDDEN key is NOT_FOUND and leaves it hidden', async () => {
+    const k = await mint(); await revoke(k.id); await hide(k.id, true);
+    await expect(hide(k.id, false, userCtx(other.id))).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
+    expect((await db.userApiKey.findUniqueOrThrow({ where: { id: k.id } })).hiddenAt).not.toBeNull();
+  });
+
   it('is idempotent: repeated hide keeps the first hiddenAt; unhide restores the default list', async () => {
     const k = await mint(); await revoke(k.id);
     const first = await hide(k.id, true);
