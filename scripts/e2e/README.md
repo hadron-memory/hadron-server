@@ -42,6 +42,15 @@ that choice consistent for teardown; auto teardown uses the recorded choice. Doc
 the Incus publication binds the disposable instance's interfaces, reachable
 only through the private QA bridge and the host-loopback forwarder.
 
+On Incus, `dns-guard.sh` probes name resolution inside the fresh instance before
+anything needs the network (`E2E_DNS_POLL_SECONDS`, `E2E_DNS_SEED_AFTER`,
+`E2E_DNS_WAIT_PROBES`). A resolver that comes up by itself is left alone. Only
+if it stays dead is `1.1.1.1` seeded, by REPLACING the instance's
+`/etc/resolv.conf` (a fresh image's is a symlink into `/run/systemd/resolve/`
+that can still dangle; appending through it fails with `Directory nonexistent`).
+If the write fails it says so on stderr, and the run stops with `DNS not
+answering` unless a later probe succeeds. Only the disposable instance is touched.
+
 The first slice includes server and DB. Run a local portal as described below;
 MinIO, NATS, external-provider mocks, git-source fixtures and automated browser
 suites are not part of this slice. Mail, LLM spend and headless workers are off.

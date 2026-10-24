@@ -69,6 +69,7 @@ import { taskWarningsPlugin } from './api/graphql/taskWarningsPlugin.js';
 import { requireOrgRole, requireSessionWriteAccess } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
 import { querySourceCap, readGraphqlAdmissionConfig } from './api/graphql/admission.js';
+import { complexityAdmissionPlugin } from './api/graphql/admissionComplexity.js';
 import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
 import {
   formatGraphQLError,
@@ -86,6 +87,7 @@ import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
+import { startAssetBytesSweepLoop } from './jobs/sweepAssetBytes.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
 import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startPendingEdgePromotionSweepLoop } from './jobs/promotePendingEdges.js';
@@ -1227,12 +1229,18 @@ export async function createServer(): Promise<Express> {
   // hadron-internal#3 L1-L3: fleet-wide bounds on every client-supplied document,
   // read here so a malformed value refuses boot.
   const admission = readGraphqlAdmissionConfig();
+  // The effective L4 configuration, on one line, so ops can confirm the mode a deploy actually booted with.
+  console.log(JSON.stringify({
+    event: 'graphql.admission.config', mode: admission.complexityMode, maxDepth: admission.maxDepth,
+    maxCost: admission.maxCost, listFactor: admission.listFactor, maxQueryBytes: admission.maxQueryBytes,
+    maxTokens: admission.maxTokens, maxSelections: admission.maxSelections,
+  }));
   const apollo = new ApolloServer({
     // #2087: concealed errors must not depend on the deployment's NODE_ENV.
     includeStacktraceInErrorResponses: false,
     typeDefs,
     resolvers: deploymentResolvers,
-    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin],
+    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, complexityAdmissionPlugin(admission)],
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.
     formatError: formatGraphQLError,
@@ -1966,6 +1974,16 @@ export async function createServer(): Promise<Express> {
     process.env.DISABLE_ASSET_ORPHAN_SWEEP !== 'true'
   ) {
     startOrphanObjectReaperLoop(db);
+  }
+
+  // Background job (#1140): hourly bounded sweep for Asset rows whose bytes are
+  // missing from object storage — the mirror of the orphan sweep. Read-only
+  // against the store; raises the `asset.bytes_missing` alarm.
+  if (
+    process.env.NODE_ENV !== 'test' &&
+    process.env.DISABLE_ASSET_BYTES_SWEEP !== 'true'
+  ) {
+    startAssetBytesSweepLoop(db);
   }
 
   // Background job (#930, narrowed by #1114): end sessions past `expiresAt`,

@@ -212,7 +212,7 @@ const SHAPE_HADRON_STOP_SIGNAL_LIST = {
   appRef,
   worker: z.string().optional().describe('Only the signals covering this worker now.'),
   includeEnded: z.boolean().optional().describe('Add ended signals (not for a worker\'s session).'),
-  first: z.number().int().optional().describe('Page size, default 50, at most 200.'),
+  first: z.number().int().optional().describe('Page size, default 20, at most 200.'),
   after: z.string().optional().describe('The endCursor of the previous page.'),
   session: SESSION_READ,
 };

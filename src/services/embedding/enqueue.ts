@@ -1,3 +1,4 @@
+import { embeddingEligibleSql } from './rawChat.js';
 /**
  * 033-rag-vector-retrieval — write-path embedding enqueue + prompt-drain.
  *
@@ -120,7 +121,7 @@ export async function backfillMemoryEmbeddings(
       embedding_error = CASE WHEN (SELECT is_encrypted FROM memories WHERE id = ${memoryId})
         THEN 'Embedding pending: fresh authorized plaintext is required.' ELSE NULL END,
       embedding_attempts = 0
-    WHERE memory_id = ${memoryId} AND deleted_at IS NULL
+    WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND ${embeddingEligibleSql()}
       AND EXISTS (SELECT 1 FROM memories WHERE id = ${memoryId} AND (vector_index_enabled = true OR class = 'system') AND deleted_at IS NULL)
   `;
   // Drain ping (empty payload): the bus listener drains the whole queue now
@@ -155,7 +156,7 @@ export async function stampMemoryEmbeddingsBatch(
   const after = opts.afterNodeId ?? '';
   const rows = await db.$queryRaw<{ id: string; eligible: boolean }[]>`
     SELECT n.id,
-      (n.abstract IS NOT NULL AND n.abstract !~ ${BLANK_ABSTRACT_REGEX}
+      (n.abstract IS NOT NULL AND n.abstract !~ ${BLANK_ABSTRACT_REGEX} AND ${embeddingEligibleSql('n')}
         AND n.embedding_pending_at IS NULL AND n.embedding_failed_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM node_embeddings e WHERE e.node_id = n.id AND e.kind = 'abstract')) AS eligible
     FROM nodes n
@@ -175,7 +176,7 @@ export async function stampMemoryEmbeddingsBatch(
           THEN 'Embedding pending: fresh authorized plaintext is required.' ELSE NULL END,
         embedding_attempts = 0
       WHERE n.id = ANY(${eligibleIds}::text[]) AND n.memory_id = ${memoryId}
-        AND n.deleted_at IS NULL AND n.embedding_pending_at IS NULL AND n.embedding_failed_at IS NULL
+        AND n.deleted_at IS NULL AND ${embeddingEligibleSql('n')} AND n.embedding_pending_at IS NULL AND n.embedding_failed_at IS NULL
         AND EXISTS (SELECT 1 FROM memories m WHERE m.id = n.memory_id
           AND m.deleted_at IS NULL AND m.class = ${SYSTEM_MEMORY_CLASS}::"MemoryClass")
     `;
@@ -211,7 +212,7 @@ export async function restampFailedEmbeddings(
       embedding_error = CASE WHEN (SELECT is_encrypted FROM memories WHERE id = ${memoryId})
         THEN 'Embedding pending: fresh authorized plaintext is required.' ELSE NULL END,
       embedding_attempts = 0
-    WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND embedding_failed_at IS NOT NULL
+    WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND ${embeddingEligibleSql()} AND embedding_failed_at IS NOT NULL
       AND EXISTS (SELECT 1 FROM memories WHERE id = ${memoryId} AND (vector_index_enabled = true OR class = 'system') AND deleted_at IS NULL)
   `;
 }

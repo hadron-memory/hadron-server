@@ -536,7 +536,7 @@ describe('cor:agt:050:13 — exactly one alarm per stall episode', () => {
   it('a re-run of the same pass is a no-op', async () => {
     await assignedToAnne('10:00');
     expect((await tick('10:15')).raised).toBe(1);
-    expect(await tick('10:15')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0 });
+    expect(await tick('10:15')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0 });
     expect(await alarms()).toHaveLength(1);
   });
 
@@ -1142,7 +1142,7 @@ describe('#1754 — backlog and the stall rules (cor:agt:050:02, :17)', () => {
     expect(await wakes(a.id)).toHaveLength(3); // ada (child owner), liam (root owner), then the App manager (#1761)
     await db.agentTask.update({ where: { id: child.id }, data: { status: 'backlog' } });
     // Row 1 fell due at 09:01; the 09:10 pass closes it (nobody is woken) and raises nothing new.
-    expect(await tick('09:10')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0 });
+    expect(await tick('09:10')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0 });
     expect(await alarms('assignment.unassignable')).toHaveLength(1);
     expect((await wakes(a.id))[1]).toMatchObject({ wokenAt: null, endedAt: at('09:10') });
     expect((await wakes(a.id))[2]).toMatchObject({ wokenAt: null, endedAt: at('09:10') });

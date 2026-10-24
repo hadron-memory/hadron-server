@@ -1,3 +1,4 @@
+import { isRawChatNode } from '../../../services/embedding/rawChat.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { BROKEN_INCLUDE_NOTICE as N } from '../../../lib/includes/spliceIncludes.js';
 import { db } from '../../../integrations/db/client.js';
@@ -1170,6 +1171,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     });
     const userMsg = messages.find((m) => m.loc.endsWith('-user'));
     expect(userMsg).toBeDefined();
+    expect(isRawChatNode(userMsg!)).toBe(true);
 
     // The whole point: before the fix this was adminUser (the creator).
     expect(userMsg!.createdBy).toBe(otherUser.id);
@@ -1281,6 +1283,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     });
     const assistantMsg = messages.find((m) => m.loc.endsWith('-assistant'));
     expect(assistantMsg).toBeDefined();
+    expect(isRawChatNode(assistantMsg!)).toBe(true);
     expect(assistantMsg!.createdBy).toBeNull();
   });
 

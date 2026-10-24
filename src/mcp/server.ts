@@ -11,6 +11,7 @@ import { registerAgentDefinitionTools } from './agentDefinitionTools.js';
 import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, resolveInheritedEdges, retainEffective, stillInherited, type InheritedFrom } from '../lib/effectiveSystemMemory.js';
 import { chatByline } from './chatByline.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
+import { whoamiSessionFilter } from './whoamiSessionFilter.js';
 import { appPrincipalSessionWriteAllowed } from '../lib/sessionOwnership.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
@@ -73,6 +74,7 @@ import {
 import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { userUrn } from '../lib/userHandle.js';
 import { registerCommentTools } from './commentTools.js';
+import { registerAssetTools } from './assetTools.js';
 import { signingSurfacePolicy, switchCapabilities } from '../lib/signing/surface.js';
 import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
@@ -88,7 +90,7 @@ import { NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
 import { normalizeObjectType, normalizeRole, validateNodeSchemaOnWrite } from '../lib/enforceNodeSchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
-import { archiveTombstone } from '../lib/tombstoneArchive.js';
+import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../lib/tombstoneArchive.js';
 import { deletePendingEdgesTargetingNodes, promotePendingEdgeForTarget, reconcilePendingEdgeCounts } from '../lib/pendingEdgePromotion.js';
 import {
   liveEdgeEndpointSet,
@@ -2191,6 +2193,8 @@ export function createMcpServerInstance(
     'hadron_team_availability',
     // #1707 — the team roster read (its own optional session).
     'hadron_team_roster',
+    // #1926 — the stall schedule read (its own optional session).
+    'hadron_stall_schedule_get',
     // #1747 — ticker reads (each takes its own optional session; wake settings enforces the write rule itself).
     'hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get',
     // #2022 — the stop-signal list (its own optional session).
@@ -2467,6 +2471,17 @@ export function createMcpServerInstance(
   // in logs / client traces see the migration trend.
   let engagedWithNewSurface = false;
 
+  /** Restore connection selection without auto-selecting or requiring one (#1597). */
+  function restoreSelectedApp(): void {
+    if (auth.appId || !auth.userId) return;
+    const sid = getSessionId();
+    const sel = sid ? activeAppByMcpSession.get(sid) : undefined;
+    if (sel) {
+      auth.appId = sel.appId;
+      auth.organizationId = sel.organizationId ?? undefined;
+    }
+  }
+
   /**
    * Spec 026 — resolve the active App for an App-scoped tool call.
    * Returns `null` when the caller can proceed (auth.appId set, possibly
@@ -2478,18 +2493,10 @@ export function createMcpServerInstance(
    * checks downstream pass without per-tool plumbing.
    */
   function requireAppScope(): AppSelectionErrorEnvelope | null {
+    restoreSelectedApp();
     if (auth.appId) return null;
     if (!auth.userId) return null; // truly unauth — let existing checks handle it
-
     const sid = getSessionId();
-    if (sid) {
-      const sel = activeAppByMcpSession.get(sid);
-      if (sel) {
-        auth.appId = sel.appId;
-        auth.organizationId = sel.organizationId ?? undefined;
-        return null;
-      }
-    }
 
     if (cachedAppResolution?.kind === 'multi-app') {
       // TODO(US3 — revocation cascade): cachedAppResolution is captured at
@@ -3451,6 +3458,7 @@ export function createMcpServerInstance(
 
   // ── #1609 — comment nodes (cor:dmo:110): thin over the GraphQL comment resolvers ──
   registerCommentTools(server, { db, auth });
+  registerAssetTools(server, { db, auth });
 
   // ── #1632 — signing requests (cor:dmo:130): request and read, never sign ──
   registerSigningTools(server, { db, auth });
@@ -4376,10 +4384,10 @@ export function createMcpServerInstance(
             expand: expand ?? undefined,
             granularity: granularity ?? undefined,
             // #497 — a query defaults to a tight page (10); an agent iterating
-            // search shouldn't pay 50 full abstracts of context per call. Survey
-            // mode ("*"/"") is a deliberate full listing, so it keeps 50. The
+            // search shouldn't pay 20 full abstracts of context per call. Survey
+            // mode ("*"/"") is a deliberate full listing, so it gets a wider page (20). The
             // minScore floor never applies to survey (those hits are unscored).
-            limit: limit ?? (isSurvey ? 50 : 10),
+            limit: limit ?? (isSurvey ? 20 : 10),
             minScore: isSurvey ? undefined : minScore,
           },
           ctx,
@@ -6044,7 +6052,7 @@ export function createMcpServerInstance(
       const createSeq =
         seq !== undefined
           ? seq
-          : existing == null
+          : existing == null && !loc.includes(':')
             ? await nextSiblingSeq(db, memoryId, loc)
             : null;
 
@@ -6230,8 +6238,8 @@ export function createMcpServerInstance(
       // pre-transaction `existing` probe lost a revision under concurrency: two
       // calls both saw no row, one created it, the other overwrote it on the
       // create branch (PR #977 review, both bots). lockLocForWrite takes the
-      // same key as an ancestor-create and as lockNodeForDelete, acquired after
-      // the ancestors so the root→leaf order stays deadlock-free.
+      // same key as an ancestor-create and as lockNodeForDelete. This path
+      // declares ancestors plus own-loc together, then re-enters only subsets (#2054).
       // #1181 — thrown from INSIDE the transaction by the authoritative gate
       // below and mapped to a refusal outside it. A sentinel rather than a
       // string match: throwing aborts the transaction, which is exactly what we
@@ -6247,7 +6255,8 @@ export function createMcpServerInstance(
           if (resolvedEdges !== null) {
             await lockOutgoingEdgeMemories(tx, memoryId, resolvedEdges);
           }
-          await lockAncestorsForCreate(tx, memoryId, loc); // no-op at a root-level loc
+          await acquireLockSet(tx, [...ancestorLocs(loc), loc].map(loc => ({ memoryId, loc })));
+          await lockAncestorsForCreate(tx, memoryId, loc); // subset; no-op at a root-level loc
           await lockLocForWrite(tx, memoryId, loc);
 
           // #1181 — THE AUTHORITATIVE live-collision gate, and the ONLY one.
@@ -6310,8 +6319,13 @@ export function createMcpServerInstance(
           const revivedPendingAt = pre?.deletedAt
             ? pendingAtForRevival(pre.embeddingPendingAt, memoryIsVectorIndexed(indexed!))
             : undefined;
+          // #443: nested siblings already share the held immediate-parent key.
+          // Allocate on this writing transaction only after that wait.
+          const nestedSeq = seq === undefined && existing == null && loc.includes(':')
+            ? await nextSiblingSeq(tx, memoryId, loc) : null;
           const written = await tx.node.upsert({
             ...upsertArgs,
+            create: { ...upsertArgs.create, ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
             // Resurrect (#543) on the authoritative row, not the stale probe: a
             // tombstone that appeared after it would otherwise stay flagged
             // deleted while taking the new content.
@@ -7210,9 +7224,16 @@ export function createMcpServerInstance(
           `(${result.skipCounts.governed} governed, ` +
           `${result.skipCounts.protectedAddress} protected address).`;
 
-        return textResult(
-          lines.length ? `${header}\n${coverage}\n${lines.join('\n')}` : `${header}\n${coverage}`,
-        );
+        // #2285: explain the existing aggregate skip, without inferring or
+        // exposing a selected node's kind or changing the resolver's gates.
+        const guidance: string[] = [];
+        if (result.nodesScanned === 0 && result.nodesSkipped > 0) {
+          guidance.push('Selected nodes were skipped before text scanning; 0 scanned does not mean those selected nodes were not found.');
+        }
+        if (result.skipCounts.governed > 0) {
+          guidance.push('Governed nodes require their own update door: tasks use hadron_update_task; reviews use hadron_update_review; specs use the CLI hadron spec commands (no MCP spec door). Other governed kinds require their owning operation. Generic full-content node updates are not a workaround.');
+        }
+        return textResult([header, coverage, ...guidance, ...lines].join('\n'));
       } catch (e) {
         return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
       }
@@ -7710,214 +7731,236 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let relocated: MoveNodeSubtreeResult['moved'] = [];
       let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
       try {
-        result = await db.$transaction(async (tx) => {
-          // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
-          await lockAgentDefinitionAuthority(tx, auth.userId ?? null, [fromMemory.id, toMemory.id]);
-          // #664/#752: moving a node INTO a subtree is the same orphan vector as
-          // creating there — lock the destination's ancestor path first (matching
-          // the GraphQL moveNode resolver and hadron_delete_node's own-loc lock),
-          // so a concurrent non-recursive delete of a destination ancestor can't
-          // count zero descendants and then let this move land under it. Taken
-          // before any row-locking statement to keep advisory-before-row ordering
-          // consistent with the delete path (no lock-order inversion).
-          // #1187 (@codex + @copilot on PR #1211) — DECLARE the complete key
-          // set first, in the one global order, exactly as the GraphQL
-          // `moveNode` resolver does. This surface was missed when that
-          // protocol landed: it took the destination ancestors here and reached
-          // the source path only later, inside `moveNodeSubtree`
-          // (`lockSourceForMove`). For source `a` and destination `z:child`
-          // that is `z` then `a`, while the GraphQL path takes `a` then `z` —
-          // so the two SURFACES could deadlock against each other, and two MCP
-          // moves with opposing paths against themselves.
-          //
-          // Enumerating the multi-key callers from the GraphQL resolvers alone
-          // is how this was missed; the writers are enumerated by STATE (who
-          // takes two keys), never by the call sites one happens to know.
-          // #1466: an edge writer holds this memory key across endpoint
-          // validation and insertion. Take it before any loc lock so an edge
-          // cannot land after archiveTombstone enumerates the target's edges.
-          await lockEdgeEndpointMemories(tx, [toMemory.id]);
-          await acquireLockSet(tx, [
-            ...ancestorLocs(toLoc).map((loc) => ({ memoryId: toMemory.id, loc })),
-            ...ancestorLocs(fromLoc).map((loc) => ({ memoryId: fromMemory.id, loc })),
-            { memoryId: fromMemory.id, loc: fromLoc },
-            { memoryId: toMemory.id, loc: toLoc },
-          ]);
-          await lockAncestorsForCreate(tx, toMemory.id, toLoc);
-
-          if (isSameSlot) {
-            // Same-slot "move": source and target address are identical, so the
-            // ONLY thing left to do is the opt-in leaf rename (#1017). Without
-            // it this is a literal no-op — writing a NodeRevision for it would
-            // record a change that did not happen, and on a memory with a
-            // maxRevCount cap it would evict real history to store nothing.
-            //
-            // The rename is itself skipped when the name ALREADY equals the
-            // leaf (PR #1018 review, Copilot): re-stamping an identical value
-            // is the same no-op-history problem one line up, and a same-slot
-            // call is exactly where it is most likely — a caller normalizing a
-            // name that is already normalized.
-            const newName = toLoc.split(':').pop()!;
-            if (renameToLeaf === true && existing.name !== newName) {
-              // Row lock + drift reconciled as its own revision, then the
-              // authoritative re-read the snapshot is built from — the rule on
-              // every single-row revisioned writer (PR #1339 review).
-              // Re-validate BEFORE reconciling (@copilot, PR #1339): the row
-              // must still be the live node at the authorized (memory, loc),
-              // or this would reconcile — and then rename — a row that moved.
-              await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${existing.id} FOR UPDATE`;
-              // This direct same-slot rename bypasses moveNodeSubtree but still
-              // snapshots history. Hold the source encryption flag before it.
-              await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${fromMemory.id} FOR SHARE`;
-              await assertLockedMemoryWriteAccess(tx, auth, fromMemory.id);
-              const still = await tx.node.findUnique({
-                where: { id: existing.id },
-                select: { memoryId: true, loc: true, deletedAt: true },
-              });
-              if (!still || still.deletedAt || still.memoryId !== fromMemory.id || still.loc !== fromLoc) {
-                throw new SubtreeMoveSourceChangedError(existing.id);
+        const completed = await withArchivePlanRetries(async (timeout) => {
+          let relocated: MoveNodeSubtreeResult['moved'] = [];
+          let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
+          const attemptResult = await db.$transaction<MoveResult>(async (tx) => {
+            let attemptAuth = auth;
+            const authorizeAttempt = async () => {
+              if (auth.userId) {
+                const user = await tx.user.findUnique({ where: { id: auth.userId }, select: { roles: true, deletedAt: true } });
+                if (!user || user.deletedAt) throw new MemoryWriteAccessChangedDuringWriteError('[node_write_conflict] Memory write access changed while this write waited — re-read and retry.');
+                attemptAuth = { ...auth, roles: auth.impersonation ? [] : user.roles };
               }
-              await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: fromMemory.id });
-              const locked = await tx.node.findUniqueOrThrow({ where: { id: existing.id } });
-              // #1641 — a decision's name is its rendered `<code>: <title>`,
-              // which its approval covers; only the decision doors change it.
-              if (isDecisionFamilyRole(locked.role)) throw decisionContainedError('Renaming this node', [locked.loc]);
-              await createNodeRevision(tx, {
-                id: generateId(),
-                ...buildNodeRevisionSnapshot(locked, editorFromAuth(auth), {
-                  changes: diffNodeChanges(locked, { loc: toLoc, name: newName, memoryId: toMemory.id }),
-                }),
-              });
-              await tx.node.update({
-                where: { id: existing.id },
-                data: {
-                  loc: toLoc,
-                  name: newName,
-                  memoryId: toMemory.id,
-                  ...clearNodeAuthorship(),
-                  revisionContentHash: revisionStateHashRefreshMarker(),
-                },
-              });
-            }
-          } else {
-            const crossMemory = toMemory.id !== fromMemory.id;
+              await assertLockedMemoryWriteAccess(tx, attemptAuth, fromMemory.id);
+              await assertLockedMemoryWriteAccess(tx, attemptAuth, toMemory.id);
+            };
+            // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
+            await lockAgentDefinitionAuthority(tx, auth.userId ?? null, [fromMemory.id, toMemory.id]);
+            await authorizeAttempt();
+            // #664/#752: moving a node INTO a subtree is the same orphan vector as
+            // creating there — lock the destination's ancestor path first (matching
+            // the GraphQL moveNode resolver and hadron_delete_node's own-loc lock),
+            // so a concurrent non-recursive delete of a destination ancestor can't
+            // count zero descendants and then let this move land under it. Taken
+            // before any row-locking statement to keep advisory-before-row ordering
+            // consistent with the delete path (no lock-order inversion).
+            // #1187 (@codex + @copilot on PR #1211) — DECLARE the complete key
+            // set first, in the one global order, exactly as the GraphQL
+            // `moveNode` resolver does. This surface was missed when that
+            // protocol landed: it took the destination ancestors here and reached
+            // the source path only later, inside `moveNodeSubtree`
+            // (`lockSourceForMove`). For source `a` and destination `z:child`
+            // that is `z` then `a`, while the GraphQL path takes `a` then `z` —
+            // so the two SURFACES could deadlock against each other, and two MCP
+            // moves with opposing paths against themselves.
+            //
+            // Enumerating the multi-key callers from the GraphQL resolvers alone
+            // is how this was missed; the writers are enumerated by STATE (who
+            // takes two keys), never by the call sites one happens to know.
+            // #1466: an edge writer holds this memory key across endpoint
+            // validation and insertion. Take it before any loc lock so an edge
+            // cannot land after archiveTombstone enumerates the target's edges.
+            await lockEdgeEndpointMemories(tx, [toMemory.id]);
+            const archivePlan = await discoverArchivePlan(tx, toMemory.id, toLoc);
+            await acquireLockSet(tx, [
+              ...archivePlan.descendantLocs.map(loc => ({ memoryId: toMemory.id, loc })),
+              ...ancestorLocs(toLoc).map((loc) => ({ memoryId: toMemory.id, loc })),
+              ...ancestorLocs(fromLoc).map((loc) => ({ memoryId: fromMemory.id, loc })),
+              { memoryId: fromMemory.id, loc: fromLoc },
+              { memoryId: toMemory.id, loc: toLoc },
+            ]);
+            await lockAncestorsForCreate(tx, toMemory.id, toLoc);
+            await authorizeAttempt();
+            await validateArchivePlan(tx, archivePlan);
 
-            // Collision policy for the EXPLICITLY-named target loc: a live
-            // occupant refuses unless overwrite:true, which soft-deletes it and
-            // re-stamps its loc out of the way so the (loc, memoryId) unique
-            // doesn't block. Use the FULL id in the archived loc — UUIDv7's first
-            // 6 bytes are the ms timestamp, so an 8-char slice was timestamp-only
-            // entropy (PR-189). Descendant-slot collisions are always refused —
-            // moveNodeSubtree throws SubtreeMoveCollisionError (caught below).
-            const existingTarget = await tx.node.findUnique({
-              where: { loc_memoryId: { loc: toLoc, memoryId: toMemory.id } },
-            });
-            if (existingTarget && !existingTarget.deletedAt && !overwrite) {
-              const targetUrn = await nodeUrn(toLoc, toMemory.id);
-              return { refused: 'urn-exists', targetUrn };
-            }
-            // #1331 — overwriting evicts the occupant: its role's writer level applies.
-            if (existingTarget && !existingTarget.deletedAt) {
-              await assertRoleWritersForNodes(tx, auth, [existingTarget], { from: toMemory.id });
-            }
-            if (existingTarget) {
-              if (!existingTarget.deletedAt) {
+            if (isSameSlot) {
+              // Same-slot "move": source and target address are identical, so the
+              // ONLY thing left to do is the opt-in leaf rename (#1017). Without
+              // it this is a literal no-op — writing a NodeRevision for it would
+              // record a change that did not happen, and on a memory with a
+              // maxRevCount cap it would evict real history to store nothing.
+              //
+              // The rename is itself skipped when the name ALREADY equals the
+              // leaf (PR #1018 review, Copilot): re-stamping an identical value
+              // is the same no-op-history problem one line up, and a same-slot
+              // call is exactly where it is most likely — a caller normalizing a
+              // name that is already normalized.
+              const newName = toLoc.split(':').pop()!;
+              if (renameToLeaf === true && existing.name !== newName) {
+                // Row lock + drift reconciled as its own revision, then the
+                // authoritative re-read the snapshot is built from — the rule on
+                // every single-row revisioned writer (PR #1339 review).
+                // Re-validate BEFORE reconciling (@copilot, PR #1339): the row
+                // must still be the live node at the authorized (memory, loc),
+                // or this would reconcile — and then rename — a row that moved.
+                await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${existing.id} FOR UPDATE`;
+                // This direct same-slot rename bypasses moveNodeSubtree but still
+                // snapshots history. Hold the source encryption flag before it.
+                await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${fromMemory.id} FOR SHARE`;
+                await assertLockedMemoryWriteAccess(tx, attemptAuth, fromMemory.id);
+                const still = await tx.node.findUnique({
+                  where: { id: existing.id },
+                  select: { memoryId: true, loc: true, deletedAt: true },
+                });
+                if (!still || still.deletedAt || still.memoryId !== fromMemory.id || still.loc !== fromLoc) {
+                  throw new SubtreeMoveSourceChangedError(existing.id);
+                }
+                await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: fromMemory.id });
+                const locked = await tx.node.findUniqueOrThrow({ where: { id: existing.id } });
+                // #1641 — a decision's name is its rendered `<code>: <title>`,
+                // which its approval covers; only the decision doors change it.
+                if (isDecisionFamilyRole(locked.role)) throw decisionContainedError('Renaming this node', [locked.loc]);
+                await createNodeRevision(tx, {
+                  id: generateId(),
+                  ...buildNodeRevisionSnapshot(locked, editorFromAuth(auth), {
+                    changes: diffNodeChanges(locked, { loc: toLoc, name: newName, memoryId: toMemory.id }),
+                  }),
+                });
                 await tx.node.update({
-                  where: { id: existingTarget.id },
-                  data: { deletedAt: new Date(), deletedBy: auth.userId ?? auth.clientId ?? null },
+                  where: { id: existing.id },
+                  data: {
+                    loc: toLoc,
+                    name: newName,
+                    memoryId: toMemory.id,
+                    ...clearNodeAuthorship(),
+                    revisionContentHash: revisionStateHashRefreshMarker(),
+                  },
                 });
               }
-              // #1466: the old node's edges keep locs derived from this address.
-              // Rekey them with the tombstone inside the same move transaction,
-              // before the mover takes the address and can create its own edges.
-              await archiveTombstone(tx, existingTarget);
-            }
+            } else {
+              const crossMemory = toMemory.id !== fromMemory.id;
 
-            // #768/#781: rebase the whole loc-subtree via the shared helper (the
-            // ONE implementation the GraphQL moveNode resolver also uses) — SAME-
-            // memory or CROSS-memory (destMemoryId carries nodes + embeddings +
-            // outgoing edges across). It locks + revalidates the source and
-            // writes a NodeRevision per moved node.
-            //
-            // #1017: renameSourceLeaf is now the CALLER's choice, defaulting off.
-            // It used to be hardcoded true, which silently overwrote the moved
-            // node's human-authored `name` with the target loc's terminal atom —
-            // unconditional, undocumented, and the opposite of what the GraphQL
-            // `moveNode` resolver does with the same helper. Two surfaces of one
-            // operation disagreeing is bad enough; the tool's own description
-            // enumerated what survives a move (id, edges, descendants) and never
-            // mentioned `name`, so the contract actively taught the wrong thing.
-            // The damage was quiet, too — loc and name are usually similar
-            // enough that a clobbered title still reads plausibly.
-            const subtreeResult = await moveNodeSubtree(tx, {
-              source: existing,
-              destLoc: toLoc,
-              destMemoryId: crossMemory ? toMemory.id : undefined,
-              editor: editorFromAuth(auth),
-              renameSourceLeaf: renameToLeaf === true,
-              authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, auth, memoryId),
-              principal: auth,
-            });
-            relocated = subtreeResult.moved;
-            linkWarnings = subtreeResult.linkWarnings;
-            // #1468 — evicting the destination occupant removes it from its
-            // corpus and hands its citation to another node: refused for a
-            // minted spec. Checked AFTER the helper on purpose: it already holds
-            // the occupant row (the eviction update) and the destination memory
-            // FOR NO KEY UPDATE, so the guard takes nothing new; checking first
-            // would take that memory FOR SHARE and then upgrade it inside the
-            // helper, the deadlock its header warns about. A refusal rolls the
-            // whole transaction back.
-            if (existingTarget) {
-              await assertNoMintedSpecRemoval(tx, toMemory.id, [existingTarget.id], 'overwrite');
-              // #1641 §3.2 — evicting a decision would delete it.
-              await refuseDecisionFamily(tx, [existingTarget.id], 'Overwriting this node');
-              // Evicting a live occupant is a removal: a governed occupant is
-              // replaced only after its marker is cleared through the kind's
-              // door. Judged on the locked row; the eviction update above already
-              // holds it, so this takes nothing new. A tombstoned occupant is
-              // only re-keyed, which removes nothing.
-              if (!existingTarget.deletedAt) {
-                const governedOccupant = await lockGovernedRowsIn(tx, toMemory.id, [existingTarget.id]);
-                if (governedOccupant.length > 0) throw governedRemovalError(governedOccupant, 'mcp', 'overwrite');
+              // Collision policy for the EXPLICITLY-named target loc: a live
+              // occupant refuses unless overwrite:true, which soft-deletes it and
+              // re-stamps its loc out of the way so the (loc, memoryId) unique
+              // doesn't block. Use the FULL id in the archived loc — UUIDv7's first
+              // 6 bytes are the ms timestamp, so an 8-char slice was timestamp-only
+              // entropy (PR-189). Descendant-slot collisions are always refused —
+              // moveNodeSubtree throws SubtreeMoveCollisionError (caught below).
+              const existingTarget = await tx.node.findUnique({
+                where: { loc_memoryId: { loc: toLoc, memoryId: toMemory.id } },
+              });
+              if (existingTarget && !existingTarget.deletedAt && !overwrite) {
+                const targetUrn = await nodeUrn(toLoc, toMemory.id);
+                return { refused: 'urn-exists', targetUrn };
+              }
+              // #1331 — overwriting evicts the occupant: its role's writer level applies.
+              if (existingTarget && !existingTarget.deletedAt) {
+                await assertRoleWritersForNodes(tx, attemptAuth, [existingTarget], { from: toMemory.id });
+              }
+              if (existingTarget) {
+                if (!existingTarget.deletedAt) {
+                  await tx.node.update({
+                    where: { id: existingTarget.id },
+                    data: { deletedAt: new Date(), deletedBy: auth.userId ?? auth.clientId ?? null },
+                  });
+                }
+                // #1466: the old node's edges keep locs derived from this address.
+                // Rekey them with the tombstone inside the same move transaction,
+                // before the mover takes the address and can create its own edges.
+                await archiveTombstone(tx, existingTarget, archivePlan);
+              }
+
+              // #768/#781: rebase the whole loc-subtree via the shared helper (the
+              // ONE implementation the GraphQL moveNode resolver also uses) — SAME-
+              // memory or CROSS-memory (destMemoryId carries nodes + embeddings +
+              // outgoing edges across). It locks + revalidates the source and
+              // writes a NodeRevision per moved node.
+              //
+              // #1017: renameSourceLeaf is now the CALLER's choice, defaulting off.
+              // It used to be hardcoded true, which silently overwrote the moved
+              // node's human-authored `name` with the target loc's terminal atom —
+              // unconditional, undocumented, and the opposite of what the GraphQL
+              // `moveNode` resolver does with the same helper. Two surfaces of one
+              // operation disagreeing is bad enough; the tool's own description
+              // enumerated what survives a move (id, edges, descendants) and never
+              // mentioned `name`, so the contract actively taught the wrong thing.
+              // The damage was quiet, too — loc and name are usually similar
+              // enough that a clobbered title still reads plausibly.
+              const subtreeResult = await moveNodeSubtree(tx, {
+                source: existing,
+                destLoc: toLoc,
+                destMemoryId: crossMemory ? toMemory.id : undefined,
+                editor: editorFromAuth(auth),
+                renameSourceLeaf: renameToLeaf === true,
+                authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, attemptAuth, memoryId),
+                principal: attemptAuth,
+              });
+              relocated = subtreeResult.moved;
+              linkWarnings = subtreeResult.linkWarnings;
+              // #1468 — evicting the destination occupant removes it from its
+              // corpus and hands its citation to another node: refused for a
+              // minted spec. Checked AFTER the helper on purpose: it already holds
+              // the occupant row (the eviction update) and the destination memory
+              // FOR NO KEY UPDATE, so the guard takes nothing new; checking first
+              // would take that memory FOR SHARE and then upgrade it inside the
+              // helper, the deadlock its header warns about. A refusal rolls the
+              // whole transaction back.
+              if (existingTarget) {
+                await assertNoMintedSpecRemoval(tx, toMemory.id, [existingTarget.id], 'overwrite');
+                // #1641 §3.2 — evicting a decision would delete it.
+                await refuseDecisionFamily(tx, [existingTarget.id], 'Overwriting this node');
+                // Evicting a live occupant is a removal: a governed occupant is
+                // replaced only after its marker is cleared through the kind's
+                // door. A tombstoned occupant is only re-keyed.
+                if (!existingTarget.deletedAt) {
+                  const governedOccupant = await lockGovernedRowsIn(tx, toMemory.id, [existingTarget.id]);
+                  if (governedOccupant.length > 0) throw governedRemovalError(governedOccupant, 'mcp', 'overwrite');
+                }
               }
             }
-          }
 
-          // Move BY ID — id is stable across moves, so this refetch can't race a
-          // concurrent move into the same slot.
-          const moved = await tx.node.findUniqueOrThrow({
-            where: { id: existing.id },
-            include: {
-              outgoingEdges: {
-                where: { target: { deletedAt: null } },
-                select: { id: true },
+            // Move BY ID — id is stable across moves, so this refetch can't race a
+            // concurrent move into the same slot.
+            const moved = await tx.node.findUniqueOrThrow({
+              where: { id: existing.id },
+              include: {
+                outgoingEdges: {
+                  where: { target: { deletedAt: null } },
+                  select: { id: true },
+                },
+                incomingEdges: {
+                  where: { source: { deletedAt: null } },
+                  select: { id: true },
+                },
               },
-              incomingEdges: {
-                where: { source: { deletedAt: null } },
-                select: { id: true },
+            });
+
+            // Immediate children now living under the destination loc (the moved
+            // descendants plus any that were pre-staged there).
+            const childCount = await tx.node.count({
+              where: {
+                memoryId: toMemory.id,
+                loc: { startsWith: toLoc + ':' },
+                deletedAt: null,
               },
-            },
-          });
+            });
 
-          // Immediate children now living under the destination loc (the moved
-          // descendants plus any that were pre-staged there).
-          const childCount = await tx.node.count({
-            where: {
-              memoryId: toMemory.id,
-              loc: { startsWith: toLoc + ':' },
-              deletedAt: null,
-            },
-          });
-
-          return { ok: true, moved, childCount };
-        },
-        // A large same-memory subtree touches many rows (two updates + a revision
-        // per node); the default 5s interactive-txn timeout is too tight — match
-        // the GraphQL moveNode path so inputs that succeed there don't time out
-        // here (mirrors extractParentNodeGraph / cloneMemory).
-        { timeout: 120_000 });
+            return { ok: true, moved, childCount };
+          },
+          // A large same-memory subtree touches many rows (two updates + a revision
+          // per node); the default 5s interactive-txn timeout is too tight — match
+          // the GraphQL moveNode path so inputs that succeed there don't time out
+          // here (mirrors extractParentNodeGraph / cloneMemory).
+          { timeout });
+          return { result: attemptResult, relocated, linkWarnings };
+        });
+        result = completed.result;
+        relocated = completed.relocated;
+        linkWarnings = completed.linkWarnings;
       } catch (e) {
+        if (e instanceof ArchivePlanExhaustedError) return textResult('The node was moved concurrently; re-read it and retry.');
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
         // A descendant-slot collision (or a move-into-own-subtree) aborts the
         // whole transaction — including any overwrite eviction — and surfaces as
@@ -8813,7 +8856,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_start_session',
-    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open until hadron_end_session. Since #1114 the reaper no longer ends a session for inactivity — silence is not evidence of abandonment. What DOES change while it sits idle is how it is DESCRIBED: liveness is derived from recent driving, so a session that remains untouched past its idle window reads as not-live and stops blocking a bind, WITHOUT being ended and with its handoff still unwritten rather than lost. That changes no HOLD: a human-held name stays held until explicit release, so only its holder can bind it again. All subsequent tool calls can reference this session ID for attribution. A worker or agent session also BINDS THIS MCP CONNECTION (DAC): every later node write on it records that Worker / Agent as its author beside you (Node.createdByWorker / updatedByWorker), checked afresh on each call, so ending the session stops it at once; a reconnect starts unbound until you start or name a session again. A host may carry SEVERAL chat sessions over one connection (#1701): binding a second worker there (or starting a plain session) does not displace the first, and once more than one worker has been bound on the connection (a plain session counting as a binding to no worker), even one after another, the server cannot tell which chat session is calling, so every writing tool takes an optional `session` argument — pass the id this call returned on each write, or the write is refused SESSION_AMBIGUOUS rather than credited to the wrong worker. The receipt warns you when this bind made the connection shared. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is actively DRIVING refuses WORKER_TAKEN (#1114: an OPEN session is not necessarily a live one — a session whose most recent activity is outside its idle window is not being driven, so that session does not refuse) with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override. Binding a worker ENDS your own other open sessions on that same worker (#1617), the lapsed ones and any a force displaces: they are marked "superseded by session <new id>" and end WITHOUT a handoff, so write the handoff with hadron_end_session first if one is owed. Do not bind a second session to recover from a context compaction; recover the existing one with hadron_whoami. A LAPSED session of yours does not need a rebind at all: if you hold the name and nobody else is driving the worker, your next team-chat post, read or mark-read through it resumes it.',
+    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open until hadron_end_session. Since #1114 the reaper no longer ends a session for inactivity — silence is not evidence of abandonment. What DOES change while it sits idle is how it is DESCRIBED: liveness is derived from recent driving, so a session that remains untouched past its idle window reads as not-live and stops blocking a bind, WITHOUT being ended and with its handoff still unwritten rather than lost. That changes no HOLD: a human-held name stays held until explicit release, so only its holder can bind it again. All subsequent tool calls can reference this session ID for attribution. A worker or agent session also BINDS THIS MCP CONNECTION (DAC): every later node write on it records that Worker / Agent as its author beside you (Node.createdByWorker / updatedByWorker), checked afresh on each call, so ending the session stops it at once; a reconnect starts unbound until you start or name a session again. A host may carry SEVERAL chat sessions over one connection (#1701): binding a second worker there (or starting a plain session) does not displace the first, and once more than one worker has been bound on the connection (a plain session counting as a binding to no worker), even one after another, the server cannot tell which chat session is calling, so every writing tool takes an optional `session` argument — pass the id this call returned on each write, or the write is refused SESSION_AMBIGUOUS rather than credited to the wrong worker. The receipt warns you when this bind made the connection shared. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App when selected), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; with no App selected, a bare NAME searches only Apps you may bind into: one non-retired match binds, several are listed with App, role and holder and nothing binds. Choose an id or URN to disambiguate; a selected App is never bypassed. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is actively DRIVING refuses WORKER_TAKEN (#1114: an OPEN session is not necessarily a live one — a session whose most recent activity is outside its idle window is not being driven, so that session does not refuse) with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override. Binding a worker ENDS your own other open sessions on that same worker (#1617), the lapsed ones and any a force displaces: they are marked "superseded by session <new id>" and end WITHOUT a handoff, so write the handoff with hadron_end_session first if one is owed. Do not bind a second session to recover from a context compaction; recover the existing one with hadron_whoami. A LAPSED session of yours does not need a rebind at all: if you hold the name and nobody else is driving the worker, your next team-chat post, read or mark-read through it resumes it.',
     SHAPE_HADRON_START_SESSION,
     async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, family, parentSessionId, prevSessionId, workerRef, reportsTo, force, launchGrant }) => {
       // Spec 026 / D-2026-05-21-003 strict tool: session-start needs App
@@ -8829,15 +8872,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // predicate the appRef path runs, so this widens nothing: it lets the
       // resolver's existing branch be reached instead of erroring above it.
       //
-      // A bare NAME still requires App scope — a name is unique only WITHIN an
-      // App (#990), so without one there is nothing to resolve it against, and
-      // guessing across the caller's Apps would resolve one name to several
-      // workers. That caller gets the normal, actionable envelope.
-      const workerRefTrimmed = workerRef?.trim();
-      const workerRefNamesItsApp =
-        !!workerRefTrimmed && (isId(workerRefTrimmed) || hasSchemePrefix(workerRefTrimmed));
-      // #1709: a launch grant names its own worker, and so its App.
-      if (!workerRefNamesItsApp && !launchGrant) {
+      // #1597: any nonblank worker ref delegates to the shared resolver. A
+      // bare name without an App is resolved there across bind-authorized Apps;
+      // id/URN forms retain their own shape dispatch. Plain sessions still need
+      // the existing App-selection behavior.
+      restoreSelectedApp();
+      if (!workerRef?.trim() && !launchGrant) {
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
       }
@@ -9144,9 +9184,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_whoami',
-    'Answer "what am I driving right now?" — your own OPEN sessions, each with its App, when it started, and the worker it is bound to IF it is bound (#1016). Not every row is a worker session: a session started without workerRef is listed too and says "working as: nobody", which is the shape in which work goes unattributed, so it is shown rather than hidden. This is also the tool that tells you a WORKER SESSION outlived the CHAT SESSION it was started from: the two are independent, and ending a chat session never ends a worker session (#1034), so a bound row here may well be one whose Desktop window or Claude Code session is long gone. For a BOUND row, its session id is the only handle that makes that work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The chat tools no longer hide the loss: since #1967, hadron_team_chat_post (like hadron_channel_post) refuses a post that names no session on a connection with no bound worker [authorship_required] instead of recording it under the human\'s name, so a lost id surfaces as that refusal — come here for the id. Do NOT read a successful call as evidence your binding is alive: hadron_record_work accepts an ended session on purpose (late attribution, cor:agt:020:05) and hadron_end_session is idempotent, so neither refuses one — both now SAY so in their receipt instead. The team chat is the only surface that refuses outright, because authoring as a worker needs a live session. This tool is the direct answer, and the one to trust. Call this whenever you are unsure which session you are driving, or after any context loss, and pass back a row that is BOUND and still OPEN — with includeEnded this list also returns bound rows marked [ENDED], and team chat refuses an unbound row (SESSION_NOT_WORKER_BOUND) and an ended one (SESSION_ENDED) rather than silently attributing either. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
+    'Answer "what am I driving right now?" — your own OPEN sessions. Optional app and workerRef filters narrow the complete authorized set before paging; omit both for the existing view. Each session shows its App, when it started, and the worker it is bound to IF it is bound (#1016). Not every row is a worker session: a session started without workerRef is listed too and says "working as: nobody", which is the shape in which work goes unattributed, so it is shown rather than hidden. This is also the tool that tells you a WORKER SESSION outlived the CHAT SESSION it was started from: the two are independent, and ending a chat session never ends a worker session (#1034), so a bound row here may well be one whose Desktop window or Claude Code session is long gone. For a BOUND row, its session id is the only handle that makes that work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The chat tools no longer hide the loss: since #1967, hadron_team_chat_post (like hadron_channel_post) refuses a post that names no session on a connection with no bound worker [authorship_required] instead of recording it under the human\'s name, so a lost id surfaces as that refusal — come here for the id. Do NOT read a successful call as evidence your binding is alive: hadron_record_work accepts an ended session on purpose (late attribution, cor:agt:020:05) and hadron_end_session is idempotent, so neither refuses one — both now SAY so in their receipt instead. The team chat is the only surface that refuses outright, because authoring as a worker needs a live session. This tool is the direct answer, and the one to trust. Call this whenever you are unsure which session you are driving, or after any context loss, and pass back a row that is BOUND and still OPEN — with includeEnded this list also returns bound rows marked [ENDED], and team chat refuses an unbound row (SESSION_NOT_WORKER_BOUND) and an ended one (SESSION_ENDED) rather than silently attributing either. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
     SHAPE_HADRON_WHOAMI,
-    async ({ limit, includeEnded }) => {
+    async ({ limit, includeEnded, app, workerRef }) => {
       // Scoped by IDENTITY, deliberately narrower than the GraphQL `sessions`
       // query's `sessionScopeFilter` — which also admits any org member, and so
       // answers "sessions I may READ" rather than "sessions I am DRIVING". The
@@ -9191,7 +9231,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // object, used by both queries), so the truncation disclosure cannot
       // leak a session count the caller may not read: whatever scopes the
       // rows scopes the total, by construction rather than by re-statement.
-      const where = {
+      const authorizedWhere = {
         AND: [scope, boundSessionPrivacyFilter(auth)],
         deletedAt: null,
         // "Open" is `endedAt IS NULL` — the ONE active predicate the platform
@@ -9206,8 +9246,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // oldest while total === length reports "not truncated". That is the
       // absence-as-reaped ambiguity this tool exists to kill, reopened in a
       // race window; one snapshot closes it.
-      const [sessions, total] = await db.$transaction(
+      const [sessions, total, selectionProblem] = await db.$transaction(
         async (tx) => {
+          const selection = await whoamiSessionFilter(tx, authorizedWhere, { app, workerRef });
+          if (selection.kind !== 'matched') return [[], 0, selection.kind] as const;
+          const where = selection.where;
           const rows = await tx.session.findMany({
             where,
             orderBy: { startedAt: 'desc' },
@@ -9221,10 +9264,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             },
           });
           const count = await tx.session.count({ where });
-          return [rows, count] as const;
+          return [rows, count, null] as const;
         },
         { isolationLevel: 'RepeatableRead' },
       );
+      if (selectionProblem === 'ambiguous') {
+        return { ...textResult('[ambiguous_ref] More than one match among your sessions. Specify an App or use an exact App/Worker ID or URN.'), isError: true as const };
+      }
+      if (sessions.length === 0 && (app !== undefined || workerRef !== undefined)) {
+        return textResult('No matching session.');
+      }
       if (sessions.length === 0) {
         return textResult(
           includeEnded
@@ -12062,7 +12111,7 @@ const SHAPE_HADRON_SEARCH = {
     .array(z.enum(['urn', 'name', 'description', 'pk', 'content']))
     .optional()
     .describe('Force these fields (overrides the smart-sniff). Omit to auto-detect.'),
-  limit: z.number().optional().describe('Max results (default 50, max 200).'),
+  limit: z.number().optional().describe('Max results (default 20, max 200).'),
   scope: z.string().optional().describe('Spec 049: run the memory + node slices under a named scope (a scope id / name, "app", or "global"). Omitted: the ladder applies (active scope › active App › active organization) and the result says which.'),
 };
 
@@ -12098,7 +12147,7 @@ const SHAPE_HADRON_LIST_SCOPES = {
   ownerType: z.enum(['ORGANIZATION', 'AGENT', 'APP']).optional().describe('With ownerRef: list one owner\'s scopes instead of an App context.'),
   ownerRef: z.string().optional().describe('URN or id of the owner (with ownerType).'),
   name: z.string().optional().describe('Only scopes with exactly this name.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
 };
 
@@ -12130,7 +12179,7 @@ const SHAPE_HADRON_SCOPE_EXPLAIN = {
 const SHAPE_HADRON_LIST_CHANNELS = {
   app: z.string().optional().describe('App URN or id. Defaults to the active App.'),
   memory: z.string().optional().describe('Or: one host memory (URN or id).'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
 };
 
@@ -12145,7 +12194,7 @@ const SHAPE_HADRON_REGISTER_LIST = {
   owner: z.string().optional().describe('An App or organization (URN or id). Defaults to the active App.'),
   channel: z.string().optional().describe('Only rows for this Channel (its id or address).'),
   attendee: z.string().optional().describe('Only rows naming this Worker or Agent (URN or id).'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
 };
 
@@ -12185,7 +12234,7 @@ const SHAPE_HADRON_FIND_NODES = {
   nodeKind: z.enum(['CONTENT', 'COMMENTS', 'ALL']).optional().describe('#1608/#1678 — which KIND of node to search (GraphQL: NodeFilter.contentScope). CONTENT (default): content nodes only. COMMENTS: comment nodes only (feedback about other nodes), found exhaustively in every mode before ranking and limits. ALL: both. A comment hit is labelled COMMENT and is never content of, or verified fact about, its target. Not hadron_get_node\'s contentScope, which picks the parts of one node to return.'),
   scope: z.string().optional().describe('Spec 049: search under a named scope — a scope id, a scope NAME (resolved in the active App\'s context), "app" (the active App\'s attached memories), or "global" (your active organization\'s view). Omitted with no memory selector: the ladder applies (active scope › active App › active organization), and the result says which. An explicit memoryUrn / memoryUrns / allMemories outranks the ambient scope but still intersects with one named here.'),
   brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
-  limit: z.number().optional().describe('Max results (default 10 for a query; 50 for survey mode "*"/""). Raise it if the top hits do not cover what you need.'),
+  limit: z.number().optional().describe('Max results (default 10 for a query; 20 for survey mode "*"/""). Raise it if the top hits do not cover what you need.'),
   minScore: z.number().optional().describe('Absolute relevance floor: drop hits scoring below this. Scores are NOT comparable across modes — keyword ranks run roughly 0..a-few, vector cosine similarity is 0..1, hybrid is a small RRF fraction — so read the (score …) values in a first unfiltered call, then set a floor for the mode in use. Prefer this (or a narrower query) over reading a long tail of weak hits. Returns fewer hits, never weaker ones; does not apply to survey mode.'),
   expand: z.number().int().min(0).max(3).optional().describe('Append undirected graph neighbors (all edge types) within depth N AFTER the ranked hits, unscored. Default 0 (no expansion). Max 3. Useful for context-stuffing — the ranked nodes plus their immediate graph context in one tool call. Spec 033 FR-020.'),
   granularity: z.enum(['node', 'chunk']).optional().describe('node (default): one entry per matching node, ranked by best-chunk similarity for content-chunk indexes. chunk: return matching passages (span text + character offsets + chunk index + parent node URN), useful for RAG context-stuffing. **chunk requires mode:vector** — hybrid + chunk is out of v1 (the design call for how RRF fuses with passage-level results was deferred). Spec 033 US2 FR-022.'),
@@ -12500,6 +12549,8 @@ const SHAPE_HADRON_END_SESSION = {
 };
 
 const SHAPE_HADRON_WHOAMI = {
+  app: z.string().optional().describe('Narrow your sessions to this App ID or qualified App URN. Missing and unavailable references return no matching session.'),
+  workerRef: z.string().optional().describe('Narrow your sessions to this Worker ID, qualified Worker URN, name or slug. Ambiguous names/slugs require app or an exact ID/URN.'),
   limit: z.number().int().optional().describe('Max sessions to return (default 10, cap 50). Newest first.'),
   includeEnded: z.boolean().optional().describe('Also list recently ENDED sessions — useful to confirm you did end one, or to find the session a work record should have been attributed to.'),
 };
@@ -12526,7 +12577,7 @@ const SHAPE_HADRON_CHANNEL_READ = {
   sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
   beforeSeq: z.number().int().optional().describe('Page BACKWARD: only messages with seq strictly less than this, newest page of those. Ignores offset.'),
   mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id) of the host App. For a worker this includes @all/@team broadcasts from an author who could wake everyone (decided at post time), and never its own posts.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
   session: z.string().optional().describe('Your session id — passing it keeps that session alive (#1081).'),
   expectedIncarnation: z.number().int().optional().describe('#2181: pin the read to the Channel incarnation you read (the "incarnation" on the final line of a read). A different one is [channel_incarnation_changed] with no page and no cursor, check or resume applied; omitted, the read is unfenced.'),
@@ -12545,7 +12596,7 @@ const SHAPE_HADRON_TEAM_CHAT_READ = {
   sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
   beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),
   mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id). For a worker this includes @all/@team broadcasts from an author who could wake everyone (decided at post time), and never its own posts.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
   session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. On an ordinary read, passing it keeps that session alive (#1081). Monitor mode uses it only as an App hint and does not heartbeat or wake the session.'),
   app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
@@ -12570,7 +12621,7 @@ const SHAPE_HADRON_TEAM_ATTENTION_PAGE = {
   app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
   since: z.string().optional().describe('v1-shaped watermark token to start a scan from. Do not pass with page. Do not pass "now".'),
   page: z.string().optional().describe('Opaque continuation returned by the preceding page. Do not pass with since.'),
-  limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit this call (default 50, cap 100).'),
+  limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit this call (default 20, cap 100).'),
   scanLimit: z.number().int().optional().describe('Max encrypted rows to decrypt or aggregate this call (default 50, cap 100).'),
 };
 
@@ -12578,7 +12629,7 @@ const SHAPE_HADRON_TEAM_ATTENTION_SWITCHOVER = {
   app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
   action: z.enum(['preview', 'apply']).describe('preview makes no writes and pages; apply requires the exact final-page proof.'),
   page: z.string().optional().describe('preview continuation from the preceding preview page.'),
-  limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit per preview call (default 50, cap 100).'),
+  limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit per preview call (default 20, cap 100).'),
   proof: z.string().optional().describe('Required for action:"apply"; returned by the final preview page.'),
 };
 
@@ -12592,7 +12643,7 @@ const SHAPE_HADRON_TEAM_CHAT_MARK_READ = {
 
 const SHAPE_HADRON_LIST_WORKERS = {
   includeRetired: z.boolean().optional().describe('Include retired castings — historical staff whose names stay reserved.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
   session: z.string().optional().describe('Your session id — used to resolve which team App to list when app is omitted. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
   app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
@@ -12647,7 +12698,7 @@ const SHAPE_HADRON_TEAM_WORK_ITEMS = {
   worker: z.string().optional().describe('Filter to ONE worker\'s records — its name ("Iris"), id, or URN. Everything that worker has done, across all of their sessions. A retired worker still resolves.'),
   tool: z.string().optional().describe('Filter by tool (e.g. "github").'),
   kind: z.string().optional().describe('Filter by kind: pr | issue | commit | branch | repo.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
   app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
 };

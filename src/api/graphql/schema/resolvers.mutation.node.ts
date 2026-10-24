@@ -872,8 +872,10 @@ async function writeNodeCoreRaw(
       // list: with no explicit seq it inherits max(sibling seq)+1 and lands at
       // the end. Create-only; an explicit input.seq always wins; an unordered /
       // empty sibling list leaves seq null (nextSiblingSeq returns null).
+      // #443: roots retain the old behavior; nested allocation waits for the
+      // existing parent lock inside the writing transaction below.
       const seqForCreate =
-        existing == null && input.seq == null
+        existing == null && input.seq == null && !input.loc.includes(':')
           ? await nextSiblingSeq(ctx.db, input.memoryId, input.loc)
           : undefined;
 
@@ -1435,11 +1437,12 @@ async function writeNodeCoreRaw(
             // meant create never held two keys at all: no new edge, nothing to
             // order against.
             //
-            // #1187 established the order (`acquireLockSet` / `compareLockKeys`)
-            // and merge and move now declare their full sets through it, so
-            // that constraint is GONE: ancestors-then-own-loc is already the
-            // global order (length-ascending), and taking this lock
-            // unconditionally would be safe today.
+            // #1187 made merge and move declare complete lock sets. #1214
+            // orders those sets by resolved advisory keys, not loc length:
+            // any additional key must join the complete set before acquisition.
+            // Ancestors-then-own-loc is no longer a safe acquisition order.
+            // This create/upsert branch still takes the own-loc key ONLY when
+            // there are no ancestors, as the condition below makes explicit.
             //
             // It stays root-level-only for the ORIGINAL, narrower reason —
             // redundancy. Two creates at one NESTED loc already serialize on
@@ -1600,8 +1603,13 @@ async function writeNodeCoreRaw(
             if (authoritative) {
               await assertNoMintedSpecUnmark(tx, input.memoryId, [markerChange(authoritative.id)], 'overwrite');
             }
+            // #443: the existing ancestor set includes the immediate parent.
+            // READ COMMITTED now sees the prior parent's holder commit.
+            const nestedSeq = existing == null && input.seq == null && input.loc.includes(':')
+              ? await nextSiblingSeq(tx, input.memoryId, input.loc) : null;
             const upserted = await tx.node.upsert({
               ...upsertArgs,
+              create: { ...upsertArgs.create, ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
               update: {
                 ...upsertArgs.update,
                 // #1326 — this arm OVERWRITES an existing row. For a copy

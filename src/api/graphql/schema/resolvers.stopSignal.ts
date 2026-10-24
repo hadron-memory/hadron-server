@@ -44,7 +44,7 @@ const LEVEL_IN: Record<string, StopLevel> = { PAUSE_DISPATCH: 'pause-dispatch', 
 const LEVEL_OUT: Record<StopLevel, string> = { 'pause-dispatch': 'PAUSE_DISPATCH', pause: 'PAUSE', halt: 'HALT' };
 const SCOPE_IN: Record<string, StopScope> = { WORKER: 'worker', TEAM: 'team', HOST: 'host' };
 
-const PAGE_DEFAULT = 50;
+export const STOP_SIGNAL_PAGE_DEFAULT = 20;
 const PAGE_MAX = 200;
 
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
@@ -315,7 +315,7 @@ export const stopSignalQueries = {
 };
 
 async function listSignals(args: ListArgs, ctx: Context) {
-  const take = Math.min(Math.max(args.first ?? PAGE_DEFAULT, 1), PAGE_MAX);
+  const take = Math.min(Math.max(args.first ?? STOP_SIGNAL_PAGE_DEFAULT, 1), PAGE_MAX);
   const cursor = decodeCursor(args.after);
   const now = new Date();
 

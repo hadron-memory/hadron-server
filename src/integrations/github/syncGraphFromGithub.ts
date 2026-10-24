@@ -1,3 +1,4 @@
+import { committedSyncReport, failedSyncReport, type SyncReportEntry, type SyncReportCode } from './syncReport.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, withSyncCaller } from '../../lib/bootPrompt.js';
 import { currentActor } from '../../lib/requestActor.js';
@@ -443,6 +444,7 @@ const syncGraphFromGithubAsSystem = async (
     const skippedInvalidIncludes: SkippedInvalidInclude[] = [];
     const deferredLateRows: string[] = [];
     const heldMoves: string[] = [];
+    const reportEntries: SyncReportEntry[] = [];
     // #1411 review — occupants a previous attempt parked and could not settle.
     // Grows by a distinct row (one sitting at a file's loc) per retry, so the
     // attempts are bounded by the file count.
@@ -515,7 +517,7 @@ const syncGraphFromGithubAsSystem = async (
     // Every accumulator restarts with the attempt: a rolled-back attempt
     // wrote nothing, so nothing it reported is true.
     embeddingWakeNeeded = false;
-    for (const acc of [writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedInvalidIncludes, deferredLateRows, heldMoves]) {
+    for (const acc of [writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedInvalidIncludes, deferredLateRows, heldMoves, reportEntries]) {
       acc.length = 0;
     }
     pendingSourceMemories = [];
@@ -530,7 +532,7 @@ const syncGraphFromGithubAsSystem = async (
       }
       // #664/#752: a git-sync bulk-upserts/moves rows into an EXISTING memory,
       // bypassing the locked create surfaces. Lock the ancestor path of every
-      // synced loc (deduped, root→leaf) up front so a concurrent non-recursive
+      // synced loc (deduped, in resolved-key order) up front so a concurrent non-recursive
       // delete of an ancestor in this memory can't count zero descendants and
       // then miss the rows this sync commits. READ COMMITTED (the tx default) is
       // required so that delete's count sees these rows once the sync commits.
@@ -842,6 +844,7 @@ const syncGraphFromGithubAsSystem = async (
               });
           if (protectedRow) protectedRowIds.add(protectedRow.id);
           skippedProtected.push(loc);
+          reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_LOC' });
           continue;
         }
         const name = node.name!;
@@ -894,6 +897,8 @@ const syncGraphFromGithubAsSystem = async (
             const text = includeRefusalText(e);
             if (!text) throw e;
             skippedInvalidIncludes.push({ loc, code: String((e as GraphQLError).extensions?.code), message: (e as Error).message });
+            // includeRefusalText admitted only these fixed public refusal codes.
+            reportEntries.push({ kind: 'invalid_include', loc, code: (e as GraphQLError).extensions.code as SyncReportCode });
             if (selfRow) skippedRowIds.add(selfRow.id);
             continue;
           }
@@ -944,6 +949,7 @@ const syncGraphFromGithubAsSystem = async (
           } catch (e) {
             if (!(e instanceof NodeSchemaViolation)) throw e;
             skippedObjectTypes.push(`${loc} (${fileObjectType}): ${e.message}`);
+            reportEntries.push({ kind: 'object_type_rejected', loc, code: 'OBJECT_TYPE_REJECTED' });
             return {};
           }
         };
@@ -969,8 +975,10 @@ const syncGraphFromGithubAsSystem = async (
         // 2026-09-27). `prior` is the row the file would write, current under
         // the locks above; a file with no role key assigns nothing. A refused
         // file is skipped and reported, and its row survives the cleanup pass.
-        const defer = (late: { id: string }, keep?: { id: string }): true => {
+        const defer = (late: { id: string; loc?: string }, keep?: { id: string; loc?: string }): true => {
           deferredLateRows.push(`${loc} (node ${late.id})`);
+          const fromLoc = keep?.loc ?? late.loc;
+          reportEntries.push({ kind: 'deferred', loc, ...(fromLoc && fromLoc !== loc ? { fromLoc } : {}), code: 'ROW_CHANGED' });
           deferredLocs.add(loc);
           if (keep) protectedRowIds.add(keep.id);
           return true;
@@ -979,6 +987,7 @@ const syncGraphFromGithubAsSystem = async (
           // #1606 (cor:dmo:110:04) — git sync never writes a comment: a file
           // that lands on a comment's loc is skipped and the comment kept.
           if (prior?.nodeType === COMMENT_NODE_TYPE) {
+            reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_COMMENT' });
             console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — it is a comment, written only through the comment path`);
             protectedRowIds.add(prior.id);
             refusedRoleLocs.add(loc);
@@ -989,6 +998,7 @@ const syncGraphFromGithubAsSystem = async (
           // sync that would create or change any boot-prompt node is refused whole
           // (cor:agt:040:11); the server's own webhook/startup syncs carry no worker.
           if (prior?.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+            reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_BOOT_PROMPT' });
             console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — it is a compiled boot prompt, written only by a compile`);
             protectedRowIds.add(prior.id);
             refusedRoleLocs.add(loc);
@@ -1000,6 +1010,7 @@ const syncGraphFromGithubAsSystem = async (
           // anyone with push access could otherwise forge one. A file that
           // declares the role, or lands on a decision's loc, is skipped.
           if (isDecisionFamilyRole(signals.role) || isDecisionFamilyRole(prior?.role)) {
+            reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_DECISION' });
             console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — decisions are written only through the decision operations`);
             if (prior) protectedRowIds.add(prior.id);
             refusedRoleLocs.add(loc);
@@ -1025,6 +1036,7 @@ const syncGraphFromGithubAsSystem = async (
           });
           if (strictParent === null) return false;
           skippedUndeclaredRoles.push({ loc, role: signals.role, strictParent, code: 'ROLE_NOT_DECLARED' });
+          reportEntries.push({ kind: 'undeclared_role', loc, code: 'ROLE_NOT_DECLARED' });
           if (prior) protectedRowIds.add(prior.id);
           refusedRoleLocs.add(loc);
           return true;
@@ -1055,6 +1067,7 @@ const syncGraphFromGithubAsSystem = async (
           // (Copilot on PR #1165).
           if (byId.loc !== loc && isProtected(byId.loc)) {
             skippedProtected.push(`${byId.loc} → ${loc}`);
+            reportEntries.push({ kind: 'protected', loc, fromLoc: byId.loc, code: 'PROTECTED_LOC' });
             protectedRowIds.add(byId.id);
             refusedMoveLocs.add(loc);
             incomingEdgesWait();
@@ -1072,6 +1085,7 @@ const syncGraphFromGithubAsSystem = async (
             continue;
           }
           if (byId.loc !== loc && refusedMoverIds.has(byId.id)) {
+            reportEntries.push({ kind: 'held_move', loc, fromLoc: byId.loc, code: 'DESTINATION_PROTECTED' });
             console.warn(
               `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} "${byId.loc}" → "${loc}" — the loc is held by a row that will not move this run (a minted spec keeps its citation, #1468)`,
             );
@@ -1089,6 +1103,7 @@ const syncGraphFromGithubAsSystem = async (
               where: { loc_memoryId: { loc, memoryId: graph.id } },
             });
             if (occupant && skippedRowIds.has(occupant.id)) {
+            reportEntries.push({ kind: 'held_move', loc, fromLoc: byId.loc, code: 'DESTINATION_PROTECTED' });
               // #1224 / @codex P2 on PR #1229 — the occupant's OWN file was
               // renamed to something unusable this run, so it is not moving
               // out of the way and it is not being deleted either. Parking it
@@ -1118,6 +1133,7 @@ const syncGraphFromGithubAsSystem = async (
               // own file never settled it. Hold the move instead: both rows
               // keep valid addresses, and the mover's edges wait with it.
               heldMoves.push(`${byId.loc} → ${loc} (occupant ${occupant.id})`);
+              reportEntries.push({ kind: 'held_move', loc, fromLoc: byId.loc, code: 'MOVE_HELD' });
               protectedRowIds.add(byId.id);
               deferredLocs.add(loc);
               incomingEdgesWait();
@@ -1127,6 +1143,7 @@ const syncGraphFromGithubAsSystem = async (
               occupant && occupant.id !== byId.id
               && (await lockMintedSpecsIn(tx, graph.id, [occupant.id])).length > 0
             ) {
+              reportEntries.push({ kind: 'held_move', loc, fromLoc: byId.loc, code: 'DESTINATION_PROTECTED' });
               // #1468 — a minted spec is never parked. Parking hands its
               // published citation to the incoming node, and whether the
               // spec's own file re-homes it later this run cannot be known
@@ -1570,6 +1587,17 @@ const syncGraphFromGithubAsSystem = async (
           }
         }
         await reconcilePendingEdgeCount(tx, graph.id);
+        // #1507: the graph and its outcome commit together. A metadata failure
+        // must roll back the graph, never leave a falsely clean old report.
+        const recordedAt = new Date();
+        await tx.memory.update({
+          where: { id: graph.id },
+          data: {
+            lastSyncedAt: recordedAt, syncStatus: 'OK', syncError: null,
+            lastSyncReport: committedSyncReport(reportEntries, recordedAt, skippedInvalidLoc.length > 0),
+            ...(correctionCheckCompleted ? { readBranchCorrected: true } : {}),
+          },
+        });
       });
       break;
     } catch (error) {
@@ -1598,15 +1626,6 @@ const syncGraphFromGithubAsSystem = async (
     await reconcilePendingEdgeCounts(db, pendingSourceMemories).catch((err) =>
       console.warn(`[syncGraphFromGithub] "${graphName}": pending-edge count reconcile failed (the periodic repair will fix it):`, err),
     );
-
-    // 5. Record sync time and status
-    await db.memory.update({
-      where: { id: graph.id },
-      data: {
-        lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null,
-        ...(correctionCheckCompleted ? { readBranchCorrected: true } : {}),
-      },
-    }).catch(() => {});
 
     // The transaction is visible before any local selector or optional broker wake.
     if (embeddingWakeNeeded) wakeEmbeddingQueue(db);
@@ -1645,7 +1664,8 @@ const syncGraphFromGithubAsSystem = async (
     // Update sync status to ERROR
     await db.memory.update({
       where: { id: graph.id },
-      data: { syncStatus: 'ERROR', syncError: (error as Error).message },
+      data: { syncStatus: 'ERROR', syncError: (error as Error).message,
+        lastSyncReport: failedSyncReport(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError ? 'BAD_USER_INPUT' : 'SYNC_FAILED') },
     }).catch(() => {});
     console.error(`Failed to sync memory "${graph.name}":`, error);
     return {

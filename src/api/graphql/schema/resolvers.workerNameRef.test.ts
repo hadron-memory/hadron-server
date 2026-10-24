@@ -6,7 +6,7 @@
  *     (the expression workers_app_name_uniq indexes) rather than JS folding;
  *   - the three ref forms are told apart by SHAPE, so a malformed URN never
  *     falls through to a roster search;
- *   - a name needs App context, and says so;
+ *   - without App context, #1597 resolves only a unique authorized name;
  *   - the roster is never an oracle: an outsider is refused before any name is
  *     looked up, and existing vs nonexistent names are reported identically;
  *   - resolution is not authorization: every downstream gate still runs.
@@ -165,9 +165,9 @@ describe('#990 — shape dispatch, not fallback', () => {
 });
 
 describe('#990 — a name needs App context', () => {
-  it('refuses typed when no App can scope the name', async () => {
-    await cast('Iris');
-    await expectCode(start({ workerRef: 'Iris' }), 'SESSION_WORKER_NAME_NEEDS_APP');
+  it('binds the unique authorized name without App context (#1597)', async () => {
+    const w = await cast('Iris');
+    expect((await start({ workerRef: 'Iris' })).workerId).toBe(w.id);
   });
 
   it('but the id and URN forms still work without appRef', async () => {

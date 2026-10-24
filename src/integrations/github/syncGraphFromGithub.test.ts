@@ -23,6 +23,16 @@ import { mirrorCheckoutLockKey } from './mirrorCheckoutLock.js';
 import { Client } from 'pg';
 import * as fsLoader from '../localFs/loadGraphFromFs.js';
 
+// The durable DTO must describe the actual source decisions, without row IDs.
+async function expectDurableEntry(memoryId: string, entry: Record<string, unknown>, forbiddenId?: string, outcome: 'partial' | 'unknown' = 'partial') {
+  const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+  expect(memory.syncStatus).toBe('OK');
+  const report = JSON.parse(memory.lastSyncReport!);
+  expect(report).toMatchObject({ version: 1, outcome });
+  expect(report.entries).toContainEqual(entry);
+  if (forbiddenId) expect(memory.lastSyncReport).not.toContain(forbiddenId);
+}
+
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
 // ---------------------------------------------------------------------------
@@ -1596,6 +1606,7 @@ describe('Channel-protected mirror cleanup (#1226)', () => {
     const result = await syncGraphFromGithub(makeGraph());
     expect(result.error).toBeUndefined();
     expect(result.skippedProtected).toContain('chats:dead:messages:kept');
+    await expectDurableEntry(makeGraph().id, { kind: 'protected', loc: 'chats:dead:messages:kept', code: 'PROTECTED_LOC' }, keptId);
     expect(await db.node.findUnique({ where: { id: keptId } })).not.toBeNull();
     expect(await db.node.findUnique({ where: { id: goneId } })).toBeNull();
   });
@@ -1808,6 +1819,7 @@ describe('a file whose path cannot be a loc (#1224)', () => {
     const held = await syncGraphFromGithub(makeGraph());
     warn.mockRestore();
     expect(held.heldMoves).toEqual([`b → a (occupant ${occupantId})`]);
+    await expectDurableEntry(makeGraph().id, { kind: 'held_move', loc: 'a', fromLoc: 'b', code: 'MOVE_HELD' }, occupantId, 'unknown');
     expect(await edgesTo(moverId)).toEqual([]);
     rmSync(join(repoRoot(), 'no-id--> evil.md'));
     await syncGraphFromGithub(makeGraph());
@@ -2042,6 +2054,7 @@ describe('#1348 — objectType through git sync', () => {
       const row = await db.node.findFirst({ where: { loc: 'u', memoryId: dbGraphId } });
       expect([row?.objectType, row?.name]).toEqual(['note', 'U-renamed']); // the rest of the file still applied
       expect(result.skippedObjectTypes).toEqual([expect.stringMatching(/^u \(bogus\): /)]);
+      await expectDurableEntry(dbGraphId, { kind: 'object_type_rejected', loc: 'u', code: 'OBJECT_TYPE_REJECTED' }, id);
     });
 
     it('a collection whose REQUIRED field the row lacks is not written — a fresh restore creates the node without it', async () => {
@@ -2117,6 +2130,7 @@ describe('#1330 — strict sub-roles through git sync', () => {
       { loc: 'bad', role: 'doc.unknown', strictParent: 'doc', code: 'ROLE_NOT_DECLARED' },
     ]);
     expect(await stored('bad')).toBeNull();
+    await expectDurableEntry(dbGraphId, { kind: 'undeclared_role', loc: 'bad', code: 'ROLE_NOT_DECLARED' });
     for (const loc of ['guide', 'parent', 'other', 'plain']) expect(await stored(loc)).not.toBeNull();
     expect(result.writtenNodes!.map((n) => n.loc).sort()).toEqual(['guide', 'other', 'parent', 'plain']);
   });
@@ -2296,6 +2310,7 @@ describe('#1330 — strict sub-roles through git sync', () => {
       return id;
     });
     expect(result.deferredLateRows).toEqual([`late (node ${lateId})`]);
+    await expectDurableEntry(dbGraphId, { kind: 'deferred', loc: 'late', code: 'ROW_CHANGED' }, lateId);
     expect(result.writtenNodes!.map((n) => n.loc)).not.toContain('late');
     expect(await stored('late')).toMatchObject({ id: lateId, content: 'concurrent' });
     const next = await sync();

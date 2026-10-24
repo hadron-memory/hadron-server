@@ -13,8 +13,9 @@
  *
  * ## What it checks
  *
- * For each registered set below: any description that spells out **two or more**
- * of its members must spell out **all** of them.
+ * For each registered set below: a description in its scope that spells out
+ * **two or more** members must spell out **all** of them. A curated pattern
+ * promising a closed list is checked even with fewer surviving members.
  *
  * ## Why that rule, and not a stricter one
  *
@@ -49,8 +50,17 @@
 import { parse, visit } from 'graphql';
 import { pathToFileURL } from 'node:url';
 import { typeDefs } from '../src/api/graphql/schema/typeDefs.js';
+import { RESERVED_OBJECT_KEYS } from '../src/lib/objectStore.js';
+import { COMMENTABLE_CLASSES } from '../src/lib/comments/index.js';
 import { CONNECTION_GRANT_SCOPES } from '../src/lib/emailOperationScopes.js';
+import { HOST_OPERATION_TYPES } from '../src/lib/hostOperations/types.js';
+import { TASK_WARNING_CODES } from '../src/api/graphql/schema/resolvers.taskWarnings.js';
 import { EMAIL_PROVIDER_KEYS } from '../src/lib/emailClient.js';
+import { GOVERNED_ROLES } from '../src/lib/governedRole.js';
+import { SKILL_HOSTS } from '../src/lib/skilldoc/hosts.js';
+import { MemoryMemberRole } from '../src/generated/prisma/index.js';
+import { AI_PROVIDER_ENDPOINTS, usesProcessCredential } from '../src/lib/aiEndpoint.js';
+import { WORK_KINDS } from '../src/lib/workRef.js';
 import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions/operators.js';
 
 /**
@@ -74,11 +84,78 @@ import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions
  * **The admission criterion is therefore DISTINCTIVE members**: values that do
  * not occur as ordinary words in English prose about the schema.
  * `mail.read` / `drive.read` qualify; `memory` / `issue` never can. A set that
- * fails this test is not covered by any mechanism, and that is the honest
+ * fails this test cannot be watched globally. An explicit coordinate allowlist
+ * may watch a description that promises a closed enumeration, without treating
+ * unrelated prose as a list. Without that scoping it is not covered, and that is the honest
  * outcome — a gate with 154 false positives is one everybody learns to ignore,
  * which costs more than the drift it would have caught.
  */
 const WATCHED_SETS = [
+  {
+    name: 'RESERVED_OBJECT_KEYS', source: 'src/lib/objectStore.ts',
+    members: RESERVED_OBJECT_KEYS,
+    coordinates: ['Mutation.createObject'],
+    enumerationPattern: /reserved object field names:\s*([^;]+);/i,
+  },
+  {
+    // #2304: ordinary class names are checked only in this promised list.
+    name: 'COMMENTABLE_CLASSES', source: 'src/lib/comments/index.ts',
+    members: [...COMMENTABLE_CLASSES],
+    coordinates: ['Mutation.createComment'],
+    enumerationPattern: /commentable classes:\s*([^;]+);/i,
+  },
+  {
+    // #2303: names come from the live host registry; one surviving host is
+    // still a promised supported-host list, not an incidental mention.
+    name: 'SKILL_HOSTS', source: 'src/lib/skilldoc/hosts.ts',
+    members: SKILL_HOSTS.map(host => host.key),
+    coordinates: ['SkillPlanInput.host'],
+    enumerationPattern: /supported hosts:\s*([^.;]+)/i,
+  },
+  {
+    name: 'MemoryMemberRole', source: 'prisma/schema.prisma',
+    members: Object.values(MemoryMemberRole), coordinates: ['MemoryMemberRole'],
+    // Owner references in the later protection rule cannot mask a missing
+    // owner entry in the promised role list.
+    enumerationPattern: /([\s\S]*?)(?:Subject to|$)/i,
+  },
+  {
+    // #2305: derive this conditional subset from the actual runtime predicate,
+    // not a copied provider list. Provider words elsewhere are not evidence.
+    name: 'PROCESS_CREDENTIAL_PROVIDERS', source: 'src/lib/aiEndpoint.ts',
+    members: Object.keys(AI_PROVIDER_ENDPOINTS).filter(provider =>
+      usesProcessCredential({ provider, endpoint: null }, 'HADRON_SERVER')),
+    coordinates: ['Mutation.createAiServiceConfig'],
+    enumerationPattern: /process-credential providers:\s*([^;]+);/i,
+  },
+  {
+    // #2301: dotted host operation identifiers, imported from the dispatch table.
+    name: 'HOST_OPERATION_TYPES',
+    source: 'src/lib/hostOperations/types.ts',
+    members: HOST_OPERATION_TYPES,
+  },
+  {
+    // #2301: dotted warning identifiers are distinctive, not ordinary prose.
+    // This checks completeness only; it cannot verify the warning's authority or timing.
+    name: 'TASK_WARNING_CODES',
+    source: 'src/api/graphql/schema/resolvers.taskWarnings.ts',
+    members: TASK_WARNING_CODES,
+  },
+  {
+    // #2302: ordinary words are admissible only at explicitly enumerating
+    // coordinates. Never scan unrelated prose for review/spec/issue/branch.
+    name: 'GOVERNED_ROLES', source: 'src/lib/governedRole.ts', members: GOVERNED_ROLES,
+    coordinates: ['Node.role', 'CreateNodeInput.role'],
+  },
+  {
+    name: 'WORK_KINDS', source: 'src/lib/workRef.ts', members: WORK_KINDS,
+    coordinates: ['Query.teamWorkItems', 'Mutation.recordTeamWork'],
+    // The canonical-ref examples also contain 'repo'; only the promised kind
+    // list supplies membership evidence, not unrelated words in the same block.
+    // These curated lists end at the first period/semicolon; keep abbreviations
+    // with dots outside the list, or revise this capture with the description.
+    enumerationPattern: /kind\s+must\s+be\s+one\s+of\s+([^.;]+)/i,
+  },
   {
     name: 'CONNECTION_GRANT_SCOPES',
     source: 'src/lib/emailOperationScopes.ts',
@@ -265,9 +342,13 @@ export function findPartialEnumerations(sdl, sets = WATCHED_SETS) {
   const violations = [];
   for (const set of sets) {
     for (const { coord, text } of descriptions) {
-      const present = set.members.filter((m) => spellsOut(text, m));
-      // Fewer than two is a mention, not an enumeration — see the docstring.
-      if (present.length < 2) continue;
+      if (set.coordinates && !set.coordinates.includes(coord)) continue;
+      const enumeration = set.enumerationPattern ? set.enumerationPattern.exec(text)?.[1] : text;
+      if (enumeration === undefined) continue;
+      const present = set.members.filter((m) => spellsOut(enumeration, m));
+      // Without a promised-list pattern, fewer than two is a mention, not
+      // an enumeration. A scoped explicit list remains checkable with one.
+      if (present.length < 2 && !set.enumerationPattern) continue;
       const missing = set.members.filter((m) => !present.includes(m));
       if (missing.length > 0) {
         violations.push({ coord, set: set.name, present, missing, text });

@@ -1,3 +1,4 @@
+import { embeddingEligibleSql, isRawChatNode } from './rawChat.js';
 import { randomUUID } from 'node:crypto';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { memoryIsVectorIndexed } from '../../lib/embedding/indexing.js';
@@ -14,10 +15,10 @@ export async function resetEmbeddingObligations(
   if (!ids.length) return;
   await tx.$executeRaw`
     UPDATE nodes SET
-      embedding_pending_at = CASE WHEN ${indexed} THEN CURRENT_TIMESTAMP AT TIME ZONE 'UTC' ELSE NULL END,
-      embedding_work_token = CASE WHEN ${indexed} THEN gen_random_uuid() ELSE NULL END,
+      embedding_pending_at = CASE WHEN ${indexed} AND ${embeddingEligibleSql()} THEN CURRENT_TIMESTAMP AT TIME ZONE 'UTC' ELSE NULL END,
+      embedding_work_token = CASE WHEN ${indexed} AND ${embeddingEligibleSql()} THEN gen_random_uuid() ELSE NULL END,
       embedding_failed_at = NULL,
-      embedding_error = CASE WHEN ${indexed}
+      embedding_error = CASE WHEN ${indexed} AND ${embeddingEligibleSql()}
         AND (SELECT is_encrypted FROM memories WHERE id = nodes.memory_id)
         THEN ${FRESH_PLAINTEXT_REQUIRED} ELSE NULL END,
       embedding_attempts = 0
@@ -34,7 +35,8 @@ export async function stampEmbeddingObligation(
   const memory = await tx.memory.findUnique({
     where: { id: memoryId }, select: { class: true, vectorIndexEnabled: true, isEncrypted: true, deletedAt: true },
   });
-  const token = memory && memoryIsVectorIndexed(memory) && !memory.deletedAt ? randomUUID() : null;
+  const node = await tx.node.findUnique({ where: { id: nodeId }, select: { nodeType: true, loc: true } });
+  const token = node && !isRawChatNode(node) && memory && memoryIsVectorIndexed(memory) && !memory.deletedAt ? randomUUID() : null;
   const res = await tx.node.updateMany({
     where: { id: nodeId, memoryId, deletedAt: null },
     data: {
