@@ -63,7 +63,7 @@ importers:
         specifier: ^8.20.0
         version: 8.20.0
       ai:
-        specifier: ^7.0.14
+        specifier: 7.0.14
         version: 7.0.14(zod@4.3.6)
       bcrypt:
         specifier: ^5.1.1
