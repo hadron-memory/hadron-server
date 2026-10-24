@@ -7418,8 +7418,8 @@ export const typeDefs = `#graphql
     access, and node revisions use their captured memory (falling back to the current
     node's memory); a retracted comment's revision history resolves only for memory
     managers. Under impersonation only the support session's shared organization admits
-    organizations, Apps, Agents, workers and App runs, and a user-owned Agent or App is not
-    visible. A retired worker still resolves. The kinds above are checked by kind,
+    organizations, Apps, non-public Agents, workers and App runs, and a user-owned App or
+    non-public Agent is not visible; a PUBLIC Agent still resolves. A retired worker still resolves. The kinds above are checked by kind,
     not an exhaustive promise. Dedicated queries can have different refusal shapes.
 
     The type prefix is the dispatch key; an untyped root:slug is ambiguous across kinds
