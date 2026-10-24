@@ -44,6 +44,7 @@ import { lockMintedSpecsIn, lockMintedSpecUnmarks } from '../../lib/mintedSpecPe
 import { recordUrnRename } from '../../lib/urnAlias.js';
 import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCount, reconcilePendingEdgeCounts } from '../../lib/pendingEdgePromotion.js';
+import { ENCRYPTED_GIT_SYNC_MESSAGE, ENCRYPTED_GIT_SYNC_UNAVAILABLE } from './encryptedGitSync.js';
 import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
@@ -187,7 +188,7 @@ export class GitSyncUnreadableFileError extends Error {
 
 export class GitSyncEncryptedMemoryError extends Error {
   constructor() {
-    super('Git sync cannot write an encrypted memory without its data key.');
+    super(ENCRYPTED_GIT_SYNC_MESSAGE);
     this.name = 'GitSyncEncryptedMemoryError';
   }
 }
@@ -303,7 +304,7 @@ const syncGraphFromGithubAsSystem = async (
   edgeEndpointPreflightAttempt = 0,
 ): Promise<{
   error?: string;
-  errorCode?: 'BAD_USER_INPUT';
+  errorCode?: 'BAD_USER_INPUT' | typeof ENCRYPTED_GIT_SYNC_UNAVAILABLE;
   nodeCount?: number;
   /**
    * #1061 — the nodes this run actually wrote, for a caller that HAS a
@@ -1671,7 +1672,8 @@ const syncGraphFromGithubAsSystem = async (
     return {
       error: (error as Error).message,
       ...(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError
-        ? { errorCode: 'BAD_USER_INPUT' as const } : {}),
+        ? { errorCode: 'BAD_USER_INPUT' as const }
+        : error instanceof GitSyncEncryptedMemoryError ? { errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE } : {}),
     };
   }
 };

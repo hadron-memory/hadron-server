@@ -17,11 +17,24 @@ import {
 } from './nodeFrontmatter.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
+import { ENCRYPTED_GIT_SYNC_MESSAGE, ENCRYPTED_GIT_SYNC_UNAVAILABLE, logEncryptedGitSyncRefusal } from './encryptedGitSync.js';
 
 function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
   const slug = memoryUrn.includes(':') ? memoryUrn.split(':').slice(1).join(':') : memoryUrn;
   return join(GRAPHS_PATH, orgUrn, slug);
 }
+
+export interface PushResult {
+  nodeCount: number;
+  error?: string;
+  /** R206: set when an encrypted memory refused the push, whatever key the caller holds. */
+  errorCode?: typeof ENCRYPTED_GIT_SYNC_UNAVAILABLE;
+}
+
+const encryptedRefusal = (memoryId: string): PushResult => {
+  logEncryptedGitSyncRefusal('[pushMemoryToGit]', memoryId);
+  return { nodeCount: 0, error: ENCRYPTED_GIT_SYNC_MESSAGE, errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE };
+};
 
 /**
  * Push all nodes in a memory to its git repo as frontmatter markdown files.
@@ -31,7 +44,7 @@ function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
  */
 export async function pushMemoryToGit(
   memoryId: string,
-): Promise<{ nodeCount: number; error?: string }> {
+): Promise<PushResult> {
   // A manual full push uses the same clone as incremental Node/Edge mirrors.
   // Hold their cross-process checkout lock through the entire push, including
   // the final remote-URL restoration.
@@ -45,7 +58,7 @@ export async function pushMemoryToGit(
 
 async function pushMemoryToGitUnderLock(
   memoryId: string,
-): Promise<{ nodeCount: number; error?: string }> {
+): Promise<PushResult> {
   // 1. Load memory + org
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
@@ -53,6 +66,9 @@ async function pushMemoryToGitUnderLock(
   });
 
   if (!memory) return { nodeCount: 0, error: 'Memory not found' };
+  // R206 / cor:sec:040:05: refuse before any Git setup or file rendering,
+  // whatever key the caller holds. Re-checked in the node-load snapshot below.
+  if (memory.isEncrypted) return encryptedRefusal(memoryId);
   if (!memory.source) return { nodeCount: 0, error: 'Memory has no git source configured' };
   // #561 — re-validate the STORED value; see the note in syncGraphFromGithub.
   // This path needs it most: it clones with the RAW source when the org has no
@@ -139,13 +155,26 @@ async function pushMemoryToGitUnderLock(
   // content: exporting it re-published deleted text on every full push (#425).
   // This only stops new writes — pruning files already in the repo is a
   // separate, gated change.
-  const nodes = await db.node.findMany({
-    where: { memoryId, nodeType: { not: 'data' }, deletedAt: null },
-    include: {
-      outgoingEdges: { include: { target: true } },
-    },
-    orderBy: { loc: 'asc' },
-  });
+  // The encryption flag and the nodes come from ONE snapshot: an encryption
+  // flip that commits after it cannot turn a plaintext read into an export of
+  // an encrypted memory, and one that committed before it is refused here —
+  // the last boundary before any file is rendered (R206).
+  const snapshot = await db.$transaction(async (tx) => {
+    const live = await tx.memory.findUnique({ where: { id: memoryId }, select: { isEncrypted: true } });
+    if (!live || live.isEncrypted) return null;
+    return tx.node.findMany({
+      where: { memoryId, nodeType: { not: 'data' }, deletedAt: null },
+      include: {
+        outgoingEdges: { include: { target: true } },
+      },
+      orderBy: { loc: 'asc' },
+    });
+  }, { isolationLevel: 'RepeatableRead' });
+  if (!snapshot) {
+    await restoreRemote(localPath, memory.source);
+    return encryptedRefusal(memoryId);
+  }
+  const nodes = snapshot;
 
   // 5. Write each node as a self-contained frontmatter markdown file. A node
   // — leaf or parent — is `<...loc>.md` (children live in the sibling

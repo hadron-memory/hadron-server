@@ -17,8 +17,6 @@ import { restoreThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
 import { assertBootPromptWriteAllowed } from '../../../lib/bootPrompt.js';
 import { assertRoleWritersForNodes } from '../../../lib/nodeRoleWriters.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
-import { deserializeTags } from '../../../integrations/db/provider.js';
-import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { isDeadlockVictim } from '../../../lib/memoryLockConflict.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { liveTxContext } from './authorizedTx.js';
@@ -242,13 +240,6 @@ export const recoveryMutations = {
     if (result.changed) await publishNodeWritten({ nodeId: result.node.id, memoryId: memory.id, ownerRepo: result.node.ownerRepo ?? '', clientId: ctx.clientId });
     const out = { ...result.node };
     decryptNodeFields(out, memory);
-    // Encrypted memories are deliberately skipped by the ID-only event subscriber.
-    // Capture the committed revision while this request still holds its plaintext key.
-    if (result.changed && memory.isEncrypted && 'outgoingEdges' in out) {
-      void writeNodeToGit({ ...out, tags: deserializeTags(out.tags) as string[],
-        outgoingEdges: out.outgoingEdges, mirrorRevSeq: out.revSeq }, out.ownerRepo ?? '', ctx.clientId, memory.id)
-        .catch((error) => console.error('[restoreNode] git write error:', error));
-    }
     return out;
   },
 };

@@ -26,6 +26,7 @@ import { execGit } from './execGit.js';
 import { sourceNamesRepo, validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
+import { logEncryptedGitSyncRefusal } from './encryptedGitSync.js';
 
 /** The prepared checkout handed to a mutate callback. */
 export interface MirrorRepo {
@@ -43,7 +44,8 @@ export interface MirrorRepo {
  * memory, user-owned memory with no org, repo never cloned) — the common case
  * on a deployment where GRAPHS_PATH holds no clones at all.
  */
-export type MirrorOutcome = 'mirrored' | 'no-changes' | 'skipped' | 'failed';
+/** `refused-encrypted`: R206 — an encrypted memory never syncs to Git (see encryptedGitSync.ts). */
+export type MirrorOutcome = 'mirrored' | 'no-changes' | 'skipped' | 'failed' | 'refused-encrypted';
 
 /**
  * Resolve a memory's clone, check out its write branch, run `mutate` against the
@@ -62,9 +64,6 @@ export async function withMirrorCheckout(
     memoryId?: string;
     ownerRepo?: string;
     clientId?: string | null;
-    /** Node-file writes capture request-scoped key presence at dispatch. Path-only
-     * removals omit it: deleting a stale file needs no decryption key. */
-    nodeWriteKeyAvailable?: boolean;
     /** Commit subject line; `[hadron-server]` is appended as the body. */
     commitSubject: string;
     /** Log-line prefix identifying the calling mirror path. */
@@ -105,6 +104,11 @@ export async function withMirrorCheckout(
   }
 
   if (!memory.source) return 'skipped'; // DB-only mode
+  // R206: no Git work of any kind for an encrypted memory, before validation or I/O.
+  if (memory.isEncrypted) {
+    logEncryptedGitSyncRefusal(logPrefix, memory.id);
+    return 'refused-encrypted';
+  }
   // #561 — re-validate the STORED value; see the note in syncGraphFromGithub.
   // This path never clones, but it does `remote set-url` + `fetch` against the
   // source, so a legacy non-github https row would still reach the network.
@@ -135,14 +139,12 @@ export async function withMirrorCheckout(
         where: { id: resolvedMemoryId }, include: { organization: true },
       });
       if (!memory || !memory.organization || !memory.source) return 'skipped';
-      // #1273 / cor:sec:040:05: a keyless structural merge is legal in the
-      // DB, but cannot export either ciphertext or plaintext. Check the live
-      // encryption state after the checkout wait, before ANY Git/filesystem
-      // mutation, and record the deferral. The next keyed write can mirror
-      // the latest state; this fire-and-forget path has no durable retry queue.
-      if (memory.isEncrypted && opts.nodeWriteKeyAvailable === false) {
-        console.warn(`[git-mirror] Deferring node write for memory ${memory.id}: no request-carried key at dispatch`);
-        return 'skipped';
+      // R206 / cor:sec:040:05: re-check the live encryption state after the
+      // checkout wait, before ANY Git/filesystem mutation. No key (request,
+      // session or cache) is an exception, and neither is a path-only cleanup.
+      if (memory.isEncrypted) {
+        logEncryptedGitSyncRefusal(logPrefix, memory.id);
+        return 'refused-encrypted';
       }
       try {
         validateMemorySource(memory.source);
@@ -212,16 +214,15 @@ export async function withMirrorCheckout(
       // 5. Let the caller reshape the working tree.
       try {
         // Git preparation can wait on the remote. An encryption flip during
-        // that wait must also stop a previously-plaintext keyless snapshot.
-        if (opts.nodeWriteKeyAvailable === false) {
-          const current = await db.memory.findUnique({
-            where: { id: resolvedMemoryId }, select: { isEncrypted: true },
-          });
-          if (!current || current.isEncrypted) {
-            console.warn(`[git-mirror] Deferring node write for memory ${resolvedMemoryId}: memory changed during preparation, no request-carried key at dispatch`);
-            await restoreRemote(localPath, memory.source);
-            return 'skipped';
-          }
+        // that wait must stop the write at the last boundary before mutation.
+        const current = await db.memory.findUnique({
+          where: { id: resolvedMemoryId }, select: { isEncrypted: true },
+        });
+        if (!current || current.isEncrypted) {
+          if (current) logEncryptedGitSyncRefusal(logPrefix, resolvedMemoryId);
+          else console.warn(`${logPrefix} Skipping write for memory ${resolvedMemoryId}: memory changed during preparation`);
+          await restoreRemote(localPath, memory.source);
+          return current ? 'refused-encrypted' : 'skipped';
         }
         const shouldCommit = await mutate({ localPath, branch, memoryUrn: memory.urn });
         if (shouldCommit === false) {

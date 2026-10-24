@@ -2185,6 +2185,7 @@ export const memoryMutations = {
 
       const { pushMemoryToGit: push } = await import('../../../integrations/github/pushMemoryToGit.js');
       const result = await push(id);
+      if (result.errorCode) throw new GraphQLError(result.error ?? result.errorCode, { extensions: { code: result.errorCode } });
       if (result.error) throw new Error(result.error);
       return true;
     },

@@ -187,7 +187,7 @@ describe('syncGraphFromGithub', () => {
   it('refuses an encrypted memory before Git I/O or a Node write', async () => {
     await db.memory.update({ where: { id: dbGraphId }, data: { isEncrypted: true } });
     const result = await syncGraphFromGithub(makeGraph());
-    expect(result.error).toContain('cannot write an encrypted memory');
+    expect(result.error).toContain('cannot read or write an encrypted memory');
     expect(await gitCalls()).toHaveLength(0);
     expect(await db.node.count({ where: { memoryId: dbGraphId } })).toBe(0);
   });
@@ -216,7 +216,7 @@ describe('syncGraphFromGithub', () => {
       await atOldFlag;
       await db.memory.update({ where: { id: dbGraphId }, data: { isEncrypted: true } });
       release();
-      expect((await syncing).error).toContain('cannot write an encrypted memory');
+      expect((await syncing).error).toContain('cannot read or write an encrypted memory');
     } finally {
       release();
       lookup.mockRestore();
