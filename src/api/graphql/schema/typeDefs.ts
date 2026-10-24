@@ -9252,7 +9252,8 @@ export const typeDefs = `#graphql
     flight, in a worktree and family the live host registers for it (WORKER_NOT_HELD, WORKER_LIVE,
     WORKER_START_PENDING). worker.end: whoever manages the App only (else HOST_OPERATION_NOT_PERMITTED), naming an open
     session of the worker on a host that registers it (else BAD_HOST_OPERATION_ARGS). worker.deliver is the one type
-    not issued yet, HOST_OPERATION_NOT_ISSUABLE until a host has a delivery path for it (hadron-cli#829). An App key
+    not issued yet, HOST_OPERATION_NOT_ISSUABLE until a host has a delivery path for it (hadron-cli#829).
+    worker.reset-context is HOST_OPERATION_NOT_ISSUABLE here: the platform issues it when a task ends (#2162). An App key
     issues nothing (FORBIDDEN). An unregistered host is HOST_NOT_FOUND.
     """
     issueHostOperation(input: IssueHostOperationInput!): HostOperation!
@@ -13360,10 +13361,11 @@ export const typeDefs = `#graphql
 
   """
   #1709 — one typed operation issued to one host (hrn:node:hadronmemory.com:specs:cor:agt:070:02, :03). type is one of
-  worktree.create, worker.start, worker.deliver, worker.end, worktree.remove; args are its typed arguments (ids and name
-  tokens only, never a command): worktree.create {workerId, repo, baseBranch, branchName, label}; worker.start
-  {workerId, worktree, family, taskId?}; worker.deliver {workerId, sessionId, eventId}; worker.end {workerId,
-  sessionId}; worktree.remove {workerId, worktree}. The per-type arguments are #1709's design, Proposed.
+  worktree.create, worker.start, worker.deliver, worker.end, worktree.remove, worker.reset-context; args are its typed
+  arguments (ids and name tokens only, never a command): worktree.create {workerId, repo, baseBranch, branchName,
+  label}; worker.start {workerId, worktree, family, taskId?}; worker.deliver {workerId, sessionId, eventId}; worker.end
+  {workerId, sessionId}; worktree.remove {workerId, worktree}; worker.reset-context {workerId, sessionId, taskId,
+  resetId} (#2162). The per-type arguments are #1709's design, Proposed.
   """
   type HostOperation {
     id: ID!
