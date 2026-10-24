@@ -120,6 +120,8 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   // #1747 — tickers: who made, changed and deleted one; who subscribed a worker; who
   // changed wake settings; who gave and who revoked a grant, and the person behind each grant use.
   tickers: ['created_by', 'updated_by', 'deleted_by'],
+  // #2024 — who declared, changed and removed an Agent ticker template.
+  agent_ticker_templates: ['created_by', 'updated_by', 'deleted_by'],
   ticker_subscriptions: ['created_by', 'ended_by', 'via_grant_person_id', 'ended_via_grant_person_id'],
   worker_wake_settings: ['updated_by'],
   app_grants: ['granted_by', 'revoked_by'],

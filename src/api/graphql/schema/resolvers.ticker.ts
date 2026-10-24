@@ -122,7 +122,7 @@ async function writeInApp<T>(
 
 // ── Validation ────────────────────────────────────────────────────────────
 
-function cleanName(raw: unknown): string {
+export function cleanName(raw: unknown): string {
   const name = typeof raw === 'string' ? raw.trim() : '';
   if (name === '') throw badInput('A ticker needs a name.');
   if (name.length > TICKER_NAME_MAX) throw badInput(`A ticker name is at most ${TICKER_NAME_MAX} characters.`);
@@ -135,7 +135,7 @@ type TickerSettings = {
   tickerLiveCap: number;
   wakeDailyBudget: number | null;
 };
-const SETTINGS_SELECT = {
+export const SETTINGS_SELECT = {
   tickerMinCadenceSeconds: true, tickerSelfSubscribeCadenceSeconds: true, tickerLiveCap: true, wakeDailyBudget: true,
   deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true,
   deliveryCheckPeriodSeconds: true, deliveryFailedChecksToOverdue: true,
@@ -155,7 +155,7 @@ function checkCadence(cadence: unknown, settings: TickerSettings): number {
   return cadence;
 }
 
-function checkQuietHours(input: unknown): Prisma.InputJsonObject {
+export function checkQuietHours(input: unknown): Prisma.InputJsonObject {
   const v = validateQuietHours(input);
   if (!v.ok) throw taskError('TICKER_QUIET_HOURS_INVALID', v.reason);
   return v.value as unknown as Prisma.InputJsonObject;
@@ -163,7 +163,7 @@ function checkQuietHours(input: unknown): Prisma.InputJsonObject {
 
 /** The closed set of ticker reasons (cor:agt:080:01). Stored kebab-case; the GraphQL enum spells them in capitals. */
 export const TICKER_REASONS = ['read-team-channel', 'every-tick', 'live-check'] as const;
-function checkReasons(list: unknown): string[] {
+export function checkReasons(list: unknown): string[] {
   if (!Array.isArray(list) || list.length === 0) throw badInput('reasons must name at least one reason: a ticker with none would never fire.');
   const out = new Set<string>();
   for (const x of list) {
@@ -173,9 +173,9 @@ function checkReasons(list: unknown): string[] {
   }
   return TICKER_REASONS.filter((k) => out.has(k));
 }
-const reasonEnum = (k: string) => k.toUpperCase().replace(/-/g, '_');
+export const reasonEnum = (k: string) => k.toUpperCase().replace(/-/g, '_');
 
-function checkRelevance(r: unknown): string {
+export function checkRelevance(r: unknown): string {
   if (typeof r !== 'string' || !(TICKER_RELEVANCE as readonly string[]).includes(r)) {
     throw badInput(`relevance is one of ${TICKER_RELEVANCE.join(', ')}.`);
   }
@@ -280,11 +280,11 @@ async function liveGrantFor(tx: Prisma.TransactionClient, appId: string, actor: 
  * race. Taken BEFORE the ticker row everywhere (create and settings hold no ticker
  * row; subscribe takes the ticker row and never this), so there is no cycle.
  */
-async function lockAppTickers(tx: Prisma.TransactionClient, appId: string): Promise<void> {
+export async function lockAppTickers(tx: Prisma.TransactionClient, appId: string): Promise<void> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tickers:${appId}`}, 0))`;
 }
 
-async function assertNameFree(tx: Prisma.TransactionClient, appId: string, name: string, exceptId?: string): Promise<void> {
+export async function assertNameFree(tx: Prisma.TransactionClient, appId: string, name: string, exceptId?: string): Promise<void> {
   const clash = await tx.ticker.findFirst({
     where: { appId, deletedAt: null, name: { equals: name, mode: 'insensitive' }, ...(exceptId ? { id: { not: exceptId } } : {}) },
     select: { id: true },

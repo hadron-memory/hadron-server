@@ -19,6 +19,12 @@ import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { GraphQLError } from 'graphql';
 import { WORKER_SIGNATURE_DEFAULTS, normalizeWorkerSignature, withWorkerSignatures } from '../../../lib/workerSignature.js';
 import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
+import {
+  GeneratedNameTooLongError, GeneratedTickerLimitError, GeneratedTickerNameTakenError,
+  endGeneratedTickersForWorker, instantiateAgentTickerTemplates, planGeneratedTickers,
+  GeneratedAgentNotInstalledError,
+} from '../../../lib/tickers/agentTickerTemplates.js';
+import { lockAppTickers, reasonEnum } from './resolvers.ticker.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
@@ -57,7 +63,7 @@ import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
-import { miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
+import { deletePristineGeneratedTickers, miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -929,6 +935,26 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
   return { appId, app: app as CastTarget['app'], agent, workerRole, requestedName, override };
 }
 
+/** The typed refusal for a failure while a cast generates its tickers (#2024); anything else is not ours. */
+function generatedTickerRefusal(e: unknown): GraphQLError | null {
+  if (e instanceof GeneratedTickerLimitError) {
+    return new GraphQLError(
+      `${e.message} Delete a ticker, or ask whoever manages the App to raise the limit; nothing was cast.`,
+      { extensions: { code: 'TICKER_LIMIT_REACHED', liveCap: e.liveCap, live: e.live, adding: e.adding } },
+    );
+  }
+  if (e instanceof GeneratedAgentNotInstalledError) {
+    return new GraphQLError(`${e.message}`, { extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId: e.appId } });
+  }
+  if (e instanceof GeneratedTickerNameTakenError) {
+    return new GraphQLError(`${e.message} Nothing was cast.`, { extensions: { code: 'TICKER_NAME_TAKEN', name: e.name } });
+  }
+  if (e instanceof GeneratedNameTooLongError) {
+    return new GraphQLError(`${e.message} Nothing was cast.`, { extensions: { code: 'BAD_USER_INPUT', workerName: e.workerName } });
+  }
+  return null;
+}
+
 export const workerMutations = {
   /**
    * castWorker — #974 (cor:dmo:050:11): cast an installed agent into the App
@@ -996,7 +1022,7 @@ export const workerMutations = {
             if ((await takenWorkersByName(tx, appId, [candidate])).has(candidate)) return NAME_TAKEN;
             await assertWorkerNameNotConfusable(tx, appId, candidate);
             const slug = await nextFreeWorkerSlug(tx, appId, candidate);
-            return tx.worker.create({
+            const castWorkerRow = await tx.worker.create({
               data: { ...WORKER_SIGNATURE_DEFAULTS,
                 appId,
                 agentId: agent.id,
@@ -1014,6 +1040,16 @@ export const workerMutations = {
               },
               select: { id: true, name: true, slug: true },
             });
+            // #2024 (S8): the Agent's declared tickers become this worker's, with the worker subscribed, in this
+            // same transaction. Any refusal rolls the whole cast back, the name allocation included.
+            try {
+              await instantiateAgentTickerTemplates(tx, {
+                appId, agentId: agent.id, worker: castWorkerRow, createdBy: ctx.userId ?? null,
+              });
+            } catch (e) {
+              throw generatedTickerRefusal(e) ?? e;
+            }
+            return castWorkerRow;
           }, { timeout: 30_000 });
         } catch (e) {
           // Order matters: a slug race is private and retried; a name
@@ -1124,6 +1160,9 @@ export const workerMutations = {
               endedBy: ctx.userId ?? null, endedByWorkerId: actor.workerId, endedByAgentId: actor.agentId,
             },
           });
+          // #2024 (S8): the tickers generated for this worker end with it (and the subscriptions others hold to
+          // them). Nothing else is touched.
+          await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null });
           await reconcileStopCoverage(tx, worker.appId, new Date());
         }
       },
@@ -1134,6 +1173,9 @@ export const workerMutations = {
           await lockStopFence(tx, worker.appId, 'exclusive');
           // #1726: the reportsTo graph lock BEFORE the worker row (the lock protocol in src/lib/workerReportsTo.ts).
           await lockAppReportsTo(tx, worker.appId);
+          // #2024 (S8): the App ticker lock after the graph and BEFORE any worker row, the order the cast and every
+          // ticker write use (a ticker edit holds it while it reads its subscribers' workers).
+          await lockAppTickers(tx, worker.appId);
         },
       },
     );
@@ -1660,6 +1702,7 @@ export const workerMutations = {
         const current = await tx.worker.findUnique({ where: { id: worker.id } });
         if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
         if (await miscastHasReferences(tx, current)) throw refuse();
+        await deletePristineGeneratedTickers(tx, worker.id);
         await tx.session.deleteMany({ where: { workerId: worker.id } });
         await tx.worker.delete({ where: { id: worker.id } });
         if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
@@ -1919,6 +1962,15 @@ export const workerQueries = {
     const boundOverride = override ? applyPlatformVariables(override, values) : override;
     const prompt = bound && boundOverride ? `${bound}\n\n${boundOverride}` : (boundOverride ?? bound);
 
+    // #2024 (S8): the tickers this cast would create, validated by the cast's own planner. Non-reserving: it reads
+    // what is committed now, takes no lock and writes nothing, so a cast may still differ if the App changes.
+    let tickers;
+    try {
+      tickers = await planGeneratedTickers(ctx.db as unknown as Prisma.TransactionClient, { appId, agentId: agent.id, workerName: name });
+    } catch (e) {
+      throw generatedTickerRefusal(e) ?? e;
+    }
+
     return {
       name,
       role: workerRole,
@@ -1926,6 +1978,15 @@ export const workerQueries = {
       agentName: agent.name,
       prompt,
       hasNamePlaceholder: template ? templateBindsName(template) : null,
+      tickers: tickers.map((t) => ({
+        name: t.name,
+        templateId: t.templateId,
+        templateRevision: t.templateRevision,
+        requestedCadenceSeconds: t.requestedCadenceSeconds,
+        effectiveCadenceSeconds: t.effectiveCadenceSeconds,
+        relevance: t.relevance,
+        reasons: t.reasons.map(reasonEnum),
+      })),
     };
   },
 };

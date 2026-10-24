@@ -2202,6 +2202,8 @@ export function createMcpServerInstance(
     'hadron_stall_schedule_get',
     // #1747 — ticker reads (each takes its own optional session; wake settings enforces the write rule itself).
     'hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get',
+    // #2024 — the Agent ticker-template list (a read through the Agent's own gate).
+    'hadron_agent_ticker_template_list',
     // #2022 — the stop-signal list (its own optional session).
     'hadron_stop_signal_list',
     // Per-connection selections and key handling: nothing authored.
