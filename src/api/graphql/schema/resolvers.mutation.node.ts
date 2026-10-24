@@ -3834,6 +3834,12 @@ export const nodeMutations = {
           extensions: { code: 'NODE_NOT_FOUND', ref: sourceRef },
         });
       }
+      // Refuse an invalid or unwritable destination before source history work.
+      // Resolution preserves concealment but permits readable non-writers, so
+      // the shared write gate is also required. This is never a success grant:
+      // retain fresh source checks and destination resolution/write checks below.
+      const earlyTarget = await resolveRelocationTarget(ctx, selectedSource, targetUrn, targetMemoryRef);
+      await requireMemoryWriteAccess(ctx, earlyTarget.destMemoryId);
       // A raw writer may have changed the source's content while leaving its
       // old task/human stamp. Reconcile under the source row lock and copy the
       // resulting state; the clone's own fingerprint would otherwise certify
