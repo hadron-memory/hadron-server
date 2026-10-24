@@ -206,6 +206,17 @@ describe('#2024 cast instantiation', () => {
     })).rejects.toThrow();
   });
 
+  it('a generated ticker cannot be owned by a user, or by a different worker, than the one it was made for (CHECK)', async () => {
+    await declare('Base');
+    const iris = await cast('Iris');
+    const henry = await cast('Henry');
+    const generated = await db.ticker.findFirstOrThrow({ where: { generatedForWorkerId: iris.id } });
+    // Complete provenance, a valid user owner, no worker owner: `owner_worker_id = generated_for_worker_id` is NULL there.
+    await expect(db.ticker.update({ where: { id: generated.id }, data: { ownerUserId: ctx.userId, ownerWorkerId: null } })).rejects.toThrow();
+    await expect(db.ticker.update({ where: { id: generated.id }, data: { ownerWorkerId: henry.id } })).rejects.toThrow();
+    expect((await db.ticker.findUniqueOrThrow({ where: { id: generated.id } })).ownerWorkerId).toBe(iris.id);
+  });
+
   it('the preview shows requested and effective cadence, reserves nothing, and refuses where the cast would', async () => {
     await declare('Fast', { cadenceSeconds: 60 });
     const preview = await Q.castWorkerPreview({}, { appRef: appId, agentRef: agentId, name: 'Iris' }, ctx);
@@ -262,6 +273,25 @@ describe('#2024 retirement and repair', () => {
     const other = await cast('Other');
     const generated = await db.ticker.findFirstOrThrow({ where: { generatedForWorkerId: miscast.id } });
     await db.tickerSubscription.create({ data: { tickerId: generated.id, workerId: other.id } });
+    expect(await refusal(M.deleteWorker({}, { workerRef: miscast.id, confirmNoExternalAttribution: true }, ctx))).toBe('WORKER_IN_USE');
+    expect(await db.worker.findUnique({ where: { id: miscast.id } })).not.toBeNull();
+  });
+});
+
+describe('#2024 repair carve-out stays narrow', () => {
+  it('a real non-ticker reference still refuses the repair, whatever generated tickers the worker has', async () => {
+    await declare('Base tick');
+    const miscast = await cast('Miscast');
+    await db.session.create({ data: { workerId: miscast.id, startedAt: new Date(), endedAt: new Date(), summary: 'did work' } as any });
+    expect(await refusal(M.deleteWorker({}, { workerRef: miscast.id, confirmNoExternalAttribution: true }, ctx))).toBe('WORKER_IN_USE');
+    expect(await db.worker.findUnique({ where: { id: miscast.id } })).not.toBeNull();
+  });
+
+  it('a generated ticker that was deleted is history, not bookkeeping: the repair refuses', async () => {
+    await declare('Base tick');
+    const miscast = await cast('Miscast');
+    const generated = await db.ticker.findFirstOrThrow({ where: { generatedForWorkerId: miscast.id } });
+    await db.ticker.update({ where: { id: generated.id }, data: { deletedAt: new Date() } });
     expect(await refusal(M.deleteWorker({}, { workerRef: miscast.id, confirmNoExternalAttribution: true }, ctx))).toBe('WORKER_IN_USE');
     expect(await db.worker.findUnique({ where: { id: miscast.id } })).not.toBeNull();
   });
@@ -358,6 +388,21 @@ describe('#2024 concurrency', () => {
 
 describe('#2024 lock protocol (two-connection barriers)', () => {
   /** Hold `take` open in its own transaction until the returned release is called. */
+  const open: Array<{ release: () => void; holder: Promise<void> }> = [];
+  afterEach(async () => { for (const h of open.splice(0)) { h.release(); await h.holder.catch(() => undefined); } });
+  /** Resolve once a backend is blocked on THIS advisory key (not just any advisory lock). */
+  async function waitForWaiterOnKey(key: string, timeoutMs = 10_000) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const [{ waiting }] = await db.$queryRaw<Array<{ waiting: number }>>`
+        SELECT count(*)::int AS waiting FROM pg_locks l, (SELECT hashtextextended(${key}, 0) AS h) k
+        WHERE l.locktype = 'advisory' AND NOT l.granted
+          AND l.classid::bigint = ((k.h >> 32) & 4294967295) AND l.objid::bigint = (k.h & 4294967295)`;
+      if (waiting >= 1) return;
+      if (Date.now() > deadline) throw new Error(`no backend blocked on advisory key ${key}`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
   async function hold(take: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<void>, after?: () => Promise<void>) {
     let release!: () => void;
     const done = new Promise<void>((r) => { release = r; });
@@ -366,7 +411,9 @@ describe('#2024 lock protocol (two-connection barriers)', () => {
     const holder = db.$transaction(async (tx) => { await take(tx); locked(); await done; }, { timeout: 30_000 });
     await ready;
     await after?.();
-    return { release: () => release(), holder };
+    const handle = { release: () => release(), holder };
+    open.push(handle);
+    return handle;
   }
 
   it('a cast waits for an in-flight template write and then SEES it (the empty-set fence)', async () => {
@@ -375,17 +422,30 @@ describe('#2024 lock protocol (two-connection barriers)', () => {
       await tx.agentTickerTemplate.create({ data: { agentId, name: 'Uncommitted', cadenceSeconds: 600, reasons: ['read-team-channel'] } });
     });
     const casting = cast('Iris');
-    await waitForLockWaitersOfType(db as any, 'advisory');
+    await waitForWaiterOnKey(`agent-ticker-templates:${agentId}`);
     h.release(); await h.holder;
     await casting;
     expect((await liveTickers()).map((t) => t.name)).toEqual(['Uncommitted \u00b7 Iris']);
+  });
+
+  it('an Agent uninstalled while a cast waits for the template lock refuses the cast and writes nothing', async () => {
+    await declare('Base');
+    const h = await hold(async (tx) => { await lockAgentTemplates(tx, agentId, 'exclusive'); });
+    const casting = refusal(cast('Iris'));
+    await waitForWaiterOnKey(`agent-ticker-templates:${agentId}`);
+    await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
+    h.release(); await h.holder;
+    expect(await casting).toBe('WORKER_AGENT_NOT_INSTALLED');
+    expect(await db.worker.count({ where: { appId } })).toBe(0);
+    expect(await db.ticker.count({ where: { appId } })).toBe(0);
+    expect(await db.tickerSubscription.count()).toBe(0);
   });
 
   it('a cast waits for the App ticker lock, as every ticker write does', async () => {
     await declare('Base');
     const h = await hold(async (tx) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tickers:${appId}`}, 0))`; });
     const casting = cast('Iris').then(() => 'cast');
-    await waitForLockWaitersOfType(db as any, 'advisory');
+    await waitForWaiterOnKey(`tickers:${appId}`);
     expect(await db.worker.count({ where: { appId } })).toBe(0);
     h.release(); await h.holder;
     expect(await casting).toBe('cast');
@@ -396,7 +456,7 @@ describe('#2024 lock protocol (two-connection barriers)', () => {
     const iris = await cast('Iris');
     const h = await hold(async (tx) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tickers:${appId}`}, 0))`; });
     const retiring = M.retireWorker({}, { workerRef: iris.id }, ctx).then(() => 'retired');
-    await waitForLockWaitersOfType(db as any, 'advisory');
+    await waitForWaiterOnKey(`tickers:${appId}`);
     expect((await db.worker.findUniqueOrThrow({ where: { id: iris.id } })).retiredAt).toBeNull();
     h.release(); await h.holder;
     expect(await retiring).toBe('retired');

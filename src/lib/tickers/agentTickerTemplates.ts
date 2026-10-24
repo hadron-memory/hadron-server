@@ -73,6 +73,13 @@ export class GeneratedTickerLimitError extends Error {
   }
 }
 
+/** The Agent stopped being installed in the App (or was removed) while the cast waited for its locks. */
+export class GeneratedAgentNotInstalledError extends Error {
+  constructor(readonly appId: string) {
+    super('The Agent is no longer installed in this App, so nothing was cast.');
+  }
+}
+
 export class GeneratedTickerNameTakenError extends Error {
   constructor(readonly name: string) {
     super(`This App already has a live ticker named "${name}" (names ignore case).`);
@@ -152,6 +159,12 @@ export async function instantiateAgentTickerTemplates(
   // The App ticker lock first (the order every ticker write uses), then the Agent's template set.
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tickers:${args.appId}`}, 0))`;
   await lockAgentTemplates(tx, args.agentId, 'shared');
+  // The installation was read before this transaction and the locks above can wait; re-decide it now, and hold
+  // the rows FOR SHARE so an uninstall or Agent removal waits for this cast instead of racing it.
+  const installed = await tx.$queryRaw<Array<{ ok: number }>>`
+    SELECT 1 AS ok FROM app_agents aa JOIN agents a ON a.id = aa.agent_id
+    WHERE aa.app_id = ${args.appId} AND aa.agent_id = ${args.agentId} AND a.deleted_at IS NULL FOR SHARE OF aa, a`;
+  if (installed.length === 0) throw new GeneratedAgentNotInstalledError(args.appId);
   const plans = await planGeneratedTickers(tx, { appId: args.appId, agentId: args.agentId, workerName: args.worker.name });
   const actor = currentActor();
   const made: Array<{ tickerId: string; subscriptionId: string; plan: PlannedTicker }> = [];

@@ -60,5 +60,5 @@ ALTER TABLE tickers DROP CONSTRAINT IF EXISTS chk_tickers_generated;
 ALTER TABLE tickers ADD CONSTRAINT chk_tickers_generated CHECK (
   (source_template_id IS NULL AND source_template_revision IS NULL AND generated_for_worker_id IS NULL)
   OR (source_template_id IS NOT NULL AND source_template_revision IS NOT NULL AND generated_for_worker_id IS NOT NULL
-      AND owner_worker_id = generated_for_worker_id)
+      AND owner_worker_id IS NOT NULL AND owner_worker_id = generated_for_worker_id)
 );

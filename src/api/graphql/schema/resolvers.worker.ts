@@ -22,6 +22,7 @@ import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/wor
 import {
   GeneratedNameTooLongError, GeneratedTickerLimitError, GeneratedTickerNameTakenError,
   endGeneratedTickersForWorker, instantiateAgentTickerTemplates, planGeneratedTickers,
+  GeneratedAgentNotInstalledError,
 } from '../../../lib/tickers/agentTickerTemplates.js';
 import { lockAppTickers, reasonEnum } from './resolvers.ticker.js';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -941,6 +942,9 @@ function generatedTickerRefusal(e: unknown): GraphQLError | null {
       `${e.message} Delete a ticker, or ask whoever manages the App to raise the limit; nothing was cast.`,
       { extensions: { code: 'TICKER_LIMIT_REACHED', liveCap: e.liveCap, live: e.live, adding: e.adding } },
     );
+  }
+  if (e instanceof GeneratedAgentNotInstalledError) {
+    return new GraphQLError(`${e.message}`, { extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId: e.appId } });
   }
   if (e instanceof GeneratedTickerNameTakenError) {
     return new GraphQLError(`${e.message} Nothing was cast.`, { extensions: { code: 'TICKER_NAME_TAKEN', name: e.name } });
