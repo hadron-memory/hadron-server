@@ -1431,6 +1431,8 @@ export const typeDefs = `#graphql
     approvalStatus: NodeApprovalStatus!
     "#1591 — whether this node is minted, and the record of it."
     mintStatus: NodeMintStatus!
+    "#2048 (hrn:node:hadronmemory.com:specs:cor:agt:040:13) — link lint for a boot-prompt source: the warnings that hold for this node as it is now, read as the caller (a target the caller cannot read is a position-only BROKEN_INCLUDE). An empty page is a real answer; null means the warnings are unavailable (a fault, or a compiled boot prompt, whose warnings read its recorded provenance). Lint never blocks a write, and nothing is stored or pushed. Pages default to 50 and clamp at 100."
+    lintWarnings(first: Int = 50, after: String): LintWarningPage
     "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:06) — the node's signatures and their derived states, current signers first. Batch-loaded on list and search reads. An encrypted node reads NOT_APPLICABLE and lists none."
     signatureStatus: NodeSignatureStatus!
     "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — the node's signing requests, newest first, including ended ones (#10019). state filters on the effective state (an open request past its deadline is EXPIRED). first: 1–100, default 20."
@@ -2225,6 +2227,49 @@ export const typeDefs = `#graphql
     urn: String!
     loc: String!
     approval: NodeApproval!
+    "#2048 — the link-lint warnings for this node as they hold now; the same data as Node.lintWarnings. Approving never blocks on a warning."
+    lintWarnings(first: Int = 50, after: String): LintWarningPage
+  }
+
+  "#2048 (hrn:node:hadronmemory.com:specs:cor:agt:040:13) — what link lint warns about."
+  enum LintKind {
+    "The include's target is soft-deleted (hrn:node:hadronmemory.com:specs:cor:agt:040:13, R20 A)."
+    RETIRED_TARGET
+    "The target is readable but has no revision that meets the include's settings (approved and/or rev=N)."
+    NO_QUALIFYING_REVISION
+    "The include pins a revision and a newer revision is approved."
+    PINNED_NEWER_APPROVED
+    "The include says signed; signing is not checked yet."
+    SIGNING_NOT_CHECKED
+    "The target is missing or the caller cannot read it. Position only: it never says which, or anything about the target."
+    BROKEN_INCLUDE
+  }
+
+  "#2048 — one link-lint warning. A fixed set of fields: there is no free-form detail."
+  type LintWarning {
+    kind: LintKind!
+    "0-based offset of the include tag in the node's source text."
+    position: Int!
+    text: String!
+    "The target's URN, only for a target the caller can read; null for BROKEN_INCLUDE."
+    targetUrn: String
+    "The revision the include pins, when it pins one."
+    pinnedRevision: Int
+    "The newest approved revision, for PINNED_NEWER_APPROVED."
+    newerRevision: Int
+    "Reserved for the policy-agent override notice; null for source lint."
+    overriddenNodeLoc: String
+    "Reserved for the worker signature/trailer lint; null for source lint."
+    workerField: String
+  }
+
+  "#2048 — one page of warnings, ordered by position."
+  type LintWarningPage {
+    items: [LintWarning!]!
+    "All warnings that hold, not just this page."
+    total: Int!
+    "Pass as after for the next page; null on the last."
+    nextCursor: String
   }
 
   "#1591 — the outcome of approving every node of a memory."

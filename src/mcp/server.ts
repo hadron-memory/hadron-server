@@ -2,7 +2,7 @@ import { mcpRequestSessionContext } from './requestSession.js';
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
 import { stampEmbeddingObligation } from '../services/embedding/obligation.js';
-import { assertBootPromptWriteAllowed, assertNoBootPromptRows } from '../lib/bootPrompt.js';
+import { assertBootPromptWriteAllowed, assertNoBootPromptRows, isBootPromptRole } from '../lib/bootPrompt.js';
 import { sessionEndReason } from '../lib/sessionEndReason.js';
 import { governedKindAnnotation } from '../lib/edgeGovernedKind.js';
 import { GraphQLError } from 'graphql';
@@ -239,6 +239,10 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
 import { resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
+import { lintWarningPageForNodeId, renderLintWarnings } from '../lib/bootPromptLint.js';
+
+/** Most changed nodes whose lint one hadron_replace_text result checks; the rest are disclosed, never silently dropped. */
+const REPLACE_LINT_MAX_NODES = 100;
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, loadAppWorkerActivity, loadAppWorkerCheckStatuses } from '../api/graphql/schema/resolvers.worker.js';
@@ -4854,7 +4858,9 @@ export function createMcpServerInstance(
       // SAYS which resource that is; `resolveUrn` tags its result the same way.
       // No notice when the LITERAL row matched: nothing was resolved away, the
       // caller got exactly the loc they named.
-      return textResult(noteFragment(projection, matchedLiteral ? undefined : fragment));
+      // #2048 (cor:agt:040:13 R19): the warnings that hold for this boot-prompt source now, recomputed on every read.
+      const lint = lockState === 'locked' || !isBootPromptRole(current.role) ? '' : renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), current.id));
+      return textResult(noteFragment(projection, matchedLiteral ? undefined : fragment) + lint);
     },
   );
 
@@ -6410,7 +6416,8 @@ export function createMcpServerInstance(
       const savedUrn = await nodeUrn(loc, memoryId);
       // #322: return the stable PK too — edges/replies created against the URN
       // break if the node is later moved/renamed; the id never changes.
-      return textResult(`Node saved: ${savedUrn} (id: ${upserted.id})`);
+      // #2048 (cor:agt:040:13): a boot-prompt source's link-lint warnings ride on the result; they never block the write.
+      return textResult(`Node saved: ${savedUrn} (id: ${upserted.id})${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), upserted.id))}`);
     },
   );
 
@@ -6827,7 +6834,7 @@ export function createMcpServerInstance(
 
       const updatedUrn = await nodeUrn(loc, existing.memoryId);
       // #322: surface the stable PK (immutable across move/rename).
-      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})`);
+      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), existing.id))}`);
     },
   );
 
@@ -7047,7 +7054,7 @@ export function createMcpServerInstance(
           ctx,
         );
         const urn = await nodeUrn(node.loc, node.memoryId);
-        return textResult(`Node data merged: ${urn} (id: ${node.id})`);
+        return textResult(`Node data merged: ${urn} (id: ${node.id})${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), node.id))}`);
       } catch (e) {
         return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
       }
@@ -7234,7 +7241,19 @@ export function createMcpServerInstance(
         if (result.skipCounts.governed > 0) {
           guidance.push('Governed nodes require their own update door: tasks use hadron_update_task; reviews use hadron_update_review; specs use the CLI hadron spec commands (no MCP spec door). Other governed kinds require their owning operation. Generic full-content node updates are not a workaround.');
         }
-        return textResult([header, coverage, ...guidance, ...lines].join('\n'));
+        // #2048: lint warnings of each boot-prompt source this call changed (a dry run changed nothing).
+        const lintLines: string[] = [];
+        if (!result.dryRun) {
+          const changed = result.results.filter((x: { replacements: number }) => x.replacements > 0);
+          for (const r of changed.slice(0, REPLACE_LINT_MAX_NODES)) {
+            const text = renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), { memoryId: r.memoryId, loc: r.loc }));
+            if (text) lintLines.push(`${await nodeUrn(r.loc, r.memoryId, memoryUrnOf)}:${text}`);
+          }
+          if (changed.length > REPLACE_LINT_MAX_NODES) {
+            lintLines.push(`Lint warnings not checked for ${changed.length - REPLACE_LINT_MAX_NODES} of ${changed.length} changed node(s); read a boot-prompt node with hadron_get_node to see its lint warnings.`);
+          }
+        }
+        return textResult([header, coverage, ...guidance, ...lines, ...lintLines].join('\n'));
       } catch (e) {
         return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
       }
