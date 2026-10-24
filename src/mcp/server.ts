@@ -240,6 +240,9 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 // narrower member-row copy that would drift from it.
 import { resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
 import { lintWarningPageForNodeId, renderLintWarnings } from '../lib/bootPromptLint.js';
+
+/** Most changed nodes whose lint one hadron_replace_text result checks; the rest are disclosed, never silently dropped. */
+const REPLACE_LINT_MAX_NODES = 100;
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, loadAppWorkerActivity, loadAppWorkerCheckStatuses } from '../api/graphql/schema/resolvers.worker.js';
@@ -7241,9 +7244,13 @@ export function createMcpServerInstance(
         // #2048: lint warnings of each boot-prompt source this call changed (a dry run changed nothing).
         const lintLines: string[] = [];
         if (!result.dryRun) {
-          for (const r of result.results.filter((x: { replacements: number }) => x.replacements > 0).slice(0, 20)) {
+          const changed = result.results.filter((x: { replacements: number }) => x.replacements > 0);
+          for (const r of changed.slice(0, REPLACE_LINT_MAX_NODES)) {
             const text = renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), { memoryId: r.memoryId, loc: r.loc }));
             if (text) lintLines.push(`${await nodeUrn(r.loc, r.memoryId, memoryUrnOf)}:${text}`);
+          }
+          if (changed.length > REPLACE_LINT_MAX_NODES) {
+            lintLines.push(`Lint warnings not checked for ${changed.length - REPLACE_LINT_MAX_NODES} of ${changed.length} changed node(s); read a boot-prompt node with hadron_get_node to see its lint warnings.`);
           }
         }
         return textResult([header, coverage, ...guidance, ...lines, ...lintLines].join('\n'));

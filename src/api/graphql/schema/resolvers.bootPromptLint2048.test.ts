@@ -14,7 +14,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { lintSourceWarnings } from '../../../lib/bootPromptLint.js';
+import { lintSourceWarnings, lintWarningPageForNodeId } from '../../../lib/bootPromptLint.js';
 import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -223,6 +223,17 @@ describe('#2048 S11a scope and audience', () => {
   });
 });
 
+describe('#2048 S11a source-content read gate on the id-based projection', () => {
+  it('is unavailable for a caller who cannot read the source, and real for one who can', async () => {
+    await target();
+    const prompt = await source('{{> part signed}}');
+    const outsider = await db.user.create({ data: { handle: 'lint2048-outsider', roles: [] } });
+    expect(await lintWarningPageForNodeId({ db, userId: outsider.id, roles: [] }, prompt.id)).toBeNull();
+    expect(await lintWarningPageForNodeId({ db, userId: outsider.id, roles: [] }, { memoryId, loc: 'prompt' })).toBeNull();
+    expect(await lintWarningPageForNodeId(ctx(), prompt.id)).toMatchObject({ total: 1 });
+  });
+});
+
 describe('#2048 S11a post-commit unavailable is not success', () => {
   it('returns null on target-batch failure without undoing the already committed source write', async () => {
     await target();
@@ -294,5 +305,20 @@ describe('#2048 S11a actual mounted MCP result text', () => {
     expect(text).toContain('Lint warnings (1):');
     expect(text).toContain('[SIGNING_NOT_CHECKED]');
     expect(text).toMatch(/at position \d+:/);
+  });
+});
+
+describe('#2048 S11a replace-text lints every changed boot source or says it did not', () => {
+  it('lints a boot source that follows more than twenty ordinary changed nodes, and discloses a count beyond the cap', async () => {
+    await target();
+    const ordinary = Array.from({ length: 121 }, (_, i) => ({ memoryId, loc: `a-ordinary-${String(i).padStart(3, '0')}`, name: `o${i}`, content: 'REPLACE_ME' }));
+    await db.node.createMany({ data: ordinary });
+    await source('REPLACE_ME', 'z-late-prompt');
+    const text = await callMountedTool('hadron_replace_text', { nodeUrns: [...ordinary.map(n => `hrn:node:${memoryUrn}:${n.loc}`).slice(0, 20), `hrn:node:${memoryUrn}:z-late-prompt`], fields: ['content'], oldText: 'REPLACE_ME', newText: '{{> part signed}}', dryRun: false });
+    expect(text).toContain(`hrn:node:${memoryUrn}:z-late-prompt:`);
+    expect(text).toContain('[SIGNING_NOT_CHECKED]');
+    expect(text).not.toContain('Lint warnings not checked');
+    const all = await callMountedTool('hadron_replace_text', { nodeUrns: ordinary.map(n => `hrn:node:${memoryUrn}:${n.loc}`), fields: ['content'], oldText: 'REPLACE_ME', newText: 'DONE', dryRun: false });
+    expect(all).toContain('Lint warnings not checked for 1 of 101 changed node(s)');
   });
 });

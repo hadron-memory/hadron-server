@@ -268,6 +268,10 @@ export async function lintWarningPageForNodeId(
       select: { id: true, memoryId: true, content: true, role: true, nodeType: true, deletedAt: true, memory: { select: { id: true, isEncrypted: true } } },
     });
     if (!row || row.deletedAt) return null;
+    // The source's include structure is its content: a caller who may write or approve it but not read it (an
+    // install memory's manager) gets unavailable, never warnings derived from text they cannot see.
+    const readable = await ctx.db.node.count({ where: { AND: [await memoryAccessFilter(ctx), { memory: { deletedAt: null } }, { id: row.id }] } });
+    if (readable === 0) return null;
     let content = row.content;
     if (row.memory?.isEncrypted) {
       if (!sessionKeyCache.getByMemoryId(row.memoryId)) return null;
