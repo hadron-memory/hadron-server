@@ -4,6 +4,7 @@ import { lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
 import { consumeUserMergeConsent, mergeConsentAlreadyApplied } from '../../lib/userMergeConsent.js';
 import { Prisma, type PrismaClient, type User } from '../../generated/prisma/index.js';
 import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js';
+import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { waitForSerializationRetry } from '../../lib/serializableRetry.js';
 
 /**
@@ -357,6 +358,10 @@ async function runMergeTxn(
         linkedAt: null,
       },
     });
+
+    // #708: the source's handle was just replaced by a random placeholder, so its original name is dead.
+    // Tombstone the #692 pool principal (name reserved forever; the user→principal link stays).
+    if (source.principalId) await releasePrincipal(tx, source.principalId);
 
     await tx.user.update({
       where: { id: targetUserId },
