@@ -794,6 +794,14 @@ export const appMutations = {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }
+      // #2403: the ceiling stamps every session's expiry (cor:agt:020:03 makes that a promise), so a
+      // non-positive one would be past before the session began. Refused after the access gate and before any
+      // write; no floor or cap exists, and omitted preserves the stored value.
+      if (sessionTimeoutSeconds != null && sessionTimeoutSeconds <= 0) {
+        throw new GraphQLError('sessionTimeoutSeconds must be a positive number of seconds.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
       // URN updates: accept a new slug and rebuild the full URN against the
       // app's current org.
       let newUrn: string | undefined;
