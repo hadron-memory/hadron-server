@@ -59,4 +59,38 @@ describe('hadron_whoami — snapshot contract (#2314)', () => {
     await createTestableMcpServer(auth()).callToolText('hadron_whoami', {});
     expect(seen.isolation).toEqual(['repeatable read']);
   });
+
+  it('reads the session rows and the total on that same transaction client', async () => {
+    const calls: string[] = [];
+    const original = db.$transaction.bind(db) as (fn: (tx: unknown) => unknown, opts?: unknown) => Promise<unknown>;
+    // Record the session reads made through the transaction client; a read that bypasses it (the pool) records nothing.
+    const record = (tx: Record<string, unknown>) =>
+      new Proxy(tx, {
+        get(target, prop) {
+          const value = target[prop as string];
+          if (prop === 'session') {
+            return new Proxy(value as Record<string, unknown>, {
+              get(model, op) {
+                const fn = model[op as string];
+                if ((op === 'findMany' || op === 'count') && typeof fn === 'function') {
+                  return (...args: unknown[]) => { calls.push(String(op)); return (fn as (...a: unknown[]) => unknown).apply(model, args); };
+                }
+                return typeof fn === 'function' ? (fn as (...a: unknown[]) => unknown).bind(model) : fn;
+              },
+            });
+          }
+          return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+        },
+      });
+    const spy = vi.spyOn(db, '$transaction').mockImplementation(
+      ((fn: (tx: unknown) => unknown, opts?: unknown) => original((tx) => fn(record(tx as Record<string, unknown>)), opts)) as never,
+    );
+    try {
+      const out = await createTestableMcpServer(auth()).callToolText('hadron_whoami', {});
+      expect(out).toContain('1 session(s):');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(calls.sort()).toEqual(['count', 'findMany']);
+  });
 });
