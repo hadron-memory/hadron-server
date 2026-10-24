@@ -9579,18 +9579,21 @@ export const typeDefs = `#graphql
     """
     renumberSpec(memoryRef: ID!, fromLoc: String!, toLoc: String!, dryRun: Boolean): SpecRenumberResult!
     """
-    #1591 — mint the unminted live nodes of a memory, at once, excluding
-    comment nodes and the decision role family. Each node is
+    #1591 — mint the live nodes of a memory in the mint scope, at once,
+    excluding comment nodes and the decision role family. The scope is the
+    unminted nodes plus (#1612) minted nodes whose content changed since their
+    minted revision or that have no recorded minted revision; a re-mint keeps
+    the first mint's time and minter. Each node is
     stamped with its current revision and that revision's approval hash
     (Node.mintStatus); a minted node's moves then record URN aliases. Refuses
-    SPEC_CORPUS_MINT_BLOCKED while any blocker remains among the unminted
-    nodes: a placeholder, an unresolved reference, a structural lint error over
+    SPEC_CORPUS_MINT_BLOCKED while any blocker remains among the nodes in
+    scope: a placeholder, an unresolved reference, a structural lint error over
     spec-marked or citation-shaped nodes (nodetype-info, tag-spec, serialization-leak,
     duplicate-loc), a stale abstract once staleAbstractsBlock is true,
     NOT_APPROVED (the current revision is not approved), TAMPERED (approved
     text changed outside the revision system), or CITES_UNMINTED (an
-    edge into another memory's node that is not minted). Nodes minted earlier
-    are not re-checked. dryRun returns the full report without minting. Any
+    edge into another memory's node that is not minted). Minted nodes outside
+    the scope are not re-checked. dryRun returns the full report without minting. Any
     writer of the memory. memoryRef accepts the ID or URN. A real run holds
     every write to the memory off while it checks and stamps, and refuses
     SPEC_CORPUS_BUSY (retryable) if a write is already in flight. Encrypted
@@ -9868,7 +9871,7 @@ export const typeDefs = `#graphql
     requestNodeSignature(nodeRef: ID!, expectedRevision: Int, signerRef: ID): SigningRequest!
     "#1632 — withdraw an open signing request. Only the requester account, from any of its sessions (#10397). Refusals (hrn:node:hadronmemory.com:specs:cor:dmo:130:03, Holger #10430): SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
     withdrawSigningRequest(id: ID!): SigningRequest!
-    "#1591 — approve the current revision of every live, unminted node of a memory (ID or fully-qualified URN) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
+    "#1591 — approve the current revision of every live node of a memory (ID or fully-qualified URN) in the mint scope (unminted, or minted and changed since or with no recorded minted revision, #1612) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
     approveMemoryNodes(memoryRef: String!): ApproveMemoryNodesResult!
 
     """
