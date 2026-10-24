@@ -9996,8 +9996,11 @@ export const typeDefs = `#graphql
     deleteEdge(edgeRef: ID!): Boolean!
 
     """
-    Run a task — a runnable node (isRunnable=true) — identified by a single
-    nodeRef (a node PK or a fully-qualified node URN, hrn:node:<root>:<memory>:<loc>),
+    Render or execute a node identified by a single nodeRef (a node PK or a
+    fully-qualified node URN, hrn:node:<root>:<memory>:<loc>). This explicit-reference
+    operation does not require isRunnable=true. The runnable flag governs by-name
+    task discovery, resolution and listing (hrn:node:hadronmemory.com:specs:cor:api:060:01).
+    The reference is
     resolved by the shared resolveNodeRef (#542). A bare loc without a memory
     is rejected — pass a full URN or an ID. For loose-name matching and
     interactive task selection use the MCP hadron_run_task tool, which
