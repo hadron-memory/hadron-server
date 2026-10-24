@@ -3905,6 +3905,8 @@ export const typeDefs = `#graphql
     agent: Agent
     syncStatus: SyncStatus!
     syncError: String
+    "Version 1 JSON outcome of the last sync: partial, failed or unknown. Null after a completed clean sync; consult lastSyncedAt/syncStatus for a never-synced memory. Same Memory-record read gate applies."
+    lastSyncReport: String
     pendingEdgeCount: Int!
     lastSyncedAt: DateTime
     createdAt: DateTime!
