@@ -3,7 +3,8 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
 import { decryptNodeFields } from '../nodeCrypto.js';
 import { sessionKeyCache } from '../sessionKeyCache.js';
 import { revisionApprovalOf, newestApprovedRevisionOf } from '../nodeApproval.js';
-import { locateIncludeTags, IncludeSyntaxError, type IncludeTag } from './parseIncludeTags.js';
+import { locateIncludeTags, locateLiteralIncludeTags, IncludeSyntaxError, type IncludeTag } from './parseIncludeTags.js';
+import { LiteralGuardCollision } from './literalGuard.js';
 
 /** Deepest include chain a read follows; past it a reader sees the notice (cor:dmo:150:06). Writes don't enforce it (#2134). */
 export const MAX_RESOLVE_DEPTH = 10;
@@ -41,6 +42,12 @@ export interface SpliceOptions {
    */
   foreign?: boolean;
   memo?: IncludeReadMemo;
+  /**
+   * #2135 — when set, the `{{>` of every include tag written as code is replaced by this guard in the
+   * spliced text, so a later Mustache render cannot treat it as a partial; the caller restores it. Each
+   * source text is judged on its own, before assembly. Unset leaves literal tags as written.
+   */
+  literalGuard?: string;
 }
 
 export type IncludeDb = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision'>;
@@ -188,22 +195,37 @@ async function spliceWithin(
   db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, opts: SpliceOptions,
   content: string, memoryId: string, trail: ReadonlySet<string>, level: number,
 ): Promise<string> {
+  const guard = opts.literalGuard;
+  // The guard must be absent from every text it will be restored out of, whether or not that text has a tag.
+  if (guard && content.includes(guard)) throw new LiteralGuardCollision();
   if (!content.includes('{{>')) return content;
+  const literal = guard ? locateLiteralIncludeTags(content) : [];
+  // Copy `content[from, to)`, guarding the opener of each literal tag inside it.
+  const copy = (from: number, to: number): string => {
+    let text = '';
+    let at = from;
+    for (const l of literal) {
+      if (l.index < from || l.index >= to) continue;
+      text += content.slice(at, l.index) + guard + content.slice(l.index + 3, l.index + l.raw.length);
+      at = l.index + l.raw.length;
+    }
+    return text + content.slice(at, to);
+  };
   let tags: Array<IncludeTag & { index: number }>;
   try {
     tags = locateIncludeTags(content);
   } catch (e) {
-    if (e instanceof IncludeSyntaxError) return content; // a stored malformed tag renders as it always did
+    if (e instanceof IncludeSyntaxError) return copy(0, content.length); // a stored malformed tag renders as it always did
     throw e;
   }
   let out = '';
   let cursor = 0;
   for (const tag of tags) {
-    out += content.slice(cursor, tag.index);
+    out += copy(cursor, tag.index);
     out += await expandTag(db, access, memo, opts, tag, memoryId, trail, level);
     cursor = tag.index + tag.raw.length;
   }
-  return out + content.slice(cursor);
+  return out + copy(cursor, content.length);
 }
 
 /**

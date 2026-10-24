@@ -36,7 +36,7 @@ import { s7Available } from '../../../lib/tickers/s7Availability.js';
 import { GraphQLError } from 'graphql';
 import { loadDeliverySettings, parseDeliverySettingsPatch, validateDeliverySettings, type DeliverySettings } from '../../../lib/tickers/deliverySettings.js';
 import { Prisma } from '../../../generated/prisma/index.js';
-import { type Context, getAccessibleMemoryIds } from './resolvers.helpers.js';
+import { type Context, getAccessibleMemoryIds, pageArgs, pageEnvelope } from './resolvers.helpers.js';
 import {
   type TaskApp,
   type TaskActor,
@@ -310,6 +310,18 @@ export const tickerQueries = {
   tickers: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
     const { app } = await resolveParticipatedApp(ctx, appRef);
     return ctx.db.ticker.findMany({ where: { appId: app.id, deletedAt: null }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+  },
+
+  /** #2213 — `tickers` as a page: the same gate, rows and order, counted and read in one snapshot. */
+  tickersPage: async (_: unknown, args: { appRef: string; limit?: number | null; offset?: number | null }, ctx: Context) => {
+    const { app } = await resolveParticipatedApp(ctx, args.appRef);
+    const where = { appId: app.id, deletedAt: null };
+    const { take, skip } = pageArgs(args);
+    const [total, items] = await ctx.db.$transaction([
+      ctx.db.ticker.count({ where }),
+      ctx.db.ticker.findMany({ where, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take, skip }),
+    ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+    return pageEnvelope(items, total, skip);
   },
 
   ticker: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {

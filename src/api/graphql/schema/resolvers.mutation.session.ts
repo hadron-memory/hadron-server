@@ -37,7 +37,7 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { resolveWorkerIdByNameGated, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
+import { resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -731,57 +731,63 @@ export const sessionMutations = {
             throw workerRefNotFound(workerRef);
           }
         } else {
-          // NAME (#990). A name is unique only WITHIN an App, so this form
-          // needs App context — which a bare-name caller always has, since it
-          // comes from an App key, an explicit appRef, or an MCP active-App
-          // selection. Without one there is nothing to scope the lookup to, and
-          // guessing across the caller's Apps would resolve one name to
-          // several workers.
+          // #1597: only a bare NAME with no App context searches the caller's
+          // bind-authorized Apps. ID/URN failures and selected-App misses never
+          // fall through here. A unique identity still runs every bind gate below.
           if (appId === null) {
-            throw new GraphQLError(
-              `workerRef "${workerRef}" is a worker name, which is only unique within an App — pass appRef (or select an App), or use the worker's id or URN.`,
-              { extensions: { code: 'SESSION_WORKER_NAME_NEEDS_APP', workerRef } },
-            );
-          }
-          // App lifecycle, checked here and not only at the gate (PR #996
-          // review, Copilot). When `appId` came from `appRef` these were
-          // already enforced above, and the worker-DERIVED path enforces them
-          // below — but when it came from `ctx.appId` (an MCP active-App
-          // SELECTION or an App key) this is the only lifecycle check before
-          // `session.create`. A stale selection pointing at an uninstalled App
-          // must not be able to resolve a name and open a session there.
-          //
-          // This stays HERE rather than inside the shared resolver (#1015):
-          // uninstall bars starting a session, but not READING the roster —
-          // Worker rows outlive their App's uninstall — so the two callers
-          // genuinely differ, and only on this point.
-          const lifecycle = await ctx.db.app.findUnique({
-            where: { id: appId },
-            select: { uninstalledAt: true },
-          });
-          if (lifecycle?.uninstalledAt) {
-            throw new GraphQLError('Cannot start a session in an uninstalled App.', {
-              extensions: { code: 'APP_UNINSTALLED', appId },
+            const candidates = await resolveWorkerBindCandidatesByName(ctx, workerRef);
+            if (candidates.length === 0) throw workerRefNotFound(workerRef);
+            if (candidates.length > 1) {
+              const lines = candidates.map(c =>
+                `${c.name} — ${c.urn ?? c.id}; App ${c.app.name} (${c.app.urn}); role ${c.role ?? 'unset'}; ` +
+                `holder ${c.holder?.handle ?? c.holder?.githubUsername ?? c.holder?.id ?? 'unheld'}`);
+              throw new GraphQLError(
+                `Worker name "${workerRef}" is ambiguous. Choose a worker id or URN:\n${lines.join('\n')}`,
+                { extensions: { code: 'SESSION_WORKER_NAME_AMBIGUOUS', candidates } },
+              );
+            }
+            resolvedWorkerId = candidates[0].id;
+          } else {
+            // App lifecycle, checked here and not only at the gate (PR #996
+            // review, Copilot). When `appId` came from `appRef` these were
+            // already enforced above, and the worker-DERIVED path enforces them
+            // below — but when it came from `ctx.appId` (an MCP active-App
+            // SELECTION or an App key) this is the only lifecycle check before
+            // `session.create`. A stale selection pointing at an uninstalled App
+            // must not be able to resolve a name and open a session there.
+            //
+            // This stays HERE rather than inside the shared resolver (#1015):
+            // uninstall bars starting a session, but not READING the roster —
+            // Worker rows outlive their App's uninstall — so the two callers
+            // genuinely differ, and only on this point.
+            const lifecycle = await ctx.db.app.findUnique({
+              where: { id: appId },
+              select: { uninstalledAt: true },
             });
+            if (lifecycle?.uninstalledAt) {
+              throw new GraphQLError('Cannot start a session in an uninstalled App.', {
+                extensions: { code: 'APP_UNINSTALLED', appId },
+              });
+            }
+            // The staff read gate runs BEFORE the lookup, not after, and a denial
+            // is reported as WORKER_NOT_FOUND — the shared
+            // `resolveWorkerIdByNameGated` owns that ordering (#1015) so this
+            // resolver and `Query.worker` cannot drift on it. A missing App, a
+            // soft-deleted App, a refused caller and an absent name all return
+            // null there and collapse into the one refusal below.
+            //
+            // In practice a caller who reached here via `appRef` has ALREADY
+            // cleared `isAppParticipant` above, the same predicate that gate
+            // uses, so an outsider is refused FORBIDDEN before any name is looked
+            // up. The gate is therefore defense in depth, not the only barrier —
+            // and deliberately so: `appId` can also arrive from an App-key
+            // credential (which skips that membership branch), so the name branch
+            // must be self-sufficient rather than relying on an ordering above it
+            // that a later change could reshuffle.
+            const byName = await resolveWorkerIdByNameGated(ctx, appId, workerRef);
+            if (!byName) throw workerRefNotFound(workerRef);
+            resolvedWorkerId = byName;
           }
-          // The staff read gate runs BEFORE the lookup, not after, and a denial
-          // is reported as WORKER_NOT_FOUND — the shared
-          // `resolveWorkerIdByNameGated` owns that ordering (#1015) so this
-          // resolver and `Query.worker` cannot drift on it. A missing App, a
-          // soft-deleted App, a refused caller and an absent name all return
-          // null there and collapse into the one refusal below.
-          //
-          // In practice a caller who reached here via `appRef` has ALREADY
-          // cleared `isAppParticipant` above, the same predicate that gate
-          // uses, so an outsider is refused FORBIDDEN before any name is looked
-          // up. The gate is therefore defense in depth, not the only barrier —
-          // and deliberately so: `appId` can also arrive from an App-key
-          // credential (which skips that membership branch), so the name branch
-          // must be self-sufficient rather than relying on an ordering above it
-          // that a later change could reshuffle.
-          const byName = await resolveWorkerIdByNameGated(ctx, appId, workerRef);
-          if (!byName) throw workerRefNotFound(workerRef);
-          resolvedWorkerId = byName;
         }
         const worker = await ctx.db.worker.findUnique({
           where: { id: resolvedWorkerId },
