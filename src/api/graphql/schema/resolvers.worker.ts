@@ -42,7 +42,7 @@ import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
-import { applyPlatformVariables, templateBindsName, type PlatformVariableValues } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables, type PlatformVariableValues } from '../../../lib/personaDescription.js';
 // Spec 049 Phase 6 — the register block, derived data through one composition point.
 import { renderDerivedBlocks, resolveRegister } from '../../../lib/resolveRegister.js';
 import {
@@ -1847,8 +1847,7 @@ export const workerQueries = {
    * refusals) is the SAME code castWorker runs, and the name projection
    * consults the same roster the allocation's unique arbitrates. Returns what
    * the caller needs to decide: the name the cast would allocate, the
-   * composed boot prompt (reviewable BEFORE the name is permanent — where a
-   * template missing {{name}} becomes visible), and which Team Agent
+   * composed boot prompt (reviewable BEFORE the name is permanent), and which Team Agent
    * resolved.
    *
    * THE PREVIEW RESERVES NOTHING. No lease exists by law (cor:agt:020:03 —
@@ -1907,7 +1906,8 @@ export const workerQueries = {
       agentId: agent.id,
       agentName: agent.name,
       prompt,
-      hasNamePlaceholder: template ? templateBindsName(template) : null,
+      // Deprecated (#2049 S12): always null; kept so older clients' queries validate.
+      hasNamePlaceholder: null,
     };
   },
 };
