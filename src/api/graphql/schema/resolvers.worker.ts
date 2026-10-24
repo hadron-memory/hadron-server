@@ -485,8 +485,23 @@ export async function resolveWorkerBindCandidatesByName(ctx: Context, name: stri
     select: { id: true, name: true, urn: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
     orderBy: [{ urn: 'asc' }, { id: 'asc' }],
   });
+  // #2346: one set-oriented query narrows the reachable Apps to those with a
+  // live worker of this name, judged by the database's lower() (the expression
+  // `workers_app_name_uniq` indexes, as `resolveWorkerIdByName`). This is an
+  // internal discovery step only: the read gate below still runs for every App
+  // that matched before anything is returned, so a denied App stays
+  // indistinguishable from an absent name and nothing is capped or sampled.
+  const trimmed = name.trim();
+  if (trimmed === '' || apps.length === 0) return [];
+  const matched = await ctx.db.$queryRaw<{ app_id: string }[]>`
+    SELECT app_id FROM workers
+    WHERE app_id = ANY(${apps.map((a) => a.id)}::text[])
+      AND lower(name) = lower(${trimmed})
+      AND retired_at IS NULL`;
+  const matchedAppIds = new Set(matched.map((r) => r.app_id));
   const candidates = [];
   for (const app of apps) {
+    if (!matchedAppIds.has(app.id)) continue;
     try {
       await requireWorkerReadAccess(ctx, app);
     } catch (e) {
