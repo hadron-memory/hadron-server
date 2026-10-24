@@ -176,3 +176,105 @@ describe('does NOT fire on the cases that only look like one', () => {
     expect(violations('scopes must be a subset of ConnectionGrantScope.')).toEqual([]);
   });
 });
+
+describe('#2302 coordinate-scoped ordinary-word sets', () => {
+  it('detects the omitted decision family in Node.role using the live governed-role list', () => {
+    const doc = 'type Node { "Governed families: review, spec." role: String }';
+    expect(findPartialEnumerations(doc).filter(v => v.set === 'GOVERNED_ROLES')).toMatchObject([
+      { coord: 'Node.role', missing: ['decision'] },
+    ]);
+  });
+
+  it('detects a missing work kind at the worklog contract', () => {
+    const doc = 'type Query { "kind must be one of pr, issue, commit, branch." teamWorkItems: String }';
+    expect(findPartialEnumerations(doc).filter(v => v.set === 'WORK_KINDS')).toMatchObject([
+      { coord: 'Query.teamWorkItems', missing: ['repo'] },
+    ]);
+  });
+
+  it('does not let owner/repo examples hide an omitted repo kind', () => {
+    const doc = 'type Mutation { "Canonical owner/repo#N. kind must be one of pr, issue, commit, branch; ref is canonical." recordTeamWork: String }';
+    expect(findPartialEnumerations(doc).filter(v => v.set === 'WORK_KINDS')).toMatchObject([
+      { coord: 'Mutation.recordTeamWork', missing: ['repo'] },
+    ]);
+  });
+
+  it('checks a promised kind list even when reduced to one member', () => {
+    const doc = 'type Query { "kind must be one of pr." teamWorkItems: String }';
+    expect(findPartialEnumerations(doc).filter(v => v.set === 'WORK_KINDS')).toMatchObject([
+      { coord: 'Query.teamWorkItems', missing: ['issue', 'commit', 'branch', 'repo'] },
+    ]);
+  });
+
+  it('does not treat unrelated ordinary-word prose as either closed enumeration', () => {
+    const doc = 'type Query { "An issue, branch and commit can carry a review or spec." other: String }';
+    expect(findPartialEnumerations(doc)).toEqual([]);
+  });
+});
+
+// #2303: ordinary enum words are watched only at their owning description.
+describe('S3 live host/member description lists (#2303)', () => {
+  it('detects an omitted skill host at its input coordinate', () => {
+    expect(findPartialEnumerations('input SkillPlanInput { """Supported hosts: claudeSkill, futureSkill.""" host: String }')
+      .some(v => v.coord === 'SkillPlanInput.host' && v.missing.includes('codexSkill'))).toBe(true);
+  });
+  it('detects an omitted member role without watching incidental prose', () => {
+    expect(findPartialEnumerations('"""Roles: reader, writer. Subject to owner protection.""" enum MemoryMemberRole { reader writer owner }')
+      .some(v => v.coord === 'MemoryMemberRole' && v.missing.includes('owner'))).toBe(true);
+    expect(findPartialEnumerations('"""The reader and writer share a document.""" type Other { id: ID }')).toEqual([]);
+  });
+});
+
+describe('#2305 process-credential provider list', () => {
+  const at = (text: string, field = 'createAiServiceConfig') =>
+    `type Mutation { """${text}""" ${field}: String }`;
+
+  it('detects an omitted eligible provider using the production predicate', () => {
+    expect(findPartialEnumerations(at('Eligible process-credential providers: openai, anthropic; no endpoint.')))
+      .toMatchObject([{ coord: 'Mutation.createAiServiceConfig', set: 'PROCESS_CREDENTIAL_PROVIDERS', missing: ['bedrock'] }]);
+  });
+
+  it('does not let a provider outside the promised list mask its omission', () => {
+    expect(findPartialEnumerations(at('Eligible process-credential providers: openai; bedrock and anthropic appear elsewhere.')))
+      .toMatchObject([{ set: 'PROCESS_CREDENTIAL_PROVIDERS', missing: ['anthropic', 'bedrock'] }]);
+  });
+
+  it('accepts the complete eligible list and ignores unrelated provider prose', () => {
+    expect(findPartialEnumerations(at('Eligible process-credential providers: bedrock, openai, anthropic; no endpoint.'))).toEqual([]);
+    expect(findPartialEnumerations(at('Only openai and anthropic examples.', 'other'))).toEqual([]);
+  });
+});
+
+describe('#2304 commentable-class list', () => {
+  const at = (text: string, field = 'createComment') =>
+    `type Mutation { """${text}""" ${field}: String }`;
+
+  it('catches an omitted commentable class from the live class set', () => {
+    expect(findPartialEnumerations(at('Commentable classes: app, knowledge, personal, group; no private.')))
+      .toMatchObject([{ coord: 'Mutation.createComment', set: 'COMMENTABLE_CLASSES', missing: ['system'] }]);
+  });
+
+  it('does not let classes outside the promised list mask omissions', () => {
+    expect(findPartialEnumerations(at('Commentable classes: app; system, knowledge, personal and group appear elsewhere.')))
+      .toMatchObject([{ set: 'COMMENTABLE_CLASSES', missing: ['knowledge', 'personal', 'group', 'system'] }]);
+  });
+
+  it('accepts the complete list and ignores unrelated ordinary class words', () => {
+    expect(findPartialEnumerations(at('Commentable classes: app, knowledge, personal, group, system; private is refused.'))).toEqual([]);
+    expect(findPartialEnumerations(at('An app has personal and group data.', 'other'))).toEqual([]);
+  });
+});
+
+describe('#2304 reserved object-field list', () => {
+  it('does not let an incidental type example hide an omitted reserved field', () => {
+    const doc = 'type Mutation { "Reserved object field names: id; type is the collection argument." createObject: String }';
+    expect(findPartialEnumerations(doc)).toMatchObject([
+      { coord: 'Mutation.createObject', set: 'RESERVED_OBJECT_KEYS', missing: ['type'] },
+    ]);
+  });
+
+  it('accepts the live reserved list and ignores other uses of id/type', () => {
+    expect(findPartialEnumerations('type Mutation { "Reserved object field names: id, type; both refused." createObject: String }')).toEqual([]);
+    expect(findPartialEnumerations('type Query { "An id field and a type name." other: String }')).toEqual([]);
+  });
+});

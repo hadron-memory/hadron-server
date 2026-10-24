@@ -12,6 +12,7 @@
 //   - `email_verified` may arrive as the STRING "true" (documented Apple
 //     quirk); accepted here, deliberately NOT loosened in the Google verifier.
 
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 import {
   jwtVerify,
   createRemoteJWKSet,
@@ -290,7 +291,6 @@ function getAppleCallbackUrl(): string {
   // redirect URI (see findings:oauth-mcp-https-discovery-bug). NOTE: Apple
   // refuses localhost/http return URLs at registration time, so real
   // round-trips in dev need a tunnel with BASE_URL set to its origin.
-  const base =
-    process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
+  const base = getProjectBaseUrl();
   return `${base}/auth/apple/callback`;
 }

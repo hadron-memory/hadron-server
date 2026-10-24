@@ -764,10 +764,11 @@ model Memory {
   /// (CHECK chk_personal_visibility_user): `class IN ('personal','private')`
   /// ⇔ `userId IS NOT NULL`.
   userId                String? @map("user_id")
-  /// Legacy 005 Agent-pivot for personal memories. **Retained for
-  /// backward-compat queries** (008 R-3); not consulted by post-008
-  /// access-control, which uses `appId` directly. A future cleanup
-  /// spec may collapse it.
+  /// Agent pivot used by live access-control and memory classification.
+  /// With a calling App, legacy personal/private rows with appId NULL require
+  /// this Agent installed; agent-scoped AgentSubscription checks use this Agent too.
+  /// Marks per-user/session/anonymous holdings for exclusion from shared App/team
+  /// memory folds. Free-standing personal/private memories leave this and appId NULL.
   userMemoryOfAgentId   String? @map("user_memory_of_agent_id")
   /// #723 — the IDENTITY of an App's `shared` app-class memory: the Agent whose
   /// shared space this is, under `appId`. Set ONLY on that runtime memory (NULL
@@ -891,6 +892,8 @@ model Memory {
   syncStatus           SyncStatus        @default(PENDING) @map("sync_status")
   /// Error message from the last failed sync.
   syncError            String?           @map("sync_error")
+  /// Versioned last completed sync outcome; null after a clean sync (or before any sync).
+  lastSyncReport       String?           @map("last_sync_report")
   /// Number of live unresolved PendingEdge records whose live source is in
   /// this memory (a derived projection, denormalized for dashboard display).
   pendingEdgeCount     Int               @default(0) @map("pending_edge_count")
@@ -1138,29 +1141,30 @@ model Asset {
 /// `baragaun.com:secureid:auth:tokens`) and **not stored**. `id` is
 /// optional in YAML; the server assigns it on import if missing.
 ///
-/// **Node types** define the node's role in the memory:
-///   - `info` (default)  — living knowledge: specs, guides, facts.
-///                         Shown in tree, normal search priority.
-///   - `abstract`        — condensed knowledge: summaries, TL;DRs,
-///                         paper abstracts. Highest search priority.
-///                         May be the only representation if the source
-///                         is archived.
-///   - `reference`       — external source: papers, URLs, legislation,
-///                         books. Carries metadata (DOI, ISBN, URL) in
-///                         `data`.
-///   - `record`          — immutable history: chat messages, session
-///                         logs. Hidden in tree by default, low search
-///                         priority.
-///   - `system`          — agent configuration: conversation designs,
-///                         stages, prompt templates, partials. Hidden
-///                         in tree, excluded from search.
+/// **Node types** — the authoritative canonical list for ordinary nodes:
+///   - `abstract`        — agent-generated summaries (chat summaries,
+///                         topic abstracts); searched first by retrieval flows.
+///   - `chat`            — chat session and message nodes.
+///   - `data`            — the structured payload is the artifact, with no
+///                         human-authored content body.
+///   - `info` (default)  — reference content: articles, guides, extracted facts;
+///                         the default for user-authored knowledge.
+///   - `prompt`          — system prompt content for an LLM call.
+///   - `record`          — append-mostly stored data: user profiles, session
+///                         logs, append-only event logs.
+///   - `reference`       — external sources or cross-memory pointers: papers,
+///                         URLs, legislation, asset references.
+///   - `system`          — agent-internal configuration: conversation designs,
+///                         stages, topics; typically in an Agent's system
+///                         memory and hidden from end-user search.
+/// `comment` is platform-reserved for governed feedback (see `commentMeta`);
+/// the canonical ordinary-node list is not a closed set of stored values.
 /// (The earlier `asset` node-type was promoted to its own Asset table
 /// in spec 004-asset-upload.)
 ///
-/// **Column type is `String` (not enum)** because the running schema
-/// pre-dates the formalization; the intended-values list above is the
-/// contract — tightening to a Prisma enum is reserved for a future
-/// cleanup spec.
+/// **Column type is free-form `String` (not enum)** to preserve extensibility
+/// for third-party agents and apps: no Prisma enum or DB CHECK constraint.
+/// Hadron core does not special-case non-canonical third-party values.
 ///
 /// **Chat-root `data.scope`** (spec 017, 2026-05-12) — chat-root nodes
 /// (loc `chats:<id>`, depth 2, nodeType `record`) carry a `scope` field

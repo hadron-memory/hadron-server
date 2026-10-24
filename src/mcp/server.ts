@@ -2470,6 +2470,17 @@ export function createMcpServerInstance(
   // in logs / client traces see the migration trend.
   let engagedWithNewSurface = false;
 
+  /** Restore connection selection without auto-selecting or requiring one (#1597). */
+  function restoreSelectedApp(): void {
+    if (auth.appId || !auth.userId) return;
+    const sid = getSessionId();
+    const sel = sid ? activeAppByMcpSession.get(sid) : undefined;
+    if (sel) {
+      auth.appId = sel.appId;
+      auth.organizationId = sel.organizationId ?? undefined;
+    }
+  }
+
   /**
    * Spec 026 — resolve the active App for an App-scoped tool call.
    * Returns `null` when the caller can proceed (auth.appId set, possibly
@@ -2481,18 +2492,10 @@ export function createMcpServerInstance(
    * checks downstream pass without per-tool plumbing.
    */
   function requireAppScope(): AppSelectionErrorEnvelope | null {
+    restoreSelectedApp();
     if (auth.appId) return null;
     if (!auth.userId) return null; // truly unauth — let existing checks handle it
-
     const sid = getSessionId();
-    if (sid) {
-      const sel = activeAppByMcpSession.get(sid);
-      if (sel) {
-        auth.appId = sel.appId;
-        auth.organizationId = sel.organizationId ?? undefined;
-        return null;
-      }
-    }
 
     if (cachedAppResolution?.kind === 'multi-app') {
       // TODO(US3 — revocation cascade): cachedAppResolution is captured at
@@ -6047,7 +6050,7 @@ export function createMcpServerInstance(
       const createSeq =
         seq !== undefined
           ? seq
-          : existing == null
+          : existing == null && !loc.includes(':')
             ? await nextSiblingSeq(db, memoryId, loc)
             : null;
 
@@ -6313,8 +6316,13 @@ export function createMcpServerInstance(
           const revivedPendingAt = pre?.deletedAt
             ? pendingAtForRevival(pre.embeddingPendingAt, memoryIsVectorIndexed(indexed!))
             : undefined;
+          // #443: nested siblings already share the held immediate-parent key.
+          // Allocate on this writing transaction only after that wait.
+          const nestedSeq = seq === undefined && existing == null && loc.includes(':')
+            ? await nextSiblingSeq(tx, memoryId, loc) : null;
           const written = await tx.node.upsert({
             ...upsertArgs,
+            create: { ...upsertArgs.create, ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
             // Resurrect (#543) on the authoritative row, not the stale probe: a
             // tombstone that appeared after it would otherwise stay flagged
             // deleted while taking the new content.
@@ -7213,9 +7221,16 @@ export function createMcpServerInstance(
           `(${result.skipCounts.governed} governed, ` +
           `${result.skipCounts.protectedAddress} protected address).`;
 
-        return textResult(
-          lines.length ? `${header}\n${coverage}\n${lines.join('\n')}` : `${header}\n${coverage}`,
-        );
+        // #2285: explain the existing aggregate skip, without inferring or
+        // exposing a selected node's kind or changing the resolver's gates.
+        const guidance: string[] = [];
+        if (result.nodesScanned === 0 && result.nodesSkipped > 0) {
+          guidance.push('Selected nodes were skipped before text scanning; 0 scanned does not mean those selected nodes were not found.');
+        }
+        if (result.skipCounts.governed > 0) {
+          guidance.push('Governed nodes require their own update door: tasks use hadron_update_task; reviews use hadron_update_review; specs use the CLI hadron spec commands (no MCP spec door). Other governed kinds require their owning operation. Generic full-content node updates are not a workaround.');
+        }
+        return textResult([header, coverage, ...guidance, ...lines].join('\n'));
       } catch (e) {
         return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
       }
@@ -8816,7 +8831,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_start_session',
-    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open until hadron_end_session. Since #1114 the reaper no longer ends a session for inactivity — silence is not evidence of abandonment. What DOES change while it sits idle is how it is DESCRIBED: liveness is derived from recent driving, so a session that remains untouched past its idle window reads as not-live and stops blocking a bind, WITHOUT being ended and with its handoff still unwritten rather than lost. That changes no HOLD: a human-held name stays held until explicit release, so only its holder can bind it again. All subsequent tool calls can reference this session ID for attribution. A worker or agent session also BINDS THIS MCP CONNECTION (DAC): every later node write on it records that Worker / Agent as its author beside you (Node.createdByWorker / updatedByWorker), checked afresh on each call, so ending the session stops it at once; a reconnect starts unbound until you start or name a session again. A host may carry SEVERAL chat sessions over one connection (#1701): binding a second worker there (or starting a plain session) does not displace the first, and once more than one worker has been bound on the connection (a plain session counting as a binding to no worker), even one after another, the server cannot tell which chat session is calling, so every writing tool takes an optional `session` argument — pass the id this call returned on each write, or the write is refused SESSION_AMBIGUOUS rather than credited to the wrong worker. The receipt warns you when this bind made the connection shared. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is actively DRIVING refuses WORKER_TAKEN (#1114: an OPEN session is not necessarily a live one — a session whose most recent activity is outside its idle window is not being driven, so that session does not refuse) with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override. Binding a worker ENDS your own other open sessions on that same worker (#1617), the lapsed ones and any a force displaces: they are marked "superseded by session <new id>" and end WITHOUT a handoff, so write the handoff with hadron_end_session first if one is owed. Do not bind a second session to recover from a context compaction; recover the existing one with hadron_whoami. A LAPSED session of yours does not need a rebind at all: if you hold the name and nobody else is driving the worker, your next team-chat post, read or mark-read through it resumes it.',
+    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open until hadron_end_session. Since #1114 the reaper no longer ends a session for inactivity — silence is not evidence of abandonment. What DOES change while it sits idle is how it is DESCRIBED: liveness is derived from recent driving, so a session that remains untouched past its idle window reads as not-live and stops blocking a bind, WITHOUT being ended and with its handoff still unwritten rather than lost. That changes no HOLD: a human-held name stays held until explicit release, so only its holder can bind it again. All subsequent tool calls can reference this session ID for attribution. A worker or agent session also BINDS THIS MCP CONNECTION (DAC): every later node write on it records that Worker / Agent as its author beside you (Node.createdByWorker / updatedByWorker), checked afresh on each call, so ending the session stops it at once; a reconnect starts unbound until you start or name a session again. A host may carry SEVERAL chat sessions over one connection (#1701): binding a second worker there (or starting a plain session) does not displace the first, and once more than one worker has been bound on the connection (a plain session counting as a binding to no worker), even one after another, the server cannot tell which chat session is calling, so every writing tool takes an optional `session` argument — pass the id this call returned on each write, or the write is refused SESSION_AMBIGUOUS rather than credited to the wrong worker. The receipt warns you when this bind made the connection shared. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App when selected), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; with no App selected, a bare NAME searches only Apps you may bind into: one non-retired match binds, several are listed with App, role and holder and nothing binds. Choose an id or URN to disambiguate; a selected App is never bypassed. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is actively DRIVING refuses WORKER_TAKEN (#1114: an OPEN session is not necessarily a live one — a session whose most recent activity is outside its idle window is not being driven, so that session does not refuse) with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override. Binding a worker ENDS your own other open sessions on that same worker (#1617), the lapsed ones and any a force displaces: they are marked "superseded by session <new id>" and end WITHOUT a handoff, so write the handoff with hadron_end_session first if one is owed. Do not bind a second session to recover from a context compaction; recover the existing one with hadron_whoami. A LAPSED session of yours does not need a rebind at all: if you hold the name and nobody else is driving the worker, your next team-chat post, read or mark-read through it resumes it.',
     SHAPE_HADRON_START_SESSION,
     async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, family, parentSessionId, prevSessionId, workerRef, reportsTo, force, launchGrant }) => {
       // Spec 026 / D-2026-05-21-003 strict tool: session-start needs App
@@ -8832,15 +8847,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // predicate the appRef path runs, so this widens nothing: it lets the
       // resolver's existing branch be reached instead of erroring above it.
       //
-      // A bare NAME still requires App scope — a name is unique only WITHIN an
-      // App (#990), so without one there is nothing to resolve it against, and
-      // guessing across the caller's Apps would resolve one name to several
-      // workers. That caller gets the normal, actionable envelope.
-      const workerRefTrimmed = workerRef?.trim();
-      const workerRefNamesItsApp =
-        !!workerRefTrimmed && (isId(workerRefTrimmed) || hasSchemePrefix(workerRefTrimmed));
-      // #1709: a launch grant names its own worker, and so its App.
-      if (!workerRefNamesItsApp && !launchGrant) {
+      // #1597: any nonblank worker ref delegates to the shared resolver. A
+      // bare name without an App is resolved there across bind-authorized Apps;
+      // id/URN forms retain their own shape dispatch. Plain sessions still need
+      // the existing App-selection behavior.
+      restoreSelectedApp();
+      if (!workerRef?.trim() && !launchGrant) {
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
       }
