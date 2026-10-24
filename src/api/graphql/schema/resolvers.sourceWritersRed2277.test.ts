@@ -122,3 +122,104 @@ describe('#2277 revisions:* creation writer (task 01a166f96535723293fe86497d6f72
     expect(await queuedOnFence(() => M.createRevision(null, { agentId: agent!.id }, as()))).toBe(true);
   });
 });
+
+/**
+ * Rev 4 (Xabat GAPS 6388164140 on rev 3 @89b66f88): the pins the corrected attach is answerable to.
+ * Hold F, start the REAL resolver, REVOKE the caller's authority while it waits, release F. A writer that decided authority
+ * before the wait (today: every family below, which do not even queue) commits; the attach must re-decide authority on the
+ * transaction client AFTER the F wait and refuse with ZERO writes. RED today for the same reason the queue pins are: the
+ * writer never waits, so it has already committed when the revocation lands.
+ */
+async function revokedWhileQueued(op: () => Promise<unknown>): Promise<{ queued: boolean; outcome: 'ok' | 'refused' }> {
+  let release!: () => void;
+  const held = new Promise<void>((r) => { release = r; });
+  let entered!: () => void;
+  const inside = new Promise<void>((r) => { entered = r; });
+  const done = withIncludeHistoryTransaction(db, async (f) => { includeHistoryClient(f); entered(); await held; });
+  await inside;
+  const running = op().then(() => 'ok' as const, () => 'refused' as const);
+  let queued = true;
+  try { await waitForLockWaitersOfType(db, 'advisory', 1, 1_500); } catch { queued = false; }
+  await db.orgMember.deleteMany({ where: { userId: admin.id } });
+  release();
+  await done;
+  return { queued, outcome: await running };
+}
+
+describe('#2277 rev 4 delta A: deciding WRITE-AUTHORITY gate after the F wait (Xylon 00:30 GAPS point 1)', () => {
+  it('createChannel: an admin removed while the writer waits on F is refused, and no root exists', async () => {
+    const { memory } = await sourceFixture('system');
+    const r = await revokedWhileQueued(() => M.createChannel(null, { input: { memoryRef: memory.id, loc: 'chats:rv1', name: 'Rv1' } }, as()));
+    expect(r).toEqual({ queued: true, outcome: 'refused' });
+    expect(await db.node.count({ where: { memoryId: memory.id, loc: { startsWith: 'chats:rv1' } } })).toBe(0);
+  });
+
+  it('deleteChannel: authority is re-decided on the transaction client after F; the Channel and its root stay live', async () => {
+    const { memory } = await sourceFixture('system');
+    const ch = await M.createChannel(null, { input: { memoryRef: memory.id, loc: 'chats:rv2', name: 'Rv2' } }, as());
+    const r = await revokedWhileQueued(() => M.deleteChannel(null, { ref: ch.id }, as()));
+    expect(r).toEqual({ queued: true, outcome: 'refused' });
+    expect((await db.channel.findUniqueOrThrow({ where: { id: ch.id } })).deletedAt).toBeNull();
+    expect(await db.node.count({ where: { memoryId: memory.id, loc: 'chats:rv2', deletedAt: null } })).toBe(1);
+  });
+
+  it('createChannelMessage (postToChannelRoot -> withChatRootLock default runner): refused after F, no message Node written', async () => {
+    const { memory } = await sourceFixture('system');
+    const ch = await M.createChannel(null, { input: { memoryRef: memory.id, loc: 'chats:rv3', name: 'Rv3' } }, as());
+    const r = await revokedWhileQueued(() => M.createChannelMessage(null, { channelRef: ch.id, body: 'hello' }, as()));
+    expect(r).toEqual({ queued: true, outcome: 'refused' });
+    expect(await db.node.count({ where: { memoryId: memory.id, loc: { startsWith: 'chats:rv3:messages:' } } })).toBe(0);
+  });
+
+  it('CONTROL (green): an admin who keeps authority is NOT refused by the attach, scope control in a knowledge memory', async () => {
+    const { memory } = await sourceFixture('knowledge');
+    const ch = await M.createChannel(null, { input: { memoryRef: memory.id, loc: 'chats:rv4', name: 'Rv4' } }, as());
+    await expect(M.createChannelMessage(null, { channelRef: ch.id, body: 'still allowed' }, as())).resolves.toBeTruthy();
+  });
+});
+
+describe('#2277 rev 4 delta B: conflict-safe revisions:* creation and authority after the F wait (Xylon 00:30 GAPS point 2)', () => {
+  it('authority after the wait: an Agent admin removed while createRevision waits on F is refused; neither revision NOR the revisions parent is left (all or nothing)', async () => {
+    const { memory, agent } = await sourceFixture('system');
+    const r = await revokedWhileQueued(() => M.createRevision(null, { agentId: agent!.id }, as()));
+    expect(r).toEqual({ queued: true, outcome: 'refused' });
+    expect(await db.node.count({ where: { memoryId: memory.id, loc: { startsWith: 'revisions' } } })).toBe(0);
+  });
+
+  it('a live gap in the numbering does not collide: rev-1 deleted while rev-2 is live, the next revision is rev-3 (count+1 picks the live rev-2 today)', async () => {
+    const { memory, agent } = await sourceFixture('system');
+    await M.createRevision(null, { agentId: agent!.id }, as());
+    await M.createRevision(null, { agentId: agent!.id }, as());
+    await db.node.updateMany({ where: { memoryId: memory.id, loc: 'revisions:rev-1' }, data: { deletedAt: new Date() } });
+    const r = await M.createRevision(null, { agentId: agent!.id }, as());
+    expect(r.revisionLoc).toBe('revisions:rev-3');
+  });
+
+  it('a tombstoned number is never reused: rev-2 soft-deleted, the next revision does not collide on the loc unique key', async () => {
+    const { memory, agent } = await sourceFixture('system');
+    await M.createRevision(null, { agentId: agent!.id }, as());
+    await M.createRevision(null, { agentId: agent!.id }, as());
+    await db.node.updateMany({ where: { memoryId: memory.id, loc: 'revisions:rev-2' }, data: { deletedAt: new Date() } });
+    const r = await M.createRevision(null, { agentId: agent!.id }, as());
+    expect(r.revisionLoc).toBe('revisions:rev-3');
+  });
+
+  it('two concurrent createRevision both commit with DISTINCT numbers (the count is taken under the path lock, not before it)', async () => {
+    const { memory, agent } = await sourceFixture('system');
+    const [a, b] = await Promise.allSettled([
+      M.createRevision(null, { agentId: agent!.id }, as()),
+      M.createRevision(null, { agentId: agent!.id }, as()),
+    ]);
+    expect([a.status, b.status]).toEqual(['fulfilled', 'fulfilled']);
+    const locs = (await db.node.findMany({ where: { memoryId: memory.id, loc: { startsWith: 'revisions:' }, deletedAt: null }, select: { loc: true } })).map((n) => n.loc).sort();
+    expect(locs).toEqual(['revisions:rev-1', 'revisions:rev-2']);
+  });
+
+  it('CONTROL (green): the revisions parent already existing (concurrent-create outcome) is not an error', async () => {
+    const { memory, agent } = await sourceFixture('system');
+    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'revisions', name: 'revisions', nodeType: 'system' } });
+    const r = await M.createRevision(null, { agentId: agent!.id }, as());
+    expect(r.revisionLoc).toBe('revisions:rev-1');
+    expect(await db.node.count({ where: { memoryId: memory.id, loc: 'revisions' } })).toBe(1);
+  });
+});
