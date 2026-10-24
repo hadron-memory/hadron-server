@@ -33,8 +33,9 @@ let a4: string; // installs only S
 
 async function seedAgent(organizationId: string, over: Record<string, unknown> = {}) {
   const id = generateId();
+  const org = await db.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { urn: true } });
   await db.agent.create({
-    data: { id, name: `Agent ${id}`, urn: `agent-${id}`, organizationId, visibility: 'ORGANIZATION', ...over },
+    data: { id, name: `Agent ${id}`, urn: `${org.urn}:agent-${id}`, organizationId, visibility: 'ORGANIZATION', ...over },
   });
   return id;
 }
@@ -117,6 +118,16 @@ describe('Query.apps(filter.agentId)', () => {
       null, { orgId: orgO, filter: { agentId: agentG } }, ctx({ userId: outsider, roles: ['READER'] }),
     );
     expect(outside).toEqual(EMPTY);
+  });
+
+  it('narrows the platform-admin unscoped list too, and still hides another user’s user-owned App', async () => {
+    const shared = await seedAgent(orgO, { visibility: 'PUBLIC' });
+    const othersOwned = await seedApp(null, { ownerUserId: outsider });
+    await install(a2, shared, new Date('2026-01-03'));
+    await install(othersOwned, shared, new Date('2026-01-03'));
+    const res = await resolvers.Query.apps(null, { filter: { agentId: shared } }, ctx({ userId: admin, roles: ['ADMIN'] }));
+    expect(ids(res)).toEqual([a2]);
+    expect(res.total).toBe(1);
   });
 
   it('paginates the filtered set; limit 0 returns the count only', async () => {
