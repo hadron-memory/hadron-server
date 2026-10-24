@@ -980,6 +980,14 @@ export const typeDefs = `#graphql
     user context) get an empty page. Powers the portal's "My apps".
     """
     ownedByMe: Boolean
+    """
+    #2343 — restricts the list to Apps that install this Agent (the AppAgent
+    join; an App has no separate primary-agent column to match). Accepts an ID
+    or a fully-qualified URN. The Agent must be one the caller can read: an
+    unreadable, deleted, unresolvable or nonexistent Agent yields an empty page,
+    never a not-found or forbidden error. Combines with ownedByMe and orgId.
+    """
+    agentId: ID
   }
 
   """
@@ -3475,6 +3483,11 @@ export const typeDefs = `#graphql
     lastUsedAt: DateTime
     revokedAt: DateTime
     """
+    #2298: when the owner hid this revoked key from their default list; null when
+    visible. Display state only: it never affects validity, revocation or lineage.
+    """
+    hiddenAt: DateTime
+    """
     Issuance identity: portal for direct sign-in issuance, or oauth:<client_id>
     for OAuth issuance. A key minted by a key inherits that credential's
     issuance identity. Powers source labels in the revocation UI.
@@ -5477,7 +5490,8 @@ export const typeDefs = `#graphql
   """
   An event boundary for create/update: exactly one of dateTime (timed) or
   date (YYYY-MM-DD, all-day). A dateTime needs timeZone unless it carries
-  its own UTC offset — a zone-less value is rejected, never guessed.
+  its own UTC offset — a zone-less value is rejected by the calendar tool
+  (validation_error), never guessed.
   """
   input CalendarEventTimeInput {
     dateTime: String
@@ -7412,9 +7426,14 @@ export const typeDefs = `#graphql
     Access is checked by kind: memory records use the memory-record read gate; nodes use the
     readable-memory set; organizations require membership (or platform administration);
     agents admit public visibility or owner/org access; Apps admit owner/org access;
-    workers use the shared worker-read gate. App runs require org access, and node
-    revisions use their captured memory (falling back to the current node's memory).
-    A retired worker still resolves. Dedicated queries can have different refusal shapes.
+    workers use the shared worker-read gate. Users resolve for themselves, a platform
+    administrator, or a caller who shares an organization with them. App runs require org
+    access, and node revisions use their captured memory (falling back to the current
+    node's memory); a retracted comment's revision history resolves only for memory
+    managers. Under impersonation only the support session's shared organization admits
+    organizations, Apps, non-public Agents, workers and App runs, and a user-owned App or
+    non-public Agent is not visible; a PUBLIC Agent still resolves. A retired worker still resolves. The kinds above are checked by kind,
+    not an exhaustive promise. Dedicated queries can have different refusal shapes.
 
     The type prefix is the dispatch key; an untyped root:slug is ambiguous across kinds
     and returns null. The optional #data fragment is supported only for nodes and App runs.
@@ -8395,7 +8414,10 @@ export const typeDefs = `#graphql
     (SC-006). Rejected with UNAUTHENTICATED for AppKey-resolved
     callers (no user in context). Impersonation is refused with Forbidden.
     """
-    myUserApiKeys: [UserApiKey!]!
+    myUserApiKeys(
+      "#2298: include keys the owner hid with setUserApiKeyHidden. Default false."
+      includeHidden: Boolean = false
+    ): [UserApiKey!]!
 
     """
     #1631 PR3: the caller's own passkey records, revoked ones included, newest first. Only the
@@ -9223,9 +9245,12 @@ export const typeDefs = `#graphql
     setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!): WorkerWakeSettings!
     """
     S7 (#2023, R85) — isolate a worker until a time (default 2 hours, at most 7 days; a later time extends, an earlier one shortens).
-    Only a person managing the App or holding the worker, acting as themselves; a worker session (even a manager's), an App key or an
-    impersonation is refused with WORKER_ISOLATION_FORBIDDEN. Never touches the worker's own pause.
-    While S7 activation is off, setting an isolation is refused with WORKER_ISOLATION_UNAVAILABLE; clearing is unaffected.
+    Only a person managing the App or holding the worker, acting as themselves. Refusals, in the order they are checked:
+    an unknown worker, or one the caller cannot read (a pure App key among them), is WORKER_NOT_FOUND; a worker session (even a
+    manager's) is WORKER_ISOLATION_FORBIDDEN; while S7 activation is off, setting an isolation is WORKER_ISOLATION_UNAVAILABLE
+    (clearing is unaffected), so an ordinary person gets this before the manager/holder check; an impersonation that reaches the
+    write is refused FORBIDDEN (read-only); a participant who neither manages the App nor holds the worker is
+    WORKER_ISOLATION_FORBIDDEN. Never touches the worker's own pause.
     """
     isolateWorker(workerRef: String!, until: DateTime): WorkerWakeSettings!
     "S7 — lift an isolation (same audience). Clearing when none is set changes nothing."
@@ -9271,7 +9296,7 @@ export const typeDefs = `#graphql
     #1709 — issue an operation to one of the App's registered hosts (hrn:node:hadronmemory.com:specs:cor:agt:070:05).
     A type outside the closed set is HOST_OPERATION_TYPE_UNKNOWN (hrn:node:hadronmemory.com:specs:cor:agt:070:03), a
     missing, extra or malformed argument BAD_HOST_OPERATION_ARGS. worktree.create and worktree.remove: the worker's
-    holder, the worker it reports to, or whoever manages the App (else HOST_OPERATION_NOT_PERMITTED). worker.start:
+    holder, the worker it reports to directly (not further up the chain), or whoever manages the App (else HOST_OPERATION_NOT_PERMITTED). worker.start:
     whoever manages the App only, with an optional taskId, for a held worker with no live session and no start in
     flight, in a worktree and family the live host registers for it (WORKER_NOT_HELD, WORKER_LIVE,
     WORKER_START_PENDING). worker.end: whoever manages the App only (else HOST_OPERATION_NOT_PERMITTED), naming an open
@@ -9314,7 +9339,7 @@ export const typeDefs = `#graphql
 
     """
     #1705 — assign a task with no assignee — a queued task (pending) or a BACKLOG task: the
-    task's owner, a worker the owner reports to, or whoever manages the App
+    task's owner, a worker the owner reports to, directly or up the reportsTo chain, or whoever manages the App
     (hrn:node:hadronmemory.com:specs:cor:agt:050:09). closeSessionWhenDone, when
     given, replaces the task's value; omitted, the stored value is kept. Assigning a BACKLOG task moves it to
     pending (hrn:node:hadronmemory.com:specs:cor:agt:050:02, #1754). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
@@ -9324,7 +9349,7 @@ export const typeDefs = `#graphql
     assignAgentTask(taskId: ID!, assignee: AgentTaskPartyInput!, closeSessionWhenDone: Boolean): AgentTask!
 
     """
-    #1705 — move a task to another assignee: the task's owner, a worker the owner reports to, or whoever
+    #1705 — move a task to another assignee: the task's owner, a worker the owner reports to, directly or up the reportsTo chain, or whoever
     manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09). A started task stays started; the former
     assignee can no longer move it. Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (no assignee yet, or the same one),
@@ -9354,7 +9379,7 @@ export const typeDefs = `#graphql
 
     """
     #1705 — cancel a pending, started or backlog task: its owner, a worker the owner reports
-    to, or whoever manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09; a backlog task directly,
+    to, directly or up the reportsTo chain, or whoever manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09; a backlog task directly,
     Holger team chat #8150). Refusals:
     TASK_NOT_FOUND, TASK_NOT_OWNER, TASK_ENDED, SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
@@ -9364,7 +9389,7 @@ export const typeDefs = `#graphql
     #1754 — park a queued task in the backlog (hrn:node:hadronmemory.com:specs:cor:agt:050:02): pending
     with no assignee becomes BACKLOG — unassigned, never matched, never waited
     on, no alarms. Whoever may assign a task may park it: its owner, a worker
-    the owner reports to, or whoever manages the App
+    the owner reports to, directly or up the reportsTo chain, or whoever manages the App
     (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (not pending, or an assignee),
     SESSION_NOT_BOUND, APP_UNINSTALLED.
@@ -9375,7 +9400,7 @@ export const typeDefs = `#graphql
     #1754 — make a backlog task ready to be worked
     (hrn:node:hadronmemory.com:specs:cor:agt:050:02): BACKLOG becomes PENDING and the task enters
     the queue. Whoever may assign a task may make it ready: its owner, a worker
-    the owner reports to, or whoever manages the App
+    the owner reports to, directly or up the reportsTo chain, or whoever manages the App
     (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (not backlog), SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
@@ -9990,8 +10015,11 @@ export const typeDefs = `#graphql
     deleteEdge(edgeRef: ID!): Boolean!
 
     """
-    Run a task — a runnable node (isRunnable=true) — identified by a single
-    nodeRef (a node PK or a fully-qualified node URN, hrn:node:<root>:<memory>:<loc>),
+    Render or execute a node identified by a single nodeRef (a node PK or a
+    fully-qualified node URN, hrn:node:<root>:<memory>:<loc>). This explicit-reference
+    operation does not require isRunnable=true. The runnable flag governs by-name
+    task discovery, resolution and listing (hrn:node:hadronmemory.com:specs:cor:api:060:01).
+    The reference is
     resolved by the shared resolveNodeRef (#542). A bare loc without a memory
     is rejected — pass a full URN or an ID. For loose-name matching and
     interactive task selection use the MCP hadron_run_task tool, which
@@ -10701,6 +10729,11 @@ export const typeDefs = `#graphql
     App install or live parent Agent import references it, or a live Agent
     extends it as its base. AgentMemoryItem attachments do not block deletion.
 
+    Also refused with DECISION_CONTAINED (#1641) while the Agent's system memory holds a decision or a
+    decision log: removing the memory would remove them, so the Agent is kept. This guard is live
+    whether or not minted-corpus permanence is enforced; the separate minted-corpus refusal applies only
+    when that enforcement is on.
+
     See hrn:node:hadronmemory.com:specs:cor:dmo:050:14.
 
     Accepts the entity's ID or URN.
@@ -11370,8 +11403,10 @@ export const typeDefs = `#graphql
 
     """
     Spec 049 Phase 4 — soft-delete a Channel AND its chat root together (the
-    protection holds while either exists, so the address stays reserved and a
-    restore brings both back). Host memory write access required. An App's
+    protection holds while either exists). There is no restore: creating a
+    Channel at the same address adopts it and starts clean, so the old
+    transcript does not come back (#1257, #1226). Host memory write access
+    required. An App's
     default Channel is unlinked from the App. ref: its id or its address
     (\`Channel.chatRootUrn\`, #1171).
     """
@@ -12439,6 +12474,15 @@ export const typeDefs = `#graphql
     UNAUTHENTICATED for AppKey-resolved callers.
     """
     revokeUserApiKey(id: ID!): UserApiKey!
+
+    """
+    #2298: hide (or unhide) one of the caller's own REVOKED API keys in the default
+    myUserApiKeys list. Hiding an active key is refused with BAD_USER_INPUT,
+    reason KEY_ACTIVE, and changes nothing. Idempotent: the first hiddenAt is kept.
+    Touches no validity, revocation time, lineage or descendant. Same authority as
+    revokeUserApiKey (own user only; unknown and foreign ids are NOT_FOUND).
+    """
+    setUserApiKeyHidden(id: ID!, hidden: Boolean!): UserApiKey!
 
     """
     005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's

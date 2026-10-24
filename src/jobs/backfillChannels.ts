@@ -13,8 +13,9 @@
  *
  * Roots in SOFT-DELETED memories are swept too (a restored memory must come
  * back protected), and tombstoned roots get TOMBSTONED rows: the address
- * stays reserved and a restore brings the row back with it. Apps that never
- * posted get their default Channel created (eager D-006) in their team-space
+ * stays occupied, and creating a Channel there adopts it and starts clean
+ * (no restore; #1257, #1226). Apps that never posted get their default
+ * Channel created (eager D-006) in their team-space
  * memory — resolved by the canonical team-space resolver, then the Team
  * Agent locator when several qualify; an App that stays ambiguous is
  * reported, not guessed.

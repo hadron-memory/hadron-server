@@ -1,3 +1,4 @@
+import { mcpRequestSessionContext } from './requestSession.js';
 /**
  * #1705 — agent tasks on the MCP surface (cor:agt:050): create, assign,
  * reassign, start, record progress, finish and cancel a task, read one or a
@@ -264,9 +265,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     appKeyId: auth.appKeyId ?? undefined,
-    // An App key's session state is the current request's; anyone else's is the connection's.
-    sessionId: (keyCaller && auth.requestSession ? auth.requestSession.sessionId : auth.sessionId) ?? undefined,
-    sessionBindingRefused: keyCaller && auth.requestSession ? auth.requestSession.refused : auth.sessionBindingRefused,
+    ...mcpRequestSessionContext(auth),
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
     impersonation: auth.impersonation,

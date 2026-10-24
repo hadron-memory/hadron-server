@@ -4046,6 +4046,9 @@ model UserApiKey {
   oauthScopes String[]  @map("oauth_scopes")
   lastUsedAt  DateTime? @map("last_used_at")
   revokedAt   DateTime? @map("revoked_at")
+  /// #2298: the owner hid this REVOKED key from their default list. Display
+  /// state only: never read by authentication, revocation or lineage.
+  hiddenAt    DateTime? @map("hidden_at")
 
   /// Authenticated credential that minted this key (#1253). Null means
   /// direct issuance or unknown legacy ancestry; never inferred/backfilled.

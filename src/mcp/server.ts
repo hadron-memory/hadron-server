@@ -1,3 +1,4 @@
+import { mcpRequestSessionContext } from './requestSession.js';
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
 import { stampEmbeddingObligation } from '../services/embedding/obligation.js';
@@ -8567,7 +8568,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_run_task',
-    "Run a task — a runnable node (isRunnable=true) — by loose name, without a fully-qualified URN. Give `task` (and optionally `memory`); the server resolves both against what you can read and runs the match. When a name is ambiguous or omitted you get a list to choose from (an interactive picker where the client supports it, otherwise a numbered list to re-invoke with `urn`). Pass a fully-qualified `urn` to skip resolution and run directly. By DEFAULT this RENDERS the task — returns the assembled instructions ({{arg}} substitution + inlined dependencies) for YOU to execute. Pass `appRef` to EXECUTE server-side instead (#529): the server mints a MANUAL app run and returns the run id to poll. Spec cor:api:060.",
+    "Render or execute a node. By-name task discovery, resolution and listing require isRunnable=true (hrn:node:hadronmemory.com:specs:cor:api:060:01); an explicit fully-qualified `urn` skips resolution and does not require that flag. Give `task` (and optionally `memory`); the server resolves both against what you can read and runs the match. When a name is ambiguous or omitted you get a list to choose from (an interactive picker where the client supports it, otherwise a numbered list to re-invoke with `urn`). Pass a fully-qualified `urn` to skip resolution and run directly. By DEFAULT this RENDERS the task — returns the assembled instructions ({{arg}} substitution + inlined dependencies) for YOU to execute. Pass `appRef` to EXECUTE server-side instead (#529): the server mints a MANUAL app run and returns the run id to poll. Spec cor:api:060.",
     SHAPE_HADRON_RUN_TASK,
     async (rawArgs) => {
       // createTestableMcpServer bypasses zod — normalize args defensively.
@@ -10774,8 +10775,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         userId: auth.userId ?? undefined,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
-        sessionId: auth.sessionId ?? undefined,
-        sessionBindingRefused: auth.sessionBindingRefused,
+        ...mcpRequestSessionContext(auth),
         roles: auth.roles as Context['roles'],
         organizationId: auth.organizationId ?? undefined,
       };
@@ -11728,11 +11728,10 @@ async function handleKnownMcpSession(
     // Credential resolution re-reads the live user after the liveness check
     // above. A demotion between those reads must win before tool dispatch.
     active.auth.roles = presented.roles ?? [];
-    // An App key carries no session of its own across requests: THIS request's header (valid, or named and refused)
-    // is what the wake tools' session-bound refusal reads, not the one the transport opened with (#1749, N5).
-    if (active.auth.appKeyId) {
-      active.auth.requestSession = { sessionId: presented.sessionId, refused: presented.sessionBindingRefused === true };
-    }
+    // #2123: every principal's session-sensitive consumers receive THIS
+    // request's binding result, under the same credential/request lock through
+    // dispatch. Keep initialization refusal and retained actor state intact.
+    active.auth.requestSession = { sessionId: presented.sessionId, refused: presented.sessionBindingRefused === true };
     await publishConnectionActor(sessionId, presented, req.headers['x-hadron-session'] !== undefined);
     await active.transport.handleRequest(req, res, req.body);
   } finally {

@@ -1,3 +1,4 @@
+import { mcpRequestSessionContext } from './requestSession.js';
 /**
  * #2022 (S6) — stop signals on the MCP surface (cor:agt:090): set, lift and list. Each tool is a thin call into the
  * SAME resolvers GraphQL serves (`resolvers.stopSignal.ts`), so the gates and refusal codes are one.
@@ -106,8 +107,7 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     appKeyId: auth.appKeyId ?? undefined,
-    sessionId: (auth.requestSession ? auth.requestSession.sessionId : auth.sessionId) ?? undefined,
-    sessionBindingRefused: auth.requestSession ? auth.requestSession.refused : auth.sessionBindingRefused,
+    ...mcpRequestSessionContext(auth),
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
     impersonation: auth.impersonation,
