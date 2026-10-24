@@ -69,6 +69,7 @@ import { taskWarningsPlugin } from './api/graphql/taskWarningsPlugin.js';
 import { requireOrgRole, requireSessionWriteAccess } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
 import { querySourceCap, readGraphqlAdmissionConfig } from './api/graphql/admission.js';
+import { complexityAdmissionPlugin } from './api/graphql/admissionComplexity.js';
 import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
 import {
   formatGraphQLError,
@@ -1227,12 +1228,18 @@ export async function createServer(): Promise<Express> {
   // hadron-internal#3 L1-L3: fleet-wide bounds on every client-supplied document,
   // read here so a malformed value refuses boot.
   const admission = readGraphqlAdmissionConfig();
+  // The effective L4 configuration, on one line, so ops can confirm the mode a deploy actually booted with.
+  console.log(JSON.stringify({
+    event: 'graphql.admission.config', mode: admission.complexityMode, maxDepth: admission.maxDepth,
+    maxCost: admission.maxCost, listFactor: admission.listFactor, maxQueryBytes: admission.maxQueryBytes,
+    maxTokens: admission.maxTokens, maxSelections: admission.maxSelections,
+  }));
   const apollo = new ApolloServer({
     // #2087: concealed errors must not depend on the deployment's NODE_ENV.
     includeStacktraceInErrorResponses: false,
     typeDefs,
     resolvers: deploymentResolvers,
-    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin],
+    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, complexityAdmissionPlugin(admission)],
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.
     formatError: formatGraphQLError,
