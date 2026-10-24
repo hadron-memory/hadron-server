@@ -31,7 +31,12 @@ export const CLONE_SOURCE_CHANGED = { graphqlCode: 'CONFLICT', reason: 'AGENT_CL
 
 export type CloneAudience =
   | { kind: 'org'; orgId: string; ctx: Context }
-  | { kind: 'outsider'; ctx: Context };
+  /**
+   * `reader` is the principal whose reads decide the blockers (an organisation with no relation to the
+   * source); `ctx` is who reads the answer and is the only principal a subject is named to. They are two
+   * people for S2's field, so neither can stand in for the other (#2246).
+   */
+  | { kind: 'outsider'; ctx: Context; reader: Context };
 
 export type CloneBlocker = {
   code: CloneBlockerCode;
@@ -93,11 +98,12 @@ export async function cloneBlockers(db: Db, sourceAgentId: string, audience: Clo
   });
   const encrypted: CloneBlocker['subjects'] = [];
   const unreadable: CloneBlocker['subjects'] = [];
+  const blockReader = audience.kind === 'outsider' ? audience.reader : audience.ctx;
   for (const [position, { memory }] of links.entries()) {
-    const readable = await canReadMemoryRecord(audience.ctx, memory);
-    const subject = { position, ...(readable ? { name: memory.name } : {}) };
+    const nameable = await canReadMemoryRecord(audience.ctx, memory);
+    const subject = { position, ...(nameable ? { name: memory.name } : {}) };
     if (memory.isEncrypted) encrypted.push(subject);
-    else if (!readable) unreadable.push(subject);
+    else if (!(blockReader === audience.ctx ? nameable : await canReadMemoryRecord(blockReader, memory))) unreadable.push(subject);
   }
   if (encrypted.length) out.push(blocker(CLONE_BLOCKER_CODES.LINKED_MEMORY_ENCRYPTED, encrypted));
   if (unreadable.length) out.push(blocker(CLONE_BLOCKER_CODES.LINKED_MEMORY_UNREADABLE, unreadable));
@@ -119,7 +125,7 @@ export async function cloneBlockers(db: Db, sourceAgentId: string, audience: Clo
 }
 
 /** The cor:dmo:050:13 manage gate as a boolean. */
-async function manages(ctx: Context, agent: { organizationId: string | null; ownerUserId: string | null }): Promise<boolean> {
+export async function manages(ctx: Context, agent: { organizationId: string | null; ownerUserId: string | null }): Promise<boolean> {
   try {
     await requireAgentAccess(ctx, agent, 'ADMIN');
     return true;

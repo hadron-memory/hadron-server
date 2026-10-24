@@ -872,8 +872,10 @@ async function writeNodeCoreRaw(
       // list: with no explicit seq it inherits max(sibling seq)+1 and lands at
       // the end. Create-only; an explicit input.seq always wins; an unordered /
       // empty sibling list leaves seq null (nextSiblingSeq returns null).
+      // #443: roots retain the old behavior; nested allocation waits for the
+      // existing parent lock inside the writing transaction below.
       const seqForCreate =
-        existing == null && input.seq == null
+        existing == null && input.seq == null && !input.loc.includes(':')
           ? await nextSiblingSeq(ctx.db, input.memoryId, input.loc)
           : undefined;
 
@@ -1600,8 +1602,13 @@ async function writeNodeCoreRaw(
             if (authoritative) {
               await assertNoMintedSpecUnmark(tx, input.memoryId, [markerChange(authoritative.id)], 'overwrite');
             }
+            // #443: the existing ancestor set includes the immediate parent.
+            // READ COMMITTED now sees the prior parent's holder commit.
+            const nestedSeq = existing == null && input.seq == null && input.loc.includes(':')
+              ? await nextSiblingSeq(tx, input.memoryId, input.loc) : null;
             const upserted = await tx.node.upsert({
               ...upsertArgs,
+              create: { ...upsertArgs.create, ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
               update: {
                 ...upsertArgs.update,
                 // #1326 — this arm OVERWRITES an existing row. For a copy

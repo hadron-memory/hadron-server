@@ -101,6 +101,32 @@ beforeEach(async () => {
   memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'team-shared' }, as());
 });
 
+describe('#1728 Channel roots cannot squat decision-code space', () => {
+  it.each([0, 1])('refuses the next code after %i decisions without consuming it', async (issued) => {
+    const log = await createLog();
+    for (let i = 0; i < issued; i++) await ask(log.row.id);
+    const code = issued === 0 ? 'DA' : 'DB';
+    const loc = `decisions:${code}`;
+    const beforeChannels = await db.channel.count({ where: { memoryId: memory.id } });
+    expect(await codeOf(M.createChannel(null, {
+      input: { memoryRef: memory.id, loc, name: 'Squatter' },
+    }, as(writer.id)))).toBe('DECISION_CONTAINED');
+    expect(await db.channel.count({ where: { memoryId: memory.id } })).toBe(beforeChannels);
+    expect(await db.node.count({ where: { memoryId: memory.id, loc: { in: [loc, `${loc}:messages`] } } })).toBe(0);
+    const decision = await ask(log.row.id);
+    expect(D.code(decision, {}, as())).toBe(code);
+  });
+
+  it('still permits a Channel outside the decision log', async () => {
+    await createLog();
+    const channel = await M.createChannel(null, {
+      input: { memoryRef: memory.id, loc: 'discussion', name: 'Discussion' },
+    }, as(writer.id));
+    expect(channel).toBeTruthy();
+    expect(await db.channel.count({ where: { memoryId: memory.id } })).toBe(1);
+  });
+});
+
 describe('createDecisionLog (§3.3, §6.1)', () => {
   it('memory MANAGE creates a governed decision.log; writers and outsiders cannot', async () => {
     expect(await codeOf(createLog({}, writer.id))).toBe('DECISION_FORBIDDEN');

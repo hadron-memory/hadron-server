@@ -249,6 +249,8 @@ export async function backfillChannels(db: PrismaClient, opts: { apply: boolean 
     }
     report.defaultsProvisioned += 1;
     if (opts.apply) {
+      // A refused provisioning (including DECISION_CONTAINED) aborts this run;
+      // prior items are committed separately. Fix the placement before retrying.
       await ensureChannelWithRoot(db, {
         memoryId,
         loc: TEAM_CHAT_LOC,

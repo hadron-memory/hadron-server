@@ -23,6 +23,7 @@
  * ceremony steps (PR2 register, PR3 revoke); the step that consumes clears the cookie with
  * {@link clearCeremonyBrowserCookie}.
  */
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 import { createHash, randomBytes } from 'node:crypto';
 import express, { type Express, type Request, type RequestHandler, type Response } from 'express';
 import rateLimit from 'express-rate-limit';
@@ -210,7 +211,7 @@ export function mountFreshSignInRoutes(
         const user = await db.user.findFirst({ where: { email, deletedAt: null }, select: { id: true, email: true } });
         if (user?.email) {
           const { token } = await startEmailSignIn(db, { userId: user.id, browserNonceHash });
-          const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
+          const baseUrl = getProjectBaseUrl();
           await sendCeremonySignInLink(user.email, `${baseUrl}${FRESH_SIGN_IN_EMAIL_VERIFY_PATH}?token=${token}`);
         }
       } catch (err) {

@@ -1,3 +1,4 @@
+import { poolDatasourceUrl } from './poolUrl.js';
 import { workerReferenceError } from '../../lib/workerReferenceError.js';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
@@ -51,7 +52,8 @@ const MODELS_WITHOUT_ID = new Set<string>([
   'WorkerWakeAck',
 ]);
 
-const basePrisma = new PrismaClient();
+const datasourceUrl = poolDatasourceUrl(process.env.DATABASE_URL, process.env);
+const basePrisma = new PrismaClient(datasourceUrl === undefined ? undefined : { datasourceUrl });
 
 type NodeData = Record<string, unknown>;
 
