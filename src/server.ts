@@ -86,6 +86,7 @@ import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
+import { startAssetBytesSweepLoop } from './jobs/sweepAssetBytes.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
 import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startPendingEdgePromotionSweepLoop } from './jobs/promotePendingEdges.js';
@@ -1966,6 +1967,16 @@ export async function createServer(): Promise<Express> {
     process.env.DISABLE_ASSET_ORPHAN_SWEEP !== 'true'
   ) {
     startOrphanObjectReaperLoop(db);
+  }
+
+  // Background job (#1140): hourly bounded sweep for Asset rows whose bytes are
+  // missing from object storage — the mirror of the orphan sweep. Read-only
+  // against the store; raises the `asset.bytes_missing` alarm.
+  if (
+    process.env.NODE_ENV !== 'test' &&
+    process.env.DISABLE_ASSET_BYTES_SWEEP !== 'true'
+  ) {
+    startAssetBytesSweepLoop(db);
   }
 
   // Background job (#930, narrowed by #1114): end sessions past `expiresAt`,

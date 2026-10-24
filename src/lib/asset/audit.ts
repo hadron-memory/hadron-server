@@ -21,6 +21,7 @@ export type AssetOperation =
   | 'purged'
   | 'orphan-reaped'
   | 'orphan-skipped'
+  | 'bytes-missing'
   | 'scan-flipped'
   | 'public-link-set';
 

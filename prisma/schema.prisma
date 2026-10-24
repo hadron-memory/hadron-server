@@ -1100,6 +1100,13 @@ model Asset {
   /// pending (CLEAN, or BLOCKED with bytes confirmed gone). Every
   /// sweep touch pushes it forward, so no row can monopolize a batch.
   scanDueAt     DateTime?       @map("scan_due_at")
+  /// When the bytes-missing row sweep (#1140) last examined this row.
+  /// NULL = never. It is the sweep's persisted cursor (least-recently
+  /// examined first, NULLs first), so a restart resumes instead of
+  /// re-walking the same head of the table. A deferral (encrypted memory
+  /// with no cached session key) stamps it too, so such a row rotates
+  /// behind other work; a failed store lookup does NOT.
+  bytesCheckedAt DateTime?      @map("bytes_checked_at")
   /// Optional; agent- or user-provided.
   description   String?
   uploadedAt    DateTime        @default(now()) @map("uploaded_at")
@@ -1121,6 +1128,8 @@ model Asset {
   @@index([memoryId, scanStatus, uploadedAt(sort: Desc)])
   // #896 — the scan sweep's selector (due rows, oldest due first).
   @@index([scanDueAt])
+  // #1140 — the bytes-missing row sweep's cursor (least-recently examined first).
+  @@index([bytesCheckedAt])
   // 006-asset-upload-redesign: two partial indexes for staged assets
   // (WHERE memory_id IS NULL) live in the migration SQL only — Prisma
   // schema syntax can't express WHERE clauses on @@index. See
