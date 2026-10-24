@@ -5949,11 +5949,11 @@ export const typeDefs = `#graphql
 
     A tool-loop call that is REJECTED (a provider or transport error, a tool
     denied by policy, a handler that threw, hadron_fail) counts the steps the
-    SDK had already completed, once: the provider billed them. The step that
-    failed is not counted, because its usage is unavailable, so such a run can
-    still under-report by that one step. A rejection before any step completed
-    counts nothing, and unknown is never recorded as zero. Do not treat this as
-    a billing figure.
+    SDK had already completed, once: the provider billed them. Usage the SDK
+    did not report is not counted: the step that failed, and any completed step
+    without token counts. Such a run can still under-report. A rejection before
+    any step completed counts nothing, and unknown is never recorded as zero.
+    Do not treat this as a billing figure.
 
     NULL means UNKNOWN: a run minted before the counter existed, with no hop
     trail to back-fill from. 0 means it genuinely spent nothing.

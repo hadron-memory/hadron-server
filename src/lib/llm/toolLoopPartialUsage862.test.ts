@@ -93,6 +93,16 @@ describe('generateWithTools partialUsage on a rejected call (#862)', () => {
     expect(err.partialUsage).toEqual({ tokensIn: 10, tokensOut: 2, measuredSteps: 1 });
   });
 
+  it('a reused provider error carries only the current call’s steps: none when this call measured none', async () => {
+    const shared = new LlmInvocationError('model refused', 'anthropic', false);
+    script(callStep('t', '1', { inputTokens: 10, outputTokens: 2 }), shared);
+    expect((await caught(run(okTool))).partialUsage).toEqual({ tokensIn: 10, tokensOut: 2, measuredSteps: 1 });
+    script(shared); // the same instance, rejected before any step completes
+    const again = await caught(run(okTool));
+    expect(again).toBe(shared);
+    expect('partialUsage' in again).toBe(false);
+  });
+
   it('a handler throw keeps its ToolExecutionError class and cause and carries the steps', async () => {
     const boom = new Error('boom');
     script(callStep('t', '1', { inputTokens: 10, outputTokens: 2 }), textStep({ inputTokens: 1, outputTokens: 1 }));

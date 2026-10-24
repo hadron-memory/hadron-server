@@ -493,6 +493,9 @@ export async function generateWithTools(
   // #862: usage of the steps the SDK reports complete, for a rejected call.
   const measured: Array<{ tokensIn: number; tokensOut: number }> = [];
   const withMeasuredUsage = <E extends Error>(err: E): E => {
+    // The usage belongs to THIS invocation: an error instance thrown again by a
+    // later call (a reused provider error) must not carry the last call's steps.
+    if (measured.length === 0) delete (err as E & { partialUsage?: PartialUsage }).partialUsage;
     if (measured.length > 0) {
       (err as E & { partialUsage?: PartialUsage }).partialUsage = {
         tokensIn: measured.reduce((n, step) => n + step.tokensIn, 0),

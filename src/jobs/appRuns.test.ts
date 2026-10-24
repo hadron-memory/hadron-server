@@ -726,6 +726,23 @@ describe('executeAppRun — edge-walking loop (plan-multi-node)', () => {
       expect(after.tokensSpent).toBe(35);
     });
 
+    it('an accounting fault keeps the original failure and charges nothing twice', async () => {
+      await script(call('t', '1', 10, 2), call('t', '2', 20, 3), providerError);
+      const run = await mint();
+      const d = await realDeps([readOnly()]);
+      const broken = new Proxy(db, {
+        get: (target, key) => (key === 'quotaCounter'
+          ? new Proxy({}, { get: () => async () => { throw new Error('quota store down'); } })
+          : Reflect.get(target, key)),
+      });
+      const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      expect(await executeAppRun(broken as never, run.id, d)).toBe('failed');
+      quiet.mockRestore();
+      const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect((after.failure as { code?: string }).code).toBe('LLM_FAILED'); // not replaced by the quota fault
+      expect(after.tokensSpent).toBe(35); // persisted once, never retried
+    });
+
     it('charging never resurrects a run that was cancelled mid-hop', async () => {
       await script(call('t', '1', 10, 2), providerError);
       const run = await mint();

@@ -4663,8 +4663,9 @@ model AppRun {
   /// the hop trail where one exists; `actions_spent` has no such signal.
   ///
   /// A rejected tool-loop call counts the steps the SDK had already completed
-  /// (#862); the step that failed is unavailable and is not counted, so such a
-  /// run can still under-report by that one step. See the GraphQL field docs.
+  /// (#862); usage the SDK did not report (the failed step, or a step without
+  /// counts) is not counted, so such a run can still under-report. See the
+  /// GraphQL field docs.
   tokensSpent          Int?                 @default(0) @map("tokens_spent")
   actionsSpent         Int?                 @default(0) @map("actions_spent")
   status               AppRunStatus         @default(PENDING)

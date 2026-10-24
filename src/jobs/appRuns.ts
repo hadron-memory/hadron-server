@@ -964,7 +964,16 @@ async function executeAppRunInner(
         // rejection with no completed step counts nothing (unknown is not zero).
         // Only measured steps become known: this closes #832's gap for those paths.
         const partial = partialUsageOf(err);
-        if (partial) await chargeUsage(partial.tokensIn, partial.tokensOut, resolved.config.provider, resolved.config.model);
+        if (partial) {
+          // An accounting fault must not replace the failure being classified below
+          // (terminal code, transient reset): log it and carry on. A charge is never
+          // retried here, so what was persisted is not counted twice.
+          try {
+            await chargeUsage(partial.tokensIn, partial.tokensOut, resolved.config.provider, resolved.config.model);
+          } catch (chargeErr) {
+            console.error(`[appRuns] run ${runId}: usage of the completed steps was not fully recorded:`, chargeErr instanceof Error ? chargeErr.message : chargeErr);
+          }
+        }
         // Tool-loop terminal errors (plan-tools D-TL-6) — never retried:
         if (err instanceof AutomationPinError) return fail(err.code, err.message);
         if (err instanceof AuthorFailError) {
