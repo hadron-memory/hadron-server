@@ -24,11 +24,11 @@ import { Client } from 'pg';
 import * as fsLoader from '../localFs/loadGraphFromFs.js';
 
 // The durable DTO must describe the actual source decisions, without row IDs.
-async function expectDurableEntry(memoryId: string, entry: Record<string, unknown>, forbiddenId?: string) {
+async function expectDurableEntry(memoryId: string, entry: Record<string, unknown>, forbiddenId?: string, outcome: 'partial' | 'unknown' = 'partial') {
   const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
   expect(memory.syncStatus).toBe('OK');
   const report = JSON.parse(memory.lastSyncReport!);
-  expect(report).toMatchObject({ version: 1, outcome: 'partial' });
+  expect(report).toMatchObject({ version: 1, outcome });
   expect(report.entries).toContainEqual(entry);
   if (forbiddenId) expect(memory.lastSyncReport).not.toContain(forbiddenId);
 }
@@ -1819,7 +1819,7 @@ describe('a file whose path cannot be a loc (#1224)', () => {
     const held = await syncGraphFromGithub(makeGraph());
     warn.mockRestore();
     expect(held.heldMoves).toEqual([`b → a (occupant ${occupantId})`]);
-    await expectDurableEntry(makeGraph().id, { kind: 'held_move', loc: 'a', fromLoc: 'b', code: 'MOVE_HELD' }, occupantId);
+    await expectDurableEntry(makeGraph().id, { kind: 'held_move', loc: 'a', fromLoc: 'b', code: 'MOVE_HELD' }, occupantId, 'unknown');
     expect(await edgesTo(moverId)).toEqual([]);
     rmSync(join(repoRoot(), 'no-id--> evil.md'));
     await syncGraphFromGithub(makeGraph());

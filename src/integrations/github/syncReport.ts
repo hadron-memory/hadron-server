@@ -19,7 +19,11 @@ export interface SyncReport {
   code?: 'SYNC_FAILED' | 'BAD_USER_INPUT';
 }
 
-/** Rebuild the public projection; never serialize caller objects/messages/ids. */
+/**
+ * #1507 / cor:int:010:01: rebuild only the public projection. Unsupported
+ * invalid-loc skips make completion unknown, retaining safe supported entries;
+ * only a completion with no skips is clean. Never serialize messages or IDs.
+ */
 export function committedSyncReport(entries: readonly SyncReportEntry[], now = new Date(), hasUnsupportedSkips = false): string | null {
   if (entries.length === 0 && !hasUnsupportedSkips) return null;
   const publicEntries = entries.map(e => ({ kind: e.kind, loc: e.loc, ...(e.fromLoc === undefined ? {} : { fromLoc: e.fromLoc }), code: e.code }));
