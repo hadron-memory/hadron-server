@@ -61,6 +61,7 @@ type RosterRow = import('../lib/agentTasks/roster.js').RosterEntry & {
   appUrn: string;
   currentTask?: import('../lib/agentTasks/rosterSummary.js').RosterTaskSummary | null;
   pausedUntil?: Date | null;
+  heldBy?: { id: string; handle: string | null; name: string | null } | null;
   checkStatus?: import('../lib/workerCheckStatus.js').WorkerCheckStatus | null;
 };
 /** The seven values of an App's stall schedule (cor:agt:050:14–:17, :10, 070:01, :02), in the order the tools render them. */
@@ -134,6 +135,8 @@ export function renderRosterEntry(r: RosterRow, asOf: Date): string {
     r.lastActiveAt ? `last active ${r.lastActiveAt.toISOString()}` : null,
     // #2138 §3.4
     r.checkStatus ? renderCheckStatusShort(r.checkStatus) : null,
+    // #2223: already behind the working-state and name gates by the time it reaches a row.
+    r.heldBy ? `held by ${r.heldBy.handle ? `@${r.heldBy.handle} (hrn:user:${r.heldBy.handle})` : `user ${r.heldBy.id}`}${r.heldBy.name ? ` ${r.heldBy.name}` : ''}` : null,
   ].filter(Boolean);
   return `${r.name} — ${r.state}: ${facts.join('; ')}`;
 }

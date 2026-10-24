@@ -10,6 +10,7 @@
 //     separate GCP project so login never enters restricted-scope
 //     verification.
 
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 import {
   jwtVerify,
   createRemoteJWKSet,
@@ -249,7 +250,6 @@ function getGoogleCallbackUrl(): string {
   // producing `http://localhost:` — symmetric with github.ts. Behind
   // Cloudflare, BASE_URL (not per-request headers) MUST drive the redirect
   // URI (see findings:oauth-mcp-https-discovery-bug).
-  const base =
-    process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
+  const base = getProjectBaseUrl();
   return `${base}/auth/google/callback`;
 }
