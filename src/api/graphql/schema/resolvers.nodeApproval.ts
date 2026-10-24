@@ -11,6 +11,7 @@ import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveNodeUrnField, resolveRevisionEditor, typeResolvers } from './resolvers.types.js';
 import { withAuthorizedMemoryTx } from './authorizedTx.js';
 import { memoryAuthorityAnchors } from './installMemory.js';
+import { inMintScopeSql } from '../../../lib/mintScope.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -237,9 +238,9 @@ export const nodeApprovalMutations = {
   },
 
   /**
-   * #1591 — approve the current revision of every live, UNMINTED node of a
-   * memory that isn't approved yet, in one transaction. Placeholders are
-   * skipped and reported.
+   * #1591 — approve the current revision of every live node of a memory in
+   * the mint scope (unminted, or minted and changed since, #1612) that isn't
+   * approved yet, in one transaction. Placeholders are skipped and reported.
    */
   approveMemoryNodes: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context) => {
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
@@ -256,10 +257,10 @@ export const nodeApprovalMutations = {
         // #2043 — decided once for the memory, inside this transaction, and applied to each locked row.
         const bootPromptGate = await bootPromptApprovalGate(txCtx, memoryId);
         // Lock in id order, so two bulk approvals cannot deadlock each other.
-        // #1591: only unminted nodes are approved in bulk; a minted node's
-        // later edits are approved one at a time.
+        // #1591, #1612: the nodes the next mint would stamp (unminted, or minted
+        // and edited since / with no recorded revision) are approved in bulk.
         const ids = await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT id FROM nodes WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND minted_at IS NULL
+          SELECT id FROM nodes WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND ${inMintScopeSql}
             AND node_type <> ${COMMENT_NODE_TYPE}
             AND NOT (role IS NOT NULL AND (role = ${DECISION_ROLE} OR role LIKE ${`${DECISION_ROLE}.%`}))
           ORDER BY id FOR UPDATE`;
