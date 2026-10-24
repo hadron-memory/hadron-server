@@ -122,7 +122,10 @@ export function locateIncludeTags(content: string): Array<IncludeTag & { index: 
       else if (p === 'signed' && !settings.signed) settings.signed = true;
       else throw new IncludeSyntaxError(raw, `unknown or repeated setting "${p}"`);
     }
-    if (target.startsWith('hrn:') || target.startsWith('urn:')) {
+    if (target.startsWith('hrn:node:')) {
+      // cor:dmo:150:02 / R78: include URNs use only flat v2, even though
+      // the general URN parser deliberately still accepts legacy aliases.
+      if (target.includes('::')) throw new IncludeSyntaxError(raw, 'target must be a flat v2 node URN');
       try {
         splitNodeUrn(target);
       } catch {

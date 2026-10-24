@@ -33,7 +33,8 @@ interface SpawnResult {
  * hermetic (we explicitly pass through only what's needed to import
  * the entry point).
  */
-async function spawnServer(env: Record<string, string>, timeoutMs = 15_000): Promise<SpawnResult> {
+// Boot retries can consume ~16.563s before cache fallback, plus module startup.
+async function spawnServer(env: Record<string, string>, timeoutMs = 25_000): Promise<SpawnResult> {
   // Spawn `tsx` directly via the resolved binary in node_modules. We used to
   // go through `pnpm exec tsx`, but pnpm 10+ runs an implicit `install`
   // before `exec` and the install was failing on this repo's legacy
@@ -108,10 +109,10 @@ describe('spec 025 FR-006: trust-proxy boot policy', () => {
           PORT: '0',
         });
 
-        // Non-zero exit (1 from unhandled promise rejection in tsx, or
-        // signal from our 15s timeout if the child hung — both
-        // indicate "did not boot cleanly").
-        expect(result.code === null ? result.signal : result.code).not.toBe(0);
+        // Fail closed through the real error, not through our safety timeout.
+        expect(result.signal).toBeNull();
+        expect(result.code).not.toBeNull();
+        expect(result.code).not.toBe(0);
 
         // stderr carries the diagnostic from initCloudflareIps.
         expect(result.stderr).toMatch(/Failed to load Cloudflare IP ranges/);
