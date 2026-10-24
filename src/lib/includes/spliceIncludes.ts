@@ -1,4 +1,4 @@
-import { splitNodeUrn } from '@hadron-memory/urn-lib-js';
+import { includeUrnTarget } from './includeUrnTarget.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { decryptNodeFields } from '../nodeCrypto.js';
 import { sessionKeyCache } from '../sessionKeyCache.js';
@@ -29,7 +29,7 @@ type Target = IncludeTarget;
  * belongs to one request's principal; it is never shared across callers.
  */
 export class IncludeReadMemo {
-  readonly memoryByUrn = new Map<string, Promise<string | null>>();
+  readonly targetIdentityByUrn = new Map<string, ReturnType<typeof includeUrnTarget>>();
   readonly targetByAddress = new Map<string, Promise<Target | null>>();
   readonly revisionByKey = new Map<string, Promise<string | null>>();
 }
@@ -50,17 +50,9 @@ export interface SpliceOptions {
   literalGuard?: string;
 }
 
-export type IncludeDb = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision'>;
+export type IncludeDb = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision' | 'urnAlias'>;
 type Db = IncludeDb;
 
-async function memoryIdOfUrn(db: Db, memo: IncludeReadMemo, urn: string): Promise<string | null> {
-  let hit = memo.memoryByUrn.get(urn);
-  if (!hit) {
-    hit = db.memory.findUnique({ where: { urn }, select: { id: true } }).then(m => m?.id ?? null);
-    memo.memoryByUrn.set(urn, hit);
-  }
-  return hit;
-}
 
 /**
  * Decrypt one sealed field with the memory's cached key. A failure (a key that
@@ -77,14 +69,14 @@ function openSealed(content: string | null, memory: { id: string; isEncrypted: b
 
 /** The stored text of a node the reader may read, or null for missing, deleted, unreadable and keyless-encrypted alike. */
 async function lookupTarget(
-  db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, memoryId: string, loc: string,
+  db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, memoryId: string, loc: string, targetId?: string,
 ): Promise<Target | null> {
-  const key = `${memoryId}\u0000${loc}`;
+  const key = targetId ?? `${memoryId}\u0000${loc}`;
   let hit = memo.targetByAddress.get(key);
   if (!hit) {
     hit = (async () => {
       const node = await db.node.findFirst({
-        where: { memoryId, loc, deletedAt: null, AND: [access] },
+        where: { ...(targetId ? { id: targetId } : { loc }), memoryId, deletedAt: null, AND: [access, { memory: { deletedAt: null } }] },
         select: { id: true, memoryId: true, content: true, revSeq: true, memory: { select: { id: true, isEncrypted: true } } },
       });
       if (!node) return null;
@@ -174,15 +166,20 @@ async function expandTag(
   if (level > MAX_RESOLVE_DEPTH) return BROKEN_INCLUDE_NOTICE;
   let memoryId = includerMemoryId;
   let loc = tag.target;
+  let targetId: string | undefined;
   if (tag.kind === 'urn') {
-    let parts: { memoryUrn: string; loc: string };
-    try { parts = splitNodeUrn(tag.target); } catch { return BROKEN_INCLUDE_NOTICE; }
-    const id = await memoryIdOfUrn(db, memo, parts.memoryUrn);
-    if (!id || (id !== includerMemoryId && !opts.foreign)) return BROKEN_INCLUDE_NOTICE;
-    memoryId = id;
-    loc = parts.loc;
+    let identity = memo.targetIdentityByUrn.get(tag.target);
+    if (!identity) {
+      identity = includeUrnTarget(db, tag.target);
+      memo.targetIdentityByUrn.set(tag.target, identity);
+    }
+    const resolved = await identity;
+    if (!resolved || (resolved.memoryId !== includerMemoryId && !opts.foreign)) return BROKEN_INCLUDE_NOTICE;
+    memoryId = resolved.memoryId;
+    loc = resolved.loc;
+    targetId = resolved.id;
   }
-  const target = await lookupTarget(db, access, memo, memoryId, loc);
+  const target = await lookupTarget(db, access, memo, memoryId, loc, targetId);
   if (!target || trail.has(target.id)) return BROKEN_INCLUDE_NOTICE;
   const selected = await selectIncludeRevision(db, memo, target, tag.settings);
   if (!selected) return BROKEN_INCLUDE_NOTICE;
