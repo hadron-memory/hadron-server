@@ -11106,7 +11106,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
         include: { organization: true },
       });
       if (!memory) return textResult('Memory not found.');
-      if (!memory.source) return textResult('Memory has no source repository configured.');
+      // R206 / cor:sec:040:05: an encrypted memory gets the typed refusal from the sync itself
+      // even with no source, so the no-source reply never reads as a healthy sync.
+      if (!memory.source && !memory.isEncrypted) return textResult('Memory has no source repository configured.');
 
       // Import and call syncGraphFromGithub
       const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
