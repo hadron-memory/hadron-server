@@ -1,6 +1,6 @@
 import { randomBytes } from 'crypto';
 import { GraphQLError } from 'graphql';
-import { lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
+import { AuthoritySnapshotStale, lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
 import { consumeUserMergeConsent, mergeConsentAlreadyApplied } from '../../lib/userMergeConsent.js';
 import { Prisma, type PrismaClient, type User } from '../../generated/prisma/index.js';
 import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js';
@@ -74,7 +74,8 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   secrets: ['created_by', 'updated_by'],
   urn_aliases: ['created_by'],
   users: ['created_by', 'updated_by', 'deleted_by'],
-  workers: ['created_by', 'updated_by'],
+  // #1416 (R204): `retired_by` is the retirer's exact User.id; it follows the survivor like every actor stamp.
+  workers: ['created_by', 'updated_by', 'retired_by'],
   // #1705 — agent tasks. `assigned_by` is the assignment's audit actor.
   agent_tasks: ['created_by', 'updated_by', 'assigned_by'],
   // #1747 — tickers: who made, changed and deleted one; who subscribed a worker; who
@@ -243,7 +244,7 @@ export async function mergeUsers(
     } catch (e) {
       const serialization = isSerializationAbort(e);
       aborted ||= serialization;
-      if ((e instanceof MergeRaceError || serialization) && attempt <= MERGE_RETRIES) {
+      if ((e instanceof MergeRaceError || e instanceof AuthoritySnapshotStale || serialization) && attempt <= MERGE_RETRIES) {
         await waitForSerializationRetry(attempt);
         continue;
       }
@@ -303,6 +304,36 @@ async function refuseUsersInOpenAlarmChains(
   }
 }
 
+/**
+ * #1416: a SERIALIZABLE merge keeps the snapshot it took before it waited on
+ * the source's authority anchor (findings:serializable-advisory-wait-keeps-old-snapshot).
+ * A start, stop or retirement that committed during that wait left impersonation
+ * or worker rows the merge's UPDATEs cannot see. Compare the source's actor-row
+ * set on the transaction and on a second connection (READ COMMITTED, sees the
+ * commit); any difference re-runs the whole merge from a fresh snapshot, inside
+ * {@link MERGE_RETRIES}. The source's anchor is held, so no participating writer
+ * can commit between this read and the rewrites below.
+ */
+async function assertSourceActorRowsFresh(
+  tx: Prisma.TransactionClient,
+  db: PrismaClient,
+  sourceUserId: string,
+): Promise<void> {
+  const rows = Prisma.sql`
+    SELECT row_key FROM (
+      SELECT 'imp:' || id || ':' || coalesce(ended_at::text, '') || ':' || coalesce(ended_by, '') AS row_key
+        FROM impersonation_sessions
+        WHERE admin_user_id = ${sourceUserId} OR target_user_id = ${sourceUserId} OR ended_by = ${sourceUserId}
+      UNION ALL
+      SELECT 'worker:' || id || ':' || coalesce(retired_at::text, '') FROM workers WHERE retired_by = ${sourceUserId}
+    ) AS source_actor_rows ORDER BY row_key`;
+  const snapshot = await tx.$queryRaw<Array<{ row_key: string }>>(rows);
+  const fresh = await db.$queryRaw<Array<{ row_key: string }>>(rows);
+  if (snapshot.length !== fresh.length || snapshot.some((row, i) => row.row_key !== fresh[i].row_key)) {
+    throw new AuthoritySnapshotStale();
+  }
+}
+
 /** The single SERIALIZABLE merge transaction {@link mergeUsers} retries. */
 async function runMergeTxn(
   db: PrismaClient,
@@ -334,6 +365,7 @@ async function runMergeTxn(
       throw new GraphQLError('The source account still holds a passkey. Revoke its passkeys before merging.',
         { extensions: { code: 'MERGE_SOURCE_HAS_PASSKEYS', passkeyCount: livePasskeys } });
     }
+    await assertSourceActorRowsFresh(tx, db, sourceUserId);
     const consent = await consumeUserMergeConsent(tx, consentProof, sourceUserId, targetUserId, actorUserId);
     await refuseUsersInOpenAlarmChains(tx, sourceUserId, targetUserId);
 
@@ -410,6 +442,24 @@ async function runMergeTxn(
     });
 
     await mergeUserOwnedTemplates(tx, sourceUserId, targetUserId);
+
+    // #1416 (R204, cor:api:010:02). Impersonation by or of the source ends here, then the exact source id in
+    // the participant and ender columns follows the survivor. Order matters: a live row is ended BEFORE its
+    // participant is rewritten, so no credential minted for the source ever matches a row naming the survivor.
+    // The decision time is read now, after every wait above, because CURRENT_TIMESTAMP is the transaction's
+    // start: a session that expired while the merge waited is expired-unstamped history, not live. A system
+    // end leaves ended_by NULL (the encoding of markImpersonationRevoked); an ended row keeps its ended_at.
+    // Naive UTC text, like the columns it is compared with: a Date or timestamptz would be read in the session zone.
+    const [{ decided_at: decidedAt }] = await tx.$queryRaw<Array<{ decided_at: string }>>`
+      SELECT (clock_timestamp() AT TIME ZONE 'UTC')::text AS decided_at`;
+    await tx.$executeRaw`UPDATE impersonation_sessions SET ended_at = ${decidedAt}::timestamp
+      WHERE ended_at IS NULL AND expires_at > ${decidedAt}::timestamp
+        AND (admin_user_id = ${sourceUserId} OR target_user_id = ${sourceUserId})`;
+    await tx.$executeRaw`UPDATE impersonation_sessions SET
+        admin_user_id = CASE WHEN admin_user_id = ${sourceUserId} THEN ${targetUserId} ELSE admin_user_id END,
+        target_user_id = CASE WHEN target_user_id = ${sourceUserId} THEN ${targetUserId} ELSE target_user_id END,
+        ended_by = CASE WHEN ended_by = ${sourceUserId} THEN ${targetUserId} ELSE ended_by END
+      WHERE admin_user_id = ${sourceUserId} OR target_user_id = ${sourceUserId} OR ended_by = ${sourceUserId}`;
 
     // Fixed-identifier statements use parameterized tagged `$executeRaw`
     // (review:raw-sql-mutations): the two user ids interpolate as BOUND params,
