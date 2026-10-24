@@ -12,7 +12,7 @@ import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { requestActorStorage, emptyActor } from '../../../lib/requestActor.js';
+import { requestActorStorage, emptyActor, publishAmbiguousActor } from '../../../lib/requestActor.js';
 import { managesApp, managesAppBatch } from '../../../lib/auth/appManagement.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
@@ -40,6 +40,7 @@ let orgMember: string;
 let appOwnerRole: string;
 let userOwner: string;
 let stranger: string;
+let guideMember: string; // org member AND a non-owner member of orgApp
 let orgO: string;
 let orgX: string;
 let orgApp: string; // org-owned, in O
@@ -63,16 +64,19 @@ beforeEach(async () => {
   appOwnerRole = await mkUser('aowner');
   userOwner = await mkUser('uowner');
   stranger = await mkUser('stranger');
+  guideMember = await mkUser('guide');
   orgO = (await db.organization.create({ data: { id: generateId(), name: 'O', urn: `o-${generateId()}` } })).id;
   orgX = (await db.organization.create({ data: { id: generateId(), name: 'X', urn: `x-${generateId()}` } })).id;
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgO, userId: orgAdmin, role: 'ADMIN' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgO, userId: orgMember, role: 'READER' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgO, userId: appOwnerRole, role: 'READER' } });
+  await db.orgMember.create({ data: { id: generateId(), organizationId: orgO, userId: guideMember, role: 'READER' } });
   orgApp = await mkApp({ organizationId: orgO });
   orgApp2 = await mkApp({ organizationId: orgO });
   userApp = await mkApp({ ownerUserId: userOwner });
   foreignApp = await mkApp({ organizationId: orgX });
   await db.appMember.create({ data: { appId: orgApp, userId: appOwnerRole, role: 'owner' } });
+  await db.appMember.create({ data: { appId: orgApp, userId: guideMember, role: 'guide' } });
   await db.appMember.create({ data: { appId: userApp, userId: userOwner, role: 'owner' } });
 });
 
@@ -86,6 +90,10 @@ describe('App.viewerManages — the shared predicate, read as a caller-scoped fa
     const asOwnerRole = await gql(LIST, ctxFor(appOwnerRole));
     expect(fact(asOwnerRole, orgApp)).toBe(true);
     expect(fact(asOwnerRole, orgApp2)).toBe(false);
+
+    // A non-owner App member is a participant, not a manager.
+    const asGuide = await gql(LIST, ctxFor(guideMember));
+    expect(fact(asGuide, orgApp)).toBe(false);
 
     const asMember = await gql(LIST, ctxFor(orgMember));
     expect(fact(asMember, orgApp)).toBe(false);
@@ -131,6 +139,16 @@ describe('App.viewerManages — the shared predicate, read as a caller-scoped fa
     const bound = await requestActorStorage.run({ ...emptyActor(), workerId: generateId() }, () => gql(LIST, ctxFor(orgAdmin)));
     expect(bound.errors).toBeUndefined();
     for (const item of bound.data?.apps.items ?? []) expect(item.viewerManages).toBe(false);
+    // A refused session binding and an ambiguous worker actor are not the direct user either.
+    const refused = await gql(LIST, ctxFor(orgAdmin, { sessionBindingRefused: true }));
+    expect(refused.errors).toBeUndefined();
+    for (const item of refused.data?.apps.items ?? []) expect(item.viewerManages).toBe(false);
+    const ambiguous = await requestActorStorage.run(emptyActor(), () => {
+      publishAmbiguousActor([generateId(), generateId()]);
+      return gql(LIST, ctxFor(orgAdmin));
+    });
+    expect(ambiguous.errors).toBeUndefined();
+    for (const item of ambiguous.data?.apps.items ?? []) expect(item.viewerManages).toBe(false);
     // The same user without the binding is still a manager.
     expect(fact(await gql(LIST, ctxFor(orgAdmin)), orgApp)).toBe(true);
   });
@@ -213,12 +231,16 @@ describe('App.viewerManages — freshness and isolation', () => {
 
 describe('the shared fold: managesApp and managesAppBatch agree on every ownership class', () => {
   it('a platform ADMIN never manages a user-owned App, and the single and batch forms give the same answers', async () => {
+    // A revoked org ADMIN row and a soft-deleted-org admin must not count in either form.
+    const revokedAdmin = await mkUser('revoked');
+    await db.orgMember.create({ data: { id: generateId(), organizationId: orgO, userId: revokedAdmin, role: 'ADMIN', deletedAt: new Date() } });
     const apps = await db.app.findMany({ select: { id: true, organizationId: true, ownerUserId: true } });
-    for (const [userId, roles] of [[platformAdmin, ['ADMIN']], [orgAdmin, ['READER']], [appOwnerRole, ['READER']], [userOwner, ['READER']], [stranger, ['READER']]] as const) {
+    for (const [userId, roles] of [[platformAdmin, ['ADMIN']], [orgAdmin, ['READER']], [appOwnerRole, ['READER']], [guideMember, ['READER']], [revokedAdmin, ['READER']], [userOwner, ['READER']], [stranger, ['READER']]] as const) {
       const caller = { db, userId, roles };
       const batch = await managesAppBatch(caller, apps);
       for (const app of apps) expect(batch.get(app.id), `${userId} on ${app.id}`).toBe(await managesApp(caller, app));
     }
+    expect((await managesAppBatch({ db, userId: revokedAdmin, roles: ['READER'] }, apps)).get(orgApp)).toBe(false);
     const userOwned = apps.find((a) => a.id === userApp)!;
     expect(await managesApp({ db, userId: platformAdmin, roles: ['ADMIN'] }, userOwned)).toBe(false);
     expect((await managesAppBatch({ db, userId: platformAdmin, roles: ['ADMIN'] }, [userOwned])).get(userApp)).toBe(false);
