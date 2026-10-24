@@ -82,7 +82,7 @@ describe('#1346 anonymous encrypted promotion', () => {
     expect(revisions).toHaveLength(1);
     for (const revision of revisions) expect(isAuthenticatedStringEnvelope(revision.content, parseDataKey(dataKey))).toBe(true);
     expect(revisions[0]).toMatchObject({ editedByInfo: 'system:revision-reconcile' });
-    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).revSeq).toBe(revisions[0].revNo + 1);
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).revSeq).toBe(revisions[0].revNo! + 1);
     expect(decryptNodeFieldsWithKey({ ...revisions[0] }, parseDataKey(dataKey)).content).toBe('late edit');
   });
 
@@ -195,7 +195,7 @@ describe('#1346 anonymous encrypted promotion', () => {
             // Memory, forming a cycle when this callback returns.
             writerResult = withTestOperationKey(dataKey, appId, () => resolvers.Mutation.searchReplaceInNodes({}, {
               input: { oldText: 'original', newText: 'bulk edit', nodeIds: [nodeId, second.id], fields: ['content'] },
-            } as never, { db, userId: admin.id, roles: ['ADMIN'] })).then(() => null, error => error);
+            } as never, { db, userId: admin.id, roles: ['ADMIN'] })).then(() => null, (error: unknown) => error);
             await vi.waitFor(async () => {
               const blocked = await db.$queryRaw<Array<{ pid: number }>>`
                 SELECT pid FROM pg_stat_activity
