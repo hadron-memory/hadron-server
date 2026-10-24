@@ -2275,6 +2275,10 @@ export const memoryMutations = {
       // plaintext branch below leaves the App-scoped class untouched.
       if (suppliedKey && !memory.isEncrypted) {
         const key = suppliedKey;
+        // #1346: reconciliation adds per-row work to this atomic conversion.
+        // Match the bulk node writers' explicit processing budget instead of
+        // inheriting Prisma's five-second default. This is not a node limit
+        // or an end-to-end latency guarantee (completion runs after commit).
         await ctx.db.$transaction(async (tx) => {
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
           const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
@@ -2372,7 +2376,7 @@ export const memoryMutations = {
           // transaction, so an interrupted completion pass below cannot leave
           // a live or copied hash behind. Who/when/revision stay.
           await endApprovalsOnEncryptedEntry(tx, { memoryId: resolvedMemoryId });
-        });
+        }, { timeout: 120_000 });
         // Promotion's live-node rewrite does not cover tombstones or prior
         // snapshots. Reuse the bounded completion pass under the verifier we
         // just installed. The owning App can recover an interrupted pass by
