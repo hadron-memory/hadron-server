@@ -640,3 +640,39 @@ it.each(['createMemoryReclaim', 'createAppReclaim'] as const)(
     expect(await db.nodeRevision.findMany({ select: { id: true, nodeId: true, content: true }, orderBy: { id: 'asc' } })).toEqual(history);
   },
 );
+
+it.each(['cloneNode', 'mergeNodes'] as const)(
+  '%s rechecks source authority after waiting while the destination stays writable', async (surface) => {
+    requestRoles = ['READER'];
+    await db.user.update({ where: { id: userId }, data: { roles: requestRoles } });
+    const sourceMemory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const targetOrg = await db.organization.create({ data: { name: 'Destination authority', urn: 'qualification-target.example' } });
+    await db.orgMember.create({ data: { organizationId: targetOrg.id, userId, role: 'ADMIN' } });
+    const targetMemory = await db.memory.create({ data: { organizationId: targetOrg.id, urn: 'qualification-target.example:mem', name: 'Target', class: 'knowledge' } });
+    const source = await db.node.create({ data: { memoryId, loc: 'source-authority', name: 'Source', content: '# Source unchanged' } });
+    const target = await db.node.create({ data: { memoryId: targetMemory.id, loc: 'target-authority', name: 'Target', content: '# Target unchanged' } });
+    const before = await db.node.findMany({ orderBy: { id: 'asc' } });
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const holder = withIncludeHistoryTransaction(db, async () => { entered(); await gate; });
+    await ready;
+    const pending = surface === 'cloneNode'
+      ? resolvers.Mutation.cloneNode(null, { sourceRef: source.id, targetMemoryRef: targetMemory.id }, ctx())
+      : resolvers.Mutation.mergeNodes(null, { input: { source: source.id, target: target.id, include: ['CONTENT'], deleteSource: true } }, ctx());
+    const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1, 1000);
+      // Clone loses source readability; merge retains read but loses source write.
+      await db.orgMember.update({ where: { organizationId_userId: { organizationId: sourceMemory.organizationId!, userId } },
+        data: surface === 'cloneNode' ? { deletedAt: new Date() } : { role: 'READER' } });
+    } finally { release(); await holder; }
+    expect(await outcome).toMatchObject({ error: { extensions: { code: surface === 'cloneNode' ? 'NODE_NOT_FOUND' : 'FORBIDDEN' } } });
+    expect(await db.node.findMany({ orderBy: { id: 'asc' } })).toEqual(before);
+    expect(await db.nodeRevision.count()).toBe(0);
+    // The independent destination membership was never revoked.
+    expect(await db.orgMember.findUniqueOrThrow({ where: { organizationId_userId: { organizationId: targetOrg.id, userId } } }))
+      .toMatchObject({ role: 'ADMIN', deletedAt: null });
+  },
+);
