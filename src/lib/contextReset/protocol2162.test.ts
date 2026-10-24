@@ -306,6 +306,112 @@ describe('cancellation by another writer (§2.4)', () => {
   });
 });
 
+// #2255 review (Diego, BLIND P2): the lease belongs to the grant the host holds, not to the reset's live phase or to
+// whichever record is current. Once the reset has ended, no later writer may expose the worker before the lease ends.
+describe('an outstanding stop grant outlives the reset that granted it (§2.2, §2.4)', () => {
+  const clear = () => M.setWorkerAvailability({}, { input: { worker: f.kit.id, appRef: f.app.id, state: 'AVAILABLE' } }, ctx(f.manager.id));
+  const leaseOf = async (s: Stage) => {
+    const r = await reset(s.resetId);
+    return stopLeaseEnd(r.stopGrantedAt!, r.stopLeaseMs!);
+  };
+  const heldUntil = async (leaseEnd: Date) => {
+    const m = (await mark())!;
+    expect(m.state).toBe('unavailable');
+    expect(m.until).not.toBeNull();
+    expect(m.until!.getTime()).toBeGreaterThanOrEqual(leaseEnd.getTime());
+  };
+
+  it('a second hand clear before the lease ends leaves the worker unavailable until it ends', async () => {
+    const s = await granted();
+    const leaseEnd = await leaseOf(s);
+    await clear();
+    await clear();
+    await heldUntil(leaseEnd);
+    expect(await isWorkerResetting(db, f.kit.id, f.app.id, new Date(leaseEnd.getTime() - 1))).toBe(true);
+    expect(await isWorkerResetting(db, f.kit.id, f.app.id, leaseEnd)).toBe(false);
+  });
+
+  it('a replacement mark then a clear: still unavailable until the lease ends', async () => {
+    const s = await granted();
+    const leaseEnd = await leaseOf(s);
+    await f.asWorker(f.kit, () =>
+      M.setWorkerAvailability({}, { input: { worker: f.kit.id, appRef: f.app.id, state: 'UNAVAILABLE', reason: 'OTHER', until: new Date(Date.now() + 1_000).toISOString() } }, ctx(f.holder.id)));
+    await clear();
+    await heldUntil(leaseEnd);
+  });
+
+  it('a host marking Kit down, then clearing its own mark: still unavailable until the lease ends', async () => {
+    const s = await granted();
+    const leaseEnd = await leaseOf(s);
+    await M.setHostWorkerAvailability({}, { input: { appRef: f.app.id, worker: f.kit.id, state: 'UNAVAILABLE', reason: 'HOST_DOWN' } }, f.keyCtx());
+    await M.setHostWorkerAvailability({}, { input: { appRef: f.app.id, worker: f.kit.id, state: 'AVAILABLE' } }, f.keyCtx());
+    await heldUntil(leaseEnd);
+  });
+
+  it('controls: with no grant a second clear is immediate, and after the lease ends a clear is immediate', async () => {
+    const s = await checkpointed();
+    await clear();
+    await clear();
+    expect(await mark()).toMatchObject({ state: 'available' });
+
+    const g = await f.collectedReset();
+    expect((await claim(g)).refused).toBeNull();
+    expect((await register(g)).refused).toBeNull();
+    expect((await authorize(g)).refused).toBeNull();
+    await clear();
+    // The grant is now in the past: its lease ended.
+    await db.contextReset.update({ where: { id: g.resetId }, data: { stopGrantedAt: new Date(Date.now() - STOP_LEASE_MS * 4) } });
+    await clear();
+    expect(await mark()).toMatchObject({ state: 'available' });
+    expect(s.resetId).not.toBe(g.resetId);
+  });
+});
+
+// #2255 review (Glen, CODE 2 P2): the `resetting` mark belongs to the reset that claimed it. An older reset that is
+// still open after its own lease lapsed may not release or move a newer reset's mark.
+describe('the resetting mark belongs to the reset that claimed it', () => {
+  /** Let a reset's mark lapse, then finish another started task and claim the reset it requests. */
+  async function laterResetClaimed(): Promise<Stage> {
+    await db.workerAvailability.update({ where: { workerId: f.kit.id }, data: { until: new Date(Date.now() - 1_000) } });
+    const next = await f.collectedReset();
+    expect((await claim(next)).refused).toBeNull();
+    return next;
+  }
+
+  it('the sweep ending an older reset CLAIM_LAPSED leaves the newer reset\'s mark as it was', async () => {
+    const old = await claimed();
+    await db.contextReset.update({ where: { id: old.resetId }, data: { claimedAt: new Date(Date.now() - CLAIM_LEASE_MS - 1_000) } });
+    const next = await laterResetClaimed();
+    const before = (await mark())!;
+    await sweepContextResets(db);
+    expect(await reset(old.resetId)).toMatchObject({ phase: 'failed', reason: 'CLAIM_LAPSED' });
+    expect(await reset(next.resetId)).toMatchObject({ phase: 'claimed', endedAt: null });
+    expect(await mark()).toEqual(before);
+    expect(before.contextResetId).toBe(next.resetId);
+    expect(await resetting()).toBe(true);
+  });
+
+  it('an older reset\'s delayed stopped report does not move the newer reset\'s mark', async () => {
+    const old = await granted();
+    await db.contextReset.update({ where: { id: old.resetId }, data: { stopGrantedAt: new Date(Date.now() - STOP_LEASE_MS * 4) } });
+    const next = await laterResetClaimed();
+    const before = (await mark())!;
+    expect((await stopped(old)).refused).toBeNull();
+    expect(await mark()).toEqual(before);
+    expect(before.contextResetId).toBe(next.resetId);
+    expect(await resetting()).toBe(true);
+  });
+
+  it('only a resetting mark names a reset, and it always does (the shape CHECK)', async () => {
+    const s = await claimed();
+    await expect(db.workerAvailability.update({ where: { workerId: f.kit.id }, data: { contextResetId: null } })).rejects.toThrow(/chk_worker_availability_shape/);
+    await expect(db.workerAvailability.update({
+      where: { workerId: f.kit.id },
+      data: { state: 'unavailable', reason: 'other', setBy: 'holder', clearsOnActivityAfter: null, contextResetId: s.resetId },
+    })).rejects.toThrow(/chk_worker_availability_shape/);
+  });
+});
+
 describe('the 070:02 report', () => {
   it('SUCCEEDED before the agent is relaunched is refused HOST_OPERATION_NOT_DONE and changes nothing', async () => {
     const s = await agentStopped();

@@ -5,7 +5,8 @@
 ALTER TABLE "agents" ADD COLUMN     "reset_context_after_task" BOOLEAN NOT NULL DEFAULT false;
 
 -- AlterTable
-ALTER TABLE "worker_availability" ADD COLUMN     "clears_on_activity_after" TIMESTAMP(3);
+ALTER TABLE "worker_availability" ADD COLUMN     "clears_on_activity_after" TIMESTAMP(3),
+ADD COLUMN     "context_reset_id" TEXT;
 
 -- AlterTable
 ALTER TABLE "host_registrations" ADD COLUMN     "capabilities" TEXT[] DEFAULT ARRAY[]::TEXT[];

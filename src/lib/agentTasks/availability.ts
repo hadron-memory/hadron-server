@@ -171,7 +171,7 @@ export async function markStalled(
       where: { workerId: args.workerId },
       data: {
         state: 'unavailable', reason: 'stalled', until: null, setAt: args.now, setBy: 'stall-rule',
-        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null, clearsOnActivityAfter: null,
+        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null, clearsOnActivityAfter: null, contextResetId: null,
       },
     });
     changed = !stalled;
@@ -303,7 +303,7 @@ async function recordLapse(db: PrismaClient, r: LapsedRecord, now: Date): Promis
       where: { workerId: r.workerId, state: 'unavailable', until: r.until, setAt: r.setAt },
       data: {
         state: 'available', reason: null, until: null, setAt: r.until, setBy: 'lapse',
-        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null, clearsOnActivityAfter: null,
+        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null, clearsOnActivityAfter: null, contextResetId: null,
       },
     });
     if (n.count === 0) return false;

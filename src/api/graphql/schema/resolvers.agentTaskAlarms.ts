@@ -67,7 +67,7 @@ import {
   type AvailabilitySetter,
 } from '../../../lib/agentTasks/events.js';
 import { recordInEffect } from '../../../lib/agentTasks/availability.js';
-import { cancelLiveReset } from '../../../lib/contextReset/contextReset.js';
+import { cancelLiveReset, holdForStopLease } from '../../../lib/contextReset/contextReset.js';
 import { effectiveWindows, STALL_WINDOW_DEFAULTS, type StallWindows } from '../../../lib/agentTasks/stall.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 import {
@@ -301,17 +301,19 @@ export const agentTaskAlarmMutations = {
         throw notPermitted("Only the worker itself, the person holding its name, or whoever manages the App sets a worker's availability.");
       }
       // #2162 (cor:agt:050:27 §2.4): a write by the worker, its holder or a manager cancels a live context reset at
-      // once (its epoch moves; the host's later steps are refused). While a granted stop could still be acted on,
-      // the worker is not made available before the lease ends: the `resetting` mark stays, lapsing by itself then.
-      const cancelled = await cancelLiveReset(tx, workerId, 'CANCELLED_BY_CLEAR', now);
-      const lease = cancelled?.leaseEnd ?? null;
+      // once (its epoch moves; the host's later steps are refused). While a granted stop could still be acted on, by
+      // a live reset or one already ended, the worker is not made available before the lease ends: it stays
+      // unavailable, lapsing by itself then (#2255 review: every such write, not only the first).
+      const lease = await cancelLiveReset(tx, workerId, 'CANCELLED_BY_CLEAR', now);
       if (lease && value.state === 'available') {
-        await tx.workerAvailability.update({ where: { workerId }, data: { until: lease } });
+        await holdForStopLease(tx, { workerId, appId: freshApp.id }, lease, now);
         return;
       }
-      const until = lease && value.until && value.until.getTime() < lease.getTime() ? lease : value.until;
+      const until = lease && value.until && value.until.getTime() < lease.leaseEnd.getTime() ? lease.leaseEnd : value.until;
       // #1709: a person's or a worker's write replaces a host's mark, and no longer names the host.
-      const data = { ...value, until, setAt: now, setBy, ...setByColumns(ctx), setByHostId: null, clearsOnActivityAfter: null };
+      const data = {
+        ...value, until, setAt: now, setBy, ...setByColumns(ctx), setByHostId: null, clearsOnActivityAfter: null, contextResetId: null,
+      };
       await tx.workerAvailability.upsert({
         where: { workerId },
         create: { workerId, ...data },

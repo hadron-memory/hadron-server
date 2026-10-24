@@ -108,6 +108,27 @@ export function outstandingLeaseEnd(r: Pick<ContextResetRow, 'stopGrantedAt' | '
   return end.getTime() > now.getTime() ? end : null;
 }
 
+/**
+ * The latest stop lease still outstanding on ANY of the worker's resets, ended ones included (#2255 review, Diego):
+ * the obligation belongs to the grant the host holds, not to the reset's phase or to whichever record is current.
+ * A reset that ended after its grant moved its epoch, so the host's "stopped" report is refused and the grant counts
+ * as outstanding until its lease ends. Every writer that could expose the worker floors at this.
+ */
+export async function outstandingStopLease(tx: Db, workerId: string, now: Date): Promise<{ resetId: string; leaseEnd: Date } | null> {
+  const rows = await tx.contextReset.findMany({
+    where: {
+      workerId, stopGrantedAt: { not: null, gt: new Date(now.getTime() - 60 * 60_000) }, agentStoppedAt: null,
+    },
+    select: { id: true, stopGrantedAt: true, stopLeaseMs: true, agentStoppedAt: true },
+  });
+  let best: { resetId: string; leaseEnd: Date } | null = null;
+  for (const r of rows) {
+    const end = outstandingLeaseEnd(r, now);
+    if (end && (!best || end > best.leaseEnd)) best = { resetId: r.id, leaseEnd: end };
+  }
+  return best;
+}
+
 // ── Events ────────────────────────────────────────────────────────────────
 
 async function appendResetEvent(
@@ -256,11 +277,15 @@ export async function requestContextResetSafely(
 
 // ── The mark ──────────────────────────────────────────────────────────────
 
-type MarkRow = { state: string; reason: string | null; until: Date | null; setAt: Date; setBy: string; clearsOnActivityAfter: Date | null };
+type MarkRow = {
+  state: string; reason: string | null; until: Date | null; setAt: Date; setBy: string; clearsOnActivityAfter: Date | null;
+  contextResetId: string | null;
+};
 
 async function lockMark(tx: Prisma.TransactionClient, workerId: string): Promise<MarkRow | null> {
   const [row] = await tx.$queryRaw<MarkRow[]>`
-    SELECT state, reason, until, set_at AS "setAt", set_by AS "setBy", clears_on_activity_after AS "clearsOnActivityAfter"
+    SELECT state, reason, until, set_at AS "setAt", set_by AS "setBy", clears_on_activity_after AS "clearsOnActivityAfter",
+           context_reset_id AS "contextResetId"
     FROM worker_availability WHERE worker_id = ${workerId} FOR UPDATE`;
   return row ?? null;
 }
@@ -268,11 +293,17 @@ async function lockMark(tx: Prisma.TransactionClient, workerId: string): Promise
 const isResettingMark = (m: MarkRow | null): m is MarkRow =>
   m !== null && m.state === 'unavailable' && m.reason === 'resetting' && m.setBy === 'context-reset';
 
+/** The mark is this reset's own (#2255 review, Glen): an older reset never moves or releases a newer one's. */
+const ownsMark = (m: MarkRow | null, r: Pick<ContextResetRow, 'id'>): m is MarkRow => isResettingMark(m) && m.contextResetId === r.id;
+
 const PLAIN_SETTER = { setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null };
 
-/** Set the worker's `resetting` mark (the claim), with an availability event. */
-async function setMark(tx: Prisma.TransactionClient, r: ContextResetRow, until: Date, now: Date): Promise<void> {
-  const data = { state: 'unavailable', reason: 'resetting', until, setAt: now, setBy: 'context-reset', clearsOnActivityAfter: null, ...PLAIN_SETTER };
+/** Set the worker's `resetting` mark, owned by the reset `r`, with an availability event. */
+async function setMark(tx: Prisma.TransactionClient, r: Pick<ContextResetRow, 'id' | 'appId' | 'workerId'>, until: Date, now: Date): Promise<void> {
+  const data = {
+    state: 'unavailable', reason: 'resetting', until, setAt: now, setBy: 'context-reset', clearsOnActivityAfter: null,
+    contextResetId: r.id, ...PLAIN_SETTER,
+  };
   await tx.workerAvailability.upsert({ where: { workerId: r.workerId }, create: { workerId: r.workerId, ...data }, update: data });
   await appendAvailabilityEvent(tx, {
     appId: r.appId, actor: PLATFORM_ACTOR, createdAt: now,
@@ -286,6 +317,23 @@ async function moveMark(tx: Prisma.TransactionClient, workerId: string, data: { 
 }
 
 /**
+ * A writer was about to make the worker available while a stop grant is outstanding (§2.2): keep it unavailable until
+ * the lease ends instead. A record still in effect lapses at the lease end; otherwise the `resetting` mark of the reset
+ * holding the grant is raised again until then. Either way it lifts by itself, through the lapse sweep. The caller
+ * holds the per-worker lock and the availability row.
+ */
+export async function holdForStopLease(
+  tx: Prisma.TransactionClient, w: { workerId: string; appId: string }, lease: { resetId: string; leaseEnd: Date }, now: Date,
+): Promise<void> {
+  const mark = await lockMark(tx, w.workerId);
+  if (mark && recordInEffect(mark, now)) {
+    await moveMark(tx, w.workerId, { until: lease.leaseEnd });
+    return;
+  }
+  await setMark(tx, { id: lease.resetId, appId: w.appId, workerId: w.workerId }, lease.leaseEnd, now);
+}
+
+/**
  * Release the reset's mark under the §2 rule. With a stop granted and not reported acted on, the mark is NOT lifted
  * before the lease's end: its `until` is pulled in to that instant (never pushed out) and `releasePendingAt` records
  * it; the lapse sweep writes the release down then. Otherwise it is released now, with an event. A mark that is not
@@ -293,8 +341,8 @@ async function moveMark(tx: Prisma.TransactionClient, workerId: string, data: { 
  */
 async function releaseMark(tx: Prisma.TransactionClient, r: ContextResetRow, now: Date): Promise<Date | null> {
   const mark = await lockMark(tx, r.workerId);
-  if (!isResettingMark(mark) || !recordInEffect(mark, now)) return null;
-  const lease = outstandingLeaseEnd(r, now);
+  if (!ownsMark(mark, r) || !recordInEffect(mark, now)) return null;
+  const lease = (await outstandingStopLease(tx, r.workerId, now))?.leaseEnd ?? null;
   if (lease) {
     if (!mark.until || mark.until.getTime() > lease.getTime()) await moveMark(tx, r.workerId, { until: lease });
     await tx.contextReset.update({ where: { id: r.id }, data: { releasePendingAt: lease } });
@@ -302,7 +350,7 @@ async function releaseMark(tx: Prisma.TransactionClient, r: ContextResetRow, now
   }
   await tx.workerAvailability.update({
     where: { workerId: r.workerId },
-    data: { state: 'available', reason: null, until: null, setAt: now, setBy: 'context-reset', clearsOnActivityAfter: null, ...PLAIN_SETTER },
+    data: { state: 'available', reason: null, until: null, setAt: now, setBy: 'context-reset', clearsOnActivityAfter: null, contextResetId: null, ...PLAIN_SETTER },
   });
   await appendAvailabilityEvent(tx, {
     appId: r.appId, actor: PLATFORM_ACTOR, createdAt: now,
@@ -426,7 +474,9 @@ export async function claimContextReset(
   if (tasks > 0) return refuse('OTHER_WORK');
   // (c) no other availability record in effect.
   const view = (await loadAvailabilityByFamily(tx, [{ id: r.workerId, appId: r.appId, families: [] }], now)).get(r.workerId);
-  if (view?.ownInEffect) return refuse('UNAVAILABLE');
+  // An ended reset's stop grant still outstanding keeps the worker out too (#2255 review): no writer exposes it before
+  // the lease ends, and no new claim takes it either.
+  if (view?.ownInEffect || (await outstandingStopLease(tx, r.workerId, now))) return refuse('UNAVAILABLE');
   const app = await tx.app.findUnique({ where: { id: r.appId }, select: { teamPausedAt: true } });
   if (!app || app.teamPausedAt) return refuse('PAUSED');
   if (!worker.on) return refuse('SETTING_OFF');
@@ -511,7 +561,7 @@ export async function authorizeContextResetStop(
     data: { phase: 'stop-granted', stopGrantedAt: now, stopLeaseMs: STOP_LEASE_MS },
   });
   const mark = await lockMark(tx, r.workerId);
-  if (isResettingMark(mark)) await moveMark(tx, r.workerId, { until: stopLeaseEnd(now, STOP_LEASE_MS) });
+  if (ownsMark(mark, r)) await moveMark(tx, r.workerId, { until: stopLeaseEnd(now, STOP_LEASE_MS) });
   return step(granted);
 }
 
@@ -531,7 +581,7 @@ export async function reportContextResetAgentStopped(
   }
   const stopped = await tx.contextReset.update({ where: { id: r.id }, data: { phase: 'agent-stopped', agentStoppedAt: now } });
   const mark = await lockMark(tx, r.workerId);
-  if (isResettingMark(mark) && recordInEffect(mark, now)) {
+  if (ownsMark(mark, r) && recordInEffect(mark, now)) {
     const op = await tx.hostOperation.findUniqueOrThrow({ where: { id: r.hostOperationId! }, select: { collectedAt: true } });
     const minutes = await hostReportTimeoutMinutes(tx, r.appId);
     const deadline = new Date((op.collectedAt ?? now).getTime() + minutes * 60_000);
@@ -609,31 +659,25 @@ export async function onContextResetReported(
 /**
  * A writer that decides the worker's availability itself (a hand clear, the worker marking itself, a host marking it
  * down) cancels its live reset (§2.4): the claim ends now, the epoch moves, and every later host step is STALE_EPOCH.
- * The caller holds the per-worker lock and writes the record. Returns the outstanding stop lease's end, when there is
- * one: the caller must not make the worker available before it (the mark then lifts by itself at that instant).
+ * The caller holds the per-worker lock and writes the record. Returns the worker's outstanding stop lease
+ * (`outstandingStopLease`), live reset or not: the caller must not make the worker available before it ends
+ * (`holdForStopLease`), nor write an `until` earlier than it.
  */
 export async function cancelLiveReset(
   tx: Prisma.TransactionClient, workerId: string, reason: 'CANCELLED_BY_CLEAR' | 'HOST_LOST', now: Date,
-): Promise<{ resetId: string; leaseEnd: Date | null } | null> {
+): Promise<{ resetId: string; leaseEnd: Date } | null> {
   const live = await tx.$queryRaw<{ id: string }[]>`
     SELECT id FROM context_resets
     WHERE worker_id = ${workerId} AND phase IN (${Prisma.join([...CANCELLABLE_PHASES].filter((p) => p !== 'requested'))})
     ORDER BY requested_at DESC, id DESC
     FOR UPDATE`;
-  if (live.length === 0) return null;
-  let leaseEnd: Date | null = null;
-  let resetId = live[0]!.id;
   for (const { id } of live) {
     const r = await tx.contextReset.findUniqueOrThrow({ where: { id } });
     const lease = outstandingLeaseEnd(r, now);
-    if (lease && (!leaseEnd || lease > leaseEnd)) {
-      leaseEnd = lease;
-      resetId = id;
-    }
     await endReset(tx, r, reason, now, { releaseMark: false });
     if (lease) await tx.contextReset.update({ where: { id }, data: { releasePendingAt: lease } });
   }
-  return { resetId, leaseEnd };
+  return outstandingStopLease(tx, workerId, now);
 }
 
 // ── The sweep ─────────────────────────────────────────────────────────────
@@ -727,9 +771,10 @@ export async function clearResetMarks(db: PrismaClient, now: Date): Promise<numb
     if (!at || at.getTime() <= m.clearsOnActivityAfter!.getTime()) continue;
     const done = await db.$transaction(async (tx) => {
       await lockWorkersForAssignment(tx, [m.workerId]);
+      if (await outstandingStopLease(tx, m.workerId, now)) return false;
       const n = await tx.workerAvailability.updateMany({
         where: { workerId: m.workerId, state: 'unavailable', reason: 'resetting', setAt: m.setAt, clearsOnActivityAfter: m.clearsOnActivityAfter },
-        data: { state: 'available', reason: null, until: null, setAt: now, setBy: 'context-reset', clearsOnActivityAfter: null, ...PLAIN_SETTER },
+        data: { state: 'available', reason: null, until: null, setAt: now, setBy: 'context-reset', clearsOnActivityAfter: null, contextResetId: null, ...PLAIN_SETTER },
       });
       if (n.count === 0) return false;
       await appendAvailabilityEvent(tx, {

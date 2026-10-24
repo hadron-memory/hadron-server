@@ -71,6 +71,8 @@ import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js'
 import {
   authorizeContextResetStop,
   cancelLiveReset,
+  holdForStopLease,
+  outstandingStopLease,
   claimContextReset,
   ContextResetError,
   onContextResetReported,
@@ -428,13 +430,19 @@ export const hostOperationMutations = {
         throw taskError('AVAILABILITY_NOT_PERMITTED', 'A host clears only a mark it set itself.');
       }
       let markUntil = until;
-      if (overReset) {
-        const lease = (await cancelLiveReset(tx, workerId, 'HOST_LOST', now))?.leaseEnd ?? null;
-        if (lease && markUntil && markUntil.getTime() < lease.getTime()) markUntil = lease;
+      // #2255 review: a granted stop still outstanding (its reset live or already ended) floors every host write: the
+      // host's own clear keeps the worker unavailable until the lease ends, and its mark lapses no earlier.
+      const lease = overReset ? await cancelLiveReset(tx, workerId, 'HOST_LOST', now) : await outstandingStopLease(tx, workerId, now);
+      if (lease && state === 'available') {
+        await holdForStopLease(tx, { workerId, appId: freshApp.id }, lease, now);
+        await recordHostKeyUse(tx, host, 'availability', { count: 1 });
+        return freshApp;
       }
+      if (lease && markUntil && markUntil.getTime() < lease.leaseEnd.getTime()) markUntil = lease.leaseEnd;
       const data = {
         state, reason, until: markUntil, setAt: now, setBy: 'host',
         setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: host.hostId, clearsOnActivityAfter: null,
+        contextResetId: null,
       };
       await tx.workerAvailability.upsert({ where: { workerId }, create: { workerId, ...data }, update: data });
       await appendAvailabilityEvent(tx, {

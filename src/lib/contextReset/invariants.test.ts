@@ -115,6 +115,8 @@ describe('the capability CHECK and the resetting mark', () => {
     const base = { workerId: kit.id, state: 'unavailable', setAt: new Date() };
     await expect(db.workerAvailability.create({ data: { ...base, reason: 'resetting', setBy: 'manager' } as any })).rejects.toThrow(/23514|check constraint/);
     await expect(db.workerAvailability.create({ data: { ...base, reason: 'other', setBy: 'manager', clearsOnActivityAfter: new Date() } as any })).rejects.toThrow(/23514|check constraint/);
-    await expect(db.workerAvailability.create({ data: { ...base, reason: 'resetting', setBy: 'context-reset', clearsOnActivityAfter: new Date() } as any })).resolves.toBeTruthy();
+    // #2255 review: a resetting mark names the reset that claimed it.
+    await expect(db.workerAvailability.create({ data: { ...base, reason: 'resetting', setBy: 'context-reset', clearsOnActivityAfter: new Date() } as any })).rejects.toThrow(/23514|check constraint/);
+    await expect(db.workerAvailability.create({ data: { ...base, reason: 'resetting', setBy: 'context-reset', clearsOnActivityAfter: new Date(), contextResetId: generateId() } as any })).resolves.toBeTruthy();
   });
 });

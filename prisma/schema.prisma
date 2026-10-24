@@ -5678,6 +5678,10 @@ model WorkerAvailability {
   /// worker's first activity AFTER it ends the mark (the relaunched agent's first call); null while the old agent may
   /// still be running, when no activity ends it.
   clearsOnActivityAfter DateTime? @map("clears_on_activity_after")
+  /// #2162 (cor:agt:050:27) — a `resetting` mark only, and always on one: the reset that claimed it. A reset moves or
+  /// releases only its own mark, so an older reset still open after its lease lapsed never touches a newer one's.
+  /// No FK: both rows go with their worker (cascade), and the shape CHECK pairs this with the reason.
+  contextResetId        String?   @map("context_reset_id")
 
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
 
