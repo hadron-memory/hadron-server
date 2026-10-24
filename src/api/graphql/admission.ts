@@ -42,7 +42,8 @@ export const GRAPHQL_ADMISSION_DEFAULTS: GraphqlAdmissionConfig = {
   maxTokens: 4000,
   maxSelections: 1000,
   maxDepth: 12,
-  maxCost: 25_000,
+  // #2372: Holger-approved calibration; portal NodeFind(limit: 500) costs 166251.
+  maxCost: 200_000,
   listFactor: 10,
   complexityMode: 'enforce',
 };

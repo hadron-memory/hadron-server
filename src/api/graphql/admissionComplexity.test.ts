@@ -306,10 +306,12 @@ describe('cost (graphql-query-complexity), enforce', () => {
     let base: string;
     beforeAll(async () => { base = await boot(); });
 
-    it('nested unpaged lists are costed at L: 4 levels pass, 5 are refused, with no resolver call', async () => {
-      expect((await (await post(base, { query: edgeChain(4) })).json()).errors).toBeUndefined();
+    it('nested unpaged lists are costed at L: one 5-level branch passes, two are refused, with no resolver call', async () => {
+      expect((await (await post(base, { query: edgeChain(5) })).json()).errors).toBeUndefined();
       nodeSpy.mockClear();
-      const over = await post(base, { query: edgeChain(5) });
+      // A sixth level hits depth first; duplicate the five-level branch to isolate cost.
+      const branch = edgeChain(5).slice(1, -1);
+      const over = await post(base, { query: `{ a: ${branch} b: ${branch} }` });
       expect(over.status).toBe(400);
       expect((await over.json()).errors[0].extensions).toMatchObject({ code: QUERY_TOO_COMPLEX, limit: 'cost' });
       noResolverCalls();
@@ -378,7 +380,7 @@ describe('modes', () => {
     expect(usageSpy).toHaveBeenCalledTimes(1);
     const lines = l4Lines().filter((l) => l.outcome === 'would_refuse');
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatchObject({ mode: 'observe', outcome: 'would_refuse', limit: 'cost', max: 25_000, operationType: 'query', operationName: 'Probe', principal: 'anonymous' });
+    expect(lines[0]).toMatchObject({ mode: 'observe', outcome: 'would_refuse', limit: 'cost', max: 200_000, operationType: 'query', operationName: 'Probe', principal: 'anonymous' });
     expect(typeof lines[0]!.queryHash).toBe('string');
     expect(JSON.stringify(lines)).not.toContain(marker);
     expect(JSON.stringify(lines)).not.toContain('usageEvents');
@@ -409,7 +411,7 @@ describe('modes', () => {
   it('observe still measures every request (near_limit is reported) and logs the boot configuration line', async () => {
     await boot({ GRAPHQL_COMPLEXITY_MODE: 'observe' });
     const cfg = logSpy.mock.calls.map((c) => String(c[0])).find((l) => l.includes('graphql.admission.config'));
-    expect(JSON.parse(cfg!)).toMatchObject({ mode: 'observe', maxDepth: 12, maxCost: 25_000, listFactor: 10 });
+    expect(JSON.parse(cfg!)).toMatchObject({ mode: 'observe', maxDepth: 12, maxCost: 200_000, listFactor: 10 });
   });
 });
 
