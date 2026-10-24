@@ -1090,35 +1090,53 @@ export const workerMutations = {
   ) => {
     const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
     await requireWorkerStaffAccess(ctx, app);
-    await ctx.db.$transaction(async (tx) => {
-      // #2022: the stop fence, exclusive, before the graph lock (src/lib/stopSignals/state.ts): a retired worker
-      // leaves every stop signal's coverage, recorded below.
-      await lockStopFence(tx, worker.appId, 'exclusive');
-      // #1726: the reportsTo graph lock BEFORE the worker row (the lock
-      // protocol in src/lib/workerReportsTo.ts; #1737 review, Diego P2-2).
-      await lockAppReportsTo(tx, worker.appId);
-      const retired = await tx.worker.updateMany({
-        where: { id: worker.id, retiredAt: null },
-        data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
-      });
-      // #1726: a retired worker reports to nobody. Workers that report TO it
-      // keep their value; the roster flags them (`reportsToRetired`) rather
-      // than the platform silently clearing a structure someone set.
-      if (retired.count > 0) {
-        await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: eventActor(ctx.userId), setBy: 'retirement' });
-        // #1747 / cor:agt:080:02: a retired worker's ticker subscriptions end
-        // with it, reason WORKER_RETIRED (history kept, never deleted).
-        const actor = currentActor();
-        await tx.tickerSubscription.updateMany({
-          where: { workerId: worker.id, endedAt: null },
-          data: {
-            endedAt: new Date(), endedReason: 'WORKER_RETIRED',
-            endedBy: ctx.userId ?? null, endedByWorkerId: actor.workerId, endedByAgentId: actor.agentId,
-          },
+    // #1416 (R204): `retired_by` is a User.id that a merge rewrites to the survivor, so the retirer takes its own
+    // shared user anchor (withAuthorizedTx adds the caller's) and is re-authorized on the transaction context: a
+    // retirer merged away before this point is refused instead of stamping a deleted account. Lock order, as
+    // setWorkerReportsTo: authority anchors, authority-row SHARE locks, then (afterLock) the stop fence
+    // exclusively, the reportsTo graph, and the worker writes.
+    const anchors: AuthorityAnchor[] = [
+      { kind: 'app', id: app.id },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    ];
+    await withAuthorizedTx(
+      ctx,
+      anchors,
+      async (txCtx) => { await requireWorkerStaffAccess(txCtx, app); },
+      async (tx) => {
+        const retired = await tx.worker.updateMany({
+          where: { id: worker.id, retiredAt: null },
+          data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
         });
-        await reconcileStopCoverage(tx, worker.appId, new Date());
-      }
-    });
+        // #1726: a retired worker reports to nobody. Workers that report TO it
+        // keep their value; the roster flags them (`reportsToRetired`) rather
+        // than the platform silently clearing a structure someone set.
+        if (retired.count > 0) {
+          await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: eventActor(ctx.userId), setBy: 'retirement' });
+          // #1747 / cor:agt:080:02: a retired worker's ticker subscriptions end
+          // with it, reason WORKER_RETIRED (history kept, never deleted).
+          const actor = currentActor();
+          await tx.tickerSubscription.updateMany({
+            where: { workerId: worker.id, endedAt: null },
+            data: {
+              endedAt: new Date(), endedReason: 'WORKER_RETIRED',
+              endedBy: ctx.userId ?? null, endedByWorkerId: actor.workerId, endedByAgentId: actor.agentId,
+            },
+          });
+          await reconcileStopCoverage(tx, worker.appId, new Date());
+        }
+      },
+      {
+        afterLock: async (tx) => {
+          // #2022: the stop fence, exclusive, before the graph lock (src/lib/stopSignals/state.ts): a retired worker
+          // leaves every stop signal's coverage, recorded below.
+          await lockStopFence(tx, worker.appId, 'exclusive');
+          // #1726: the reportsTo graph lock BEFORE the worker row (the lock protocol in src/lib/workerReportsTo.ts).
+          await lockAppReportsTo(tx, worker.appId);
+        },
+      },
+    );
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
 
