@@ -290,7 +290,7 @@ describe('configuration', () => {
   it('unset variables take the ruled defaults', () => {
     expect(readGraphqlAdmissionConfig({})).toEqual({
       maxQueryBytes: 32768, maxTokens: 4000, maxSelections: 1000,
-      maxDepth: 12, maxCost: 25_000, listFactor: 10, complexityMode: 'enforce',
+      maxDepth: 12, maxCost: 200_000, listFactor: 10, complexityMode: 'enforce',
     });
   });
 });
