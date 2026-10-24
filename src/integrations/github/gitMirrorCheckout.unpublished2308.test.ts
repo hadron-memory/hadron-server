@@ -20,15 +20,25 @@ import { generateId } from '../../lib/id.js';
 
 const env = vi.hoisted(() => ({
   root: '', bare: '', failOn: null as null | ((args: string[]) => boolean),
+  stdoutFor: null as null | ((args: string[]) => string | null),
+}));
+const TOKEN = 'tok-2308-secret';
+vi.mock('./githubApp.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./githubApp.js')>()),
+  getInstallationToken: vi.fn(async () => TOKEN),
 }));
 vi.mock('../../config.js', () => ({ get GRAPHS_PATH() { return env.root; } }));
 vi.mock('./execGit.js', () => ({
   execGit: vi.fn(async (args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) => {
     if (env.failOn?.(args)) throw new Error('Git command failed. Check the repository and branch, then retry.');
+    const forged = env.stdoutFor?.(args);
+    if (forged != null) return { stdout: forged, stderr: '' };
     try {
       const stdout = execFileSync('git', [
         '-c', 'protocol.allow=never', '-c', 'protocol.file.allow=always',
-        '-c', `url.${env.bare}.insteadOf=${SOURCE}`, ...args,
+        '-c', `url.${env.bare}.insteadOf=${SOURCE}`,
+        '-c', `url.${env.bare}.insteadOf=${SOURCE.replace('https://github.com/', `https://x-access-token:${TOKEN}@github.com/`)}`,
+        ...args,
       ], { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
       return { stdout, stderr: '' };
     } catch {
@@ -67,9 +77,9 @@ function seedRemote(opts: { develop?: boolean; empty?: boolean } = {}) {
   rmSync(seed, { recursive: true, force: true });
 }
 
-async function setup(opts: { develop?: boolean; empty?: boolean; readBranch?: string } = {}) {
+async function setup(opts: { develop?: boolean; empty?: boolean; readBranch?: string; token?: boolean } = {}) {
   seedRemote(opts);
-  const org = await db.organization.create({ data: { id: generateId(), name: 'o', urn: 'mirror2308-org' } });
+  const org = await db.organization.create({ data: { id: generateId(), name: 'o', urn: 'mirror2308-org', ...(opts.token ? { githubInstallationId: 4242 } : {}) } });
   const memory = await db.memory.create({
     data: {
       id: generateId(), organizationId: org.id, name: 'mem', urn: 'mirror2308-org:mem',
@@ -102,6 +112,7 @@ beforeEach(async () => {
   env.root = mkdtempSync(join(tmpdir(), 'hadron-2308-'));
   env.bare = mkdtempSync(join(tmpdir(), 'hadron-2308-bare-'));
   env.failOn = null;
+  env.stdoutFor = null;
   errors = [];
   vi.spyOn(console, 'error').mockImplementation((...a) => { errors.push(a.map(String).join(' ')); });
   vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -245,5 +256,77 @@ describe('pushMemoryToGit — the same unpublished-commit retry (#2308)', () => 
     env.failOn = (args) => args[0] === 'rev-list';
     expect((await pushMemoryToGit(memoryId)).error).toMatch(/Commit\/push failed/);
     expect(remoteTip('main')).toBe(before);
+  });
+});
+
+describe('the unpublished-commit count is parsed strictly (#2308 QA P2)', () => {
+  it.each(['0 invalid\n', '', 'abc\n', '-1\n', '1.5\n', '0x1\n'])('rev-list output %j is an unknown state: failed, never no-changes', async (out) => {
+    await setup();
+    rejectPushes();
+    expect(await run(['a.txt', 'one'])).toBe('failed');
+    allowPushes();
+    env.stdoutFor = (args) => (args[0] === 'rev-list' ? out : null);
+    expect(await run(null)).toBe('failed');
+    expect(remoteTip('hadron-updates')).toBeNull();
+  });
+
+  it('the full push fails closed on a "0 invalid" count too', async () => {
+    await setup();
+    const before = remoteTip('main');
+    rejectPushes();
+       expect((await pushMemoryToGit(memoryId)).error).toMatch(/Commit\/push failed/);
+    allowPushes();
+    env.stdoutFor = (args) => (args[0] === 'rev-list' ? '0 invalid\n' : null); // clean tree, commit left behind
+       expect((await pushMemoryToGit(memoryId)).error).toMatch(/Commit\/push failed/);
+       expect(remoteTip('main')).toBe(before);
+  });
+
+  it('a clean "0" and a padded "1" still parse', async () => {
+    await setup();
+    expect(await run(['a.txt', 'one'])).toBe('mirrored');
+    env.stdoutFor = (args) => (args[0] === 'rev-list' ? ' 0\n' : null);
+    expect(await run(null)).toBe('no-changes');
+  });
+});
+
+describe('the token URL is restored on every new exit path (#2308 §10 P3-1)', () => {
+  const noLeak = () => {
+    for (const line of errors) expect(line).not.toContain(TOKEN);
+  };
+
+  it('no-changes with an installation token', async () => {
+    await setup({ token: true });
+    expect(await run(['a.txt', 'one'])).toBe('mirrored');
+    expect(originUrl()).toBe(SOURCE);
+    expect(await run(null)).toBe('no-changes');
+    expect(originUrl()).toBe(SOURCE);
+    noLeak();
+  });
+
+  it('ahead-push success and ahead-push failure both restore it', async () => {
+    await setup({ token: true });
+    rejectPushes();
+    expect(await run(['a.txt', 'one'])).toBe('failed');
+    expect(originUrl()).toBe(SOURCE);
+    expect(await run(null)).toBe('failed'); // still rejected: the ahead-push itself fails
+    expect(originUrl()).toBe(SOURCE);
+    allowPushes();
+    expect(await run(null)).toBe('mirrored');
+    expect(originUrl()).toBe(SOURCE);
+    expect(remoteTip('hadron-updates')).toBe(localTip('hadron-updates'));
+    noLeak();
+  });
+
+  it('the full push restores it on the count-0 path and on the ahead-push', async () => {
+    await setup({ token: true });
+    rejectPushes();
+    expect((await pushMemoryToGit(memoryId)).error).toMatch(/Commit\/push failed/);
+    expect(originUrl()).toBe(SOURCE);
+    allowPushes();
+    expect((await pushMemoryToGit(memoryId)).error).toBeUndefined();
+    expect(originUrl()).toBe(SOURCE);
+    expect((await pushMemoryToGit(memoryId)).error).toBeUndefined(); // count 0
+    expect(originUrl()).toBe(SOURCE);
+    noLeak();
   });
 });

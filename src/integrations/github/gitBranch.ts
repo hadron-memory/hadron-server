@@ -125,7 +125,11 @@ export async function unpublishedCommitCount(
   const base = (await refExists(localPath, twin)) ? twin : await resolveBaseRef(localPath, baseBranch);
   if (!base) throw new Error(`No fork point to compare ${branch} against`);
   const { stdout } = await execGit(['rev-list', '--count', `${base}..refs/heads/${branch}`], { cwd: localPath });
-  const count = Number.parseInt(stdout.trim(), 10);
-  if (!Number.isSafeInteger(count) || count < 0) throw new Error('Unparsable unpublished commit count');
+  // Strict: `parseInt` reads a numeric PREFIX, so '0 invalid' (or '1.5', '0x1')
+  // would parse as 0 and read as "nothing to publish". Only a bare run of
+  // digits is a count; anything else is an unknown state and fails closed.
+  const text = stdout.trim();
+  const count = /^\d+$/.test(text) ? Number(text) : NaN;
+  if (!Number.isSafeInteger(count)) throw new Error('Unparsable unpublished commit count');
   return count;
 }
