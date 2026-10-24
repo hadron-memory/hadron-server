@@ -40,6 +40,28 @@ describe('#1507 persisted sync outcome', () => {
     expect(JSON.parse(text!)).toMatchObject({ version: 1, outcome: 'partial', entries: [{ kind: 'invalid_include', loc: 'bad', code: expect.any(String) }] });
   });
 
+  it.each([false, true])('records unknown for invalid-loc skips without leaking paths or ids (mixed=%s)', async mixed => {
+    file('good', 'committed');
+    const root = join(graphsPath, 'report-org', 'report-memory');
+    writeFileSync(join(root, 'private--> invalid.md'), '---\nname: invalid source\nid: untrusted-foreign-id\n---\nignored');
+    if (mixed) file('bad', '{{> good bogus}}');
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    const text = (await storedReport())!;
+    const report = JSON.parse(text);
+    expect(report).toMatchObject({ version: 1, outcome: 'unknown' });
+    expect(report.entries).toEqual(mixed ? [{ kind: 'invalid_include', loc: 'bad', code: 'INVALID_INCLUDE' }] : []);
+    expect(text).not.toMatch(/private|untrusted-foreign-id|invalid source/);
+    expect(await db.node.count({ where: { memoryId: graph.id, loc: 'good' } })).toBe(1);
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: graph.id } });
+    expect(memory.syncStatus).toBe('OK');
+    expect(memory.syncError).toBeNull();
+    const { unlinkSync } = await import('node:fs');
+    unlinkSync(join(root, 'private--> invalid.md'));
+    if (mixed) unlinkSync(join(root, 'bad.md'));
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect(await storedReport()).toBeNull();
+  });
+
   it('uses null only after a clean committed sync', async () => {
     file('good', 'committed');
     expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
