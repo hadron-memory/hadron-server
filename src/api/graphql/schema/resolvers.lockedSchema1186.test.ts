@@ -147,7 +147,7 @@ for (const surface of ['GraphQL', 'MCP'] as const) {
 }
 
 describe('GraphQL #1186 replacement-at-address (Cedar #1200 test 4)', () => {
-  it('rejects invalid properties for the replacement collection without reconciling or editing either row', async () => {
+  it('refuses a replacement at the address (ruling A, #1200) without reconciling or editing either row', async () => {
     const original = await seed();
     const replacement = await seed('other', { objectType: 'item', properties: { priority: 'low' } });
     let originalState: Awaited<ReturnType<typeof snapshot>>;
@@ -160,7 +160,7 @@ describe('GraphQL #1186 replacement-at-address (Cedar #1200 test 4)', () => {
     };
     await expect(resolvers.Mutation.updateNode({}, { input: {
       memoryId, loc: 'doc', properties: { priority: 'urgent' },
-    } } as never, ctx())).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    } } as never, ctx())).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
     expect(await snapshot(original.id)).toEqual(originalState!);
     expect(await snapshot(replacement.id)).toEqual(replacementState!);
   });
