@@ -892,6 +892,8 @@ model Memory {
   syncStatus           SyncStatus        @default(PENDING) @map("sync_status")
   /// Error message from the last failed sync.
   syncError            String?           @map("sync_error")
+  /// Versioned last completed sync outcome; null after a clean sync (or before any sync).
+  lastSyncReport       String?           @map("last_sync_report")
   /// Number of live unresolved PendingEdge records whose live source is in
   /// this memory (a derived projection, denormalized for dashboard display).
   pendingEdgeCount     Int               @default(0) @map("pending_edge_count")
