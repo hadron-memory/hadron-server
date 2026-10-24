@@ -1,10 +1,10 @@
 /**
- * #2403 — updateApp refuses a non-positive sessionTimeoutSeconds. A stamped session expiry is a promise
+ * #2403 — updateApp and createApp refuse a non-positive sessionTimeoutSeconds. A stamped session expiry is a promise
  * (cor:agt:020:03), so a ceiling of 0 or less would make it already past at creation. Only `<= 0` is refused:
- * no floor or cap exists (a range is a product ruling), and createApp / startAgentSession are separate doors.
+ * no floor or cap exists (a range is a product ruling); startAgentSession's caller timeout is a separate door, not in this cut.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -12,10 +12,16 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
+  writeNodeToGit: vi.fn().mockResolvedValue(undefined),
+}));
+
 const server = new ApolloServer<Context>({ typeDefs, resolvers });
 let admin: { id: string };
 let member: { id: string };
 let app: { id: string };
+let orgId: string;
+let agentId: string;
 
 const ctx = (userId: string): Context => ({ db, userId, roles: ['READER'] });
 async function update(userId: string, args: Record<string, unknown>) {
@@ -38,6 +44,8 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'timeout', urn: `timeout-${generateId()}` } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: member.id, role: 'READER' } });
+  orgId = org.id;
+  agentId = (await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:ag`, name: 'ag', type: 'CHATBOT', surfaces: ['api'], visibility: 'ORGANIZATION' } })).id;
   app = await db.app.create({ data: { organizationId: org.id, name: 'timeout', urn: `${org.urn}:timeout` } });
 });
 
@@ -69,5 +77,29 @@ describe('#2403 updateApp sessionTimeoutSeconds', () => {
     expect(invalid.errors?.[0]?.message).toBe(valid.errors?.[0]?.message);
     expect(invalid.errors?.[0]?.extensions?.code).not.toBe('BAD_USER_INPUT');
     expect((await stored()).sessionTimeoutSeconds).toBe(900);
+  });
+});
+
+describe('#2403 createApp sessionTimeoutSeconds', () => {
+  const create = (userId: string, args: Record<string, unknown>) => (resolvers.Mutation as any).createApp(
+    null, { orgRef: orgId, agentRef: agentId, name: 'Fresh', ...args }, ctx(userId));
+
+  it.each([0, -1, -900])('refuses %i with BAD_USER_INPUT and creates no App', async (t) => {
+    await expect(create(admin.id, { sessionTimeoutSeconds: t })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await db.app.count({ where: { organizationId: orgId, name: 'Fresh' } })).toBe(0);
+  });
+
+  it.each([[1, 1], [900, 900], [undefined, 900]])('accepts %s and stores %s', async (t, stored) => {
+    const created = await create(admin.id, { sessionTimeoutSeconds: t });
+    expect(created.sessionTimeoutSeconds).toBe(stored);
+  });
+
+  it('a non-admin is refused by the org gate first, for a valid and an invalid value alike', async () => {
+    const valid = await create(member.id, { sessionTimeoutSeconds: 60 }).catch((e: Error) => e);
+    const invalid = await create(member.id, { sessionTimeoutSeconds: 0 }).catch((e: Error) => e);
+    expect(valid).toBeInstanceOf(Error);
+    expect((invalid as Error).message).toBe((valid as Error).message);
+    expect((invalid as any).extensions?.code).not.toBe('BAD_USER_INPUT');
+    expect(await db.app.count({ where: { organizationId: orgId, name: 'Fresh' } })).toBe(0);
   });
 });
