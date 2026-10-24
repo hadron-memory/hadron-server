@@ -5947,11 +5947,13 @@ export const typeDefs = `#graphql
     failed — strictly more than a sum over the hops trail, which has no element
     for a hop that did not complete.
 
-    KNOWN GAP: a hop aborted by the TOOL LOOP (a tool denied by policy, or a
-    tool handler that threw) is NOT counted. The provider has already billed
-    that call, but the tool-loop helper discards the accumulated usage when a
-    tool throws, so the number is not available at the failure site. Such a run
-    under-reports. Do not treat this as a billing figure.
+    A tool-loop call that is REJECTED (a provider or transport error, a tool
+    denied by policy, a handler that threw, hadron_fail) counts the steps the
+    SDK had already completed, once: the provider billed them. The step that
+    failed is not counted, because its usage is unavailable, so such a run can
+    still under-report by that one step. A rejection before any step completed
+    counts nothing, and unknown is never recorded as zero. Do not treat this as
+    a billing figure.
 
     NULL means UNKNOWN: a run minted before the counter existed, with no hop
     trail to back-fill from. 0 means it genuinely spent nothing.

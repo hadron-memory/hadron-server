@@ -85,6 +85,14 @@ describe('generateWithTools partialUsage on a rejected call (#862)', () => {
     expect(err.partialUsage).toEqual({ tokensIn: 30, tokensOut: 5, measuredSteps: 2 });
   });
 
+  it('an LlmInvocationError raised by the provider layer passes through the same instance and carries the steps', async () => {
+    const own = new LlmInvocationError('model refused', 'anthropic', false);
+    script(callStep('t', '1', { inputTokens: 10, outputTokens: 2 }), own);
+    const err = await caught(run(okTool));
+    expect(err).toBe(own);
+    expect(err.partialUsage).toEqual({ tokensIn: 10, tokensOut: 2, measuredSteps: 1 });
+  });
+
   it('a handler throw keeps its ToolExecutionError class and cause and carries the steps', async () => {
     const boom = new Error('boom');
     script(callStep('t', '1', { inputTokens: 10, outputTokens: 2 }), textStep({ inputTokens: 1, outputTokens: 1 }));
