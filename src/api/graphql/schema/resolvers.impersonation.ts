@@ -45,6 +45,8 @@ const badInput = (message: string) =>
  * stamp a deleted account. The stop therefore takes the ender's shared authority anchor (the one a merge holds
  * exclusively) and re-reads the ender as live under it, at READ COMMITTED so the read after the wait sees the
  * merge. `endedBy` null (a key-authenticated platform admin) writes the session's own admin, which takes the same anchor and live check.
+ * The anchor is defence in depth: the live-row `FOR SHARE` would meet the merge's `FOR UPDATE` anyway, and the
+ * merge's fresh-row comparison catches a commit made during its wait.
  * Idempotent: only a still-open session is written.
  */
 async function endSessionAs(ctx: Context, sessionId: string, endedBy: string | null): Promise<void> {

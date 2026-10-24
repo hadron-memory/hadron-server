@@ -140,6 +140,17 @@ describe('actor-only writers around a merge', () => {
     expect((await rowOf(s.id)).endedAt).toBeNull();
   });
 
+  it('a source stop of a third party\'s session committed while the merge waits is moved to the survivor', async () => {
+    const s = await thirdPartySession();
+    const hold = await holdAnchor('shared', async (tx) => {
+      await tx.impersonationSession.update({ where: { id: s.id }, data: { endedAt: new Date(), endedBy: source.id } });
+    }, 50);
+    const merging = startMerge();
+    await hold.after();
+    await merging;
+    expect(await rowOf(s.id)).toMatchObject({ endedBy: target.id, adminUserId: other.id });
+  });
+
   it('self-stop, a different stopper and an idempotent re-stop are unchanged', async () => {
     const s = await thirdPartySession();
     await db.orgMember.create({ data: { organizationId: org.id, userId: other.id, role: 'ADMIN' } });
@@ -192,6 +203,28 @@ describe('retirement around a merge', () => {
     expect((await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).retiredBy).toBe(source.id);
     await startMerge();
     expect((await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).retiredBy).toBe(target.id);
+  });
+
+  it('a retirement committed while the merge waits is moved to the survivor', async () => {
+    const worker = await setup();
+    const hold = await holdAnchor('shared', async (tx) => {
+      await tx.worker.update({ where: { id: worker.id }, data: { retiredAt: new Date(), retiredBy: source.id } });
+    }, 50);
+    const merging = startMerge();
+    await hold.after();
+    await merging;
+    expect((await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).retiredBy).toBe(target.id);
+  });
+
+  it('a retirer whose staff role was revoked while it waited is refused, though still a live user', async () => {
+    const worker = await setup();
+    const hold = await holdAnchor('exclusive', async (tx) => {
+      await tx.orgMember.updateMany({ where: { organizationId: org.id, userId: source.id }, data: { role: 'READER' } });
+    }, 50);
+    const retiring = codeOf(retireAsSource(worker.id));
+    await hold.after();
+    expect(await retiring).not.toBe('NO_ERROR');
+    expect(await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).toMatchObject({ retiredAt: null, retiredBy: null });
   });
 
   it('a retirement that arrives while the merge holds the anchor is refused and stamps nothing', async () => {
