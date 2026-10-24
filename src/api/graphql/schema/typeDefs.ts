@@ -7291,8 +7291,12 @@ export const typeDefs = `#graphql
     openQuestions: [SpecOpenQuestionGroup!]!
     "#1591 — how many nodes this call minted (0 on a dry run or refusal)."
     mintedCount: Int!
-    "#1591 — the locs this call minted, or would mint on a dry run, ordered by loc."
+    "#1591 — the locs of NEW nodes this call minted, or would mint on a dry run, ordered by loc."
     mintLocs: [String!]!
+    "#1612 — the locs of already-minted nodes this call re-minted (edited since, or minted with no recorded revision), or would on a dry run, ordered by loc. A re-mint keeps the first mint's time and minter."
+    remintLocs: [String!]!
+    "#1612 — how many of mintedCount were re-mints."
+    remintedCount: Int!
     "#1607 — nodes in mintLocs with open discussion: a WARNING, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Ordered by loc."
     unresolvedFeedback: [UnresolvedFeedback!]!
   }

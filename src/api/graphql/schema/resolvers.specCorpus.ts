@@ -8,6 +8,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 // https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862 §4.
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
+import { inMintScope, inMintScopeSql } from '../../../lib/mintScope.js';
 import { mirrorNodeMoveToGit, type MovedNodeRef } from '../../../integrations/github/mirrorNodeMove.js';
 import type { Context } from './resolvers.js';
 import { nodeMoveOps, writeNodeCore } from './resolvers.mutation.node.js';
@@ -1158,6 +1159,10 @@ type MintReport = {
   mintedCount: number;
   /** #1591 — the locs this call minted, or would mint on a dry run, by loc. */
   mintLocs: string[];
+  /** #1612 — the minted nodes in scope again (edited since, or no recorded revision), by loc. */
+  remintLocs: string[];
+  /** #1612 — how many of the stamped nodes were re-mints; a subset of mintedCount. */
+  remintedCount: number;
   /** #1607 — nodes in scope with open discussion: a warning, never a blocker (cor:dmo:110:07). */
   unresolvedFeedback: UnresolvedFeedbackRow[];
 };
@@ -1201,11 +1206,13 @@ async function fenceCorpusForMint(tx: Prisma.TransactionClient, memoryId: string
 }
 
 /**
- * #1591 — mint every unminted live node of a memory, once, after its checks.
+ * #1591 — mint every live node of a memory in the mint scope, after its checks.
  * `mintMemoryNodes` and the older `mintSpecCorpus` are this one operation.
  *
- * Scope (Holger's #1447 round-3 ruling 2b): the memory's live nodes with no
- * `mintedAt`. Findings are reported only for those nodes; a node minted
+ * Scope (Holger's #1447 round-3 ruling 2b, widened by #1612, cor:dmo:120:06):
+ * the memory's live nodes with no `mintedAt`, plus minted nodes with no
+ * recorded revision or changed since ({@link inMintScope}); a re-mint keeps the
+ * first mint's time and minter and advances the revision and hash. Findings are reported only for those nodes; a node minted
  * earlier neither blocks nor is linted again, so an existing corpus's legacy
  * issues cannot block minting its new specs. The scans still read the whole
  * memory, because a new spec's citation of a minted one must resolve.
@@ -1257,10 +1264,10 @@ async function mintMemoryNodes(
       select: {
         id: true, loc: true, nodeType: true, tags: true, role: true, isPlaceholder: true, revSeq: true,
         name: true, description: true, abstract: true, content: true, abstractOriginHash: true,
-        mintedAt: true, approvedRevNo: true, contentRevSeq: true, approvalHash: true,
+        mintedAt: true, mintedRevNo: true, approvedRevNo: true, contentRevSeq: true, approvalHash: true,
       },
     });
-    const inScope = nodes.filter((n) => n.mintedAt === null);
+    const inScope = nodes.filter(inMintScope);
     const inScopeIds = new Set(inScope.map((n) => n.id));
     const inScopeLocs = new Set(inScope.map((n) => n.loc));
     // The lint scope is exactly the CLI's (`lintSelects`, hadron-cli #708;
@@ -1344,7 +1351,7 @@ async function mintMemoryNodes(
     const foreignTargets = await tx.edge.findMany({
       where: {
         deletedAt: null,
-        source: { memoryId: id, deletedAt: null, mintedAt: null },
+        source: { memoryId: id, deletedAt: null, id: { in: [...inScopeIds] } },
         target: { memoryId: { not: id }, deletedAt: null, isPlaceholder: false, mintedAt: null },
       },
       select: {
@@ -1379,11 +1386,13 @@ async function mintMemoryNodes(
       .sort(([a], [b]) => (a === null ? 1 : b === null ? -1 : a.localeCompare(b)))
       .map(([decider, questions]) => ({ decider, questions }));
 
-    const mintLocs = inScope.map((n) => n.loc);
+    // New nodes and re-mints are reported apart; mintedCount counts both.
+    const mintLocs = inScope.filter((n) => n.mintedAt === null).map((n) => n.loc);
+    const remintLocs = inScope.filter((n) => n.mintedAt !== null).map((n) => n.loc);
     const report: MintReport = {
       memoryId: id, dryRun, minted: false, blockers,
       staleAbstracts, staleAbstractsBlock: STALE_ABSTRACT_BLOCKS_MINT, openQuestions,
-      mintedCount: 0, mintLocs,
+      mintedCount: 0, remintedCount: 0, mintLocs, remintLocs,
       unresolvedFeedback: (await unresolvedFeedbackOf(tx, inScope)).map((f) => ({ ...f, memoryId: id })),
     };
     if (dryRun) return report;
@@ -1410,12 +1419,12 @@ async function mintMemoryNodes(
     const ids = [...inScopeIds];
     const mintedCount = await tx.$executeRaw`
       UPDATE nodes SET
-        minted_at = ${now},
-        minted_by = ${minter.userId ?? null},
-        minted_by_info = ${minter.userId ? null : minter.info ?? 'unknown'},
+        minted_at = COALESCE(minted_at, ${now}),
+        minted_by = CASE WHEN minted_at IS NULL THEN ${minter.userId ?? null}::text ELSE minted_by END,
+        minted_by_info = CASE WHEN minted_at IS NULL THEN ${minter.userId ? null : minter.info ?? 'unknown'}::text ELSE minted_by_info END,
         minted_rev_no = rev_seq,
         minted_hash = approval_hash
-      WHERE memory_id = ${id} AND deleted_at IS NULL AND minted_at IS NULL
+      WHERE memory_id = ${id} AND deleted_at IS NULL AND ${inMintScopeSql}
         AND id = ANY(${ids}::text[]) AND approved_rev_no >= content_rev_seq AND approval_hash IS NOT NULL`;
     if (mintedCount !== ids.length) {
       // Unreachable under the fence; refuse rather than mint a partial set.
@@ -1427,7 +1436,7 @@ async function mintMemoryNodes(
       where: { id },
       data: { corpusDraft: false, corpusMintedAt: now, corpusMintedBy: ctx.userId ?? ctx.clientId ?? null },
     });
-    return { ...report, minted: true, mintedCount };
+    return { ...report, minted: true, mintedCount, remintedCount: remintLocs.length };
   }, { timeout: 120_000 });
 }
 
