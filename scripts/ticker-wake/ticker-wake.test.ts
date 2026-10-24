@@ -150,7 +150,7 @@ function fake(): Fake {
     if (argv[0] === 'orca' && argv[1] === 'terminal') {
       if (argv[2] === 'list') {
         if (f.terminalReply) return out(f.terminalReply());
-        return out({ ok: true, result: { terminals: [{ handle: 'term_a', incarnationId: f.incarnation, worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }, ...f.extraTerminals] } });
+        return out({ ok: true, result: { hostScope: { hostIds: ['local'], omittedHostIds: [] }, terminals: [{ handle: 'term_a', incarnationId: f.incarnation, worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }, ...f.extraTerminals] } });
       }
       if (argv[2] === 'wait') return out({ ok: f.idle, result: { wait: { satisfied: f.idle } }, error: f.idle ? undefined : { code: 'timeout' } });
       if (argv[2] === 'read') return out({ ok: true, result: { terminal: f.screen } });
@@ -2456,7 +2456,7 @@ describe('#2275 dead-receiver replacement', () => {
     at: Date.now() - 60_000, detail: 'accepted, turn start not confirmed (input_accepted)',
     text: 'old notification', handle: 'term_old', requestId: 'old-request', checkedBefore: null });
   const stored = () => JSON.parse(readFileSync(receiptsFile(), 'utf8'));
-  const inventory = () => ({ ok: true, result: { terminals: [{ handle: 'term_a', incarnationId: f.incarnation,
+  const inventory = () => ({ ok: true, result: { hostScope: { hostIds: ['local'], omittedHostIds: [] }, terminals: [{ handle: 'term_a', incarnationId: f.incarnation,
     worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }, ...f.extraTerminals] } });
   function seed(prior = old()) {
     mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
@@ -2510,6 +2510,48 @@ describe('#2275 dead-receiver replacement', () => {
       expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
     });
   }
+  const incompleteScopes = [
+    ['missing scope', undefined], ['null scope', null],
+    ['empty covered hosts', { hostIds: [], omittedHostIds: [] }],
+    ['unknown covered hosts', { hostIds: ['future:host'], omittedHostIds: [] }],
+    ['omitted SSH host', { hostIds: ['local'], omittedHostIds: ['ssh:devbox'] }],
+    ['omitted local host', { hostIds: ['ssh:devbox'], omittedHostIds: ['local'] }],
+    ['omitted unknown host', { hostIds: ['local'], omittedHostIds: ['future:host'] }],
+    ['missing omitted list', { hostIds: ['local'] }],
+    ['invalid encoded host', { hostIds: ['ssh:%ZZ'], omittedHostIds: [] }],
+    ['invalid runtime omission', { hostIds: ['local'], omittedHostIds: ['runtime:'] }],
+    ['pipe in runtime omission', { hostIds: ['local'], omittedHostIds: ['runtime:a|b'] }],
+  ] as const;
+  for (const [label, scope] of incompleteScopes) {
+    it(`holds without Orca census completeness: ${label}`, async () => {
+      const prior = seed();
+      f.terminalReply = () => ({ ...inventory(), result: { ...inventory().result, hostScope: scope } });
+      await go();
+      expect(f.sent).toEqual([]); expect(f.retries).toEqual([]); expect(f.acked).toEqual([]);
+      expect(stored()['w-ada']).toEqual(prior);
+      expect(existsSync(join(dir, 'ticker-wake', 'needs-person.json'))).toBe(false);
+    });
+  }
+  it('accepts a legible covered host with runtime-only omissions, including unknown future covered host kinds', async () => {
+    seed();
+    f.terminalReply = () => ({ ...inventory(), result: { ...inventory().result,
+      hostScope: { hostIds: ['future:host', 'ssh:dev%20box'], omittedHostIds: ['runtime:peer%20box'] } } });
+    await go();
+    expect(f.sent).toHaveLength(1); expect(f.acked).toEqual([]);
+  });
+  it('rechecks host-scope coverage before archiving or replacement intent', async () => {
+    const prior = seed(); let calls = 0;
+    f.terminalReply = () => ({ ...inventory(), result: { ...inventory().result,
+      hostScope: { hostIds: ['local'], omittedHostIds: ++calls > 1 ? ['ssh:lost'] : [] } } });
+    await go();
+    expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
+  });
+  it('duplicate terminal handles cannot prove the old receiver gone', async () => {
+    const prior = seed();
+    f.extraTerminals = [{ handle: 'term_a', incarnationId: 'different', worktreePath: dir }];
+    await go();
+    expect(f.sent).toEqual([]); expect(f.acked).toEqual([]); expect(stored()['w-ada']).toEqual(prior);
+  });
   it('archives before replacement intent: archive failure leaves the old receipt and unrelated entries intact', async () => {
     const prior = seed(); mkdirSync(join(dir, 'ticker-wake', `needs-person.json.${process.pid}.tmp`));
     await go();
