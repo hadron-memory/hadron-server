@@ -2595,3 +2595,82 @@ describe('#2275 dead-receiver replacement', () => {
     expect(stored().unrelated).toMatchObject({ receiver: 'term_other#inc-other' });
   });
 });
+
+// #2275 slice A: a failed request identity is still uncertain, not proof of non-delivery.
+describe('#2275 same-receiver never-accepted recovery', () => {
+  const T0 = Date.UTC(2026, 9, 24, 0);
+  const at = (ms: number) => ({ now: () => ms });
+  const timing = { anchorAt: iso(T0 - 600_000), deliverAfter: iso(T0 - 300_000), busyDeadline: iso(T0 + 3_600_000) };
+  const stored = () => JSON.parse(readFileSync(receiptsFile(), 'utf8'));
+  const archived = () => Object.values(JSON.parse(readFileSync(join(dir, 'ticker-wake', 'needs-person.json'), 'utf8'))) as any[];
+  const failed = { ok: false, error: { code: 'transport' }, requestId: 'failed-request' };
+  function seed(joined = false) {
+    const prior = { state: 'ambiguous', coverage: ['T:1', 'task:old-event:0'], receiver: 'term_a#inc-1', at: T0,
+      detail: 'failed with a request identity' + (joined ? '; same-id retry: failed with a request identity' : ''),
+      text: 'original prompt must not be replayed as fresh', handle: 'term_a', requestId: 'failed-request', checkedBefore: null };
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': prior, unrelated: { state: 'sent', coverage: ['U:9'], receiver: 'other#inc', at: 1 } }));
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('old-task', 'ASSIGNED', 'old-event')], proof(['T:3'], T0 + 1_200_000, [taskEntry('old-task', 'old-event')]), [], timing)];
+    f.retryReply = () => JSON.stringify(failed);
+    f.sendReply = () => JSON.stringify({ ...ACCEPTED_ONLY, result: { send: { accepted: true, prompt: { requestId: 'new-request', stages: ['input_accepted'] } } } });
+    return prior;
+  }
+  for (const joined of [false, true]) {
+    it(`replaces old failure${joined ? ' with joined retry detail' : ''} with newer tick only, keeping old coverage and unrelated receipts`, async () => {
+      const prior = seed(joined);
+      await go(at(T0 + 1_200_000));
+      expect(f.sent).toHaveLength(1);
+      expect(f.sent[0]).toContain('Fresh tick request at');
+      expect(f.sent[0]).not.toContain('original prompt');
+      expect(f.sent[0]).not.toContain('old-task');
+      expect(f.retries).toEqual(['failed-request']); // only the existing own-id reconciliation
+      expect(stored()['w-ada']).toMatchObject({ requestId: 'new-request', coverage: ['T:3'] });
+      expect(stored().unrelated).toMatchObject({ receiver: 'other#inc' });
+      expect(archived()).toEqual([expect.objectContaining({ ...prior, workerId: 'w-ada' })]);
+      expect(log()).toContain('Orca never reported the input accepted');
+      expect(log()).toMatch(/needs a person.*not a retype/);
+      expect(f.acked).toEqual([]);
+      expect(f.enters).toEqual([]);
+      await go(at(T0 + 1_200_001));
+      expect(f.sent).toHaveLength(1); // restart/re-offer cannot repeat archived coverage
+      expect(f.acked).toEqual([]);
+    });
+  }
+  for (const guard of ['young', 'different live receiver', 'draft', 'busy', 'missing incarnation', 'same tick', 'dry'] as const) {
+    it(`still holds failed identity with ${guard}`, async () => {
+      const prior = seed();
+      if (guard === 'different live receiver') {
+        f.incarnation = 'inc-2';
+        f.extraTerminals = [{ handle: 'term_a', incarnationId: 'inc-1', worktreePath: dir }];
+      }
+      if (guard === 'draft') f.screen.draft = 'human typing';
+      if (guard === 'busy') { f.idle = false; f.screen = { source: 'screen', tail: ['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'] }; }
+      if (guard === 'missing incarnation') f.incarnation = '';
+      if (guard === 'same tick') f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], T0 + 1_200_000), [], timing)];
+      await go({ ...at(T0 + (guard === 'young' ? 1_199_999 : 1_200_000)), dry: guard === 'dry' });
+      expect(f.sent).toEqual([]);
+      expect(f.acked).toEqual([]);
+      expect(stored()['w-ada']).toEqual(prior);
+    });
+  }
+  for (const fault of ['archive', 'intent', 'after send'] as const) {
+    it(`keeps durable old ambiguity and unrelated receipts on ${fault} persistence failure`, async () => {
+      const prior = seed();
+      const blocked = fault === 'archive' ? join(dir, 'ticker-wake', `needs-person.json.${process.pid}.tmp`) : `${receiptsFile()}.${process.pid}.tmp`;
+      if (fault === 'after send') f.sendReply = () => { mkdirSync(blocked); return JSON.stringify(CONFIRMED); };
+      else mkdirSync(blocked);
+      await go(at(T0 + 1_200_000));
+      expect(f.sent).toHaveLength(fault === 'after send' ? 1 : 0);
+      expect(f.acked).toEqual([]);
+      expect(stored().unrelated).toMatchObject({ receiver: 'other#inc' });
+      if (fault === 'after send') {
+        expect(stored()['w-ada']).toMatchObject({ state: 'ambiguous', detail: 'send intent recorded before submission; outcome unknown' });
+        expect(archived()).toEqual([expect.objectContaining(prior)]);
+        rmSync(blocked, { recursive: true });
+        await go(at(T0 + 1_200_001));
+        expect(f.sent).toHaveLength(1);
+        expect(f.acked).toEqual([]);
+      } else expect(stored()['w-ada']).toEqual(prior);
+    });
+  }
+});
