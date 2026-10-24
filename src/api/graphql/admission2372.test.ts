@@ -5,6 +5,8 @@ import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createServer } from '../../server.js';
 import { resolvers } from './schema/resolvers.js';
+type Body = { errors?: Array<{ extensions: { code: string; limit: string; max: number } }> };
+const readBody = async (response: Response): Promise<Body> => await response.json() as Body;
 const query = readFileSync(new URL('./nodeFind2372.graphql', import.meta.url), 'utf8');
 let server: Server;
 let base: string;
@@ -27,7 +29,7 @@ describe('#2372 portal NodeFind admission', () => {
     const document = form === 'variable' ? query : query.replace('limit: $limit', 'limit: 2147483647').replace('$limit: Int', '');
     const response = await post(document, form === 'variable' ? { limit: 2147483647 } : {});
     expect(response.status).toBe(400);
-    expect((await response.json()).errors[0].extensions).toMatchObject({ code: 'QUERY_TOO_COMPLEX', limit: 'cost', max: 25000 });
+    expect((await readBody(response)).errors?.[0]?.extensions).toMatchObject({ code: 'QUERY_TOO_COMPLEX', limit: 'cost', max: 25000 });
     expect(find).not.toHaveBeenCalled();
   });
   it('still refuses depth 13 before the resolver', async () => {
@@ -36,13 +38,13 @@ describe('#2372 portal NodeFind admission', () => {
     const document = `{ ${chain.reduceRight((inner, field) => `${field} { ${inner} }`, 'id')} }`;
     const response = await post(document);
     expect(response.status).toBe(400);
-    expect((await response.json()).errors[0].extensions).toMatchObject({ code: 'QUERY_TOO_COMPLEX', limit: 'depth', max: 12 });
+    expect((await readBody(response)).errors?.[0]?.extensions).toMatchObject({ code: 'QUERY_TOO_COMPLEX', limit: 'depth', max: 12 });
     expect(node).not.toHaveBeenCalled();
   });
   it('admits the established SEARCH_LIMIT=500 projection and structured predicate', async () => {
     find.mockClear();
     const response = await fetch(`${base}/graphql`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query, operationName: 'NodeFind', variables: { limit: 500, objectType: 'qa_widget', where: { path: ['score'], as: 'number', eq: 0 } } }) });
-    const body = await response.json();
+    const body = await readBody(response);
     expect(body.errors, 'established portal NodeFind must not fail QUERY_TOO_COMPLEX at limit 500').toBeUndefined();
     expect(response.status).toBe(200);
     expect(find).toHaveBeenCalledTimes(1);
