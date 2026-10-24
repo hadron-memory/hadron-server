@@ -4662,11 +4662,10 @@ model AppRun {
   /// false total (PR #854 review, Codex P2). `tokens_spent` is backfilled from
   /// the hop trail where one exists; `actions_spent` has no such signal.
   ///
-  /// KNOWN GAP: a hop aborted by the tool loop (ToolDenied / ToolExecution /
-  /// AuthorFail) does not increment. The provider has already billed that
-  /// call, but generateWithTools discards the accumulated usage when a tool
-  /// throws, so the number is not available at the failure site. Tracked
-  /// separately; see the GraphQL field docs.
+  /// A rejected tool-loop call counts the steps the SDK had already completed
+  /// (#862); usage the SDK did not report (the failed step, or a step without
+  /// counts) is not counted, so such a run can still under-report. See the
+  /// GraphQL field docs.
   tokensSpent          Int?                 @default(0) @map("tokens_spent")
   actionsSpent         Int?                 @default(0) @map("actions_spent")
   status               AppRunStatus         @default(PENDING)
