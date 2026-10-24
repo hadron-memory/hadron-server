@@ -90,7 +90,7 @@ import { NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
 import { normalizeObjectType, normalizeRole, validateNodeSchemaOnWrite } from '../lib/enforceNodeSchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
-import { archiveTombstone } from '../lib/tombstoneArchive.js';
+import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../lib/tombstoneArchive.js';
 import { deletePendingEdgesTargetingNodes, promotePendingEdgeForTarget, reconcilePendingEdgeCounts } from '../lib/pendingEdgePromotion.js';
 import {
   liveEdgeEndpointSet,
@@ -6238,8 +6238,8 @@ export function createMcpServerInstance(
       // pre-transaction `existing` probe lost a revision under concurrency: two
       // calls both saw no row, one created it, the other overwrote it on the
       // create branch (PR #977 review, both bots). lockLocForWrite takes the
-      // same key as an ancestor-create and as lockNodeForDelete, acquired after
-      // the ancestors so the root→leaf order stays deadlock-free.
+      // same key as an ancestor-create and as lockNodeForDelete. This path
+      // declares ancestors plus own-loc together, then re-enters only subsets (#2054).
       // #1181 — thrown from INSIDE the transaction by the authoritative gate
       // below and mapped to a refusal outside it. A sentinel rather than a
       // string match: throwing aborts the transaction, which is exactly what we
@@ -6255,7 +6255,8 @@ export function createMcpServerInstance(
           if (resolvedEdges !== null) {
             await lockOutgoingEdgeMemories(tx, memoryId, resolvedEdges);
           }
-          await lockAncestorsForCreate(tx, memoryId, loc); // no-op at a root-level loc
+          await acquireLockSet(tx, [...ancestorLocs(loc), loc].map(loc => ({ memoryId, loc })));
+          await lockAncestorsForCreate(tx, memoryId, loc); // subset; no-op at a root-level loc
           await lockLocForWrite(tx, memoryId, loc);
 
           // #1181 — THE AUTHORITATIVE live-collision gate, and the ONLY one.
@@ -7730,214 +7731,236 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let relocated: MoveNodeSubtreeResult['moved'] = [];
       let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
       try {
-        result = await db.$transaction(async (tx) => {
-          // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
-          await lockAgentDefinitionAuthority(tx, auth.userId ?? null, [fromMemory.id, toMemory.id]);
-          // #664/#752: moving a node INTO a subtree is the same orphan vector as
-          // creating there — lock the destination's ancestor path first (matching
-          // the GraphQL moveNode resolver and hadron_delete_node's own-loc lock),
-          // so a concurrent non-recursive delete of a destination ancestor can't
-          // count zero descendants and then let this move land under it. Taken
-          // before any row-locking statement to keep advisory-before-row ordering
-          // consistent with the delete path (no lock-order inversion).
-          // #1187 (@codex + @copilot on PR #1211) — DECLARE the complete key
-          // set first, in the one global order, exactly as the GraphQL
-          // `moveNode` resolver does. This surface was missed when that
-          // protocol landed: it took the destination ancestors here and reached
-          // the source path only later, inside `moveNodeSubtree`
-          // (`lockSourceForMove`). For source `a` and destination `z:child`
-          // that is `z` then `a`, while the GraphQL path takes `a` then `z` —
-          // so the two SURFACES could deadlock against each other, and two MCP
-          // moves with opposing paths against themselves.
-          //
-          // Enumerating the multi-key callers from the GraphQL resolvers alone
-          // is how this was missed; the writers are enumerated by STATE (who
-          // takes two keys), never by the call sites one happens to know.
-          // #1466: an edge writer holds this memory key across endpoint
-          // validation and insertion. Take it before any loc lock so an edge
-          // cannot land after archiveTombstone enumerates the target's edges.
-          await lockEdgeEndpointMemories(tx, [toMemory.id]);
-          await acquireLockSet(tx, [
-            ...ancestorLocs(toLoc).map((loc) => ({ memoryId: toMemory.id, loc })),
-            ...ancestorLocs(fromLoc).map((loc) => ({ memoryId: fromMemory.id, loc })),
-            { memoryId: fromMemory.id, loc: fromLoc },
-            { memoryId: toMemory.id, loc: toLoc },
-          ]);
-          await lockAncestorsForCreate(tx, toMemory.id, toLoc);
-
-          if (isSameSlot) {
-            // Same-slot "move": source and target address are identical, so the
-            // ONLY thing left to do is the opt-in leaf rename (#1017). Without
-            // it this is a literal no-op — writing a NodeRevision for it would
-            // record a change that did not happen, and on a memory with a
-            // maxRevCount cap it would evict real history to store nothing.
-            //
-            // The rename is itself skipped when the name ALREADY equals the
-            // leaf (PR #1018 review, Copilot): re-stamping an identical value
-            // is the same no-op-history problem one line up, and a same-slot
-            // call is exactly where it is most likely — a caller normalizing a
-            // name that is already normalized.
-            const newName = toLoc.split(':').pop()!;
-            if (renameToLeaf === true && existing.name !== newName) {
-              // Row lock + drift reconciled as its own revision, then the
-              // authoritative re-read the snapshot is built from — the rule on
-              // every single-row revisioned writer (PR #1339 review).
-              // Re-validate BEFORE reconciling (@copilot, PR #1339): the row
-              // must still be the live node at the authorized (memory, loc),
-              // or this would reconcile — and then rename — a row that moved.
-              await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${existing.id} FOR UPDATE`;
-              // This direct same-slot rename bypasses moveNodeSubtree but still
-              // snapshots history. Hold the source encryption flag before it.
-              await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${fromMemory.id} FOR SHARE`;
-              await assertLockedMemoryWriteAccess(tx, auth, fromMemory.id);
-              const still = await tx.node.findUnique({
-                where: { id: existing.id },
-                select: { memoryId: true, loc: true, deletedAt: true },
-              });
-              if (!still || still.deletedAt || still.memoryId !== fromMemory.id || still.loc !== fromLoc) {
-                throw new SubtreeMoveSourceChangedError(existing.id);
+        const completed = await withArchivePlanRetries(async (timeout) => {
+          let relocated: MoveNodeSubtreeResult['moved'] = [];
+          let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
+          const attemptResult = await db.$transaction<MoveResult>(async (tx) => {
+            let attemptAuth = auth;
+            const authorizeAttempt = async () => {
+              if (auth.userId) {
+                const user = await tx.user.findUnique({ where: { id: auth.userId }, select: { roles: true, deletedAt: true } });
+                if (!user || user.deletedAt) throw new MemoryWriteAccessChangedDuringWriteError('[node_write_conflict] Memory write access changed while this write waited — re-read and retry.');
+                attemptAuth = { ...auth, roles: auth.impersonation ? [] : user.roles };
               }
-              await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: fromMemory.id });
-              const locked = await tx.node.findUniqueOrThrow({ where: { id: existing.id } });
-              // #1641 — a decision's name is its rendered `<code>: <title>`,
-              // which its approval covers; only the decision doors change it.
-              if (isDecisionFamilyRole(locked.role)) throw decisionContainedError('Renaming this node', [locked.loc]);
-              await createNodeRevision(tx, {
-                id: generateId(),
-                ...buildNodeRevisionSnapshot(locked, editorFromAuth(auth), {
-                  changes: diffNodeChanges(locked, { loc: toLoc, name: newName, memoryId: toMemory.id }),
-                }),
-              });
-              await tx.node.update({
-                where: { id: existing.id },
-                data: {
-                  loc: toLoc,
-                  name: newName,
-                  memoryId: toMemory.id,
-                  ...clearNodeAuthorship(),
-                  revisionContentHash: revisionStateHashRefreshMarker(),
-                },
-              });
-            }
-          } else {
-            const crossMemory = toMemory.id !== fromMemory.id;
+              await assertLockedMemoryWriteAccess(tx, attemptAuth, fromMemory.id);
+              await assertLockedMemoryWriteAccess(tx, attemptAuth, toMemory.id);
+            };
+            // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
+            await lockAgentDefinitionAuthority(tx, auth.userId ?? null, [fromMemory.id, toMemory.id]);
+            await authorizeAttempt();
+            // #664/#752: moving a node INTO a subtree is the same orphan vector as
+            // creating there — lock the destination's ancestor path first (matching
+            // the GraphQL moveNode resolver and hadron_delete_node's own-loc lock),
+            // so a concurrent non-recursive delete of a destination ancestor can't
+            // count zero descendants and then let this move land under it. Taken
+            // before any row-locking statement to keep advisory-before-row ordering
+            // consistent with the delete path (no lock-order inversion).
+            // #1187 (@codex + @copilot on PR #1211) — DECLARE the complete key
+            // set first, in the one global order, exactly as the GraphQL
+            // `moveNode` resolver does. This surface was missed when that
+            // protocol landed: it took the destination ancestors here and reached
+            // the source path only later, inside `moveNodeSubtree`
+            // (`lockSourceForMove`). For source `a` and destination `z:child`
+            // that is `z` then `a`, while the GraphQL path takes `a` then `z` —
+            // so the two SURFACES could deadlock against each other, and two MCP
+            // moves with opposing paths against themselves.
+            //
+            // Enumerating the multi-key callers from the GraphQL resolvers alone
+            // is how this was missed; the writers are enumerated by STATE (who
+            // takes two keys), never by the call sites one happens to know.
+            // #1466: an edge writer holds this memory key across endpoint
+            // validation and insertion. Take it before any loc lock so an edge
+            // cannot land after archiveTombstone enumerates the target's edges.
+            await lockEdgeEndpointMemories(tx, [toMemory.id]);
+            const archivePlan = await discoverArchivePlan(tx, toMemory.id, toLoc);
+            await acquireLockSet(tx, [
+              ...archivePlan.descendantLocs.map(loc => ({ memoryId: toMemory.id, loc })),
+              ...ancestorLocs(toLoc).map((loc) => ({ memoryId: toMemory.id, loc })),
+              ...ancestorLocs(fromLoc).map((loc) => ({ memoryId: fromMemory.id, loc })),
+              { memoryId: fromMemory.id, loc: fromLoc },
+              { memoryId: toMemory.id, loc: toLoc },
+            ]);
+            await lockAncestorsForCreate(tx, toMemory.id, toLoc);
+            await authorizeAttempt();
+            await validateArchivePlan(tx, archivePlan);
 
-            // Collision policy for the EXPLICITLY-named target loc: a live
-            // occupant refuses unless overwrite:true, which soft-deletes it and
-            // re-stamps its loc out of the way so the (loc, memoryId) unique
-            // doesn't block. Use the FULL id in the archived loc — UUIDv7's first
-            // 6 bytes are the ms timestamp, so an 8-char slice was timestamp-only
-            // entropy (PR-189). Descendant-slot collisions are always refused —
-            // moveNodeSubtree throws SubtreeMoveCollisionError (caught below).
-            const existingTarget = await tx.node.findUnique({
-              where: { loc_memoryId: { loc: toLoc, memoryId: toMemory.id } },
-            });
-            if (existingTarget && !existingTarget.deletedAt && !overwrite) {
-              const targetUrn = await nodeUrn(toLoc, toMemory.id);
-              return { refused: 'urn-exists', targetUrn };
-            }
-            // #1331 — overwriting evicts the occupant: its role's writer level applies.
-            if (existingTarget && !existingTarget.deletedAt) {
-              await assertRoleWritersForNodes(tx, auth, [existingTarget], { from: toMemory.id });
-            }
-            if (existingTarget) {
-              if (!existingTarget.deletedAt) {
+            if (isSameSlot) {
+              // Same-slot "move": source and target address are identical, so the
+              // ONLY thing left to do is the opt-in leaf rename (#1017). Without
+              // it this is a literal no-op — writing a NodeRevision for it would
+              // record a change that did not happen, and on a memory with a
+              // maxRevCount cap it would evict real history to store nothing.
+              //
+              // The rename is itself skipped when the name ALREADY equals the
+              // leaf (PR #1018 review, Copilot): re-stamping an identical value
+              // is the same no-op-history problem one line up, and a same-slot
+              // call is exactly where it is most likely — a caller normalizing a
+              // name that is already normalized.
+              const newName = toLoc.split(':').pop()!;
+              if (renameToLeaf === true && existing.name !== newName) {
+                // Row lock + drift reconciled as its own revision, then the
+                // authoritative re-read the snapshot is built from — the rule on
+                // every single-row revisioned writer (PR #1339 review).
+                // Re-validate BEFORE reconciling (@copilot, PR #1339): the row
+                // must still be the live node at the authorized (memory, loc),
+                // or this would reconcile — and then rename — a row that moved.
+                await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${existing.id} FOR UPDATE`;
+                // This direct same-slot rename bypasses moveNodeSubtree but still
+                // snapshots history. Hold the source encryption flag before it.
+                await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${fromMemory.id} FOR SHARE`;
+                await assertLockedMemoryWriteAccess(tx, attemptAuth, fromMemory.id);
+                const still = await tx.node.findUnique({
+                  where: { id: existing.id },
+                  select: { memoryId: true, loc: true, deletedAt: true },
+                });
+                if (!still || still.deletedAt || still.memoryId !== fromMemory.id || still.loc !== fromLoc) {
+                  throw new SubtreeMoveSourceChangedError(existing.id);
+                }
+                await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: fromMemory.id });
+                const locked = await tx.node.findUniqueOrThrow({ where: { id: existing.id } });
+                // #1641 — a decision's name is its rendered `<code>: <title>`,
+                // which its approval covers; only the decision doors change it.
+                if (isDecisionFamilyRole(locked.role)) throw decisionContainedError('Renaming this node', [locked.loc]);
+                await createNodeRevision(tx, {
+                  id: generateId(),
+                  ...buildNodeRevisionSnapshot(locked, editorFromAuth(auth), {
+                    changes: diffNodeChanges(locked, { loc: toLoc, name: newName, memoryId: toMemory.id }),
+                  }),
+                });
                 await tx.node.update({
-                  where: { id: existingTarget.id },
-                  data: { deletedAt: new Date(), deletedBy: auth.userId ?? auth.clientId ?? null },
+                  where: { id: existing.id },
+                  data: {
+                    loc: toLoc,
+                    name: newName,
+                    memoryId: toMemory.id,
+                    ...clearNodeAuthorship(),
+                    revisionContentHash: revisionStateHashRefreshMarker(),
+                  },
                 });
               }
-              // #1466: the old node's edges keep locs derived from this address.
-              // Rekey them with the tombstone inside the same move transaction,
-              // before the mover takes the address and can create its own edges.
-              await archiveTombstone(tx, existingTarget);
-            }
+            } else {
+              const crossMemory = toMemory.id !== fromMemory.id;
 
-            // #768/#781: rebase the whole loc-subtree via the shared helper (the
-            // ONE implementation the GraphQL moveNode resolver also uses) — SAME-
-            // memory or CROSS-memory (destMemoryId carries nodes + embeddings +
-            // outgoing edges across). It locks + revalidates the source and
-            // writes a NodeRevision per moved node.
-            //
-            // #1017: renameSourceLeaf is now the CALLER's choice, defaulting off.
-            // It used to be hardcoded true, which silently overwrote the moved
-            // node's human-authored `name` with the target loc's terminal atom —
-            // unconditional, undocumented, and the opposite of what the GraphQL
-            // `moveNode` resolver does with the same helper. Two surfaces of one
-            // operation disagreeing is bad enough; the tool's own description
-            // enumerated what survives a move (id, edges, descendants) and never
-            // mentioned `name`, so the contract actively taught the wrong thing.
-            // The damage was quiet, too — loc and name are usually similar
-            // enough that a clobbered title still reads plausibly.
-            const subtreeResult = await moveNodeSubtree(tx, {
-              source: existing,
-              destLoc: toLoc,
-              destMemoryId: crossMemory ? toMemory.id : undefined,
-              editor: editorFromAuth(auth),
-              renameSourceLeaf: renameToLeaf === true,
-              authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, auth, memoryId),
-              principal: auth,
-            });
-            relocated = subtreeResult.moved;
-            linkWarnings = subtreeResult.linkWarnings;
-            // #1468 — evicting the destination occupant removes it from its
-            // corpus and hands its citation to another node: refused for a
-            // minted spec. Checked AFTER the helper on purpose: it already holds
-            // the occupant row (the eviction update) and the destination memory
-            // FOR NO KEY UPDATE, so the guard takes nothing new; checking first
-            // would take that memory FOR SHARE and then upgrade it inside the
-            // helper, the deadlock its header warns about. A refusal rolls the
-            // whole transaction back.
-            if (existingTarget) {
-              await assertNoMintedSpecRemoval(tx, toMemory.id, [existingTarget.id], 'overwrite');
-              // #1641 §3.2 — evicting a decision would delete it.
-              await refuseDecisionFamily(tx, [existingTarget.id], 'Overwriting this node');
-              // Evicting a live occupant is a removal: a governed occupant is
-              // replaced only after its marker is cleared through the kind's
-              // door. Judged on the locked row; the eviction update above already
-              // holds it, so this takes nothing new. A tombstoned occupant is
-              // only re-keyed, which removes nothing.
-              if (!existingTarget.deletedAt) {
-                const governedOccupant = await lockGovernedRowsIn(tx, toMemory.id, [existingTarget.id]);
-                if (governedOccupant.length > 0) throw governedRemovalError(governedOccupant, 'mcp', 'overwrite');
+              // Collision policy for the EXPLICITLY-named target loc: a live
+              // occupant refuses unless overwrite:true, which soft-deletes it and
+              // re-stamps its loc out of the way so the (loc, memoryId) unique
+              // doesn't block. Use the FULL id in the archived loc — UUIDv7's first
+              // 6 bytes are the ms timestamp, so an 8-char slice was timestamp-only
+              // entropy (PR-189). Descendant-slot collisions are always refused —
+              // moveNodeSubtree throws SubtreeMoveCollisionError (caught below).
+              const existingTarget = await tx.node.findUnique({
+                where: { loc_memoryId: { loc: toLoc, memoryId: toMemory.id } },
+              });
+              if (existingTarget && !existingTarget.deletedAt && !overwrite) {
+                const targetUrn = await nodeUrn(toLoc, toMemory.id);
+                return { refused: 'urn-exists', targetUrn };
+              }
+              // #1331 — overwriting evicts the occupant: its role's writer level applies.
+              if (existingTarget && !existingTarget.deletedAt) {
+                await assertRoleWritersForNodes(tx, attemptAuth, [existingTarget], { from: toMemory.id });
+              }
+              if (existingTarget) {
+                if (!existingTarget.deletedAt) {
+                  await tx.node.update({
+                    where: { id: existingTarget.id },
+                    data: { deletedAt: new Date(), deletedBy: auth.userId ?? auth.clientId ?? null },
+                  });
+                }
+                // #1466: the old node's edges keep locs derived from this address.
+                // Rekey them with the tombstone inside the same move transaction,
+                // before the mover takes the address and can create its own edges.
+                await archiveTombstone(tx, existingTarget, archivePlan);
+              }
+
+              // #768/#781: rebase the whole loc-subtree via the shared helper (the
+              // ONE implementation the GraphQL moveNode resolver also uses) — SAME-
+              // memory or CROSS-memory (destMemoryId carries nodes + embeddings +
+              // outgoing edges across). It locks + revalidates the source and
+              // writes a NodeRevision per moved node.
+              //
+              // #1017: renameSourceLeaf is now the CALLER's choice, defaulting off.
+              // It used to be hardcoded true, which silently overwrote the moved
+              // node's human-authored `name` with the target loc's terminal atom —
+              // unconditional, undocumented, and the opposite of what the GraphQL
+              // `moveNode` resolver does with the same helper. Two surfaces of one
+              // operation disagreeing is bad enough; the tool's own description
+              // enumerated what survives a move (id, edges, descendants) and never
+              // mentioned `name`, so the contract actively taught the wrong thing.
+              // The damage was quiet, too — loc and name are usually similar
+              // enough that a clobbered title still reads plausibly.
+              const subtreeResult = await moveNodeSubtree(tx, {
+                source: existing,
+                destLoc: toLoc,
+                destMemoryId: crossMemory ? toMemory.id : undefined,
+                editor: editorFromAuth(auth),
+                renameSourceLeaf: renameToLeaf === true,
+                authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, attemptAuth, memoryId),
+                principal: attemptAuth,
+              });
+              relocated = subtreeResult.moved;
+              linkWarnings = subtreeResult.linkWarnings;
+              // #1468 — evicting the destination occupant removes it from its
+              // corpus and hands its citation to another node: refused for a
+              // minted spec. Checked AFTER the helper on purpose: it already holds
+              // the occupant row (the eviction update) and the destination memory
+              // FOR NO KEY UPDATE, so the guard takes nothing new; checking first
+              // would take that memory FOR SHARE and then upgrade it inside the
+              // helper, the deadlock its header warns about. A refusal rolls the
+              // whole transaction back.
+              if (existingTarget) {
+                await assertNoMintedSpecRemoval(tx, toMemory.id, [existingTarget.id], 'overwrite');
+                // #1641 §3.2 — evicting a decision would delete it.
+                await refuseDecisionFamily(tx, [existingTarget.id], 'Overwriting this node');
+                // Evicting a live occupant is a removal: a governed occupant is
+                // replaced only after its marker is cleared through the kind's
+                // door. A tombstoned occupant is only re-keyed.
+                if (!existingTarget.deletedAt) {
+                  const governedOccupant = await lockGovernedRowsIn(tx, toMemory.id, [existingTarget.id]);
+                  if (governedOccupant.length > 0) throw governedRemovalError(governedOccupant, 'mcp', 'overwrite');
+                }
               }
             }
-          }
 
-          // Move BY ID — id is stable across moves, so this refetch can't race a
-          // concurrent move into the same slot.
-          const moved = await tx.node.findUniqueOrThrow({
-            where: { id: existing.id },
-            include: {
-              outgoingEdges: {
-                where: { target: { deletedAt: null } },
-                select: { id: true },
+            // Move BY ID — id is stable across moves, so this refetch can't race a
+            // concurrent move into the same slot.
+            const moved = await tx.node.findUniqueOrThrow({
+              where: { id: existing.id },
+              include: {
+                outgoingEdges: {
+                  where: { target: { deletedAt: null } },
+                  select: { id: true },
+                },
+                incomingEdges: {
+                  where: { source: { deletedAt: null } },
+                  select: { id: true },
+                },
               },
-              incomingEdges: {
-                where: { source: { deletedAt: null } },
-                select: { id: true },
+            });
+
+            // Immediate children now living under the destination loc (the moved
+            // descendants plus any that were pre-staged there).
+            const childCount = await tx.node.count({
+              where: {
+                memoryId: toMemory.id,
+                loc: { startsWith: toLoc + ':' },
+                deletedAt: null,
               },
-            },
-          });
+            });
 
-          // Immediate children now living under the destination loc (the moved
-          // descendants plus any that were pre-staged there).
-          const childCount = await tx.node.count({
-            where: {
-              memoryId: toMemory.id,
-              loc: { startsWith: toLoc + ':' },
-              deletedAt: null,
-            },
-          });
-
-          return { ok: true, moved, childCount };
-        },
-        // A large same-memory subtree touches many rows (two updates + a revision
-        // per node); the default 5s interactive-txn timeout is too tight — match
-        // the GraphQL moveNode path so inputs that succeed there don't time out
-        // here (mirrors extractParentNodeGraph / cloneMemory).
-        { timeout: 120_000 });
+            return { ok: true, moved, childCount };
+          },
+          // A large same-memory subtree touches many rows (two updates + a revision
+          // per node); the default 5s interactive-txn timeout is too tight — match
+          // the GraphQL moveNode path so inputs that succeed there don't time out
+          // here (mirrors extractParentNodeGraph / cloneMemory).
+          { timeout });
+          return { result: attemptResult, relocated, linkWarnings };
+        });
+        result = completed.result;
+        relocated = completed.relocated;
+        linkWarnings = completed.linkWarnings;
       } catch (e) {
+        if (e instanceof ArchivePlanExhaustedError) return textResult('The node was moved concurrently; re-read it and retry.');
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
         // A descendant-slot collision (or a move-into-own-subtree) aborts the
         // whole transaction — including any overwrite eviction — and surfaces as

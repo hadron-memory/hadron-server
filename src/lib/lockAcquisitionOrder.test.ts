@@ -1,6 +1,6 @@
 /**
  * #1187 — every advisory key in the `(memoryId, loc)` space is acquired in ONE
- * global order, so no two call sites can invert against each other.
+ * global resolved-key order (#1214), so input hash collisions cannot invert it.
  *
  * The four lock helpers share one key space and their callers had no common
  * order: bulk sorted length-first, merge took target-then-source, move took
@@ -69,7 +69,7 @@ function deadlocks(results: PromiseSettledResult<unknown>[]): string[] {
     .filter((m) => /deadlock|40P01/i.test(m));
 }
 
-describe('compareLockKeys — the one global order', () => {
+describe('compareLockKeys — stable input order, not acquisition order', () => {
   it('sorts by memory, then length (root→leaf), then lexically', () => {
     const keys: LockKey[] = [
       { memoryId: 'm2', loc: 'a' },
@@ -88,9 +88,8 @@ describe('compareLockKeys — the one global order', () => {
   });
 
   it('is a TOTAL order — any permutation of one set sorts identically', () => {
-    // The property that actually matters: two call sites holding the same keys
-    // in different input orders must reach the same acquisition sequence. A
-    // spot-check of one input order cannot show that.
+    // This comparator remains a stable input-space utility; acquisition order
+    // is now independently derived from PostgreSQL hashes (#1214).
     const keys: LockKey[] = [
       { memoryId: 'm1', loc: 'z' },
       { memoryId: 'm1', loc: 'a:b' },
@@ -109,6 +108,7 @@ describe('acquireLockSet', () => {
   it('dedupes — a key named twice is acquired once', async () => {
     const calls: string[] = [];
     const tx = {
+      $queryRaw: async () => [{ h1: 1, h2: 2 }, { h1: 1, h2: 1 }],
       $executeRaw: (_s: TemplateStringsArray, m: string, l: string) => {
         calls.push(`${m}/${l}`);
         return Promise.resolve(1);
@@ -119,7 +119,7 @@ describe('acquireLockSet', () => {
       { memoryId: 'm', loc: 'a' },
       { memoryId: 'm', loc: 'a:b' },
     ]);
-    expect(calls).toEqual(['m/a', 'm/a:b']);
+    expect(calls).toEqual(['1/1', '1/2']);
   });
 
   it('two transactions given the SAME keys in OPPOSITE input orders do not deadlock', async () => {
@@ -174,8 +174,9 @@ describe('acquireLockSet', () => {
  *
  * The invariant is about the SEQUENCE, so the sequence is what to observe.
  */
-function recordingCtx(): { ctx: Context; keys: LockKey[] } {
-  const keys: LockKey[] = [];
+type ActualKey = { h1: number; h2: number };
+function recordingCtx(): { ctx: Context; keys: ActualKey[] } {
+  const keys: ActualKey[] = [];
   const LOCK_RE = /pg_advisory_xact_lock/;
   const proxied = new Proxy(db, {
     get(target, prop, receiver) {
@@ -185,9 +186,13 @@ function recordingCtx(): { ctx: Context; keys: LockKey[] } {
           const spy = new Proxy(tx, {
             get(t, p, r) {
               if (p !== '$executeRaw') return Reflect.get(t, p, r);
-              return (strings: TemplateStringsArray, ...values: unknown[]) => {
+              return async (strings: TemplateStringsArray, ...values: unknown[]) => {
                 if (LOCK_RE.test(strings.join(''))) {
-                  keys.push({ memoryId: String(values[0]), loc: String(values[1]) });
+                  const [m, l] = values;
+                  const actual = typeof m === 'number' && typeof l === 'number'
+                    ? { h1: m, h2: l }
+                    : (await tx.$queryRaw<ActualKey[]>`SELECT hashtext(${String(m)}) AS h1, hashtext(${String(l)}) AS h2`)[0];
+                  keys.push(actual);
                 }
                 return (t as typeof tx).$executeRaw(strings, ...values);
               };
@@ -212,17 +217,19 @@ function recordingCtx(): { ctx: Context; keys: LockKey[] } {
  * meaningless. Only the first time a key is taken can make this transaction
  * WAIT, so only that order can deadlock.
  */
-function firstAcquisitionsOrdered(keys: LockKey[]): boolean {
+function firstAcquisitionsOrdered(keys: ActualKey[]): boolean {
   const seen = new Set<string>();
-  const firsts: LockKey[] = [];
+  const firsts: ActualKey[] = [];
   for (const k of keys) {
-    const id = `${k.memoryId}\0${k.loc}`;
+    const id = `${k.h1},${k.h2}`;
     if (seen.has(id)) continue;
     seen.add(id);
     firsts.push(k);
   }
   for (let i = 1; i < firsts.length; i++) {
-    if (compareLockKeys(firsts[i - 1], firsts[i]) > 0) return false;
+    const a = firsts[i - 1];
+    const b = firsts[i];
+    if ((a.h1 - b.h1 || a.h2 - b.h2) > 0) return false;
   }
   return true;
 }
@@ -231,11 +238,11 @@ describe('the real operations acquire in the global order (#1187)', () => {
   const mk = (loc: string) =>
     db.node.create({ data: { id: generateId(), memoryId: memory.id, loc, name: loc } });
 
-  it('a LEAF→ROOT merge still acquires ROOT→LEAF', async () => {
+  it('a LEAF→ROOT merge acquires resolved signed pairs in order', async () => {
     // The specific inversion #1187 catalogues. `mergeNodes` guards only
     // `source !== target`, so merging an ANCESTOR into its DESCENDANT is legal —
-    // and it names its endpoints target-then-source, i.e. `a:b` before `a`,
-    // against every other caller's root→leaf. The declared set must re-sort it.
+    // and it names its endpoints target-then-source, i.e. `a:b` before `a`.
+    // The declared set must order the actual keys independently of input direction.
     const root = await mk('a');
     const leaf = await mk('a:b');
     const { ctx: rec, keys } = recordingCtx();
@@ -250,11 +257,10 @@ describe('the real operations acquire in the global order (#1187)', () => {
     );
 
     expect(keys.length).toBeGreaterThan(0);
-    expect(keys).toContainEqual({ memoryId: memory.id, loc: 'a' });
-    expect(keys).toContainEqual({ memoryId: memory.id, loc: 'a:b' });
-    // The assertion that matters: `a` is taken BEFORE `a:b`, even though the
-    // operation names them the other way round.
-    expect(keys.findIndex((k) => k.loc === 'a')).toBeLessThan(keys.findIndex((k) => k.loc === 'a:b'));
+    const expected = await db.$queryRaw<ActualKey[]>`
+      SELECT hashtext(${memory.id}) AS h1, hashtext(loc) AS h2
+      FROM unnest(ARRAY['a', 'a:b']) AS loc`;
+    for (const actual of expected) expect(keys).toContainEqual(actual);
     expect(firstAcquisitionsOrdered(keys)).toBe(true);
   });
 

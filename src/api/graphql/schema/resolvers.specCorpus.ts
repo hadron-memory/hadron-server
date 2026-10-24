@@ -1,5 +1,11 @@
 import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
 import { liveTxContext } from './authorizedTx.js';
+import { liveCaller } from '../../../lib/tickers/liveCaller.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+// Draft spec corpora (#1447): the server-owned spec-corpus operations.
+//
+// #1450 — reserveSpecCitation. Contract:
+// https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862 §4.
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { mirrorNodeMoveToGit, type MovedNodeRef } from '../../../integrations/github/mirrorNodeMove.js';
@@ -21,8 +27,8 @@ import {
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { legacyMemoryUrnToCanonical, normalizeUrnForLookup, parseUrnInput } from '../../../lib/urn.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
-import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
-import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
+import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../../lib/nodeSubtreeLock.js';
+import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../../../lib/tombstoneArchive.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
 import { pendingEdgeStableTargetId } from '../../../lib/pendingEdgePromotion.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
@@ -78,80 +84,102 @@ export const specCorpusMutations = {
     // unauthorized caller must not contend for this tenant's locks, and no
     // archive-time error may reveal that a tombstone exists at the loc.
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
-    const effects: Array<() => void> = [];
-    const reserved = await ctx.db.$transaction(async (tx) => {
-      // (@codex P1/P2s, PR #1452) Never REVIVE a deleted node as a placeholder.
-      // A revival keeps everything attached to the row (text, payload, edges,
-      // vectors, provenance, revision history), and each of those surfaced a
-      // leak in turn. Archive the tombstone at `<loc>__deleted-<id>` instead,
-      // the convention a move that overwrites a live target already uses, so
-      // the placeholder is a FRESH node and the deleted spec keeps its own
-      // identity and history on its still-deleted row.
-      // (@codex P2, PR #1452) Take the address locks FIRST, in the global
-      // order every create/move/overwrite at this loc uses (ancestors, then the
-      // loc itself), before touching the tombstone's row. Row-locking the
-      // tombstone first would invert against a concurrent writer that holds
-      // these advisory locks and waits on that row: a deadlock instead of a
-      // typed loc conflict. writeNodeCore's own acquisition below is then a
-      // re-entrant no-op.
-      // (Chip's QA, PR #1452) The edge-endpoint memory key first, as every edge
-      // writer takes it before its address locks: an in-flight edge naming the
-      // tombstone then commits before the archive lists edges, and a later one
-      // revalidates the endpoint under this key and finds it gone.
-      await lockEdgeEndpointMemories(tx, [memoryId]);
-      await acquireLockSet(tx, [
-        ...ancestorLocs(loc).map((ancestor) => ({ memoryId, loc: ancestor })),
-        { memoryId, loc },
-      ]);
-      const tombstone = await tx.node.findFirst({
-        where: { memoryId, loc, deletedAt: { not: null } },
-        select: { id: true },
+    let completed;
+    try {
+      completed = await withArchivePlanRetries(async (timeout) => {
+        const effects: Array<() => void> = [];
+        const reserved = await ctx.db.$transaction(async (tx) => {
+          let txCtx = withoutRequestCaches(ctx, tx);
+          const authorizeAttempt = async () => {
+            const current = await liveCaller(ctx, tx);
+            if (!current) throw authorizationDenied();
+            txCtx = current;
+            await concealUnreadableDenial(txCtx, memoryId, memoryRef, () => requireMemoryWriteAccess(txCtx, memoryId));
+          };
+          await authorizeAttempt();
+          // (@codex P1/P2s, PR #1452) Never REVIVE a deleted node as a placeholder.
+          // A revival keeps everything attached to the row (text, payload, edges,
+          // vectors, provenance, revision history), and each of those surfaced a
+          // leak in turn. Archive the tombstone at `<loc>__deleted-<id>` instead,
+          // the convention a move that overwrites a live target already uses, so
+          // the placeholder is a FRESH node and the deleted spec keeps its own
+          // identity and history on its still-deleted row.
+          // (@codex P2, PR #1452) Take the address locks FIRST, in the global
+          // order every create/move/overwrite at this loc uses (ancestors, then the
+          // loc itself), before touching the tombstone's row. Row-locking the
+          // tombstone first would invert against a concurrent writer that holds
+          // these advisory locks and waits on that row: a deadlock instead of a
+          // typed loc conflict. writeNodeCore's own acquisition below is then a
+          // re-entrant no-op.
+          // (Chip's QA, PR #1452) The edge-endpoint memory key first, as every edge
+          // writer takes it before its address locks: an in-flight edge naming the
+          // tombstone then commits before the archive lists edges, and a later one
+          // revalidates the endpoint under this key and finds it gone.
+          await lockEdgeEndpointMemories(tx, [memoryId]);
+          const archivePlan = await discoverArchivePlan(tx, memoryId, loc);
+          await acquireLockSet(tx, [
+            ...archivePlan.descendantLocs.map(loc => ({ memoryId, loc })),
+            ...ancestorLocs(loc).map((ancestor) => ({ memoryId, loc: ancestor })),
+            { memoryId, loc },
+          ]);
+          await lockAncestorsForCreate(tx, memoryId, loc, { op: 'create' });
+          await authorizeAttempt();
+          await validateArchivePlan(tx, archivePlan);
+          const tombstone = await tx.node.findFirst({
+            where: { memoryId, loc, deletedAt: { not: null } },
+            select: { id: true },
+          });
+          // (@codex P2, PR #1452) The tombstone's edges go with it: their derived
+          // locs would otherwise collide with the placeholder's once it is filled.
+          if (tombstone) await archiveTombstone(tx, { id: tombstone.id, loc, memoryId }, archivePlan);
+          const node = await writeNodeCore(
+            {
+              memoryId, loc, name: name?.trim() || loc, role: 'spec', nodeType: 'info',
+              // Every authored field is stated, not omitted, so the placeholder is
+              // empty by construction rather than by relying on a fresh row. The
+              // test that pins this compares a reservation over a tombstone to a
+              // fresh one column by column.
+              content: null, abstract: null, description: null, contentType: null,
+              alias: null, tags: [], data: null, properties: null,
+              llmModel: null, aiAgent: null, isLink: false, objectType: null,
+              edges: [],
+            },
+            txCtx,
+            'create',
+            {
+              ownsKind: 'spec',
+              governedContext: 'node-write',
+              concealUnreadable: { entity: 'memory', ref: memoryRef },
+              transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
+            },
+          );
+          // Git provenance is not a node-input field, so it is reset here, in the
+          // same write that marks the placeholder (@codex P2, PR #1452): a revived
+          // git-synced tombstone would otherwise keep the deleted body's hash and
+          // stay owned by the old repo, where sync's cleanup could delete it.
+          await tx.node.update({
+            where: { id: node.id },
+            data: { isPlaceholder: true, contentHash: null, ownerRepo: null },
+            select: { id: true },
+          });
+          // (@codex P1, PR #1452) Soft deletion keeps a node's vectors, and vector
+          // search only checks the node's own deleted_at. A revived tombstone would
+          // therefore let the placeholder rank for, and chunk search return, the
+          // deleted spec's text. A placeholder has no content, so it has no vectors.
+          await tx.nodeEmbedding.deleteMany({ where: { nodeId: node.id } });
+          // The node as the create door built it (relations included), now marked.
+          // …with the values this transaction just reset, not the ones read
+          // before it (@codex P2, PR #1452): Node.ownerRepo is client-visible.
+          return { ...node, isPlaceholder: true, contentHash: null, ownerRepo: null };
+        }, { timeout });
+        return { reserved, effects };
       });
-      // (@codex P2, PR #1452) The tombstone's edges go with it: their derived
-      // locs would otherwise collide with the placeholder's once it is filled.
-      if (tombstone) await archiveTombstone(tx, { id: tombstone.id, loc, memoryId });
-      const node = await writeNodeCore(
-        {
-          memoryId, loc, name: name?.trim() || loc, role: 'spec', nodeType: 'info',
-          // Every authored field is stated, not omitted, so the placeholder is
-          // empty by construction rather than by relying on a fresh row. The
-          // test that pins this compares a reservation over a tombstone to a
-          // fresh one column by column.
-          content: null, abstract: null, description: null, contentType: null,
-          alias: null, tags: [], data: null, properties: null,
-          llmModel: null, aiAgent: null, isLink: false, objectType: null,
-          edges: [],
-        },
-        withoutRequestCaches(ctx, tx),
-        'create',
-        {
-          ownsKind: 'spec',
-          governedContext: 'node-write',
-          concealUnreadable: { entity: 'memory', ref: memoryRef },
-          transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
-        },
-      );
-      // Git provenance is not a node-input field, so it is reset here, in the
-      // same write that marks the placeholder (@codex P2, PR #1452): a revived
-      // git-synced tombstone would otherwise keep the deleted body's hash and
-      // stay owned by the old repo, where sync's cleanup could delete it.
-      await tx.node.update({
-        where: { id: node.id },
-        data: { isPlaceholder: true, contentHash: null, ownerRepo: null },
-        select: { id: true },
-      });
-      // (@codex P1, PR #1452) Soft deletion keeps a node's vectors, and vector
-      // search only checks the node's own deleted_at. A revived tombstone would
-      // therefore let the placeholder rank for, and chunk search return, the
-      // deleted spec's text. A placeholder has no content, so it has no vectors.
-      await tx.nodeEmbedding.deleteMany({ where: { nodeId: node.id } });
-      // The node as the create door built it (relations included), now marked.
-      // …with the values this transaction just reset, not the ones read
-      // before it (@codex P2, PR #1452): Node.ownerRepo is client-visible.
-      return { ...node, isPlaceholder: true, contentHash: null, ownerRepo: null };
-    }, { timeout: 120_000 });
-    for (const effect of effects) effect();
-    return reserved;
+    } catch (error) {
+      if (error instanceof ArchivePlanExhaustedError) throw new GraphQLError(error.message, { extensions: { code: 'CONFLICT' } });
+      throw error;
+    }
+    for (const effect of completed.effects) effect();
+    return completed.reserved;
   },
 };
 

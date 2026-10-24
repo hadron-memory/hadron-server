@@ -532,7 +532,7 @@ const syncGraphFromGithubAsSystem = async (
       }
       // #664/#752: a git-sync bulk-upserts/moves rows into an EXISTING memory,
       // bypassing the locked create surfaces. Lock the ancestor path of every
-      // synced loc (deduped, root→leaf) up front so a concurrent non-recursive
+      // synced loc (deduped, in resolved-key order) up front so a concurrent non-recursive
       // delete of an ancestor in this memory can't count zero descendants and
       // then miss the rows this sync commits. READ COMMITTED (the tx default) is
       // required so that delete's count sees these rows once the sync commits.
