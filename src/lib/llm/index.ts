@@ -465,6 +465,7 @@ export async function generateWithTools(
   const toolCalls: ToolCallRecord[] = [];
   // Our terminal errors, captured before the SDK can wrap them.
   let fatal: Error | null = null;
+  const terminal = (): Error | null => fatal;
 
   const sdkTools = Object.fromEntries(
     toolDefs.map((def) => [
@@ -485,15 +486,22 @@ export async function generateWithTools(
             toolCalls.push({ name: def.name, ok: false, ms: Date.now() - started });
             // instanceof, not name-matching: a non-Error rejection with a
             // spoofed `name` must not ride the passthrough (PR-540 Copilot).
-            fatal =
-              err instanceof AuthorFailError || err instanceof ToolDeniedError
-                ? err
-                : new ToolExecutionError(
-                    def.name,
-                    String((err as Error)?.message ?? err),
-                    { cause: err },
-                  );
-            throw fatal; // abort the SDK loop
+            // The FIRST terminal wins: with parallel calls in one step a later
+            // sibling's failure must not replace the error that ended the run.
+            if (fatal === null) {
+              fatal =
+                err instanceof AuthorFailError || err instanceof ToolDeniedError
+                  ? err
+                  : new ToolExecutionError(
+                      def.name,
+                      String((err as Error)?.message ?? err),
+                      { cause: err },
+                    );
+            }
+            // ai@7 turns a throwing execute into a `tool-error` part and keeps
+            // looping, so a throw alone no longer aborts (#2412): `stopWhen`
+            // ends the loop after this step, and the resolved path rethrows.
+            throw fatal;
           }
         },
       }),
@@ -507,9 +515,15 @@ export async function generateWithTools(
       ...(req.system ? { system: req.system } : {}),
       prompt: req.prompt,
       tools: sdkTools,
-      stopWhen: stepCountIs(opts.stepCap ?? DEFAULT_TOOL_STEP_CAP),
+      stopWhen: [stepCountIs(opts.stepCap ?? DEFAULT_TOOL_STEP_CAP), () => terminal() !== null],
       ...settings,
     });
+    // Backstop (#2412): the SDK resolved after a tool terminal. Our error
+    // wins, un-wrapped, so the kernel maps it (AUTHOR_FAIL / ACTIVATION_DENIED /
+    // TOOL_FAILED) instead of recording a success. Its usage is not reported
+    // here, same as the rejected-call path (#832 / #862).
+    const ended = terminal();
+    if (ended) throw ended;
     const usage = out.totalUsage ?? out.usage; // summed across steps (spike-pinned)
     return {
       text: out.text,
@@ -522,7 +536,8 @@ export async function generateWithTools(
       toolCalls,
     };
   } catch (err) {
-    if (fatal) throw fatal; // our terminal errors win over SDK wrapping
+    const ended = terminal();
+    if (ended) throw ended; // our terminal errors win over SDK wrapping
     if (err instanceof LlmInvocationError) throw err;
     // Transient (⇒ bus-redelivery retry) ONLY while no SIDE-EFFECTING tool
     // has executed (D-TL-6, refined per PR-540 Gemini): cost-0 tools are

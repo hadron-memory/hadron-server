@@ -23,6 +23,12 @@ vi.mock('../lib/bus/index.js', () => ({
   getBusClient: vi.fn(async () => null), // sweep/standalone mode in tests
 }));
 
+// #2412: the real `ai` SDK drives one test below; only the provider factories are replaced.
+const sdkModel: { model: unknown } = { model: null };
+vi.mock('@ai-sdk/anthropic', () => ({ createAnthropic: () => () => sdkModel.model }));
+vi.mock('@ai-sdk/openai', () => ({ createOpenAI: () => () => sdkModel.model }));
+vi.mock('@ai-sdk/amazon-bedrock', () => ({ createAmazonBedrock: () => () => sdkModel.model }));
+
 import {
   mintAppRun,
   executeAppRun,
@@ -583,6 +589,38 @@ describe('executeAppRun — edge-walking loop (plan-multi-node)', () => {
     expect(await executeAppRun(db, r2.id, d2)).toBe('failed');
     expect(((await db.appRun.findUniqueOrThrow({ where: { id: r2.id } })).failure as { code?: string }).code)
       .toBe('TOOL_FAILED');
+  });
+
+  it.each([
+    ['hadron_fail', 'AUTHOR_FAIL'],
+    ['denied', 'ACTIVATION_DENIED'],
+    ['throws', 'TOOL_FAILED'],
+  ])('#2412: on the real ai SDK a %s terminal fails the run as %s and the model is asked once', async (kind, code) => {
+    const { MockLanguageModelV4 } = await import('ai/test');
+    const { generateWithTools } = await import('../lib/llm/index.js');
+    const { hadronFail } = await import('../lib/runner/tools/index.js');
+    const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 2, text: 2, reasoning: 0 } };
+    const tool = kind === 'hadron_fail' ? 'hadron_fail' : 't';
+    const steps = [
+      { content: [{ type: 'tool-call', toolCallId: '1', toolName: tool, input: '{}' }], finishReason: { unified: 'tool-calls', raw: 'x' }, usage, warnings: [] },
+      { content: [{ type: 'text', text: 'carried on' }], finishReason: { unified: 'stop', raw: 'x' }, usage, warnings: [] },
+    ];
+    let asked = 0;
+    sdkModel.model = new MockLanguageModelV4({ doGenerate: async () => steps[asked++] as never });
+    const t = { name: 't', description: 'd', inputSchema: { type: 'object', properties: {} }, cost: 1, execute: async () => { throw new Error('boom'); } };
+    const run = await mint();
+    const d = deps({
+      loadNodeSpec: vi.fn(async () => ({ extractionSpec: null, hasOutput: false, tools: ['hadron_log'] })),
+      resolveConfig: vi.fn(async () => ({ ownerType: 'HADRON_SERVER', config: { provider: 'anthropic', model: 'test' } }) as never),
+      llmTools: async (r, resolved, req, _names, opts) => generateWithTools(resolved, req, [hadronFail, t as never], {
+        onToolCall: kind === 'denied' ? async () => false : opts.onToolCall,
+        toolCtx: { log: opts.log, db, run: r, principal: {} as never },
+      }),
+    });
+    expect(await executeAppRun(db, run.id, d)).toBe('failed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.failure, JSON.stringify(after.failure)).toMatchObject({ code });
+    expect(asked).toBe(1);
   });
 
   it('an unverified tool-loop provider maps to NO_TOOL_SUPPORT (D-TL-8)', async () => {
