@@ -149,10 +149,10 @@ const tenantOf = (o: BootPromptPointerOwner) => (o.field === 'AGENT' ? o.agent :
 
 class OwnerTenantChanged extends Error {}
 
-/** A lock-wait or transaction timeout from the budgeted fence transaction (Postgres 55P03, Prisma P2028 / expired). */
+/** A lock-wait, transaction timeout or connection-pool wait timeout (Postgres 55P03, Prisma P2028 / P2024 / expired). */
 function isBudgetFault(e: unknown): boolean {
   const x = e as { code?: string; meta?: { code?: string }; message?: string };
-  return x?.code === 'P2028' || x?.meta?.code === '55P03' || /lock timeout|lock_timeout|transaction expired|Transaction already closed|Include-history transaction expired/i.test(String(x?.message ?? ''));
+  return x?.code === 'P2028' || x?.code === 'P2024' || x?.meta?.code === '55P03' || /lock timeout|lock_timeout|transaction expired|Transaction already closed|Include-history transaction expired/i.test(String(x?.message ?? ''));
 }
 
 /** Race a probe against the operation deadline: an unbounded read must not outlive the budget. */
@@ -167,6 +167,16 @@ async function withinBudget<T>(deadline: number, work: Promise<T>): Promise<T> {
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+/** A pre-fence read that hit the budget (pool wait included) is the same sanitized conflict; anything else passes through. */
+async function preFence<T>(work: Promise<T>): Promise<T> {
+  try {
+    return await work;
+  } catch (e) {
+    if (isBudgetFault(e)) throw compileConflict();
+    throw e;
   }
 }
 
@@ -193,7 +203,7 @@ export async function compileBootPrompt(
     if (deadline - performance.now() < 1) throw compileConflict();
     // The anchors are chosen from the owner as read BEFORE the fence; a transfer that lands first is caught
     // inside and retried with the new ones (the setBootPromptPointer shape).
-    const before = await withinBudget(deadline, loadCompileOwner(ctx.db, target));
+    const before = await preFence(withinBudget(deadline, loadCompileOwner(ctx.db, target)));
     if (!before) throw compileNotPermitted();
     // A lock-free, NON-authoritative gate before anything is held: a caller who may not compile must not queue
     // on the platform-wide fence or take the tenant's anchors, which would be a cheap lock-DoS and an existence
@@ -203,6 +213,7 @@ export async function compileBootPrompt(
     } catch (e) {
       if (e instanceof GraphQLError && e.extensions?.code !== 'CONFLICT') throw compileNotPermitted();
       if (e instanceof GraphQLError) throw e;
+      if (isBudgetFault(e)) throw compileConflict();
       throw e;
     }
     const expected = tenantOf(before.owner);
