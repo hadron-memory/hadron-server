@@ -62,3 +62,12 @@ Open design choice for Xylon (flagged, not decided): a handle/org rename rewrite
 ## 6. Limits and what I have not done
 
 Static reading only; no run. Cascade set of `memories` hard delete not enumerated. `mergeOwnerNamespacedUrns` and `linkMemoryToUser` classification open. `propagateOrgUrnRename` trigger-target omission noted, not investigated. Vera FIT is needed for C and for the scoped row boundaries before any CHECK.
+
+# Rev 2 (Vera #33370, comment 6377625664: tag-resolution FIT)
+
+Ruling: cor:urn:030:01/:02 already decide it. Include tags FOLLOW ALIASES (live URN wins, ambiguity refuses, access re-checked). Retarget on re-mint is accepted by design; reserving freed URNs is ruled out; rewriting tags is not required.
+
+Effect on this packet:
+- Attach C (section 4) CLOSES: no tag rewrite, no reservation. E2 (retarget by reuse) is accepted behavior, not a gap. E1 (old-URN tag breaks) is a CONFORMANCE DEFECT in `spliceIncludes` (exact-only lookup, no alias fallback) already handed to Cooper; it is not a writer-fencing item and I do not fix it here.
+- New census obligation (Vera): EVERY rename writer records its alias in its OWN transaction. Red-first item 1 is replaced by: for each of updateMyProfile, updateOrganization and the updateMemory URN path (and, once classified, mergeOwnerNamespacedUrns and linkMemoryToUser), a failure after the URN rewrite rolls back the alias row with it, and a success leaves an alias for every rewritten Memory/Agent/App URN. VERIFIED by reading: the owner and org helpers insert aliases before the UPDATE inside the caller's tx; `updateMemory` calls `recordUrnRename` in its tx. Gap candidates to test, UNPROVEN: org helper writes no alias for `entry_node_urn` rewrites (it makes none), and the owner helper's alias INSERT is skipped for rows already at the target prefix.
+- Still open for Xylon: fence-always vs fence-if-system for the bulk renames (attach A), and surgical vs namespace-wide tombstone reclaim (attach B). E3 (compile-time incoherence against an unfenced rename) and ROW 2 cascade-versus-selection are unchanged by the ruling.
