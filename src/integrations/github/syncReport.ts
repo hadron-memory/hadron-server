@@ -20,12 +20,12 @@ export interface SyncReport {
 }
 
 /** Rebuild the public projection; never serialize caller objects/messages/ids. */
-export function committedSyncReport(entries: readonly SyncReportEntry[], now = new Date()): string | null {
-  if (entries.length === 0) return null;
+export function committedSyncReport(entries: readonly SyncReportEntry[], now = new Date(), hasUnsupportedSkips = false): string | null {
+  if (entries.length === 0 && !hasUnsupportedSkips) return null;
   const publicEntries = entries.map(e => ({ kind: e.kind, loc: e.loc, ...(e.fromLoc === undefined ? {} : { fromLoc: e.fromLoc }), code: e.code }));
   const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
   publicEntries.sort((a, b) => compare(a.loc, b.loc) || compare(a.kind, b.kind) || compare(a.fromLoc ?? '', b.fromLoc ?? '') || compare(a.code, b.code));
-  return JSON.stringify({ version: 1, outcome: 'partial', recordedAt: now.toISOString(), entries: publicEntries } satisfies SyncReport);
+  return JSON.stringify({ version: 1, outcome: hasUnsupportedSkips ? 'unknown' : 'partial', recordedAt: now.toISOString(), entries: publicEntries } satisfies SyncReport);
 }
 
 export function failedSyncReport(code: 'SYNC_FAILED' | 'BAD_USER_INPUT', now = new Date()): string {
