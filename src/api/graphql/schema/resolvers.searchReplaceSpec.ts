@@ -24,15 +24,13 @@ import {
   editorFromAuth,
   revisionStateHashRefreshMarker,
 } from '../../../lib/nodeRevisionSnapshot.js';
-import { getMemoryEncryptionInfo, decryptNodeFields, encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
+import { decryptNodeFields, encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import { clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
 import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
-import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
-import { deserializeTags } from '../../../integrations/db/provider.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import {
   type Context,
@@ -435,28 +433,6 @@ export async function searchReplaceInSpecNodes(
       ownerRepo: node.raw.ownerRepo ?? '',
       clientId: ctx.clientId,
     });
-    if (node.isEncrypted) {
-      void (async () => {
-        const fresh = await ctx.db.node.findUnique({
-          where: { id: node.raw.id },
-          include: { outgoingEdges: { include: { target: true } } },
-        });
-        if (!fresh) return;
-        const info = await getMemoryEncryptionInfo(ctx.db, fresh.memoryId);
-        decryptNodeFields(fresh, info);
-        await writeNodeToGit({
-          id: fresh.id, loc: fresh.loc, name: fresh.name, nodeType: fresh.nodeType,
-          alias: fresh.alias, description: fresh.description, abstract: fresh.abstract,
-          abstractOriginHash: fresh.abstractOriginHash, contentHash: fresh.contentHash,
-          content: fresh.content, tags: deserializeTags(fresh.tags) as string[],
-          seq: fresh.seq, data: fresh.data, properties: fresh.properties,
-          role: fresh.role ?? null, isRunnable: fresh.isRunnable ?? null,
-          isPlaceholder: fresh.isPlaceholder,
-          outgoingEdges: fresh.outgoingEdges ?? [],
-          mirrorRevSeq: fresh.revSeq,
-        }, node.raw.ownerRepo ?? '', ctx.clientId, fresh.memoryId);
-      })().catch((cause) => console.error('[searchReplaceInSpecNodes] git write error:', cause));
-    }
   }
   return applied.result;
 }

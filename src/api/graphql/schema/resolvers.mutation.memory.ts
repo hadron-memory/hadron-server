@@ -2185,6 +2185,7 @@ export const memoryMutations = {
 
       const { pushMemoryToGit: push } = await import('../../../integrations/github/pushMemoryToGit.js');
       const result = await push(id);
+      if (result.errorCode) throw new GraphQLError(result.error ?? result.errorCode, { extensions: { code: result.errorCode } });
       if (result.error) throw new Error(result.error);
       return true;
     },
@@ -2355,6 +2356,8 @@ export const memoryMutations = {
           // and alias in this transaction.
           // Evaluate expiry in the claim statement, not against an application
           // clock or the transaction's start time (a lock wait can outlive it).
+          // R206: this flip is serialized against an in-flight Git mirror's KEY SHARE
+          // fence by the memory row FOR UPDATE this transaction took on entry.
           const claimed = await tx.$executeRaw`
             UPDATE memories SET urn = ${newUrn}, created_by = ${user.id},
               anonymous_expires_at = NULL, is_encrypted = true,

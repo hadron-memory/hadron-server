@@ -108,7 +108,6 @@ import {
   deserializeTags,
   serializeTags,
 } from '../../../integrations/db/provider.js';
-import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { mirrorEdgeSourceAfterCommit } from '../../../integrations/github/mirrorEdgeSource.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
 import {
@@ -1707,9 +1706,9 @@ async function writeNodeCoreRaw(
       const finalNode = node;
 
       // Event pivot: the write core announces the fact; subscribers (git
-      // mirror, embedding wake, whatever comes next) act on it. Encrypted
-      // memories keep the direct git write below — the subscriber can't
-      // decrypt without this request's session key, and finalNode is plaintext.
+      // mirror, embedding wake, whatever comes next) act on it. An encrypted
+      // memory never syncs to Git (R206): the git subscriber records a typed
+      // skip for it, whatever key this request carries.
       // When the caller owns the transaction, delay every effect until its
       // commit succeeds. The callback uses the pooled client, never the tx.
       const afterCommit = () => {
@@ -1720,43 +1719,6 @@ async function writeNodeCoreRaw(
           ownerRepo: input.ownerRepo ?? '',
           clientId: ctx.clientId,
         });
-        if (memEncInfo.isEncrypted) {
-          // reserveSpecCitation marks the new row AFTER writeNodeCore returns,
-          // in its enclosing transaction. The direct encrypted mirror path is
-          // the only exporter for that memory, so read the committed marker
-          // rather than serializing finalNode's pre-reservation false value.
-          void (async () => {
-            const committed = await pooledDb.node.findUnique({
-              where: { id: finalNode.id }, select: { isPlaceholder: true },
-            });
-            if (!committed) return;
-            await writeNodeToGit({
-              id: finalNode.id,
-              loc: finalNode.loc,
-              name: finalNode.name,
-              nodeType: finalNode.nodeType,
-              alias: finalNode.alias,
-              description: finalNode.description,
-              abstract: finalNode.abstract,
-              abstractOriginHash: finalNode.abstractOriginHash,
-              contentHash: finalNode.contentHash,
-              content: finalNode.content,
-              tags: deserializeTags(finalNode.tags) as string[],
-              seq: finalNode.seq,
-              data: finalNode.data,
-              properties: finalNode.properties,
-              // #1218 — the mirror carries the governed signals.
-              role: finalNode.role ?? null,
-              isRunnable: finalNode.isRunnable ?? null,
-              isPlaceholder: committed.isPlaceholder,
-              outgoingEdges: finalNode.outgoingEdges ?? [],
-              mirrorRevSeq: finalNode.revSeq,
-            }, input.ownerRepo ?? '', ctx.clientId, input.memoryId);
-          })().catch((err) => {
-            console.error('[writeNodeCore] git write error:', err);
-          });
-        }
-
         // 033 — (re-)embed on write. finalNode is decrypted (plaintext) here,
         // so the prompt-drain embeds correctly on encrypted memories (FR-027).
         void enqueueNodeEmbedding(pooledDb, {
@@ -3065,54 +3027,14 @@ export const nodeMutations = {
           });
         }
         // Announce the write (git mirror rides the event — so a later
-        // repo-wins sync can't revert the edit). Encrypted memories keep the
-        // direct decrypt-and-mirror below: the subscriber has no session key.
+        // repo-wins sync can't revert the edit). An encrypted memory never
+        // syncs to Git (R206); the subscriber records a typed skip for it.
         void publishNodeWritten({
           nodeId: p.raw.id,
           memoryId: p.raw.memoryId,
           ownerRepo: p.ownerRepo,
           clientId: ctx.clientId,
         });
-        if (p.isEncrypted) {
-          void (async () => {
-            const fresh = await ctx.db.node.findUnique({
-              where: { id: p.raw.id },
-              include: { outgoingEdges: { include: { target: true } } },
-            });
-            if (!fresh) return;
-            const memEnc = await getMemEnc(fresh.memoryId);
-            decryptNodeFields(fresh, memEnc);
-            await writeNodeToGit(
-              {
-                id: fresh.id,
-                loc: fresh.loc,
-                name: fresh.name,
-                nodeType: fresh.nodeType,
-                alias: fresh.alias,
-                description: fresh.description,
-                abstract: fresh.abstract,
-                abstractOriginHash: fresh.abstractOriginHash,
-                contentHash: fresh.contentHash,
-                content: fresh.content,
-                tags: deserializeTags(fresh.tags) as string[],
-                seq: fresh.seq,
-                data: fresh.data,
-                properties: fresh.properties,
-                // #1218 — the mirror carries the governed signals.
-                role: fresh.role ?? null,
-                isRunnable: fresh.isRunnable ?? null,
-                isPlaceholder: fresh.isPlaceholder,
-                outgoingEdges: fresh.outgoingEdges ?? [],
-                mirrorRevSeq: fresh.revSeq,
-              },
-              p.ownerRepo,
-              ctx.clientId,
-              fresh.memoryId,
-            );
-          })().catch((err) => {
-            console.error('[searchReplaceInNodes] git write error:', err);
-          });
-        }
       }
 
       return buildResult();
@@ -4421,48 +4343,14 @@ export const nodeMutations = {
       }
 
       // Announce the write (git mirror rides the event — so a later
-      // repo-wins sync can't revert the merge). Encrypted memories keep the
-      // direct mirror below, using whatever plaintext this request could
-      // decrypt. The shared checkout defers a keyless encrypted export
-      // without touching the existing mirror (#1273).
+      // repo-wins sync can't revert the merge). An encrypted memory never
+      // syncs to Git (R206); the subscriber records a typed skip for it.
       void publishNodeWritten({
         nodeId: finalNode.id,
         memoryId: target.memoryId,
         ownerRepo: (finalNode as { ownerRepo?: string | null }).ownerRepo ?? '',
         clientId: ctx.clientId,
       });
-      if (tgtEnc.isEncrypted) {
-        writeNodeToGit(
-          {
-            id: finalNode.id,
-            loc: finalNode.loc,
-            name: finalNode.name,
-            nodeType: finalNode.nodeType,
-            alias: finalNode.alias,
-            description: finalNode.description,
-            abstract: finalNode.abstract,
-            abstractOriginHash: finalNode.abstractOriginHash,
-            contentHash: finalNode.contentHash,
-            content: finalNode.content,
-            tags: deserializeTags(finalNode.tags) as string[],
-            seq: finalNode.seq,
-            data: finalNode.data,
-            properties: finalNode.properties,
-            // #1218 — the mirror carries the governed signals.
-            role: finalNode.role ?? null,
-            isRunnable: finalNode.isRunnable ?? null,
-            isPlaceholder: finalNode.isPlaceholder,
-            outgoingEdges: finalNode.outgoingEdges ?? [],
-            mirrorRevSeq: finalNode.revSeq,
-          },
-          (finalNode as { ownerRepo?: string | null }).ownerRepo ?? '',
-          ctx.clientId,
-          target.memoryId,
-        ).catch((err) => {
-          console.error('[mergeNodes] git write error:', err);
-        });
-      }
-
       // Re-embed when the embedded text (content/abstract) changed.
       if (contentChanged || abstractChanged) {
         void enqueueNodeEmbedding(ctx.db, {

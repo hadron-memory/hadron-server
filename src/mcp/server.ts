@@ -11106,13 +11106,15 @@ function ageOf(at: Date, now: Date = new Date()): string {
         include: { organization: true },
       });
       if (!memory) return textResult('Memory not found.');
-      if (!memory.source) return textResult('Memory has no source repository configured.');
+      // R206 / cor:sec:040:05: an encrypted memory gets the typed refusal from the sync itself
+      // even with no source, so the no-source reply never reads as a healthy sync.
+      if (!memory.source && !memory.isEncrypted) return textResult('Memory has no source repository configured.');
 
       // Import and call syncGraphFromGithub
       const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
       const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
 
-      if (result.error) return textResult(`Sync failed: ${result.error}`);
+      if (result.error) return textResult(`Sync failed${result.errorCode ? ` [${result.errorCode}]` : ''}: ${result.error}`);
       // #1061 — one write per node the sync actually wrote. This tool is the
       // ONE entry point to a git sync that has a principal to attribute to; the
       // webhook and startup batch-loop callers deliberately drop `writtenNodes`

@@ -44,6 +44,7 @@ import { lockMintedSpecsIn, lockMintedSpecUnmarks } from '../../lib/mintedSpecPe
 import { recordUrnRename } from '../../lib/urnAlias.js';
 import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCount, reconcilePendingEdgeCounts } from '../../lib/pendingEdgePromotion.js';
+import { ENCRYPTED_GIT_SYNC_MESSAGE, ENCRYPTED_GIT_SYNC_UNAVAILABLE } from './encryptedGitSync.js';
 import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
@@ -187,7 +188,7 @@ export class GitSyncUnreadableFileError extends Error {
 
 export class GitSyncEncryptedMemoryError extends Error {
   constructor() {
-    super('Git sync cannot write an encrypted memory without its data key.');
+    super(ENCRYPTED_GIT_SYNC_MESSAGE);
     this.name = 'GitSyncEncryptedMemoryError';
   }
 }
@@ -303,7 +304,7 @@ const syncGraphFromGithubAsSystem = async (
   edgeEndpointPreflightAttempt = 0,
 ): Promise<{
   error?: string;
-  errorCode?: 'BAD_USER_INPUT';
+  errorCode?: 'BAD_USER_INPUT' | typeof ENCRYPTED_GIT_SYNC_UNAVAILABLE;
   nodeCount?: number;
   /**
    * #1061 — the nodes this run actually wrote, for a caller that HAS a
@@ -353,6 +354,14 @@ const syncGraphFromGithubAsSystem = async (
     // user-owned memory has no org — surface it as an error so an explicit
     // syncMemory call gets a meaningful message rather than a silent no-op
     // (startup's batch loop guards on `organization` before calling).
+    // R206 / cor:sec:040:05: an explicit sync of an encrypted memory fails loudly
+    // with the typed code BEFORE the DB-only and no-organization no-ops, so a
+    // memory with no source (or no org) never reads as a healthy sync. The row
+    // is left untouched: there is nothing to mark ERROR on a memory that has no
+    // sync to fail.
+    if ((await db.memory.findUnique({ where: { id: graph.id }, select: { isEncrypted: true } }))?.isEncrypted) {
+      return { error: ENCRYPTED_GIT_SYNC_MESSAGE, errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE };
+    }
     if (!graph.organization) {
       return { error: 'Memory has no organization (user-owned memories are not git-synced)' };
     }
@@ -1671,7 +1680,8 @@ const syncGraphFromGithubAsSystem = async (
     return {
       error: (error as Error).message,
       ...(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError
-        ? { errorCode: 'BAD_USER_INPUT' as const } : {}),
+        ? { errorCode: 'BAD_USER_INPUT' as const }
+        : error instanceof GitSyncEncryptedMemoryError ? { errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE } : {}),
     };
   }
 };
