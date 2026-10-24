@@ -9237,9 +9237,12 @@ export const typeDefs = `#graphql
     setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!): WorkerWakeSettings!
     """
     S7 (#2023, R85) — isolate a worker until a time (default 2 hours, at most 7 days; a later time extends, an earlier one shortens).
-    Only a person managing the App or holding the worker, acting as themselves; a worker session (even a manager's), an App key or an
-    impersonation is refused with WORKER_ISOLATION_FORBIDDEN. Never touches the worker's own pause.
-    While S7 activation is off, setting an isolation is refused with WORKER_ISOLATION_UNAVAILABLE; clearing is unaffected.
+    Only a person managing the App or holding the worker, acting as themselves. Refusals, in the order they are checked:
+    an unknown worker, or one the caller cannot read (a pure App key among them), is WORKER_NOT_FOUND; a worker session (even a
+    manager's) is WORKER_ISOLATION_FORBIDDEN; while S7 activation is off, setting an isolation is WORKER_ISOLATION_UNAVAILABLE
+    (clearing is unaffected), so an ordinary person gets this before the manager/holder check; an impersonation that reaches the
+    write is refused FORBIDDEN (read-only); a participant who neither manages the App nor holds the worker is
+    WORKER_ISOLATION_FORBIDDEN. Never touches the worker's own pause.
     """
     isolateWorker(workerRef: String!, until: DateTime): WorkerWakeSettings!
     "S7 — lift an isolation (same audience). Clearing when none is set changes nothing."
@@ -9285,7 +9288,7 @@ export const typeDefs = `#graphql
     #1709 — issue an operation to one of the App's registered hosts (hrn:node:hadronmemory.com:specs:cor:agt:070:05).
     A type outside the closed set is HOST_OPERATION_TYPE_UNKNOWN (hrn:node:hadronmemory.com:specs:cor:agt:070:03), a
     missing, extra or malformed argument BAD_HOST_OPERATION_ARGS. worktree.create and worktree.remove: the worker's
-    holder, the worker it reports to, or whoever manages the App (else HOST_OPERATION_NOT_PERMITTED). worker.start:
+    holder, the worker it reports to directly (not further up the chain), or whoever manages the App (else HOST_OPERATION_NOT_PERMITTED). worker.start:
     whoever manages the App only, with an optional taskId, for a held worker with no live session and no start in
     flight, in a worktree and family the live host registers for it (WORKER_NOT_HELD, WORKER_LIVE,
     WORKER_START_PENDING). worker.end: whoever manages the App only (else HOST_OPERATION_NOT_PERMITTED), naming an open
@@ -9328,7 +9331,7 @@ export const typeDefs = `#graphql
 
     """
     #1705 — assign a task with no assignee — a queued task (pending) or a BACKLOG task: the
-    task's owner, a worker the owner reports to, or whoever manages the App
+    task's owner, a worker the owner reports to, directly or up the reportsTo chain, or whoever manages the App
     (hrn:node:hadronmemory.com:specs:cor:agt:050:09). closeSessionWhenDone, when
     given, replaces the task's value; omitted, the stored value is kept. Assigning a BACKLOG task moves it to
     pending (hrn:node:hadronmemory.com:specs:cor:agt:050:02, #1754). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
@@ -9338,7 +9341,7 @@ export const typeDefs = `#graphql
     assignAgentTask(taskId: ID!, assignee: AgentTaskPartyInput!, closeSessionWhenDone: Boolean): AgentTask!
 
     """
-    #1705 — move a task to another assignee: the task's owner, a worker the owner reports to, or whoever
+    #1705 — move a task to another assignee: the task's owner, a worker the owner reports to, directly or up the reportsTo chain, or whoever
     manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09). A started task stays started; the former
     assignee can no longer move it. Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (no assignee yet, or the same one),
@@ -9368,7 +9371,7 @@ export const typeDefs = `#graphql
 
     """
     #1705 — cancel a pending, started or backlog task: its owner, a worker the owner reports
-    to, or whoever manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09; a backlog task directly,
+    to, directly or up the reportsTo chain, or whoever manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09; a backlog task directly,
     Holger team chat #8150). Refusals:
     TASK_NOT_FOUND, TASK_NOT_OWNER, TASK_ENDED, SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
@@ -9378,7 +9381,7 @@ export const typeDefs = `#graphql
     #1754 — park a queued task in the backlog (hrn:node:hadronmemory.com:specs:cor:agt:050:02): pending
     with no assignee becomes BACKLOG — unassigned, never matched, never waited
     on, no alarms. Whoever may assign a task may park it: its owner, a worker
-    the owner reports to, or whoever manages the App
+    the owner reports to, directly or up the reportsTo chain, or whoever manages the App
     (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (not pending, or an assignee),
     SESSION_NOT_BOUND, APP_UNINSTALLED.
@@ -9389,7 +9392,7 @@ export const typeDefs = `#graphql
     #1754 — make a backlog task ready to be worked
     (hrn:node:hadronmemory.com:specs:cor:agt:050:02): BACKLOG becomes PENDING and the task enters
     the queue. Whoever may assign a task may make it ready: its owner, a worker
-    the owner reports to, or whoever manages the App
+    the owner reports to, directly or up the reportsTo chain, or whoever manages the App
     (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (not backlog), SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
