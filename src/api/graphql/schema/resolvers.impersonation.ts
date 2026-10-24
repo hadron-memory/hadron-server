@@ -29,6 +29,7 @@ import {
   resolveOrgRefArg,
   resolveUserRefArg,
 } from './resolvers.helpers.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 const forbidden = () =>
@@ -36,6 +37,32 @@ const forbidden = () =>
 
 const badInput = (message: string) =>
   new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
+
+/**
+ * #1416 (R204): end a session as `endedBy`, a User.id that becomes the ender of record. The ender is a
+ * participant in the merge protocol even when it is not a participant of the session: a merge rewrites an
+ * existing `ended_by = source` to the survivor, so a stop that a merged-away account lands afterwards would
+ * stamp a deleted account. The stop therefore takes the ender's shared authority anchor (the one a merge holds
+ * exclusively) and re-reads the ender as live under it, at READ COMMITTED so the read after the wait sees the
+ * merge. `endedBy` null (a key-authenticated platform admin) writes the session's own admin and takes no anchor.
+ * Idempotent: only a still-open session is written.
+ */
+async function endSessionAs(ctx: Context, sessionId: string, endedBy: string | null): Promise<void> {
+  await ctx.db.$transaction(async (tx) => {
+    let ender = endedBy;
+    if (ender) {
+      await lockAuthorityAnchors(tx, [{ kind: 'user', id: ender }], 'shared');
+      const live = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${ender} AND deleted_at IS NULL FOR SHARE`;
+      if (live.length === 0) throw forbidden();
+    } else {
+      ender = (await tx.impersonationSession.findUnique({ where: { id: sessionId }, select: { adminUserId: true } }))?.adminUserId ?? null;
+    }
+    await tx.impersonationSession.updateMany({
+      where: { id: sessionId, endedAt: null },
+      data: { endedAt: new Date(), endedBy: ender },
+    });
+  });
+}
 
 /** A session is live iff not explicitly ended and not TTL-lapsed. */
 const isActive = (s: { endedAt: Date | null; expiresAt: Date }): boolean =>
@@ -201,10 +228,7 @@ export const impersonationMutations = {
       if (id && id !== ctx.impersonation.sessionId) throw forbidden();
       const endedBy = ctx.impersonation.actorUserId; // the admin, never the target
       // Atomic conditional update so a concurrent stop stays idempotent.
-      await ctx.db.impersonationSession.updateMany({
-        where: { id: ctx.impersonation.sessionId, endedAt: null },
-        data: { endedAt: new Date(), endedBy },
-      });
+      await endSessionAs(ctx, ctx.impersonation.sessionId, endedBy);
       return ctx.db.impersonationSession.findUnique({
         where: { id: ctx.impersonation.sessionId },
       });
@@ -220,10 +244,7 @@ export const impersonationMutations = {
     }
     if (!(await canAdministerSession(ctx, session))) throw forbidden();
     if (session.endedAt) return session; // idempotent
-    await ctx.db.impersonationSession.updateMany({
-      where: { id, endedAt: null },
-      data: { endedAt: new Date(), endedBy: ctx.userId ?? session.adminUserId },
-    });
+    await endSessionAs(ctx, id, ctx.userId ?? null);
     return ctx.db.impersonationSession.findUnique({ where: { id } });
   },
 };
