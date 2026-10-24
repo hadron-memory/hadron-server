@@ -184,22 +184,33 @@ describe('what a revocation does, and only for the owner', () => {
       await lockAuthorityAnchors(tx, [{ kind: 'user', id: ana }], 'exclusive');
       locked();
       await held;
-    });
-    await lockTaken;
-    const racers = Promise.all([finish(id, laptop), finish(id, third)]);
-    for (let i = 0; i < 200; i++) {
-      const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_stat_activity
-        WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`;
-      if (Number(n) >= 2) break;
-      await new Promise((r) => setTimeout(r, 25));
+    }, { timeout: 30_000 });
+    let racers: Promise<unknown[]> | undefined;
+    let waiting = 0;
+    try {
+      await lockTaken;
+      racers = Promise.all([finish(id, laptop), finish(id, third)]);
+      // Precondition: both finishes are parked on THIS owner's anchor (the ungranted advisory locks on its key), i.e.
+      // both already passed the unlocked pre-check. A sequential run never reaches 2, so the pin cannot pass vacuously.
+      for (let i = 0; i < 200 && waiting < 2; i++) {
+        const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks
+          WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+            AND classid = hashtext('authorization:user')::oid AND objid = hashtext(${ana})::oid`;
+        waiting = Number(n);
+        if (waiting < 2) await new Promise((r) => setTimeout(r, 25));
+      }
+    } finally {
+      release();
+      await holder;
+      if (racers) await racers.catch(() => undefined);
     }
-    release(); await holder;
-    const results = await racers;
+    expect(waiting).toBe(2);
+    const results = await racers!;
     expect(results.filter((r) => r !== null)).toHaveLength(1);
     const revoked = [await rec(laptopId), await rec(thirdId)].filter((p) => p.revokedAt !== null);
     expect(revoked).toHaveLength(1);
     expect((await rec(phoneId)).revokedAt).toBeNull();
-  });
+  }, 20_000);
 
   it('a bound ceremony aged past its TTL finishes nothing (consume UPDATE `expires_at`)', async () => {
     const id = await ceremony();
