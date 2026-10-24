@@ -15,7 +15,7 @@ import {
   revisionStateHashRefreshMarker,
 } from '../../../lib/nodeRevisionSnapshot.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
-import { lockAncestorsForCreate, lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
+import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
@@ -2077,52 +2077,64 @@ export const sessionMutations = {
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
-      // Snapshot all non-revision nodes + edges in the system memory
-      const nodes = await ctx.db.node.findMany({
-        where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
-        select: { loc: true, name: true, nodeType: true, description: true, content: true, data: true, tags: true },
-      });
-      const nodeIds = (await ctx.db.node.findMany({
-        where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
-        select: { id: true },
-      })).map((n) => n.id);
-      const edges = await ctx.db.edge.findMany({
-        // Derived INCLUDE edges (#2040) are not snapshotted: restore re-derives them from content.
-        where: { sourceId: { in: nodeIds }, deletedAt: null, governedKind: null },
-        include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
-      });
-      const edgeSnapshots = edges.map((e) => ({
-        sourceLoc: e.source.loc,
-        targetLoc: e.target.loc,
-        loc: e.loc,
-        name: e.name,
-        description: e.description,
-        isRunnable: e.isRunnable,
-        data: e.data,
-      }));
+      // #2277: the Agent system memory is a boot-prompt SOURCE, so the revision writer takes the #2063 include-history
+      // fence F first, decides write authority again on the transaction client after the wait, and does the snapshot,
+      // the numbering, the `revisions` parent and the revision insert in ONE transaction (all or nothing).
+      const { revLoc, label } = await withAuthorizedMemoryTx(ctx, sysMemId, [
+        { kind: 'agent', id: resolvedAgentId },
+        ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+        ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+      ], async (fresh) => {
+        const current = await fresh.db.agent.findUnique({ where: { id: resolvedAgentId } });
+        if (!current || current.deletedAt || current.systemMemoryId !== sysMemId ||
+            current.organizationId !== agent.organizationId || current.ownerUserId !== agent.ownerUserId) {
+          throw new GraphQLError('Agent revision scope changed; retry.', { extensions: { code: 'FORBIDDEN' } });
+        }
+        await requireAgentAccess(fresh, current, 'ADMIN');
+      }, async (tx) => {
+        // #664/#752: revLoc is `revisions:<label>`, so a concurrent non-recursive delete of the `revisions` parent could
+        // count zero descendants and then orphan this row. The path lock is taken first (advisory before row; READ
+        // COMMITTED so the delete's count sees this post-commit) and the number is taken UNDER it.
+        await lockPathForCreateUnder(tx, sysMemId, 'revisions');
 
-      // Count existing revisions to auto-increment
-      const existingRevisions = await ctx.db.node.count({
-        where: { memoryId: sysMemId, loc: { startsWith: 'revisions:' }, deletedAt: null },
-      });
-      const revNum = existingRevisions + 1;
-      const label = `rev-${revNum}`;
-      const revLoc = `revisions:${label}`;
-
-      // Ensure revisions parent exists
-      try {
-        await ctx.db.node.upsert({
-          where: { loc_memoryId: { loc: 'revisions', memoryId: sysMemId } },
-          create: { id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' },
-          update: {},
+        // Snapshot all non-revision nodes + edges in the system memory
+        const nodes = await tx.node.findMany({
+          where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
+          select: { id: true, loc: true, name: true, nodeType: true, description: true, content: true, data: true, tags: true },
         });
-      } catch { /* exists */ }
+        const edges = await tx.edge.findMany({
+          // Derived INCLUDE edges (#2040) are not snapshotted: restore re-derives them from content.
+          where: { sourceId: { in: nodes.map((n) => n.id) }, deletedAt: null, governedKind: null },
+          include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
+        });
+        const edgeSnapshots = edges.map((e) => ({
+          sourceLoc: e.source.loc,
+          targetLoc: e.target.loc,
+          loc: e.loc,
+          name: e.name,
+          description: e.description,
+          isRunnable: e.isRunnable,
+          data: e.data,
+        }));
 
-      // #664/#752: revLoc is `revisions:<label>`, so a concurrent non-recursive
-      // delete of the `revisions` parent could count zero descendants and then
-      // orphan this row. Hold the ancestor-path lock across the insert (advisory
-      // before row; READ COMMITTED so the delete's count sees this post-commit).
-      await ctx.db.$transaction(async (tx) => {
+        // The next number follows the highest `revisions:rev-N` EVER used, tombstones included: the loc unique key
+        // spans soft-deleted rows, so a live count would collide with a gap or a tombstoned number.
+        const used = await tx.node.findMany({
+          where: { memoryId: sysMemId, loc: { startsWith: 'revisions:rev-' } },
+          select: { loc: true },
+        });
+        const revNum = used.reduce((max, r) => {
+          const m = /^revisions:rev-(\d+)$/.exec(r.loc);
+          return m ? Math.max(max, Number(m[1])) : max;
+        }, 0) + 1;
+        const label = `rev-${revNum}`;
+        const revLoc = `revisions:${label}`;
+
+        // ON CONFLICT DO NOTHING: a concurrent or earlier parent is no error, and a real failure rolls everything back.
+        await tx.node.createMany({
+          data: [{ id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' }],
+          skipDuplicates: true,
+        });
         await lockAncestorsForCreate(tx, sysMemId, revLoc);
         await tx.node.create({
           data: {
@@ -2134,11 +2146,12 @@ export const sessionMutations = {
               label,
               published: false,
               createdBy: ctx.userId ?? null,
-              snapshot: { nodes: nodes.map((n) => ({ ...n, tags: n.tags ?? [] })), edges: edgeSnapshots },
+              snapshot: { nodes: nodes.map(({ id: _id, ...n }) => ({ ...n, tags: n.tags ?? [] })), edges: edgeSnapshots },
             } as InputJsonValue,
           },
         });
-      });
+        return { revLoc, label };
+      }, { fence: true });
 
       return { revisionLoc: revLoc, label, published: false, createdAt: new Date().toISOString() };
     },

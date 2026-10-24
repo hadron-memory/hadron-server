@@ -427,6 +427,8 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
   });
 
   it('the admin may update the definition through the revision surface (within "update it"; PR body corrected)', async () => {
+    // #2277: createRevision decides authority again on the transaction, which reads the PERSISTED platform role (as restore does).
+    await db.user.update({ where: { id: otherId }, data: { roles: ['ADMIN'] } });
     const agent = await rogueAgent();
     const revision = await resolvers.Mutation.createRevision(null, { agentId: agent.id, description: 'admin snapshot' }, admin());
     expect(revision).not.toBeNull();
