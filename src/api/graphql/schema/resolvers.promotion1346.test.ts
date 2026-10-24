@@ -5,6 +5,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { memoryMutations } from './resolvers.mutation.memory.js';
 import { resolvers } from './resolvers.js';
 import { withTestOperationKey } from '../../../test/operationKey.js';
+import { generateId } from '../../../lib/id.js';
 import { parseDataKey } from '../../../lib/crypto.js';
 import { decryptNodeFieldsWithKey, isAuthenticatedStringEnvelope } from '../../../lib/nodeCrypto.js';
 
@@ -219,5 +220,33 @@ describe('#1346 anonymous encrypted promotion', () => {
       expect(isAuthenticatedStringEnvelope(row.content, parseDataKey(dataKey))).toBe(true);
     }
   });
+
+
+  it.each([1500, 3000])('promotes %s live nodes without the default five-second transaction ceiling', async count => {
+    await db.node.createMany({ data: Array.from({ length: count - 1 }, (_, index) => ({
+      id: generateId(), memoryId, loc: `capacity:${index}`, name: `Node ${index}`,
+      content: `capacity content ${index}`, abstract: `capacity abstract ${index}`, data: { index },
+    })) });
+    const started = performance.now();
+    await promote();
+    console.info(`#1346 ${count}-node promotion including completion: ${Math.round(performance.now() - started)}ms`);
+    expect(await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).toMatchObject({
+      isEncrypted: true, class: 'private', anonymousExpiresAt: null,
+    });
+    const nodes = await db.node.findMany({ where: { memoryId }, orderBy: { loc: 'asc' } });
+    expect(nodes).toHaveLength(count);
+    const key = parseDataKey(dataKey);
+    for (const node of nodes) {
+      expect(isAuthenticatedStringEnvelope(node.content, key)).toBe(true);
+      expect(isAuthenticatedStringEnvelope(node.abstract, key)).toBe(true);
+      const plain = decryptNodeFieldsWithKey({ ...node }, key);
+      if (node.id === nodeId) {
+        expect(plain).toMatchObject({ content: 'original', abstract: 'original abstract', data: { value: 'original' } });
+      } else {
+        const index = Number(node.loc.split(':')[1]);
+        expect(plain).toMatchObject({ content: `capacity content ${index}`, abstract: `capacity abstract ${index}`, data: { index } });
+      }
+    }
+  }, 90_000);
 
 });
