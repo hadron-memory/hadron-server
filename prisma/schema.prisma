@@ -2151,6 +2151,8 @@ model Agent {
   @@index([legacyUrn])
   @@index([bootPromptNodeId])
   @@map("agents")
+  /// #2024 (S8, cor:agt:080:33): the tickers this Agent declares; each cast of a worker from it instantiates them.
+  tickerTemplates       AgentTickerTemplate[]
 }
 
 /// Associates a Memory with an Agent, with a per-memory access level.
@@ -6067,6 +6069,13 @@ model Ticker {
   enabled           Boolean   @default(true)
   ownerUserId       String?   @map("owner_user_id")
   ownerWorkerId     String?   @map("owner_worker_id")
+  /// #2024 (S8): set only on a ticker the platform generated at cast from an Agent ticker template. The template
+  /// is a plain reference (no FK, so removing a template never cascades into runtime state) and the revision is
+  /// the one the ticker was made from; `generatedForWorkerId` is the worker it was made for. The unique
+  /// (generatedForWorkerId, sourceTemplateId) makes a retried cast unable to mint a second instance.
+  sourceTemplateId       String? @map("source_template_id")
+  sourceTemplateRevision Int?    @map("source_template_revision")
+  generatedForWorkerId   String? @map("generated_for_worker_id")
   createdAt         DateTime  @default(now()) @map("created_at")
   createdBy         String?   @map("created_by")
   createdByWorkerId String?   @map("created_by_worker_id")
@@ -6085,8 +6094,41 @@ model Ticker {
   deliveryTicks WorkerDeliveryTick[]
 
   @@unique([appId, slug], map: "tickers_app_slug_uniq")
+  @@unique([generatedForWorkerId, sourceTemplateId], map: "tickers_generated_uniq")
   @@index([appId, deletedAt])
   @@map("tickers")
+}
+
+/// #2024 (S8, cor:agt:080:33) — one ticker an Agent declares. Casting a worker from the Agent into an App creates
+/// the worker's tickers from these (a SNAPSHOT: a later edit or removal reaches only future casts, R96 A) and
+/// subscribes it. Identity is `id`, never the name or a position; `revision` counts edits so a stale writer is
+/// refused (`expectedRevision`); `shapeVersion` lets a future shape be decoded explicitly (an unknown one is
+/// refused). Soft-deleted rows stay, because generated tickers keep their provenance.
+/// Live names are unique per Agent ignoring case; the CHECKs mirror the ticker's (prisma/agent-ticker-template-invariants.sql).
+model AgentTickerTemplate {
+  id             String    @id @default(cuid())
+  agentId        String    @map("agent_id")
+  revision       Int       @default(1)
+  shapeVersion   Int       @default(1) @map("shape_version")
+  name           String
+  /// Requested cadence; the cast clamps it up to the App's floor (R92).
+  cadenceSeconds Int       @map("cadence_seconds")
+  quietHours     Json?     @map("quiet_hours")
+  /// 'ALL' | 'MENTIONS'.
+  relevance      String    @default("ALL")
+  /// Closed set, non-empty: 'read-team-channel' | 'every-tick' | 'live-check' (a template with none would never fire).
+  reasons        String[]  @default(["read-team-channel"]) @map("reasons")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by")
+  updatedAt      DateTime? @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  deletedAt      DateTime? @map("deleted_at")
+  deletedBy      String?   @map("deleted_by")
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, deletedAt])
+  @@map("agent_ticker_templates")
 }
 
 /// #1747 — a worker's subscription to one ticker (cor:agt:080:02). Workers of the

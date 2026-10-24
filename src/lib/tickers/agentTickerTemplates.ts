@@ -1,0 +1,209 @@
+// Agent ticker templates — #2024 (S8), hrn:node:hadronmemory.com:specs:cor:agt:080:33 (Proposed).
+//
+// An Agent declares the tickers its workers should have. Casting a worker from the Agent into an App turns every
+// live template into a ticker owned by the new worker, with the worker subscribed, in the cast's own transaction
+// (a SNAPSHOT: a later template edit or removal reaches only future casts, R96 A). Retiring the worker ends only
+// the tickers generated for it. Nothing here touches a ticker that already exists: no adoption by name, no
+// fan-out, no backfill (R97 B is #2096's manager-run apply operation).
+//
+// The functions take a TRANSACTION and never open one, so the cast that owns the transaction (castWorker today,
+// the S12 cast tomorrow) composes them under its own lock order:
+//
+//   worker-name lock  ->  (reportsTo graph)  ->  App ticker lock  ->  Agent template lock (shared)  ->  rows
+//
+// Template writers take the Agent template lock EXCLUSIVE and never an App lock, so the two cannot cycle, and a
+// cast either sees a template that committed first or waits for the writer: the lock is what fences the
+// "no templates yet" read, which a row lock cannot (there is no row to lock).
+
+import { Prisma } from '../../generated/prisma/index.js';
+import { currentActor } from '../requestActor.js';
+import { TICKER_NAME_MAX } from './bounds.js';
+import { nextFreeTickerSlug } from './tickerSlug.js';
+
+/** The only template shape that exists; the CHECK on `agent_ticker_templates` refuses any other. */
+export const TEMPLATE_SHAPE_VERSION = 1;
+
+/** Separates the template's name from the worker's in a generated ticker's name (cor:agt:080:01 name uniqueness). */
+export const GENERATED_NAME_SEPARATOR = ' · ';
+
+export type TemplateRow = Prisma.AgentTickerTemplateGetPayload<Record<string, never>>;
+
+export type TemplateLockMode = 'shared' | 'exclusive';
+
+/**
+ * Serialize the template set of one Agent against casts. A writer (create, update, delete) takes it exclusive; a
+ * cast takes it shared, so any number of casts run together and none overlaps a template write.
+ */
+export async function lockAgentTemplates(tx: Prisma.TransactionClient, agentId: string, mode: TemplateLockMode): Promise<void> {
+  const key = `agent-ticker-templates:${agentId}`;
+  if (mode === 'exclusive') await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+  else await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtextextended(${key}, 0))`;
+}
+
+/** The live templates of an Agent, in a stable order (name, then id). */
+export function liveTemplates(db: Pick<Prisma.TransactionClient, 'agentTickerTemplate'>, agentId: string): Promise<TemplateRow[]> {
+  return db.agentTickerTemplate.findMany({
+    where: { agentId, deletedAt: null },
+    orderBy: [{ name: 'asc' }, { id: 'asc' }],
+  });
+}
+
+/**
+ * The name a template's ticker gets for one worker: `<template name> · <worker name>`. A ticker's name is unique
+ * among the App's live tickers ignoring case (cor:agt:080:01), so two casts of one Agent into an App must not
+ * share the template's name. The template's part is shortened, never the worker's, when the pair would pass the
+ * name bound; a worker name that alone cannot fit refuses the cast.
+ */
+export function generatedTickerName(templateName: string, workerName: string): string {
+  const suffix = `${GENERATED_NAME_SEPARATOR}${workerName}`;
+  const room = TICKER_NAME_MAX - suffix.length;
+  if (room < 1) throw new GeneratedNameTooLongError(workerName);
+  return `${templateName.length > room ? templateName.slice(0, room).trimEnd() : templateName}${suffix}`;
+}
+
+export class GeneratedNameTooLongError extends Error {
+  constructor(readonly workerName: string) {
+    super(`The worker name "${workerName}" is too long to name a generated ticker (a ticker name is at most ${TICKER_NAME_MAX} characters).`);
+  }
+}
+
+export class GeneratedTickerLimitError extends Error {
+  constructor(readonly live: number, readonly adding: number, readonly liveCap: number) {
+    super(`This App has ${live} live tickers and this cast would add ${adding}; the limit is ${liveCap}.`);
+  }
+}
+
+export class GeneratedTickerNameTakenError extends Error {
+  constructor(readonly name: string) {
+    super(`This App already has a live ticker named "${name}" (names ignore case).`);
+  }
+}
+
+/** One planned ticker of a cast: what the template asks for and what the App's floor makes of it (R92). */
+export type PlannedTicker = {
+  templateId: string;
+  templateRevision: number;
+  name: string;
+  requestedCadenceSeconds: number;
+  effectiveCadenceSeconds: number;
+  quietHours: Prisma.JsonValue | null;
+  relevance: string;
+  reasons: string[];
+};
+
+/**
+ * What a cast would create for this Agent in this App, without writing anything: the live templates, each with
+ * its generated name and its effective cadence, the larger of the template's and the App's floor (a below-floor
+ * template is clamped, not refused, R92). Refuses the whole plan when the App's live cap cannot take every ticker
+ * (aggregate, so a cast never lands part of its set). The caller holds the App ticker lock when it will write;
+ * the preview reads without it and so shows what a cast would do now.
+ *
+ * Reasons are not re-validated here: a template is validated when written and the CHECK keeps it so.
+ */
+export async function planGeneratedTickers(
+  tx: Prisma.TransactionClient, args: { appId: string; agentId: string; workerName: string },
+): Promise<PlannedTicker[]> {
+  const templates = await liveTemplates(tx, args.agentId);
+  if (templates.length === 0) return [];
+  const settings = await tx.app.findUniqueOrThrow({ where: { id: args.appId }, select: { tickerMinCadenceSeconds: true, tickerLiveCap: true } });
+  const live = await tx.ticker.count({ where: { appId: args.appId, deletedAt: null } });
+  if (live + templates.length > settings.tickerLiveCap) throw new GeneratedTickerLimitError(live, templates.length, settings.tickerLiveCap);
+  return templates.map((t) => ({
+    templateId: t.id,
+    templateRevision: t.revision,
+    name: generatedTickerName(t.name, args.workerName),
+    requestedCadenceSeconds: t.cadenceSeconds,
+    effectiveCadenceSeconds: Math.max(t.cadenceSeconds, settings.tickerMinCadenceSeconds),
+    quietHours: t.quietHours as Prisma.JsonValue | null,
+    relevance: t.relevance,
+    reasons: t.reasons,
+  }));
+}
+
+/**
+ * Create the worker's tickers from the Agent's live templates and subscribe it, inside the caller's transaction.
+ * The caller has already taken the worker-name lock and holds the worker row it just created. Takes the App
+ * ticker lock, then the Agent template lock shared, and plans against what is then committed. Any refusal throws
+ * and the caller's transaction rolls the whole cast back, name allocation included (no orphan worker, ticker
+ * or subscription).
+ *
+ * Each generated ticker is owned by the new worker (`ownerWorkerId`) and records its template, revision and
+ * worker (`sourceTemplateId`, `sourceTemplateRevision`, `generatedForWorkerId`); the caster stays `createdBy`.
+ * The subscription is the platform's, made at cast from a template (cor:agt:080:02, :20 as amended by V3); it
+ * rests on no subscribe grant and on the caster's own subscribe right, which is why the consent rules that guard
+ * subscribing someone else's worker do not apply to a worker that did not exist a moment ago.
+ */
+export async function instantiateAgentTickerTemplates(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; agentId: string; worker: { id: string; name: string }; createdBy: string | null },
+): Promise<Array<{ tickerId: string; subscriptionId: string; plan: PlannedTicker }>> {
+  // The App ticker lock first (the order every ticker write uses), then the Agent's template set.
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tickers:${args.appId}`}, 0))`;
+  await lockAgentTemplates(tx, args.agentId, 'shared');
+  const plans = await planGeneratedTickers(tx, { appId: args.appId, agentId: args.agentId, workerName: args.worker.name });
+  const actor = currentActor();
+  const made: Array<{ tickerId: string; subscriptionId: string; plan: PlannedTicker }> = [];
+  for (const plan of plans) {
+    const clash = await tx.ticker.findFirst({
+      where: { appId: args.appId, deletedAt: null, name: { equals: plan.name, mode: 'insensitive' } },
+      select: { id: true },
+    });
+    if (clash) throw new GeneratedTickerNameTakenError(plan.name);
+    const slug = await nextFreeTickerSlug(tx, args.appId, plan.name);
+    const stamp = {
+      createdBy: args.createdBy, createdByWorkerId: actor.workerId, createdByAgentId: actor.agentId,
+      updatedBy: args.createdBy, updatedByWorkerId: actor.workerId, updatedByAgentId: actor.agentId,
+    };
+    const ticker = await tx.ticker.create({
+      data: {
+        appId: args.appId, name: plan.name, slug, cadenceSeconds: plan.effectiveCadenceSeconds,
+        quietHours: plan.quietHours === null ? Prisma.DbNull : (plan.quietHours as Prisma.InputJsonValue),
+        channelIds: [], relevance: plan.relevance, reasons: plan.reasons, enabled: true,
+        ownerWorkerId: args.worker.id,
+        sourceTemplateId: plan.templateId, sourceTemplateRevision: plan.templateRevision, generatedForWorkerId: args.worker.id,
+        ...stamp,
+      },
+      select: { id: true },
+    });
+    const subscription = await tx.tickerSubscription.create({
+      data: {
+        tickerId: ticker.id, workerId: args.worker.id,
+        createdBy: args.createdBy, createdByWorkerId: actor.workerId, createdByAgentId: actor.agentId,
+      },
+      select: { id: true },
+    });
+    made.push({ tickerId: ticker.id, subscriptionId: subscription.id, plan });
+  }
+  return made;
+}
+
+/**
+ * Retirement: soft-delete ONLY the tickers generated for this worker, ending every live subscription to them
+ * with the standard ticker-deleted history. A runtime ticker the worker created, an App ticker, and another
+ * worker's generated ticker are never touched. The caller holds the App ticker lock (taken after the graph lock).
+ */
+export async function endGeneratedTickersForWorker(
+  tx: Prisma.TransactionClient,
+  args: { workerId: string; deletedBy: string | null },
+): Promise<number> {
+  const actor = currentActor();
+  const now = new Date();
+  const doomed = await tx.ticker.findMany({
+    where: { generatedForWorkerId: args.workerId, deletedAt: null },
+    select: { id: true },
+  });
+  if (doomed.length === 0) return 0;
+  const ids = doomed.map((t) => t.id);
+  await tx.tickerSubscription.updateMany({
+    where: { tickerId: { in: ids }, endedAt: null },
+    data: {
+      endedAt: now, endedReason: 'TICKER_DELETED',
+      endedBy: args.deletedBy, endedByWorkerId: actor.workerId, endedByAgentId: actor.agentId,
+    },
+  });
+  await tx.ticker.updateMany({
+    where: { id: { in: ids }, deletedAt: null },
+    data: { deletedAt: now, deletedBy: args.deletedBy, deletedByWorkerId: actor.workerId, deletedByAgentId: actor.agentId },
+  });
+  return ids.length;
+}

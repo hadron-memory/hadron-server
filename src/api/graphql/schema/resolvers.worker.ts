@@ -19,6 +19,11 @@ import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { GraphQLError } from 'graphql';
 import { WORKER_SIGNATURE_DEFAULTS, normalizeWorkerSignature, withWorkerSignatures } from '../../../lib/workerSignature.js';
 import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
+import {
+  GeneratedNameTooLongError, GeneratedTickerLimitError, GeneratedTickerNameTakenError,
+  endGeneratedTickersForWorker, instantiateAgentTickerTemplates,
+} from '../../../lib/tickers/agentTickerTemplates.js';
+import { lockAppTickers } from './resolvers.ticker.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
@@ -929,6 +934,23 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
   return { appId, app: app as CastTarget['app'], agent, workerRole, requestedName, override };
 }
 
+/** The typed refusal for a failure while a cast generates its tickers (#2024); anything else is not ours. */
+function generatedTickerRefusal(e: unknown): GraphQLError | null {
+  if (e instanceof GeneratedTickerLimitError) {
+    return new GraphQLError(
+      `${e.message} Delete a ticker, or ask whoever manages the App to raise the limit; nothing was cast.`,
+      { extensions: { code: 'TICKER_LIMIT_REACHED', liveCap: e.liveCap, live: e.live, adding: e.adding } },
+    );
+  }
+  if (e instanceof GeneratedTickerNameTakenError) {
+    return new GraphQLError(`${e.message} Nothing was cast.`, { extensions: { code: 'TICKER_NAME_TAKEN', name: e.name } });
+  }
+  if (e instanceof GeneratedNameTooLongError) {
+    return new GraphQLError(`${e.message} Nothing was cast.`, { extensions: { code: 'BAD_USER_INPUT', workerName: e.workerName } });
+  }
+  return null;
+}
+
 export const workerMutations = {
   /**
    * castWorker — #974 (cor:dmo:050:11): cast an installed agent into the App
@@ -996,7 +1018,7 @@ export const workerMutations = {
             if ((await takenWorkersByName(tx, appId, [candidate])).has(candidate)) return NAME_TAKEN;
             await assertWorkerNameNotConfusable(tx, appId, candidate);
             const slug = await nextFreeWorkerSlug(tx, appId, candidate);
-            return tx.worker.create({
+            const castWorkerRow = await tx.worker.create({
               data: { ...WORKER_SIGNATURE_DEFAULTS,
                 appId,
                 agentId: agent.id,
@@ -1014,6 +1036,16 @@ export const workerMutations = {
               },
               select: { id: true, name: true, slug: true },
             });
+            // #2024 (S8): the Agent's declared tickers become this worker's, with the worker subscribed, in this
+            // same transaction. Any refusal rolls the whole cast back, the name allocation included.
+            try {
+              await instantiateAgentTickerTemplates(tx, {
+                appId, agentId: agent.id, worker: castWorkerRow, createdBy: ctx.userId ?? null,
+              });
+            } catch (e) {
+              throw generatedTickerRefusal(e) ?? e;
+            }
+            return castWorkerRow;
           }, { timeout: 30_000 });
         } catch (e) {
           // Order matters: a slug race is private and retried; a name
@@ -1097,6 +1129,9 @@ export const workerMutations = {
       // #1726: the reportsTo graph lock BEFORE the worker row (the lock
       // protocol in src/lib/workerReportsTo.ts; #1737 review, Diego P2-2).
       await lockAppReportsTo(tx, worker.appId);
+      // #2024 (S8): the App ticker lock after the graph and BEFORE any worker row, the order the cast and every
+      // ticker write use (a ticker edit holds it while it reads its subscribers' workers).
+      await lockAppTickers(tx, worker.appId);
       const retired = await tx.worker.updateMany({
         where: { id: worker.id, retiredAt: null },
         data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
@@ -1116,6 +1151,9 @@ export const workerMutations = {
             endedBy: ctx.userId ?? null, endedByWorkerId: actor.workerId, endedByAgentId: actor.agentId,
           },
         });
+        // #2024 (S8): the tickers generated for this worker end with it (and the subscriptions others hold to
+        // them). Nothing else is touched.
+        await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null });
         await reconcileStopCoverage(tx, worker.appId, new Date());
       }
     });
