@@ -1,5 +1,5 @@
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
-import { systemMemoryReadGrants } from '../../../lib/auth/systemMemoryRead.js';
+import { createSystemMemoryGrantBatch, systemMemoryReadGrants, type SystemMemoryGrantBatch } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 // Helpers extracted from resolvers.ts (Step 1 of the resolver split).
 // Pure mechanical move: shared auth/include/AI-config/chat/asset helpers used
@@ -1066,6 +1066,8 @@ export function nodeNotFoundError(ref: string): GraphQLError {
 type MemoryRecordReadBatch = {
   memberOrgIds?: Promise<string[]>;
   accessibleIds?: Promise<string[] | null>;
+  /** #1813: the caller's system-record grant lookups, built from THIS list's ctx so it cannot span principals. */
+  systemGrants?: SystemMemoryGrantBatch;
 };
 
 /** Gate a record list without repeating membership and access-set queries per row. */
@@ -1153,6 +1155,7 @@ export async function canReadMemoryRecord(
   const accessible = () => batch
     ? (batch.accessibleIds ??= getAccessibleMemoryIds(ctx))
     : getAccessibleMemoryIds(ctx, memory.id);
+  const systemGrants = () => batch ? (batch.systemGrants ??= createSystemMemoryGrantBatch(ctx)) : undefined;
   if (memory.class === 'personal' || memory.class === 'private') {
     // Impersonation: personal-class records are invisible even though the
     // TARGET owns them — the shared-org scope excludes all identity-scoped
@@ -1173,13 +1176,13 @@ export async function canReadMemoryRecord(
     // an impersonation keep the hard-isolated content set below.
     if (ctx.sessionId && ctx.userId && !ctx.impersonation && !isRunPrincipal(ctx)
       && await ctx.db.memory.count({ where: { id: memory.id, isInstallMemory: true } }) > 0) {
-      return (await systemMemoryReadGrants(ctx.db, ctx, memory.id)).length > 0;
+      return (await systemMemoryReadGrants(ctx.db, ctx, memory.id, systemGrants())).length > 0;
     }
     if (ctx.sessionId || ctx.impersonation || isRunPrincipal(ctx) || !ctx.userId) {
       const ids = await accessible();
       return ids === null || ids.includes(memory.id);
     }
-    return (await systemMemoryReadGrants(ctx.db, ctx, memory.id)).length > 0;
+    return (await systemMemoryReadGrants(ctx.db, ctx, memory.id, systemGrants())).length > 0;
   }
   if (memory.ownerUserId != null) {
     // Impersonation: user-owned (spec 047) records are identity-scoped —
