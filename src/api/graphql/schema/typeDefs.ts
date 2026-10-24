@@ -7293,6 +7293,10 @@ export const typeDefs = `#graphql
     mintedCount: Int!
     "#1591 — the locs this call minted, or would mint on a dry run, ordered by loc."
     mintLocs: [String!]!
+    "#1612 — the already-minted nodes this call re-minted, or would on a dry run (content changed since the minted revision, or no recorded minted revision), ordered by loc. mintLocs lists new nodes only."
+    remintLocs: [String!]!
+    "#1612 — how many of mintedCount were re-mints (0 on a dry run or refusal)."
+    remintedCount: Int!
     "#1607 — nodes in mintLocs with open discussion: a WARNING, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Ordered by loc."
     unresolvedFeedback: [UnresolvedFeedback!]!
   }
@@ -9575,7 +9579,7 @@ export const typeDefs = `#graphql
     """
     renumberSpec(memoryRef: ID!, fromLoc: String!, toLoc: String!, dryRun: Boolean): SpecRenumberResult!
     """
-    #1591 — mint the unminted live nodes of a memory, at once, excluding
+    #1591, #1612 — mint the live nodes of a memory in the mint scope: unminted ones, plus minted ones whose content changed since their minted revision or that have no recorded minted revision (re-mints keep the first-mint time and minter; see remintLocs). Excludes
     comment nodes and the decision role family. Each node is
     stamped with its current revision and that revision's approval hash
     (Node.mintStatus); a minted node's moves then record URN aliases. Refuses
@@ -9864,7 +9868,7 @@ export const typeDefs = `#graphql
     requestNodeSignature(nodeRef: ID!, expectedRevision: Int, signerRef: ID): SigningRequest!
     "#1632 — withdraw an open signing request. Only the requester account, from any of its sessions (#10397). Refusals (hrn:node:hadronmemory.com:specs:cor:dmo:130:03, Holger #10430): SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
     withdrawSigningRequest(id: ID!): SigningRequest!
-    "#1591 — approve the current revision of every live, unminted node of a memory (ID or fully-qualified URN) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
+    "#1591 — approve the current revision of every live node in the mint scope (unminted, or minted and changed since its minted revision or with none recorded; #1612) of a memory (ID or fully-qualified URN) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
     approveMemoryNodes(memoryRef: String!): ApproveMemoryNodesResult!
 
     """

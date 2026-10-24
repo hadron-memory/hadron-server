@@ -76,14 +76,14 @@ describe('mintMemoryNodes (#1591)', () => {
     expect(await resolvers.Memory.corpusState({ id: memory.id }, {}, as())).toBe('MINTED');
   });
 
-  it('reports and mints only unminted nodes: an earlier mint is never re-checked', async () => {
+  it('reports and mints only nodes in scope: an unchanged earlier mint is never re-checked', async () => {
     await approveAll();
     await mint();
     // A minted node edited since (no longer approved) and with a lint error
     // (nodeType not info) blocks nothing.
     const old = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'specs' } });
     await db.node.update({ where: { id: old.id }, data: { revSeq: { increment: 1 } } });
-    await spec('pas:020', { nodeType: 'parent', mintedAt: new Date(), mintedByInfo: 'test' });
+    await spec('pas:020', { nodeType: 'parent', mintedAt: new Date(), mintedByInfo: 'test', mintedRevNo: 1, mintedHash: 'h' });
     const added = await spec('pas:030');
     const dry = await mint(true);
     expect(dry.mintLocs).toEqual(['pas:030']);
@@ -142,13 +142,80 @@ describe('mint certifies the text it stamps (Atilla, PR #1593)', () => {
   });
 });
 
-describe('approveMemoryNodes skips minted nodes (#1591)', () => {
-  it('approves only unminted ones', async () => {
-    const minted = await spec('pas:010', { mintedAt: new Date(), mintedByInfo: 'test' });
+describe('approveMemoryNodes covers the mint scope (#1612)', () => {
+  it('skips a minted node unchanged since its minted revision, approves unminted ones', async () => {
+    const minted = await spec('pas:010', { mintedAt: new Date(), mintedByInfo: 'test', mintedRevNo: 1, mintedHash: 'h' });
     await spec('pas:020');
     const result = await approveAll();
     expect(result.approved.map((r: { loc: string }) => r.loc).sort()).toEqual(['pas:020', 'specs']);
     expect((await rowOf(minted.id)).approvedRevNo).toBeNull();
+  });
+});
+
+describe('re-mint (#1612, cor:dmo:120:06)', () => {
+  const edit = (loc: string, patch: Record<string, unknown>) =>
+    resolvers.Mutation.updateSpecNode(null, { input: { memoryId: memory.id, loc, ...patch } } as never, as(writer.id));
+
+  it('puts a content-edited minted node back in scope, blocks it until approved, then re-stamps and keeps the first mint', async () => {
+    const n = await spec('pas:010');
+    await approveAll();
+    await mint(false, admin.id);
+    const first = await rowOf(n.id);
+
+    await edit('pas:010', { content: 'Changed.' });
+    const dry = await mint(true);
+    expect(dry.mintLocs).toEqual([]);
+    expect(dry.remintLocs).toEqual(['pas:010']);
+    expect(dry.blockers).toEqual([expect.objectContaining({ kind: 'NOT_APPROVED', loc: 'pas:010' })]);
+    expect(await codeOf(mint(false, writer.id))).toBe('SPEC_CORPUS_MINT_BLOCKED');
+
+    const approved = await approveAll(writer.id);
+    expect(approved.approved.map((r: { loc: string }) => r.loc)).toEqual(['pas:010']);
+    const done = await mint(false, writer.id);
+    expect(done).toMatchObject({ minted: true, mintedCount: 1, remintedCount: 1, mintLocs: [], remintLocs: ['pas:010'], blockers: [] });
+
+    const row = await rowOf(n.id);
+    expect(row.mintedRevNo).toBe(2);
+    expect(row.mintedHash).toBe(row.approvalHash);
+    expect(row.mintedHash).not.toBe(first.mintedHash);
+    expect(row.mintedAt).toEqual(first.mintedAt);
+    expect(row.mintedBy).toBe(admin.id);
+    expect(await mintStatusOf(n.id)).toMatchObject({ minted: true, mintedBy: admin.id, revision: 2 });
+    // Settled: a second mint has nothing in scope.
+    expect(await mint(true)).toMatchObject({ remintLocs: [], mintLocs: [], blockers: [] });
+  });
+
+  it('keeps new and re-minted nodes apart in one report', async () => {
+    await spec('pas:010');
+    await approveAll();
+    await mint();
+    await edit('pas:010', { content: 'Changed.' });
+    await spec('pas:020');
+    await approveAll();
+    expect(await mint()).toMatchObject({ mintedCount: 2, remintedCount: 1, mintLocs: ['pas:020'], remintLocs: ['pas:010'] });
+  });
+
+  it('leaves a minted node out of scope after a tags-only edit', async () => {
+    const n = await spec('pas:010');
+    await approveAll();
+    await mint();
+    const before = await rowOf(n.id);
+    await edit('pas:010', { tags: ['spec', 'extra'] });
+    expect((await rowOf(n.id)).contentRevSeq).toBe(before.contentRevSeq);
+    expect(await mint(true)).toMatchObject({ mintLocs: [], remintLocs: [], blockers: [] });
+    expect((await approveAll()).approved).toEqual([]);
+  });
+
+  it('puts a minted node with no recorded minted revision in scope (R197, option A)', async () => {
+    const n = await spec('pas:010', { mintedAt: new Date('2026-05-01T00:00:00.000Z'), mintedByInfo: 'backfill' });
+    const dry = await mint(true);
+    expect(dry.remintLocs).toEqual(['pas:010']);
+    expect(dry.blockers).toContainEqual(expect.objectContaining({ kind: 'NOT_APPROVED', loc: 'pas:010' }));
+    await approveAll();
+    await mint();
+    const row = await rowOf(n.id);
+    expect(row).toMatchObject({ mintedRevNo: row.revSeq, mintedHash: row.approvalHash, mintedByInfo: 'backfill', mintedBy: null });
+    expect(row.mintedAt!.toISOString()).toBe('2026-05-01T00:00:00.000Z');
   });
 });
 

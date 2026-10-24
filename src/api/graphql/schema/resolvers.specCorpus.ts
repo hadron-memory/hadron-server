@@ -39,6 +39,7 @@ import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
 import { NOT_DECISION_FAMILY_WHERE } from '../../../lib/decisions/index.js';
 import { unresolvedFeedbackOf, type UnresolvedFeedbackRow } from '../../../lib/comments/summary.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
+import { MINT_SCOPE_SQL, inMintScope } from '../../../lib/nodeMintScope.js';
 import { SubtreeMoveMintedError } from '../../../lib/nodeSubtreeMove.js';
 import { InvalidLocError, validateLoc } from '../../../lib/validateLoc.js';
 import {
@@ -1158,6 +1159,10 @@ type MintReport = {
   mintedCount: number;
   /** #1591 — the locs this call minted, or would mint on a dry run, by loc. */
   mintLocs: string[];
+  /** #1612 — the already-minted nodes re-minted (or to be), by loc; mintLocs is new nodes only. */
+  remintLocs: string[];
+  /** #1612 — how many of mintedCount were re-mints. */
+  remintedCount: number;
   /** #1607 — nodes in scope with open discussion: a warning, never a blocker (cor:dmo:110:07). */
   unresolvedFeedback: UnresolvedFeedbackRow[];
 };
@@ -1257,10 +1262,10 @@ async function mintMemoryNodes(
       select: {
         id: true, loc: true, nodeType: true, tags: true, role: true, isPlaceholder: true, revSeq: true,
         name: true, description: true, abstract: true, content: true, abstractOriginHash: true,
-        mintedAt: true, approvedRevNo: true, contentRevSeq: true, approvalHash: true,
+        mintedAt: true, mintedRevNo: true, approvedRevNo: true, contentRevSeq: true, approvalHash: true,
       },
     });
-    const inScope = nodes.filter((n) => n.mintedAt === null);
+    const inScope = nodes.filter(inMintScope);
     const inScopeIds = new Set(inScope.map((n) => n.id));
     const inScopeLocs = new Set(inScope.map((n) => n.loc));
     // The lint scope is exactly the CLI's (`lintSelects`, hadron-cli #708;
@@ -1344,7 +1349,7 @@ async function mintMemoryNodes(
     const foreignTargets = await tx.edge.findMany({
       where: {
         deletedAt: null,
-        source: { memoryId: id, deletedAt: null, mintedAt: null },
+        source: { memoryId: id, deletedAt: null, id: { in: [...inScopeIds] } },
         target: { memoryId: { not: id }, deletedAt: null, isPlaceholder: false, mintedAt: null },
       },
       select: {
@@ -1379,11 +1384,12 @@ async function mintMemoryNodes(
       .sort(([a], [b]) => (a === null ? 1 : b === null ? -1 : a.localeCompare(b)))
       .map(([decider, questions]) => ({ decider, questions }));
 
-    const mintLocs = inScope.map((n) => n.loc);
+    const mintLocs = inScope.filter((n) => n.mintedAt === null).map((n) => n.loc);
+    const remintLocs = inScope.filter((n) => n.mintedAt !== null).map((n) => n.loc);
     const report: MintReport = {
       memoryId: id, dryRun, minted: false, blockers,
       staleAbstracts, staleAbstractsBlock: STALE_ABSTRACT_BLOCKS_MINT, openQuestions,
-      mintedCount: 0, mintLocs,
+      mintedCount: 0, mintLocs, remintLocs, remintedCount: 0,
       unresolvedFeedback: (await unresolvedFeedbackOf(tx, inScope)).map((f) => ({ ...f, memoryId: id })),
     };
     if (dryRun) return report;
@@ -1408,14 +1414,16 @@ async function mintMemoryNodes(
     // since it was recorded, #1611) and its stored hash equals the text being
     // minted: stamp the current revision and that hash.
     const ids = [...inScopeIds];
+    // A re-mint keeps the first-mint time and minter (cor:dmo:120:06) and
+    // advances only the minted revision and hash.
     const mintedCount = await tx.$executeRaw`
       UPDATE nodes SET
-        minted_at = ${now},
-        minted_by = ${minter.userId ?? null},
-        minted_by_info = ${minter.userId ? null : minter.info ?? 'unknown'},
+        minted_at = COALESCE(minted_at, ${now}),
+        minted_by = CASE WHEN minted_at IS NULL THEN ${minter.userId ?? null} ELSE minted_by END,
+        minted_by_info = CASE WHEN minted_at IS NULL THEN ${minter.userId ? null : minter.info ?? 'unknown'} ELSE minted_by_info END,
         minted_rev_no = rev_seq,
         minted_hash = approval_hash
-      WHERE memory_id = ${id} AND deleted_at IS NULL AND minted_at IS NULL
+      WHERE memory_id = ${id} AND deleted_at IS NULL AND ${MINT_SCOPE_SQL}
         AND id = ANY(${ids}::text[]) AND approved_rev_no >= content_rev_seq AND approval_hash IS NOT NULL`;
     if (mintedCount !== ids.length) {
       // Unreachable under the fence; refuse rather than mint a partial set.
@@ -1427,7 +1435,7 @@ async function mintMemoryNodes(
       where: { id },
       data: { corpusDraft: false, corpusMintedAt: now, corpusMintedBy: ctx.userId ?? ctx.clientId ?? null },
     });
-    return { ...report, minted: true, mintedCount };
+    return { ...report, minted: true, mintedCount, remintedCount: remintLocs.length };
   }, { timeout: 120_000 });
 }
 

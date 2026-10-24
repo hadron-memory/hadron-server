@@ -33,6 +33,7 @@ import {
   type NodeApprovalRow,
   type NodeIntegrityResult,
 } from '../../../lib/nodeApproval.js';
+import { MINT_SCOPE_SQL } from '../../../lib/nodeMintScope.js';
 import { bootPromptApprovalGate } from '../../../lib/bootPromptApproval.js';
 
 /**
@@ -256,10 +257,10 @@ export const nodeApprovalMutations = {
         // #2043 — decided once for the memory, inside this transaction, and applied to each locked row.
         const bootPromptGate = await bootPromptApprovalGate(txCtx, memoryId);
         // Lock in id order, so two bulk approvals cannot deadlock each other.
-        // #1591: only unminted nodes are approved in bulk; a minted node's
-        // later edits are approved one at a time.
+        // #1612: bulk approval covers the mint scope (cor:dmo:120:03): unminted
+        // nodes plus minted ones changed since their minted revision.
         const ids = await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT id FROM nodes WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND minted_at IS NULL
+          SELECT id FROM nodes WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND ${MINT_SCOPE_SQL}
             AND node_type <> ${COMMENT_NODE_TYPE}
             AND NOT (role IS NOT NULL AND (role = ${DECISION_ROLE} OR role LIKE ${`${DECISION_ROLE}.%`}))
           ORDER BY id FOR UPDATE`;
