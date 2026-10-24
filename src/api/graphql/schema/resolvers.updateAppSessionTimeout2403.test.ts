@@ -37,7 +37,7 @@ beforeEach(async () => {
   member = await db.user.create({ data: { githubId: 240302, githubUsername: 'timeout-member' } });
   const org = await db.organization.create({ data: { id: generateId(), name: 'timeout', urn: `timeout-${generateId()}` } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  await db.orgMember.create({ data: { organizationId: org.id, userId: member.id, role: 'MEMBER' } });
+  await db.orgMember.create({ data: { organizationId: org.id, userId: member.id, role: 'READER' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'timeout', urn: `${org.urn}:timeout` } });
 });
 
