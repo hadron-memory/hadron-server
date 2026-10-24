@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1005 — App scope must not evaporate mid-session for a multi-App user.
  *
@@ -84,7 +85,7 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'owner' } });
   await db.appMember.create({ data: { appId: otherApp.id, userId: user.id, role: 'owner' } });
   worker = await db.worker.create({
-    data: { appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' },
   });
 });
 
@@ -159,18 +160,15 @@ describe('#1005 — the active App is pinned at session start', () => {
     expect(read).not.toContain('No App context');
   });
 
-  it('a bare NAME workerRef still requires App scope (#990 — a name is App-scoped)', async () => {
-    // Deliberately NOT relaxed: a name is unique only within an App, so
-    // resolving one across the caller's Apps could name several workers. The
-    // caller gets the actionable envelope instead of a guess.
+  it('a unique authorized bare NAME binds and pins its App (#1597)', async () => {
     const srv = coldServer();
     const out = await srv.callToolText('hadron_start_session', {
       description: 'by name',
       workerRef: 'Iris',
     });
-    expect(out).toContain('multiple_apps_resolved');
-    expect(out).toContain('hadron_set_active_app');
-    expect(await db.session.count()).toBe(0);
+    expect(out).toContain('Session started:');
+    expect(out).not.toContain('multiple_apps_resolved');
+    expect(await db.session.count({ where: { workerId: worker.id, appId: app.id } })).toBe(1);
   });
 });
 
@@ -352,7 +350,7 @@ describe('#1005 — App scope is recoverable from the session after a reconnect'
     });
     await db.appAgent.create({ data: { appId: soloApp.id, agentId: soloAgent.id } });
     const soloWorker = await db.worker.create({
-      data: { appId: soloApp.id, agentId: soloAgent.id, name: 'Solo Worker', slug: 'solo-worker' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: soloApp.id, agentId: soloAgent.id, name: 'Solo Worker', slug: 'solo-worker' },
     });
 
     const authOf = (): AuthContext =>

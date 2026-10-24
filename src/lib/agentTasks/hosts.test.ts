@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1707 — host registrations (cor:agt:070:01): the internal writer, what makes
  * a worker launchable, and the lapse after the App's count of poll intervals (default 3, #1763)
@@ -33,7 +34,7 @@ beforeEach(async () => {
   const agent = await db.agent.create({ data: { id: generateId(), name: 'A', urn: `hosts-agent-${generateId().toLowerCase()}`, ownerUserId: owner.id }, select: { id: true } });
   const worker = (appId: string, name: string) =>
     // #1709: held, so a host can launch them (cor:agt:060:05).
-    db.worker.create({ data: { appId, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: owner.id }, select: { id: true } });
+    db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: owner.id }, select: { id: true } });
   anne = await worker(app.id, 'Anne');
   liam = await worker(app.id, 'Liam');
   rook = await worker(app.id, 'Rook');
@@ -47,6 +48,13 @@ const ORCA1 = () => ({
 const hostEvents = () => db.agentTeamEvent.findMany({ where: { type: { startsWith: 'host.' } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
 
 describe('cor:agt:070:01 — a host registers which workers it can launch, and as which family', () => {
+  it('#2191 normalizes registration storage and existing aliases on launchable comparison', async () => {
+    const r = await registerHost(db, { ...ORCA1(), workers: [{ workerId: anne.id, family: ' OpenAI ', worktrees: ['repo/anne'] }] }, at('10:00'));
+    expect((await db.hostRegistrationWorker.findFirstOrThrow({ where: { registrationId: r.registrationId } })).family).toBe('codex');
+    await db.hostRegistrationWorker.updateMany({ where: { registrationId: r.registrationId }, data: { family: 'openai' } });
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:01'))).get(anne.id)).toEqual(['codex']);
+  });
+
   it('the spec example: orca1 registers anne as codex, liam as glm, rook as claude', async () => {
     const r = await registerHost(db, ORCA1(), at('10:00'));
     expect(r.registered).toBe(true);

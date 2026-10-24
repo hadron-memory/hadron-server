@@ -424,7 +424,11 @@ describe('approvals on an encrypted memory (#1591)', () => {
           expect(r!.approvedByInfo).toBeNull();
         }
       }
-      expect((await db.nodeRevision.findUniqueOrThrow({where:{id:retained.id}})).approvalHash).toBe(retained.approvalHash);
+      // #1838 (cor:dmo:120:04): entering ended the approval: hash cleared, who/when kept.
+      const stored = await db.nodeRevision.findUniqueOrThrow({where:{id:retained.id}});
+      expect(stored.approvalHash).toBeNull();
+      expect(stored.approvedBy).toBe(retained.approvedBy);
+      expect(stored.approvedAt).toEqual(retained.approvedAt);
     } finally {sessionKeyCache.clear();}
   });
 

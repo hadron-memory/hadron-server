@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /**
  * Holger's DY rulings (2026-10-05) on session lifetime:
  *  - DY-2 (#1653): a usage event counts as ACTIVITY only when its session was
@@ -80,7 +81,7 @@ beforeEach(async () => {
   otherApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'B', urn: `${org.urn}:b` } });
   const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'agent', urn: `${org.urn}:agent`, visibility: 'ORGANIZATION' } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' } });
 });
 
 describe('DY-2 (#1653): a usage event on a lapsed session is attribution, never activity', () => {

@@ -1,6 +1,7 @@
 /** #1719 R5b interim consent artifact. Replace this mechanism with signed
  * compiled automation; never remove the exact-automation execution gate. */
-import { templatePartialLocs } from '../template.js';
+import { splitNodeUrn } from '@hadron-memory/urn-lib-js';
+import { storedIncludeTags } from '../includes/writeIncludes.js';
 import { isRoutingName, routingNameOf } from '../runner/selectNextEdge.js';
 import { executionIdentities, configSelection, aiIdentity, mcpIdentity, haIdentity, type ExecutionSelection, type ExecutionIdentities } from './identities.js';
 import { createHash } from 'node:crypto';
@@ -91,14 +92,34 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
     // partial dictionary from the root template, so a nested-only reference
     // may not render today; changing it still requires re-adoption because
     // the declared instruction definition changed (R5b-3=A).
-    for (const loc of templatePartialLocs(node.content ?? '')) {
-      const urn = emitNodeUrnV2(node.memory.urn, loc);
+    for (const tag of storedIncludeTags(node.content)) {
+      // A URN target (#2040) is judged exactly like a loc one, plus the pin's own
+      // rules for another memory: same organization, plaintext, readable by the
+      // principal. Anything else is recorded as absent, so an unreadable target is
+      // indistinguishable from a missing one.
+      let targetMemoryId = node.memoryId;
+      let loc = tag.target;
+      let urn: string;
+      if (tag.kind === 'urn') {
+        const parts = splitNodeUrn(tag.target);
+        urn = tag.target;
+        const mem = await db.memory.findUnique({
+          where: { urn: parts.memoryUrn },
+          select: { id: true, organizationId: true, isEncrypted: true, deletedAt: true },
+        });
+        if (mem && !mem.deletedAt && !mem.isEncrypted && mem.organizationId === organizationId && await canReadMemory(db, principal, mem.id)) {
+          targetMemoryId = mem.id;
+          loc = parts.loc;
+        }
+      } else {
+        urn = emitNodeUrnV2(node.memory.urn, loc);
+      }
       if (partialRefs.has(urn)) continue;
       partialRefs.add(urn);
       if (partialRefs.size > 200) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation exceeds 200 partial references');
-      const partial = await db.node.findFirst({ where: { memoryId: node.memoryId, loc, deletedAt: null }, select: { id: true } });
+      const partial = await db.node.findFirst({ where: { memoryId: targetMemoryId, loc, deletedAt: null }, select: { id: true } });
       if (partial) pending.push({ id: partial.id, flow: false });
-      else absentPartials.set(urn, { urn, memoryId: node.memoryId, loc });
+      else absentPartials.set(urn, { urn, memoryId: targetMemoryId, loc });
     }
   }
   if (Object.keys(edges).length > 1000) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph exceeds 1000 edges');

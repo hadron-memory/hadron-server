@@ -98,6 +98,25 @@ that drift is what the deprecated `hadron_dev` row above warns about).
 > HNSW index) to sync schema without wiping, or **`pnpm db:dev-reset`** for a
 > clean wipe + reseed. Both follow `.env`.
 
+## Test-run ownership (#1137)
+
+`HADRON_TEST_RUN_ID` remains the bare vitest main PID. Global setup overwrites
+`HADRON_TEST_RUN_SCOPE` from Linux boot identity and PID-namespace device/inode,
+then workers inherit it unchanged. Database names and graph roots use the full
+scope-plus-PID token; shared loopback or Unix sockets do not establish ownership.
+Native non-Linux retains parallel mode in an explicit platform/machine scope with
+the existing local-machine assumption. Linux without verifiable `/proc` identity
+refuses parallel mode; `HADRON_TEST_PARALLEL=0` remains available.
+
+Automatic cleanup preserves previous-boot, foreign, unknown and legacy names.
+Their disk/inode cost is **unbounded**, including old graph roots (#1951).
+Manual maintenance must establish quiescence of **all** namespaces sharing the
+Postgres endpoint or temporary directory; local PID absence is insufficient.
+`db:test-prune-legacy` does not prove ownership and does not collect pid-only
+`r<pid>` clones or graph roots. No boot-mismatch deletion rule is authorized.
+Keep checkout/venv/probe scratch in a private disk-backed `TMPDIR` when `/tmp`'s
+inode limit is tight; never clear another run's files based on local PID absence.
+
 ## Common commands
 
 ```bash
@@ -170,7 +189,7 @@ pnpm admin:mint-token --email you@example.com
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | #581 — Sign-in-with-Google (`src/auth/google.ts`, `/auth/google` + `/auth/google/callback` in `src/server.ts`) | Both unset (`/auth/google` answers 503; Google login is off) | OAuth client of the LOGIN-ONLY GCP project (scopes `openid email profile` — never add gmail scopes to this client; the Gmail tool (#580) uses a separate client in a separate project, so login never enters restricted-scope verification). Register in Doppler (dev + prd). Authorized redirect URIs on the client: `${BASE_URL}/auth/google/callback` (prod) + `http://localhost:4000/auth/google/callback` (dev). Identity comes from the verified ID-token claims (jose + Google JWKS); email-based account linking requires `email_verified: true`. |
 | `APPLE_CLIENT_ID` / `APPLE_TEAM_ID` / `APPLE_KEY_ID` / `APPLE_PRIVATE_KEY` | #584 — Sign in with Apple (`src/auth/apple.ts`, `/auth/apple` + `POST /auth/apple/callback` in `src/server.ts`) | All unset (`/auth/apple` answers 503 unless ALL FOUR are set; Apple login is off) | CLIENT_ID is the Services ID (e.g. `com.hadronmemory.signin`); TEAM_ID + KEY_ID + PRIVATE_KEY (the `.p8` PEM — multi-line in Doppler, `\n`-escaped tolerated) mint the per-request ES256 client-secret JWT (Apple has no static secret). Login-only scopes `name email`; identity from the verified ID token (jose + Apple JWKS); the callback is a form POST (`response_mode=form_post`) and the user's name arrives on FIRST auth only. Apple refuses localhost/http return URLs — dev round-trips need a tunnel with `BASE_URL` set to its origin. Register the return URL `${BASE_URL}/auth/apple/callback` on the Services ID. |
 | `CORE_EVENTS_TOKEN` | #396 Phase 4 — email events ingress (`src/api/emailEvents.ts`, `POST /internal/email-events`) | none (unset ⇒ the ingress answers 503; the event plane is off) | Bearer the provider tools present when delivering normalized `email.received` / `email.sent` events (the tool's `CORE_EVENTS_URL` points at this route and carries the same token value). v1 dispatch resolves the connection + logs; consumers (AgentWebhook fan-out, spec-039 bus publish) attach in `dispatchEmailEvent` — agent-pong#1 prerequisite 2. |
-| `BASE_URL` | `src/auth/oauth.ts` (`getServerOrigin`) + `src/auth/email.ts` + `src/auth/github.ts` + `src/auth/google.ts` + `src/auth/apple.ts` + `src/integrations/exchange/auth.ts` + `src/mcp/server.ts:getDeploymentInfo` (#187/#190 diagnostics) | OAuth path: per-request `${req.protocol}://${req.get('host')}`. email.ts / github.ts / mcp/server.ts:getDeploymentInfo: `http://localhost:${process.env.PORT \|\| 4000}` (`\|\|` so empty-string falls back — PR-194 review aligned the three). exchange/auth.ts: hardcoded `http://localhost:4000` (no `PORT` lookup). | **Project-wide canonical-origin env var.** Already used by email verification, GitHub OAuth callbacks, Exchange auth, and `/mcp` discovery (spec 025 added OAuth metadata + `/mcp` 401 `WWW-Authenticate`; #187/#190 added the diagnostic surface). **Strongly recommended in production** so every server-emitted absolute URL agrees on the same origin. Without it OAuth-metadata URLs derive from per-request headers, which depends on `trust proxy` + `X-Forwarded-Proto` being honored by every upstream hop — a single misconfigured request can emit `http://` URLs that Codex Desktop refuses to accept (EF-003). **Strict shape on the OAuth path** (`<scheme>://<host>[:<port>]`, lowercase scheme, no trailing slash / path / query / fragment / whitespace / underscore / IPv6 brackets): malformed value throws at boot via the OAuth module's IIFE. The other consumers don't validate; they concat raw. The unset-defaults aren't fully consistent (exchange/auth.ts hardcodes 4000 vs the others honoring PORT); centralizing behind one helper is a known follow-up. If `BASE_URL` is wrong on the OAuth side it's wrong on the others too, so fail-loud is right. |
+| `BASE_URL` | Ten localhost-default consumers use `src/lib/baseUrl.ts:getProjectBaseUrl` (login callbacks, verification/fresh-sign-in mail, passkey notices, Exchange/Gmail/Calendar/Drive callbacks). | Shared helper: `http://localhost:${process.env.PORT \|\| 4000}`. Empty BASE_URL/PORT falls back; `/` is unset only under NODE_ENV=test. | Configured nonempty values are returned byte-for-byte, without normalization or validation. The four provider callbacks now honor PORT. `src/auth/oauth.ts` remains separate: strict boot validator and per-request origin fallback. `src/api/assetPublic.ts` and `src/mcp/deploymentInfo.ts` keep their no-default semantics. Strongly recommended in production so emitted URLs agree; this helper does not replace OAuth strict validation. **OAuth strict shape:** `<scheme>://<host>[:<port>]`, lowercase scheme; no trailing slash, path, query, fragment, whitespace, underscore or IPv6 brackets; malformed values fail boot. Without BASE_URL, OAuth metadata derives its origin from per-request headers and depends on `trust proxy` plus `X-Forwarded-Proto` being honored at every upstream hop (EF-003: a misconfigured hop can emit HTTP links rejected by clients). |
 
 ## Seed fixtures (post-008-agent-installation)
 
@@ -211,8 +230,14 @@ two-layer model without further setup:
   Enforced by `chk_personal_visibility_user` (the name predates 035 — it's now
   keyed on `class`, not a `visibility = 'PERSONAL'` value, which no longer
   exists). Set the owner whenever creating a personal/private memory.
-- **Memory app_id invariant** (008, relaxed by 034 and #653): `app_id` is
-  REQUIRED for `class='app'`, FORBIDDEN for `class='system'`, and OPTIONAL for
+- **Memory app_id invariant** (008, 034, #653, #2064;
+  `hrn:node:hadronmemory.com:specs:cor:dmo:060:01`): `app_id` is REQUIRED for
+  `class='app'`. For `class='system'`, it is NULL on an Agent's own system
+  memory and set only on an install memory (`is_install_memory = true`).
+  `install_of_agent_id` names that install's Agent while present; it may be
+  NULL after erasure detaches the retained App-owned install memory. Other
+  classes require `is_install_memory = false` and `install_of_agent_id` NULL.
+  `app_id` is OPTIONAL for
   `knowledge`/`group`/`personal`/`private` — set when provisioned inside an App
   (e.g. the `(app_id, user_id)` scope for personal), NULL when **free-standing**
   (created via the CLI or Cowork outside any App). #653 moved `knowledge` +

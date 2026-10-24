@@ -1,3 +1,4 @@
+import { poolDatasourceUrl } from './poolUrl.js';
 import { workerReferenceError } from '../../lib/workerReferenceError.js';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
@@ -14,6 +15,8 @@ import { ATTRIBUTED_NODE_FIELDS } from '../../lib/nodeRevisionSnapshot.js';
 // 667-webfetch-polling: WebFetchPollBinding (jobId is the PK).
 // durable-login-state: PendingLoginState (the OAuth `state` is the PK).
 const MODELS_WITHOUT_ID = new Set<string>([
+  // #2046 — keyed by (compiled node, compiled revision).
+  'CompiledPromptRevision',
   'AgentSubscription',
   'WorkerReferenceFence',
   'ManualAutomationPin',
@@ -45,9 +48,12 @@ const MODELS_WITHOUT_ID = new Set<string>([
   'WorkerWakeSettings',
   'WorkerDeliveryChannel',
   'WorkerDeliveryTick', 'AppWakeDay', 'AppWakeReservation',
+  // #2072 — keyed by (worker, wake key).
+  'WorkerWakeAck',
 ]);
 
-const basePrisma = new PrismaClient();
+const datasourceUrl = poolDatasourceUrl(process.env.DATABASE_URL, process.env);
+const basePrisma = new PrismaClient(datasourceUrl === undefined ? undefined : { datasourceUrl });
 
 type NodeData = Record<string, unknown>;
 
@@ -77,6 +83,8 @@ function stampNodeUpdate(data: NodeData): void {
   const actor = currentActor();
   if (!('updatedByWorkerId' in data)) data.updatedByWorkerId = actor.workerId;
   if (!('updatedByAgentId' in data)) data.updatedByAgentId = actor.agentId;
+  // #2176: the User behind the edit, stamped with the Worker / Agent so a clear is a clear for all three.
+  if (!('updatedByUserId' in data)) data.updatedByUserId = actor.userId ?? null;
 }
 
 /**

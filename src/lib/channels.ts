@@ -1,3 +1,5 @@
+import { isRawChatNode } from '../services/embedding/rawChat.js';
+import { randomUUID } from 'node:crypto';
 /**
  * Spec 049 Phase 4 — Channel creation and the App's default Channel
  * (D-2026-09-13-006 / -007 D2).
@@ -37,6 +39,7 @@
  * its own (#1194 is this change's draft ancestor).
  */
 
+import { refuseUnderDecisionLog } from './decisions/index.js';
 import { sessionKeyReleasedHint } from './sessionKeyCache.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
@@ -51,6 +54,7 @@ import { resolveAppTeamSpaceMemoryIds } from '../api/graphql/schema/resolvers.he
 import { pendingAtForRevival } from '../services/embedding/enqueue.js';
 import { assertNoMintedSpecRemoval } from './mintedSpecPermanence.js';
 import { archivedTombstoneLoc } from './tombstoneArchive.js';
+import { memoryIsVectorIndexed } from './embedding/indexing.js';
 
 /** The name of every App's default Channel — the row `chats:team` became. */
 export const DEFAULT_CHANNEL_NAME = 'team';
@@ -240,7 +244,7 @@ async function resetReusedChannel(
   const now = new Date();
   const root = await tx.node.findUniqueOrThrow({
     where: { id: args.rootId },
-    select: { abstract: true, content: true, data: true, embeddingPendingAt: true },
+    select: { abstract: true, content: true, data: true, embeddingPendingAt: true, embeddingWorkToken: true, nodeType: true, loc: true },
   });
   const encrypted = translateSessionExpired(args.memoryId, () => {
     const plain = decryptNodeFields(root, args.memEncInfo);
@@ -263,7 +267,8 @@ async function resetReusedChannel(
       data: (encrypted.data ?? null) as InputJsonValue,
       // On a vector-indexed host the fresh marker from restoreOrCreate must
       // survive this payload reset; an old worker may still be in flight.
-      embeddingPendingAt: args.vectorIndexEnabled ? root.embeddingPendingAt : null,
+      embeddingPendingAt: args.vectorIndexEnabled && !isRawChatNode(root) ? root.embeddingPendingAt : null,
+      embeddingWorkToken: args.vectorIndexEnabled && !isRawChatNode(root) ? root.embeddingWorkToken : null,
       embeddingFailedAt: null,
       embeddingAttempts: 0,
       embeddingError: null,
@@ -335,9 +340,12 @@ async function archiveChannelStructuralRow(
   // KEY SHARE lock. A fresh READ COMMITTED edge listing then includes it.
   await tx.node.update({
     where: { id: row.id },
-    data: { loc: archivedTombstoneLoc(row.loc, row.id), embeddingPendingAt: null },
+    data: { loc: archivedTombstoneLoc(row.loc, row.id), embeddingPendingAt: null, embeddingWorkToken: null },
   });
   await tx.nodeEmbedding.deleteMany({ where: { nodeId: row.id } });
+  // Derived include edges (#2040) are re-derivable from content, and the
+  // governed-edge trigger refuses to soft-delete them: drop them outright.
+  await tx.edge.deleteMany({ where: { governedKind: 'INCLUDE', OR: [{ sourceId: row.id }, { targetId: row.id }] } });
   const edges = await tx.edge.findMany({
     where: { OR: [{ sourceId: row.id }, { targetId: row.id }] },
     select: { id: true, loc: true, deletedAt: true },
@@ -416,12 +424,16 @@ export async function ensureChannelWithRoot(
     // Re-checked under that lock: the preflight above ran outside it.
     const live = await tx.memory.findFirst({
       where: { id: args.memoryId, deletedAt: null },
-      select: { id: true, vectorIndexEnabled: true },
+      select: { id: true, vectorIndexEnabled: true, class: true },
     });
     if (!live) throw new GraphQLError('Host memory not found.', { extensions: { code: 'NOT_FOUND' } });
     await args.authorizeLockedHost?.(tx);
     await lockAncestorsForCreateMany(tx, args.memoryId, [args.loc, messagesLoc], { owns: 'channel' });
     await assertNoChannelOverlap(tx, args.memoryId, args.loc);
+    // #1728: raw Channel roots share the decision-log code-space guard.
+    // Check under the path locks before any root/structural/Channel writes.
+    await refuseUnderDecisionLog(tx, args.memoryId, args.loc, 'Channel creation');
+    const indexNode = (nodeType: string, loc: string) => memoryIsVectorIndexed(live) && !isRawChatNode({ nodeType, loc });
     const restoreOrCreate = async (
       loc: string,
       create: () => Promise<{ id: string }>,
@@ -453,7 +465,8 @@ export async function ensureChannelWithRoot(
             where: { id: existing.id },
             data: {
               deletedAt: null, deletedBy: null,
-              embeddingPendingAt: pendingAtForRevival(existing.embeddingPendingAt, live.vectorIndexEnabled),
+              embeddingPendingAt: pendingAtForRevival(existing.embeddingPendingAt, indexNode(existing.nodeType, loc)),
+              embeddingWorkToken: indexNode(existing.nodeType, loc) ? randomUUID() : null,
             },
           });
         }
@@ -465,7 +478,8 @@ export async function ensureChannelWithRoot(
       await restoreOrCreate(parent, () =>
         tx.node.create({
           data: { id: generateId(), memoryId: args.memoryId, loc: parent, name: parent.split(':').pop()!, nodeType: 'record', createdBy: args.createdBy,
-            embeddingPendingAt: live.vectorIndexEnabled ? new Date() : null },
+            embeddingPendingAt: indexNode('record', parent) ? new Date() : null,
+            embeddingWorkToken: indexNode('record', parent) ? randomUUID() : null },
           select: { id: true },
         }),
         () => true,
@@ -505,7 +519,8 @@ export async function ensureChannelWithRoot(
     await restoreOrCreate(messagesLoc, () =>
       tx.node.create({
         data: { id: generateId(), memoryId: args.memoryId, loc: messagesLoc, name: 'messages', nodeType: 'record', createdBy: args.createdBy,
-          embeddingPendingAt: live.vectorIndexEnabled ? new Date() : null },
+          embeddingPendingAt: indexNode('record', messagesLoc) ? new Date() : null,
+            embeddingWorkToken: indexNode('record', messagesLoc) ? randomUUID() : null },
         select: { id: true },
       }),
       () => true,
@@ -541,7 +556,7 @@ export async function ensureChannelWithRoot(
         messagesLoc,
         deletedBy: args.createdBy ?? null,
         memEncInfo,
-        vectorIndexEnabled: live.vectorIndexEnabled,
+        vectorIndexEnabled: memoryIsVectorIndexed(live),
       });
     }
     const channel = await ensureChannelRow(tx, { ...args, rootId, resetForReuse: reusingDeadAddress });

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1769 S1/S2: the four governed doors on a SHARED MCP connection.
  *
@@ -50,8 +51,8 @@ beforeEach(async () => {
     id: generateId(), urn: MEMORY_URN, name: 'team-shared', class: 'app',
     appId: app.id, organizationId: org.id, sharedMemoryOfAgentId: agent.id,
   } })).id;
-  const iris = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
-  const dara = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+  const iris = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+  const dara = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
   workers = { iris: iris.id, dara: dara.id };
   ({ rawKey: token } = await mintUserApiKey(db, { userId: user.id, label: null, createdBy: user.id, issuedVia: 'test' }));
 });

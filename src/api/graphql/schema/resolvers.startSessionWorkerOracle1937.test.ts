@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1937 — `startSession`'s id/URN worker ref is not an existence oracle across tenants (the #1742 class).
  *
@@ -62,7 +63,7 @@ let outsiderKey: { id: string };
 
 async function worker(appRow: { id: string; urn: string }, name: string, extra: Record<string, unknown> = {}) {
   const slug = name.toLowerCase();
-  const w = await db.worker.create({ data: { appId: appRow.id, agentId, name, slug, ...extra }, select: { id: true } });
+  const w = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: appRow.id, agentId, name, slug, ...extra }, select: { id: true } });
   return { id: w.id, urn: composeWorkerUrn(appRow.urn, slug) };
 }
 

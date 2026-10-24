@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1706 — availability for work and stall windows: the setter gates
  * (cor:agt:060:08 / :09), the record shapes (060:02 / :03), the derived
@@ -70,7 +71,7 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId: app.id, userId: holder.id, role: 'member' } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
   const worker = (appId: string, name: string) =>
-    db.worker.create({ data: { appId, agentId, name, slug: name.toLowerCase(), heldByUserId: holder.id }, select: { id: true } });
+    db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId, name, slug: name.toLowerCase(), heldByUserId: holder.id }, select: { id: true } });
   liam = await worker(app.id, 'Liam');
   rook = await worker(app.id, 'Rook');
   zed = await worker(otherApp.id, 'Zed');
@@ -168,7 +169,7 @@ describe('cor:agt:060:11 — the worker a stalled worker reports to may clear th
   const record = () => db.workerAvailability.findUniqueOrThrow({ where: { workerId: liam.id } });
 
   beforeEach(async () => {
-    ada = await db.worker.create({ data: { appId: app.id, agentId, name: 'Ada', slug: 'ada', heldByUserId: holder.id }, select: { id: true } });
+    ada = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Ada', slug: 'ada', heldByUserId: holder.id }, select: { id: true } });
     await db.worker.update({ where: { id: rook.id }, data: { reportsToWorkerId: ada.id } });
     await db.worker.update({ where: { id: liam.id }, data: { reportsToWorkerId: rook.id } });
   });
@@ -211,7 +212,7 @@ describe('cor:agt:060:11 — the worker a stalled worker reports to may clear th
 
   it('the line is direct: Ada, higher up the chain, and an unrelated worker are refused', async () => {
     await mark({});
-    const nobody = await db.worker.create({ data: { appId: app.id, agentId, name: 'Nia', slug: 'nia', heldByUserId: holder.id }, select: { id: true } });
+    const nobody = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Nia', slug: 'nia', heldByUserId: holder.id }, select: { id: true } });
     await expectCode(clear(ada), 'AVAILABILITY_NOT_PERMITTED');
     await expectCode(clear(nobody), 'AVAILABILITY_NOT_PERMITTED');
     expect(await record()).toMatchObject({ state: 'unavailable', setBy: 'stall-rule' });

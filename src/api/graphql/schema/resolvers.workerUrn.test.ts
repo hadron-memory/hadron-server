@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #991 — the Worker URN: `hrn:worker:<root>:<app-slug>:<slug>`.
  *
@@ -274,7 +275,7 @@ describe('#991 — migration backfill: cross-base collisions', () => {
   ])('assigns distinct slugs for %j (%s)', async (names) => {
     for (const [i, name] of names.entries()) {
       await db.worker.create({
-        data: { appId: app.id, agentId: roleAgent.id, name, slug: `seed-${i}` },
+        data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: roleAgent.id, name, slug: `seed-${i}` },
       });
     }
     // Re-run the backfill over these rows exactly as a migration would.
@@ -304,10 +305,10 @@ describe('#991 — migration backfill: cross-base collisions', () => {
 
   it('gives the oldest casting the bare base', async () => {
     await db.worker.create({
-      data: { appId: app.id, agentId: roleAgent.id, name: 'Iris', slug: 'seed-a' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: roleAgent.id, name: 'Iris', slug: 'seed-a' },
     });
     await db.worker.create({
-      data: { appId: app.id, agentId: roleAgent.id, name: 'Iris!', slug: 'seed-b' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: roleAgent.id, name: 'Iris!', slug: 'seed-b' },
     });
     await db.$executeRawUnsafe('ALTER TABLE workers ALTER COLUMN slug DROP NOT NULL');
     try {

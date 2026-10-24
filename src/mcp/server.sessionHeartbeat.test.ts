@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1081 — MCP tools handed a live session id touch it, so the reaper counts it.
  *
@@ -75,7 +76,7 @@ beforeEach(async () => {
   });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   worker = await db.worker.create({
-    data: { appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara', role: 'server-engineer' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara', role: 'server-engineer' },
   });
 });
 

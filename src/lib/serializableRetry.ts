@@ -10,6 +10,12 @@ export const SERIALIZATION_RETRIES = 5;
 /** Upper bound, in ms, of the first retry's random delay; it doubles per attempt. */
 const BASE_BACKOFF_MS = 10;
 
+/** Shared full-jitter wait for a retry's one-based attempt, without selecting its errors or budget. */
+export async function waitForSerializationRetry(attempt: number): Promise<void> {
+  const ceiling = BASE_BACKOFF_MS * 2 ** (attempt - 1);
+  await new Promise((resolve) => setTimeout(resolve, Math.random() * ceiling));
+}
+
 /** True when `e` is Postgres's serialization failure (40001) as Prisma reports it. */
 export function isSerializationFailure(e: unknown): boolean {
   return e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2034';
@@ -42,8 +48,7 @@ export async function retryOnSerializationFailure<T>(
       return await run();
     } catch (e) {
       if ((!isSerializationFailure(e) && !(e instanceof AuthoritySnapshotStale)) || attempt > retries) throw e;
-      const ceiling = BASE_BACKOFF_MS * 2 ** (attempt - 1);
-      await new Promise((resolve) => setTimeout(resolve, Math.random() * ceiling));
+      await waitForSerializationRetry(attempt);
     }
   }
 }

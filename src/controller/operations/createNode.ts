@@ -1,3 +1,5 @@
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, bootPromptCompiledWriteError, isBootPromptRole } from '../../lib/bootPrompt.js';
+import { assertIncludesWritable, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
 import type { Node } from '../../index.d.js';
 import { runAsSystem } from '../../lib/requestActor.js';
 import { GRAPHS_PATH } from '../../config.js';
@@ -39,7 +41,7 @@ const createNodeAsSystem = async (
   }
 
   const id = node.id ?? generateId();
-  const tags = serializeTags(node.tags ?? []) as string[];
+  const serializedTags = serializeTags(node.tags ?? []) as string[];
   const content = node.content ?? null;
   const fields = {
     name,
@@ -47,7 +49,7 @@ const createNodeAsSystem = async (
     description: node.description ?? null,
     content,
     contentHash: node.contentHash ?? null,
-    tags,
+    tags: serializedTags,
     ownerRepo: node.ownerRepo ?? null,
   };
 
@@ -77,6 +79,12 @@ const createNodeAsSystem = async (
     if (prior && (!existing || existing.loc !== loc || existing.memoryId !== node.memoryId)) {
       throw new Error(`createNode: the node at "${loc}" moved during the write; retry.`);
     }
+    // #2043 — defensive: no boot-prompt role or compiled marker reaches this
+    // legacy path today (memory-root creation only); a future caller must not reopen it.
+    if (isBootPromptRole((node as { role?: string | null }).role) || (node as { nodeType?: string | null }).nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+      throw bootPromptCompiledWriteError('create', 'produces');
+    }
+    assertBootPromptWriteAllowed(existing, {}, 'update');
     let authoredEdit = false;
     if (existing) {
       const changes = diffNodeChanges(existing, fields);
@@ -96,7 +104,7 @@ const createNodeAsSystem = async (
       }
     }
 
-    return tx.node.upsert({
+    const written = await tx.node.upsert({
       where: { loc_memoryId: { loc, memoryId: node.memoryId } },
       create: {
         id,
@@ -115,6 +123,13 @@ const createNodeAsSystem = async (
         incomingEdges: { include: { source: true } },
       },
     });
+    // #2040 — this legacy seam runs as the system with no principal, so tags
+    // reach only the node's own memory; a refusal rolls the write back. With no
+    // writing person it skips the writer's read check (#2041 S2b). Its only
+    // callers write a new memory's root node, with no caller content.
+    const tags = await assertIncludesWritable(tx, written, content, [node.memoryId], undefined, { includeSystemWrite: true });
+    await syncDerivedIncludesEdges(tx, written, tags, [node.memoryId]);
+    return written;
   });
 
   return saved as unknown as Node;

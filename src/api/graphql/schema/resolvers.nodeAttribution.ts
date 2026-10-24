@@ -13,6 +13,7 @@ import type { Context } from './resolvers.helpers.js';
 import { safeCanonicalUrn } from './resolvers.helpers.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import { normalizeUrnForLookup } from '../../../lib/urn.js';
+import { resolveRevisionEditor } from './resolvers.types.js';
 
 export type ActorRef = { id: string; name: string; urn: string | null };
 
@@ -58,7 +59,7 @@ async function loadAgentRef(ctx: Context, id: string): Promise<ActorRef | null> 
 }
 
 type AttributionColumn =
-  | 'createdByWorkerId' | 'createdByAgentId' | 'updatedByWorkerId' | 'updatedByAgentId';
+  | 'createdByWorkerId' | 'createdByAgentId' | 'updatedByWorkerId' | 'updatedByAgentId' | 'updatedByUserId';
 
 /**
  * The parent's own column, or — for a parent selected without it — one read
@@ -99,6 +100,12 @@ export const nodeAttributionFieldResolvers = {
     createdByAgent: nodeActor('createdByAgentId', 'agent'),
     updatedByWorker: nodeActor('updatedByWorkerId', 'worker'),
     updatedByAgent: nodeActor('updatedByAgentId', 'agent'),
+    // #2176 — public identifiers only (handle + urn), the projection a revision's editor already has.
+    // One lookup per distinct user per request (the editor cache memoizes misses too).
+    updatedByUser: async (n: { id: string; memoryId?: string }, _: unknown, ctx: Context) => {
+      const id = await nodeColumn(n, 'updatedByUserId', ctx);
+      return id ? resolveRevisionEditor(ctx, [id]) : null;
+    },
   },
   NodeRevision: {
     editedByWorker: revisionActor('editedByWorkerId', 'worker'),

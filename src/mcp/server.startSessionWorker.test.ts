@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #940 — hadron_start_session delegates to resolvers.Mutation.startSession
  * (findings:node-write-surface-invariants — MCP tools delegate, never
@@ -59,10 +60,10 @@ beforeEach(async () => {
   });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   worker = await db.worker.create({
-    data: { appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' },
   });
   otherAppWorker = await db.worker.create({
-    data: { appId: otherApp.id, agentId: agent.id, name: 'Nadia', slug: 'nadia' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: otherApp.id, agentId: agent.id, name: 'Nadia', slug: 'nadia' },
   });
 });
 

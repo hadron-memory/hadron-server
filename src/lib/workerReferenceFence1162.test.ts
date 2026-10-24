@@ -7,8 +7,10 @@ import { workerReferenceError } from './workerReferenceError.js';
 const source = readFileSync(new URL('../../prisma/worker-reference-invariants.sql', import.meta.url), 'utf8');
 describe('#1162 reference fence deployment', () => {
   it('ships byte-identical migration and post-push guards', () => {
-    const migration = readFileSync(new URL('../../prisma/migrations/20261016050000_worker_reference_fence/migration.sql', import.meta.url), 'utf8');
-    expect(migration).toBe(source);
+    // The guard file is its migrations, in order: the #1162 fence, then each later table that joined the inventory.
+    const migrations = ['20261016050000_worker_reference_fence', '20261019040100_worker_wake_acks_fence', '20261020030200_stop_signal_worker_fence', '20261022000100_compiled_prompt_worker_fence']
+      .map((m) => readFileSync(new URL(`../../prisma/migrations/${m}/migration.sql`, import.meta.url), 'utf8'));
+    expect(migrations.join('')).toBe(source);
     expect(readFileSync(new URL('../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir worker-reference-invariants.sql');
   });
 

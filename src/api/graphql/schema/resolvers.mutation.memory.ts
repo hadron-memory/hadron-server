@@ -1,4 +1,5 @@
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { endApprovalsOnEncryptedEntry } from '../../../lib/nodeApproval.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { generateId } from '../../../lib/id.js';
 import { UrnNotQualifiedError } from '../../../lib/urn.js';
@@ -22,7 +23,8 @@ import {
   publishEmbedWake,
   restampFailedEmbeddings,
 } from '../../../services/embedding/enqueue.js';
-import { deleteMemoryVectors } from '../../../services/embedding/vectors.js';
+import { deleteMemoryChunkVectors, deleteMemoryVectors } from '../../../services/embedding/vectors.js';
+import { embeddingKindsWanted, memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
 import {
   createMemoryShare,
   InvalidMemoryClassForShareError,
@@ -151,9 +153,12 @@ import {
   resolveUserRefArg,
   resolveOrgRefArg,
   resolveMemoryRefArg,
+  getAccessibleMemoryIds,
   type MergeMemoriesInput,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
+import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
+import { installDeleteAllowed, lockInstallAuthorityFirst } from './installMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /**
@@ -1145,6 +1150,19 @@ export const memoryMutations = {
         (chunkOverlap !== undefined && chunkOverlap !== memory.chunkOverlap) ||
         (forceFixedSize !== undefined && forceFixedSize !== memory.forceFixedSize);
       const chunkConfigChanged = chunkDialsChanged && sourceUsesChunks;
+      if (updated.class === 'system') {
+        // #2199 (cor:rag:010:01 r17): a system memory's summary index cannot be switched off, so the setting and the
+        // source only add or drop PASSAGES. Summary vectors survive every change; only chunk rows are managed.
+        const wasChunks = embeddingKindsWanted(memory).chunks;
+        const nowChunks = embeddingKindsWanted(updated).chunks;
+        if (wasChunks && !nowChunks) {
+          await deleteMemoryChunkVectors(ctx.db, id);
+        } else if (nowChunks && (!wasChunks || sourceChanged || chunkConfigChanged)) {
+          if (wasChunks) await deleteMemoryChunkVectors(ctx.db, id); // dials/source moved the boundaries
+          await backfillMemoryEmbeddings(ctx.db, id);
+        }
+        return updated;
+      }
       if (nowEnabled && (!wasEnabled || sourceChanged || chunkConfigChanged)) {
         // When the source itself changes (abstract ↔ contentChunks ↔ both),
         // the previously-stored vectors are now the wrong KIND. vectorSearch
@@ -1173,6 +1191,7 @@ export const memoryMutations = {
           where: { memoryId: id },
           data: {
             embeddingPendingAt: null,
+            embeddingWorkToken: null,
             embeddingFailedAt: null,
             embeddingError: null,
             embeddingAttempts: 0,
@@ -1212,7 +1231,7 @@ export const memoryMutations = {
         await concealUnreadableDenial(txCtx, memoryId, memoryRef, () =>
           requireMemoryManageAccess(txCtx, current),
         );
-        if (!current.vectorIndexEnabled) return 0;
+        if (!memoryIsVectorIndexed(current)) return 0;
         return restampFailedEmbeddings(tx, memoryId);
       });
       if (count > 0) void publishEmbedWake({});
@@ -1239,6 +1258,15 @@ export const memoryMutations = {
       // miss — the owner-only refusals below also named the memory's class.
       const authorizeDelete = (authCtx: Context, current: typeof memory) =>
         concealUnreadableDenial(authCtx, resolvedId, id, async () => {
+          if (isInstallMemoryRow(current)) {
+            // #2044, R45: whoever manages the App (its owner, an OWNER-role member,
+            // an org admin) deletes its install memory by hand, also after the App
+            // was soft-deleted. Not content access: the record is all this opens.
+            if (!(await installDeleteAllowed(authCtx, current))) {
+              throw new Error('Forbidden: only whoever manages the App can delete its install memory');
+            }
+            return;
+          }
           if (current.class === 'personal' || current.class === 'private') {
             if (!authCtx.userId || current.userId !== authCtx.userId) {
               throw new Error(`Forbidden: only the owner can delete a ${current.class} memory`);
@@ -1262,10 +1290,12 @@ export const memoryMutations = {
       // System-class memories are owned by their agent and can only be
       // removed by deleting the agent. This prevents the agent from ending
       // up with no brain via a stray deleteMemory call.
-      if (memory.class === 'system') {
+      if (memory.class === 'system' && !isInstallMemoryRow(memory)) {
         throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
       }
       await ctx.db.$transaction(async (tx) => {
+        // #2044: an install memory's authority before the memory row lock below.
+        await lockInstallAuthorityFirst(tx, ctx, resolvedId);
         // Spec 049 §8.5: a memory hosting a live Channel is not deleted around
         // the Channel — delete the Channel through its own operation first.
         // Checked and tombstoned under the memory-level lock Channel creation
@@ -1279,7 +1309,7 @@ export const memoryMutations = {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedId} FOR UPDATE`;
         const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedId } });
         await authorizeDelete({ ...ctx, db: tx } as Context, current);
-        if (current.class === 'system') {
+        if (current.class === 'system' && !isInstallMemoryRow(current)) {
           throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
         }
         const hosted = await tx.channel.findFirst({
@@ -1465,6 +1495,8 @@ export const memoryMutations = {
         ownerUserId: isUserOwned ? ctx.userId! : null,
         groupOwnerUserId: source.class === 'group' ? (ctx.userId ?? null) : null,
         actorId: ctx.userId ?? ctx.clientId ?? null,
+        // #2167 — every copied include tag is checked against the copier's reads.
+        copierReadableMemoryIds: await getAccessibleMemoryIds(ctx),
       });
 
       // 033 — the clone carries the source's vector-index config but no
@@ -1694,6 +1726,8 @@ export const memoryMutations = {
         move,
         actorId: ctx.userId ?? ctx.clientId ?? null,
         principal: ctx,
+        // #2167 — every copied include tag is checked against the copier's reads.
+        copierReadableMemoryIds: await getAccessibleMemoryIds(ctx),
       });
 
       // The extract carries the subtree's content but no vectors; stamp every
@@ -2308,6 +2342,10 @@ export const memoryMutations = {
               extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: resolvedMemoryId },
             });
           }
+          // #1838 (cor:dmo:120:04): the flip ENDS the approvals in this same
+          // transaction, so an interrupted completion pass below cannot leave
+          // a live or copied hash behind. Who/when/revision stay.
+          await endApprovalsOnEncryptedEntry(tx, { memoryId: resolvedMemoryId });
         });
         // Promotion's live-node rewrite does not cover tombstones or prior
         // snapshots. Reuse the bounded completion pass under the verifier we
@@ -2506,6 +2544,9 @@ export const memoryMutations = {
             },
           });
           if (flip.count !== 1) throw new Error('Memory is already encrypted');
+          // #1838 (cor:dmo:120:04): entering ENDS the approvals, in this same
+          // transaction, so no copied hash can revive after any later move out.
+          await endApprovalsOnEncryptedEntry(tx, { memoryId: resolvedMemoryId });
         });
       }
       /** Keep conversion authority current while holding memory before node locks. */
@@ -2716,7 +2757,12 @@ export const memoryMutations = {
           extensions: { code: 'ENCRYPTION_INCOMPLETE', memoryId: resolvedMemoryId },
         });
       }
-      return ctx.db.$transaction(lockConversionMemory);
+      return ctx.db.$transaction(async (tx) => {
+        const current = await lockConversionMemory(tx);
+        // A completion of an earlier encryption ends approvals it predates.
+        await endApprovalsOnEncryptedEntry(tx, { memoryId: resolvedMemoryId });
+        return current;
+      });
     },
 
     // Spec cor:api:060 — run a task by loose name (mirrors hadron_run_task MCP tool).

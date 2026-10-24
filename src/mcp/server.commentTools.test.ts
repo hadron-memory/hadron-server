@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1609 — the comment tools on the MCP surface (cor:dmo:110).
  *
@@ -353,7 +354,7 @@ describe('comment tools over HTTP: a worker bound with hadron_start_session auth
     } });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     await db.appMember.create({ data: { appId: app.id, userId: writer.id, role: 'owner' } });
-    const iris = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+    const iris = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
     const appTarget = await db.node.create({ data: { id: generateId(), memoryId: appMemory.id, loc: 'plan', name: 'Plan', content: 'p' } });
     const { rawKey } = await mintUserApiKey(db, { userId: writer.id, label: null, createdBy: writer.id, issuedVia: 'test' });
 

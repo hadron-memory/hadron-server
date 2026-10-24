@@ -24,7 +24,7 @@
  * mutation paths). A malformed URN and an absent worker are deliberately
  * indistinguishable — no existence oracle.
  */
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
 import { parseUrnV2, composeUrnV2, composeWorkerUrnV2 } from '../urn.js';
 import { AppNotFoundError, WorkerNotFoundError } from './errors.js';
@@ -47,14 +47,14 @@ export function composeWorkerUrn(appUrn: string, workerSlug: string): string {
 export async function resolveWorkerRef(
   db: Pick<PrismaClient, 'worker' | 'app' | 'urnAlias'>,
   ref: string,
+  options?: { scope?: Prisma.WorkerWhereInput; appScope?: Prisma.AppWhereInput },
 ): Promise<{ id: string }> {
   const trimmed = (ref ?? '').trim();
 
   if (isIdFunc(trimmed)) {
-    const worker = await db.worker.findUnique({
-      where: { id: trimmed },
-      select: { id: true },
-    });
+    const worker = options?.scope
+      ? await db.worker.findFirst({ where: { AND: [{ id: trimmed }, options.scope] }, select: { id: true } })
+      : await db.worker.findUnique({ where: { id: trimmed }, select: { id: true } });
     if (!worker) throw new WorkerNotFoundError(ref);
     return { id: worker.id };
   }
@@ -75,14 +75,14 @@ export async function resolveWorkerRef(
 
   let appId: string;
   try {
-    ({ id: appId } = await resolveAppRef(db, composeUrnV2('app', root, appSlug)));
+    ({ id: appId } = await resolveAppRef(db, composeUrnV2('app', root, appSlug), { scope: options?.appScope }));
   } catch (err) {
     if (err instanceof AppNotFoundError) throw new WorkerNotFoundError(ref);
     throw err;
   }
 
   const worker = await db.worker.findFirst({
-    where: { appId, slug: workerSlug },
+    where: options?.scope ? { AND: [{ appId, slug: workerSlug }, options.scope] } : { appId, slug: workerSlug },
     select: { id: true },
   });
   if (!worker) throw new WorkerNotFoundError(ref);

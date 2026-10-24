@@ -87,6 +87,22 @@ export function assertSystemMemoryOwner(
   if (!sameOwner(agent, memory)) throw new SystemMemoryOwnerMismatchError(agent, memory);
 }
 
+/**
+ * #2044 (Andi P2-1): an App's INSTALL MEMORY is `class='system'` but never an
+ * Agent's brain. Promoting it would put an App-only compile override into
+ * ordinary inheritance (cor:agt:040:16, #1840) and let deleting the "Agent"
+ * tombstone the App's customisation. Both promotion doors (createAgent's
+ * `systemMemoryId`, updateAgent's first attach and its locked recheck) ask this.
+ */
+export function assertNotInstallMemory(memory: { installOfAgentId?: string | null; isInstallMemory?: boolean; appId?: string | null }): void {
+  if (memory.isInstallMemory || memory.installOfAgentId || memory.appId) {
+    throw new GraphQLError(
+      "An App's install memory cannot be an Agent's system memory.",
+      { extensions: { code: 'BAD_USER_INPUT' } },
+    );
+  }
+}
+
 /** One agent whose system memory is owned by somebody else. */
 export interface SystemMemoryOwnerMismatch {
   agentId: string;

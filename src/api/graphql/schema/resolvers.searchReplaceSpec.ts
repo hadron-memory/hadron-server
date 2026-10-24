@@ -1,3 +1,4 @@
+import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 /**
  * #1294: the spec-only bulk door. Selection is explicit and belongs to one
  * draft corpus. Apply locks that corpus and every selected row, rebuilds the
@@ -37,7 +38,9 @@ import {
   type Context,
   requireMemoryWriteAccess,
   concealUnreadableDenial,
+  getAccessibleMemoryIds,
 } from './resolvers.helpers.js';
+import { assertIncludesWritable, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 
 export interface SpecSearchReplaceInput {
   memoryRef: string;
@@ -61,6 +64,8 @@ interface ChangedNode {
   raw: NodeRow;
   changed: { content?: string; abstract?: string | null };
   plaintext: { content: string | null; abstract: string | null };
+  /** #2041 S2b — the content before replacement, read under the apply transaction's row locks. */
+  storedContent: string | null;
   isEncrypted: boolean;
   contentChanged: boolean;
   abstractChanged: boolean;
@@ -272,6 +277,7 @@ export async function searchReplaceInSpecNodes(
         raw: row,
         changed: {},
         plaintext: { content: pt.content, abstract: pt.abstract },
+        storedContent: pt.content,
         isEncrypted: encryption.isEncrypted,
         contentChanged: false,
         abstractChanged: false,
@@ -354,6 +360,7 @@ export async function searchReplaceInSpecNodes(
     return preview.result;
   }
 
+  let readableForIncludes: string[] | null = null;
   const applied = await ctx.db.$transaction(async (tx) => {
     // Channel creation takes this memory key. Lock every selected Node before
     // the Memory row: ordinary node writers take Node then Memory FOR SHARE.
@@ -395,6 +402,17 @@ export async function searchReplaceInSpecNodes(
       data.revisionContentHash = revisionStateHashRefreshMarker();
       Object.assign(data, clearNodeAuthorship());
       await tx.node.update({ where: { id: node.raw.id }, data });
+      if (node.contentChanged || node.abstractChanged) {
+        node.raw.embeddingWorkToken = await stampEmbeddingObligation(tx, node.raw.id, memoryId);
+      }
+      // #2040 — a content rewrite re-checks its include tags inside the batch.
+      if (node.contentChanged) {
+        const text = node.plaintext.content;
+        readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+        const stored = { storedPlaintext: node.storedContent };
+        const tags = await assertIncludesWritable(tx, node.raw, text, readableForIncludes, undefined, stored);
+        await syncDerivedIncludesEdges(tx, node.raw, tags, readableForIncludes, stored);
+      }
     }
     return current;
   }, { timeout: 120_000 });
@@ -406,6 +424,7 @@ export async function searchReplaceInSpecNodes(
     if (node.contentChanged || node.abstractChanged) {
       void enqueueNodeEmbedding(ctx.db, {
         nodeId: node.raw.id,
+        workToken: node.raw.embeddingWorkToken,
         memoryId,
         plaintext: node.plaintext,
       });

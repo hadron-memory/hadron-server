@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1026 — every MCP surface that prints a worker URN prints the link with it.
  *
@@ -77,7 +78,7 @@ function auth(): AuthContext {
 
 const castWorker = (name: string, slug: string) =>
   db.worker.create({
-    data: { appId: app.id, agentId: agent.id, name, slug, role: 'server-engineer' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name, slug, role: 'server-engineer' },
   });
 
 /** Every `URL:` value in a tool's output, in order. */

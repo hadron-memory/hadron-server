@@ -25,6 +25,7 @@ import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { normalizeRole } from './enforceNodeSchema.js';
 import { isDecisionFamilyRole } from './decisions/index.js';
 import { computeApprovalHash } from './approvalHash.js';
+import { includeHistoryClient, type IncludeHistoryTransaction } from './includes/includeHistoryFence.js';
 
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
@@ -203,6 +204,17 @@ export function revisionStateHashRefreshMarker(): string {
 
 /** `NodeRevision.editedByInfo` of a server-authored drift reconcile — one spelling for writer and reader. */
 export const RECONCILE_EDITOR_INFO = 'system:revision-reconcile';
+
+/** #2063 caller cut: a reconciliation read must carry the outer fence's live context.
+ * Existing writer callers are migrated in later cuts; this entry has no raw-client fallback.
+ */
+export async function reconcileNodeWithIncludeHistory(
+  history: IncludeHistoryTransaction,
+  nodeId: string,
+  opts: { expectedMemoryId: string },
+): Promise<number | null> {
+  return ensureCurrentNodeRevisionInTransaction(includeHistoryClient(history), nodeId, opts);
+}
 
 /**
  * Row-lock and reconcile one node inside the caller's transaction. Callers that
@@ -402,12 +414,9 @@ export async function createNodeRevision(
   )[0];
   if (!cutoff) return; // fewer than `max` rows for this memory → nothing to prune
 
-  // #1632 (cor:dmo:130:05, Holger #9901): automatic pruning never removes a
-  // revision a signature was made on; deliberate history clears still may.
-  // A legacy row with no revNo can carry no signature and stays prunable.
-  const signedRevisions = (await db.nodeSignature.findMany({
-    where: { nodeId: data.nodeId }, select: { revision: true }, distinct: ['revision'],
-  })).map((s) => s.revision);
+  // Automatic pruning never removes a revision in the exempt set (see
+  // revisionsExemptFromPruning); deliberate history clears still may.
+  const exempt = [...(await revisionsExemptFromPruning(db, data.nodeId, memoryId))];
   await db.nodeRevision.deleteMany({
     where: {
       nodeId: data.nodeId,
@@ -417,10 +426,42 @@ export async function createNodeRevision(
           { createdAt: { lt: cutoff.createdAt } },
           { createdAt: cutoff.createdAt, id: { lt: cutoff.id } },
         ] },
-        ...(signedRevisions.length ? [{ OR: [{ revNo: null }, { revNo: { notIn: signedRevisions } }] }] : []),
+        ...(exempt.length ? [{ OR: [{ revNo: null }, { revNo: { notIn: exempt } }] }] : []),
       ],
     },
   });
+}
+
+/**
+ * The revision numbers of a node that automatic cap-pruning must keep: the ONE
+ * seam every retention reason joins (#1838; #2063's include-relied revisions
+ * and #2047's served revisions add their sets here, never a second prune rule).
+ *
+ * - #1632 (cor:dmo:130:05, Holger #9901): a revision a signature was made on.
+ * - #1838 (cor:dmo:060:04, R7): a revision whose row carries a recorded
+ *   approval (a hash), because that row is the evidence identical-content
+ *   revisions are judged approved by.
+ *
+ * Deliberate deletion (`deleteNodeRevision`, `clearNodeHistory`, restore) is
+ * not governed by this and stays allowed. A legacy row with no revNo can carry
+ * neither a signature nor a pinnable approval, so it is never in the set and
+ * stays prunable.
+ */
+export async function revisionsExemptFromPruning(
+  db: Pick<PrismaClient, 'nodeSignature' | 'nodeRevision'> | Prisma.TransactionClient,
+  nodeId: string,
+  memoryId: string,
+): Promise<Set<number>> {
+  const [signed, carriers] = await Promise.all([
+    db.nodeSignature.findMany({ where: { nodeId }, select: { revision: true }, distinct: ['revision'] }),
+    db.nodeRevision.findMany({
+      where: { nodeId, memoryId, approvalHash: { not: null }, revNo: { not: null } },
+      select: { revNo: true },
+    }),
+  ]);
+  const out = new Set<number>(signed.map((s) => s.revision));
+  for (const c of carriers) if (c.revNo != null) out.add(c.revNo);
+  return out;
 }
 
 /**

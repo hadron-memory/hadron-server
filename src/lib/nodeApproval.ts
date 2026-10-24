@@ -5,6 +5,8 @@ import { computeApprovalHash, type ApprovalHashFields } from './approvalHash.js'
 import type { EncryptionKey } from './crypto.js';
 import { decryptNodeFieldsWithKey } from './nodeCrypto.js';
 import { ensureCurrentNodeRevisionInTransaction, RECONCILE_EDITOR_INFO, type SnapshotEditor } from './nodeRevisionSnapshot.js';
+import { isBootPromptRole } from './bootPrompt.js';
+import { BOOT_PROMPT_APPROVAL_MESSAGES, type BootPromptApprovalGate, type BootPromptApprovalRefusalCode } from './bootPromptApproval.js';
 
 /**
  * #1591 — node approvals: approving a node's CURRENT revision, and the state
@@ -90,13 +92,20 @@ export function approvalRecordOf(node: Pick<NodeApprovalRow,
  * approval was recorded at. Metadata-only revisions advance `revSeq` but not
  * `contentRevSeq`, so they leave it valid.
  */
-export function approvalHoldsFor(node: Pick<NodeApprovalRow, 'approvedRevNo' | 'contentRevSeq'>): boolean {
+export function approvalHoldsFor(
+  node: Pick<NodeApprovalRow, 'approvedRevNo' | 'contentRevSeq'> & { approvalHash?: string | null },
+): boolean {
+  // #1838: an approval ended on entering an encrypted memory keeps who/when/
+  // revision but has no hash (explicit null), and covers nothing.
+  if (node.approvalHash === null) return false;
   return node.approvedRevNo != null && node.contentRevSeq <= node.approvedRevNo;
 }
 
 /** Approval state of the current text given the node's latest approval. */
-export function approvalStateOf(node: Pick<NodeApprovalRow, 'approvedRevNo' | 'contentRevSeq'>): NodeApprovalState {
-  if (node.approvedRevNo == null) return 'NOT_APPROVED';
+export function approvalStateOf(
+  node: Pick<NodeApprovalRow, 'approvedRevNo' | 'contentRevSeq'> & { approvalHash?: string | null },
+): NodeApprovalState {
+  if (node.approvedRevNo == null || node.approvalHash === null) return 'NOT_APPROVED';
   return approvalHoldsFor(node) ? 'APPROVED' : 'SUPERSEDED';
 }
 
@@ -123,7 +132,8 @@ export class NodeApprovalRefusal extends Error {
       | 'REVISION_MISMATCH'
       | 'COMMENT_NOT_APPROVABLE'
       | 'DECISION_NOT_APPROVABLE'
-      | 'DECISION_LOG_NOT_APPROVABLE',
+      | 'DECISION_LOG_NOT_APPROVABLE'
+      | BootPromptApprovalRefusalCode,
     message: string,
     readonly details: Record<string, unknown> = {},
   ) {
@@ -154,8 +164,20 @@ export async function approveNodeInTransaction(
     key: EncryptionKey | null;
     expectedRevision?: number | null;
     now?: Date;
+    /** #2043 — the caller's boot-prompt approval decision for this memory (bootPromptApprovalGate). Required: no caller skips it. */
+    bootPromptGate: BootPromptApprovalGate;
   },
 ): Promise<{ node: NodeApprovalRow; approvedNow: boolean }> {
+  // #2043 (R30, cor:agt:040:18) — judged on the LOCKED row, before the revision
+  // reconcile below can write anything: a refusal changes nothing.
+  const gate = opts.bootPromptGate;
+  if (gate.placed && gate.refusal) {
+    const [row] = await tx.$queryRaw<Array<{ role: string | null }>>`
+      SELECT role FROM nodes WHERE id = ${nodeId} AND memory_id = ${opts.memoryId} AND deleted_at IS NULL FOR UPDATE`;
+    if (row && isBootPromptRole(row.role)) {
+      throw new NodeApprovalRefusal(gate.refusal, BOOT_PROMPT_APPROVAL_MESSAGES[gate.refusal], { op: 'approve' });
+    }
+  }
   const revision = await ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: opts.memoryId });
   if (revision == null) throw new NodeApprovalRefusal('NODE_NOT_FOUND', 'Node not found');
   // Re-read under the lock, pinned to the authorized memory and to a LIVE row:
@@ -311,9 +333,9 @@ export function approvalStatePrismaWhere(
   if (state == null) return {};
   if (state === 'NOT_APPLICABLE') return { memory: { isEncrypted: true } };
   const memory = { isEncrypted: false };
-  if (state === 'NOT_APPROVED') return { memory, approvedRevNo: null };
-  if (state === 'APPROVED') return { memory, approvedRevNo: { gte: db.node.fields.contentRevSeq } };
-  if (state === 'SUPERSEDED') return { memory, approvedRevNo: { lt: db.node.fields.contentRevSeq } };
+  if (state === 'NOT_APPROVED') return { memory, OR: [{ approvedRevNo: null }, { approvalHash: null }] };
+  if (state === 'APPROVED') return { memory, approvalHash: { not: null }, approvedRevNo: { gte: db.node.fields.contentRevSeq } };
+  if (state === 'SUPERSEDED') return { memory, approvalHash: { not: null }, approvedRevNo: { lt: db.node.fields.contentRevSeq } };
   return { id: { in: [] } }; // Unknown wire values grant no approved matches.
 }
 
@@ -322,9 +344,10 @@ export function approvalStateSql(state: NodeApprovalState | null | undefined): s
   if (state == null) return null;
   const encrypted = 'EXISTS (SELECT 1 FROM memories approval_memory WHERE approval_memory.id = nodes.memory_id AND approval_memory.is_encrypted)';
   if (state === 'NOT_APPLICABLE') return encrypted;
-  const predicate = state === 'NOT_APPROVED' ? 'approved_rev_no IS NULL'
-    : state === 'APPROVED' ? 'approved_rev_no >= content_rev_seq'
-    : state === 'SUPERSEDED' ? 'approved_rev_no < content_rev_seq' : 'FALSE';
+  // #1838: a hashless record (approval ended on encrypted entry) is no approval.
+  const predicate = state === 'NOT_APPROVED' ? '(approved_rev_no IS NULL OR approval_hash IS NULL)'
+    : state === 'APPROVED' ? '(approval_hash IS NOT NULL AND approved_rev_no >= content_rev_seq)'
+    : state === 'SUPERSEDED' ? '(approval_hash IS NOT NULL AND approved_rev_no < content_rev_seq)' : 'FALSE';
   return `(NOT ${encrypted} AND ${predicate})`;
 }
 
@@ -340,4 +363,180 @@ export function mintedSql(minted: boolean | null | undefined): string | null {
   if (minted == null) return null;
   const encrypted = 'EXISTS (SELECT 1 FROM memories mint_memory WHERE mint_memory.id = nodes.memory_id AND mint_memory.is_encrypted)';
   return minted ? `(NOT ${encrypted} AND minted_at IS NOT NULL)` : `(${encrypted} OR minted_at IS NULL)`;
+}
+
+/** Whether a revision was approved, and by which recorded approval (#1838). */
+export interface RevisionApproval {
+  /** NOT_APPLICABLE inside an encrypted memory (cor:dmo:120:00): nothing is read. */
+  state: 'APPROVED' | 'NOT_APPROVED' | 'NOT_APPLICABLE';
+  /** The covering record, with the revision it was recorded at. Null unless APPROVED. */
+  record: NodeApprovalRecord | null;
+  /**
+   * Only when APPROVED: the exact content this verdict hashed, and the memory that captured it. An include serves
+   * THIS text, so what is served is what qualified; it never re-reads the revision after the verdict (#2041).
+   */
+  served?: { content: string | null; memoryId: string };
+}
+
+const NOT_APPROVED_REVISION: RevisionApproval = { state: 'NOT_APPROVED', record: null };
+
+/**
+ * #1838 (cor:dmo:060:04, Holger's R7) — was revision `revNo` of the node
+ * approved? Yes when some recorded approval covers exactly its hashed content,
+ * whichever revision the approval was recorded on. The records are the
+ * `NodeRevision` rows' copied approvals plus the node's current one, and no
+ * table was added for them.
+ *
+ * A record counts only while the text it hashed still hashes to it (an altered
+ * snapshot or live row is not an approval, and stays the integrity check's to
+ * report), only from the same capture memory as the revision asked about (a
+ * node moved across memories discloses nothing across them), and only with a
+ * hash (an approval ended on encrypted entry has none). A legacy row with no
+ * `revNo` can be neither pinned nor a record. This is a per-revision read: it
+ * deliberately does not change what `Node.approvalStatus` says about the live
+ * revision (#1611).
+ *
+ * Pure read; `db` may be a transaction client.
+ */
+export async function revisionApprovalOf(
+  db: Pick<PrismaClient, 'node' | 'nodeRevision' | 'memory'> | Prisma.TransactionClient,
+  nodeId: string,
+  revNo: number,
+): Promise<RevisionApproval> {
+  const live = await db.node.findUnique({
+    where: { id: nodeId },
+    select: {
+      memoryId: true, name: true, abstract: true, content: true, revSeq: true, contentRevSeq: true,
+      approvedRevNo: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true,
+    },
+  });
+  if (!live) return NOT_APPROVED_REVISION;
+  const target = await db.nodeRevision.findFirst({
+    where: { nodeId, revNo },
+    select: { memoryId: true, name: true, abstract: true, content: true },
+  });
+  const isLive = !target && revNo === live.revSeq;
+  if (!target && !isLive) return NOT_APPROVED_REVISION;
+  const captureMemoryId = target ? (target.memoryId ?? live.memoryId) : live.memoryId;
+  const memories = await db.memory.findMany({
+    where: { id: { in: [...new Set([captureMemoryId, live.memoryId])] } },
+    select: { isEncrypted: true },
+  });
+  if (memories.some((m) => m.isEncrypted)) return { state: 'NOT_APPLICABLE', record: null };
+
+  const hashOf = (f: { name: string; abstract: string | null; content: string | null }) =>
+    computeApprovalHash({ title: f.name, abstract: f.abstract, content: f.content });
+  const wanted = hashOf(target ?? live);
+
+  const rows = await db.nodeRevision.findMany({
+    where: {
+      nodeId, approvalHash: { not: null }, revNo: { not: null }, approvedAt: { not: null },
+      OR: [{ memoryId: captureMemoryId }, ...(captureMemoryId === live.memoryId ? [{ memoryId: null }] : [])],
+    },
+    select: {
+      revNo: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true,
+      name: true, abstract: true, content: true,
+    },
+    orderBy: { revNo: 'asc' },
+  });
+  const candidates: NodeApprovalRecord[] = [];
+  for (const r of rows) {
+    if (hashOf(r) !== r.approvalHash) continue; // altered snapshot: not an approval
+    candidates.push({
+      revision: r.revNo!, approvedBy: r.approvedBy, approvedByInfo: r.approvedByInfo,
+      approvedAt: r.approvedAt!, hash: r.approvalHash!,
+    });
+  }
+  const current = captureMemoryId === live.memoryId ? approvalRecordOf(live) : null;
+  if (current && approvalHoldsFor(live) && hashOf(live) === current.hash) candidates.push(current);
+
+  const covering = candidates.filter((c) => c.hash === wanted);
+  if (covering.length === 0) return NOT_APPROVED_REVISION;
+  // Prefer the record made AT this revision, else the earliest that covers it.
+  const record = covering.find((c) => c.revision === revNo)
+    ?? covering.reduce((a, b) => (b.revision < a.revision ? b : a));
+  return { state: 'APPROVED', record, served: { content: (target ?? live).content, memoryId: captureMemoryId } };
+}
+
+/** How many revisions `newestApprovedRevisionOf` examines before it gives up (newest first). */
+export const NEWEST_APPROVED_REVISION_SCAN_CAP = 100;
+
+export interface NewestApprovedRevision {
+  /** Null when no examined revision is approved (or the node/memory yields nothing to read). */
+  found: { revNo: number; record: NodeApprovalRecord; source: 'live' | 'snapshot' } | null;
+  /** True when the scan stopped at the cap with older revisions unexamined: `found: null` is then not "never approved". */
+  truncated: boolean;
+}
+
+/**
+ * #2041 (cor:dmo:150:05, "a newer unapproved edit of an `approved` target is
+ * not broken: serve the newest approved revision") — the newest revision of
+ * the node that `revisionApprovalOf` reads APPROVED. It is a walk over that one
+ * predicate (live revision first, then the retained snapshots newest-first), so
+ * no second definition of "approved" exists. It reads no `approvedRevNo`
+ * pointer: that is the node's CURRENT approval, which a later edit supersedes
+ * and an encrypted entry can end.
+ *
+ * Only revisions that can be served from the node's CURRENT memory count: a
+ * snapshot captured in another memory (a node moved across memories) is never
+ * selected, and an encrypted memory yields nothing (NOT_APPLICABLE, nothing is
+ * read). A legacy snapshot with no `revNo` cannot be pinned and is skipped.
+ *
+ * Pure read; `db` may be a transaction client.
+ */
+export async function newestApprovedRevisionOf(
+  db: Pick<PrismaClient, 'node' | 'nodeRevision' | 'memory'> | Prisma.TransactionClient,
+  nodeId: string,
+  cap: number = NEWEST_APPROVED_REVISION_SCAN_CAP,
+): Promise<NewestApprovedRevision> {
+  const none: NewestApprovedRevision = { found: null, truncated: false };
+  const live = await db.node.findUnique({ where: { id: nodeId }, select: { memoryId: true, revSeq: true } });
+  if (!live) return none;
+  // Snapshots servable from the node's CURRENT memory only (a foreign-memory capture is never selected).
+  const snapshots = await db.nodeRevision.findMany({
+    where: { nodeId, revNo: { not: null }, OR: [{ memoryId: null }, { memoryId: live.memoryId }] },
+    select: { revNo: true },
+    orderBy: { revNo: 'desc' },
+    take: cap + 1,
+  });
+  const snapshotNos = new Set(snapshots.map((r) => r.revNo!));
+  // `revisionApprovalOf` resolves a number to its snapshot row first, whichever memory captured it, so the live
+  // revision is offered only while NO snapshot at all holds its number: a foreign-memory snapshot at `revSeq` would
+  // otherwise be read through, and reported as live.
+  const liveNumberHeld = (await db.nodeRevision.findFirst({ where: { nodeId, revNo: live.revSeq }, select: { id: true } })) != null;
+  const candidates = [...(liveNumberHeld ? [] : [live.revSeq]), ...snapshotNos].sort((a, b) => b - a);
+  const examined = candidates.slice(0, cap);
+  for (const revNo of examined) {
+    const verdict = await revisionApprovalOf(db, nodeId, revNo);
+    if (verdict.state === 'NOT_APPLICABLE') return none;
+    if (verdict.state === 'APPROVED') {
+      return { found: { revNo, record: verdict.record!, source: snapshotNos.has(revNo) ? 'snapshot' : 'live' }, truncated: false };
+    }
+  }
+  return { found: null, truncated: candidates.length > cap };
+}
+
+/**
+ * #1838 (cor:dmo:120:04) — entering an encrypted memory ENDS the approvals of
+ * the nodes that enter: the hash is cleared and who/when/revision are kept.
+ * Applied to the node's current approval and to every copied record on its
+ * revisions, in the caller's transaction, so no byte-identical revision can be
+ * revived should the node ever leave. The one function every entry path calls
+ * (`encryptMemory`; a future move-in, #1921, must too). Idempotent.
+ */
+export async function endApprovalsOnEncryptedEntry(
+  tx: Prisma.TransactionClient,
+  scope: { nodeIds: string[] } | { memoryId: string },
+): Promise<void> {
+  if ('nodeIds' in scope && scope.nodeIds.length === 0) return;
+  // By memory: every node the memory holds (tombstones included) and every
+  // snapshot of those nodes, whichever memory captured it (a node moved in
+  // keeps modern snapshots from where it lived), plus snapshots captured here.
+  const nodeWhere: Prisma.NodeWhereInput = 'nodeIds' in scope
+    ? { id: { in: scope.nodeIds } } : { memoryId: scope.memoryId };
+  const revisionWhere: Prisma.NodeRevisionWhereInput = 'nodeIds' in scope
+    ? { nodeId: { in: scope.nodeIds } }
+    : { OR: [{ memoryId: scope.memoryId }, { node: { memoryId: scope.memoryId } }] };
+  await tx.node.updateMany({ where: { ...nodeWhere, approvalHash: { not: null } }, data: { approvalHash: null } });
+  await tx.nodeRevision.updateMany({ where: { ...revisionWhere, approvalHash: { not: null } }, data: { approvalHash: null } });
 }

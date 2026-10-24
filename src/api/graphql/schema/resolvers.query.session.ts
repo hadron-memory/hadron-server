@@ -9,6 +9,7 @@ import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { GraphQLError } from 'graphql';
+import { Prisma } from '../../../generated/prisma/index.js';
 import {
   type ToolCalendarEvent,
   type ToolCalendarInfo,
@@ -21,7 +22,10 @@ import {
 import {
   type Context,
   requireRole,
-  requireOrgRole,
+  listOrgExchangeConnections,
+  orgExchangeConnectionScope,
+  pageArgs,
+  pageEnvelope,
   getAccessibleMemoryIds,
   sessionScopeFilter,
   SESSION_INCLUDE,
@@ -31,12 +35,14 @@ import {
 } from './resolvers.helpers.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 
-export const sessionQueries = {
-    sessions: async (
-      _: unknown,
-      { type, repo, customerId, workerRef, limit, offset }: { type?: string; repo?: string; customerId?: string; workerRef?: string; limit?: number; offset?: number },
-      ctx: Context,
-    ) => {
+/**
+ * The `where` shared by `sessions` and `sessionsPage` (#2212 A1): one audience, one filter set.
+ * `null` is the empty answer (a blank or unresolvable `workerRef` narrows to nothing, never widens).
+ */
+async function sessionsWhere(
+  ctx: Context,
+  { type, repo, customerId, workerRef }: { type?: string; repo?: string; customerId?: string; workerRef?: string | null },
+): Promise<Prisma.SessionWhereInput | null> {
       // Ordinary session audience intersected with bound-memory strict ownership.
       const scopeFilter = await sessionScopeFilter(ctx);
       // #974 / cor:agt:020:03: the "taken right now" / "last driven by" reads —
@@ -58,55 +64,30 @@ export const sessionQueries = {
       let workerId: string | undefined;
       if (workerRef !== undefined && workerRef !== null) {
         const trimmedWorkerRef = workerRef.trim();
-        if (trimmedWorkerRef === '') return [];
+        if (trimmedWorkerRef === '') return null;
         try {
           ({ id: workerId } = await resolveWorkerRef(ctx.db, trimmedWorkerRef));
         } catch {
-          return [];
+          return null;
         }
       }
-      return ctx.db.session.findMany({
-        where: {
+      return {
           ...scopeFilter,
           ...(type ? { type: type as any } : {}),
           ...(repo ? { repo } : {}),
           ...(customerId ? { customerId } : {}),
           ...(workerId ? { workerId } : {}),
-        },
-        orderBy: { startedAt: 'desc' },
-        take: limit ?? 50,
-        skip: offset ?? 0,
-        include: SESSION_INCLUDE,
-      });
-    },
+      };
+}
 
-    session: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      // One predicate for point/list reads; denied and missing are both null.
-      return ctx.db.session.findFirst({
-        where: { AND: [{ id }, await sessionScopeFilter(ctx)] },
-        include: SESSION_INCLUDE,
-      });
-    },
-
-    usageEvents: async (
-      _: unknown,
-      {
-        type,
-        memoryId,
-        nodeId,
-        loc,
-        limit,
-        offset,
-      }: {
-        type?: string;
-        memoryId?: string;
-        nodeId?: string;
-        loc?: string;
-        limit?: number;
-        offset?: number;
-      },
-      ctx: Context,
-    ) => {
+/**
+ * The `where` shared by `usageEvents` and `usageEventsPage` (#2212 A1): the READER gate, the loc/nodeId
+ * addressing rules and the accessible-memory scope, all resolved before any query.
+ */
+async function usageEventsWhere(
+  ctx: Context,
+  { type, memoryId, nodeId, loc }: { type?: string; memoryId?: string; nodeId?: string; loc?: string },
+): Promise<Prisma.UsageEventWhereInput> {
       requireRole(ctx, 'READER');
 
       // `loc` and `nodeId` are two different addressing modes for the same
@@ -230,29 +211,106 @@ export const sessionQueries = {
             ? { memoryId: { in: accessibleMemoryIds } }
             : undefined;
 
-      return ctx.db.usageEvent.findMany({
-        where: {
+  return {
           ...(type ? { type } : {}),
           ...(nodeIdFilter ? { nodeId: nodeIdFilter } : {}),
           ...(memoryFilter ?? {}),
           // nodeId-as-bare-loc → exact nodeLoc match (the supported loc filter
           // since the deprecated nodeLoc substring arg was removed in #252).
           ...(nodeLocExact ? { nodeLoc: nodeLocExact } : {}),
-        },
-        orderBy: { createdAt: 'desc' },
+  };
+}
+
+export const sessionQueries = {
+    sessions: async (
+      _: unknown,
+      { type, repo, customerId, workerRef, limit, offset }: { type?: string; repo?: string; customerId?: string; workerRef?: string; limit?: number; offset?: number },
+      ctx: Context,
+    ) => {
+      const where = await sessionsWhere(ctx, { type, repo, customerId, workerRef });
+      if (!where) return [];
+      return ctx.db.session.findMany({
+        where,
+        orderBy: { startedAt: 'desc' },
         take: limit ?? 50,
         skip: offset ?? 0,
+        include: SESSION_INCLUDE,
       });
+    },
+
+    /** #2212 A1 — `sessions` as a page: the same audience and filters (one shared `where`), a stable `id` tiebreak, the real total. */
+    sessionsPage: async (
+      _: unknown,
+      args: { type?: string; repo?: string; customerId?: string; workerRef?: string; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const where = await sessionsWhere(ctx, args);
+      const { take, skip } = pageArgs(args);
+      if (!where) return pageEnvelope([], 0, skip);
+      const [total, items] = await ctx.db.$transaction([
+        ctx.db.session.count({ where }),
+        ctx.db.session.findMany({ where, orderBy: [{ startedAt: 'desc' }, { id: 'desc' }], take, skip, include: SESSION_INCLUDE }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(items, total, skip);
+    },
+
+    session: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      // One predicate for point/list reads; denied and missing are both null.
+      return ctx.db.session.findFirst({
+        where: { AND: [{ id }, await sessionScopeFilter(ctx)] },
+        include: SESSION_INCLUDE,
+      });
+    },
+
+    usageEvents: async (
+      _: unknown,
+      args: { type?: string; memoryId?: string; nodeId?: string; loc?: string; limit?: number; offset?: number },
+      ctx: Context,
+    ) => {
+      const where = await usageEventsWhere(ctx, args);
+      return ctx.db.usageEvent.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: args.limit ?? 50,
+        skip: args.offset ?? 0,
+      });
+    },
+
+    /** #2212 A1 — `usageEvents` as a page: the same gate and scope (one shared `where`), a stable `id` tiebreak, the real total. */
+    usageEventsPage: async (
+      _: unknown,
+      args: { type?: string; memoryId?: string; nodeId?: string; loc?: string; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const where = await usageEventsWhere(ctx, args);
+      const { take, skip } = pageArgs(args);
+      const [total, items] = await ctx.db.$transaction([
+        ctx.db.usageEvent.count({ where }),
+        ctx.db.usageEvent.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(items, total, skip);
     },
 
     exchangeConnections: async (_: unknown, { orgId }: { orgId: string }, ctx: Context) => {
       // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
-      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
-      return ctx.db.exchangeConnection.findMany({
-        where: { organizationId: resolvedOrgId, deletedAt: null },
-        orderBy: { createdAt: 'asc' },
-      });
+      return listOrgExchangeConnections(ctx, resolvedOrgId);
+    },
+
+    /** #2213 — `exchangeConnections` as a page: the same admission, rows and order (one shared scope), counted and read in one snapshot. */
+    exchangeConnectionsPage: async (
+      _: unknown,
+      args: { orgId: string; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, args.orgId);
+      const { where, orderBy } = await orgExchangeConnectionScope(ctx, resolvedOrgId);
+      const { take, skip } = pageArgs(args);
+      const [total, items] = await ctx.db.$transaction([
+        ctx.db.exchangeConnection.count({ where }),
+        ctx.db.exchangeConnection.findMany({ where, orderBy, take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(items, total, skip);
     },
 
     exchangeMessages: async (

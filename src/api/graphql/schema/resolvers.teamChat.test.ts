@@ -1,3 +1,5 @@
+import { isRawChatNode } from '../../../services/embedding/rawChat.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #939 — createTeamChatMessage + teamChatMessages: the team-chat platform
  * operations.
@@ -132,7 +134,7 @@ beforeEach(async () => {
  * named identity; `Session.agentId` still records the role-agent. */
 async function workerSession(userId: string, name = 'Iris'): Promise<{ workerId: string; workerName: string; sessionId: string }> {
   const worker = await db.worker.create({
-    data: { appId: app.id, agentId: teamAgent.id, name, slug: workerSlugBase(name) },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: teamAgent.id, name, slug: workerSlugBase(name) },
   });
   const sessionId = generateId();
   await db.session.create({
@@ -184,6 +186,8 @@ describe('createTeamChatMessage — happy path + bootstrap', () => {
 
     const row = await db.node.findUnique({ where: { id: msg.nodeId } });
     expect(row!.nodeType).toBe('chat-message');
+    expect(isRawChatNode(row!)).toBe(true);
+    expect(isRawChatNode(root!)).toBe(false);
     expect(row!.seq).toBe(1);
     expect(row!.content).toBe('first!');
     expect(row!.createdBy).toBe(appMember.id);
@@ -549,7 +553,7 @@ describe('createTeamChatMessage — sessionRef author derivation', () => {
     });
     await db.appAgent.create({ data: { appId: otherApp.id, agentId: teamAgent.id } });
     const foreignWorker = await db.worker.create({
-      data: { appId: otherApp.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: otherApp.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
     });
     const sessionId = generateId();
     await db.session.create({
@@ -599,7 +603,7 @@ describe('teamChatMessages — mentions round trip', () => {
       body: ['```sh', `> ${token}`, token, '```'].join('\n'),
     });
     expect(codeWithQuotePrefix.mentions).toEqual([]);
-    expect(await read(ctx(appMember.id), { mentionsRef: s.workerId })).toEqual({ items: [], total: 0 });
+    expect(await read(ctx(appMember.id), { mentionsRef: s.workerId })).toMatchObject({ items: [], total: 0 });
 
     const addressed = await post(ctx(admin.id), { body: `\`${token}\` is an example. ${token}, please review.` });
     expect(addressed.mentions).toEqual([s.workerName.toLowerCase()]);
@@ -640,7 +644,7 @@ describe('teamChatMessages — mentions round trip', () => {
   it('an unresolvable mentionsRef collapses to the empty page, never an error', async () => {
     await post(ctx(appMember.id), { body: '@nobody hello' });
     const page = await read(ctx(appMember.id), { mentionsRef: 'hrn:agent:no-such-org.com:ghost' });
-    expect(page).toEqual({ items: [], total: 0 });
+    expect(page).toMatchObject({ items: [], total: 0 });
   });
 
   it("a Worker of ANOTHER App reads as the same empty page (Codex P1 — no existence oracle)", async () => {
@@ -667,14 +671,14 @@ describe('teamChatMessages — mentions round trip', () => {
       },
     });
     const foreignWorker = await db.worker.create({
-      data: { appId: foreignApp.id, agentId: foreignAgent.id, name: 'Iris', slug: 'iris' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: foreignApp.id, agentId: foreignAgent.id, name: 'Iris', slug: 'iris' },
     });
     await post(ctx(appMember.id), { body: '@iris are you there' });
     const page = await read(ctx(appMember.id), { mentionsRef: foreignWorker.id });
-    expect(page).toEqual({ items: [], total: 0 });
+    expect(page).toMatchObject({ items: [], total: 0 });
     // Nor does the foreign worker's NAME resolve here — this App has no Iris.
     const byName = await read(ctx(appMember.id), { mentionsRef: 'Iris' });
-    expect(byName).toEqual({ items: [], total: 0 });
+    expect(byName).toMatchObject({ items: [], total: 0 });
   });
 
   it('a user who is not on the roster reads as the empty page; the caller themself resolves', async () => {
@@ -682,7 +686,7 @@ describe('teamChatMessages — mentions round trip', () => {
     // outsider (a real user, resolvable globally) is not an AppMember —
     // filtering by them must look identical to a nonexistent ref.
     const page = await read(ctx(appMember.id), { mentionsRef: outsider.id });
-    expect(page).toEqual({ items: [], total: 0 });
+    expect(page).toMatchObject({ items: [], total: 0 });
     // The caller can always filter for their own mentions.
     const self = await read(ctx(appMember.id), { mentionsRef: appMember.id });
     expect(self.total).toBe(1);
@@ -692,7 +696,7 @@ describe('teamChatMessages — mentions round trip', () => {
     // Worker names may legally contain spaces; the mention contract slugs
     // them (mentionTokenOf) on both the write and the filter side.
     const mj = await db.worker.create({
-      data: { appId: app.id, agentId: teamAgent.id, name: 'Mary Jane', slug: 'mary-jane' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: teamAgent.id, name: 'Mary Jane', slug: 'mary-jane' },
     });
     await post(ctx(appMember.id), { body: '@mary-jane please review' });
     const page = await read(ctx(appMember.id), { mentionsRef: mj.id });
@@ -785,7 +789,7 @@ describe('teamChatMessages — pagination + sinceSeq', () => {
 
   it('limit: 0 is count-only', async () => {
     const page = await read(ctx(appMember.id), { limit: 0 });
-    expect(page).toEqual({ items: [], total: 5 });
+    expect(page).toMatchObject({ items: [], total: 5 });
   });
 
   it('an App with no team chat yet reads as the empty page', async () => {
@@ -1030,7 +1034,7 @@ describe('#1029 — worker handoff', () => {
 
   async function castOne(name = 'Iris') {
     const worker = await db.worker.create({
-      data: { appId: app.id, agentId: teamAgent.id, name, slug: workerSlugBase(name) },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: teamAgent.id, name, slug: workerSlugBase(name) },
     });
     return worker;
   }
