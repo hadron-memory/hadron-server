@@ -1,6 +1,7 @@
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
+import { lintWarningPage, lintWarningPageForNodeId } from '../../../lib/bootPromptLint.js';
 import { sharedOrganizations } from './sharedOrganizations.js';
 import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
@@ -896,7 +897,18 @@ export const typeResolvers = {
     hasApiKey: (s: { apiKeyEncrypted?: string | null }) => s.apiKeyEncrypted != null,
     from: (s: { fromAddress: string }) => s.fromAddress,
   },
+  NodeApprovalReceipt: {
+    /** #2048 — the same warnings as Node.lintWarnings, for the node just approved; approving never blocked on them. */
+    lintWarnings: (r: { nodeId: string }, args: { first?: number | null; after?: string | null }, ctx: Context) =>
+      lintWarningPageForNodeId(ctx, r.nodeId, args),
+  },
   Node: {
+    /** #2048 — link lint, computed on read from the stored source and the caller's own reads; null when unavailable. */
+    lintWarnings: (
+      n: { id: string; memoryId: string; content: string | null; role?: string | null; nodeType?: string | null },
+      args: { first?: number | null; after?: string | null },
+      ctx: Context,
+    ) => lintWarningPage(ctx, n, args),
     /**
      * #2041 — the one place a node's include tags resolve for a reader
      * (cor:dmo:150:03), so every path that reaches `Node.content` is covered

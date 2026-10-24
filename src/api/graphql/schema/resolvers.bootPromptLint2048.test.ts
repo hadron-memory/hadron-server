@@ -14,6 +14,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { lintSourceWarnings } from '../../../lib/bootPromptLint.js';
 import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -28,7 +29,7 @@ afterAll(async () => {
   await server.stop();
   await new Promise<void>(resolve => httpServer.close(() => resolve()));
 });
-let userId: string, memoryId: string, memoryUrn: string, foreignMemoryId: string, foreignMemoryUrn: string;
+let userId: string, foreignOrgId: string, memoryId: string, memoryUrn: string, foreignMemoryId: string, foreignMemoryUrn: string;
 const ctx = (): Context => ({ db, userId, roles: [] });
 const fields = `kind position text targetUrn pinnedRevision newerRevision overriddenNodeLoc workerField`;
 const pageSelection = `items { ${fields} } total nextCursor`;
@@ -43,7 +44,11 @@ beforeEach(async () => {
   userId = user.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
   const memory = await db.memory.create({ data: { name: 'Sources', urn: `${org.urn}:sources`, class: 'system', organizationId: org.id } });
+  // A boot prompt's source lives in an Agent's system memory, which its org's manager reads (cor:agt:040:05).
+  await db.agent.create({ data: { name: 'Lint agent', urn: `${org.urn}:lint-agent`, organizationId: org.id, systemMemoryId: memory.id } });
   const hidden = await db.memory.create({ data: { name: 'Hidden', urn: `${foreign.urn}:sources`, class: 'system', organizationId: foreign.id } });
+  await db.agent.create({ data: { name: 'Hidden agent', urn: `${foreign.urn}:hidden-agent`, organizationId: foreign.id, systemMemoryId: hidden.id } });
+  foreignOrgId = foreign.id;
   memoryId = memory.id; memoryUrn = memory.urn;
   foreignMemoryId = hidden.id; foreignMemoryUrn = hidden.urn;
 });
@@ -168,7 +173,7 @@ describe('#2048 S11a source warnings, current state and concealment', () => {
   it('a selected write/approval payload carries the same non-blocking warnings as a later read', async () => {
     await target();
     const prompt = await source('Original');
-    const saved = await execute(`mutation($id: ID!) { updateNode(input: { id: $id, content: "{{> part signed}}" }) {
+    const saved = await execute(`mutation($id: String!) { updateNode(input: { id: $id, content: "{{> part signed}}" }) {
       id lintWarnings { ${pageSelection} }
     } }`, { id: prompt.id });
     expect(saved.errors).toBeUndefined();
@@ -179,6 +184,41 @@ describe('#2048 S11a source warnings, current state and concealment', () => {
     const approved = await execute(`mutation($ref: ID!) { approveNode(nodeRef: $ref) { nodeId lintWarnings { ${pageSelection} } } }`, { ref: prompt.id });
     expect(approved.errors).toBeUndefined();
     expect((approved.data?.approveNode as any).lintWarnings).toEqual(await page(prompt.id));
+    expect((await db.node.findUniqueOrThrow({ where: { id: prompt.id } })).approvedAt).not.toBeNull();
+  });
+});
+
+describe('#2048 S11a scope and audience', () => {
+  it('an ordinary node with include-shaped text has nothing to lint, and a compiled boot prompt is unavailable, not empty', async () => {
+    await target();
+    const plain = await db.node.create({ data: { memoryId, loc: 'plain', name: 'plain', content: '{{> part signed}} {{> absent}}' } });
+    expect(await page(plain.id)).toEqual({ items: [], total: 0, nextCursor: null });
+    const compiled = await db.node.create({ data: { memoryId, loc: 'compiled', name: 'compiled', content: '{{> part signed}}', role: 'boot-prompt', nodeType: 'compiled-boot-prompt' } });
+    const result = await execute(`query($ref: ID!) { node(ref: $ref, raw: true) { lintWarnings { total } } }`, { ref: compiled.id });
+    expect(result.errors).toBeUndefined();
+    expect((result.data?.node as any).lintWarnings).toBeNull();
+  });
+
+  it('the same include lints as retired for a caller who can read the target and as position-only for one who cannot', async () => {
+    const retired = await db.node.create({ data: { memoryId: foreignMemoryId, loc: 'policy', name: 'policy', content: 'x', deletedAt: new Date() } });
+    const prompt = await source(`{{> hrn:node:${foreignMemoryUrn}:policy approved}}`);
+    const row = { id: prompt.id, memoryId, content: prompt.content, role: 'boot-prompt', nodeType: null };
+    const reader = await db.user.create({ data: { handle: 'lint2048-foreign-manager', roles: [] } });
+    await db.orgMember.create({ data: { organizationId: foreignOrgId, userId: reader.id, role: 'ADMIN' } });
+    const asReader = await lintSourceWarnings({ db, userId: reader.id, roles: [] }, row);
+    expect(asReader).toEqual([expect.objectContaining({ kind: 'RETIRED_TARGET', targetUrn: `hrn:node:${foreignMemoryUrn}:policy` })]);
+    const asOutsider = await lintSourceWarnings(ctx(), row);
+    expect(asOutsider).toEqual([expect.objectContaining({ kind: 'BROKEN_INCLUDE', targetUrn: null })]);
+    expect(retired.deletedAt).not.toBeNull();
+  });
+
+  it('lint never blocks: approving a source whose include is retired is recorded, with the warning on the receipt', async () => {
+    const part = await target();
+    const prompt = await source('{{> part}}');
+    await db.node.update({ where: { id: part.id }, data: { deletedAt: new Date() } });
+    const approved = await execute(`mutation($ref: ID!) { approveNode(nodeRef: $ref) { nodeId lintWarnings { total items { kind } } } }`, { ref: prompt.id });
+    expect(approved.errors).toBeUndefined();
+    expect((approved.data?.approveNode as any).lintWarnings).toEqual({ total: 1, items: [{ kind: 'RETIRED_TARGET' }] });
     expect((await db.node.findUniqueOrThrow({ where: { id: prompt.id } })).approvedAt).not.toBeNull();
   });
 });
