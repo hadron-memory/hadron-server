@@ -199,7 +199,8 @@ only when ALL of these hold:
 
 A timeout alone never resolves an entry. After 2 team-tick cadences (20 min),
 Ada's #26811 ruling allows **one fresh request for strictly newer tick work**
-when the old input was accepted, the composer is provably empty, and the same
+when the old send is still unresolved (including a failed send carrying a request
+identity that Orca never reported accepted), the composer is provably empty, and the same
 terminal handle/incarnation still receives it. Busy/deadline, draft, identity,
 server-timing and pre-send server-check guards still apply. The incarnation is
 checked again after reconciliation/evidence reads. No new tick means no new
@@ -323,3 +324,17 @@ This slice does not change family derivation, relaunch scripts, existing host
 receipt files, same-receiver never-accepted recovery, or escalation. Tests use
 synthetic mocked hosts; deployment and any existing-state remediation remain
 separate host-manager actions.
+
+### Failed request identities can yield to newer ticks (#2275 slice A)
+
+After the same 20-minute window, a failed request with an identity, including
+a `; same-id retry:` failure, can yield to a strictly newer tick under the
+same receiver/incarnation, empty-composer and idle/send guards above. The log
+still says `Orca never reported the input accepted` and `needs a person`;
+the old request is not retyped as a fresh prompt. Its coverage is archived
+before the replacement intent is atomically persisted, preserving other receipts.
+Displacement itself never acknowledges a wake, completes a task or marks chat read.
+A failed same-id retry cannot prove the old prompt never ran: this is
+**at-least-once notification recovery**, relying on the server cursor/task protocol,
+not exactly-once delivery. Families derivation, relaunch changes, escalation and
+existing receipt remediation remain separate; rollout requires Hugo's actual grant.

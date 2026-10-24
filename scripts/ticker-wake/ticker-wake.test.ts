@@ -2429,7 +2429,7 @@ describe('#2138 — fresh ticks after two unreconciled cadences', () => {
     expect(current().coverage).toEqual(['T:1']);
     expect(log()).toContain('old request could not be retained');
   });
-  for (const guard of ['draft', 'incomplete inventory', 'busy', 'before cadence', 'same tick', 'not accepted', 'missing incarnation', 'server check failed'] as const) {
+  for (const guard of ['draft', 'incomplete inventory', 'busy', 'before cadence', 'same tick', 'missing incarnation', 'server check failed'] as const) {
     it(`holds a replacement with ${guard}`, async () => {
       await stuck();
       if (guard === 'draft') f.screen = {...f.screen, draft: 'human typing'};
@@ -2440,7 +2440,6 @@ describe('#2138 — fresh ticks after two unreconciled cadences', () => {
       if (guard === 'missing incarnation') f.incarnation = '';
       if (guard === 'busy') { f.idle = false; f.screen = {source:'screen', tail:['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)']}; }
       if (guard === 'same tick') f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], T0 + 1_200_000), [], timing)];
-      if (guard === 'not accepted') { const r = current(); r.detail = 'unrecognized send receipt'; writeFileSync(receiptsFile(), JSON.stringify({'w-ada': r})); f.retryReply = () => JSON.stringify({ok:false,error:{code:'transport'},requestId:'r1'}); }
       if (guard === 'server check failed') f.checkError = 'unavailable';
       await go(at(T0 + (guard === 'before cadence' ? 1_199_999 : 1_200_000)));
       expect(f.sent).toHaveLength(1);
@@ -2640,8 +2639,9 @@ describe('#2275 same-receiver never-accepted recovery', () => {
     it(`still holds failed identity with ${guard}`, async () => {
       const prior = seed();
       if (guard === 'different live receiver') {
-        f.incarnation = 'inc-2';
-        f.extraTerminals = [{ handle: 'term_a', incarnationId: 'inc-1', worktreePath: dir }];
+        prior.handle = 'term_old'; prior.receiver = 'term_old#inc-old';
+        writeFileSync(receiptsFile(), JSON.stringify({ ...stored(), 'w-ada': prior }));
+        f.extraTerminals = [{ handle: 'term_old', incarnationId: 'inc-old', worktreePath: dir }];
       }
       if (guard === 'draft') f.screen.draft = 'human typing';
       if (guard === 'busy') { f.idle = false; f.screen = { source: 'screen', tail: ['✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'] }; }
@@ -2670,7 +2670,10 @@ describe('#2275 same-receiver never-accepted recovery', () => {
         await go(at(T0 + 1_200_001));
         expect(f.sent).toHaveLength(1);
         expect(f.acked).toEqual([]);
-      } else expect(stored()['w-ada']).toEqual(prior);
+      } else {
+        expect(stored()['w-ada']).toEqual(prior);
+        expect(log()).toContain(fault === 'archive' ? 'old request could not be retained' : 'send intent could not be recorded');
+      }
     });
   }
 });
