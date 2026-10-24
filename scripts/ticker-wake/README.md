@@ -297,8 +297,12 @@ evidence is separate.
 
 An ambiguous receipt for another receiver stops holding the worker only when a
 successful, complete current terminal inventory proves that the prior
-handle/incarnation is absent. A reused handle needs a known different
-incarnation. Failed or partial lists, unknown identities, and a still-present
+handle/incarnation is absent. Completeness requires Orca `result.hostScope`:
+at least one legible covered host, with any omitted hosts restricted to
+`runtime:` peers (which own separate control planes). Missing scope or an omitted
+local/SSH/unknown host holds, even if all returned terminal rows look valid.
+A reused handle needs a known different incarnation. Failed or partial lists,
+unknown identities, and a still-present
 old incarnation (even disconnected or unwritable) remain held.
 
 Before replacement, the script checks the inventory and current incarnation

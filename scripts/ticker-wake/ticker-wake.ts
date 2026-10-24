@@ -273,6 +273,25 @@ function saveReceipts(dir: string, r: Receipts, file = 'receipts.json'): void {
   renameSync(tmp, path);
 }
 
+/** Orca execution-host identity grammar, used by its hostScopeCensusIsComplete contract. */
+function executionHostKind(raw: unknown): 'local' | 'ssh' | 'runtime' | null {
+  if (typeof raw !== 'string') return null;
+  const id = raw.trim();
+  if (id === 'local') return 'local';
+  const kind = id.startsWith('ssh:') ? 'ssh' : id.startsWith('runtime:') ? 'runtime' : null;
+  if (!kind) return null;
+  const encoded = id.slice(kind.length + 1);
+  if (!encoded || encoded.includes('|')) return null;
+  try { return decodeURIComponent(encoded) ? kind : null; } catch { return null; }
+}
+
+/** Missing host coverage is not completeness; omitted runtime peers own their separate control plane. */
+function hostScopeCensusComplete(scope: any): boolean {
+  return scope !== null && typeof scope === 'object' && !Array.isArray(scope)
+    && Array.isArray(scope.hostIds) && scope.hostIds.some((id: unknown) => executionHostKind(id) !== null)
+    && Array.isArray(scope.omittedHostIds) && scope.omittedHostIds.every((id: unknown) => executionHostKind(id) === 'runtime');
+}
+
 /** A successful unpaginated host inventory; explicit truncation or unknown row identity is not absence proof. */
 function terminalInventory(cfg: Config, run: Runner) {
   let envelope: any;
@@ -286,7 +305,7 @@ function terminalInventory(cfg: Config, run: Runner) {
   if (!Array.isArray(terminals)) throw new SafeError('terminal inventory has no list');
   const result = envelope?.result;
   const metadata = [envelope, result, result?.pageInfo].filter((v) => v !== undefined);
-  const complete = succeeded && envelope?.ok === true && metadata.every((v) => v && typeof v === 'object'
+  const complete = succeeded && envelope?.ok === true && hostScopeCensusComplete(result?.hostScope) && metadata.every((v) => v && typeof v === 'object'
     && !['hasNextPage', 'hasMore', 'partial', 'truncated', 'incomplete'].some((k) => v[k] !== undefined && v[k] !== false)
     && (v.complete === undefined || v.complete === true)
     && (v.nextCursor === undefined || v.nextCursor === null)
