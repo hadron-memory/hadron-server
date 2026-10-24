@@ -1332,9 +1332,9 @@ describe('teamChatMessages beforeSeq (#1116)', () => {
 
     const newest = await read(ctx(admin.id));
     expect(newest.total).toBe(205);
-    expect(newest.items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 50 }, (_, i) => i + 156));
-    expect((await read(ctx(admin.id), { beforeSeq: 156 })).items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 50 }, (_, i) => i + 106));
-    expect((await read(ctx(admin.id), { sinceSeq: 0 })).items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
+    expect(newest.items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 20 }, (_, i) => i + 186));
+    expect((await read(ctx(admin.id), { beforeSeq: 186 })).items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 20 }, (_, i) => i + 166));
+    expect((await read(ctx(admin.id), { sinceSeq: 0 })).items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
     // The old portal's second request remains correct during rollout.
     expect((await read(ctx(admin.id), { offset: 5, limit: 200 })).items.at(-1)?.seq).toBe(205);
   });

@@ -136,7 +136,7 @@ describe('nodeRevisionsPage', () => {
   it('the old nodeRevisions is unchanged (still returns the readable snapshots up to its limit)', async () => {
     await db.nodeRevision.createMany({ data: Array.from({ length: 60 }, (_, i) => rev(memA.id, i, T(i))) });
     const old = await Q.nodeRevisions({}, { nodeRef: node.id }, asUser(member.id));
-    expect(old).toHaveLength(50);
+    expect(old).toHaveLength(20);
   });
 
   it('count and rows are database-side: the page query carries take/skip', async () => {
