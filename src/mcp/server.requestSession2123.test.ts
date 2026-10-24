@@ -6,6 +6,9 @@ import { createServer } from '../server.js';
 import { signJwt } from '../auth/jwt.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { ensureChannelWithRoot } from '../lib/channels.js';
+import { appendChatMessage } from '../lib/chatRoot.js';
+import { getMemoryEncryptionInfo } from '../lib/nodeCrypto.js';
 import { generateId } from '../lib/id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../middleware/auth.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
@@ -200,13 +203,59 @@ describe('#2123 request-local session refusal', () => {
     expect(deniedSticky.text).toMatch(/^\[session_(not_found|not_live)\]/);
   });
 
-  it('self inbox preserves the existing explicit validated-body override of ambient refusal', async () => {
+  it('S1 explicit-body read and ack preserve validation, refusal floors and delivery atomicity', async () => {
     const bound = await db.session.create({ data: { id: generateId(), appId, userId, workerId, agentId } });
+    const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
+    const org = await db.organization.findUniqueOrThrow({ where: { id: app.organizationId! } });
+    const memory = await db.memory.create({ data: { urn: `${org.urn}:inbox-shared`, name: 'Shared', class: 'app',
+      organizationId: org.id, appId, sharedMemoryOfAgentId: agentId } });
+    const made = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:team', name: 'Team', createdBy: userId });
+    await db.registerEntry.create({ data: { id: generateId(), appId, channelId: made.channel.id, attendeeWorkerId: workerId, role: 'BOTH' } });
+    const enc = await getMemoryEncryptionInfo(db, memory.id);
+    await appendChatMessage(db, { id: made.rootId, memoryId: memory.id, loc: 'chats:team' }, enc,
+      async ({ tx, seq, msgNum }) => tx.node.create({ data: { id: generateId(), memoryId: memory.id,
+        loc: `chats:team:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq,
+        messageChannelId: made.channel.id, content: 'Synthetic mention for @fixture', data: { mentions: ['fixture'], authorName: 'Manager' } } }),
+      { asChannel: true });
+    await db.node.updateMany({ where: { messageChannelId: made.channel.id }, data: { createdAt: new Date(Date.now() - 3600_000) } });
     const connection = await open(generateId());
-    const result = await call(connection, 'hadron_team_chat_inbox', { appRef: appId, session: bound.id });
-    expect(result.status).toBe(200);
+    const inbox = (session?: string) => call(connection, 'hadron_team_chat_inbox', { appRef: appId, ...(session ? { session } : {}) }, bound.id);
+    const result = await inbox(bound.id);
     expect(result.result?.isError).not.toBe(true);
-    expect(JSON.parse(result.text).batches).toEqual([]);
+    const batches = JSON.parse(result.text).batches;
+    expect(batches.length).toBe(1);
+    expect(batches[0].workerId).toBe(workerId);
+    const proof = batches[0].id as string;
+    const ack = (session?: string) => call(connection, 'hadron_team_chat_inbox_ack', { batchIds: [proof], ...(session ? { session } : {}) }, bound.id);
+    const foreign = await db.user.create({ data: { githubId: 2123004, githubUsername: 'other-inbox', roles: ['READER'] } });
+    const old = new Date(Date.now() - 400 * 86400000);
+    const badSessions: Array<string | undefined> = [undefined, generateId()];
+    for (const kind of ['foreign', 'ended', 'expired', 'dormant']) {
+      const bad = await db.session.create({ data: { id: generateId(), appId, agentId, workerId,
+        userId: kind === 'foreign' ? foreign.id : userId,
+        ...(kind === 'ended' ? { endedAt: new Date() } : {}),
+        ...(kind === 'expired' ? { expiresAt: new Date(0) } : {}),
+        ...(kind === 'dormant' ? { startedAt: old, updatedAt: old, expiresAt: null } : {}),
+      } });
+      badSessions.push(bad.id);
+    }
+    for (const bad of badSessions) {
+      const refusedRead = await inbox(bad);
+      expect(refusedRead.result?.isError).toBe(true);
+      expect(refusedRead.text).toMatch(/^\[session_(not_bound|not_found|not_live)\]/);
+      const refusedAck = await ack(bad);
+      expect(refusedAck.result?.isError).toBe(true);
+      expect(refusedAck.text).toMatch(/^\[session_(required|not_bound|not_found|not_live)\]/);
+      expect(await db.workerDeliveryChannel.count()).toBe(0);
+      expect(await db.workerWakeAck.count()).toBe(0);
+      expect((await db.channelReadState.findFirstOrThrow({ where: { workerId, channelId: made.channel.id } })).lastSeenSeq).toBe(0);
+    }
+    expect((await ack(bound.id)).text).toBe('Acknowledged 1.');
+    expect(await db.workerDeliveryChannel.count()).toBe(1);
+    expect((await db.channelReadState.findFirstOrThrow({ where: { workerId, channelId: made.channel.id } })).lastSeenSeq).toBe(0);
+    // The local explicit-body override must not mutate the connection's
+    // sticky refusal or let the next header-only request use that authority.
+    expect((await inbox()).text).toMatch(/^\[session_(not_found|not_live)\]/);
   });
 
   it('queued requests keep their own bearer/header decision through real dispatch', async () => {
