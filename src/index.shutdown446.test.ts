@@ -66,6 +66,20 @@ describe('#446 Prisma disconnect inside graceful shutdown deadline', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('waits for HTTP drain after worker rejection, then disconnects and exits unsuccessfully', async () => {
+    state.stop.mockRejectedValueOnce(new Error('worker stop failed'));
+    signals.get('SIGTERM')!();
+    await flush();
+    expect(state.events).toEqual(['close']);
+    closeDone();
+    await flush();
+    expect(state.events).toEqual(['close', 'disconnect']);
+    disconnectDone();
+    await flush();
+    expect(state.events).toEqual(['close', 'disconnect', 'exit:1']);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('keeps the original ten-second deadline while disconnect is pending', async () => {
     signals.get('SIGTERM')!();
     closeDone(); stopDone(true);
