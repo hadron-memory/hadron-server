@@ -22,7 +22,8 @@ export type AssetOperation =
   | 'orphan-reaped'
   | 'orphan-skipped'
   | 'bytes-missing'
-  | 'scan-flipped';
+  | 'scan-flipped'
+  | 'public-link-set';
 
 export interface AssetAuditEvent {
   operation: AssetOperation;

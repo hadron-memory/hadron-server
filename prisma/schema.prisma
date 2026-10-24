@@ -1118,6 +1118,10 @@ model Asset {
   /// Soft-delete marker. Janitor sweeps R2 object + hard-deletes
   /// after 24h.
   deletedAt     DateTime?       @map("deleted_at")
+  /// #1667, cor:dmo:060:15 — the per-asset public-link opt-in. STORED POLICY, not
+  /// proof of publication: the anonymous hotlink also needs the deployment gate
+  /// and the existing eligibility checks. Every asset starts OFF.
+  publicLinkEnabled Boolean     @default(false) @map("public_link_enabled")
 
   memory Memory? @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
@@ -1970,26 +1974,30 @@ model UsageEvent {
 /// from), "Juno" (the mentee chat agent shared across MicroMentor
 /// orgs).
 model Agent {
-  id                   String          @id @default(cuid())
+  id                    String          @id @default(cuid())
   /// #2138 §3.5 — false: every worker cast from this Agent counts as HAVING a task (coordinators, the
   /// lifecycle agent), so it is expected to check every period.
-  usesTasks            Boolean         @default(true) @map("uses_tasks")
-  organizationId       String?         @map("organization_id")
+  usesTasks             Boolean         @default(true) @map("uses_tasks")
+  /// #2162 (cor:agt:050:27) — when a task one of this Agent's workers had started finishes or is cancelled, and it holds
+  /// no other started task, the platform asks the worker's host to reset its context: a shed, never a session end.
+  /// Off by default; written by whoever manages the Agent, like `usesTasks`.
+  resetContextAfterTask Boolean         @default(false) @map("reset_context_after_task")
+  organizationId        String?         @map("organization_id")
   /// User owner of a user-owned Agent (rooted on the bare `<handle>` — #697 v2,
   /// no `@` sigil). The org/owner XOR is ENFORCED — `chk_agent_owner_xor` in
   /// post-push.sql: `(organization_id IS NULL) <> (owner_user_id IS NULL)` — so
   /// exactly one of `organizationId`/`ownerUserId` is non-null.
-  ownerUserId          String?         @map("owner_user_id")
-  ownerUser            User?           @relation("AgentOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  ownerUserId           String?         @map("owner_user_id")
+  ownerUser             User?           @relation("AgentOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   /// Globally unique identifier (e.g. "micromentor.org:juno");
   /// derived from `org.urn + ":" + slug`.
-  urn                  String          @unique
+  urn                   String          @unique
   /// Display name of this agent.
-  name                 String
-  description          String?
+  name                  String
+  description           String?
   /// Agent prompt template. {{name}}/{{role}} bind to the Worker's identity
   /// for a worker briefing, or to this Agent's name/role for a chat.
-  systemPrompt         String?         @map("system_prompt")
+  systemPrompt          String?         @map("system_prompt")
   /// #2045 (S8, cor:agt:040:07) — this Agent's boot-prompt POINTER: the id of a
   /// compiled boot-prompt node (`nodeType = 'compiled-boot-prompt'`), never its
   /// source. NO foreign key: nodes are hard-deleted on some paths (deleteNode
@@ -1999,28 +2007,28 @@ model Agent {
   /// read only when the row is gone; both are set or both NULL
   /// (chk_*_boot_prompt_pointer_pair, prisma/boot-prompt-pointer-invariants.sql).
   /// Written only through `setBootPromptPointer` (src/lib/bootPromptPointer.ts).
-  bootPromptNodeId     String?         @map("boot_prompt_node_id")
-  bootPromptUrn        String?         @map("boot_prompt_urn")
+  bootPromptNodeId      String?         @map("boot_prompt_node_id")
+  bootPromptUrn         String?         @map("boot_prompt_urn")
   /// Memory containing conversation designs (stages, prompts,
   /// partials). Universally read-only from any App context post-008
   /// (DEVELOP-from-App is dropped per R-10); edits happen in the
   /// Agent ownership surface.
-  systemMemoryId       String?         @map("system_memory_id")
+  systemMemoryId        String?         @map("system_memory_id")
   /// PUBLIC | ORGANIZATION | PERSONAL (035-visibility-enum-cleanup gave
   /// agents their own enum). PERSONAL is the creator-only draft state.
-  visibility           AgentVisibility @default(PERSONAL)
+  visibility            AgentVisibility @default(PERSONAL)
   /// Opt-in marketplace catalogue flag (cor:acl:080:04): whether this agent is
   /// advertised in the marketplace browse. DISTINCT from `visibility` — PUBLIC
   /// governs access, this governs advertisement. Contributes to the owner org's
   /// discoverability (cor:acl:080:02) only when that org is activated.
-  listedOnMarketplace  Boolean         @default(false) @map("listed_on_marketplace")
+  listedOnMarketplace   Boolean         @default(false) @map("listed_on_marketplace")
   /// Coarse behavior hint — see AgentType enum doc. Largely legacy
   /// post-008.
-  type                 AgentType       @default(ASSISTANT)
+  type                  AgentType       @default(ASSISTANT)
   /// Surfaces this Agent is designed for (free-form per 008 R-9; v1
   /// known values: 'chat', 'slack', 'mcp', 'web'). Distinct from the
   /// per-App `surfaces` — this is the *design-time* declaration.
-  surfaces             String[]        @default([])
+  surfaces              String[]        @default([])
   // 036-ai-service-config: the legacy ai_provider/ai_model/
   // ai_api_key_encrypted/ai_api_key_preview columns were dropped in favor
   // of Agent-owned AiServiceConfig rows (the Agent's design-time default
@@ -2029,15 +2037,15 @@ model Agent {
   /// Loc of the currently-published revision of the Agent's system
   /// memory. Lets the Builder ship draft revisions without affecting
   /// running Apps.
-  publishedRevisionLoc String?         @map("published_revision_loc")
+  publishedRevisionLoc  String?         @map("published_revision_loc")
   /// Optimistic editor-lock owner (one Builder at a time can hold the
   /// edit lock on the system memory).
-  editorLockUserId     String?         @map("editor_lock_user_id")
+  editorLockUserId      String?         @map("editor_lock_user_id")
   /// When the editor lock expires (auto-released on stale).
-  editorLockExpiresAt  DateTime?       @map("editor_lock_expires_at")
+  editorLockExpiresAt   DateTime?       @map("editor_lock_expires_at")
   /// Agent working state (per-user data like family budget,
   /// preferences); automatically available to the LLM as context.
-  properties           Json?
+  properties            Json?
   // 008-agent-installation (2026-05-02): Agent declares per-deployment memory
   // provisioning shape. Schema: { appMemory: 'shared' | 'user' | 'none' }.
   // Personal-class provisioning is implicit (lazy on first user-attributed write).
@@ -2045,11 +2053,11 @@ model Agent {
   /// provisioned. Shape: `{ appMemory: 'shared' | 'user' | 'none' }`.
   /// `personalMemory` provisioning is implicit (lazy-create on first
   /// user-attributed write). 008-agent-installation FR-008.
-  memoryProvisioning   Json            @default("{\"appMemory\": \"shared\"}") @map("memory_provisioning")
+  memoryProvisioning    Json            @default("{\"appMemory\": \"shared\"}") @map("memory_provisioning")
   /// Spec 049 Phase 5 (plan §3.5 recommendation): the defaults this Agent's
   /// install-created register row is made with — `{ mentionOnly?: boolean }`.
   /// A scalar default, not a reference that can rot; null = platform defaults.
-  registerDefaults     Json?           @map("register_defaults")
+  registerDefaults      Json?           @map("register_defaults")
   // 008-agent-installation (2026-05-02): Agent declares membership constraints.
   // Schema: { maxMembers: number | 'unlimited', memberRoles: string[] }.
   // Enforced at AppMember invite-acceptance time.
@@ -2057,7 +2065,7 @@ model Agent {
   /// Agent. Shape: `{ maxMembers: number | 'unlimited', memberRoles:
   /// string[] }`. `maxMembers` enforced at AppMember
   /// invite-acceptance time. 008-agent-installation FR-009.
-  installationPolicy   Json            @default("{\"maxMembers\": \"unlimited\", \"memberRoles\": [\"owner\"]}") @map("installation_policy")
+  installationPolicy    Json            @default("{\"maxMembers\": \"unlimited\", \"memberRoles\": [\"owner\"]}") @map("installation_policy")
   // #928 persona dressing, re-cut to the Worker model by #974 (cor:agt:020:01,
   // D-2026-08-14-004): a persona is UNIVERSAL DRESSING on an Agent — a role
   // plus a template prompt that let any agent present as a colleague. The
@@ -2070,14 +2078,14 @@ model Agent {
   /// Persona role — free string with conventions ("backend-engineer").
   /// A dedicated column so roster/casting queries can filter without
   /// parsing the prompt.
-  personaRole          String?         @map("persona_role")
+  personaRole           String?         @map("persona_role")
   /// #1885 (cor:dmo:050:14) — the one base Agent this Agent extends, or null.
   /// The child inherits its base chain's system-memory nodes (except boot
   /// prompts). One base, no cycles, at most 4 Agents in a chain counting this
   /// one: enforced by `src/lib/agentBase.ts`, the only writer, and backstopped
   /// by `agent_base_guard` (prisma/agent-base-invariants.sql). `Restrict`, as
   /// for an imported Agent: a live child keeps its base from being removed.
-  extendsAgentId       String?         @map("extends_agent_id")
+  extendsAgentId        String?         @map("extends_agent_id")
   /// #1892 (cor:dmo:050:15) — the index node whose incoming, trigger-labelled
   /// edges list this Agent's own tasks; null when it names none. Written only
   /// by `setAgentIndexRefs`, read by src/lib/agentDefinitionLists.ts.
@@ -2088,13 +2096,13 @@ model Agent {
   tasksIndexRef        String?         @map("tasks_index_ref")
   /// #1892 (cor:dmo:050:16) — the index node whose incoming, trigger-labelled
   /// edges list the processes this Agent starts or owns; null when none.
-  processesIndexRef    String?         @map("processes_index_ref")
-  createdAt            DateTime        @default(now()) @map("created_at")
-  createdBy            String?         @map("created_by")
-  updatedAt            DateTime?       @updatedAt @map("updated_at")
-  updatedBy            String?         @map("updated_by")
-  deletedAt            DateTime?       @map("deleted_at")
-  deletedBy            String?         @map("deleted_by")
+  processesIndexRef     String?         @map("processes_index_ref")
+  createdAt             DateTime        @default(now()) @map("created_at")
+  createdBy             String?         @map("created_by")
+  updatedAt             DateTime?       @updatedAt @map("updated_at")
+  updatedBy             String?         @map("updated_by")
+  deletedAt             DateTime?       @map("deleted_at")
+  deletedBy             String?         @map("deleted_by")
 
   /// Online URN-shape migration gate (spec 021 FR-032, repurposed for the #697
   /// v1→v2 emission flip). Null = pre-normalization row; set = row normalized
@@ -3374,6 +3382,8 @@ model App {
   /// #1707 — hosts that registered which workers they can launch (cor:agt:070:01).
   hostRegistrations       HostRegistration[]
   hostOperations          HostOperation[]
+  /// #2162 — the context resets of this App's workers.
+  contextResets           ContextReset[]
   /// #2022 (S6, cor:agt:090) — the App's stop signals, live and ended.
   stopSignals             TeamStopSignal[]
   launchGrants            LaunchGrant[]
@@ -3900,6 +3910,8 @@ model Worker {
   appGrants            AppGrant[]
   launchableVia        HostRegistrationWorker[]
   hostOperations       HostOperation[]
+  /// #2162 — this worker's context resets (cor:agt:050:27).
+  contextResets        ContextReset[]
   /// #2022 — worker- and team-scope stop signals naming this worker as target.
   stopSignalsTargeting TeamStopSignal[]
 
@@ -5661,20 +5673,28 @@ model AgentTeamAlarmSchedule {
 /// The actor ids follow the #1610 shape. Shape: chk_worker_availability_shape
 /// (prisma/agent-task-stall-invariants.sql).
 model WorkerAvailability {
-  workerId      String    @id @map("worker_id")
+  workerId              String    @id @map("worker_id")
   /// 'available' | 'unavailable'.
-  state         String
+  state                 String
   /// Unavailable only: 'stalled' | 'out-of-tokens' | 'host-down' | 'other'.
-  reason        String?
-  until         DateTime?
-  setAt         DateTime  @map("set_at")
-  setBy         String    @map("set_by")
-  setByUserId   String?   @map("set_by_user_id")
-  setByWorkerId String?   @map("set_by_worker_id")
-  setByAgentId  String?   @map("set_by_agent_id")
+  reason                String?
+  until                 DateTime?
+  setAt                 DateTime  @map("set_at")
+  setBy                 String    @map("set_by")
+  setByUserId           String?   @map("set_by_user_id")
+  setByWorkerId         String?   @map("set_by_worker_id")
+  setByAgentId          String?   @map("set_by_agent_id")
   /// #1709 — the host whose key set this record (`setBy = host` only), so a
   /// host clears only its own marks (cor:agt:060:08).
-  setByHostId   String?   @map("set_by_host_id")
+  setByHostId           String?   @map("set_by_host_id")
+  /// #2162 (cor:agt:050:27) — a `resetting` mark only: the instant the host reported the old agent stopped. The
+  /// worker's first activity AFTER it ends the mark (the relaunched agent's first call); null while the old agent may
+  /// still be running, when no activity ends it.
+  clearsOnActivityAfter DateTime? @map("clears_on_activity_after")
+  /// #2162 (cor:agt:050:27) — a `resetting` mark only, and always on one: the reset that claimed it. A reset moves or
+  /// releases only its own mark, so an older reset still open after its lease lapsed never touches a newer one's.
+  /// No FK: both rows go with their worker (cascade), and the shape CHECK pairs this with the reason.
+  contextResetId        String?   @map("context_reset_id")
 
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
 
@@ -5754,6 +5774,9 @@ model HostRegistration {
   registeredAt        DateTime  @default(now()) @map("registered_at")
   refreshedAt         DateTime  @map("refreshed_at")
   lostAt              DateTime? @map("lost_at")
+  /// #2162 (cor:agt:070:01, Proposed) — the capability-gated operation types this host declared it performs. A host
+  /// is never issued such a type unless its live registration lists it; today that is only `worker.reset-context`.
+  capabilities        String[]  @default([])
 
   app         App                      @relation(fields: [appId], references: [id], onDelete: Cascade)
   workers     HostRegistrationWorker[]
@@ -5894,6 +5917,50 @@ model LaunchGrant {
 
   @@index([operationId])
   @@map("launch_grants")
+}
+
+/// #2162 (cor:agt:050:27) — one context reset of a worker, requested when a task it had started finished or was
+/// cancelled. At most one per task (`taskId` unique: a task ends once). The phase only moves forward:
+/// requested → claimed → checkpointed → stop-granted → agent-stopped → relaunched → done, or to `refused` / `failed`
+/// with a closed `reason`. `epoch` moves at claim and at every cancellation, so a host call naming an older epoch is
+/// refused STALE_EPOCH. The host operation keeps its own 070:02 status; this row is the reset's protocol state.
+/// Never reads or writes the task's outcome.
+model ContextReset {
+  id                   String    @id
+  appId                String    @map("app_id")
+  workerId             String    @map("worker_id")
+  /// The worker's session open when the task ended: the fence the claim re-checks.
+  sessionId            String    @map("session_id")
+  taskId               String    @unique @map("task_id")
+  /// The host the reset was issued to; null when no capable live host registered the worker (HOST_UNSUPPORTED).
+  hostId               String?   @map("host_id")
+  hostOperationId      String?   @unique @map("host_operation_id")
+  phase                String
+  /// Refused or failed only: a word from the closed set (src/lib/contextReset/types.ts).
+  reason               String?
+  epoch                Int       @default(0)
+  requestedAt          DateTime  @map("requested_at")
+  claimedAt            DateTime? @map("claimed_at")
+  /// The agent process the host observed at claim: `{pid, startTime}`.
+  claimProcess         Json?     @map("claim_process")
+  /// `{checkpointNodeId, sessionId, taskId}`, registered before any process control.
+  recoveryRef          Json?     @map("recovery_ref")
+  recoveryRegisteredAt DateTime? @map("recovery_registered_at")
+  stopGrantedAt        DateTime? @map("stop_granted_at")
+  stopLeaseMs          Int?      @map("stop_lease_ms")
+  agentStoppedAt       DateTime? @map("agent_stopped_at")
+  relaunchedAt         DateTime? @map("relaunched_at")
+  relaunchProcess      Json?     @map("relaunch_process")
+  /// When a cancellation found a stop lease outstanding: the mark lifts no earlier than this.
+  releasePendingAt     DateTime? @map("release_pending_at")
+  endedAt              DateTime? @map("ended_at")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([workerId, phase])
+  @@index([phase])
+  @@map("context_resets")
 }
 
 /// #1709 (cor:agt:050:10) — a task's request that its assignee end its worker
@@ -6404,4 +6471,21 @@ model AgentCloneAudit {
 
   @@index([sourceAgentId])
   @@map("agent_clone_audits")
+}
+
+/// #1667, cor:dmo:060:15 — append-only record of every successful per-asset
+/// public-link switch call: who, when, to what. Written in the SAME transaction
+/// as the flag. Deliberately NO foreign keys: the record must outlive the asset
+/// row (the janitor hard-deletes assets) and the actor.
+model AssetPublicLinkAudit {
+  id                String   @id @map("id")
+  assetId           String   @map("asset_id")
+  memoryId          String   @map("memory_id")
+  actorUserId       String   @map("actor_user_id")
+  enabled           Boolean
+  previouslyEnabled Boolean  @map("previously_enabled")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([assetId, createdAt])
+  @@map("asset_public_link_audits")
 }

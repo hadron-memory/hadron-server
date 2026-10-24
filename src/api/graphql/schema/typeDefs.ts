@@ -349,7 +349,7 @@ export const typeDefs = `#graphql
   #
   # Every entity's paginated list query returns the same { items, total }
   # shape so a client can drive one generic pager for all of them. total is
-  # the exact full count for the query's scope+filter; limit defaults to 50
+  # the exact full count for the query's scope+filter; limit defaults to 20
   # (capped 200) and limit: 0 returns just the total (the cheap count).
 
   type MemoriesPage {
@@ -4289,6 +4289,8 @@ export const typeDefs = `#graphql
     listedOnMarketplace: Boolean!
     "#2138: false means every Worker cast from this Agent counts as having a task and is expected to check its team channel every period (coordinators, the lifecycle agent). Default true."
     usesTasks: Boolean!
+    "#2162 (hrn:node:hadronmemory.com:specs:cor:agt:050:27): when a task one of this Agent's workers had started finishes or is cancelled, and it holds no other started task, its host resets the worker's context (a shed: the binding and session stay). Default false. Set by whoever manages the Agent."
+    resetContextAfterTask: Boolean!
     type: AgentType!
     surfaces: [String!]!
     # #928/#974 persona dressing (cor:agt:020:01): universal metadata that
@@ -6750,12 +6752,34 @@ export const typeDefs = `#graphql
     it. A deliberate, temporary posture; see src/api/assetPublic.ts. Do
     not present it in a UI as though it were access-controlled.
 
-    Null when the server has no BASE_URL configured (no canonical
-    origin to build an absolute URL from), when the asset is not
-    CLEAN, or when its memory is encrypted — encrypted memories are
-    never hotlinkable, since an anonymous request holds no session key.
+    Null unless the asset would be served right now: its per-asset
+    switch (publicLinkEnabled) is on, the deployment switch is on, and it is
+    CLEAN in a live unencrypted memory. Also null when the server has no
+    BASE_URL configured (no canonical origin to build an absolute URL from)
+    even though it would be served, so null is NEVER proof the switch is off.
     """
     publicUrl:   String
+    """
+    #1667 — the per-asset public-link opt-in. STORED POLICY, not
+    proof of publication: the anonymous link also needs the deployment switch
+    (publicLinkAvailable) and a live, CLEAN asset in an unencrypted memory.
+    Every asset starts false. Reading it grants no Asset read right.
+    """
+    publicLinkEnabled: Boolean!
+    """
+    Whether THE CALLER may switch this asset's public link right now: the
+    memory's manager under the shared class-manager predicate, never a mere
+    writer, and strictly the owner in a personal or private memory. False in a
+    session's memory and in an encrypted memory. Not a download capability.
+    """
+    canManagePublicLink: Boolean!
+    """
+    Whether this deployment serves public links at all
+    (ASSET_PUBLIC_HOTLINK_ENABLED). Independent of the stored opt-in, of who is
+    asking, of the scan state and of whether a canonical origin is configured.
+    Hide the switch when false; never infer this from publicUrl.
+    """
+    publicLinkAvailable: Boolean!
   }
 
   enum UploadIntent {
@@ -7295,7 +7319,7 @@ export const typeDefs = `#graphql
     """
     #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:07) — an App's stop signals, oldest set first. A person in the App sees
     every signal (worker narrows to those covering that worker now); a worker's session sees the live ones covering it; a
-    host key sees its own host's. includeEnded adds ended ones (not for a worker's session). first: default 50, max 200.
+    host key sees its own host's. includeEnded adds ended ones (not for a worker's session). first: default 20, max 200.
     """
     teamStopSignals(appRef: String!, worker: String, includeEnded: Boolean, first: Int, after: String): StopSignalPage!
     """
@@ -7314,7 +7338,7 @@ export const typeDefs = `#graphql
     #1705 — a team App's agent tasks, newest first. Party filters combine with the other selectors;
     owner / assignee name a party of the App (a ref naming nobody matches
     nothing). queued selects pending tasks with no assignee; rootsOnly selects roots. These
-    take precedence over status and parentTaskId respectively. limit defaults to 50 (cap 200).
+    take precedence over status and parentTaskId respectively. limit defaults to 20 (cap 200).
     Readers: the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:050:21), or the App's own live key
     without a session binding (#1755).
     An App you do not participate in answers APP_NOT_FOUND, exactly like an
@@ -7344,7 +7368,7 @@ export const typeDefs = `#graphql
     order. To read the next page pass after: the id of the last event you
     read; the cursor is the (createdAt, id) pair, so events sharing a
     timestamp are never skipped. since is a coarse time filter (strictly
-    after), not a continuation. limit defaults to 50 (cap 200).
+    after), not a continuation. limit defaults to 20 (cap 200).
     """
     agentTeamEvents(
       appRef: ID!
@@ -7557,7 +7581,7 @@ export const typeDefs = `#graphql
     who is not a member of orgId gets an empty page (total: 0) — no
     org-existence disclosure; membership-gated for everyone, no admin bypass.
 
-    Paged in the repo standard idiom: limit (default 50, capped 200) + offset
+    Paged in the repo standard idiom: limit (default 20, capped 200) + offset
     (default 0), with total in the envelope. NOTE: total is the ranked-match
     count WITHIN the per-entity candidate bound (a fixed cap per entity type),
     not an unbounded COUNT — deep paging past that bound is not surfaced. See
@@ -7590,7 +7614,7 @@ export const typeDefs = `#graphql
     source-side) memory the caller can read, AND-narrowed by the filter.
     orgId follows cor:api:100:01 (member -> scope, non-member -> empty page,
     no disclosure, no admin bypass). Deterministic loc-ascending order
-    (id tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
+    (id tiebreak); limit default 20 / cap 200; limit: 0 -> count only.
     """
     edges(filter: EdgeFilter, orgId: ID, limit: Int, offset: Int): EdgesPage!
 
@@ -7733,7 +7757,7 @@ export const typeDefs = `#graphql
     verifyMemoryNodes(memoryRef: String!): MemoryIntegrityReport!
 
     "#1606 — the discussion on a node (ID or URN), newest thread first. Read-gated on the node's memory; an unreadable or missing node is COMMENT_TARGET_NOT_FOUND."
-    commentThreads(targetRef: ID!, state: [CommentThreadState!], limit: Int = 50, offset: Int = 0): CommentThreadPage!
+    commentThreads(targetRef: ID!, state: [CommentThreadState!], limit: Int = 20, offset: Int = 0): CommentThreadPage!
     "#1606 — one comment by ID or URN; null when missing or unreadable."
     comment(ref: ID!): Comment
 
@@ -7754,7 +7778,7 @@ export const typeDefs = `#graphql
       urgency: [DecisionUrgency!]
       authorizes: Boolean
       sort: DecisionSort = PORTAL_DEFAULT
-      limit: Int = 50
+      limit: Int = 20
       offset: Int = 0
     ): DecisionPage!
     "#1641 — re-render a decision from its payload and check it against its content, data and approval: the findings behind its state."
@@ -7861,7 +7885,7 @@ export const typeDefs = `#graphql
     githubUsername by substring, email by exact match, and name for platform
     admins or users sharing one of the viewer's active org memberships.
     Name-ascending order (id
-    tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
+    tiebreak); limit default 20 / cap 200; limit: 0 -> count only.
     """
     users(filter: UserFilter, limit: Int, offset: Int): UsersPage!
 
@@ -7891,7 +7915,7 @@ export const typeDefs = `#graphql
     Uniform paginated admin-impersonation audit list (createdAt-desc).
     Platform admins may omit orgId (unscoped); everyone else must name an
     org they are a live ADMIN/OWNER of. filter.activeOnly keeps only
-    currently-live sessions. limit default 50 / cap 200.
+    currently-live sessions. limit default 20 / cap 200.
     """
     impersonationSessions(orgId: String, filter: ImpersonationSessionFilter, limit: Int, offset: Int): ImpersonationSessionList!
 
@@ -7901,7 +7925,7 @@ export const typeDefs = `#graphql
     get every live org (the established admin unscoped reach) unless
     filter.memberOnly restricts the list to their own memberships (the old
     myOrganizations view, as a slice-as-filter). Name-ascending order (id
-    tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
+    tiebreak); limit default 20 / cap 200; limit: 0 -> count only.
     """
     organizations(filter: OrganizationFilter, limit: Int, offset: Int): OrganizationsPage!
 
@@ -7981,7 +8005,7 @@ export const typeDefs = `#graphql
     (own personal/private + that org's owned + subscribed memories);
     non-member -> empty page, no existence disclosure, no admin bypass.
 
-    Name-ascending order (id tiebreak); limit default 50 / cap 200;
+    Name-ascending order (id tiebreak); limit default 20 / cap 200;
     limit: 0 -> count only.
     """
     memories(filter: MemoryFilter, orgId: ID, limit: Int, offset: Int): MemoriesPage!
@@ -8037,7 +8061,7 @@ export const typeDefs = `#graphql
     Uniform paginated Slack-connection list (cor:api:120). Default scope:
     the caller's member orgs. orgId follows cor:api:100:01 (member -> that
     org, non-member -> empty page, no disclosure, no admin bypass).
-    Team-name-ascending order (id tiebreak); limit default 50 / cap 200;
+    Team-name-ascending order (id tiebreak); limit default 20 / cap 200;
     limit: 0 -> count only.
     """
     slackConnections(orgId: ID, limit: Int, offset: Int): SlackConnectionsPage!
@@ -8053,7 +8077,7 @@ export const typeDefs = `#graphql
     Uniform paginated MCP-server list (cor:api:120). Default scope: the
     caller's member orgs. orgId follows cor:api:100:01 (member -> that
     org, non-member -> empty page, no disclosure, no admin bypass).
-    Slug-ascending order (id tiebreak); limit default 50 / cap 200;
+    Slug-ascending order (id tiebreak); limit default 20 / cap 200;
     limit: 0 -> count only.
     """
     mcpServers(orgId: ID, limit: Int, offset: Int): McpServersPage!
@@ -8083,7 +8107,7 @@ export const typeDefs = `#graphql
     surface). ownerRef accepts ID or URN (cor:api:140) and defaults to the
     caller for ownerType user. An unresolvable ref or a non-entitled owner
     yields an empty page — no disclosure. Name-ascending order (id
-    tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
+    tiebreak); limit default 20 / cap 200; limit: 0 -> count only.
     """
     secrets(ownerType: String!, ownerRef: ID, limit: Int, offset: Int): SecretsPage!
 
@@ -8098,7 +8122,7 @@ export const typeDefs = `#graphql
     Uniform paginated Home Assistant instance list (cor:api:120). Default
     scope: the caller's member orgs. orgId follows cor:api:100:01 (member
     -> that org, non-member -> empty page, no disclosure, no admin
-    bypass). Slug-ascending order (id tiebreak); limit default 50 / cap
+    bypass). Slug-ascending order (id tiebreak); limit default 20 / cap
     200; limit: 0 -> count only.
     """
     homeAssistantInstances(orgId: ID, limit: Int, offset: Int): HomeAssistantInstancesPage!
@@ -8209,7 +8233,7 @@ export const typeDefs = `#graphql
     doesn't carry a userId, so org membership is the routing); platform
     ADMIN/OWNER unscoped get every live App. orgId follows cor:api:100:01
     (member -> scope, non-member -> empty page, no disclosure, no admin
-    bypass). Name-ascending order (id tiebreak); limit default 50 / cap 200;
+    bypass). Name-ascending order (id tiebreak); limit default 20 / cap 200;
     limit: 0 -> count only. filter.ownedByMe (#782) narrows to the caller's own
     user-owned (org-less) Apps for every caller including platform admins.
     """
@@ -8264,7 +8288,7 @@ export const typeDefs = `#graphql
     disclosure, no admin bypass). filter narrows by type / visibility.
     filter.ownedByMe (#782) narrows to the caller's own user-owned (org-less)
     agents for every caller including platform admins. Name-ascending order
-    (id tiebreak); limit default 50 / cap 200; limit: 0 -> count only.
+    (id tiebreak); limit default 20 / cap 200; limit: 0 -> count only.
     """
     agents(filter: AgentFilter, orgId: ID, limit: Int, offset: Int): AgentsPage!
 
@@ -8285,7 +8309,7 @@ export const typeDefs = `#graphql
     tenants (apps / appAgents / appCount / orgGrants / importedBy) are scoped to
     the caller's own access and come back empty for an outsider (#552, #757).
 
-    Name-ascending order (id tiebreak); limit default 50 / cap 200;
+    Name-ascending order (id tiebreak); limit default 20 / cap 200;
     limit: 0 -> count only.
     """
     publicAgents(filter: PublicAgentFilter, limit: Int, offset: Int): AgentsPage!
@@ -8330,7 +8354,7 @@ export const typeDefs = `#graphql
 
     memoryRef accepts the memory's ID or URN; a memory the caller can't read
     returns an empty page (total 0, no existence disclosure). Paged via limit
-    (default 1000, hard-capped 2000) + offset; total is the memory's full node
+    (default 20, hard-capped 2000) + offset; total is the memory's full node
     count so the client can show "N of M" and know when it has paged them all.
     limit: 0 returns an empty page with just the total — the cheap "how big is
     this memory" node count. Deterministic loc-ascending order so offset paging
@@ -8412,7 +8436,7 @@ export const typeDefs = `#graphql
     APP / AGENT owners. filter omitted entirely = the platform ADMIN/OWNER
     cross-owner view of every config (non-admin callers must filter).
 
-    Name-ascending order (id tiebreak); limit default 50 / cap 200;
+    Name-ascending order (id tiebreak); limit default 20 / cap 200;
     limit: 0 -> count only.
     """
     aiServiceConfigs(filter: AiServiceConfigFilter, limit: Int, offset: Int): AiServiceConfigsPage!
@@ -8436,7 +8460,7 @@ export const typeDefs = `#graphql
     memoryConfigTemplate(ref: ID!): MemoryConfigTemplate
 
     """
-    #1325 part (c) — the templates you manage, name-ascending. Default page 50,
+    #1325 part (c) — the templates you manage, name-ascending. Default page 20,
     at most 200; limit 0 returns the count only.
     """
     memoryConfigTemplates(filter: MemoryConfigTemplateFilter, limit: Int, offset: Int): MemoryConfigTemplatesPage!
@@ -8445,7 +8469,7 @@ export const typeDefs = `#graphql
     Spec 049 Phase 2 — paginated list of the scopes you may read, optionally
     narrowed by owner, by an App's resolution context, by name, and by the
     cor:api:100:01 orgId (member-gated, no admin bypass; non-member ⇒ empty
-    page). Name-ascending (id tiebreak); limit default 50 / cap 200; limit: 0
+    page). Name-ascending (id tiebreak); limit default 20 / cap 200; limit: 0
     ⇒ count only.
     """
     scopes(filter: ScopeFilter, orgId: ID, limit: Int, offset: Int): ScopesPage!
@@ -8472,7 +8496,7 @@ export const typeDefs = `#graphql
     """
     Spec 049 Phase 4 — Channels whose host memory you may read, narrowed by an
     App (its host memories' Channels) or by one memory, and by the cor:api:100:01
-    orgId. Loc-ascending (id tiebreak); limit default 50 / cap 200.
+    orgId. Loc-ascending (id tiebreak); limit default 20 / cap 200.
     """
     channels(filter: ChannelFilter, orgId: ID, limit: Int, offset: Int): ChannelsPage!
 
@@ -8486,7 +8510,7 @@ export const typeDefs = `#graphql
     Spec 049 Phase 5 — register entries you may read (§8.6), narrowed by owner
     (an App or an organization), Channel, or attendee (a Worker or an Agent),
     and by the cor:api:100:01 orgId. A filter naming something foreign returns
-    the same empty page as one naming nothing. Oldest first; limit default 50 / cap 200.
+    the same empty page as one naming nothing. Oldest first; limit default 20 / cap 200.
     """
     registerEntries(filter: RegisterEntryFilter, orgId: ID, limit: Int, offset: Int): RegisterEntriesPage!
 
@@ -8630,7 +8654,7 @@ export const typeDefs = `#graphql
     Message history for a saved chat. Returns plain role/content pairs
     suitable for feeding back into an LLM.
 
-    limit bounds the transcript to its MOST RECENT messages (default 100),
+    limit bounds the transcript to its MOST RECENT messages (default 20),
     and they are returned oldest-first. Stated because it was not: the window
     used to be taken from the other end, so a chat longer than the limit
     returned its opening forever (#1111), and a client author had no written
@@ -8686,7 +8710,7 @@ export const typeDefs = `#graphql
     worker's own posts. A user ref matches the handle alone. The ref must name this App's own
     staff or members (a Worker of the App, an AppMember, or the caller); an
     unresolvable or foreign mentionsRef yields the empty page identically (no
-    existence oracle). limit defaults to 50 (cap 200); limit: 0 returns only
+    existence oracle). limit defaults to 20 (cap 200); limit: 0 returns only
     total.
 
     Authorization: an AppMember of the App (any role), an org member with
@@ -8757,7 +8781,7 @@ export const typeDefs = `#graphql
     verbatim spelling; with no tool it matches either. sessionRef / tool / kind
     are equality filters; kind must be one of pr, issue, commit, branch, repo
     when given.
-    limit defaults to 50 (cap 200); limit: 0 returns only total.
+    limit defaults to 20 (cap 200); limit: 0 returns only total.
 
     Authorization: an AppMember of the App (any role), an org member with
     CONTRIBUTOR+ on the App's org, the owner of a user-owned App, or the
@@ -8910,7 +8934,7 @@ export const typeDefs = `#graphql
     assets(
       filter: AssetFilter
       orgId:  ID
-      limit:  Int = 50
+      limit:  Int = 20
       offset: Int = 0
     ): AssetsPage!
 
@@ -9227,7 +9251,7 @@ export const typeDefs = `#graphql
     #1709 — a host collects its own operations, oldest first: those still ISSUED (now marked COLLECTED) and those it
     collected and has not reported, except a worker.start whose launch grant is still live (#1928: a re-collection never
     revokes a launch in flight). Only its own host's, in its own App (hrn:node:hadronmemory.com:specs:cor:agt:070:04).
-    first: at most 200, default 50.
+    first: at most 200, default 20.
     """
     collectHostOperations(appRef: String!, first: Int): [HostOperation!]!
     """
@@ -9252,10 +9276,35 @@ export const typeDefs = `#graphql
     flight, in a worktree and family the live host registers for it (WORKER_NOT_HELD, WORKER_LIVE,
     WORKER_START_PENDING). worker.end: whoever manages the App only (else HOST_OPERATION_NOT_PERMITTED), naming an open
     session of the worker on a host that registers it (else BAD_HOST_OPERATION_ARGS). worker.deliver is the one type
-    not issued yet, HOST_OPERATION_NOT_ISSUABLE until a host has a delivery path for it (hadron-cli#829). An App key
+    not issued yet, HOST_OPERATION_NOT_ISSUABLE until a host has a delivery path for it (hadron-cli#829).
+    worker.reset-context is HOST_OPERATION_NOT_ISSUABLE here: the platform issues it when a task ends (#2162). An App key
     issues nothing (FORBIDDEN). An unregistered host is HOST_NOT_FOUND.
     """
     issueHostOperation(input: IssueHostOperationInput!): HostOperation!
+
+    """
+    #2162 — a context reset's protocol (hrn:node:hadronmemory.com:specs:cor:agt:050:27), for the host its
+    worker.reset-context operation was issued to, with that host's key only, after collecting the operation
+    (HOST_OPERATION_NOT_COLLECTED otherwise). Each step names the reset and its epoch (STALE_EPOCH when it moved), is
+    idempotent (a replay answers replayed: true), and is out of order CONTEXT_RESET_WRONG_PHASE. Another App's or host's
+    reset is CONTEXT_RESET_NOT_FOUND. The final outcome is reported with reportHostOperation: SUCCEEDED once relaunched,
+    or FAILED with a reason that starts with its code. claimContextReset takes the fence: the worker becomes unavailable
+    RESETTING, or the reset is refused SESSION_CHANGED, OTHER_WORK, UNAVAILABLE, PAUSED, SETTING_OFF or WORKER_GONE.
+    """
+    claimContextReset(input: ClaimContextResetInput!): ContextResetStep!
+    "#2162 — register the durable checkpoint before any process control. A wrong reference is RECOVERY_REF_INVALID and changes nothing."
+    registerContextResetRecovery(input: RegisterContextResetRecoveryInput!): ContextResetStep!
+    """
+    #2162 — the single stop grant per claim; a replay returns the same grant. The host signals only within stopLeaseMs of
+    the moment it SENT this request (CLOCK_BOOTTIME). Refused NO_RECOVERY_REF, CLAIM_LAPSED, PROCESS_CHANGED or NOT_IDLE.
+    """
+    authorizeContextResetStop(input: AuthorizeContextResetStopInput!): ContextResetStep!
+    "#2162 — the old agent stopped; its resetting mark now lasts until the relaunched agent's first activity."
+    reportContextResetAgentStopped(input: ContextResetStepInput!): ContextResetStep!
+    "#2162 — the agent was relaunched under its wrapper."
+    reportContextResetRelaunched(input: ReportContextResetRelaunchedInput!): ContextResetStep!
+    "#2162 — a failure after the claim that the host saw; the reset ends and the mark is released."
+    reportContextResetRelaunchFailed(input: ReportContextResetRelaunchFailedInput!): ContextResetStep!
 
     "#1747 — give a worker a named App grant (hrn:node:hadronmemory.com:specs:cor:agt:080:24). Whoever manages the App only. Idempotent."
     grantApp(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
@@ -10016,6 +10065,12 @@ export const typeDefs = `#graphql
     beginAssetUpload(input: BeginAssetUploadInput!): BeginAssetUploadResult!
     completeAssetUpload(input: CompleteAssetUploadInput!): Asset!
     setAgentAssetUploadEnabled(input: SetAgentAssetUploadEnabledInput!): App!
+    """
+    #1667 — switch an asset's anonymous public link on or off. Only whoever
+    manages the asset's memory; a refused request changes
+    nothing. Returns the asset.
+    """
+    setAssetPublicLink(assetRef: ID!, enabled: Boolean!): Asset!
     softDeleteAsset(assetId: ID!): Asset!
     restoreAsset(assetId: ID!): Asset!
 
@@ -10607,7 +10662,7 @@ export const typeDefs = `#graphql
 
     orgId accepts the org's ID or URN.
     """
-    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean): Agent!
+    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean): Agent!
     """
     Clone an Agent into an organization you administer: a new PERSONAL-draft Agent
     with its own copy of the source's system memory, its links and imports, and a recorded origin. Needs a
@@ -10638,7 +10693,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, registerDefaults: RegisterDefaultsInput): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, registerDefaults: RegisterDefaultsInput): Agent!
 
     """
     Soft-delete an Agent and its owned system memory. Requires management
@@ -13241,6 +13296,8 @@ export const typeDefs = `#graphql
     OUT_OF_TOKENS
     HOST_DOWN
     OTHER
+    "#2162 — a context reset is in progress (hrn:node:hadronmemory.com:specs:cor:agt:050:27). Set only by the platform; no caller sets it."
+    RESETTING
   }
 
   "Who set a worker's availability (hrn:node:hadronmemory.com:specs:cor:agt:060:08)."
@@ -13259,6 +13316,8 @@ export const typeDefs = `#graphql
     HOST
     "#1766 — the platform, recording that an until passed (hrn:node:hadronmemory.com:specs:cor:agt:060:02): the record is then AVAILABLE, set at the instant it lapsed."
     LAPSE
+    "#2162 — the platform's context reset (hrn:node:hadronmemory.com:specs:cor:agt:050:27): it set RESETTING, or released it."
+    CONTEXT_RESET
   }
 
   """
@@ -13296,6 +13355,8 @@ export const typeDefs = `#graphql
     refreshedAt: DateTime!
     "Refreshed within the App's lapse count of its poll intervals, now."
     live: Boolean!
+    "#2162 — the capability-gated operation types this host declared it performs (hrn:node:hadronmemory.com:specs:cor:agt:070:01, Proposed): worker.reset-context. A host is never issued one it did not declare."
+    capabilities: [String!]!
     workers: [HostRegistrationWorker!]!
   }
 
@@ -13330,10 +13391,11 @@ export const typeDefs = `#graphql
 
   """
   #1709 — one typed operation issued to one host (hrn:node:hadronmemory.com:specs:cor:agt:070:02, :03). type is one of
-  worktree.create, worker.start, worker.deliver, worker.end, worktree.remove; args are its typed arguments (ids and name
-  tokens only, never a command): worktree.create {workerId, repo, baseBranch, branchName, label}; worker.start
-  {workerId, worktree, family, taskId?}; worker.deliver {workerId, sessionId, eventId}; worker.end {workerId,
-  sessionId}; worktree.remove {workerId, worktree}. The per-type arguments are #1709's design, Proposed.
+  worktree.create, worker.start, worker.deliver, worker.end, worktree.remove, worker.reset-context; args are its typed
+  arguments (ids and name tokens only, never a command): worktree.create {workerId, repo, baseBranch, branchName,
+  label}; worker.start {workerId, worktree, family, taskId?}; worker.deliver {workerId, sessionId, eventId}; worker.end
+  {workerId, sessionId}; worktree.remove {workerId, worktree}; worker.reset-context {workerId, sessionId, taskId,
+  resetId} (#2162). The per-type arguments are #1709's design, Proposed.
   """
   type HostOperation {
     id: ID!
@@ -13387,6 +13449,104 @@ export const typeDefs = `#graphql
     pollIntervalSeconds: Int!
     "The whole list: it replaces the last registration's."
     workers: [RegisterHostWorkerInput!]
+    "#2162 — the capability-gated operation types this host performs, in full at every refresh: worker.reset-context. Omitted means none. Anything else is BAD_HOST_REGISTRATION."
+    capabilities: [String!]
+  }
+
+  "#2162 — the agent process a host observed: its pid and the kernel's start time for it (a token)."
+  input ObservedProcessInput {
+    pid: Int!
+    startTime: String!
+  }
+
+  "#2162 — a context reset step: the reset and the epoch the host holds (0 until claimed)."
+  input ContextResetStepInput {
+    appRef: String!
+    resetId: ID!
+    epoch: Int!
+  }
+
+  input ClaimContextResetInput {
+    appRef: String!
+    resetId: ID!
+    "The epoch the reset was collected at: 0."
+    epoch: Int!
+    "The agent process the host observed idle, which a later stop must still match."
+    process: ObservedProcessInput!
+  }
+
+  input RegisterContextResetRecoveryInput {
+    appRef: String!
+    resetId: ID!
+    epoch: Int!
+    "The checkpoint node the host wrote: its id or full URN, in the worker's own working memory."
+    checkpointNode: String!
+    "The reset's own session and task."
+    sessionId: ID!
+    taskId: ID!
+  }
+
+  input AuthorizeContextResetStopInput {
+    appRef: String!
+    resetId: ID!
+    epoch: Int!
+    "The agent process about to be stopped: the one the claim observed."
+    process: ObservedProcessInput!
+  }
+
+  input ReportContextResetRelaunchedInput {
+    appRef: String!
+    resetId: ID!
+    epoch: Int!
+    "The relaunched agent process."
+    process: ObservedProcessInput!
+  }
+
+  input ReportContextResetRelaunchFailedInput {
+    appRef: String!
+    resetId: ID!
+    epoch: Int!
+    "CHECKPOINT_FAILED, STAGING_FAILED, RELAUNCH_UNVERIFIED or RELAUNCH_BLOCKED."
+    reason: String!
+  }
+
+  """
+  #2162 — a worker's context reset (hrn:node:hadronmemory.com:specs:cor:agt:050:27): a shed, never a session end. One per
+  task at most. phase is requested, claimed, checkpointed, stop-granted, agent-stopped, relaunched, done, refused or
+  failed; reason names why a reset was refused or failed, from a closed set. epoch moves at the claim and at every
+  cancellation: a host step naming another is STALE_EPOCH.
+  """
+  type ContextReset {
+    id: ID!
+    appId: ID!
+    workerId: ID!
+    sessionId: ID!
+    taskId: ID!
+    hostId: String
+    hostOperationId: ID
+    phase: String!
+    reason: String
+    epoch: Int!
+    requestedAt: DateTime!
+    claimedAt: DateTime
+    recoveryRegisteredAt: DateTime
+    "When the single stop was granted; the host may act on it only within stopLeaseMs of its own send time."
+    stopGrantedAt: DateTime
+    stopLeaseMs: Int
+    agentStoppedAt: DateTime
+    relaunchedAt: DateTime
+    "When a cancellation found a stop lease outstanding: the resetting mark lifts no earlier than this."
+    releasePendingAt: DateTime
+    endedAt: DateTime
+  }
+
+  "#2162 — what a context reset step answered."
+  type ContextResetStep {
+    reset: ContextReset!
+    "This step refused or failed the reset, and why; the reset has ended. Null when the step was accepted."
+    refused: String
+    "The step had already been made: the recorded answer is returned, nothing changed."
+    replayed: Boolean!
   }
 
   input ReportHostOperationInput {

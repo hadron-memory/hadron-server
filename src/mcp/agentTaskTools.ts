@@ -463,7 +463,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
         const rows = await Q.agentTeamEvents({}, args, ctx);
         if (!rows.length) return textResult('No events match.');
         const lines = await Promise.all(rows.map((e) => renderEvent(e, ctx)));
-        const pageSize = args.limit ?? 50;
+        const pageSize = args.limit ?? 20;
         if (rows.length >= pageSize) lines.push(`\nMore may follow: pass after: "${rows[rows.length - 1].id}".`);
         return textResult(lines.join('\n'));
       }),
@@ -636,7 +636,7 @@ const SHAPE_HADRON_TASK_LIST = {
   parentTaskId: z.string().optional(),
   rootsOnly: z.boolean().optional(),
   queued: z.boolean().optional().describe('Only pending tasks with no assignee.'),
-  limit: z.number().int().nonnegative().optional().describe('Default 50, cap 200.'),
+  limit: z.number().int().nonnegative().optional().describe('Default 20, cap 200.'),
   offset: z.number().int().nonnegative().optional(),
   session: SESSION_READ,
 };
@@ -648,7 +648,7 @@ const SHAPE_HADRON_TEAM_EVENTS = {
   types: z.array(z.string()).optional().describe('e.g. task.assigned, task.finished.'),
   alarmsOnly: z.boolean().optional(),
   taskId: z.string().optional(),
-  limit: z.number().int().nonnegative().optional().describe('Default 50, cap 200.'),
+  limit: z.number().int().nonnegative().optional().describe('Default 20, cap 200.'),
   session: SESSION_READ,
 };
 

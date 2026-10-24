@@ -127,6 +127,8 @@ export interface CreateAgentCoreInput {
   usesTasks?: boolean | null;
   /** Re-run the caller's policy inside the prepared provisioning transaction. */
   authorize?: (fresh: Context) => Promise<void>;
+  /** #2162 (cor:agt:050:27): reset a worker's context when its task ends. Default false; null means the default. */
+  resetContextAfterTask?: boolean | null;
 }
 
 /**
@@ -291,6 +293,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
         // #928 persona dressing — pure metadata (see schema.prisma).
         personaRole: personaRoleNorm,
         ...(input.usesTasks != null ? { usesTasks: input.usesTasks } : {}),
+        ...(input.resetContextAfterTask != null ? { resetContextAfterTask: input.resetContextAfterTask } : {}),
         createdBy: ctx.userId ?? ctx.clientId ?? null,
       },
       include: AGENT_INCLUDE,
@@ -418,7 +421,7 @@ async function requireKnownImportedAgent(
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null },
+      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
@@ -481,12 +484,13 @@ export const agentMutations = {
         surfaces,
         personaRole,
         usesTasks,
+        resetContextAfterTask,
       });
     },
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, registerDefaults }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; registerDefaults?: { mentionOnly?: boolean | null } | null },
+      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, registerDefaults }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; registerDefaults?: { mentionOnly?: boolean | null } | null },
       ctx: Context,
     ) => {
       // #929 review: normalize persona dressing (blank-after-trim clears).
@@ -814,6 +818,9 @@ export const agentMutations = {
           // blank-after-trim string) clears the field; omitted preserves.
           ...(personaRoleNorm !== undefined ? { personaRole: personaRoleNorm } : {}),
           ...(usesTasks != null ? { usesTasks } : {}),
+          // #2162 (cor:agt:050:27, R116): the same gate and lock as usesTasks; null and omitted change nothing. Turning
+          // it off cancels nothing in flight: a reset's claim re-reads it (SETTING_OFF).
+          ...(resetContextAfterTask != null ? { resetContextAfterTask } : {}),
           // Spec 049 Phase 5: the install-row defaults — a scalar declaration,
           // stored as given; null clears to the platform defaults.
           ...(registerDefaults !== undefined

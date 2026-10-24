@@ -1440,11 +1440,12 @@ async function writeNodeCoreRaw(
             // meant create never held two keys at all: no new edge, nothing to
             // order against.
             //
-            // #1187 established the order (`acquireLockSet` / `compareLockKeys`)
-            // and merge and move now declare their full sets through it, so
-            // that constraint is GONE: ancestors-then-own-loc is already the
-            // global order (length-ascending), and taking this lock
-            // unconditionally would be safe today.
+            // #1187 made merge and move declare complete lock sets. #1214
+            // orders those sets by resolved advisory keys, not loc length:
+            // any additional key must join the complete set before acquisition.
+            // Ancestors-then-own-loc is no longer a safe acquisition order.
+            // This create/upsert branch still takes the own-loc key ONLY when
+            // there are no ancestors, as the condition below makes explicit.
             //
             // It stays root-level-only for the ORIGINAL, narrower reason —
             // redundancy. Two creates at one NESTED loc already serialize on

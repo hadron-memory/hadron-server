@@ -1,5 +1,5 @@
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
-import { systemMemoryReadGrants } from '../../../lib/auth/systemMemoryRead.js';
+import { createSystemMemoryGrantBatch, systemMemoryReadGrants, type SystemMemoryGrantBatch } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 // Helpers extracted from resolvers.ts (Step 1 of the resolver split).
 // Pure mechanical move: shared auth/include/AI-config/chat/asset helpers used
@@ -1066,6 +1066,8 @@ export function nodeNotFoundError(ref: string): GraphQLError {
 type MemoryRecordReadBatch = {
   memberOrgIds?: Promise<string[]>;
   accessibleIds?: Promise<string[] | null>;
+  /** #1813: the caller's system-record grant lookups, built from THIS list's ctx so it cannot span principals. */
+  systemGrants?: SystemMemoryGrantBatch;
 };
 
 /** Gate a record list without repeating membership and access-set queries per row. */
@@ -1153,6 +1155,7 @@ export async function canReadMemoryRecord(
   const accessible = () => batch
     ? (batch.accessibleIds ??= getAccessibleMemoryIds(ctx))
     : getAccessibleMemoryIds(ctx, memory.id);
+  const systemGrants = () => batch ? (batch.systemGrants ??= createSystemMemoryGrantBatch(ctx)) : undefined;
   if (memory.class === 'personal' || memory.class === 'private') {
     // Impersonation: personal-class records are invisible even though the
     // TARGET owns them — the shared-org scope excludes all identity-scoped
@@ -1173,13 +1176,13 @@ export async function canReadMemoryRecord(
     // an impersonation keep the hard-isolated content set below.
     if (ctx.sessionId && ctx.userId && !ctx.impersonation && !isRunPrincipal(ctx)
       && await ctx.db.memory.count({ where: { id: memory.id, isInstallMemory: true } }) > 0) {
-      return (await systemMemoryReadGrants(ctx.db, ctx, memory.id)).length > 0;
+      return (await systemMemoryReadGrants(ctx.db, ctx, memory.id, systemGrants())).length > 0;
     }
     if (ctx.sessionId || ctx.impersonation || isRunPrincipal(ctx) || !ctx.userId) {
       const ids = await accessible();
       return ids === null || ids.includes(memory.id);
     }
-    return (await systemMemoryReadGrants(ctx.db, ctx, memory.id)).length > 0;
+    return (await systemMemoryReadGrants(ctx.db, ctx, memory.id, systemGrants())).length > 0;
   }
   if (memory.ownerUserId != null) {
     // Impersonation: user-owned (spec 047) records are identity-scoped —
@@ -1985,10 +1988,10 @@ export function defaultAiConfigOf(
 // ── Uniform find-many surface (#473) — Spec: cor:api:120 ───────────────
 
 // Standard page bounds for the uniform `<entity>s(filter, orgId, limit,
-// offset)` list queries — matches the globalSearch idiom (default 50, cap
-// 200). `limit: 0` is preserved (an empty page with just `total` — the cheap
+// offset)` list queries — default 20 (#2211), cap
+// 200. `limit: 0` is preserved (an empty page with just `total` — the cheap
 // count, same contract as memoryNodes). Spec: cor:api:120:02.
-export const LIST_PAGE_DEFAULT = 50;
+export const LIST_PAGE_DEFAULT = 20;
 export const LIST_PAGE_MAX = 200;
 
 export function clampListTake(limit?: number | null): number {
@@ -2000,8 +2003,7 @@ export function clampListTake(limit?: number | null): number {
  * #2213 — size arguments of the `<field>Page` siblings (cor:api:120:04). An
  * omitted or null limit pages at 20; 0 is count-only (an empty page with the
  * real total); a negative limit is 0; a limit over 200 is served as 200, never a
- * refusal. A negative or omitted offset is 0. Distinct from `clampListTake`, whose
- * default of 50 the older `<entity>s` lists keep.
+ * refusal. A negative or omitted offset is 0. Same default as `clampListTake` since #2211.
  */
 export const PAGE_ARGS_DEFAULT = 20;
 export const PAGE_ARGS_MAX = 200;

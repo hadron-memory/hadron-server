@@ -899,7 +899,7 @@ export const appRunQueries = {
   ) => {
     const app = await requireScheduleAdmin(ctx, appRef);
     const where = { appId: app.id, deletedAt: null };
-    const take = Math.min(Math.max(limit ?? 50, 1), 200);
+    const take = Math.min(Math.max(limit ?? 20, 1), 200);
     const [items, total] = await Promise.all([
       ctx.db.agentSchedule.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
       ctx.db.agentSchedule.count({ where }),
@@ -971,7 +971,7 @@ export const appRunQueries = {
       // review, Gemini).
       ...(parentRunId !== undefined ? { parentRunId } : {}),
     };
-    const take = Math.min(Math.max(limit ?? 50, 1), 200);
+    const take = Math.min(Math.max(limit ?? 20, 1), 200);
     const [items, total] = await Promise.all([
       ctx.db.appRun.findMany({
         where,
@@ -991,7 +991,7 @@ export const appRunQueries = {
   ) => {
     const app = await requireScheduleAdmin(ctx, appRef);
     const where = { appId: app.id, deletedAt: null };
-    const take = Math.min(Math.max(limit ?? 50, 1), 200);
+    const take = Math.min(Math.max(limit ?? 20, 1), 200);
     const [items, total] = await Promise.all([
       ctx.db.agentWebhook.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
       ctx.db.agentWebhook.count({ where }),
@@ -1010,7 +1010,7 @@ export const appRunQueries = {
     const { id: organizationId } = await resolveOrgRef(ctx.db, orgRef);
     await requireOrgRole(ctx, organizationId, 'ADMIN');
     const where = { organizationId };
-    const take = Math.min(Math.max(limit ?? 50, 1), 200);
+    const take = Math.min(Math.max(limit ?? 20, 1), 200);
     const [items, total] = await Promise.all([
       ctx.db.actionTicket.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
       ctx.db.actionTicket.count({ where }),
