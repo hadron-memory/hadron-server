@@ -21,7 +21,7 @@ vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: 
 let userId: string;
 let memoryId: string;
 let presentedKeyId: string | undefined;
-let requestRoles: string[] = ['ADMIN'];
+let requestRoles: Context['roles'] = ['ADMIN'];
 const ctx = (): Context => ({ db, userId, roles: requestRoles, ...(presentedKeyId ? { apiKeyId: presentedKeyId } : {}) });
 beforeEach(async () => {
   presentedKeyId = undefined;
