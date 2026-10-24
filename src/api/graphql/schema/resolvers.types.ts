@@ -1341,6 +1341,11 @@ export const typeResolvers = {
     },
   },
   Memory: {
+    // A nested Memory parent is not independent authorization to expose per-file locs.
+    lastSyncReport: async (m: { id: string }, _: unknown, ctx: Context) => {
+      const record = await loadReadableMemoryRecord(ctx, m.id) as { lastSyncReport: string | null } | null;
+      return record?.lastSyncReport ?? null;
+    },
     // #1448, derived from the nodes since #1591 (corpusMintStateOf): DRAFT
     // while no live node is minted; corpusMintedAt is the latest node mint.
     corpusMintedAt: async (m: { id: string }, _: unknown, ctx: Context) =>
