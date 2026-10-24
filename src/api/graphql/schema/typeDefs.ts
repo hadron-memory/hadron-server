@@ -8972,6 +8972,12 @@ export const typeDefs = `#graphql
     teamRoles(appRef: ID!, teamAgentRef: ID, limit: Int, offset: Int): TeamRolesPage!
 
     """
+    #2024 — the live ticker templates of an Agent, by name. Anyone who can read the Agent. An Agent the caller cannot read answers
+    as absent (AGENT_NOT_FOUND).
+    """
+    agentTickerTemplates(agentRef: String!): [AgentTickerTemplate!]!
+
+    """
     Dry-run castWorker (#964): run the cast's exact resolution — same
     arguments, same typed refusals (WORKER_AGENT_NOT_FOUND / _AMBIGUOUS /
     _NOT_INSTALLED, WORKER_NAME_REQUIRED, WORKER_NAME_TAKEN,
@@ -8985,12 +8991,6 @@ export const typeDefs = `#graphql
     be gone at cast time — by design; the cast's uniqueness constraint
     remains the only allocation primitive.
     """
-    """
-    #2024 — the live ticker templates of an Agent, by name. Anyone who can read the Agent. An Agent the caller cannot read answers
-    as absent (AGENT_NOT_FOUND).
-    """
-    agentTickerTemplates(agentRef: String!): [AgentTickerTemplate!]!
-
     castWorkerPreview(
       appRef: ID!
       agentRef: ID
@@ -13128,10 +13128,6 @@ export const typeDefs = `#graphql
   }
 
   """
-  #1747 — a named wake schedule owned by one team App (hrn:node:hadronmemory.com:specs:cor:agt:080:01). Its URN is hrn:ticker:ROOT:APP-SLUG:SLUG,
-  computed from the App and the permanent slug. Ticks are computed, not stored; nothing reads a ticker until due wakes ship.
-  """
-  """
   #2024 — one ticker an Agent declares. Casting a worker from the Agent into an App creates the worker's tickers from the live
   templates and subscribes it, in the cast's own transaction. A SNAPSHOT: a later edit or removal reaches only future casts;
   existing workers and tickers are untouched. Identity is the id, never the name or the position. The cadence is the requested
@@ -13174,6 +13170,10 @@ export const typeDefs = `#graphql
     reasons: [TickerReason!]
   }
 
+  """
+  #1747 — a named wake schedule owned by one team App (hrn:node:hadronmemory.com:specs:cor:agt:080:01). Its URN is hrn:ticker:ROOT:APP-SLUG:SLUG,
+  computed from the App and the permanent slug. Ticks are computed, not stored; nothing reads a ticker until due wakes ship.
+  """
   type Ticker {
     id: ID!
     "The canonical URN. Null when it cannot be composed."
