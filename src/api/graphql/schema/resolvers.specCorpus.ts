@@ -1,7 +1,7 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
 import { liveTxContext } from './authorizedTx.js';
-import { liveCaller } from '../../../lib/tickers/liveCaller.js';
-import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+import { lockAgentDefinitionAuthority } from '../../../lib/auth/managedSystemMemory.js';
 // Draft spec corpora (#1447): the server-owned spec-corpus operations.
 //
 // #1450 — reserveSpecCitation. Contract:
@@ -88,11 +88,11 @@ export const specCorpusMutations = {
     try {
       completed = await withArchivePlanRetries(async (timeout) => {
         const effects: Array<() => void> = [];
-        const reserved = await ctx.db.$transaction(async (tx) => {
+        const reserved = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+          await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [memoryId]);
           let txCtx = withoutRequestCaches(ctx, tx);
           const authorizeAttempt = async () => {
-            const current = await liveCaller(ctx, tx);
-            if (!current) throw authorizationDenied();
+            const current = await liveTxContext(ctx, tx);
             txCtx = current;
             await concealUnreadableDenial(txCtx, memoryId, memoryRef, () => requireMemoryWriteAccess(txCtx, memoryId));
           };
@@ -1099,6 +1099,7 @@ async function rewriteWithRetry(
     // then read the settled revSeq and plan from that.
     await withIncludeHistoryTransaction(ctx.db, async (history) => {
       const tx = includeHistoryClient(history);
+      await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [corpus.id]);
       const fresh = await liveTxContext(ctx, tx);
       await concealUnreadableDenial(fresh, corpus.id, corpus.id, () => requireMemoryWriteAccess(fresh, corpus.id));
       return reconcileNodeWithIncludeHistory(history, node!.id, { expectedMemoryId: corpus.id });
@@ -1238,7 +1239,7 @@ async function mintMemoryNodes(
   const { id } = await resolveMemoryRef(ctx.db, memoryRef);
   await concealUnreadableDenial(ctx, id, memoryRef, () => mayMintNodes(ctx, id));
 
-  return ctx.db.$transaction(async (tx) => {
+  return withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
     if (dryRun) await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR NO KEY UPDATE`;
     else await fenceCorpusForMint(tx, id);
     const txCtx = withoutRequestCaches(ctx, tx);

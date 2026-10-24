@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../lib/includes/includeHistoryFence.js';
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
 import { stampEmbeddingObligation } from '../services/embedding/obligation.js';
@@ -757,6 +758,22 @@ export type AddEdgeResult =
   | { error: string }
   | { sourceUrn: string; targetUrn: string; edgeUrn: string; name: string | null; loc: string };
 
+/** Refresh the presented writer after waiting on the outer history fence. */
+async function withLiveMcpHistoryTransaction<T>(
+  database: Pick<typeof db, '$transaction'>,
+  presented: AuthContext,
+  memoryIds: string | readonly string[],
+  work: (tx: Prisma.TransactionClient, auth: AuthContext) => Promise<T>,
+  options: { timeout?: number; maxWait?: number } = {},
+): Promise<T> {
+  return withIncludeHistoryClientTransaction(database, async (tx) => {
+    // Definition authority must precede presented-key/root row locks.
+    await lockAgentDefinitionAuthority(tx, presented.userId ?? null, memoryIds);
+    const fresh = await liveTxContext({ ...presented, db: database as typeof db }, tx);
+    return work(tx, { ...presented, roles: fresh.roles });
+  }, options);
+}
+
 export async function addEdge(args: {
   sourceUrn: string;
   targetUrn: string;
@@ -874,7 +891,7 @@ export async function addEdge(args: {
     throw e;
   }
 
-  const writeError = await db.$transaction(async (tx): Promise<string | null> => {
+  const writeError = await withLiveMcpHistoryTransaction(db, auth, [sourceNode.memoryId, target.memoryId], async (tx, auth): Promise<string | null> => {
     const locked = await lockLiveEdgeEndpoints(
       tx,
       sourceNode,
@@ -977,7 +994,7 @@ export async function replaceOutgoingEdges(args: {
   createdBy: string | null;
 }): Promise<string | null> {
   try {
-    return await db.$transaction(async (tx) => {
+    return await withIncludeHistoryClientTransaction(db, async (tx) => {
       await lockOutgoingEdgeMemories(tx, args.sourceMemoryId, args.resolved);
       return replaceOutgoingEdgesInTransaction(tx, args);
     });
@@ -4015,7 +4032,7 @@ export function createMcpServerInstance(
       // was otherwise overwritable here (Codex P1 on PR #1165).
       let sectionId: string;
       try {
-        sectionId = await db.$transaction(async (tx) => {
+        sectionId = await withLiveMcpHistoryTransaction(db, auth, memoryId, async (tx, auth) => {
           // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
           await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           await lockAncestorsForCreate(tx, memoryId, loc);
@@ -6249,7 +6266,7 @@ export function createMcpServerInstance(
 
       let upserted;
       try {
-        upserted = await db.$transaction(async (tx) => {
+        upserted = await withLiveMcpHistoryTransaction(db, auth, memoryId, async (tx, auth) => {
           // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
           await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           if (resolvedEdges !== null) {
@@ -6667,7 +6684,7 @@ export function createMcpServerInstance(
         // under it — the check above is the fast refusal, this the
         // authoritative one (Copilot on PR #1165).
         try {
-          await db.$transaction(async (tx) => {
+          await withLiveMcpHistoryTransaction(db, auth, existing.memoryId, async (tx, auth) => {
             // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
             await lockAgentDefinitionAuthority(tx, auth.userId ?? null, existing.memoryId);
             if (resolvedEdges !== null) {
@@ -7413,7 +7430,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
 
       // #449 — source memories whose pending-edge count a hard delete changed.
       let pendingSourceMemories: string[] = [];
-      const result: DeleteResult = await db.$transaction(async (tx) => {
+      const result: DeleteResult = await withLiveMcpHistoryTransaction(db, auth, memory.id, async (tx, auth) => {
         // Keep the dead-Channel cleanup verdict stable through the delete.
         // Channel resurrection takes this same key before any loc key.
         await lockMemoryForChannelChange(tx, memory.id);
@@ -7734,8 +7751,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const completed = await withArchivePlanRetries(async (timeout) => {
           let relocated: MoveNodeSubtreeResult['moved'] = [];
           let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
-          const attemptResult = await db.$transaction<MoveResult>(async (tx) => {
-            let attemptAuth = auth;
+          const attemptResult = await withLiveMcpHistoryTransaction<MoveResult>(db, auth, [fromMemory.id, toMemory.id], async (tx, fencedAuth) => {
+            let attemptAuth = fencedAuth;
             const authorizeAttempt = async () => {
               if (auth.userId) {
                 const user = await tx.user.findUnique({ where: { id: auth.userId }, select: { roles: true, deletedAt: true } });
@@ -7960,6 +7977,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         relocated = completed.relocated;
         linkWarnings = completed.linkWarnings;
       } catch (e) {
+        // The outer history adapter refreshes the caller before each attempt.
+        // Preserve this move surface's existing typed authority-change refusal.
+        if (e instanceof GraphQLError && e.extensions.code === 'FORBIDDEN') {
+          return textResult('[node_write_conflict] Memory write access changed while this write waited — re-read and retry.');
+        }
         if (e instanceof ArchivePlanExhaustedError) return textResult('The node was moved concurrently; re-read it and retry.');
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
         // A descendant-slot collision (or a move-into-own-subtree) aborts the

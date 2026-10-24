@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../lib/includes/includeHistoryFence.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -128,6 +129,8 @@ export interface CloneMemoryArgs {
   actorId: string | null;
   /** #2167 — memories the copier may read (`getAccessibleMemoryIds`); `null` = unrestricted. */
   copierReadableMemoryIds: ReadableMemoryIds;
+  /** Recheck an external caller under this prepared outer transaction before any copy/reconciliation. */
+  authorize?: (tx: Prisma.TransactionClient) => Promise<ReadableMemoryIds>;
 }
 
 export interface CloneMemoryResult {
@@ -163,9 +166,10 @@ export async function cloneMemoryGraph(
   db: PrismaClient,
   args: CloneMemoryArgs,
 ): Promise<CloneMemoryResult> {
-  return db.$transaction(
+  return withIncludeHistoryClientTransaction(db,
     async (tx) => {
-      const { nodeIdMap: _nodeIdMap, skippedEdgeCount: _skipped, ...result } = await cloneMemoryGraphInTx(tx, args);
+      const copierReadableMemoryIds = args.authorize ? await args.authorize(tx) : args.copierReadableMemoryIds;
+      const { nodeIdMap: _nodeIdMap, skippedEdgeCount: _skipped, ...result } = await cloneMemoryGraphInTx(tx, { ...args, copierReadableMemoryIds });
       return result;
     },
     // Large memories copy thousands of rows; the default 5s interactive-

@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from './includes/includeHistoryFence.js';
 /**
  * Agent ↔ system-memory tenancy (#949).
  *
@@ -25,7 +26,7 @@
  * CLASS first, then apply that class's rule.
  */
 import { GraphQLError } from 'graphql';
-import type { PrismaClient } from '../generated/prisma/index.js';
+import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { recordUrnRename } from './urnAlias.js';
 import { reclaimTombstonedMemory } from './mintedSpecPermanence.js';
 
@@ -198,7 +199,11 @@ export interface SystemMemoryRepairResult {
 export async function repairAgentSystemMemoryOwner(
   db: PrismaClient,
   agentId: string,
-  opts: { actorId?: string | null } = {},
+  opts: {
+    actorId?: string | null;
+    /** Public callers recheck current authority inside the prepared repair root. */
+    authorize?: (tx: Prisma.TransactionClient, selected: OwnerColumns & { id: string; systemMemoryId: string | null }) => Promise<void>;
+  } = {},
 ): Promise<SystemMemoryRepairResult> {
   const agent = await db.agent.findUniqueOrThrow({
     where: { id: agentId },
@@ -233,7 +238,14 @@ export async function repairAgentSystemMemoryOwner(
 
   const derivedUrn = `${agent.urn}-system`;
   const actor = opts.actorId ?? null;
-  return db.$transaction(async (tx) => {
+  return withIncludeHistoryClientTransaction(db, async (tx) => {
+    await opts.authorize?.(tx, agent);
+    const currentAgent = await tx.agent.findUnique({ where: { id: agentId }, select: { urn: true, organizationId: true, ownerUserId: true, systemMemoryId: true } });
+    const currentMemory = await tx.memory.findUnique({ where: { id: memory.id }, select: { urn: true, organizationId: true, ownerUserId: true } });
+    if (!currentAgent || !sameOwner(agent, currentAgent) || currentAgent.systemMemoryId !== agent.systemMemoryId || currentAgent.urn !== agent.urn ||
+        !currentMemory || currentMemory.urn !== memory.urn || !sameOwner(memory, currentMemory)) {
+      throw new GraphQLError('Agent repair scope changed; retry.', { extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
+    }
     let urn = memory.urn;
     let urnNote: string | undefined;
     if (memory.urn !== derivedUrn) {

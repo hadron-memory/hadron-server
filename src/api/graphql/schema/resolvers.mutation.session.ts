@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { isWorkerResetting } from '../../../lib/contextReset/contextReset.js';
@@ -105,7 +106,7 @@ import {
   writeResumeClaim,
 } from '../../../lib/resumeClaims.js';
 import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx } from '../../../lib/teamAttention.js';
-import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
+import { liveTxContext, withAuthorizedMemoryTx, withAuthorizedTx } from './authorizedTx.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
@@ -2234,8 +2235,25 @@ export const sessionMutations = {
       // a large snapshot; READ COMMITTED (the default) gives each statement a
       // fresh snapshot after the lock is granted.
       const locToId = new Map<string, string>();
-      await ctx.db.$transaction(
+      await withIncludeHistoryClientTransaction(ctx.db,
         async (tx) => {
+          await withAuthorizedMemoryTx(ctx, sysMemId, [
+            { kind: 'agent', id: resolvedAgentId },
+            ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+            ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+          ], async (fresh) => {
+            const current = await fresh.db.agent.findUnique({ where: { id: resolvedAgentId } });
+            if (!current || current.deletedAt || current.systemMemoryId !== sysMemId ||
+                current.organizationId !== agent.organizationId || current.ownerUserId !== agent.ownerUserId) {
+              throw new GraphQLError('Agent restore scope changed; retry.', { extensions: { code: 'FORBIDDEN' } });
+            }
+            await requireAgentAccess(fresh, current, 'ADMIN');
+            const currentRevision = await fresh.db.node.findUnique({ where: { id: revNode.id } });
+            if (!currentRevision || currentRevision.deletedAt || currentRevision.memoryId !== sysMemId ||
+                currentRevision.loc !== revisionLoc || JSON.stringify(currentRevision.data) !== JSON.stringify(revNode.data)) {
+              throw new GraphQLError('Restore snapshot changed; retry.', { extensions: { code: 'NODE_WRITE_CONFLICT' } });
+            }
+          }, async () => {}, { preparedTransaction: tx });
           await lockAncestorsForCreateMany(
             tx,
             sysMemId,

@@ -106,3 +106,33 @@ describe('App hard-delete retention', () => {
     expect((await db.user.findUniqueOrThrow({ where: { id: f.actor.id } })).deletedAt).not.toBeNull();
   });
 });
+
+it('dependency reclamation rechecks the key before detaching or deleting retained data', async () => {
+  const f = await fixture();
+  const dependency = await db.agent.create({ data: { name: 'Dependency', urn: 'retention.test:retention', organizationId: f.org.id } });
+  await db.agentOrgGrant.create({ data: { orgId: f.org.id, agentId: dependency.id, activatedAt: new Date() } });
+  await db.agentImport.create({ data: { parentAgentId: f.agent.id, importedAgentId: dependency.id, required: true, position: 0, agentOrgGrantOrgId: f.org.id, agentOrgGrantAgentId: dependency.id } });
+  const node = await db.node.create({ data: { memoryId: f.scratch.id, loc: 'retained', name: 'Retained', content: 'Retained source' } });
+  const revision = await db.nodeRevision.create({ data: { nodeId: node.id, memoryId: f.scratch.id, loc: node.loc, name: node.name, content: 'Retained history', revNo: 0 } });
+  const key = await db.userApiKey.create({ data: { userId: f.actor.id, keyHash: 'dependency-reclaim-key', keyPreview: 'test', oauthScopes: [] } });
+  const original = db.app.findFirst.bind(db.app);
+  let revoked = false;
+  const lookup = vi.spyOn(db.app, 'findFirst').mockImplementation((async (args: any) => {
+    const row = await original(args);
+    if (!revoked && args?.where?.urn === f.app.urn && row?.id === f.app.id) {
+      revoked = true;
+      await resolvers.Mutation.revokeUserApiKey(null, { id: key.id }, { db, userId: f.actor.id, roles: ['ADMIN'] });
+    }
+    return row;
+  }) as typeof db.app.findFirst);
+  try {
+    await expect(resolvers.Mutation.createApp({}, { orgRef: f.org.id, agentRef: f.agent.id, name: 'Parent', urn: 'parent' }, { db, userId: f.actor.id, roles: ['ADMIN'], apiKeyId: key.id }))
+      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  } finally { lookup.mockRestore(); }
+  expect(revoked).toBe(true);
+  expect(await db.app.findUniqueOrThrow({ where: { id: f.app.id } })).toEqual(f.app);
+  expect(await db.memory.findUniqueOrThrow({ where: { id: f.scratch.id } })).toEqual(f.scratch);
+  expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toEqual(node);
+  expect(await db.nodeRevision.findUniqueOrThrow({ where: { id: revision.id } })).toEqual(revision);
+  for (const { memory } of f.memories) expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toEqual(memory);
+});

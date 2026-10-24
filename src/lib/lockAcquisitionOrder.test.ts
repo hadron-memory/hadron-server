@@ -187,7 +187,7 @@ function recordingCtx(): { ctx: Context; keys: ActualKey[] } {
             get(t, p, r) {
               if (p !== '$executeRaw') return Reflect.get(t, p, r);
               return async (strings: TemplateStringsArray, ...values: unknown[]) => {
-                if (LOCK_RE.test(strings.join(''))) {
+                if (LOCK_RE.test(strings.join('')) && values.length === 2) {
                   const [m, l] = values;
                   const actual = typeof m === 'number' && typeof l === 'number'
                     ? { h1: m, h2: l }

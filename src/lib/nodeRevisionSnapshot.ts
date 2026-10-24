@@ -25,7 +25,7 @@ import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { normalizeRole } from './enforceNodeSchema.js';
 import { isDecisionFamilyRole } from './decisions/index.js';
 import { computeApprovalHash } from './approvalHash.js';
-import { includeHistoryClient, type IncludeHistoryTransaction } from './includes/includeHistoryFence.js';
+import { assertIncludeHistoryClient, includeHistoryClient, type IncludeHistoryTransaction } from './includes/includeHistoryFence.js';
 
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
@@ -237,6 +237,7 @@ export async function ensureCurrentNodeRevisionInTransaction(
     expectedMemoryId: string;
   },
 ): Promise<number | null> {
+  assertIncludeHistoryClient(tx);
   const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "nodes" WHERE "id" = ${nodeId} FOR UPDATE`;
   if (locked.length === 0) return null;
   const node = await tx.node.findUnique({ where: { id: nodeId } });
@@ -342,7 +343,8 @@ function approvalForSnapshot(node: NodeApprovalColumns | null, revNo: number) {
  * `nodeRevision.create`) so the cap is enforced in ONE place. After the insert,
  * any revisions beyond the newest `maxRevCount` for this node are deleted.
  *
- * `db` may be the base client or a transaction client (both satisfy the Pick).
+ * `db` must be the current prepared include-history transaction client. The
+ * structural Pick also admits pooled clients, which the runtime guard refuses.
  * The cap is read from the snapshot's memory — the memory the node lived in at
  * capture (#602); for a move that's the source memory, which is correct (the
  * pre-move history belonged there).
@@ -351,6 +353,7 @@ export async function createNodeRevision(
   db: Pick<PrismaClient, 'nodeRevision' | 'memory' | 'node' | 'nodeSignature'>,
   data: Prisma.NodeRevisionUncheckedCreateInput,
 ): Promise<void> {
+  assertIncludeHistoryClient(db);
   // #696/#1323: Node.revSeq names the LIVE state. Snapshot the pre-edit state
   // at its current number, then atomically advance the live row. The increment
   // remains the race-safe allocator; subtracting one from the returned value

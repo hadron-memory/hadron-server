@@ -120,10 +120,11 @@ export const signingMutations = {
       return await withAuthorizedMemoryTx(
         ctx, memoryId, [],
         async (txCtx) => { if (!(await isMemoryReadableCached(txCtx, memoryId))) throw nodeNotFound(nodeRef); },
-        (tx) => createSigningRequestInTransaction(tx, id, {
+        (tx, txCtx) => createSigningRequestInTransaction(tx, id, {
           memoryId, requester: requesterOf(ctx), namedSignerId: signerRef ?? null, expectedRevision,
-          mayWrite: maySignInMemory(ctx.db),
+          mayWrite: maySignInMemory(txCtx.db),
         }),
+        { fence: true },
       );
     } catch (error) {
       if (error instanceof SigningRefusal) {
@@ -144,6 +145,7 @@ export const signingMutations = {
         ctx, row.memoryId, [],
         async (txCtx) => { if (!(await isMemoryReadableCached(txCtx, row.memoryId))) throw requestNotFound(id); },
         (tx) => withdrawSigningRequestInTransaction(tx, id, { memoryId: row.memoryId, caller }),
+        { fence: true },
       );
     } catch (error) {
       if (error instanceof SigningRefusal) {

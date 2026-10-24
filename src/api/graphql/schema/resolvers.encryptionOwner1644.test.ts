@@ -1,3 +1,6 @@
+import { withIncludeHistoryTransaction, includeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
+import { revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
 import { withTestOperationKey } from '../../../test/operationKey.js';
 /** #1644: encryption transitions retain strict ownership (cor:acl:010:02, DT). */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,7 +9,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateDataKey, parseDataKey } from '../../../lib/crypto.js';
 import { makeKeyVerifier } from '../../../lib/memoryUnlock.js';
-import { isAuthenticatedStringEnvelope } from '../../../lib/nodeCrypto.js';
+import { decryptNodeFieldsWithKey, isAuthenticatedStringEnvelope } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { memoryMutations } from './resolvers.mutation.memory.js';
 import { generateId } from '../../../lib/id.js';
@@ -364,4 +367,34 @@ describe('#1644 encryption authority', () => {
     expect(await db.user.count()).toBe(usersBefore);
   });
 
+});
+
+
+it('queued encrypted promotion encrypts the committed source text, never its pre-fence scan', async () => {
+  const agent = await db.agent.create({ data: { name: 'Queued agent', urn: 'enc-owner.test:queued-agent', organizationId: orgId } });
+  await db.memory.update({ where: { id: memoryId }, data: { class: 'app', userId: null, appId, userMemoryOfAgentId: agent.id, anonymousExpiresAt: new Date(Date.now() + 86400000) } });
+  await db.user.create({ data: { handle: 'queued-promotion-user', externalAppId: appId, externalId: 'queued-promotion', identityProvider: 'APP' } });
+  let entered!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const holder = withIncludeHistoryTransaction(db, async (proof) => {
+    entered(); await gate;
+    // Stage a source edit committed by the preceding prepared writer.
+    await includeHistoryClient(proof).node.update({ where: { id: nodeId }, data: {
+      content: 'Committed while promotion queued', abstract: 'Committed abstract', data: { latest: true },
+      revisionContentHash: revisionStateHashRefreshMarker(),
+    } });
+  });
+  await ready;
+  const pending = withTestOperationKey(dataKey, appId, () => resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'queued-promotion' }, { db, appId, roles: [] }));
+  const outcome = pending.then((value: unknown) => ({ value }), (error: unknown) => ({ error }));
+  try { await waitForLockWaitersOfType(db, 'advisory', 1, 1000); }
+  finally { release(); await holder; }
+  expect(await outcome).toHaveProperty('value');
+  const current = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+  const plaintext = decryptNodeFieldsWithKey(current, parseDataKey(dataKey));
+  expect(plaintext.content).toBe('Committed while promotion queued');
+  expect(plaintext.abstract).toBe('Committed abstract');
+  expect(plaintext.data).toEqual({ latest: true });
 });

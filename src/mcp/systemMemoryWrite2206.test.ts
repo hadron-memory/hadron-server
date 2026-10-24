@@ -362,3 +362,40 @@ describe('#2233 parity (Xan): MCP\'s deciding write is fenced and rechecked on l
     expect(await db.node.count({ where: { memoryId: orgAgent.systemMemoryId, loc: 'mcp-org-raced' } })).toBe(0);
   });
 });
+
+it('#2063 takes definition authority before presented-key rows in the actual MCP writer', async () => {
+  const key = await db.userApiKey.create({ data: { userId: u.orgAdmin.id, keyHash: generateId(), keyPreview: 'order', oauthScopes: [] } });
+  const urn = await nodeUrn(orgAgent.systemMemoryId, 'credential-order');
+  const events: Array<{ sql: string; values: unknown[] }> = [];
+  const transaction = db.$transaction.bind(db);
+  const spy = vi.spyOn(db, '$transaction').mockImplementation((async (work: unknown, options: unknown) => {
+    if (typeof work !== 'function') return transaction(work as never, options as never);
+    return transaction(async (tx) => {
+      const recorded = new Proxy(tx, {
+        get(target, property, receiver) {
+          if (property !== '$executeRaw' && property !== '$queryRaw') return Reflect.get(target, property, receiver);
+          return (strings: TemplateStringsArray, ...values: unknown[]) => {
+            events.push({ sql: strings.join('?'), values });
+            return (target[property] as (...args: unknown[]) => unknown).call(target, strings, ...values);
+          };
+        },
+      });
+      return work(recorded);
+    }, options as never);
+  }) as never);
+  try {
+    expect(text(await mcp(authOf(u.orgAdmin, { apiKeyId: key.id })).callTool('hadron_create_node', { urn, name: 'Ordered', content: 'Safe' }))).not.toMatch(/forbidden|error/i);
+  } finally { spy.mockRestore(); }
+  const credential = events.findIndex((event) => event.sql.includes('FROM user_api_keys'));
+  expect(credential).toBeGreaterThan(0);
+  expect(events[0].sql).toContain('pg_advisory_xact_lock(2063, 1772)');
+  const firstAnchors = new Map<string, number>();
+  events.forEach((event, index) => {
+    if (!event.sql.includes('pg_advisory_xact_lock_shared') || !String(event.values[0]).startsWith('authorization:')) return;
+    const identity = JSON.stringify(event.values);
+    if (!firstAnchors.has(identity)) firstAnchors.set(identity, index);
+  });
+  expect(firstAnchors.size).toBeGreaterThanOrEqual(3); // Agent, org and presented user
+  for (const index of firstAnchors.values()) expect(index).toBeLessThan(credential);
+  expect(await db.node.findFirst({ where: { memoryId: orgAgent.systemMemoryId, loc: 'credential-order' } })).not.toBeNull();
+});

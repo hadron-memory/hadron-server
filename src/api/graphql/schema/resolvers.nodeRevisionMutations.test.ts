@@ -20,12 +20,13 @@ import { resolvers, type Context } from './resolvers.js';
 let org: { id: string; urn: string };
 let memory: { id: string; urn: string };
 let node: { id: string; loc: string };
+let adminUser: { id: string };
 let userMember: { id: string };
 let userOutsider: { id: string };
 
 // A global ADMIN sees every fixture memory and passes the write gate.
 function adminCtx(): Context {
-  return { db, roles: ['ADMIN'], userId: 'admin-user' } as Context;
+  return { db, roles: ['ADMIN'], userId: adminUser.id } as Context;
 }
 function memberCtx(): Context {
   return { db, roles: ['READER'], userId: userMember.id } as Context;
@@ -45,6 +46,7 @@ let v3: { id: string };
 
 beforeEach(async () => {
   await cleanDb(db);
+  adminUser = await db.user.create({ data: { roles: ['ADMIN'] } });
 
   org = await db.organization.create({
     data: { id: generateId(), name: 'nvm-org', urn: 'nvm-org' },

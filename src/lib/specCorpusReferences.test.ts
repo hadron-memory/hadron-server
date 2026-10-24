@@ -1242,8 +1242,12 @@ describe('#2063 standalone renumber reconciliation boundary', () => {
       await holder;
       await outcome;
     }
-    await pending;
+    // The move now participates in the same outer fence, so revoked authority
+    // refuses before moving rather than reaching a later rewrite's skip.
+    if (revoked) await expect(pending).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    else await pending;
     if (revoked) {
+      expect((await db.node.findUniqueOrThrow({ where: { id: feature.id } })).loc).toBe('pas:010');
       expect((await db.node.findUniqueOrThrow({ where: { id: other.id } })).revSeq).toBe(1);
       expect(await content('pas:020')).toContain('pas:010');
       expect(await db.nodeRevision.count({ where: { nodeId: other.id } })).toBe(0);

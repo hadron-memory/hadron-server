@@ -20,6 +20,7 @@ const locs = (res: any): string[] => res.hits.map((h: any) => h.node.loc).sort()
 let memId: string;
 beforeEach(async () => {
   await cleanDb(db);
+  await db.user.create({ data: { id: 'admin-ot', roles: ['ADMIN'] } });
   const made = await createDbOrgAndGraph(db, { orgName: 'ot-org', graphName: 'ot/graph' });
   memId = made.graph.id;
 });

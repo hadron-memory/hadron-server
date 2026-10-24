@@ -8,8 +8,9 @@
  * requires a revision to describe the node actually written).
  *
  * The interleaving is driven at the lock seam, as in resolvers.updateNodeToctou1198:
- * `lockLocForWrite` is the first statement inside the write transaction, i.e. the
- * instant after the probe saw the original.
+ * `lockLocForWrite` runs after the outer history fence. The hook simulates
+ * uncooperative storage drift after the probe; another participating writer
+ * cannot enter a nested transaction or pass the held history fence.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -93,11 +94,11 @@ const replaceAtLock = (originalId: string, loc: string) => {
   const out = { replacementId: '' };
   onLock.fire = async () => {
     await db.node.update({ where: { id: originalId }, data: { loc: `${loc}:moved` } });
-    const replacement = await resolvers.Mutation.createNode(
-      {},
-      { input: { memoryId, loc, name: 'replacement' } as never },
-      ctx(),
-    );
+    // Like the direct move above, this is fixture-only storage drift. Calling
+    // createNode here would nest a prepared history transaction, which refuses.
+    const replacement = await db.node.create({
+      data: { id: generateId(), memoryId, loc, name: 'replacement', nodeType: 'info' },
+    });
     out.replacementId = replacement.id;
   };
   return out;

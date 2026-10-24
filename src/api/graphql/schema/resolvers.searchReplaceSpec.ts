@@ -1,3 +1,4 @@
+import { withAuthorizedMemoryTx } from './authorizedTx.js';
 import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 /**
  * #1294: the spec-only bulk door. Selection is explicit and belongs to one
@@ -361,61 +362,67 @@ export async function searchReplaceInSpecNodes(
   }
 
   let readableForIncludes: string[] | null = null;
-  const applied = await ctx.db.$transaction(async (tx) => {
-    // Channel creation takes this memory key. Lock every selected Node before
-    // the Memory row: ordinary node writers take Node then Memory FOR SHARE.
-    // Minting and memory deletion update the Memory row after these locks.
-    await lockMemoryForChannelChange(tx, memoryId);
-    await tx.$queryRaw`SELECT id FROM nodes WHERE id = ANY(${selectedIds}::text[]) ORDER BY id FOR UPDATE`;
-    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR NO KEY UPDATE`;
-
-    // Repeat authorization under the row/memory locks. Snapshot then refuses
-    // any row that moved out of this memory before it reads plaintext.
-    await requireMemoryWriteAccess(ctx, memoryId);
-
-    const current = await snapshot(tx, true);
-    if (current.result.plan !== input.expectedPlan) throw stale();
-    if (input.maxNodesChanged != null && current.changed.length > input.maxNodesChanged) {
-      throw error('The replacement exceeds maxNodesChanged.', 'SEARCH_REPLACE_MAX_NODES_CHANGED');
-    }
-    for (const node of current.changed) {
-      await createNodeRevision(tx, buildNodeRevisionSnapshot(node.raw, editorFromAuth(ctx), {
-        revLabel: input.reason,
-        changes: Object.keys(node.changed),
-      }));
-      const data: Record<string, unknown> = {};
-      if (node.isEncrypted) {
-        const key = sessionKeyCache.getByMemoryId(memoryId)!;
-        const encrypted = encryptNodeFieldsWithKey({
-          content: node.contentChanged ? node.changed.content! : null,
-          abstract: node.abstractChanged ? node.changed.abstract! : null,
-        }, key);
-        if (node.contentChanged) data.content = encrypted.content;
-        if (node.abstractChanged) data.abstract = encrypted.abstract;
-      } else {
-        if (node.contentChanged) data.content = node.changed.content;
-        if (node.abstractChanged) data.abstract = node.changed.abstract;
+  const applied = await withAuthorizedMemoryTx(ctx, memoryId, [],
+    async (fresh) => {
+      const currentMemory = await fresh.db.memory.findUnique({ where: { id: memoryId }, select: { deletedAt: true } });
+      if (!currentMemory || currentMemory.deletedAt) throw stale();
+      await requireMemoryWriteAccess(fresh, memoryId);
+    }, async (tx, txCtx) => {
+      const current = await snapshot(tx, true);
+      if (current.result.plan !== input.expectedPlan) throw stale();
+      if (input.maxNodesChanged != null && current.changed.length > input.maxNodesChanged) {
+        throw error('The replacement exceeds maxNodesChanged.', 'SEARCH_REPLACE_MAX_NODES_CHANGED');
       }
-      if (node.abstractChanged) {
-        data.abstractOriginHash = computeContentHash(node.plaintext.content);
+      for (const node of current.changed) {
+        await createNodeRevision(tx, buildNodeRevisionSnapshot(node.raw, editorFromAuth(txCtx), {
+          revLabel: input.reason,
+          changes: Object.keys(node.changed),
+        }));
+        const data: Record<string, unknown> = {};
+        if (node.isEncrypted) {
+          const key = sessionKeyCache.getByMemoryId(memoryId)!;
+          const encrypted = encryptNodeFieldsWithKey({
+            content: node.contentChanged ? node.changed.content! : null,
+            abstract: node.abstractChanged ? node.changed.abstract! : null,
+          }, key);
+          if (node.contentChanged) data.content = encrypted.content;
+          if (node.abstractChanged) data.abstract = encrypted.abstract;
+        } else {
+          if (node.contentChanged) data.content = node.changed.content;
+          if (node.abstractChanged) data.abstract = node.changed.abstract;
+        }
+        if (node.abstractChanged) {
+          data.abstractOriginHash = computeContentHash(node.plaintext.content);
+        }
+        data.revisionContentHash = revisionStateHashRefreshMarker();
+        Object.assign(data, clearNodeAuthorship());
+        await tx.node.update({ where: { id: node.raw.id }, data });
+        if (node.contentChanged || node.abstractChanged) {
+          node.raw.embeddingWorkToken = await stampEmbeddingObligation(tx, node.raw.id, memoryId);
+        }
+        // #2040 — a content rewrite re-checks its include tags inside the batch.
+        if (node.contentChanged) {
+          const text = node.plaintext.content;
+          readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(txCtx) : null;
+          const stored = { storedPlaintext: node.storedContent };
+          const tags = await assertIncludesWritable(tx, node.raw, text, readableForIncludes, undefined, stored);
+          await syncDerivedIncludesEdges(tx, node.raw, tags, readableForIncludes, stored);
+        }
       }
-      data.revisionContentHash = revisionStateHashRefreshMarker();
-      Object.assign(data, clearNodeAuthorship());
-      await tx.node.update({ where: { id: node.raw.id }, data });
-      if (node.contentChanged || node.abstractChanged) {
-        node.raw.embeddingWorkToken = await stampEmbeddingObligation(tx, node.raw.id, memoryId);
-      }
-      // #2040 — a content rewrite re-checks its include tags inside the batch.
-      if (node.contentChanged) {
-        const text = node.plaintext.content;
-        readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
-        const stored = { storedPlaintext: node.storedContent };
-        const tags = await assertIncludesWritable(tx, node.raw, text, readableForIncludes, undefined, stored);
-        await syncDerivedIncludesEdges(tx, node.raw, tags, readableForIncludes, stored);
-      }
-    }
-    return current;
-  }, { timeout: 120_000 });
+      return current;
+  }, {
+    fence: true,
+    // A corpus deleted after preview is the existing stale-plan refusal.
+    allowDeletedMemory: true,
+    timeout: 120_000,
+    beforeMemoryRows: async (tx) => {
+      // Preserve the apply path's Channel / sorted Node / Memory order after
+      // the shared authority anchors and owner rows have been prepared.
+      await lockMemoryForChannelChange(tx, memoryId);
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ANY(${selectedIds}::text[]) ORDER BY id FOR UPDATE`;
+    },
+    memoryRowLocks: new Map([[memoryId, 'no-key-update']]),
+  });
 
   if (applied.changed.length > 0) {
     recordNodeUsage(ctx.db, 'write', toUsageNodeRefs(applied.changed.map((node) => node.raw)), ctx);

@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 /**
  * Issue #564 — moveNode / cloneNode on the <object>Ref convention.
  *
@@ -77,7 +78,7 @@ describe('moveNode (#564)', () => {
       await mayRelease;
     }, { timeout: 20_000 });
     await held;
-    const moving = db.$transaction(async (tx) => moveNodeSubtree(tx, {
+    const moving = withIncludeHistoryClientTransaction(db, async (tx) => moveNodeSubtree(tx, {
       source: root, destLoc: 'renamed', editor: { userId: user.id },
     }), { timeout: 20_000 });
     try {
@@ -116,7 +117,7 @@ describe('moveNode (#564)', () => {
     let moved: Promise<unknown> | undefined;
     let flip: Promise<unknown> | undefined;
     try {
-      moved = db.$transaction(async (tx) => {
+      moved = withIncludeHistoryClientTransaction(db, async (tx) => {
         const findNodes = tx.node.findMany.bind(tx.node);
         let held = false;
         vi.spyOn(tx.node, 'findMany').mockImplementation((async (args: Parameters<typeof findNodes>[0]) => {
@@ -162,7 +163,7 @@ describe('moveNode (#564)', () => {
     let moved: Promise<unknown> | undefined;
     let flip: Promise<unknown> | undefined;
     try {
-      moved = db.$transaction(async (tx) => {
+      moved = withIncludeHistoryClientTransaction(db, async (tx) => {
         const findMemory = tx.memory.findUnique.bind(tx.memory);
         let held = false;
         vi.spyOn(tx.memory, 'findUnique').mockImplementation((async (args: Parameters<typeof findMemory>[0]) => {
@@ -656,6 +657,41 @@ describe('moveNode subtree cascade (#768)', () => {
 });
 
 describe('cloneNode (#564)', () => {
+  it('conceals an unreadable source before checking malformed destination arguments', async () => {
+    const other = await createDbOrgAndGraph(db, { orgName: 'hidden-source', graphName: 'source', visibility: 'ORGANIZATION' });
+    const source = await createDbNode(db, { loc: 'hidden-source', memoryId: other.graph.id });
+    const transactions = vi.spyOn(db, '$transaction');
+    try {
+      await expect(M.cloneNode(null, { sourceRef: source.id }, asUser()))
+        .rejects.toMatchObject({ message: `Node not found: "${source.id}"`, extensions: { code: 'NODE_NOT_FOUND', ref: source.id } });
+      expect(transactions).not.toHaveBeenCalled();
+    } finally { transactions.mockRestore(); }
+  });
+
+  it.each(['read-only', 'malformed', 'hidden'] as const)('refuses a %s destination before opening any history transaction', async (kind) => {
+    const source = await createDbNode(db, { loc: 'refusal-source', memoryId: memA.id });
+    let targetMemoryRef: string | undefined = memB.id;
+    if (kind === 'read-only') {
+      await db.orgMember.update({ where: { organizationId_userId: { organizationId: org.id, userId: user.id } }, data: { role: 'READER' } });
+    } else if (kind === 'hidden') {
+      const other = await createDbOrgAndGraph(db, { orgName: 'hidden-destination', graphName: 'hidden', visibility: 'ORGANIZATION' });
+      targetMemoryRef = other.graph.id;
+    } else targetMemoryRef = undefined;
+    const before = await db.node.findUniqueOrThrow({ where: { id: source.id } });
+    const counts = [await db.node.count(), await db.nodeRevision.count()];
+    const transactions = vi.spyOn(db, '$transaction');
+    try {
+      await expect(M.cloneNode(null, { sourceRef: source.id, targetMemoryRef }, asUser()))
+        .rejects.toMatchObject(kind === 'read-only'
+          ? { message: 'Forbidden: no write access to this memory', extensions: { code: 'FORBIDDEN' } }
+          : kind === 'malformed' ? { extensions: { code: 'BAD_USER_INPUT' } }
+          : { name: 'MemoryNotFoundError' });
+      expect(transactions).not.toHaveBeenCalled();
+    } finally { transactions.mockRestore(); }
+    expect(await db.node.findUniqueOrThrow({ where: { id: source.id } })).toEqual(before);
+    expect([await db.node.count(), await db.nodeRevision.count()]).toEqual(counts);
+  });
+
   it.each([
     { role: null, isRunnable: null },
     { role: 'weather', isRunnable: false },

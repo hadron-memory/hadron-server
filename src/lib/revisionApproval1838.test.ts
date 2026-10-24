@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from './includes/includeHistoryFence.js';
 /**
  * #1838 — historical per-revision approval (cor:dmo:060:04, R7): a revision is
  * approved when some recorded approval covers exactly its hashed content.
@@ -184,7 +185,7 @@ describe('entering an encrypted memory ends approvals (#1838, cor:dmo:120:04)', 
     await touchMeta(n.id, ['x']); // 2
     await edit(n.id, 'changed'); // 3
     await edit(n.id, 'v1'); // 4: byte-identical to rev 1 (history keeps a copy)
-    await db.$transaction((tx) => endApprovalsOnEncryptedEntry(tx, { nodeIds: [n.id] }));
+    await withIncludeHistoryClientTransaction(db, (tx) => endApprovalsOnEncryptedEntry(tx, { nodeIds: [n.id] }));
     const node = await db.node.findUniqueOrThrow({ where: { id: n.id } });
     expect(node).toMatchObject({ approvalHash: null, approvedBy: admin.id });
     expect(node.approvedRevNo).not.toBeNull();
@@ -231,7 +232,7 @@ describe('a hashless record authorizes nothing, on any surface (#1838)', () => {
     await approve(ended.id);
     await approve(control.id);
     // the memory is plaintext again (the fixture stands in for a move out)
-    await db.$transaction((tx) => endApprovalsOnEncryptedEntry(tx, { nodeIds: [ended.id] }));
+    await withIncludeHistoryClientTransaction(db, (tx) => endApprovalsOnEncryptedEntry(tx, { nodeIds: [ended.id] }));
 
     const row = await db.node.findUniqueOrThrow({ where: { id: ended.id } });
     expect(await resolvers.Node.approvalStatus(row, {}, as())).toEqual({ state: 'NOT_APPROVED', approval: null });
@@ -314,7 +315,7 @@ describe('entry clears snapshots captured elsewhere for a node now resident (#18
     const carried = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id, approvalHash: { not: null } } });
     expect(carried.memoryId).toBe(memory.id);
     await db.node.update({ where: { id: n.id }, data: { memoryId: b.id } });
-    await db.$transaction((tx) => endApprovalsOnEncryptedEntry(tx, { memoryId: b.id }));
+    await withIncludeHistoryClientTransaction(db, (tx) => endApprovalsOnEncryptedEntry(tx, { memoryId: b.id }));
     expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).approvalHash).toBeNull();
     const after = await db.nodeRevision.findUniqueOrThrow({ where: { id: carried.id } });
     expect(after.approvalHash).toBeNull();

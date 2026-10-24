@@ -7,6 +7,9 @@
  *
  * R = root loc, D = R:d. 'r1': hashtext(D) < hashtext(R) (inverted vs loc length);
  * 'r2': hashtext(D) > hashtext(R) (control).
+ * With #2063 these production callers serialize at the outer history fence.
+ * This pins that schedule and final outcomes, not inner-lock compatibility
+ * independently of the fence.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -65,18 +68,18 @@ function installHook() {
   }) as never);
 }
 
-async function waiterOn(h2: number, other: number, timeoutMs = 8000): Promise<number> {
+async function waiterOnHistoryFence(timeoutMs = 8000): Promise<number> {
   const until = Date.now() + timeoutMs;
   while (Date.now() < until) {
     const rows = await db.$queryRaw<Array<{ pid: number }>>`
       SELECT pid FROM pg_locks WHERE locktype='advisory' AND NOT granted
         AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
-        AND pid=${backendB} AND classid=${h1 >>> 0}::bigint::oid
-        AND objid IN (${h2 >>> 0}::bigint::oid, ${other >>> 0}::bigint::oid) AND objsubid=2`;
+        AND pid=${backendB} AND classid=2063::oid
+        AND objid=1772::oid AND objsubid=2`;
     if (rows.length) return rows[0].pid;
     await sleep(10);
   }
-  throw new Error('no waiter on key');
+  throw new Error('no waiter on outer history fence');
 }
 async function holds(pid: number, h2: number) {
   const rows = await db.$queryRaw<Array<{ n: bigint }>>`
@@ -111,9 +114,15 @@ async function run(label: string, R: string, startA: () => Promise<unknown>, sta
   const a = Promise.allSettled([roles.run('A', startA)]);
   await Promise.race([granted.promise, sleep(8000).then(()=>{throw new Error('A did not grant root');})]); // A holds R, has not asked for anything after it
   const b = Promise.allSettled([roles.run('B', startB)]);
-  // B must be queued behind A on R; record whether it already holds D.
+  // A holds the outer history fence as well as R. B must queue on that
+  // fence before acquiring either address key; callers/results remain real.
   let bHoldsD = false; let observationError: unknown;
-  try { const pidB = await waiterOn(hR, hD); bHoldsD = await holds(pidB, hD); }
+  try {
+    const pidB = await waiterOnHistoryFence();
+    bHoldsD = await holds(pidB, hD);
+    expect(bHoldsD).toBe(false);
+    expect(await holds(pidB, hR)).toBe(false);
+  }
   catch (error) { observationError=error; }
   finally { release.resolve(); }
   const [ra] = await a; const [rb] = await b;

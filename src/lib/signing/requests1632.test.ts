@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../includes/includeHistoryFence.js';
 /**
  * #1632 / cor:dmo:130:02–:04 (S2b-1) — signing requests end to end against a
  * real database and a real (software) passkey: create, withdraw, decline,
@@ -38,7 +39,7 @@ async function refusal(p: Promise<unknown>): Promise<SigningRefusal> {
 }
 
 const create = (opts: Partial<Parameters<typeof createSigningRequestInTransaction>[2]> & { node?: string } = {}) =>
-  db.$transaction((tx) => createSigningRequestInTransaction(tx, opts.node ?? nodeId, {
+  withIncludeHistoryClientTransaction(db, (tx) => createSigningRequestInTransaction(tx, opts.node ?? nodeId, {
     memoryId, requester: asUser(requesterId), mayWrite: writer, ...opts,
   }));
 
@@ -50,7 +51,7 @@ function assertionFor(req: { nodeId: string; approvalHash: string }, over: Parti
 const complete = (req: { id: string; nodeId: string; approvalHash: string }, opts: {
   signer?: string; mayWrite?: (u: string, m: string) => Promise<boolean>; credentialId?: Buffer;
   assertion?: ReturnType<SoftPasskey['assert']>;
-} = {}) => db.$transaction((tx) => completeSigningRequestInTransaction(tx, req.id, {
+} = {}) => withIncludeHistoryClientTransaction(db, (tx) => completeSigningRequestInTransaction(tx, req.id, {
   memoryId, signerId: opts.signer ?? signerId, credentialId: opts.credentialId ?? key.credentialId,
   assertion: opts.assertion ?? assertionFor(req), mayWrite: opts.mayWrite ?? writer,
 }));
@@ -141,7 +142,7 @@ describe('requestNodeSignature: what a request pins (cor:dmo:130:03)', () => {
     expect((await refusal(create({ node: placeholder.id }))).code).toBe('NODE_IS_PLACEHOLDER');
     expect((await refusal(create({ expectedRevision: 7 }))).code).toBe('REVISION_MISMATCH');
     const other = (await createDbOrgAndGraph(db, { orgName: 'sig-org-2', graphName: 'other' })).graph;
-    expect((await refusal(db.$transaction((tx) => createSigningRequestInTransaction(tx, nodeId, {
+    expect((await refusal(withIncludeHistoryClientTransaction(db, (tx) => createSigningRequestInTransaction(tx, nodeId, {
       memoryId: other.id, requester: asUser(requesterId), mayWrite: writer })))).code).toBe('NODE_NOT_FOUND');
     await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: true } });
     const enc = await refusal(create());
@@ -151,7 +152,7 @@ describe('requestNodeSignature: what a request pins (cor:dmo:130:03)', () => {
 
 describe('withdraw: the requester account, from any session (#10024, #10397)', () => {
   const withdraw = (id: string, caller: { userId: string | null; appId: string | null }) =>
-    db.$transaction((tx) => withdrawSigningRequestInTransaction(tx, id, { memoryId, caller }));
+    withIncludeHistoryClientTransaction(db, (tx) => withdrawSigningRequestInTransaction(tx, id, { memoryId, caller }));
 
   it('the same user withdraws, whichever session or worker asks', async () => {
     await createDbWorkerAttribution(db, requesterId, 'w-a', 's-a');
@@ -190,7 +191,7 @@ describe('withdraw: the requester account, from any session (#10024, #10397)', (
     expect((await refusal(withdraw('nope', { userId: requesterId, appId: null }))).code).toBe('SIGNING_REQUEST_NOT_FOUND');
     const req = await create();
     const other = (await createDbOrgAndGraph(db, { orgName: 'sig-org-3', graphName: 'o3' })).graph;
-    expect((await refusal(db.$transaction((tx) => withdrawSigningRequestInTransaction(tx, req.id, {
+    expect((await refusal(withIncludeHistoryClientTransaction(db, (tx) => withdrawSigningRequestInTransaction(tx, req.id, {
       memoryId: other.id, caller: { userId: requesterId, appId: null } })))).code).toBe('SIGNING_REQUEST_NOT_FOUND');
   });
 });
@@ -274,7 +275,7 @@ describe('complete: server-side verification, one record, one end (cor:dmo:130:0
 describe('decline (cor:dmo:130:03)', () => {
   it('the eligible signer declines once; a non-writer may not', async () => {
     const req = await create();
-    const decline = (mayWrite: typeof writer) => db.$transaction((tx) =>
+    const decline = (mayWrite: typeof writer) => withIncludeHistoryClientTransaction(db, (tx) =>
       declineSigningRequestInTransaction(tx, req.id, { memoryId, signerId, mayWrite }));
     expect((await refusal(decline(notWriter))).code).toBe('SIGNER_NOT_ELIGIBLE');
     expect((await decline(writer)).state).toBe('declined');
@@ -356,7 +357,7 @@ describe('signature state on read (cor:dmo:130:04)', () => {
     const { createNodeRevision } = await import('../nodeRevisionSnapshot.js');
     const snap = async (content: string) => {
       const live = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
-      await createNodeRevision(db, { nodeId, memoryId, loc: live.loc, name: live.name, content: live.content, tags: [] });
+      await withIncludeHistoryClientTransaction(db, (tx) => createNodeRevision(tx, { nodeId, memoryId, loc: live.loc, name: live.name, content: live.content, tags: [] }));
       await db.node.update({ where: { id: nodeId }, data: { content } });
     };
     await snap('edit one');   // snapshots r1, the signed revision

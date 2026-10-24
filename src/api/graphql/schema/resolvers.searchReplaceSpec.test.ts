@@ -1,3 +1,5 @@
+import { withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
@@ -408,4 +410,26 @@ describe('searchReplaceInSpecNodes', () => {
     expect(after.content).toBe('cat cat scatter');
     expect(after.revSeq).toBe(before.revSeq);
   });
+});
+
+
+it('spec apply refuses a credential revoked while waiting on its history fence', async () => {
+  const spec = await node('pas:revoked');
+  const preview = await call(request([spec.id]));
+  const key = await db.userApiKey.create({ data: { userId: admin.id, keyHash: generateId(), keyPreview: 'spec', oauthScopes: [] } });
+  let entered!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const holder = withIncludeHistoryTransaction(db, async () => { entered(); await gate; });
+  await ready;
+  const pending = resolvers.Mutation.searchReplaceInSpecNodes(null, { input: request([spec.id], { dryRun: false, expectedPlan: preview.plan }) } as never, { ...ctx(), apiKeyId: key.id });
+  const result = pending.then((value: unknown) => ({ value }), (error: unknown) => ({ error }));
+  try {
+    await waitForLockWaitersOfType(db, 'advisory', 1, 750);
+    await db.userApiKey.update({ where: { id: key.id }, data: { revokedAt: new Date() } });
+  } finally { release(); await holder; }
+  expect(await result).toMatchObject({ error: { extensions: { code: 'FORBIDDEN' } } });
+  expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).content).toBe('cat cat scatter');
+  expect(await db.nodeRevision.count({ where: { nodeId: spec.id } })).toBe(0);
 });

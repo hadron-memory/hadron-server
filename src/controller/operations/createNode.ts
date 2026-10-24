@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from '../../lib/includes/includeHistoryFence.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, bootPromptCompiledWriteError, isBootPromptRole } from '../../lib/bootPrompt.js';
 import { assertIncludesWritable, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
 import type { Node } from '../../index.d.js';
@@ -53,7 +54,7 @@ const createNodeAsSystem = async (
     ownerRepo: node.ownerRepo ?? null,
   };
 
-  const saved = await db.$transaction(async (tx) => {
+  const saved = await withIncludeHistoryClientTransaction(db, async (tx) => {
     // This legacy controller is still a real authoring seam. Declare its whole
     // path lock-set first, then use the normal create/update helpers for their
     // authoritative gates. A second call at the same loc must snapshot the

@@ -140,7 +140,7 @@ describe('#1903 / #1952 roster liveness probe', () => {
     expect(plan, withPlan(plan)).toMatch(/usage_events_\w+_idx/);
   });
 
-  it('moves only the plan: the answer is identical to the bare max(created_at) under both plans', async () => {
+  it('preserves the bare max(created_at) answer over the full liveness fixture', async () => {
     const result = await rolledBack(async (tx) => {
       await seedSkew(tx);
       // The heavy session and a spread of liveness cases, all in scope. Times
@@ -185,10 +185,12 @@ describe('#1903 / #1952 roster liveness probe', () => {
       };
     });
 
-    // Two genuinely different plans were compared...
-    expect(result.incidentPlan, withPlan(result.incidentPlan)).toContain(WALK);
+    // The dedicated skew pin above proves the incident shape can pick WALK.
+    // Adding a full roster may make that old shape choose a healthy session
+    // index instead (PG16 CI); answer parity must hold under either choice.
+    // The shipped shape must still avoid WALK on this populated fixture.
     expect(result.shippedPlan, withPlan(result.shippedPlan)).not.toContain(WALK);
-    // ...over a fixture that exercises the probe, not an empty roster...
+    // Exercise the probe over real liveness rows, not an empty roster.
     expect(result.shipped.map((r) => r.workerId)).toEqual(['w-ended', 'w-heavy', 'w-mixed', 'w-quiet']);
     expect(result.shipped.find((r) => r.workerId === 'w-heavy')?.lastActiveAt).toEqual(
       new Date('2026-09-01T05:33:20Z'),

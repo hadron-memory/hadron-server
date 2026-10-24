@@ -1,3 +1,6 @@
+import { lockAgentDefinitionAuthority } from '../../../lib/auth/managedSystemMemory.js';
+import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { endApprovalsOnEncryptedEntry } from '../../../lib/nodeApproval.js';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -105,7 +108,7 @@ import {
   hasSchemePrefix,
 } from '../../../lib/urn.js';
 import { GraphQLError } from 'graphql';
-import { withAuthorizedMemoryTx } from './authorizedTx.js';
+import { withAuthorizedMemoryTx, liveTxContext } from './authorizedTx.js';
 // Spec 049 §8.5 — the memory-level lock Channel creation shares with deleteMemory.
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
@@ -420,20 +423,38 @@ export const memoryMutations = {
       // writer could already delete its nodes one by one). Deleting the source
       // memory ROW is the stricter, delete-level action → owner for personal/
       // private, org ADMIN otherwise (mirrors deleteMemory).
-      await requireMemoryWriteAccess(ctx, targetMem.id);
-      await requireMemoryWriteAccess(ctx, sourceMem.id);
-      if (deleteSourceMem) {
-        if (sourceMem.class === 'personal' || sourceMem.class === 'private') {
-          if (!ctx.userId || sourceMem.userId !== ctx.userId) {
-            throw new GraphQLError(
-              `Forbidden: only the owner can delete a ${sourceMem.class} memory`,
-              { extensions: { code: 'FORBIDDEN' } },
-            );
+      const authorizeMerge = async (gateCtx: Context, currentSource: typeof sourceMem, currentTarget: typeof targetMem) => {
+        await requireMemoryWriteAccess(gateCtx, currentTarget.id);
+        await requireMemoryWriteAccess(gateCtx, currentSource.id);
+        if (deleteSourceMem) {
+          if (currentSource.class === 'personal' || currentSource.class === 'private') {
+            if (!gateCtx.userId || currentSource.userId !== gateCtx.userId) {
+              throw new GraphQLError(
+                `Forbidden: only the owner can delete a ${currentSource.class} memory`,
+                { extensions: { code: 'FORBIDDEN' } },
+              );
+            }
+          } else {
+            await requireOwnerOrOrgRole(gateCtx, currentSource, 'ADMIN');
           }
-        } else {
-          await requireOwnerOrOrgRole(ctx, sourceMem, 'ADMIN');
         }
-      }
+
+        if (fields.has('EDGES')) {
+          const edgeMems = await gateCtx.db.edge.findMany({
+            where: { OR: [{ memoryId: currentSource.id }, { target: { memoryId: currentSource.id } }] },
+            select: { memoryId: true },
+            distinct: ['memoryId'],
+          });
+          const authed = new Set<string>([currentSource.id, currentTarget.id]);
+          for (const { memoryId } of edgeMems) {
+            if (authed.has(memoryId)) continue;
+            await requireMemoryWriteAccess(gateCtx, memoryId);
+            authed.add(memoryId);
+          }
+        }
+
+      };
+      await authorizeMerge(ctx, sourceMem, targetMem);
 
       const editor = editorFromAuth(ctx);
 
@@ -443,19 +464,6 @@ export const memoryMutations = {
       // a relation filter (edges sourced FROM the source memory, plus edges
       // whose TARGET node lives in it) so a large source memory never needs its
       // node ids materialized into a giant `IN (...)` list.
-      if (fields.has('EDGES')) {
-        const edgeMems = await ctx.db.edge.findMany({
-          where: { OR: [{ memoryId: sourceMem.id }, { target: { memoryId: sourceMem.id } }] },
-          select: { memoryId: true },
-          distinct: ['memoryId'],
-        });
-        const authed = new Set<string>([sourceMem.id, targetMem.id]);
-        for (const { memoryId } of edgeMems) {
-          if (authed.has(memoryId)) continue;
-          await requireMemoryWriteAccess(ctx, memoryId);
-          authed.add(memoryId);
-        }
-      }
 
       // The merge runs as bounded, resumable batches rather than one
       // interactive transaction, so a very large source memory neither blows
@@ -474,6 +482,41 @@ export const memoryMutations = {
           deleteSourceMem,
           editor,
           principal: ctx,
+          authorize: async (tx, phase) => {
+            const edgeMemories = fields.has('EDGES') ? await tx.edge.findMany({ where: { OR: [{ memoryId: sourceMem.id }, { target: { memoryId: sourceMem.id } }] }, select: { memoryId: true }, distinct: ['memoryId'] }) : [];
+            const scopeIds = [...new Set([sourceMem.id, targetMem.id, ...edgeMemories.map((row) => row.memoryId)])].sort();
+            const memories = await tx.memory.findMany({ where: { id: { in: scopeIds } }, select: { id: true, organizationId: true, ownerUserId: true, userId: true } });
+            const agents = await tx.agent.findMany({ where: { systemMemoryId: { in: scopeIds }, deletedAt: null }, select: { id: true, organizationId: true, ownerUserId: true } });
+            const anchors: AuthorityAnchor[] = [
+              ...scopeIds.map((id) => ({ kind: 'memory' as const, id })),
+              ...memories.flatMap((memory) => [
+                ...(memory.organizationId ? [{ kind: 'org' as const, id: memory.organizationId }] : []),
+                ...(memory.ownerUserId ? [{ kind: 'user' as const, id: memory.ownerUserId }] : []),
+                ...(memory.userId ? [{ kind: 'user' as const, id: memory.userId }] : []),
+              ]),
+              ...agents.flatMap((agent) => [
+                { kind: 'agent' as const, id: agent.id },
+                ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+                ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+              ]),
+            ];
+            return withAuthorizedMemoryTx(ctx, sourceMem.id, anchors, async (fresh) => {
+              const [currentSource, currentTarget] = await Promise.all([
+                fresh.db.memory.findUniqueOrThrow({ where: { id: sourceMem.id } }),
+                fresh.db.memory.findUniqueOrThrow({ where: { id: targetMem.id } }),
+              ]);
+              await authorizeMerge(fresh, currentSource, currentTarget);
+              for (const [current, selected] of [[currentSource, sourceMem], [currentTarget, targetMem]]) {
+                if (current.deletedAt || current.class !== selected.class || current.organizationId !== selected.organizationId || current.ownerUserId !== selected.ownerUserId || current.userId !== selected.userId || current.urn !== selected.urn || (phase === 'batch' && current.isEncrypted)) {
+                  throw new GraphQLError('Memory merge scope changed while its batch waited; retry.', { extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: selected.id } });
+                }
+              }
+            }, async (_tx, fresh) => fresh, {
+              preparedTransaction: tx,
+              beforeMemoryRows: async (client) => { for (const id of scopeIds) await lockMemoryForChannelChange(client, id); },
+              memoryRowLocks: phase === 'delete-source' ? new Map<string, 'update' | 'no-key-update'>([[sourceMem.id, 'update'], [targetMem.id, 'no-key-update']]) : undefined,
+            });
+          },
         });
       } catch (e) {
         // Surface the same typed error mergeNodes does, with the offending loc.
@@ -632,28 +675,31 @@ export const memoryMutations = {
       // - org-anchored personal/private: require ACTUAL membership of the org
       //   *container* — the memory is theirs, not the org's, but it lives in the
       //   org's namespace.
-      if (userOwned) {
-        // Owner is the authenticated caller (verified above); no org, no
-        // membership to check. The memory is theirs outright.
-      } else if (isUserOwned) {
-        // NOT requireOrgRole, whose global ADMIN/OWNER bypass would let a
-        // platform admin create a personal/private memory in an org they don't
-        // belong to.
-        const orgMembership = await ctx.db.orgMember.findFirst({
-          where: { organizationId: resolvedOrgId!, userId: ctx.userId!, ...LIVE_ORG_MEMBERSHIP },
-        });
-        if (!orgMembership) {
-          throw new GraphQLError(
-            'You must be a member of the organization to create a personal/private memory in it.',
-            { extensions: { code: 'FORBIDDEN' } },
-          );
+      const authorizeMemoryCreation = async (gateCtx: Context) => {
+        if (userOwned) {
+          // Owner is the authenticated caller (verified above); no org, no
+          // membership to check. The memory is theirs outright.
+        } else if (isUserOwned) {
+          // NOT requireOrgRole, whose global ADMIN/OWNER bypass would let a
+          // platform admin create a personal/private memory in an org they don't
+          // belong to.
+          const orgMembership = await gateCtx.db.orgMember.findFirst({
+            where: { organizationId: resolvedOrgId!, userId: gateCtx.userId!, ...LIVE_ORG_MEMBERSHIP },
+          });
+          if (!orgMembership) {
+            throw new GraphQLError(
+              'You must be a member of the organization to create a personal/private memory in it.',
+              { extensions: { code: 'FORBIDDEN' } },
+            );
+          }
+        } else {
+          // Grant-model gate (design:grant-model P2a): role bundle union
+          // individual grants. Behavior-equivalent to the former
+          // requireOrgRole(ADMIN) until a memory.create grant row exists.
+          await requireOrgAction(gateCtx, resolvedOrgId!, 'memory.create');
         }
-      } else {
-        // Grant-model gate (design:grant-model P2a): role bundle union
-        // individual grants. Behavior-equivalent to the former
-        // requireOrgRole(ADMIN) until a memory.create grant row exists.
-        await requireOrgAction(ctx, resolvedOrgId!, 'memory.create');
-      }
+      };
+      await authorizeMemoryCreation(ctx);
       // 023-app-shape US4: group-class memories must carry GROUP
       // visibility (enforced by the chk_memory_group_visibility CHECK
       // constraint at the DB level; we surface a clearer error at the
@@ -698,7 +744,12 @@ export const memoryMutations = {
       if (existing) {
         if (existing.deletedAt) {
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+            await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [existing.id]);
+            const fresh = await liveTxContext(ctx, tx);
+            await authorizeMemoryCreation(fresh);
+            await reclaimTombstonedMemory(tx, existing.id);
+          });
         } else {
           throw new Error(`A memory with URN "${memoryUrn}" already exists`);
         }
@@ -1293,7 +1344,7 @@ export const memoryMutations = {
       if (memory.class === 'system' && !isInstallMemoryRow(memory)) {
         throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
       }
-      await ctx.db.$transaction(async (tx) => {
+      await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
         // #2044: an install memory's authority before the memory row lock below.
         await lockInstallAuthorityFirst(tx, ctx, resolvedId);
         // Spec 049 §8.5: a memory hosting a live Channel is not deleted around
@@ -1365,30 +1416,33 @@ export const memoryMutations = {
       // #1316: and a caller who cannot even open the source's record is denied
       // as if it were missing (MEMORY_NOT_FOUND), so the denial itself does not
       // disclose that the memory exists; one who can keeps the Forbidden.
-      await concealUnreadableDenial(ctx, source.id, ref, async () => {
-        if (source.class === 'personal' || source.class === 'private') {
-          if (!ctx.userId || source.userId !== ctx.userId) {
+      const authorizeCloneSource = async (gateCtx: Context, current: typeof source) => {
+        await concealUnreadableDenial(gateCtx, current.id, ref, async () => {
+        if (current.class === 'personal' || current.class === 'private') {
+          if (!gateCtx.userId || current.userId !== gateCtx.userId) {
             throw new GraphQLError(
-              `Forbidden: only the owner can clone a ${source.class} memory`,
+              `Forbidden: only the owner can clone a ${current.class} memory`,
               { extensions: { code: 'FORBIDDEN' } },
             );
           }
-        } else if (source.ownerUserId !== null) {
+        } else if (current.ownerUserId !== null) {
           // spec 047: a user-owned source memory is cloneable only by its owner.
-          if (ctx.userId !== source.ownerUserId) {
+          if (gateCtx.userId !== current.ownerUserId) {
             throw new Error('Forbidden: only the owner can clone this memory');
           }
         } else {
           // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
-          if (source.organizationId === null) {
+          if (current.organizationId === null) {
             throw new Error('Invariant: org-owned memory has no organizationId');
           }
           // Grant-model gate (design:grant-model P2a) — was requireOrgRole(ADMIN).
           // A memory.clone PrincipalGrant now lets a specific non-admin member
           // clone; the cross-org DESTINATION gate below is unchanged (#604).
-          await requireOrgAction(ctx, source.organizationId, 'memory.clone');
+          await requireOrgAction(gateCtx, current.organizationId, 'memory.clone');
         }
       });
+      };
+      await authorizeCloneSource(ctx, source);
       // system/app-class memories auto-provision via the agent/install
       // paths (same rationale as createMemory rejecting these classes) —
       // a free-standing clone would violate their pivot invariants
@@ -1451,23 +1505,27 @@ export const memoryMutations = {
       // READER. findFirst + deletedAt:null so a revoked membership can't
       // authorize (findings:revoked-membership-auth-gates); no global-role
       // bypass — "member and not read-only" means real membership.
-      if (targetOrgId !== source.organizationId) {
-        if (!ctx.userId) {
-          throw new GraphQLError(
-            'Cloning into another organization requires an authenticated user.',
-            { extensions: { code: 'UNAUTHENTICATED' } },
-          );
+      const authorizeCloneTarget = async (gateCtx: Context, current: typeof source) => {
+        if (targetOrgId !== current.organizationId) {
+          if (!gateCtx.userId) {
+            throw new GraphQLError(
+              'Cloning into another organization requires an authenticated user.',
+              { extensions: { code: 'UNAUTHENTICATED' } },
+            );
+          }
+          const membership = await gateCtx.db.orgMember.findFirst({
+            where: { organizationId: targetOrgId, userId: gateCtx.userId, ...LIVE_ORG_MEMBERSHIP },
+          });
+          if (!membership || membership.role === 'READER') {
+            throw new GraphQLError(
+              'Forbidden: cloning into an organization requires a non-reader membership there.',
+              { extensions: { code: 'FORBIDDEN' } },
+            );
+          }
         }
-        const membership = await ctx.db.orgMember.findFirst({
-          where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
-        });
-        if (!membership || membership.role === 'READER') {
-          throw new GraphQLError(
-            'Forbidden: cloning into an organization requires a non-reader membership there.',
-            { extensions: { code: 'FORBIDDEN' } },
-          );
-        }
-      }
+
+      };
+      await authorizeCloneTarget(ctx, source);
 
       const newUrn = `${targetOrg.urn}:${targetSlug}`;
       // The clone's display name is derived from the target slug (the arg that
@@ -1479,7 +1537,17 @@ export const memoryMutations = {
       if (existing) {
         if (existing.deletedAt) {
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+            await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [source.id, existing.id]);
+            const fresh = await liveTxContext(ctx, tx);
+            const current = await tx.memory.findUniqueOrThrow({ where: { id: source.id } });
+            await authorizeCloneSource(fresh, current);
+            await authorizeCloneTarget(fresh, current);
+            if (current.deletedAt || current.class !== source.class || current.isEncrypted || current.urn !== source.urn) {
+              throw new GraphQLError('Memory clone scope changed while reclaiming; retry.', { extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
+            }
+            await reclaimTombstonedMemory(tx, existing.id);
+          });
         } else {
           throw new Error(`A memory with URN "${newUrn}" already exists`);
         }
@@ -1497,6 +1565,15 @@ export const memoryMutations = {
         actorId: ctx.userId ?? ctx.clientId ?? null,
         // #2167 — every copied include tag is checked against the copier's reads.
         copierReadableMemoryIds: await getAccessibleMemoryIds(ctx),
+        authorize: (tx) => withAuthorizedMemoryTx(ctx, source.id, [{ kind: 'org', id: targetOrgId }], async (fresh) => {
+          const current = await fresh.db.memory.findUniqueOrThrow({ where: { id: source.id } });
+          await authorizeCloneSource(fresh, current);
+          await authorizeCloneTarget(fresh, current);
+          const currentOrg = await fresh.db.organization.findUniqueOrThrow({ where: { id: targetOrgId }, select: { urn: true } });
+          if (current.deletedAt || current.class !== source.class || current.isEncrypted || current.urn !== source.urn || currentOrg.urn !== targetOrg.urn) {
+            throw new GraphQLError('Memory clone scope changed while it waited; retry.', { extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: source.id } });
+          }
+        }, (_tx, fresh) => getAccessibleMemoryIds(fresh), { preparedTransaction: tx }),
       });
 
       // 033 — the clone carries the source's vector-index config but no
@@ -1622,77 +1699,81 @@ export const memoryMutations = {
       const isGroup = source.class === 'group';
       const newClass = source.class; // system/app already rejected above
 
-      if (isUserOwned) {
-        // canReadMemory already proved ctx.userId is the owner. The new memory
-        // must land in an org the owner actually belongs to (NOT requireOrgAction,
-        // whose global-admin bypass would let a platform admin drop it into an
-        // org they don't belong to — matches createMemory's personal path).
-        if (!ctx.userId) {
-          throw new GraphQLError(
-            'Extracting a personal/private subtree requires an authenticated user (the owner).',
-            { extensions: { code: 'UNAUTHENTICATED' } },
-          );
-        }
-        const membership = await ctx.db.orgMember.findFirst({
-          where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
-        });
-        if (!membership) {
-          throw new GraphQLError(
-            'You must be a member of the organization to extract a personal/private subtree into it.',
-            { extensions: { code: 'FORBIDDEN' } },
-          );
-        }
-      } else {
-        // A group extract bootstraps the caller as first owner → needs a user.
-        if (isGroup && !ctx.userId) {
-          throw new GraphQLError(
-            'Extracting a group-class subtree requires an authenticated user (the caller becomes the first owner).',
-            { extensions: { code: 'UNAUTHENTICATED' } },
-          );
-        }
-        // Source-side gate at clone parity (design:grant-model P2a): copying a
-        // subtree out is an export, so hold the SOURCE org's memory.clone grant
-        // — canReadMemory alone would let a bare reader exfiltrate. cloneMemory
-        // gates the same way. spec 047: a user-owned source is gated by its owner.
-        if (source.ownerUserId !== null) {
-          if (ctx.userId !== source.ownerUserId) {
-            throw new Error('Forbidden: only the owner can copy from this memory');
-          }
-        } else {
-          // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
-          if (source.organizationId === null) {
-            throw new Error('Invariant: org-owned memory has no organizationId');
-          }
-          await requireOrgAction(ctx, source.organizationId, 'memory.clone');
-        }
-        // Target-side create grant (same as createMemory).
-        await requireOrgAction(ctx, targetOrgId, 'memory.create');
-        // Cross-org drop requires an ACTUAL non-reader membership of the target
-        // org (mirrors cloneMemory #604; findFirst + deletedAt:null so a revoked
-        // membership can't authorize).
-        if (targetOrgId !== source.organizationId) {
-          if (!ctx.userId) {
+      const authorizeExtract = async (gateCtx: Context, current: typeof source) => {
+        if (current.class === 'personal' || current.class === 'private') {
+          // canReadMemory already proved gateCtx.userId is the owner. The new memory
+          // must land in an org the owner actually belongs to (NOT requireOrgAction,
+          // whose global-admin bypass would let a platform admin drop it into an
+          // org they don't belong to — matches createMemory's personal path).
+          if (!gateCtx.userId) {
             throw new GraphQLError(
-              'Extracting into another organization requires an authenticated user.',
+              'Extracting a personal/private subtree requires an authenticated user (the owner).',
               { extensions: { code: 'UNAUTHENTICATED' } },
             );
           }
-          const membership = await ctx.db.orgMember.findFirst({
-            where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
+          const membership = await gateCtx.db.orgMember.findFirst({
+            where: { organizationId: targetOrgId, userId: gateCtx.userId, ...LIVE_ORG_MEMBERSHIP },
           });
-          if (!membership || membership.role === 'READER') {
+          if (!membership) {
             throw new GraphQLError(
-              'Forbidden: extracting into an organization requires a non-reader membership there.',
+              'You must be a member of the organization to extract a personal/private subtree into it.',
               { extensions: { code: 'FORBIDDEN' } },
             );
           }
+        } else {
+          // A group extract bootstraps the caller as first owner → needs a user.
+          if (current.class === 'group' && !gateCtx.userId) {
+            throw new GraphQLError(
+              'Extracting a group-class subtree requires an authenticated user (the caller becomes the first owner).',
+              { extensions: { code: 'UNAUTHENTICATED' } },
+            );
+          }
+          // Source-side gate at clone parity (design:grant-model P2a): copying a
+          // subtree out is an export, so hold the SOURCE org's memory.clone grant
+          // — canReadMemory alone would let a bare reader exfiltrate. cloneMemory
+          // gates the same way. spec 047: a user-owned source is gated by its owner.
+          if (current.ownerUserId !== null) {
+            if (gateCtx.userId !== current.ownerUserId) {
+              throw new Error('Forbidden: only the owner can copy from this memory');
+            }
+          } else {
+            // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
+            if (current.organizationId === null) {
+              throw new Error('Invariant: org-owned memory has no organizationId');
+            }
+            await requireOrgAction(gateCtx, current.organizationId, 'memory.clone');
+          }
+          // Target-side create grant (same as createMemory).
+          await requireOrgAction(gateCtx, targetOrgId, 'memory.create');
+          // Cross-org drop requires an ACTUAL non-reader membership of the target
+          // org (mirrors cloneMemory #604; findFirst + deletedAt:null so a revoked
+          // membership can't authorize).
+          if (targetOrgId !== current.organizationId) {
+            if (!gateCtx.userId) {
+              throw new GraphQLError(
+                'Extracting into another organization requires an authenticated user.',
+                { extensions: { code: 'UNAUTHENTICATED' } },
+              );
+            }
+            const membership = await gateCtx.db.orgMember.findFirst({
+              where: { organizationId: targetOrgId, userId: gateCtx.userId, ...LIVE_ORG_MEMBERSHIP },
+            });
+            if (!membership || membership.role === 'READER') {
+              throw new GraphQLError(
+                'Forbidden: extracting into an organization requires a non-reader membership there.',
+                { extensions: { code: 'FORBIDDEN' } },
+              );
+            }
+          }
         }
-      }
 
-      // move soft-deletes the source subtree → write access to the source.
-      if (move) {
-        await requireMemoryWriteAccess(ctx, source.id);
-      }
+        // move soft-deletes the source subtree → write access to the source.
+        if (move) {
+          await requireMemoryWriteAccess(gateCtx, current.id);
+        }
+
+      };
+      await authorizeExtract(ctx, source);
 
       // URN collision handling matches createMemory / cloneMemory.
       const newUrn = `${targetOrg.urn}:${targetSlug}`;
@@ -1700,7 +1781,17 @@ export const memoryMutations = {
       if (existing) {
         if (existing.deletedAt) {
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+            await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [source.id, existing.id]);
+            const fresh = await liveTxContext(ctx, tx);
+            const current = await tx.memory.findUniqueOrThrow({ where: { id: source.id } });
+            if (!(await canReadMemory(fresh.db, fresh, current.id))) throw new GraphQLError(`Node not found: "${parentRef}"`, { extensions: { code: 'NODE_NOT_FOUND', ref: parentRef } });
+            await authorizeExtract(fresh, current);
+            if (current.deletedAt || current.class !== source.class || current.isEncrypted || current.urn !== source.urn) {
+              throw new GraphQLError('Memory extract scope changed while reclaiming; retry.', { extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
+            }
+            await reclaimTombstonedMemory(tx, existing.id);
+          });
         } else {
           throw new Error(`A memory with URN "${newUrn}" already exists`);
         }
@@ -1728,6 +1819,22 @@ export const memoryMutations = {
         principal: ctx,
         // #2167 — every copied include tag is checked against the copier's reads.
         copierReadableMemoryIds: await getAccessibleMemoryIds(ctx),
+        authorize: (tx) => withAuthorizedMemoryTx(ctx, source.id, [{ kind: 'org', id: targetOrgId }], async (fresh) => {
+          const current = await fresh.db.memory.findUniqueOrThrow({ where: { id: source.id } });
+          if (!(await canReadMemory(fresh.db, fresh, current.id))) throw new GraphQLError(`Node not found: "${parentRef}"`, { extensions: { code: 'NODE_NOT_FOUND', ref: parentRef } });
+          await authorizeExtract(fresh, current);
+          const currentOrg = await fresh.db.organization.findUniqueOrThrow({ where: { id: targetOrgId }, select: { urn: true } });
+          if (current.deletedAt || current.class !== source.class || current.isEncrypted || current.urn !== source.urn || currentOrg.urn !== targetOrg.urn) {
+            throw new GraphQLError('Memory extract scope changed while it waited; retry.', { extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: source.id } });
+          }
+          const currentParent = await fresh.db.node.findUnique({ where: { id: parent.id }, select: { loc: true, memoryId: true, deletedAt: true } });
+          if (!currentParent || currentParent.deletedAt || currentParent.memoryId !== source.id || currentParent.loc !== parent.loc) {
+            throw new GraphQLError('Extract parent changed while it waited; retry.', { extensions: { code: 'NODE_WRITE_CONFLICT', nodeId: parent.id } });
+          }
+          if (move && !(await fresh.db.node.findFirst({ where: { memoryId: source.id, deletedAt: null, NOT: { OR: [{ loc: parent.loc }, { loc: { startsWith: `${parent.loc}:` } }] } }, select: { id: true } }))) {
+            throw new GraphQLError('extractParentNodeToMemory: this move would empty the source memory.', { extensions: { code: 'BAD_USER_INPUT', memoryId: source.id, parentLoc: parent.loc } });
+          }
+        }, async (_tx, fresh) => ({ readableMemoryIds: await getAccessibleMemoryIds(fresh), principal: fresh }), { preparedTransaction: tx, beforeMemoryRows: (client) => lockMemoryForChannelChange(client, source.id) }),
       });
 
       // The extract carries the subtree's content but no vectors; stamp every
@@ -2230,7 +2337,7 @@ export const memoryMutations = {
         // end-user gets a RANDOM handle — addressed by (externalAppId,
         // externalId), not by handle.
         const appUserHandle = await generateUniqueHandle(ctx.db);
-        user = await ctx.db.$transaction(async (tx) => {
+        user = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
           const u = await tx.user.create({
             data: {
               externalAppId: ctx.appId,
@@ -2275,14 +2382,7 @@ export const memoryMutations = {
       // plaintext branch below leaves the App-scoped class untouched.
       if (suppliedKey && !memory.isEncrypted) {
         const key = suppliedKey;
-        const nodes = await ctx.db.node.findMany({
-          where: { memoryId: resolvedMemoryId, deletedAt: null },
-          // abstract encrypts alongside content since spec 031 — selecting only
-          // content+data here would leave abstracts plaintext on a memory marked
-          // encrypted (matches the encryptMemory fix below).
-          select: { id: true, content: true, abstract: true, data: true },
-        });
-        await ctx.db.$transaction(async (tx) => {
+        await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
           const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
           const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`;
@@ -2293,6 +2393,17 @@ export const memoryMutations = {
               extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: resolvedMemoryId },
             });
           }
+          // The promotion may have waited behind a committed authoring write.
+          // Lock and read its current plaintext here, never encrypt values
+          // enumerated before the deciding fence. The Memory UPDATE lock also
+          // prevents a new child from slipping into this conversion/claim set.
+          await tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${resolvedMemoryId}
+            AND deleted_at IS NULL ORDER BY id FOR UPDATE`;
+          const nodes = await tx.node.findMany({
+            where: { memoryId: resolvedMemoryId, deletedAt: null },
+            select: { id: true, content: true, abstract: true, data: true },
+            orderBy: { id: 'asc' },
+          });
           for (const node of nodes) {
             const encrypted = encryptNodeFieldsWithKey(
               { content: node.content, abstract: node.abstract, data: node.data },
@@ -2360,7 +2471,7 @@ export const memoryMutations = {
 
       // Claim the plaintext rename under the same scope and lock as encrypted
       // promotion. A competing rename/registration must roll the alias back.
-      return ctx.db.$transaction(async (tx) => {
+      return withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
         const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
         const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`;
@@ -2502,13 +2613,17 @@ export const memoryMutations = {
       // otherwise a losing caller could replace the verifier while the winner
       // encrypts rows under its own key (#1346).
       if (!memory.isEncrypted) {
-        await ctx.db.$transaction(async (tx) => {
+        await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+          await withAuthorizedMemoryTx(ctx, resolvedMemoryId, [], async () => {}, async () => {}, {
+            preparedTransaction: tx,
+            memoryRowLocks: new Map([[resolvedMemoryId, 'update']]),
+          });
           // A transfer may win after the preflight above. Hold the same row
           // lock as transfer while checking the current owner and class, so
           // the former owner's key cannot encrypt the receiver's nodes.
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
           const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
-          const txCtx = { ...ctx, db: tx } as Context;
+          const txCtx = await liveTxContext(ctx, tx);
           await concealUnreadableDenial(txCtx, resolvedMemoryId, memoryId, async () => {
             if (current.deletedAt) throw new GraphQLError('Memory not found.', { extensions: { code: 'FORBIDDEN' } });
             if (!isStrictOwner(ctx, current.userId)) {
@@ -2551,10 +2666,14 @@ export const memoryMutations = {
       }
       /** Keep conversion authority current while holding memory before node locks. */
       const lockConversionMemory = async (tx: Prisma.TransactionClient) => {
+        await withAuthorizedMemoryTx(ctx, resolvedMemoryId, [], async () => {}, async () => {}, {
+          preparedTransaction: tx,
+        });
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR SHARE`;
         const current = await tx.memory.findUnique({ where: { id: resolvedMemoryId } });
-        await concealUnreadableDenial({ ...ctx, db: tx } as Context, resolvedMemoryId, memoryId, async () => {
-          if (!current || current.deletedAt || (!isStrictOwner(ctx, current.userId) &&
+        const txCtx = await liveTxContext(ctx, tx);
+        await concealUnreadableDenial(txCtx, resolvedMemoryId, memoryId, async () => {
+          if (!current || current.deletedAt || (!isStrictOwner(txCtx, current.userId) &&
               !(appCompletionOnly && current.appId === ctx.appId && current.userId === memory.userId &&
                 current.class === 'private' && current.isEncrypted))) {
             throw new GraphQLError('Only the memory owner may encrypt it.', { extensions: { code: 'FORBIDDEN' } });
@@ -2589,7 +2708,7 @@ export const memoryMutations = {
           if (nodes.length === 0) break;
           cursor = nodes[nodes.length - 1].id;
           for (const node of nodes) {
-            const didConvert = await ctx.db.$transaction(async (tx) => {
+            const didConvert = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
               await lockConversionMemory(tx);
               // Lock first, then re-read. A moved row is outside this memory;
               // a deleted row still belongs here and retains restorable
@@ -2704,7 +2823,7 @@ export const memoryMutations = {
           if (revisions.length === 0) break;
           revisionCursor = revisions[revisions.length - 1].id;
           for (const candidate of revisions) {
-            const didConvert = await ctx.db.$transaction(async (tx) => {
+            const didConvert = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
               await lockConversionMemory(tx);
               await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${candidate.nodeId} FOR UPDATE`;
               // A concurrent history prune may delete a page candidate. Lock
@@ -2757,7 +2876,7 @@ export const memoryMutations = {
           extensions: { code: 'ENCRYPTION_INCOMPLETE', memoryId: resolvedMemoryId },
         });
       }
-      return ctx.db.$transaction(async (tx) => {
+      return withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
         const current = await lockConversionMemory(tx);
         // A completion of an earlier encryption ends approvals it predates.
         await endApprovalsOnEncryptedEntry(tx, { memoryId: resolvedMemoryId });

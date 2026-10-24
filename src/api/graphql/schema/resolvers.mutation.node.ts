@@ -1,3 +1,6 @@
+import { assertIncludeHistoryClient } from '../../../lib/includes/includeHistoryFence.js';
+import { withIncludeHistoryClientTransaction } from '../../../lib/includes/includeHistoryFence.js';
+import { withAuthorizedMemoryTx, liveTxContext } from './authorizedTx.js';
 import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { currentActor } from '../../../lib/requestActor.js';
@@ -910,8 +913,8 @@ async function writeNodeCoreRaw(
       };
       const inWriteTransaction = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
         opts?.transaction
-          ? work(opts.transaction.tx)
-          : mapDeadlockToWriteConflict(input.memoryId, () => ctx.db.$transaction(async (tx) => {
+          ? (assertIncludeHistoryClient(opts.transaction.tx), work(opts.transaction.tx))
+          : mapDeadlockToWriteConflict(input.memoryId, () => withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
             // #2044: an install memory's authority comes before ANY memory/node/loc lock.
             await lockInstallAuthorityFirst(tx, ctx, input.memoryId);
             return work(tx);
@@ -932,7 +935,7 @@ async function writeNodeCoreRaw(
             extensions: { code: 'NODE_WRITE_CONFLICT', memoryId: input.memoryId },
           });
         }
-        await authorizeWrite(withoutRequestCaches(ctx, tx));
+        await authorizeWrite(await liveTxContext(ctx, tx));
       };
 
       // Inline edge replacement is part of the node mutation, not a follow-up
@@ -2067,7 +2070,7 @@ export async function updateNodePropertiesWith(
   // event, embedding, git and usage effects run only after this commit, on the
   // pooled client rather than a closed transaction client.
   const effects: Array<() => void> = [];
-  const written = await ctx.db.$transaction(async (lockTx) => {
+  const written = await withIncludeHistoryClientTransaction(ctx.db, async (lockTx) => {
     await lockTx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${meta.id}))`;
 
     // Fresh read UNDER the lock — the merge base can't be stale. `properties`
@@ -2106,7 +2109,7 @@ export async function updateNodePropertiesWith(
         ...(fresh.ownerRepo != null ? { ownerRepo: fresh.ownerRepo } : {}),
         ...(reason != null ? { reason } : {}),
       },
-      withoutRequestCaches(ctx, lockTx),
+      await liveTxContext(ctx, lockTx),
       'update',
       {
         targetNodeId: meta.id,
@@ -2184,7 +2187,7 @@ export const nodeMoveOps = {
       try {
         let relocated: MoveNodeSubtreeResult['moved'] = [];
         let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
-        const moved = await ctx.db.$transaction(
+        const moved = await withIncludeHistoryClientTransaction(ctx.db,
           async (tx) => {
             // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
             await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [source.memoryId, destMemoryId]);
@@ -2219,8 +2222,8 @@ export const nodeMoveOps = {
               destMemoryId: crossMemory ? destMemoryId : undefined,
               editor: editorFromAuth(ctx),
               requireUnminted,
-              authorizeLockedMemory: (memoryId) =>
-                requireMemoryWriteAccess(withoutRequestCaches(ctx, tx), memoryId),
+              authorizeLockedMemory: async (memoryId) =>
+                requireMemoryWriteAccess(await liveTxContext(ctx, tx), memoryId),
               principal: ctx,
             });
             relocated = result.moved;
@@ -2321,6 +2324,309 @@ export async function findCallerInstallMemory(ctx: Context, install: InstallTarg
   }
   return row;
 }
+
+export interface NodeWriteTransaction {
+  tx: Prisma.TransactionClient;
+  pooledDb: Context['db'];
+  afterCommit: (effect: () => void) => void;
+}
+export type DeleteNodeInput = {
+        nodeRef: string;
+        hard?: boolean | null;
+        recursive?: boolean | null;
+        cascadeCrossMemoryEdges?: boolean | null;
+      };
+
+/** The same delete operation, using an explicit caller-owned prepared transaction. */
+export function deleteNodeInTransaction(args: DeleteNodeInput, ctx: Context, transaction: NodeWriteTransaction) {
+  assertIncludeHistoryClient(transaction.tx);
+  return deleteNodeCore(null, args, ctx, transaction);
+}
+
+async function deleteNodeCore(_: unknown,
+{ nodeRef, hard, recursive, cascadeCrossMemoryEdges }: {
+        nodeRef: string;
+        hard?: boolean | null;
+        recursive?: boolean | null;
+        cascadeCrossMemoryEdges?: boolean | null;
+      },
+ctx: Context, transaction?: NodeWriteTransaction) {
+      const runDeleteTransaction = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>, options: { timeout?: number }) =>
+        transaction
+          ? (assertIncludeHistoryClient(transaction.tx), work(transaction.tx))
+          : withIncludeHistoryClientTransaction(ctx.db, work, options);
+      // #542 — a single 'nodeRef' (ID or fully-qualified URN) identifies the
+      // node, resolved by the shared resolveNodeRef. includeDeleted so a
+      // re-delete of an already soft-deleted node stays idempotent (its ref
+      // still resolves through the tombstone) — the old loc+memoryId path hit
+      // the row directly regardless of deletedAt, so this preserves behavior.
+      let resolvedId: string;
+      try {
+        ({ id: resolvedId } = await resolveNodeRefForCaller(ctx, nodeRef, undefined, {
+          includeDeleted: true,
+        }));
+      } catch (e) {
+        if (e instanceof NodeNotFoundError) {
+          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+          });
+        }
+        throw e;
+      }
+      const node = await ctx.db.node.findUnique({
+        where: { id: resolvedId },
+        select: { memoryId: true, loc: true, deletedAt: true },
+      });
+      if (!node) {
+        throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+        });
+      }
+      // One check covers the subtree too: every descendant shares this memory.
+      // #1316: a node in a memory the caller cannot read answers as a missing one.
+      await concealUnreadableNodeDenial(ctx, node.memoryId, () => nodeNotFoundError(nodeRef), () =>
+        requireMemoryWriteAccess(ctx, node.memoryId),
+      );
+
+      // Idempotent no-op: a non-recursive soft re-delete of an already-tombstoned
+      // node preserves its original deletedAt/deletedBy (matches the
+      // hadron_delete_node MCP tool) instead of re-stamping it. This must run
+      // before Channel protection: clean Channel reuse tombstones the previous
+      // transcript, then makes the Channel live again, and a retry by stable id
+      // is still a no-op rather than a fresh attempt to mutate that live Channel.
+      if (!recursive && !hard && node.deletedAt !== null) return true;
+
+      // Spec 049 S4: a Channel's address (and any subtree overlapping it) is its own operation's.
+      // 'delete', not 'write' (@copilot, PR #1198). The verb reaches the user twice —
+      // "the only thing that may delete here", and the REMEDY, which must not offer
+      // an authoring door for an operation neither door performs.
+      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'delete');
+
+      const deletedBy = ctx.userId ?? ctx.appId ?? ctx.clientId ?? null;
+      const now = new Date();
+      const memoryId = node.memoryId;
+      // The node at its loc PLUS every descendant, on ':' path boundaries (so
+      // 'auth' won't catch 'authoring') — the same subtree shape as
+      // extractParentNode / the bulk node ops.
+      const subtree: Prisma.NodeWhereInput = {
+        memoryId,
+        OR: [{ loc: node.loc }, { loc: { startsWith: escapePrismaLikePattern(`${node.loc}:`) } }],
+      };
+      // #449 — source memories whose pending-edge count a hard delete changed.
+      let pendingSourceMemories: string[] = [];
+      try {
+        // The count and the delete run in one transaction (parity with
+        // hadron_delete_node). #664: an advisory lock on this node's loc — taken
+        // first, as the matching key any descendant-create locks as an ancestor
+        // (nodeSubtreeLock.ts) — closes the count-then-act race. A concurrent
+        // create of a descendant either commits before this lock (so the count
+        // below sees it and refuses) or blocks until this delete commits (so it
+        // lands under an already-deleted prefix — the tolerated create-after-
+        // delete case). READ COMMITTED (the default) is required so the count
+        // runs on a fresh snapshot taken after the lock is granted.
+        await runDeleteTransaction(async (tx) => {
+          // A dead Channel releases strict descendants for cleanup, so this
+          // authoritative re-check must serialize with Channel resurrection.
+          // Memory-before-loc matches ensureChannelWithRoot's global order.
+          await lockMemoryForChannelChange(tx, memoryId);
+          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
+          const txCtx = await liveTxContext(ctx, tx);
+          await concealUnreadableNodeDenial(
+            txCtx, memoryId, () => nodeNotFoundError(nodeRef),
+            () => requireMemoryWriteAccess(txCtx, memoryId),
+          );
+          // This helper acquires the loc lock AND runs assertLocWritable on a
+          // fresh snapshot. Keep that re-check under the memory lock: if reuse
+          // won while this request waited, the now-live Channel refuses the
+          // stale cleanup before any descendant is touched.
+          await lockNodeForDelete(tx, memoryId, node.loc);
+          // The target may have moved while this delete waited. The loc lock
+          // above protects the address we authorized, not the stable id; do
+          // not let that id carry the delete into its new address or memory.
+          const current = await tx.node.findUnique({
+            where: { id: resolvedId },
+            select: { memoryId: true, loc: true },
+          });
+          if (!current || current.memoryId !== memoryId || current.loc !== node.loc) {
+            const movedMemory = !!current && current.memoryId !== memoryId;
+            throw new GraphQLError(
+              `Node "${nodeRef}" moved while this delete waited — re-read it and retry.`,
+              {
+                extensions: {
+                  code: 'NODE_WRITE_CONFLICT',
+                  ref: nodeRef,
+                  memoryId,
+                  movedMemory,
+                  ...(!movedMemory && current ? { currentLoc: current.loc } : {}),
+                },
+              },
+            );
+          }
+          const useSubtree = !!recursive;
+          if (!useSubtree) {
+            // Non-recursive: refuse rather than silently orphan a subtree under a
+            // now-missing prefix. Hard counts the union (a tombstoned descendant
+            // still cascades via FK); soft counts only live descendants.
+            const descendantCount = await tx.node.count({
+              where: {
+                memoryId,
+                loc: { startsWith: escapePrismaLikePattern(`${node.loc}:`) },
+                ...(hard ? {} : { deletedAt: null }),
+              },
+            });
+            if (descendantCount > 0) {
+              throw new GraphQLError(
+                `Node "${nodeRef}" has ${descendantCount} descendant(s). Pass recursive: true to delete the whole subtree.`,
+                { extensions: { code: 'NODE_HAS_DESCENDANTS', count: descendantCount, ref: nodeRef } },
+              );
+            }
+          }
+
+          // #1468 — the complete removal scope, under the address lock taken
+          // above (no row can join it now). A hard delete also removes
+          // tombstones, so they count; a soft delete removes live rows only.
+          // Hard deletes reuse these ids for the cross-memory edge gate +
+          // PendingEdge cleanup — the safeguards hadron_delete_node applies.
+          const affectedIds = useSubtree
+            ? (await tx.node.findMany({
+                where: hard ? subtree : { ...subtree, deletedAt: null },
+                select: { id: true },
+              })).map((n) => n.id)
+            : [resolvedId];
+          await assertNoMintedSpecRemoval(tx, memoryId, affectedIds, hard ? 'hard-delete' : 'delete');
+          // #1606 (cor:dmo:110:04/05) — a comment is removed only by the comment
+          // path's thread delete; a target takes its threads with it.
+          if ((await commentIdsAmong(tx, affectedIds)).length > 0) throw commentGovernedError('delete', 'removes');
+          await assertNoBootPromptRows(tx, affectedIds, 'delete');
+          // #1641 §3.2 — a decision is withdrawn, never deleted, and deleting a
+          // log or an ancestor of one would erase decision history.
+          await refuseDecisionFamily(tx, affectedIds, 'Deleting this node');
+          // A governed node is removed only after its marker is cleared through
+          // the kind's door: the whole affected set is judged here, on locked
+          // rows, before any write.
+          const removed = await assertNoGovernedRemoval(tx, memoryId, affectedIds, 'graphql', { hard: !!hard });
+          // cor:acl:130:07 — removing a node writes it: each removed row's role
+          // and runnable state needs its writer level, judged on the rows locked
+          // above, so one row of an ADMIN role refuses the whole removal.
+          await assertRoleWritersForNodes(tx, ctx, removed, { from: memoryId });
+          if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
+          else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy, at: now });
+
+          if (hard) {
+            // A hard delete cascades Edge rows on BOTH endpoints via FK. If an
+            // edge bridges this memory to another, cascading silently removes it
+            // from a memory the caller may not own — refuse unless acknowledged.
+            if (!cascadeCrossMemoryEdges) {
+              const crossMemEdges = await tx.edge.count({
+                where: {
+                  OR: [
+                    { targetId: { in: affectedIds }, source: { memoryId: { not: memoryId } } },
+                    { sourceId: { in: affectedIds }, target: { memoryId: { not: memoryId } } },
+                  ],
+                },
+              });
+              if (crossMemEdges > 0) {
+                throw new GraphQLError(
+                  `Hard-delete refused: ${crossMemEdges} edge(s) bridge this memory to another. ` +
+                    `Pass cascadeCrossMemoryEdges: true to remove them (the other memory's view loses them).`,
+                  { extensions: { code: 'CROSS_MEMORY_EDGES', count: crossMemEdges } },
+                );
+              }
+            }            // #1647: acknowledging the cascade is not write authority over the other holdings it edits. The whole
+            // delete refuses (the transaction rolls back), with the generic write refusal.
+            for (const other of await foreignEdgeMemoryIds(tx, affectedIds, memoryId)) {
+              await requireMemoryWriteAccess(ctx, other);
+            }
+            // PendingEdge.targetId is intentionally NOT a foreign key, so the FK
+            // cascade misses pending rows aimed at the deleted nodes — clean them
+            // up explicitly (PR-189 pattern), in both node-keyed forms (#449).
+            pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, affectedIds);
+
+            if (useSubtree) {
+              await tx.node.deleteMany({ where: subtree });
+            } else {
+              // Scope the write to the authorized memory: if the node was moved
+              // to another memory between the access check and here, this yields
+              // 0 rows → NODE_NOT_FOUND rather than a cross-memory write (TOCTOU).
+              const res = await tx.node.deleteMany({ where: { id: resolvedId, memoryId } });
+              if (res.count === 0) {
+                throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+                  extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+                });
+              }
+            }
+          } else if (useSubtree) {
+            // Soft-delete the whole subtree; only touch live rows so an
+            // already-deleted node keeps its original audit stamp (idempotent).
+            await tx.node.updateMany({
+              where: { ...subtree, deletedAt: null },
+              data: { deletedAt: now, deletedBy },
+            });
+          } else {
+            // #391: soft-delete — set deletedAt/deletedBy so the node drops out of
+            // every read (nodes/nodeById/node/resolveUrn) but stays recoverable.
+            // Scoped to the authorized memory (TOCTOU, as above); the already-
+            // deleted case was handled by the early no-op above, so 0 rows here
+            // means the node moved → NODE_NOT_FOUND.
+            const res = await tx.node.updateMany({
+              where: { id: resolvedId, memoryId, deletedAt: null },
+              data: { deletedAt: now, deletedBy },
+            });
+            if (res.count === 0) {
+              throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+                extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+              });
+            }
+          }
+        // #1619 — a hard delete cascades every node's edges, revisions and
+        // derived rows; a few dozen nodes outlast Prisma's 5 s default and
+        // the transaction expired partway ("Transaction already closed").
+        // Trade-off, accepted: the 5 s default also capped how long one slow
+        // delete pins a pool connection and its row/advisory locks. At 120 s
+        // a few concurrent huge deletes could starve the pool (others fail
+        // fast at maxWait). Large recursive deletes are rare, operator-driven
+        // calls, so we take that over failing every legitimate one; chunking
+        // or a concurrency cap is the follow-up if it ever bites.
+        }, { timeout: 120_000 });
+      } catch (e) {
+        if (e instanceof GraphQLError) throw e; // typed NODE_HAS_DESCENDANTS
+        // Prisma P2025 = record not found — wrap so a missing node surfaces a
+        // typed NODE_NOT_FOUND instead of leaking as INTERNAL_SERVER_ERROR
+        // (mirrors moveNode; issue #100).
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+          });
+        }
+        throw e;
+      }
+      const afterCommit = async () => {
+      await reconcilePendingEdgeCounts(transaction?.pooledDb ?? ctx.db, pendingSourceMemories).catch((err) =>
+        console.warn('[deleteNode] pending-edge count reconcile failed (the periodic repair will fix it):', err),
+      );
+      // #1061 — a delete is a write. Recorded for the addressed node only, not
+      // per descendant of a recursive delete: the subtree is removed by one
+      // `updateMany` whose row identities are never materialized, and counting
+      // a tree's size as N separate writes would swamp the series for what the
+      // caller experienced as a single edit.
+      //
+      // A HARD delete records nothing: the row is gone, so the event's `nodeId`
+      // FK has nothing to point at (the insert would simply fail into the
+      // recorder's swallowed catch) — and unlike the soft case there is no
+      // surviving node whose usage series the event belongs to.
+      if (!hard) {
+        recordNodeWrite(
+          transaction?.pooledDb ?? ctx.db,
+          { id: resolvedId, loc: node.loc, memoryId: node.memoryId },
+          ctx,
+        );
+      }
+
+      };
+      if (transaction) transaction.afterCommit(() => { void afterCommit().catch((error) => console.warn('[deleteNode] post-commit effect failed:', error)); });
+      else await afterCommit();
+      return true;
+    }
 
 export const nodeMutations = {
     // Create a single node (spec 039 Phase 0 D1/D4). Create-only: a live
@@ -2883,7 +3189,14 @@ export const nodeMutations = {
       if (dryRun) return buildResult();
 
       // ── Write pass: revision snapshot + node update, all-or-nothing ──
-      await mapDeadlockToWriteConflict(plans[0]?.raw.memoryId ?? '', () => ctx.db.$transaction(async (tx) => {
+      await mapDeadlockToWriteConflict(plans[0]?.raw.memoryId ?? '', () => withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+        const writeMemoryIds = [...new Set(plans.map((plan) => plan.raw.memoryId))].sort();
+        await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, writeMemoryIds);
+        const txCtx = await liveTxContext(ctx, tx);
+        for (const memoryId of writeMemoryIds) {
+          await requireMemoryWriteAccess(txCtx, memoryId);
+          if (await isWriteBeyondRead(tx as unknown as Context['db'], txCtx, memoryId)) throw memoryWriteForbidden();
+        }
         // A Channel can claim an ancestor after selection but before this
         // transaction. Take its per-memory key BEFORE any node row lock (the
         // Channel/create and delete paths use the same order), then classify
@@ -2955,7 +3268,7 @@ export const nodeMutations = {
           const locked = lockedRoles.get(plan.raw.id);
           const role = locked?.role ?? null;
           const runnable = locked?.isRunnable ?? null;
-          if ((role || runnable === true) && await roleWritersRefusal(tx, ctx, plan.raw.memoryId, {
+          if ((role || runnable === true) && await roleWritersRefusal(tx, txCtx, plan.raw.memoryId, {
             priorRole: role, nextRole: role, priorRunnable: runnable, nextRunnable: runnable,
           })) {
             skipCounts.governed += 1;
@@ -3037,7 +3350,7 @@ export const nodeMutations = {
           // refusal throws and rolls the whole batch back with it.
           if (p.contentChanged) {
             const text = p.plaintext.content;
-            readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+            readableForIncludes ??= text?.includes('{{>') ? await getAccessibleMemoryIds(txCtx) : null;
             const stored = { storedPlaintext: p.storedContent };
             const tags = await assertIncludesWritable(tx, raw, text, readableForIncludes, undefined, stored);
             await syncDerivedIncludesEdges(tx, raw, tags, readableForIncludes, stored);
@@ -3120,283 +3433,7 @@ export const nodeMutations = {
 
     searchReplaceInSpecNodes,
 
-    deleteNode: async (
-      _: unknown,
-      { nodeRef, hard, recursive, cascadeCrossMemoryEdges }: {
-        nodeRef: string;
-        hard?: boolean | null;
-        recursive?: boolean | null;
-        cascadeCrossMemoryEdges?: boolean | null;
-      },
-      ctx: Context,
-    ) => {
-      // #542 — a single 'nodeRef' (ID or fully-qualified URN) identifies the
-      // node, resolved by the shared resolveNodeRef. includeDeleted so a
-      // re-delete of an already soft-deleted node stays idempotent (its ref
-      // still resolves through the tombstone) — the old loc+memoryId path hit
-      // the row directly regardless of deletedAt, so this preserves behavior.
-      let resolvedId: string;
-      try {
-        ({ id: resolvedId } = await resolveNodeRefForCaller(ctx, nodeRef, undefined, {
-          includeDeleted: true,
-        }));
-      } catch (e) {
-        if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
-          });
-        }
-        throw e;
-      }
-      const node = await ctx.db.node.findUnique({
-        where: { id: resolvedId },
-        select: { memoryId: true, loc: true, deletedAt: true },
-      });
-      if (!node) {
-        throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
-        });
-      }
-      // One check covers the subtree too: every descendant shares this memory.
-      // #1316: a node in a memory the caller cannot read answers as a missing one.
-      await concealUnreadableNodeDenial(ctx, node.memoryId, () => nodeNotFoundError(nodeRef), () =>
-        requireMemoryWriteAccess(ctx, node.memoryId),
-      );
-
-      // Idempotent no-op: a non-recursive soft re-delete of an already-tombstoned
-      // node preserves its original deletedAt/deletedBy (matches the
-      // hadron_delete_node MCP tool) instead of re-stamping it. This must run
-      // before Channel protection: clean Channel reuse tombstones the previous
-      // transcript, then makes the Channel live again, and a retry by stable id
-      // is still a no-op rather than a fresh attempt to mutate that live Channel.
-      if (!recursive && !hard && node.deletedAt !== null) return true;
-
-      // Spec 049 S4: a Channel's address (and any subtree overlapping it) is its own operation's.
-      // 'delete', not 'write' (@copilot, PR #1198). The verb reaches the user twice —
-      // "the only thing that may delete here", and the REMEDY, which must not offer
-      // an authoring door for an operation neither door performs.
-      await assertLocWritable(ctx.db, node.memoryId, node.loc, 'delete');
-
-      const deletedBy = ctx.userId ?? ctx.appId ?? ctx.clientId ?? null;
-      const now = new Date();
-      const memoryId = node.memoryId;
-      // The node at its loc PLUS every descendant, on ':' path boundaries (so
-      // 'auth' won't catch 'authoring') — the same subtree shape as
-      // extractParentNode / the bulk node ops.
-      const subtree: Prisma.NodeWhereInput = {
-        memoryId,
-        OR: [{ loc: node.loc }, { loc: { startsWith: escapePrismaLikePattern(`${node.loc}:`) } }],
-      };
-      // #449 — source memories whose pending-edge count a hard delete changed.
-      let pendingSourceMemories: string[] = [];
-      try {
-        // The count and the delete run in one transaction (parity with
-        // hadron_delete_node). #664: an advisory lock on this node's loc — taken
-        // first, as the matching key any descendant-create locks as an ancestor
-        // (nodeSubtreeLock.ts) — closes the count-then-act race. A concurrent
-        // create of a descendant either commits before this lock (so the count
-        // below sees it and refuses) or blocks until this delete commits (so it
-        // lands under an already-deleted prefix — the tolerated create-after-
-        // delete case). READ COMMITTED (the default) is required so the count
-        // runs on a fresh snapshot taken after the lock is granted.
-        await ctx.db.$transaction(async (tx) => {
-          // A dead Channel releases strict descendants for cleanup, so this
-          // authoritative re-check must serialize with Channel resurrection.
-          // Memory-before-loc matches ensureChannelWithRoot's global order.
-          await lockMemoryForChannelChange(tx, memoryId);
-          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
-          const txCtx = withoutRequestCaches(ctx, tx);
-          await concealUnreadableNodeDenial(
-            txCtx, memoryId, () => nodeNotFoundError(nodeRef),
-            () => requireMemoryWriteAccess(txCtx, memoryId),
-          );
-          // This helper acquires the loc lock AND runs assertLocWritable on a
-          // fresh snapshot. Keep that re-check under the memory lock: if reuse
-          // won while this request waited, the now-live Channel refuses the
-          // stale cleanup before any descendant is touched.
-          await lockNodeForDelete(tx, memoryId, node.loc);
-          // The target may have moved while this delete waited. The loc lock
-          // above protects the address we authorized, not the stable id; do
-          // not let that id carry the delete into its new address or memory.
-          const current = await tx.node.findUnique({
-            where: { id: resolvedId },
-            select: { memoryId: true, loc: true },
-          });
-          if (!current || current.memoryId !== memoryId || current.loc !== node.loc) {
-            const movedMemory = !!current && current.memoryId !== memoryId;
-            throw new GraphQLError(
-              `Node "${nodeRef}" moved while this delete waited — re-read it and retry.`,
-              {
-                extensions: {
-                  code: 'NODE_WRITE_CONFLICT',
-                  ref: nodeRef,
-                  memoryId,
-                  movedMemory,
-                  ...(!movedMemory && current ? { currentLoc: current.loc } : {}),
-                },
-              },
-            );
-          }
-          const useSubtree = !!recursive;
-          if (!useSubtree) {
-            // Non-recursive: refuse rather than silently orphan a subtree under a
-            // now-missing prefix. Hard counts the union (a tombstoned descendant
-            // still cascades via FK); soft counts only live descendants.
-            const descendantCount = await tx.node.count({
-              where: {
-                memoryId,
-                loc: { startsWith: escapePrismaLikePattern(`${node.loc}:`) },
-                ...(hard ? {} : { deletedAt: null }),
-              },
-            });
-            if (descendantCount > 0) {
-              throw new GraphQLError(
-                `Node "${nodeRef}" has ${descendantCount} descendant(s). Pass recursive: true to delete the whole subtree.`,
-                { extensions: { code: 'NODE_HAS_DESCENDANTS', count: descendantCount, ref: nodeRef } },
-              );
-            }
-          }
-
-          // #1468 — the complete removal scope, under the address lock taken
-          // above (no row can join it now). A hard delete also removes
-          // tombstones, so they count; a soft delete removes live rows only.
-          // Hard deletes reuse these ids for the cross-memory edge gate +
-          // PendingEdge cleanup — the safeguards hadron_delete_node applies.
-          const affectedIds = useSubtree
-            ? (await tx.node.findMany({
-                where: hard ? subtree : { ...subtree, deletedAt: null },
-                select: { id: true },
-              })).map((n) => n.id)
-            : [resolvedId];
-          await assertNoMintedSpecRemoval(tx, memoryId, affectedIds, hard ? 'hard-delete' : 'delete');
-          // #1606 (cor:dmo:110:04/05) — a comment is removed only by the comment
-          // path's thread delete; a target takes its threads with it.
-          if ((await commentIdsAmong(tx, affectedIds)).length > 0) throw commentGovernedError('delete', 'removes');
-          await assertNoBootPromptRows(tx, affectedIds, 'delete');
-          // #1641 §3.2 — a decision is withdrawn, never deleted, and deleting a
-          // log or an ancestor of one would erase decision history.
-          await refuseDecisionFamily(tx, affectedIds, 'Deleting this node');
-          // A governed node is removed only after its marker is cleared through
-          // the kind's door: the whole affected set is judged here, on locked
-          // rows, before any write.
-          const removed = await assertNoGovernedRemoval(tx, memoryId, affectedIds, 'graphql', { hard: !!hard });
-          // cor:acl:130:07 — removing a node writes it: each removed row's role
-          // and runnable state needs its writer level, judged on the rows locked
-          // above, so one row of an ADMIN role refuses the whole removal.
-          await assertRoleWritersForNodes(tx, ctx, removed, { from: memoryId });
-          if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
-          else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy, at: now });
-
-          if (hard) {
-            // A hard delete cascades Edge rows on BOTH endpoints via FK. If an
-            // edge bridges this memory to another, cascading silently removes it
-            // from a memory the caller may not own — refuse unless acknowledged.
-            if (!cascadeCrossMemoryEdges) {
-              const crossMemEdges = await tx.edge.count({
-                where: {
-                  OR: [
-                    { targetId: { in: affectedIds }, source: { memoryId: { not: memoryId } } },
-                    { sourceId: { in: affectedIds }, target: { memoryId: { not: memoryId } } },
-                  ],
-                },
-              });
-              if (crossMemEdges > 0) {
-                throw new GraphQLError(
-                  `Hard-delete refused: ${crossMemEdges} edge(s) bridge this memory to another. ` +
-                    `Pass cascadeCrossMemoryEdges: true to remove them (the other memory's view loses them).`,
-                  { extensions: { code: 'CROSS_MEMORY_EDGES', count: crossMemEdges } },
-                );
-              }
-            }            // #1647: acknowledging the cascade is not write authority over the other holdings it edits. The whole
-            // delete refuses (the transaction rolls back), with the generic write refusal.
-            for (const other of await foreignEdgeMemoryIds(tx, affectedIds, memoryId)) {
-              await requireMemoryWriteAccess(ctx, other);
-            }
-            // PendingEdge.targetId is intentionally NOT a foreign key, so the FK
-            // cascade misses pending rows aimed at the deleted nodes — clean them
-            // up explicitly (PR-189 pattern), in both node-keyed forms (#449).
-            pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, affectedIds);
-
-            if (useSubtree) {
-              await tx.node.deleteMany({ where: subtree });
-            } else {
-              // Scope the write to the authorized memory: if the node was moved
-              // to another memory between the access check and here, this yields
-              // 0 rows → NODE_NOT_FOUND rather than a cross-memory write (TOCTOU).
-              const res = await tx.node.deleteMany({ where: { id: resolvedId, memoryId } });
-              if (res.count === 0) {
-                throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-                  extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
-                });
-              }
-            }
-          } else if (useSubtree) {
-            // Soft-delete the whole subtree; only touch live rows so an
-            // already-deleted node keeps its original audit stamp (idempotent).
-            await tx.node.updateMany({
-              where: { ...subtree, deletedAt: null },
-              data: { deletedAt: now, deletedBy },
-            });
-          } else {
-            // #391: soft-delete — set deletedAt/deletedBy so the node drops out of
-            // every read (nodes/nodeById/node/resolveUrn) but stays recoverable.
-            // Scoped to the authorized memory (TOCTOU, as above); the already-
-            // deleted case was handled by the early no-op above, so 0 rows here
-            // means the node moved → NODE_NOT_FOUND.
-            const res = await tx.node.updateMany({
-              where: { id: resolvedId, memoryId, deletedAt: null },
-              data: { deletedAt: now, deletedBy },
-            });
-            if (res.count === 0) {
-              throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-                extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
-              });
-            }
-          }
-        // #1619 — a hard delete cascades every node's edges, revisions and
-        // derived rows; a few dozen nodes outlast Prisma's 5 s default and
-        // the transaction expired partway ("Transaction already closed").
-        // Trade-off, accepted: the 5 s default also capped how long one slow
-        // delete pins a pool connection and its row/advisory locks. At 120 s
-        // a few concurrent huge deletes could starve the pool (others fail
-        // fast at maxWait). Large recursive deletes are rare, operator-driven
-        // calls, so we take that over failing every legitimate one; chunking
-        // or a concurrency cap is the follow-up if it ever bites.
-        }, { timeout: 120_000 });
-      } catch (e) {
-        if (e instanceof GraphQLError) throw e; // typed NODE_HAS_DESCENDANTS
-        // Prisma P2025 = record not found — wrap so a missing node surfaces a
-        // typed NODE_NOT_FOUND instead of leaking as INTERNAL_SERVER_ERROR
-        // (mirrors moveNode; issue #100).
-        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
-          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
-          });
-        }
-        throw e;
-      }
-      await reconcilePendingEdgeCounts(ctx.db, pendingSourceMemories).catch((err) =>
-        console.warn('[deleteNode] pending-edge count reconcile failed (the periodic repair will fix it):', err),
-      );
-      // #1061 — a delete is a write. Recorded for the addressed node only, not
-      // per descendant of a recursive delete: the subtree is removed by one
-      // `updateMany` whose row identities are never materialized, and counting
-      // a tree's size as N separate writes would swamp the series for what the
-      // caller experienced as a single edit.
-      //
-      // A HARD delete records nothing: the row is gone, so the event's `nodeId`
-      // FK has nothing to point at (the insert would simply fail into the
-      // recorder's swallowed catch) — and unlike the soft case there is no
-      // surviving node whose usage series the event belongs to.
-      if (!hard) {
-        recordNodeWrite(
-          ctx.db,
-          { id: resolvedId, loc: node.loc, memoryId: node.memoryId },
-          ctx,
-        );
-      }
-      return true;
-    },
+    deleteNode: (parent: unknown, args: DeleteNodeInput, ctx: Context) => deleteNodeCore(parent, args, ctx),
 
     // ── Edge CRUD ──────────────────────────────────────────────────────
 
@@ -3489,7 +3526,7 @@ export const nodeMutations = {
         }
         throw e;
       }
-      const edge = await ctx.db.$transaction(async (tx) => {
+      const edge = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
         const locked = await lockLiveEdgeEndpoints(
           tx,
           { id: resolvedSourceId, ...src },
@@ -3510,7 +3547,7 @@ export const nodeMutations = {
         for (const memoryId of [...new Set([src.memoryId, tgt.memoryId])].sort()) {
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
         }
-        const txCtx = withoutRequestCaches(ctx, tx);
+        const txCtx = await liveTxContext(ctx, tx);
         if (!(await isMemoryReadableCached(txCtx, src.memoryId))) {
           throw new GraphQLError(`Source node not found: "${sourceRef}"`, {
             extensions: { code: 'NODE_NOT_FOUND' },
@@ -3649,9 +3686,9 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess(ctx, edgeMem.memoryId);
-      const updatedEdge = await ctx.db.$transaction(async (tx) => {
+      const updatedEdge = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${edgeMem.memoryId} FOR SHARE`;
-        const txCtx = withoutRequestCaches(ctx, tx);
+        const txCtx = await liveTxContext(ctx, tx);
         if (!(await isMemoryReadableCached(txCtx, edgeMem.memoryId))) {
           throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
             extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
@@ -3741,9 +3778,9 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess(ctx, edgeMem.memoryId);
-      await ctx.db.$transaction(async (tx) => {
+      await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${edgeMem.memoryId} FOR SHARE`;
-        const txCtx = withoutRequestCaches(ctx, tx);
+        const txCtx = await liveTxContext(ctx, tx);
         if (!(await isMemoryReadableCached(txCtx, edgeMem.memoryId))) {
           throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
             extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
@@ -3810,12 +3847,20 @@ export const nodeMutations = {
           extensions: { code: 'NODE_NOT_FOUND', ref: sourceRef },
         });
       }
+      // Refuse an invalid or unwritable destination before source history work.
+      // Resolution preserves concealment but permits readable non-writers, so
+      // the shared write gate is also required. This is never a success grant:
+      // retain fresh source checks and destination resolution/write checks below.
+      const earlyTarget = await resolveRelocationTarget(ctx, selectedSource, targetUrn, targetMemoryRef);
+      await requireMemoryWriteAccess(ctx, earlyTarget.destMemoryId);
       // A raw writer may have changed the source's content while leaving its
       // old task/human stamp. Reconcile under the source row lock and copy the
       // resulting state; the clone's own fingerprint would otherwise certify
       // the stale stamp permanently. A concurrent move or delete is a miss in
       // the memory this caller was authorized to read.
-      const source = await ctx.db.$transaction(async (tx) => {
+      const source = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+        const fresh = await liveTxContext(ctx, tx);
+        if (!(await canReadMemory(tx as unknown as Context['db'], fresh, selectedSource.memoryId))) return null;
         if ((await ensureCurrentNodeRevisionInTransaction(tx, selectedSource.id, {
           expectedMemoryId: selectedSource.memoryId,
         })) == null) return null;
@@ -4152,7 +4197,13 @@ export const nodeMutations = {
       // ── Atomic write: revision snapshot → target update → edge re-point →
       //    source delete ──────────────────────────────────────────────────
       let pendingSourceMemories: string[] = []; // #449
-      await mapDeadlockToWriteConflict(target.memoryId, () => ctx.db.$transaction(async (tx) => {
+      await mapDeadlockToWriteConflict(target.memoryId, () => withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+        await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [source.memoryId, target.memoryId]);
+        const txCtx = await liveTxContext(ctx, tx);
+        if (!(await canReadMemory(tx as unknown as Context['db'], txCtx, source.memoryId))) throw nodeNotFoundError(rawSource);
+        if (!(await canReadMemory(tx as unknown as Context['db'], txCtx, target.memoryId))) throw nodeNotFoundError(rawTarget);
+        await requireMemoryWriteAccess(txCtx, target.memoryId);
+        if (deleteSource || fields.has('EDGES')) await requireMemoryWriteAccess(txCtx, source.memoryId);
         // #1187 — DECLARE the complete key set first, in the one global order.
         // A merge takes two keys and used to take them target-then-source,
         // which inverted against move's destination-then-source; sorting only
@@ -4222,11 +4273,11 @@ export const nodeMutations = {
         }
         // #1331 — the target is written, and a source that is deleted or whose edges
         // are re-pointed is written too: each role's writer level, on the locked rows.
-        await assertRoleWritersForWrite(tx, ctx, target.memoryId, {
+        await assertRoleWritersForWrite(tx, txCtx, target.memoryId, {
           priorRole: lockedTarget.role, nextRole: lockedTarget.role, priorRunnable: lockedTarget.isRunnable, nextRunnable: lockedTarget.isRunnable,
         });
         if (takesSource) {
-          await assertRoleWritersForWrite(tx, ctx, source.memoryId, {
+          await assertRoleWritersForWrite(tx, txCtx, source.memoryId, {
             priorRole: lockedSource.role, nextRole: lockedSource.role, priorRunnable: lockedSource.isRunnable, nextRunnable: lockedSource.isRunnable,
           });
         }
@@ -4277,7 +4328,7 @@ export const nodeMutations = {
           // can combine two nodes' tags into a cycle); a refusal rolls it back.
           if ('content' in changed) {
             const text = changed.content as string | null;
-            const readable = text?.includes('{{>') ? await getAccessibleMemoryIds(ctx) : null;
+            const readable = text?.includes('{{>') ? await getAccessibleMemoryIds(txCtx) : null;
             // The target's text before the fold: tgtPt, revalidated against the
             // locked row above (revisionStateMatches), so only the source's tags
             // and any the fold changes count as added (#2041 S2b).
@@ -4630,7 +4681,13 @@ export const nodeMutations = {
 
       // Restore (+ optional truncate) in one transaction (#617) so the portal
       // never sequences restore + N deletes and can't half-apply on a crash.
-      const { restored, restoredPlaintext, destinationEncrypted } = await ctx.db.$transaction(async (tx) => {
+      const { restored, restoredPlaintext, destinationEncrypted } = await withIncludeHistoryClientTransaction(ctx.db, async (tx) => {
+        await lockInstallAuthorityFirst(tx, ctx, node.memoryId);
+        const txCtx = await liveTxContext(ctx, tx);
+        await requireMemoryWriteAccess(txCtx, node.memoryId);
+        const freshAccessible = await getAccessibleMemoryIds(txCtx);
+        const freshCanRead = (id: string) => freshAccessible === null || freshAccessible.includes(id);
+        if (!freshCanRead(sourceMemoryId)) throw notFound();
         // Spec 049 S4: lock-then-gate — the check above is the fast refusal.
         await lockLocForWrite(tx, node.memoryId, node.loc);
         // Row lock + drift reconciled as its own revision before the restore's
@@ -4664,7 +4721,7 @@ export const nodeMutations = {
         // leave us restoring an obsolete ciphertext/plaintext view.
         await tx.$queryRaw`SELECT id FROM node_revisions WHERE id = ${revisionId} FOR UPDATE`;
         const selected = await tx.nodeRevision.findUnique({ where: { id: revisionId } });
-        if (!selected || !canRead(selected.memoryId ?? current.memoryId)) throw notFound();
+        if (!selected || !freshCanRead(selected.memoryId ?? current.memoryId)) throw notFound();
         const selectedSourceId = selected.memoryId ?? current.memoryId;
         const selectedSource = await tx.memory.findUniqueOrThrow({
           where: { id: selectedSourceId }, select: { isEncrypted: true },
@@ -4712,7 +4769,7 @@ export const nodeMutations = {
         // #1331 — the writer level of the role before AND after, on the locked row.
         {
           const restoredRole = (restoreFields as { role?: string | null }).role;
-          await assertRoleWritersForWrite(tx, ctx, current.memoryId, {
+          await assertRoleWritersForWrite(tx, txCtx, current.memoryId, {
             priorRole: current.role, nextRole: restoredRole === undefined ? current.role : restoredRole,
             priorRunnable: current.isRunnable,
             nextRunnable: mergedGovernedState(current, {
@@ -4847,12 +4904,21 @@ export const nodeMutations = {
       }
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
-      // #1641 §3.2 — a decision's history is its audit trail. Unlocked: no
-      // write ever turns an existing node into a decision or back.
-      if (isDecisionFamilyRole(node.role)) throw decisionContainedError("Deleting a decision's revision", [node.loc]);
-      // No protected-loc gate: a revision row is history, not the address.
-      await ctx.db.nodeRevision.delete({ where: { id: revisionId } });
-      return true;
+      return withAuthorizedMemoryTx(ctx, node.memoryId, [],
+        (txCtx) => requireMemoryWriteAccess(txCtx, node.memoryId),
+        async (tx) => {
+          const [current] = await tx.$queryRaw<Array<{ memory_id: string; role: string | null; loc: string }>>`
+            SELECT memory_id, role, loc FROM nodes WHERE id = ${node.id} FOR UPDATE`;
+          if (!current || current.memory_id !== node.memoryId) {
+            throw new GraphQLError('Node changed while deleting history; retry.', { extensions: { code: 'NODE_WRITE_CONFLICT' } });
+          }
+          await requireMemoryWriteAccess(await liveTxContext(ctx, tx), node.memoryId);
+          if (isDecisionFamilyRole(current.role)) throw decisionContainedError("Deleting a decision's revision", [current.loc]);
+          // No protected-loc gate or retention exemption on a deliberate delete.
+          const deleted = await tx.nodeRevision.deleteMany({ where: { id: revisionId, nodeId: node.id } });
+          if (deleted.count !== 1) throw new GraphQLError('Node revision not found', { extensions: { code: 'NOT_FOUND', revisionId } });
+          return true;
+        }, { fence: true });
     },
 
     // #620 — set or clear the user-facing label on a revision snapshot
@@ -4925,10 +4991,20 @@ export const nodeMutations = {
         select: { memoryId: true, role: true, loc: true },
       });
       await requireMemoryWriteAccess(ctx, node.memoryId);
-      // #1641 §3.2 — a decision's history is its audit trail (as deleteNodeRevision).
-      if (isDecisionFamilyRole(node.role)) throw decisionContainedError("Clearing a decision's history", [node.loc]);
-      const { count } = await ctx.db.nodeRevision.deleteMany({ where: { nodeId } });
-      return count;
+      return withAuthorizedMemoryTx(ctx, node.memoryId, [],
+        (txCtx) => requireMemoryWriteAccess(txCtx, node.memoryId),
+        async (tx) => {
+          const [current] = await tx.$queryRaw<Array<{ memory_id: string; role: string | null; loc: string }>>`
+            SELECT memory_id, role, loc FROM nodes WHERE id = ${nodeId} FOR UPDATE`;
+          if (!current || current.memory_id !== node.memoryId) {
+            throw new GraphQLError('Node changed while clearing history; retry.', { extensions: { code: 'NODE_WRITE_CONFLICT' } });
+          }
+          await requireMemoryWriteAccess(await liveTxContext(ctx, tx), node.memoryId);
+          // Deliberate deletion still breaks includes; automatic exemptions do not apply.
+          if (isDecisionFamilyRole(current.role)) throw decisionContainedError("Clearing a decision's history", [current.loc]);
+          const { count } = await tx.nodeRevision.deleteMany({ where: { nodeId } });
+          return count;
+        }, { fence: true });
     },
 
     // #749 — export a node's markdown as a NEW Google Doc via the drive

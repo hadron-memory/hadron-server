@@ -6,6 +6,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../../test/softPasskey.js';
 import { createSignIn } from '../../auth/signIn.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
+import { withIncludeHistoryTransaction } from '../includes/includeHistoryFence.js';
 import { createCeremony } from './ceremony.js';
 import { confirmFreshSignIn, recordIdpSignIn, startEmailSignIn } from './freshSignIn.js';
 import { bindRevokeByIdp, bindRevokeByPasskey, finishRevoke } from './revoke.js';
@@ -174,28 +175,29 @@ describe('what a revocation does, and only for the owner', () => {
     const third = softPasskey(); const thirdId = await insertSoftPasskey(db, ana, third, { label: 'Tablet' });
     const id = await ceremony();
     expect(await byPasskey(id, phone)).not.toBeNull();
-    // Hold the owner's anchor so both finishes pass their unlocked pre-check and queue behind it; releasing it then
-    // serializes them, and only the consume UPDATE's `consumed_at IS NULL` can refuse the second.
+    // Hold the OUTER history fence so both finishes pass their unlocked
+    // pre-check before either enters. The fence now precedes owner anchors;
+    // waiting for two owner-anchor waiters would leave the second parked at F.
+    // After release, the consume CAS must still admit exactly one target.
     let release!: () => void;
     const held = new Promise<void>((r) => { release = r; });
     let locked!: () => void;
     const lockTaken = new Promise<void>((r) => { locked = r; });
-    const holder = db.$transaction(async (tx) => {
-      await lockAuthorityAnchors(tx, [{ kind: 'user', id: ana }], 'exclusive');
+    const holder = withIncludeHistoryTransaction(db, async () => {
       locked();
       await held;
-    }, { timeout: 30_000 });
+    }, { timeoutMs: 30_000 });
     let racers: Promise<unknown[]> | undefined;
     let waiting = 0;
     try {
       await lockTaken;
       racers = Promise.all([finish(id, laptop), finish(id, third)]);
-      // Precondition: both finishes are parked on THIS owner's anchor (the ungranted advisory locks on its key), i.e.
-      // both already passed the unlocked pre-check. A sequential run never reaches 2, so the pin cannot pass vacuously.
+      // Both real calls must be parked on this database's exact outer key.
+      // A sequential execution cannot reach two waiters before release.
       for (let i = 0; i < 200 && waiting < 2; i++) {
         const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks
           WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
-            AND classid = hashtext('authorization:user')::oid AND objid = hashtext(${ana})::oid`;
+            AND classid = 2063 AND objid = 1772 AND objsubid = 2`;
         waiting = Number(n);
         if (waiting < 2) await new Promise((r) => setTimeout(r, 25));
       }

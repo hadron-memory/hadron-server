@@ -1,3 +1,4 @@
+import { withIncludeHistoryClientTransaction } from './includes/includeHistoryFence.js';
 /** #1391: a move preserves each published node address through the alias map. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
@@ -483,7 +484,7 @@ describe('node move URN aliases', () => {
   it('rolls aliases back with the move when the enclosing transaction aborts', async () => {
     const root = await createNode(source.id, 'old');
     const child = await createNode(source.id, 'old:child');
-    await expect(db.$transaction(async (tx) => {
+    await expect(withIncludeHistoryClientTransaction(db, async (tx) => {
       await moveNodeSubtree(tx, {
         source: root, destLoc: 'new', editor: { userId: mover.id },
       });

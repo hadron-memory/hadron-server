@@ -184,6 +184,7 @@ export async function cloneAgent(ctx: Context, input: CloneAgentInput, hooks: Cl
         (tx, txCtx) => writeClone(ctx, txCtx, tx, target, plan, input, { afterBaseline: () => hooks.afterBaseline?.(attempt), afterCopy: () => hooks.afterCopy?.(attempt) }),
         {
           lockMode: 'exclusive',
+          fence: true,
           timeout: 120_000,
           // Advisory keys first, before ANY row lock (Andi/Dara P2 on #2245): setAgentBase takes the graph lock and
           // then the child row FOR UPDATE, and every channel-host key holder takes the key before a memory row.

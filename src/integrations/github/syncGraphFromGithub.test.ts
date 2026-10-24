@@ -1,3 +1,5 @@
+import type { Prisma } from '../../generated/prisma/index.js';
+import { withIncludeHistoryTransaction, withIncludeHistoryClientTransaction } from '../../lib/includes/includeHistoryFence.js';
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { dirname, join } from 'path';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
@@ -236,7 +238,7 @@ describe('syncGraphFromGithub', () => {
     let releaseMove!: () => void;
     const pathHeld = new Promise<void>((resolve) => { signalPathHeld = resolve; });
     const mayMove = new Promise<void>((resolve) => { releaseMove = resolve; });
-    const moving = db.$transaction(async (tx) => {
+    const moving = withIncludeHistoryClientTransaction(db, async (tx) => {
       await acquireLockSet(tx, [{ memoryId: dbGraphId, loc: 'source' }]);
       signalPathHeld();
       await mayMove;
@@ -808,7 +810,7 @@ describe('syncGraphFromGithub', () => {
     const nodeId = 'aaaa000000000000000000000000001340';
     const row = await db.node.create({ data: { id: nodeId, memoryId: dbGraphId, loc: 'moved:away', name: 'n', content: 'mine' } });
     await expect(
-      db.$transaction((tx) => updateNodeFromGitSync(tx, row, { content: 'from git' }, undefined, 'some-other-memory')),
+      withIncludeHistoryClientTransaction(db, (tx) => updateNodeFromGitSync(tx, row, { content: 'from git' }, undefined, 'some-other-memory')),
     ).rejects.toBeInstanceOf(GitSyncTargetMovedError);
     const after = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     expect(after.content).toBe('mine');
@@ -826,13 +828,13 @@ describe('syncGraphFromGithub', () => {
         authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1, authoredAt,
       },
     });
-    await db.$transaction((tx) => updateNodeFromGitSync(tx, original, { loc: 'new-path' }, undefined, dbGraphId));
+    await withIncludeHistoryClientTransaction(db, (tx) => updateNodeFromGitSync(tx, original, { loc: 'new-path' }, undefined, dbGraphId));
     const moved = await db.node.findUniqueOrThrow({ where: { id: original.id } });
     expect(moved).toMatchObject({
       loc: 'new-path', authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1, authoredAt,
     });
 
-    await db.$transaction((tx) => updateNodeFromGitSync(tx, moved, { content: 'new body' }, undefined, dbGraphId));
+    await withIncludeHistoryClientTransaction(db, (tx) => updateNodeFromGitSync(tx, moved, { content: 'new body' }, undefined, dbGraphId));
     expect(await db.node.findUniqueOrThrow({ where: { id: original.id } })).toMatchObject({
       content: 'new body', authorshipKind: null, authoredByTask: null,
       authoredByRevision: null, authoredAt: null,
@@ -1542,7 +1544,7 @@ describe('Channel-protected mirror cleanup (#1226)', () => {
       // The edge insert has reached the target FK and is blocked while the
       // sync transaction still holds the source's complete path lock.
       await waitForLockWaitersOfType(db, 'transactionid', 1);
-      const moving = db.$transaction(async (tx) => {
+      const moving = withIncludeHistoryClientTransaction(db, async (tx) => {
         await acquireLockSet(tx, [
           ...ancestorLocs('moved:source').map((loc) => ({ memoryId: movedMemory.id, loc })),
           ...ancestorLocs(source.loc).map((loc) => ({ memoryId: source.memoryId, loc })),
@@ -3075,4 +3077,63 @@ describe('#449 — git sync cleanup and PendingEdges aimed at pruned nodes', () 
     expect((await db.pendingEdge.findMany({ select: { targetId: true } })).map((p) => p.targetId)).toEqual(['gone']);
     expect((await db.memory.findUniqueOrThrow({ where: { id: other.id } })).pendingEdgeCount).toBe(1);
   });
+});
+
+
+it('Git sync waits on history before source rows and snapshots', async () => {
+  const source = await db.node.create({ data: { memoryId: dbGraphId, loc: 'boundary', name: 'Boundary', content: 'Before' } });
+  const path = join(mockSources, 'test-org', 'test/repo', 'boundary');
+  mkdirSync(path, { recursive: true });
+  writeNodeFiles(path, { name: 'Boundary' }, 'After');
+  let entered!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const holder = withIncludeHistoryTransaction(db, async () => { entered(); await gate; });
+  await ready;
+  const pending = syncGraphFromGithub(makeGraph());
+  const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }));
+  try {
+    await waitForLockWaitersOfType(db, 'advisory', 1, 1500);
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${dbGraphId} FOR UPDATE NOWAIT`;
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${source.id} FOR UPDATE NOWAIT`;
+    });
+    expect((await db.node.findUniqueOrThrow({ where: { id: source.id } })).content).toBe('Before');
+    expect(await db.nodeRevision.count({ where: { nodeId: source.id } })).toBe(0);
+  } finally { release(); await holder; await outcome; }
+  expect((await pending).error).toBeUndefined();
+  expect((await db.node.findUniqueOrThrow({ where: { id: source.id } })).content).toBe('After');
+});
+
+it('Git sync retains history exclusivity through its actual deciding commit', async () => {
+  const source = await db.node.create({ data: { memoryId: dbGraphId, loc: 'boundary', name: 'Boundary', content: 'Before' } });
+  const path = join(mockSources, 'test-org', 'test/repo', 'boundary');
+  mkdirSync(path, { recursive: true });
+  writeNodeFiles(path, { name: 'Boundary' }, 'After');
+  let entered!: () => void;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const transaction = db.$transaction.bind(db);
+  let first = true;
+  const hook = vi.spyOn(db, '$transaction').mockImplementation((async (work: (tx: Prisma.TransactionClient) => Promise<unknown>, options: unknown) => {
+    const held = first; first = false;
+    return transaction(async (tx) => { const value = await work(tx); if (held) { entered(); await gate; } return value; }, options as never);
+  }) as typeof db.$transaction);
+  const pending = syncGraphFromGithub(makeGraph());
+  const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }));
+  let otherEntered = false;
+  try {
+    await Promise.race([ready, outcome.then((result) => { if ('error' in result) throw result.error; throw new Error('missing Git commit barrier'); })]);
+    const counterparty = withIncludeHistoryTransaction(db, async () => { otherEntered = true; });
+    const otherOutcome = counterparty.then(() => undefined, (error: unknown) => error);
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1, 1500);
+      expect(otherEntered).toBe(false);
+      expect((await db.node.findUniqueOrThrow({ where: { id: source.id } })).content).toBe('Before');
+    } finally { release(); await outcome; await otherOutcome; }
+    expect((await pending).error).toBeUndefined();
+    expect(otherEntered).toBe(true);
+  } finally { release(); hook.mockRestore(); }
 });
