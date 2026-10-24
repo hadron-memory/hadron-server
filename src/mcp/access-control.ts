@@ -99,10 +99,20 @@ export function foldAgentIntoAccessMap(agent: AgentLike): Map<string, string> {
  *
  * The Agent path requires a live App, Agent, and install license.
  */
+/** #2190: which installed Agent put a memory into an App's access map, and whether as its system memory. */
+export type AgentProvenance = { agentId: string; system: boolean };
+
 export async function getAppMemoryAccess(
   db: PrismaClient,
   appId: string,
-  opts: { includeTeamSpace?: boolean; callerUserId?: string | null; allAgents?: boolean; memberAdmitted?: boolean } = {},
+  opts: {
+    includeTeamSpace?: boolean;
+    callerUserId?: string | null;
+    allAgents?: boolean;
+    memberAdmitted?: boolean;
+    /** #2190: filled, per memory, with the Agents whose fold granted it (install order). */
+    provenance?: Map<string, AgentProvenance[]>;
+  } = {},
 ): Promise<Map<string, string>> {
   const app = await db.app.findUnique({
     where: { id: appId },
@@ -163,6 +173,11 @@ export async function getAppMemoryAccess(
     );
     for (const [memoryId, level] of agentAccess) {
       if (level === 'READ_WRITE' || !access.has(memoryId)) access.set(memoryId, level);
+      if (opts.provenance && install.agent) {
+        const list = opts.provenance.get(memoryId) ?? [];
+        list.push({ agentId: install.agent.id, system: memoryId === install.agent.systemMemoryId });
+        opts.provenance.set(memoryId, list);
+      }
     }
   }
 
