@@ -63,7 +63,7 @@ describe('#2063 include-history prepared transaction boundary', () => {
     }) as unknown as typeof tx.$executeRaw);
     const work = vi.fn();
     await expect(withIncludeHistoryTransaction(client, work, { timeoutMs: 10 }))
-      .rejects.toThrow(/expired/i);
+      .rejects.toMatchObject({ extensions: { code: 'INCLUDE_HISTORY_EXPIRED', retryable: true } });
     expect(work).not.toHaveBeenCalled();
   });
 
@@ -96,7 +96,7 @@ describe('#2063 include-history prepared transaction boundary', () => {
       await withIncludeHistoryTransaction(client, async (prepared) => {
         expect(includeHistoryClient(prepared)).toBeDefined();
         clock.mockReturnValue(30_100);
-        expect(() => includeHistoryClient(prepared)).toThrow(/prepared include-history transaction/i);
+        expect(() => includeHistoryClient(prepared)).toThrow(/transaction budget expired/i);
       });
     } finally {
       clock.mockRestore();
@@ -278,8 +278,8 @@ describe('#2063 exclusive fence over real Postgres transactions', () => {
       escaped = prepared;
       await includeHistoryClient(prepared).user.create({ data: { id, email: `timeout-${id}@example.test` } });
       await new Promise((done) => setTimeout(done, 250));
-      expect(() => includeHistoryClient(prepared)).toThrow(/prepared include-history transaction/i);
-    }, { timeoutMs: 100 })).rejects.toThrow(/expired|closed|timeout/i);
+      expect(() => includeHistoryClient(prepared)).toThrow(/transaction budget expired/i);
+    }, { timeoutMs: 100 })).rejects.toThrow(/expired|exceeded|closed|timeout/i);
     expect(await db.user.findUnique({ where: { id } })).toBeNull();
     expect(() => includeHistoryClient(escaped)).toThrow(/prepared include-history transaction/i);
     await expect(withIncludeHistoryTransaction(db, async () => 'released')).resolves.toBe('released');

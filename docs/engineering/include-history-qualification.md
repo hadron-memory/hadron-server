@@ -14,6 +14,14 @@ Machine-readable retained blockers: `include-history-open-rows.json`. All listed
 
 Landing order: bounded qualification/history primitive and checked Dan caller first under original T3/final-security/seed-startup/integrated-QA gates; separately CHECKED dependent writer cuts afterward; complete actual composition before combined readiness. Analysis may proceed now. Every proposed new implementation still needs its own CHECKED attach. Marco owns named QA allocation; real stack remains held by human pause #13670, with non-stack preparation assigned to Cooper. Older sections below are dated evidence, not evidence that a newer tree ran their checks.
 
+## Operational refusal delta (CHECKED 6378006448)
+
+The shared primitive now translates recognized structured SQLSTATE `55P03` only after the complete outer transaction has rejected: `INCLUDE_HISTORY_BUSY`, `retryable: true`, with neutral lock-contention wording for acquisition or later locks. Its own active-context deadline sentinel becomes `INCLUDE_HISTORY_EXPIRED` after settled rollback. These invite a caller-selected fresh invocation; neither automatically replays work nor promises success. Missing, forged and post-return proofs remain programming misuse, not authority failures.
+
+Prisma `P2028` provides no safe structured expiry discriminator in this checkout. It stays unclassified and can replace the primitive sentinel; not every timed-out call returns BUSY or EXPIRED. Dan observed three P2028 and three P2010/55P03 results across six scaled waiter attempts. No message parsing or broad pool/connection/domain mapping is used. Total budgets remain clone 120000 ms / ordinary 30000 ms, with separate pool 5000 ms; transaction-local lock_timeout stays active for subsequent lock statements and is reset on commit or rollback.
+
+Security review 6378034267 remains CHANGES REQUESTED: cloneNode pre-fence destination authorization, platform-wide serialization availability and five revocation coverage rows are open. The operational classification correction closes none of those by itself. Dan's measured plain-node fixtures up to N=1000 had median holds 89/288/1677 ms (max1905 ms), with no authored nodes/includes/imports: mechanism evidence, not a capacity or availability acceptance. Actual composed server QA, seed/startup, fleet and all retained source-writer gates remain.
+
 ## Integrated source baseline
 
 - Current main `00c20188` includes #2235 approval placement and #2129 unchanged

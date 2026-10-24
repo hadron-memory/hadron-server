@@ -5,8 +5,24 @@
   "includedCheckedCaller": "Dan cloneAgent 2aad4b5e (source20e6c0bf), CHECKED6356294522",
   "openRows": [
     {
-      "id": "2274-namespace-address",
-      "family": "owner-handle, organization and Memory URN/alias/trigger rewrites",
+      "id": "2274-owner-handle-address",
+      "family": "owner-handle namespace rewrites (Memory/Agent/App URNs, aliases and trigger entries)",
+      "status": "GAPS",
+      "owner": "Basil",
+      "reference": "01a16b44b6d3734d9716e10078ff9102",
+      "blocksCombinedReadiness": true
+    },
+    {
+      "id": "2274-org-address",
+      "family": "updateOrganization / propagateOrgUrnRename outer entry",
+      "status": "GAPS",
+      "owner": "Basil",
+      "reference": "01a16b44b6d3734d9716e10078ff9102",
+      "blocksCombinedReadiness": true
+    },
+    {
+      "id": "2274-memory-address",
+      "family": "updateMemory ordinary Memory URN/alias outer entry",
       "status": "GAPS",
       "owner": "Basil",
       "reference": "01a16b44b6d3734d9716e10078ff9102",
@@ -82,6 +98,14 @@
       "status": "analysis-open",
       "owner": "Basil",
       "reference": "01a16b44ba417c6e982068dc921315d0",
+      "blocksCombinedReadiness": true
+    },
+    {
+      "id": "2273-security-review",
+      "family": "pre-fence cloneNode destination authorization, global write-availability disposition and missing revocation pins",
+      "status": "P2-open",
+      "owner": "Anne/Xylon",
+      "reference": "https://github.com/hadron-memory/hadron-server/pull/2273#issuecomment-6378034267",
       "blocksCombinedReadiness": true
     }
   ]
