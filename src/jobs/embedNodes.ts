@@ -1,3 +1,4 @@
+import { isRawChatNode } from '../services/embedding/rawChat.js';
 import { randomUUID } from 'node:crypto';
 /**
  * 033-rag-vector-retrieval — embedding worker (interim Postgres-backed queue).
@@ -121,8 +122,16 @@ export async function embedNode(
   const memory = node.memory;
   const capturedPendingAt = node.embeddingPendingAt;
   const capturedWorkToken = node.embeddingWorkToken;
-  if (!capturedWorkToken || !capturedPendingAt || capturedPendingAt.getTime() > Date.now()
+  if (!capturedWorkToken || !capturedPendingAt
     || (retryOpts.workToken !== undefined && retryOpts.workToken !== capturedWorkToken)) return 'skipped';
+  // Excluded turns never reach plaintext selection or an embedding provider.
+  // Clear only this obligation; existing vectors require the separately reviewed
+  // purge plan and are deliberately left untouched by this build (#1282).
+  if (isRawChatNode(node)) {
+    await clearMarkers(db, nodeId, capturedWorkToken);
+    return 'skipped';
+  }
+  if (capturedPendingAt.getTime() > Date.now()) return 'skipped';
   // R132: a keyless worker cannot recover this plaintext. Preserve the explicit pending
   // diagnostic and obligation; only a fresh authorized plaintext prompt can serve it.
   if (memory.isEncrypted && plaintext === undefined) return 'skipped';
