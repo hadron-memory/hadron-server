@@ -24,6 +24,25 @@ afterEach(() => {
 });
 
 describe('#147 boot-only Cloudflare retries', () => {
+  it('clears the deadline after first-attempt success before the deadline elapses (#2367)', async () => {
+    const started = Date.now();
+    let signal: AbortSignal | undefined;
+    const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+      signal = init!.signal!;
+      return fresh();
+    });
+
+    const result = await initCloudflareIps({ cachePath, fetchImpl, skipRefresh: true });
+
+    expect(result.ipv4_cidrs).toEqual(['103.21.244.0/22']);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(Date.now()).toBe(started);
+    expect(signal?.aborted).toBe(false);
+    // Do not advance timers first: firing the deadline would hide its leak.
+    // skipRefresh excludes the intentionally scheduled daily refresh timer.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('recovers on attempt two before choosing an existing stale cache', async () => {
     writeFileSync(cachePath, JSON.stringify(stale));
     const fetchImpl = vi.fn<typeof fetch>()

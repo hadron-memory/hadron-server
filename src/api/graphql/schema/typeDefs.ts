@@ -5485,7 +5485,8 @@ export const typeDefs = `#graphql
   """
   An event boundary for create/update: exactly one of dateTime (timed) or
   date (YYYY-MM-DD, all-day). A dateTime needs timeZone unless it carries
-  its own UTC offset — a zone-less value is rejected, never guessed.
+  its own UTC offset — a zone-less value is rejected by the calendar tool
+  (validation_error), never guessed.
   """
   input CalendarEventTimeInput {
     dateTime: String
@@ -7420,9 +7421,14 @@ export const typeDefs = `#graphql
     Access is checked by kind: memory records use the memory-record read gate; nodes use the
     readable-memory set; organizations require membership (or platform administration);
     agents admit public visibility or owner/org access; Apps admit owner/org access;
-    workers use the shared worker-read gate. App runs require org access, and node
-    revisions use their captured memory (falling back to the current node's memory).
-    A retired worker still resolves. Dedicated queries can have different refusal shapes.
+    workers use the shared worker-read gate. Users resolve for themselves, a platform
+    administrator, or a caller who shares an organization with them. App runs require org
+    access, and node revisions use their captured memory (falling back to the current
+    node's memory); a retracted comment's revision history resolves only for memory
+    managers. Under impersonation only the support session's shared organization admits
+    organizations, Apps, non-public Agents, workers and App runs, and a user-owned App or
+    non-public Agent is not visible; a PUBLIC Agent still resolves. A retired worker still resolves. The kinds above are checked by kind,
+    not an exhaustive promise. Dedicated queries can have different refusal shapes.
 
     The type prefix is the dispatch key; an untyped root:slug is ambiguous across kinds
     and returns null. The optional #data fragment is supported only for nodes and App runs.
@@ -9998,8 +10004,11 @@ export const typeDefs = `#graphql
     deleteEdge(edgeRef: ID!): Boolean!
 
     """
-    Run a task — a runnable node (isRunnable=true) — identified by a single
-    nodeRef (a node PK or a fully-qualified node URN, hrn:node:<root>:<memory>:<loc>),
+    Render or execute a node identified by a single nodeRef (a node PK or a
+    fully-qualified node URN, hrn:node:<root>:<memory>:<loc>). This explicit-reference
+    operation does not require isRunnable=true. The runnable flag governs by-name
+    task discovery, resolution and listing (hrn:node:hadronmemory.com:specs:cor:api:060:01).
+    The reference is
     resolved by the shared resolveNodeRef (#542). A bare loc without a memory
     is rejected — pass a full URN or an ID. For loose-name matching and
     interactive task selection use the MCP hadron_run_task tool, which
