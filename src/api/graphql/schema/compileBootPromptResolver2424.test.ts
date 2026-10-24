@@ -85,6 +85,30 @@ describe('#2424 (1) reference resolution is inside the operation budget', () => 
     expect((await pending).code).toBe('CONFLICT');
   });
 
+  it('the compile gets only what the ref resolution left of the one budget', async () => {
+    const agentRow = await db.agent.findFirst({ where: { id: agentId } }); // read before the clock is faked: no I/O while it is
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    // The ref read finishes after 29.9 s of the 30 s budget; the compile's own first read then stalls.
+    const slow = new Proxy(db, {
+      get(target, prop, recv) {
+        const v = Reflect.get(target, prop, recv);
+        if (prop !== 'agent') return typeof v === 'function' ? v.bind(target) : v;
+        return new Proxy(v as object, {
+          get: (m, p, r) => {
+            if (p === 'findFirst') return () => new Promise((res) => setTimeout(() => res(agentRow), 29_900));
+            if (p === 'findUnique') return () => new Promise(() => undefined);
+            return Reflect.get(m, p, r);
+          },
+        });
+      },
+    }) as Context['db'];
+    let settled: string | null = null;
+    const pending = outcome(doors.compileAgentBootPrompt(null, { agentRef: 'r-org:agent' }, ctxWith(slow))).then((r) => { settled = r.code; return r; });
+    await vi.advanceTimersByTimeAsync(30_500);
+    expect(settled).toBe('CONFLICT'); // not after a second full budget
+    await pending;
+  });
+
   it('control: a ref that names nothing is still the stable NOT_PERMITTED, not a conflict', async () => {
     const r = await outcome(doors.compileAgentBootPrompt(null, { agentRef: 'r-org:no-such-agent' }, ctxWith(db)));
     expect(r.code).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
