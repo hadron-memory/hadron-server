@@ -269,3 +269,50 @@ it.each(['queued','between'] as const)('a user deleted %s attempts cannot keep c
   expect((await db.node.findUniqueOrThrow({where:{id:old.id}})).loc).toBe('target');
   expect(await db.node.count({where:{isPlaceholder:true}})).toBe(0);expect(publishNodeWritten).not.toHaveBeenCalled();
 });
+
+describe('MCP move re-reads the caller per attempt (platform-role demotion, soft-deletion)',()=>{
+  const revoke={
+    demoted:(tx:Pick<typeof db,'user'>,id:string)=>tx.user.update({where:{id},data:{roles:['READER']}}),
+    deleted:(tx:Pick<typeof db,'user'>,id:string)=>tx.user.update({where:{id},data:{deletedAt:new Date()}}),
+  };
+  // Write access here rests on the caller's PLATFORM role alone: no org membership at either end.
+  const setup=async()=>{
+    const source=await node('source');
+    const other=await db.organization.create({data:{name:'other2054b',urn:'other2054b'}});
+    await db.orgMember.create({data:{organizationId:other.id,userId:user.id,role:'ADMIN'}});
+    const destination=await resolvers.Mutation.createMemory({}, {orgId:other.id,name:'destination2054b'},context());
+    await db.node.create({data:{id:generateId(),memoryId:destination.id,loc:'target',name:'target',nodeType:'info',deletedAt:new Date()}});
+    await db.orgMember.deleteMany({where:{userId:user.id}});
+    return {source,destination};
+  };
+  const caller=()=>({userId:user.id,roles:['ADMIN'],clientId:`user:${user.id}`}) as never;
+  it.each(['demoted','deleted'] as const)('between attempts: a %s caller stops retries and effects',async kind=>{
+    const {source,destination}=await setup();
+    validation.mockImplementationOnce(async()=>{await revoke[kind](db,user.id);throw new ArchivePlanStaleError();});
+    const text=await createTestableMcpServer(caller()).callToolText('hadron_move_node',{urn:urn('source'),targetUrn:`urn:node:${destination.urn}:target`,overwrite:true});
+    expect(text).toContain('Memory write access changed');expect(text).not.toContain('The node was moved concurrently');
+    expect(validation).toHaveBeenCalledTimes(1);
+    expect((await db.node.findUniqueOrThrow({where:{id:source.id}})).loc).toBe('source');
+    expect(mirrorNodeMoveToGit).not.toHaveBeenCalled();expect(await db.nodeRevision.count()).toBe(0);
+  });
+  it.each(['demoted','deleted'] as const)('queued on the first address: a %s caller wins over the held lock',async kind=>{
+    const {source,destination}=await setup();
+    const held=latch(),release=latch();
+    const blocker=db.$transaction(async tx=>{
+      await acquireLockSet(tx,[{memoryId:destination.id,loc:'target'}]);held.resolve();await release.promise;
+      await revoke[kind](tx,user.id);
+    },{timeout:20000});
+    await held.promise;
+    const observed=observeTransactionBackend(db);
+    const spy=vi.spyOn(db,'$transaction').mockImplementation(observed.db.$transaction as never);
+    const pending=createTestableMcpServer(caller()).callToolText('hadron_move_node',{urn:urn('source'),targetUrn:`urn:node:${destination.urn}:target`,overwrite:true});
+    try {
+      const pid=await observed.backendFor(pending);
+      await waitForAdvisoryWaiter(db,{pid,key:{form:'int-pair',first:destination.id,second:'target'}});
+    } finally {release.resolve();await blocker;}
+    const text=await pending;spy.mockRestore();
+    expect(text).toContain('Memory write access changed');expect(validation).not.toHaveBeenCalled();
+    expect((await db.node.findUniqueOrThrow({where:{id:source.id}})).loc).toBe('source');
+    expect(mirrorNodeMoveToGit).not.toHaveBeenCalled();expect(await db.nodeRevision.count()).toBe(0);
+  });
+});
