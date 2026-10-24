@@ -5046,8 +5046,8 @@ export const typeDefs = `#graphql
     template and no override was given.
     """
     prompt: String
-    "Whether the agent's systemPrompt binds {{name}} — a nameless template silently produces workers whose prompt never names them. Null when the agent has no template."
-    hasNamePlaceholder: Boolean
+    "Always null. The name-placeholder check was retired with the old variable logic (#2049)."
+    hasNamePlaceholder: Boolean @deprecated(reason: "Retired (#2049); always null.")
   }
 
   """
@@ -5091,14 +5091,8 @@ export const typeDefs = `#graphql
     posture), like Worker.agent.
     """
     roleAgent: Agent
-    """
-    Whether the role-agent's systemPrompt binds {{name}} — the check that
-    finds templates which silently produce nameless workers (role-agents
-    authored before any guard existed). Null when no single role-agent
-    resolves. Computed even when roleAgent itself is masked: it discloses one
-    boolean about the caller's own App's casting default.
-    """
-    hasNamePlaceholder: Boolean
+    "Always null. The name-placeholder check was retired with the old variable logic (#2049)."
+    hasNamePlaceholder: Boolean @deprecated(reason: "Retired (#2049); always null.")
   }
 
   type TeamRolesPage {
