@@ -59,6 +59,8 @@ export async function acknowledgeWakes(args: {
    * It must hold the rows it reads (the holder's row, the caller's memberships).
    */
   mayReadWorker: (proof: WakeProof, tx: Prisma.TransactionClient, txCtx: Context) => Promise<boolean>;
+  /** App-key scope locks for the complete batch, before any per-worker lock. */
+  prepareWorkers?: (tx: Prisma.TransactionClient, proofs: readonly WakeProof[]) => Promise<void>;
   now?: Date;
 }): Promise<AcknowledgeResult> {
   const { ctx, requester } = args;
@@ -104,6 +106,7 @@ export async function acknowledgeWakes(args: {
     // under, so a reservation becomes a spent wake atomically with respect to issuance), then the per-worker wake
     // locks by worker id. Two acknowledgements, or an acknowledgement and an issue, can then never wait in a cycle.
     for (const appId of appIds) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + appId}, 0))`;
+    await args.prepareWorkers?.(tx, proofs);
     for (const p of [...proofs].sort((a, b) => a.workerId.localeCompare(b.workerId))) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + p.workerId}, 0))`;
       if (!(await args.mayReadWorker(p, tx, txCtx))) refuse('WAKE_PROOF_REQUESTER_MISMATCH', 'This wake proof was issued to someone else.');
