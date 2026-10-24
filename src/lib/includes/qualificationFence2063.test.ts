@@ -676,3 +676,40 @@ it.each(['cloneNode', 'mergeNodes'] as const)(
       .toMatchObject({ role: 'ADMIN', deletedAt: null });
   },
 );
+
+it.each(['createAgent', 'reclaimApp'] as const)(
+  'personal %s rechecks owner liveness after the fence wait without provisioning or reclaiming', async (surface) => {
+    requestRoles = ['READER'];
+    await db.user.update({ where: { id: userId }, data: { roles: requestRoles } });
+    let agentId: string | undefined;
+    if (surface === 'reclaimApp') {
+      const agent = await resolvers.Mutation.createAgent(null, { name: 'Personal source' }, ctx());
+      agentId = agent.id;
+      await db.app.create({ data: { ownerUserId: userId, urn: 'qualification-admin:personal-reclaim', name: 'Personal reclaim', deletedAt: new Date() } });
+    }
+    const snapshot = async () => ({
+      agents: await db.agent.findMany({ orderBy: { id: 'asc' } }),
+      apps: await db.app.findMany({ orderBy: { id: 'asc' } }),
+      memories: await db.memory.findMany({ orderBy: { id: 'asc' } }),
+      nodes: await db.node.findMany({ orderBy: { id: 'asc' } }),
+      revisions: await db.nodeRevision.findMany({ orderBy: { id: 'asc' } }),
+    });
+    const before = await snapshot();
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const holder = withIncludeHistoryTransaction(db, async () => { entered(); await gate; });
+    await ready;
+    const pending = surface === 'createAgent'
+      ? resolvers.Mutation.createAgent(null, { name: 'Personal pending' }, ctx())
+      : resolvers.Mutation.createApp(null, { agentRef: agentId!, name: 'Personal reclaim' }, ctx());
+    const outcome = pending.then((value: unknown) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1, 1000);
+      await db.user.update({ where: { id: userId }, data: { deletedAt: new Date() } });
+    } finally { release(); await holder; }
+    expect(await outcome).toMatchObject({ error: { extensions: { code: 'FORBIDDEN' } } });
+    expect(await snapshot()).toEqual(before);
+  },
+);
