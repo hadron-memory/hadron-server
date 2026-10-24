@@ -201,6 +201,22 @@
    "8a754d2b6308851abc698f969c56c65cf5ca60562012b702c03a81745aee27c8"
   ],
   [
+   "hadron_agent_ticker_template_list",
+   "1895f5f52b96cd911fd26f03bd7b546d8573db03a5776a330dbacff46bf9b5fe"
+  ],
+  [
+   "hadron_agent_ticker_template_create",
+   "e837d6fba9884c8724d70afb5042dc0463dcb6cdf74ef378aa6fd3dd0f4f7a49"
+  ],
+  [
+   "hadron_agent_ticker_template_update",
+   "f48981fbead805c8db6e897f9b8c2825c6f02f8968230d29f7338b4b97ab29ac"
+  ],
+  [
+   "hadron_agent_ticker_template_delete",
+   "26f4bf0e9257f4606f58c769d2538cf489e0eeae551ef9736bc075ae56ad63d2"
+  ],
+  [
    "hadron_ack_wakes",
    "defc52239f56af74fdd68b911f31f98234d549849dffa9a379877384789b5fab"
   ],
@@ -709,6 +725,22 @@
   [
    "hadron_team_chat_inbox_ack",
    "8a754d2b6308851abc698f969c56c65cf5ca60562012b702c03a81745aee27c8"
+  ],
+  [
+   "hadron_agent_ticker_template_list",
+   "1895f5f52b96cd911fd26f03bd7b546d8573db03a5776a330dbacff46bf9b5fe"
+  ],
+  [
+   "hadron_agent_ticker_template_create",
+   "e837d6fba9884c8724d70afb5042dc0463dcb6cdf74ef378aa6fd3dd0f4f7a49"
+  ],
+  [
+   "hadron_agent_ticker_template_update",
+   "f48981fbead805c8db6e897f9b8c2825c6f02f8968230d29f7338b4b97ab29ac"
+  ],
+  [
+   "hadron_agent_ticker_template_delete",
+   "26f4bf0e9257f4606f58c769d2538cf489e0eeae551ef9736bc075ae56ad63d2"
   ],
   [
    "hadron_ack_wakes",
@@ -1221,6 +1253,22 @@
    "8a754d2b6308851abc698f969c56c65cf5ca60562012b702c03a81745aee27c8"
   ],
   [
+   "hadron_agent_ticker_template_list",
+   "1895f5f52b96cd911fd26f03bd7b546d8573db03a5776a330dbacff46bf9b5fe"
+  ],
+  [
+   "hadron_agent_ticker_template_create",
+   "e837d6fba9884c8724d70afb5042dc0463dcb6cdf74ef378aa6fd3dd0f4f7a49"
+  ],
+  [
+   "hadron_agent_ticker_template_update",
+   "f48981fbead805c8db6e897f9b8c2825c6f02f8968230d29f7338b4b97ab29ac"
+  ],
+  [
+   "hadron_agent_ticker_template_delete",
+   "26f4bf0e9257f4606f58c769d2538cf489e0eeae551ef9736bc075ae56ad63d2"
+  ],
+  [
    "hadron_ack_wakes",
    "defc52239f56af74fdd68b911f31f98234d549849dffa9a379877384789b5fab"
   ],
@@ -1713,6 +1761,22 @@
   [
    "hadron_team_chat_inbox_ack",
    "8a754d2b6308851abc698f969c56c65cf5ca60562012b702c03a81745aee27c8"
+  ],
+  [
+   "hadron_agent_ticker_template_list",
+   "1895f5f52b96cd911fd26f03bd7b546d8573db03a5776a330dbacff46bf9b5fe"
+  ],
+  [
+   "hadron_agent_ticker_template_create",
+   "e837d6fba9884c8724d70afb5042dc0463dcb6cdf74ef378aa6fd3dd0f4f7a49"
+  ],
+  [
+   "hadron_agent_ticker_template_update",
+   "f48981fbead805c8db6e897f9b8c2825c6f02f8968230d29f7338b4b97ab29ac"
+  ],
+  [
+   "hadron_agent_ticker_template_delete",
+   "26f4bf0e9257f4606f58c769d2538cf489e0eeae551ef9736bc075ae56ad63d2"
   ],
   [
    "hadron_ack_wakes",

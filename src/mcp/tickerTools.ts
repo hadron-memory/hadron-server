@@ -464,7 +464,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     'List the ticker templates an Agent declares (#2024). Casting a worker from the Agent creates these tickers for the worker ' +
       'and subscribes it; a template edit reaches only FUTURE casts. Readable by anyone who can read the Agent.',
     SHAPE_HADRON_AGENT_TICKER_TEMPLATE_LIST,
-    async ({ agentRef }) => plain(async (ctx) => {
+    async ({ agentRef, session }) => read(session, async (ctx) => {
       const rows = await Q.agentTickerTemplates({}, { agentRef }, ctx);
       if (!rows.length) return 'No ticker templates.';
       return `${rows.length} template${rows.length === 1 ? '' : 's'}:\n\n${rows.map(renderTemplate).join('\n')}`;
@@ -606,7 +606,7 @@ const SHAPE_HADRON_TEAM_CHAT_INBOX_ACK = {
   session: z.string().optional().describe('Self: required, the same live bound worker session that received the batch. Host key: omit session and use the receiving key.'),
 };
 
-const SHAPE_HADRON_AGENT_TICKER_TEMPLATE_LIST = { agentRef: z.string().describe('The Agent: its id or hrn:agent: URN.') };
+const SHAPE_HADRON_AGENT_TICKER_TEMPLATE_LIST = { agentRef: z.string().describe('The Agent: its id or hrn:agent: URN.'), session: SESSION_READ };
 
 const SHAPE_HADRON_AGENT_TICKER_TEMPLATE_CREATE = {
   agentRef: z.string().describe('The Agent: its id or hrn:agent: URN.'),
