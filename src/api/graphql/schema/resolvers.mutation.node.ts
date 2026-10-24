@@ -506,6 +506,18 @@ async function writeNodeCoreRaw(
           : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
       });
 
+      // #1200 (Holger's ruling A, 2026-10-24): an update by address means "the
+      // node I found there". Anchor the rest of the write on the probed row's
+      // immutable id, exactly as the id selector does, so a replacement that
+      // takes the address between this probe and the write is refused
+      // (NODE_WRITE_CONFLICT, via `assertTargetStillWritable` and the write's own
+      // predicate) instead of being written with a snapshot, authorization and
+      // schema decision taken from the original (cor:dmo:060:04). A missing or
+      // tombstoned probe keeps its NODE_NOT_FOUND below.
+      if (mode === 'update' && !opts?.targetNodeId && existing && !existing.deletedAt) {
+        opts = { ...opts, targetNodeId: existing.id };
+      }
+
       // #1201 — the GOVERNED-KIND gate, on the RESULTING STATE.
       //
       // Deliberately reads the merged post-write state rather than the input.

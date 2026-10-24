@@ -4,8 +4,9 @@
 // and (#1749, S3) an App key holding the attention:deliver scope. Under
 // impersonation nobody holds or manages anything. A holder reads the workers
 // they hold; a manager reads every worker of the App; a scoped key reads the
-// workers of its own App, through the App-derived reach alone (never a personal
-// memory), and is refused while bound to a session. Which channels a wake shows
+// workers of its own App through current host-registration scope: its own host
+// only, or workers registered on no host for a non-host key. Former-host keys
+// fail closed. This is App-derived reach (never personal memory), with session-bound keys refused. Which channels a wake shows
 // is the two-reader gate in src/lib/tickers/dueWakes.ts.
 //
 // ACKNOWLEDGING (cor:agt:080:17): only the requester named in the proof; the
@@ -24,6 +25,7 @@ import type { WakeProof } from '../../../lib/tickers/wakeProof.js';
 import { liveCaller } from '../../../lib/tickers/liveCaller.js';
 import { appKeyCaller, refuseSessionBound, requireKeyScope } from '../../../lib/appKeyScopes/scopes.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
+import { legacyWakeKeyScope, authorizeLegacyWakeWorkers } from '../../../lib/tickers/wakeKeyScope.js';
 import { generateId } from '../../../lib/id.js';
 
 type Reader = { manager: boolean; userId: string | null };
@@ -47,10 +49,10 @@ const appAnchors = (app: TaskApp): AuthorityAnchor[] => [
 ];
 
 /** The last gate of an App key's read: scope held now, under the shared anchor; records the read in the same transaction. */
-async function decideKeyAnswer(ctx: Context, app: TaskApp, key: { appKeyId: string; appId: string }, workerCount: number): Promise<void> {
+async function decideKeyAnswer(ctx: Context, app: TaskApp, key: { appKeyId: string; appId: string }, workerCount: number, authorize: (tx: Prisma.TransactionClient) => Promise<void>): Promise<void> {
   await ctx.db.$transaction(async (tx) => {
     await lockAuthorityAnchors(tx, appAnchors(app), 'shared');
-    await requireKeyScope(tx, key, 'attention:deliver');
+    await authorize(tx);
     await tx.appKeyWakeRead.create({ data: { id: generateId(), appKeyId: key.appKeyId, appId: app.id, workerCount } });
   });
 }
@@ -72,12 +74,16 @@ async function keyEntry(ctx: Context, key: { appKeyId: string; appId: string }, 
   if (!app || app.deletedAt || app.uninstalledAt) throw taskError('APP_NOT_FOUND', 'App not found.');
   await requireKeyScope(ctx.db, key, 'attention:deliver');
   refuseSessionBound(ctx);
+  const scope = await legacyWakeKeyScope(ctx.db, key);
   const held = app;
   return {
     app: held,
-    authorize: async (tx: Prisma.TransactionClient) => {
+    workerWhere: scope.where,
+    authorize: async (tx: Prisma.TransactionClient, workerIds: string[]) => {
       await lockAuthorityAnchors(tx, appAnchors(held), 'shared');
-      await requireKeyScope(tx, key, 'attention:deliver');
+      if (!(await authorizeLegacyWakeWorkers(tx, key, scope.hostId, workerIds))) {
+        throw taskError('WORKER_NOT_FOUND', 'Worker not found. Read the due wakes again.');
+      }
     },
   };
 }
@@ -91,9 +97,11 @@ export async function dueWakesFor(
   const ctx = (await liveCaller(requestCtx)) ?? (() => { throw taskError('APP_NOT_FOUND', 'App not found.'); })();
   let app: TaskApp;
   let reader: Reader;
-  let authorize: ((tx: Prisma.TransactionClient) => Promise<void>) | undefined;
+  let authorize: ((tx: Prisma.TransactionClient, workerIds: string[]) => Promise<void>) | undefined;
+  let workerWhere: Prisma.WorkerWhereInput | undefined;
+  let selectedWorkerIds: string[] = [];
   if (key) {
-    ({ app, authorize } = await keyEntry(ctx, key, a.appRef));
+    ({ app, authorize, workerWhere } = await keyEntry(ctx, key, a.appRef));
     reader = { manager: true, userId: null };
   } else {
     const resolved = await resolveParticipatedApp(ctx, a.appRef);
@@ -108,7 +116,8 @@ export async function dueWakesFor(
   }
   const result = await computeDueWakes({
     ctx, app, reader, requester: key ? { appKeyId: key.appKeyId } : { userId: reader.userId! },
-    workerIds: only, first: a.first, after: a.after, authorize,
+    workerIds: only, first: a.first, after: a.after, authorize, workerWhere,
+    onWorkersSelected: ids => { selectedWorkerIds = ids; },
   });
 
   const workerIds = [...new Set([...result.wakes.map((w) => w.workerId), ...result.dormant.map((d) => d.workerId)])];
@@ -116,7 +125,7 @@ export async function dueWakesFor(
   // dormant-only, nothing-due and empty pages carry worker names, mention counts and cursors too (N4, Diego, Riana).
   // The same transaction writes the audit row (key, App, workers shown, time), so a read is recorded exactly when it
   // is allowed to be returned (cor:agt:080:23).
-  if (key) await decideKeyAnswer(ctx, app, key, workerIds.length);
+  if (key) await decideKeyAnswer(ctx, app, key, workerIds.length, tx => authorize!(tx, selectedWorkerIds));
   // The budget notice is posted by the platform itself, once a day per App, whoever's read triggered it: a person's or an
   // App key's (#1791, cor:agt:080:15). Posted only once an App key's answer is decided: a read that is refused posts nothing (Rook #1799).
   if (result.budgetNotice) await postBudgetNotice(ctx, app, result.budgetNotice);
@@ -230,14 +239,19 @@ export async function acknowledgeWakesFor(requestCtx: Context, a: { proofs: stri
 async function acknowledgeAsKey(requestCtx: Context, key: { appKeyId: string; appId: string }, proofs: string[]) {
   await requireKeyScope(requestCtx.db, key, 'attention:deliver');
   refuseSessionBound(requestCtx);
+  const scope = await legacyWakeKeyScope(requestCtx.db, key);
   return acknowledgeWakes({
     ctx: requestCtx,
     requester: { appKeyId: key.appKeyId },
     proofs,
+    prepareWorkers: async (tx, batch) => {
+      if (batch.some(p => p.appId !== key.appId) || !(await authorizeLegacyWakeWorkers(tx, key, scope.hostId, batch.map(p => p.workerId)))) {
+        throw taskError('WAKE_PROOF_REQUESTER_MISMATCH', 'This wake proof was issued to someone else.');
+      }
+    },
     mayReadWorker: async (p: WakeProof, tx: Prisma.TransactionClient) => {
       if (p.appId !== key.appId) return false;
-      await requireKeyScope(tx, key, 'attention:deliver');
-      return true;
+      return authorizeLegacyWakeWorkers(tx, key, scope.hostId, [p.workerId]);
     },
   });
 }
