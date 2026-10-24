@@ -1,4 +1,6 @@
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
+import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
+import { isWorkerResetting } from '../../../lib/contextReset/contextReset.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { storedIncludeTags, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
@@ -1221,6 +1223,19 @@ export const sessionMutations = {
           const [op] = await tx.$queryRaw<Array<{ status: string }>>`
             SELECT status FROM host_operations WHERE id = ${launch.grant.operationId} FOR SHARE`;
           if (op?.status !== 'collected') throw launchGrantInvalid();
+        }
+        // #2162 (cor:agt:050:27 §4, R118): the per-worker assignment lock, before the worker row, the order every task
+        // write and a context reset's claim take it in. A worker under a `resetting` mark takes no new session, force
+        // included: its reset is fenced on the session it has, and a rebind would strand it. (Resuming that same open
+        // session is not a bind; it does not come here.)
+        if (workerId) {
+          await lockWorkersForAssignment(tx, [workerId]);
+          if (appId && (await isWorkerResetting(tx, workerId, appId, new Date()))) {
+            throw new GraphQLError(
+              'This worker is resetting its context: its relaunched agent resumes the session it has. Clear its availability to cancel the reset.',
+              { extensions: { code: 'WORKER_RESETTING', workerId } },
+            );
+          }
         }
         if (workerId) {
           const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; held_at: Date | null; retired_at: Date | null }>>`

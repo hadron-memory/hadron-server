@@ -4289,6 +4289,8 @@ export const typeDefs = `#graphql
     listedOnMarketplace: Boolean!
     "#2138: false means every Worker cast from this Agent counts as having a task and is expected to check its team channel every period (coordinators, the lifecycle agent). Default true."
     usesTasks: Boolean!
+    "#2162 (hrn:node:hadronmemory.com:specs:cor:agt:050:27): when a task one of this Agent's workers had started finishes or is cancelled, and it holds no other started task, its host resets the worker's context (a shed: the binding and session stay). Default false. Set by whoever manages the Agent."
+    resetContextAfterTask: Boolean!
     type: AgentType!
     surfaces: [String!]!
     # #928/#974 persona dressing (cor:agt:020:01): universal metadata that
@@ -9274,10 +9276,35 @@ export const typeDefs = `#graphql
     flight, in a worktree and family the live host registers for it (WORKER_NOT_HELD, WORKER_LIVE,
     WORKER_START_PENDING). worker.end: whoever manages the App only (else HOST_OPERATION_NOT_PERMITTED), naming an open
     session of the worker on a host that registers it (else BAD_HOST_OPERATION_ARGS). worker.deliver is the one type
-    not issued yet, HOST_OPERATION_NOT_ISSUABLE until a host has a delivery path for it (hadron-cli#829). An App key
+    not issued yet, HOST_OPERATION_NOT_ISSUABLE until a host has a delivery path for it (hadron-cli#829).
+    worker.reset-context is HOST_OPERATION_NOT_ISSUABLE here: the platform issues it when a task ends (#2162). An App key
     issues nothing (FORBIDDEN). An unregistered host is HOST_NOT_FOUND.
     """
     issueHostOperation(input: IssueHostOperationInput!): HostOperation!
+
+    """
+    #2162 — a context reset's protocol (hrn:node:hadronmemory.com:specs:cor:agt:050:27), for the host its
+    worker.reset-context operation was issued to, with that host's key only, after collecting the operation
+    (HOST_OPERATION_NOT_COLLECTED otherwise). Each step names the reset and its epoch (STALE_EPOCH when it moved), is
+    idempotent (a replay answers replayed: true), and is out of order CONTEXT_RESET_WRONG_PHASE. Another App's or host's
+    reset is CONTEXT_RESET_NOT_FOUND. The final outcome is reported with reportHostOperation: SUCCEEDED once relaunched,
+    or FAILED with a reason that starts with its code. claimContextReset takes the fence: the worker becomes unavailable
+    RESETTING, or the reset is refused SESSION_CHANGED, OTHER_WORK, UNAVAILABLE, PAUSED, SETTING_OFF or WORKER_GONE.
+    """
+    claimContextReset(input: ClaimContextResetInput!): ContextResetStep!
+    "#2162 — register the durable checkpoint before any process control. A wrong reference is RECOVERY_REF_INVALID and changes nothing."
+    registerContextResetRecovery(input: RegisterContextResetRecoveryInput!): ContextResetStep!
+    """
+    #2162 — the single stop grant per claim; a replay returns the same grant. The host signals only within stopLeaseMs of
+    the moment it SENT this request (CLOCK_BOOTTIME). Refused NO_RECOVERY_REF, CLAIM_LAPSED, PROCESS_CHANGED or NOT_IDLE.
+    """
+    authorizeContextResetStop(input: AuthorizeContextResetStopInput!): ContextResetStep!
+    "#2162 — the old agent stopped; its resetting mark now lasts until the relaunched agent's first activity."
+    reportContextResetAgentStopped(input: ContextResetStepInput!): ContextResetStep!
+    "#2162 — the agent was relaunched under its wrapper."
+    reportContextResetRelaunched(input: ReportContextResetRelaunchedInput!): ContextResetStep!
+    "#2162 — a failure after the claim that the host saw; the reset ends and the mark is released."
+    reportContextResetRelaunchFailed(input: ReportContextResetRelaunchFailedInput!): ContextResetStep!
 
     "#1747 — give a worker a named App grant (hrn:node:hadronmemory.com:specs:cor:agt:080:24). Whoever manages the App only. Idempotent."
     grantApp(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
@@ -10635,7 +10662,7 @@ export const typeDefs = `#graphql
 
     orgId accepts the org's ID or URN.
     """
-    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean): Agent!
+    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean): Agent!
     """
     Clone an Agent into an organization you administer: a new PERSONAL-draft Agent
     with its own copy of the source's system memory, its links and imports, and a recorded origin. Needs a
@@ -10666,7 +10693,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, registerDefaults: RegisterDefaultsInput): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, registerDefaults: RegisterDefaultsInput): Agent!
 
     """
     Soft-delete an Agent and its owned system memory. Requires management
@@ -13269,6 +13296,8 @@ export const typeDefs = `#graphql
     OUT_OF_TOKENS
     HOST_DOWN
     OTHER
+    "#2162 — a context reset is in progress (hrn:node:hadronmemory.com:specs:cor:agt:050:27). Set only by the platform; no caller sets it."
+    RESETTING
   }
 
   "Who set a worker's availability (hrn:node:hadronmemory.com:specs:cor:agt:060:08)."
@@ -13287,6 +13316,8 @@ export const typeDefs = `#graphql
     HOST
     "#1766 — the platform, recording that an until passed (hrn:node:hadronmemory.com:specs:cor:agt:060:02): the record is then AVAILABLE, set at the instant it lapsed."
     LAPSE
+    "#2162 — the platform's context reset (hrn:node:hadronmemory.com:specs:cor:agt:050:27): it set RESETTING, or released it."
+    CONTEXT_RESET
   }
 
   """
@@ -13324,6 +13355,8 @@ export const typeDefs = `#graphql
     refreshedAt: DateTime!
     "Refreshed within the App's lapse count of its poll intervals, now."
     live: Boolean!
+    "#2162 — the capability-gated operation types this host declared it performs (hrn:node:hadronmemory.com:specs:cor:agt:070:01, Proposed): worker.reset-context. A host is never issued one it did not declare."
+    capabilities: [String!]!
     workers: [HostRegistrationWorker!]!
   }
 
@@ -13358,10 +13391,11 @@ export const typeDefs = `#graphql
 
   """
   #1709 — one typed operation issued to one host (hrn:node:hadronmemory.com:specs:cor:agt:070:02, :03). type is one of
-  worktree.create, worker.start, worker.deliver, worker.end, worktree.remove; args are its typed arguments (ids and name
-  tokens only, never a command): worktree.create {workerId, repo, baseBranch, branchName, label}; worker.start
-  {workerId, worktree, family, taskId?}; worker.deliver {workerId, sessionId, eventId}; worker.end {workerId,
-  sessionId}; worktree.remove {workerId, worktree}. The per-type arguments are #1709's design, Proposed.
+  worktree.create, worker.start, worker.deliver, worker.end, worktree.remove, worker.reset-context; args are its typed
+  arguments (ids and name tokens only, never a command): worktree.create {workerId, repo, baseBranch, branchName,
+  label}; worker.start {workerId, worktree, family, taskId?}; worker.deliver {workerId, sessionId, eventId}; worker.end
+  {workerId, sessionId}; worktree.remove {workerId, worktree}; worker.reset-context {workerId, sessionId, taskId,
+  resetId} (#2162). The per-type arguments are #1709's design, Proposed.
   """
   type HostOperation {
     id: ID!
@@ -13415,6 +13449,104 @@ export const typeDefs = `#graphql
     pollIntervalSeconds: Int!
     "The whole list: it replaces the last registration's."
     workers: [RegisterHostWorkerInput!]
+    "#2162 — the capability-gated operation types this host performs, in full at every refresh: worker.reset-context. Omitted means none. Anything else is BAD_HOST_REGISTRATION."
+    capabilities: [String!]
+  }
+
+  "#2162 — the agent process a host observed: its pid and the kernel's start time for it (a token)."
+  input ObservedProcessInput {
+    pid: Int!
+    startTime: String!
+  }
+
+  "#2162 — a context reset step: the reset and the epoch the host holds (0 until claimed)."
+  input ContextResetStepInput {
+    appRef: String!
+    resetId: ID!
+    epoch: Int!
+  }
+
+  input ClaimContextResetInput {
+    appRef: String!
+    resetId: ID!
+    "The epoch the reset was collected at: 0."
+    epoch: Int!
+    "The agent process the host observed idle, which a later stop must still match."
+    process: ObservedProcessInput!
+  }
+
+  input RegisterContextResetRecoveryInput {
+    appRef: String!
+    resetId: ID!
+    epoch: Int!
+    "The checkpoint node the host wrote: its id or full URN, in the worker's own working memory."
+    checkpointNode: String!
+    "The reset's own session and task."
+    sessionId: ID!
+    taskId: ID!
+  }
+
+  input AuthorizeContextResetStopInput {
+    appRef: String!
+    resetId: ID!
+    epoch: Int!
+    "The agent process about to be stopped: the one the claim observed."
+    process: ObservedProcessInput!
+  }
+
+  input ReportContextResetRelaunchedInput {
+    appRef: String!
+    resetId: ID!
+    epoch: Int!
+    "The relaunched agent process."
+    process: ObservedProcessInput!
+  }
+
+  input ReportContextResetRelaunchFailedInput {
+    appRef: String!
+    resetId: ID!
+    epoch: Int!
+    "CHECKPOINT_FAILED, STAGING_FAILED, RELAUNCH_UNVERIFIED or RELAUNCH_BLOCKED."
+    reason: String!
+  }
+
+  """
+  #2162 — a worker's context reset (hrn:node:hadronmemory.com:specs:cor:agt:050:27): a shed, never a session end. One per
+  task at most. phase is requested, claimed, checkpointed, stop-granted, agent-stopped, relaunched, done, refused or
+  failed; reason names why a reset was refused or failed, from a closed set. epoch moves at the claim and at every
+  cancellation: a host step naming another is STALE_EPOCH.
+  """
+  type ContextReset {
+    id: ID!
+    appId: ID!
+    workerId: ID!
+    sessionId: ID!
+    taskId: ID!
+    hostId: String
+    hostOperationId: ID
+    phase: String!
+    reason: String
+    epoch: Int!
+    requestedAt: DateTime!
+    claimedAt: DateTime
+    recoveryRegisteredAt: DateTime
+    "When the single stop was granted; the host may act on it only within stopLeaseMs of its own send time."
+    stopGrantedAt: DateTime
+    stopLeaseMs: Int
+    agentStoppedAt: DateTime
+    relaunchedAt: DateTime
+    "When a cancellation found a stop lease outstanding: the resetting mark lifts no earlier than this."
+    releasePendingAt: DateTime
+    endedAt: DateTime
+  }
+
+  "#2162 — what a context reset step answered."
+  type ContextResetStep {
+    reset: ContextReset!
+    "This step refused or failed the reset, and why; the reset has ended. Null when the step was accepted."
+    refused: String
+    "The step had already been made: the recorded answer is returned, nothing changed."
+    replayed: Boolean!
   }
 
   input ReportHostOperationInput {

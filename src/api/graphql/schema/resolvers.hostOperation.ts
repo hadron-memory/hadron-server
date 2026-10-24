@@ -67,6 +67,22 @@ import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { sessionHasHandoff } from '../../../lib/hostOperations/settle.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { normalizeAvailability, type AvailabilityInput } from './resolvers.agentTaskAlarms.js';
+import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
+import {
+  authorizeContextResetStop,
+  cancelLiveReset,
+  holdForStopLease,
+  outstandingStopLease,
+  claimContextReset,
+  ContextResetError,
+  onContextResetReported,
+  registerContextResetRecovery,
+  reportContextResetAgentStopped,
+  reportContextResetRelaunched,
+  reportContextResetRelaunchFailed,
+  type ContextResetStep,
+  type ResetHost,
+} from '../../../lib/contextReset/contextReset.js';
 
 const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.', { appRef });
 const opNotFound = (id: string): GraphQLError => taskError('HOST_OPERATION_NOT_FOUND', 'Host operation not found.', { id });
@@ -140,6 +156,8 @@ type RegisterHostInput = {
   label: string;
   pollIntervalSeconds: number;
   workers?: { worker: string; family: string; worktrees?: string[] | null }[] | null;
+  /** #2162: the capability-gated operation types this host performs (cor:agt:070:01, Proposed). */
+  capabilities?: string[] | null;
 };
 
 type HostOperationRow = Prisma.HostOperationGetPayload<Record<string, never>>;
@@ -187,7 +205,10 @@ export const hostOperationMutations = {
     try {
       await registerHost(
         ctx.db,
-        { appId: app.id, hostId: host.hostId, label: input.label, pollIntervalSeconds: input.pollIntervalSeconds, workers },
+        {
+          appId: app.id, hostId: host.hostId, label: input.label, pollIntervalSeconds: input.pollIntervalSeconds, workers,
+          capabilities: input.capabilities ?? [],
+        },
         new Date(),
         {
           authorize,
@@ -315,6 +336,15 @@ export const hostOperationMutations = {
           result = { handoff: await sessionHasHandoff(tx, args.workerId, args.sessionId) };
         }
       }
+      if (op.type === 'worker.reset-context') {
+        // #2162: the reset's own outcome first. SUCCEEDED needs the agent relaunched; FAILED names its closed reason.
+        try {
+          await onContextResetReported(tx, op, status, status === 'failed' ? reason : null, now);
+        } catch (e) {
+          if (e instanceof ContextResetError) throw taskError(e.code === 'CONTEXT_RESET_WRONG_PHASE' ? 'HOST_OPERATION_NOT_DONE' : e.code, e.message, { id: op.id });
+          throw e;
+        }
+      }
       const updated = await tx.hostOperation.update({
         where: { id: op.id },
         data: {
@@ -366,6 +396,8 @@ export const hostOperationMutations = {
     const app = await asHost(ctx, input.appRef, async (tx, freshApp, host) => {
       workerId = await resolveTaskWorkerId(ctx, freshApp.id, input.worker);
       if (!workerId) throw notRegistered();
+      // #2162: the per-worker assignment lock before the worker row (src/lib/agentTasks/workerLock.ts).
+      await lockWorkersForAssignment(tx, [workerId]);
       const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null }[]>`
         SELECT app_id AS "appId", retired_at AS "retiredAt" FROM workers WHERE id = ${workerId} FOR UPDATE`;
       // FOR UPDATE, not SHARE (#1876 review, Diego P2-3): the worker row exists before any availability row, so it is
@@ -387,23 +419,37 @@ export const hostOperationMutations = {
         SELECT state, reason, until, set_at AS "setAt", set_by AS "setBy", set_by_host_id AS "setByHostId"
         FROM worker_availability WHERE worker_id = ${workerId} FOR UPDATE`;
       const ownMark = cur?.setBy === 'host' && cur.setByHostId === host.hostId;
-      const othersMarkInEffect = cur && cur.state === 'unavailable' && !ownMark && recordInEffect(cur, now);
+      // #2162: a host marking the worker DOWN replaces a context reset's `resetting` mark and cancels the reset; the
+      // worker stays unavailable at least until a granted stop's lease ends (cor:agt:050:27 §2.4).
+      const overReset = state === 'unavailable' && reason === 'host-down' && cur?.reason === 'resetting' && cur.setBy === 'context-reset';
+      const othersMarkInEffect = cur && cur.state === 'unavailable' && !ownMark && !overReset && recordInEffect(cur, now);
       if (state === 'unavailable' && othersMarkInEffect) {
         throw taskError('AVAILABILITY_NOT_PERMITTED', 'This worker is unavailable by someone else\'s mark; a host does not replace it.');
       }
       if (state === 'available' && !(ownMark && cur!.state === 'unavailable')) {
         throw taskError('AVAILABILITY_NOT_PERMITTED', 'A host clears only a mark it set itself.');
       }
+      let markUntil = until;
+      // #2255 review: a granted stop still outstanding (its reset live or already ended) floors every host write: the
+      // host's own clear keeps the worker unavailable until the lease ends, and its mark lapses no earlier.
+      const lease = overReset ? await cancelLiveReset(tx, workerId, 'HOST_LOST', now) : await outstandingStopLease(tx, workerId, now);
+      if (lease && state === 'available') {
+        await holdForStopLease(tx, { workerId, appId: freshApp.id }, lease, now);
+        await recordHostKeyUse(tx, host, 'availability', { count: 1 });
+        return freshApp;
+      }
+      if (lease && markUntil && markUntil.getTime() < lease.leaseEnd.getTime()) markUntil = lease.leaseEnd;
       const data = {
-        state, reason, until, setAt: now, setBy: 'host',
-        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: host.hostId,
+        state, reason, until: markUntil, setAt: now, setBy: 'host',
+        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: host.hostId, clearsOnActivityAfter: null,
+        contextResetId: null,
       };
       await tx.workerAvailability.upsert({ where: { workerId }, create: { workerId, ...data }, update: data });
       await appendAvailabilityEvent(tx, {
         appId: freshApp.id,
         actor: PLATFORM_ACTOR,
         event: {
-          kind: 'worker', workerId, state, reason: reason as 'out-of-tokens' | 'host-down' | null, until, setBy: 'host', hostId: host.hostId,
+          kind: 'worker', workerId, state, reason: reason as 'out-of-tokens' | 'host-down' | null, until: markUntil, setBy: 'host', hostId: host.hostId,
         },
       });
       await recordHostKeyUse(tx, host, 'availability', { count: 1 });
@@ -441,6 +487,10 @@ export const hostOperationMutations = {
         'HOST_OPERATION_NOT_ISSUABLE',
         'worker.deliver is not issued until a host has a delivery path for it (hadron-cli#829).',
       );
+    }
+    if (validated.type === 'worker.reset-context') {
+      // #2162 (cor:agt:050:27 §8): only a task's end requests a reset; nobody issues one by hand.
+      throw taskError('HOST_OPERATION_NOT_ISSUABLE', 'worker.reset-context is issued only by the platform, when a task ends.');
     }
     const hostId = (input.hostId ?? '').trim();
     if (!HOST_ID_PATTERN.test(hostId)) throw badInput('hostId is a host token.');
@@ -505,7 +555,67 @@ export const hostOperationMutations = {
     });
     return ctx.db.hostOperation.findUniqueOrThrow({ where: { id } });
   }),
+
+  // ── #2162 (cor:agt:050:27): a context reset's protocol steps, the host's own key only ──────────────────────
+  // Each names the reset and its epoch; each is idempotent; each is recorded as a `reset` use of the key.
+
+  /** Take the fence: the worker becomes `resetting` (§1.5). Refused steps end the reset and say why. */
+  claimContextReset: (_: unknown, { input }: { input: ResetStepInput & { process: unknown } }, ctx: Context) =>
+    resetStep(ctx, input, (tx, host, now) => claimContextReset(tx, host, input.resetId, input.epoch, input.process, now)),
+
+  /** Register the durable checkpoint before any process control (§3.4). */
+  registerContextResetRecovery: (
+    _: unknown,
+    { input }: { input: ResetStepInput & { checkpointNode: string; sessionId: string; taskId: string } },
+    ctx: Context,
+  ) => resetStep(ctx, input, (tx, host, now) => registerContextResetRecovery(tx, host, input.resetId, input.epoch, input, now)),
+
+  /** The single stop grant (§2.1): the host signals only within `stopLeaseMs` of its own send time. */
+  authorizeContextResetStop: (_: unknown, { input }: { input: ResetStepInput & { process: unknown } }, ctx: Context) =>
+    resetStep(ctx, input, (tx, host, now) => authorizeContextResetStop(tx, host, input.resetId, input.epoch, input.process, now)),
+
+  /** The old agent stopped: the mark now waits for the relaunched agent's first activity. */
+  reportContextResetAgentStopped: (_: unknown, { input }: { input: ResetStepInput }, ctx: Context) =>
+    resetStep(ctx, input, (tx, host, now) => reportContextResetAgentStopped(tx, host, input.resetId, input.epoch, now)),
+
+  /** The agent was relaunched under its wrapper, with the new process. */
+  reportContextResetRelaunched: (_: unknown, { input }: { input: ResetStepInput & { process: unknown } }, ctx: Context) =>
+    resetStep(ctx, input, (tx, host, now) => reportContextResetRelaunched(tx, host, input.resetId, input.epoch, input.process, now)),
+
+  /** A failure after the claim that the host saw; the reset ends and its mark is released under §2. */
+  reportContextResetRelaunchFailed: (_: unknown, { input }: { input: ResetStepInput & { reason: string } }, ctx: Context) =>
+    resetStep(ctx, input, (tx, host, now) => reportContextResetRelaunchFailed(tx, host, input.resetId, input.epoch, input.reason, now)),
 };
+
+type ResetStepInput = { appRef: string; resetId: string; epoch: number };
+
+/**
+ * One host step of a context reset: the host-key gate (cor:agt:070:04), one transaction under the App's anchor, the
+ * step, and the key's use recorded with it. A refusal that changes nothing (a wrong id, a stale epoch, a step out of
+ * order) is a typed error, recorded apart like every refused host call.
+ */
+async function resetStep(
+  ctx: Context,
+  input: ResetStepInput | null | undefined,
+  run: (tx: Prisma.TransactionClient, host: ResetHost, now: Date) => Promise<ContextResetStep>,
+) {
+  return recordingRefusal(ctx, 'reset', null, async () => {
+    if (!input) throw badInput('input is required.');
+    try {
+      const out = await asHost(ctx, input.appRef, async (tx, app, host) => {
+        const result = await run(tx, { appId: app.id, hostId: host.hostId }, new Date());
+        await recordHostKeyUse(tx, host, 'reset', { operationId: result.reset.hostOperationId ?? undefined });
+        return result;
+      });
+      // A refusal or failure may have released the worker; a queued task may now match (cor:agt:060:06).
+      if (out.refused) await matchAfterChange(ctx.db, out.reset.appId);
+      return out;
+    } catch (e) {
+      if (e instanceof ContextResetError) throw taskError(e.code, e.message, { resetId: input.resetId });
+      throw e;
+    }
+  });
+}
 
 /**
  * cor:agt:070:05 — start a worker: whoever manages the App, with a task or without (Holger via Vera #10774: a manager
@@ -605,6 +715,7 @@ async function loadRegistrationViews(ctx: Context, appId: string, hostId?: strin
     registeredAt: r.registeredAt,
     refreshedAt: r.refreshedAt,
     live: isRegistrationLive(r, now, checkIns),
+    capabilities: r.capabilities,
     workers: r.workers.map((w) => ({ workerId: w.workerId, family: w.family, worktrees: w.worktrees })),
   }));
 }
