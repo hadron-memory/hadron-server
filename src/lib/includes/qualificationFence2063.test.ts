@@ -21,9 +21,11 @@ vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: 
 let userId: string;
 let memoryId: string;
 let presentedKeyId: string | undefined;
-const ctx = (): Context => ({ db, userId, roles: ['ADMIN'], ...(presentedKeyId ? { apiKeyId: presentedKeyId } : {}) });
+let requestRoles: string[] = ['ADMIN'];
+const ctx = (): Context => ({ db, userId, roles: requestRoles, ...(presentedKeyId ? { apiKeyId: presentedKeyId } : {}) });
 beforeEach(async () => {
   presentedKeyId = undefined;
+  requestRoles = ['ADMIN'];
   await cleanDb(db);
   vi.stubEnv('PASSKEY_RP_ID', 'qualification.example');
   userId = (await db.user.create({ data: { handle: 'qualification-admin', roles: ['ADMIN'] } })).id;
@@ -609,5 +611,32 @@ it.each(['createMemoryReclaim', 'cloneMemoryReclaim', 'extractReclaim', 'createA
     expect(await result).toMatchObject({ error: { extensions: { code: 'FORBIDDEN' } } });
     expect(await db.node.findMany({ where: { id: { in: nodes.map((row) => row.id) } }, select: { id: true, memoryId: true, content: true }, orderBy: { id: 'asc' } })).toEqual(nodes);
     expect(await db.nodeRevision.findMany({ where: { id: { in: history.map((row) => row.id) } }, select: { id: true, nodeId: true, content: true }, orderBy: { id: 'asc' } })).toEqual(history);
+  },
+);
+
+it.each(['createMemoryReclaim', 'createAppReclaim'] as const)(
+  '%s rechecks revoked org authority after its fence wait, preserving tombstones and history', async (surface) => {
+    const act = await qualificationAct(surface);
+    // Use org authority, without the platform-admin shortcut.
+    requestRoles = ['READER'];
+    await db.user.update({ where: { id: userId }, data: { roles: ['READER'] } });
+    const memories = await db.memory.findMany({ select: { id: true, urn: true, deletedAt: true }, orderBy: { id: 'asc' } });
+    const nodes = await db.node.findMany({ select: { id: true, memoryId: true, content: true }, orderBy: { id: 'asc' } });
+    const history = await db.nodeRevision.findMany({ select: { id: true, nodeId: true, content: true }, orderBy: { id: 'asc' } });
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const holder = withIncludeHistoryTransaction(db, async () => { entered(); await gate; });
+    await ready;
+    const result = act.run(db).then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1, 1000);
+      await db.orgMember.updateMany({ where: { userId, deletedAt: null }, data: { deletedAt: new Date() } });
+    } finally { release(); await holder; }
+    expect(await result).toMatchObject({ error: { extensions: { code: 'FORBIDDEN' } } });
+    expect(await db.memory.findMany({ select: { id: true, urn: true, deletedAt: true }, orderBy: { id: 'asc' } })).toEqual(memories);
+    expect(await db.node.findMany({ select: { id: true, memoryId: true, content: true }, orderBy: { id: 'asc' } })).toEqual(nodes);
+    expect(await db.nodeRevision.findMany({ select: { id: true, nodeId: true, content: true }, orderBy: { id: 'asc' } })).toEqual(history);
   },
 );
