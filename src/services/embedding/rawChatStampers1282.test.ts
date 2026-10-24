@@ -10,6 +10,7 @@ import { embeddingEligibleSql, isRawChatNode } from './rawChat.js';
 import { embedNode } from '../../jobs/embedNodes.js';
 import { ensureChannelWithRoot } from '../../lib/channels.js';
 import { moveNodeSubtree } from '../../lib/nodeSubtreeMove.js';
+import { includeHistoryClient, withIncludeHistoryTransaction } from '../../lib/includes/includeHistoryFence.js';
 vi.mock('../../lib/metering/index.js', () => ({ recordLlmUsage: vi.fn(async () => {}) }));
 let memoryId: string;
 let ids: string[];
@@ -61,7 +62,7 @@ it('a cross-memory subtree move restamps controls but not record turns under the
   const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
   const destination = await db.memory.create({ data: { id: generateId(), organizationId: memory.organizationId, urn: `test:dest-${generateId()}`, name: 'Destination', class: 'knowledge', vectorIndexEnabled: true } });
   const root = await db.node.findUniqueOrThrow({ where: { id: ids[5]! } });
-  await db.$transaction(tx => moveNodeSubtree(tx, { source: root, destLoc: 'moved', destMemoryId: destination.id, editor: { userId: null } }));
+  await withIncludeHistoryTransaction(db, history => moveNodeSubtree(includeHistoryClient(history), { source: root, destLoc: 'moved', destMemoryId: destination.id, editor: { userId: null } }));
   const rows = await db.node.findMany({ where: { memoryId: destination.id } });
   expect(rows.length).toBe(5);
   for (const row of rows) expect(row.embeddingWorkToken === null).toBe(isRawChatNode(row));
