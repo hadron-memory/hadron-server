@@ -5,7 +5,7 @@ import { stringify } from 'yaml';
 import { GRAPHS_PATH } from '../../config.js';
 import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
-import { prepareWriteBranch } from './gitBranch.js';
+import { prepareWriteBranch, unpublishedCommitCount } from './gitBranch.js';
 import { execGit } from './execGit.js';
 import { validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
 import { deserializeTags } from '../db/provider.js';
@@ -214,21 +214,26 @@ async function pushMemoryToGitUnderLock(
     await execGit(['add', '-A'], { cwd: localPath });
     const { stdout } = await execGit(['status', '--porcelain'], { cwd: localPath });
     if (!stdout.trim()) {
-      await restoreRemote(localPath, memory.source);
-      return { nodeCount: nodes.length, error: undefined };
+      // #2308: a clean tree is not "nothing to publish" (see withMirrorCheckout):
+      // an earlier failed push leaves its commit on the write branch. An unknown
+      // ahead state throws into the catch below, never a silent success.
+      if ((await unpublishedCommitCount(localPath, branch, memory.readBranch ?? undefined)) === 0) {
+        await restoreRemote(localPath, memory.source);
+        return { nodeCount: nodes.length, error: undefined };
+      }
+    } else {
+      const gitEnv = {
+        ...process.env,
+        GIT_AUTHOR_NAME: org.name,
+        GIT_AUTHOR_EMAIL: `hadron@${org.urn}`,
+        GIT_COMMITTER_NAME: org.name,
+        GIT_COMMITTER_EMAIL: `hadron@${org.urn}`,
+      };
+
+      await execGit([
+        'commit', '-m', `Push ${nodes.length} nodes from Hadron\n\n[hadron-server pushMemoryToGit]`,
+      ], { cwd: localPath, env: gitEnv });
     }
-
-    const gitEnv = {
-      ...process.env,
-      GIT_AUTHOR_NAME: org.name,
-      GIT_AUTHOR_EMAIL: `hadron@${org.urn}`,
-      GIT_COMMITTER_NAME: org.name,
-      GIT_COMMITTER_EMAIL: `hadron@${org.urn}`,
-    };
-
-    await execGit([
-      'commit', '-m', `Push ${nodes.length} nodes from Hadron\n\n[hadron-server pushMemoryToGit]`,
-    ], { cwd: localPath, env: gitEnv });
 
     if (token) {
       const tokenUrl = toHttpsUrl(memory.source, token);

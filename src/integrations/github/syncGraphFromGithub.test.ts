@@ -48,7 +48,8 @@ vi.mock('child_process', () => {
       return;
     }
     cb(null, {
-      stdout: argv.includes('ls-remote') ? `ref: refs/heads/${mockDefaultBranch}\tHEAD\n` : '',
+      // rev-list --count: nothing unpublished (#2308), so a clean tree is 'no-changes'.
+      stdout: argv.includes('ls-remote') ? `ref: refs/heads/${mockDefaultBranch}\tHEAD\n` : argv.includes('rev-list') ? '0\n' : '',
       stderr: '',
     });
   });
