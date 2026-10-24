@@ -2326,6 +2326,9 @@ export const memoryMutations = {
           // every stale Node rewrite and alias in this transaction.
           // Evaluate expiry in the claim statement, not against an application
           // clock or the transaction's start time (a lock wait can outlive it).
+          // R206: the same row lock encryptMemory takes (FOR UPDATE), so this
+          // flip is serialized against an in-flight Git mirror's KEY SHARE fence.
+          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
           const claimed = await tx.$executeRaw`
             UPDATE memories SET urn = ${newUrn}, created_by = ${user.id},
               anonymous_expires_at = NULL, is_encrypted = true,

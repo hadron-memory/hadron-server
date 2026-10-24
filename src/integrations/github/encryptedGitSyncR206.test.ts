@@ -221,3 +221,60 @@ describe('R206 positive controls: unencrypted memories still mirror', () => {
     expect(['mirrored', 'no-changes']).toContain(outcome);
   });
 });
+
+describe('R206: a conversion cannot interleave with a mirror side effect (late-flip fence)', () => {
+  beforeEach(async () => {
+    await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: false, keyVerifier: null } });
+    await db.node.updateMany({ where: { memoryId }, data: { content: 'plain body', abstract: null, data: {} as never } });
+  });
+
+  /** Starts a conversion exactly as encryptMemory does (row FOR UPDATE, then flip), without awaiting it. */
+  const startConversion = () => db.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+    await tx.memory.update({ where: { id: memoryId }, data: { isEncrypted: true, keyVerifier: makeKeyVerifier(key) } });
+  });
+  const flagNow = async () => (await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).isEncrypted;
+
+  it('serializes a conversion that starts mid-push behind the push (no plaintext push after the flag flips)', async () => {
+    let conversion: Promise<unknown> | undefined;
+    const flagAtPush: boolean[] = [];
+    vi.mocked(execGit).mockImplementation(async args => {
+      if (args[0] === 'fetch') {
+        conversion = startConversion();
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+      if (args[0] === 'push') flagAtPush.push(await flagNow());
+      return { stdout: args[0] === 'status' ? ' M node.md\n' : '', stderr: '' };
+    });
+    const result = await pushMemoryToGit(memoryId);
+    expect(result.errorCode).toBeUndefined();
+    expect(flagAtPush).toEqual([false]);
+    await conversion;
+    expect(await flagNow()).toBe(true);
+  });
+
+  it('serializes a conversion that starts after the move rows were read (metadata-only rows)', async () => {
+    const dest = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const src = await db.memory.create({ data: { organizationId: dest.organizationId, class: 'knowledge', name: 'src', urn: 'r206.test:src2' } });
+    let conversion: Promise<unknown> | undefined;
+    const flagAtPush: boolean[] = [];
+    vi.mocked(execGit).mockImplementation(async args => {
+      if (args[0] === 'fetch') {
+        conversion = startConversion();
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+      if (args[0] === 'push') flagAtPush.push(await flagNow());
+      return { stdout: args[0] === 'status' ? ' M node.md\n' : '', stderr: '' };
+    });
+    await mirrorNodeMoveToGit(db, { srcMemoryId: src.id, destMemoryId: memoryId, moved: [{ id: nodeId, previousLoc: 'node' }] });
+    expect(flagAtPush).toEqual([false]);
+    await conversion;
+    expect(await flagNow()).toBe(true);
+  });
+
+  it('a conversion that wins first still refuses the mirror with the typed outcome', async () => {
+    await startConversion();
+    const outcome = await withMirrorCheckout({ memoryId, commitSubject: 'after flip', logPrefix: '[fixture]' }, () => {});
+    expect(outcome).toBe('refused-encrypted');
+  });
+});

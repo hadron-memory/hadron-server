@@ -16,7 +16,7 @@ import {
   orphanedLegacyPaths,
 } from './nodeFrontmatter.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
-import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
+import { withMirrorCheckoutLock, EncryptedMemoryFenceError } from './mirrorCheckoutLock.js';
 import { ENCRYPTED_GIT_SYNC_MESSAGE, ENCRYPTED_GIT_SYNC_UNAVAILABLE, logEncryptedGitSyncRefusal } from './encryptedGitSync.js';
 
 function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
@@ -49,8 +49,9 @@ export async function pushMemoryToGit(
   // Hold their cross-process checkout lock through the entire push, including
   // the final remote-URL restoration.
   try {
-    return await withMirrorCheckoutLock(memoryId, () => pushMemoryToGitUnderLock(memoryId));
+    return await withMirrorCheckoutLock(memoryId, () => pushMemoryToGitUnderLock(memoryId), { fenceEncryption: true });
   } catch (err) {
+    if (err instanceof EncryptedMemoryFenceError) return encryptedRefusal(memoryId);
     console.error('[pushMemoryToGit] Checkout lock failed:', err);
     return { nodeCount: 0, error: `Git checkout lock failed: ${String(err)}` };
   }
@@ -155,9 +156,9 @@ async function pushMemoryToGitUnderLock(
   // content: exporting it re-published deleted text on every full push (#425).
   // This only stops new writes — pruning files already in the repo is a
   // separate, gated change.
-  // The encryption flag and the nodes come from ONE snapshot: an encryption
-  // flip that commits after it cannot turn a plaintext read into an export of
-  // an encrypted memory, and one that committed before it is refused here —
+  // The checkout lock above holds a KEY SHARE fence on the Memory row for this
+  // whole push, so a conversion (row FOR UPDATE) cannot commit between this
+  // check and the final push; one that committed earlier is refused here, at
   // the last boundary before any file is rendered (R206).
   const snapshot = await db.$transaction(async (tx) => {
     const live = await tx.memory.findUnique({ where: { id: memoryId }, select: { isEncrypted: true } });

@@ -226,17 +226,22 @@ describe('#1273 encrypted node Git mirror', () => {
     expect(warning).toHaveBeenCalledWith(expect.stringMatching(/ENCRYPTED_GIT_SYNC_UNAVAILABLE/));
   });
 
-  it('restores the remote when the memory disappears during preparation', async () => {
+  it('makes a memory deletion wait for an in-flight mirror instead of pulling the row out from under it (R206 row fence)', async () => {
     await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: false } });
+    let deletion: Promise<unknown> | undefined;
+    let deletedDuringMirror = false;
     vi.mocked(execGit).mockImplementation(async args => {
-      if (args[0] === 'fetch') await db.memory.delete({ where: { id: memoryId } });
-      return { stdout: '', stderr: '' };
+      if (args[0] === 'fetch') {
+        deletion = db.memory.delete({ where: { id: memoryId } }).then(() => { deletedDuringMirror = true; });
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+      if (args[0] === 'push') expect(deletedDuringMirror).toBe(false);
+      return { stdout: args[0] === 'status' ? ' M target.md\n' : '', stderr: '' };
     });
     await mirror.writeNodeToGit(await payload(), '', null, memoryId);
-    expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
-    expect(execGit).toHaveBeenCalledWith(['remote', 'set-url', 'origin', 'https://github.com/andi1273/fixture'], { cwd: localPath });
-    expect(vi.mocked(execGit).mock.calls.some(([args]) => ['add', 'commit', 'push'].includes(args[0]))).toBe(false);
-    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/memory changed during preparation/));
+    expect(vi.mocked(execGit).mock.calls.some(([args]) => args[0] === 'push')).toBe(true);
+    await deletion;
+    expect(await db.memory.findUnique({ where: { id: memoryId } })).toBeNull();
   });
 
   it('does not use key possession to bypass the merge owner gate', async () => {

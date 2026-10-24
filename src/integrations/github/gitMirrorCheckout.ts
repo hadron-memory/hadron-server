@@ -25,7 +25,7 @@ import { prepareWriteBranch } from './gitBranch.js';
 import { execGit } from './execGit.js';
 import { sourceNamesRepo, validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
-import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
+import { withMirrorCheckoutLock, EncryptedMemoryFenceError } from './mirrorCheckoutLock.js';
 import { logEncryptedGitSyncRefusal } from './encryptedGitSync.js';
 
 /** The prepared checkout handed to a mutate callback. */
@@ -274,8 +274,12 @@ export async function withMirrorCheckout(
         await restoreRemote(localPath, memory.source);
         return 'failed';
       }
-    });
+    }, { fenceEncryption: true });
   } catch (err) {
+    if (err instanceof EncryptedMemoryFenceError) {
+      logEncryptedGitSyncRefusal(logPrefix, memory.id);
+      return 'refused-encrypted';
+    }
     console.error(`${logPrefix} Checkout lock failed for ${commitSubject}:`, err);
     return 'failed';
   }
