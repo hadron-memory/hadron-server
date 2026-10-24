@@ -24,7 +24,7 @@ import { batchKeyOf, type BatchProof } from './wakeProof.js';
 import { standbyAdmitsSql, workerStandby } from './standby.js';
 import { s7Available } from './s7Availability.js';
 
-export const DELIVERY_BATCHES_PAGE_DEFAULT = 50;
+export const DELIVERY_BATCHES_PAGE_DEFAULT = 20;
 export const DELIVERY_BATCHES_PAGE_MAX = 200;
 /** A global batch selects at most ten; no channel can contribute an eleventh.
  * Count all reached rows before this cap so overflow is exact without loading their bodies. */

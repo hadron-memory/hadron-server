@@ -43,7 +43,7 @@ function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
 // Graph-view fetch (issue #466): default page size + hard cap for the slim
 // memoryNodes / memoryEdges lists. Large enough to fill the graph in a few
 // round trips, capped so a single page stays bounded.
-const GRAPH_PAGE_DEFAULT = 1000;
+export const GRAPH_PAGE_DEFAULT = 20;
 const GRAPH_PAGE_MAX = 2000;
 
 /**
@@ -52,7 +52,7 @@ const GRAPH_PAGE_MAX = 2000;
  * fetch only `total` — the cheap "how big is this memory?" node/edge count — or
  * suppress the payload during init, the standard limit-0 pattern.
  */
-function clampGraphTake(limit?: number | null): number {
+export function clampGraphTake(limit?: number | null): number {
   if (limit == null) return GRAPH_PAGE_DEFAULT;
   return Math.min(GRAPH_PAGE_MAX, Math.max(0, limit));
 }

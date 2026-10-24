@@ -57,7 +57,7 @@ import { pendingTaskWakes, type PendingTaskWake } from '../agentTasks/taskWakes.
  */
 export const WAKE_SCAN_ROWS_PER_CHANNEL = 5_000;
 export const WAKE_SCAN_MAX_ROWS_PER_CHANNEL = 50_000;
-export const DUE_WAKES_PAGE_DEFAULT = 100;
+export const DUE_WAKES_PAGE_DEFAULT = 20;
 export const DUE_WAKES_PAGE_MAX = 200;
 /**
  * #1708 (Colin, Riana P2-2 on #1859): the most task reasons one wake carries. A worker with more pending gets the

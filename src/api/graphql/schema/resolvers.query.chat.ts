@@ -132,7 +132,7 @@ export const chatQueries = {
           ...excludeChannelRoots,
         },
         orderBy: { updatedAt: 'desc' as const },
-        take: limit ?? 100,
+        take: limit ?? 20,
         skip: offset ?? 0,
       });
       if (tops.length === 0) return [];
@@ -290,7 +290,7 @@ export const chatQueries = {
           { createdAt: 'desc' as const },
           { loc: 'desc' as const },
         ],
-        take: limit ?? 100,
+        take: limit ?? 20,
         // `id` rides along for the #1061 usage attribution; the projection
         // below doesn't use it (a transcript entry is addressed by loc/seq).
         select: { id: true, loc: true, content: true, data: true, seq: true, createdAt: true, memoryId: true, nodeType: true },

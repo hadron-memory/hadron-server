@@ -4384,10 +4384,10 @@ export function createMcpServerInstance(
             expand: expand ?? undefined,
             granularity: granularity ?? undefined,
             // #497 — a query defaults to a tight page (10); an agent iterating
-            // search shouldn't pay 50 full abstracts of context per call. Survey
-            // mode ("*"/"") is a deliberate full listing, so it keeps 50. The
+            // search shouldn't pay 20 full abstracts of context per call. Survey
+            // mode ("*"/"") is a deliberate full listing, so it gets a wider page (20). The
             // minScore floor never applies to survey (those hits are unscored).
-            limit: limit ?? (isSurvey ? 50 : 10),
+            limit: limit ?? (isSurvey ? 20 : 10),
             minScore: isSurvey ? undefined : minScore,
           },
           ctx,
@@ -12088,7 +12088,7 @@ const SHAPE_HADRON_SEARCH = {
     .array(z.enum(['urn', 'name', 'description', 'pk', 'content']))
     .optional()
     .describe('Force these fields (overrides the smart-sniff). Omit to auto-detect.'),
-  limit: z.number().optional().describe('Max results (default 50, max 200).'),
+  limit: z.number().optional().describe('Max results (default 20, max 200).'),
   scope: z.string().optional().describe('Spec 049: run the memory + node slices under a named scope (a scope id / name, "app", or "global"). Omitted: the ladder applies (active scope › active App › active organization) and the result says which.'),
 };
 
@@ -12124,7 +12124,7 @@ const SHAPE_HADRON_LIST_SCOPES = {
   ownerType: z.enum(['ORGANIZATION', 'AGENT', 'APP']).optional().describe('With ownerRef: list one owner\'s scopes instead of an App context.'),
   ownerRef: z.string().optional().describe('URN or id of the owner (with ownerType).'),
   name: z.string().optional().describe('Only scopes with exactly this name.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
 };
 
@@ -12156,7 +12156,7 @@ const SHAPE_HADRON_SCOPE_EXPLAIN = {
 const SHAPE_HADRON_LIST_CHANNELS = {
   app: z.string().optional().describe('App URN or id. Defaults to the active App.'),
   memory: z.string().optional().describe('Or: one host memory (URN or id).'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
 };
 
@@ -12171,7 +12171,7 @@ const SHAPE_HADRON_REGISTER_LIST = {
   owner: z.string().optional().describe('An App or organization (URN or id). Defaults to the active App.'),
   channel: z.string().optional().describe('Only rows for this Channel (its id or address).'),
   attendee: z.string().optional().describe('Only rows naming this Worker or Agent (URN or id).'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
 };
 
@@ -12211,7 +12211,7 @@ const SHAPE_HADRON_FIND_NODES = {
   nodeKind: z.enum(['CONTENT', 'COMMENTS', 'ALL']).optional().describe('#1608/#1678 — which KIND of node to search (GraphQL: NodeFilter.contentScope). CONTENT (default): content nodes only. COMMENTS: comment nodes only (feedback about other nodes), found exhaustively in every mode before ranking and limits. ALL: both. A comment hit is labelled COMMENT and is never content of, or verified fact about, its target. Not hadron_get_node\'s contentScope, which picks the parts of one node to return.'),
   scope: z.string().optional().describe('Spec 049: search under a named scope — a scope id, a scope NAME (resolved in the active App\'s context), "app" (the active App\'s attached memories), or "global" (your active organization\'s view). Omitted with no memory selector: the ladder applies (active scope › active App › active organization), and the result says which. An explicit memoryUrn / memoryUrns / allMemories outranks the ambient scope but still intersects with one named here.'),
   brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
-  limit: z.number().optional().describe('Max results (default 10 for a query; 50 for survey mode "*"/""). Raise it if the top hits do not cover what you need.'),
+  limit: z.number().optional().describe('Max results (default 10 for a query; 20 for survey mode "*"/""). Raise it if the top hits do not cover what you need.'),
   minScore: z.number().optional().describe('Absolute relevance floor: drop hits scoring below this. Scores are NOT comparable across modes — keyword ranks run roughly 0..a-few, vector cosine similarity is 0..1, hybrid is a small RRF fraction — so read the (score …) values in a first unfiltered call, then set a floor for the mode in use. Prefer this (or a narrower query) over reading a long tail of weak hits. Returns fewer hits, never weaker ones; does not apply to survey mode.'),
   expand: z.number().int().min(0).max(3).optional().describe('Append undirected graph neighbors (all edge types) within depth N AFTER the ranked hits, unscored. Default 0 (no expansion). Max 3. Useful for context-stuffing — the ranked nodes plus their immediate graph context in one tool call. Spec 033 FR-020.'),
   granularity: z.enum(['node', 'chunk']).optional().describe('node (default): one entry per matching node, ranked by best-chunk similarity for content-chunk indexes. chunk: return matching passages (span text + character offsets + chunk index + parent node URN), useful for RAG context-stuffing. **chunk requires mode:vector** — hybrid + chunk is out of v1 (the design call for how RRF fuses with passage-level results was deferred). Spec 033 US2 FR-022.'),
@@ -12554,7 +12554,7 @@ const SHAPE_HADRON_CHANNEL_READ = {
   sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
   beforeSeq: z.number().int().optional().describe('Page BACKWARD: only messages with seq strictly less than this, newest page of those. Ignores offset.'),
   mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id) of the host App. For a worker this includes @all/@team broadcasts from an author who could wake everyone (decided at post time), and never its own posts.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
   session: z.string().optional().describe('Your session id — passing it keeps that session alive (#1081).'),
   expectedIncarnation: z.number().int().optional().describe('#2181: pin the read to the Channel incarnation you read (the "incarnation" on the final line of a read). A different one is [channel_incarnation_changed] with no page and no cursor, check or resume applied; omitted, the read is unfenced.'),
@@ -12573,7 +12573,7 @@ const SHAPE_HADRON_TEAM_CHAT_READ = {
   sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
   beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),
   mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id). For a worker this includes @all/@team broadcasts from an author who could wake everyone (decided at post time), and never its own posts.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
   session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. On an ordinary read, passing it keeps that session alive (#1081). Monitor mode uses it only as an App hint and does not heartbeat or wake the session.'),
   app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
@@ -12598,7 +12598,7 @@ const SHAPE_HADRON_TEAM_ATTENTION_PAGE = {
   app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
   since: z.string().optional().describe('v1-shaped watermark token to start a scan from. Do not pass with page. Do not pass "now".'),
   page: z.string().optional().describe('Opaque continuation returned by the preceding page. Do not pass with since.'),
-  limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit this call (default 50, cap 100).'),
+  limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit this call (default 20, cap 100).'),
   scanLimit: z.number().int().optional().describe('Max encrypted rows to decrypt or aggregate this call (default 50, cap 100).'),
 };
 
@@ -12606,7 +12606,7 @@ const SHAPE_HADRON_TEAM_ATTENTION_SWITCHOVER = {
   app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
   action: z.enum(['preview', 'apply']).describe('preview makes no writes and pages; apply requires the exact final-page proof.'),
   page: z.string().optional().describe('preview continuation from the preceding preview page.'),
-  limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit per preview call (default 50, cap 100).'),
+  limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit per preview call (default 20, cap 100).'),
   proof: z.string().optional().describe('Required for action:"apply"; returned by the final preview page.'),
 };
 
@@ -12620,7 +12620,7 @@ const SHAPE_HADRON_TEAM_CHAT_MARK_READ = {
 
 const SHAPE_HADRON_LIST_WORKERS = {
   includeRetired: z.boolean().optional().describe('Include retired castings — historical staff whose names stay reserved.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
   session: z.string().optional().describe('Your session id — used to resolve which team App to list when app is omitted. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
   app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
@@ -12675,7 +12675,7 @@ const SHAPE_HADRON_TEAM_WORK_ITEMS = {
   worker: z.string().optional().describe('Filter to ONE worker\'s records — its name ("Iris"), id, or URN. Everything that worker has done, across all of their sessions. A retired worker still resolves.'),
   tool: z.string().optional().describe('Filter by tool (e.g. "github").'),
   kind: z.string().optional().describe('Filter by kind: pr | issue | commit | branch | repo.'),
-  limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
+  limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Page offset.'),
   app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
 };

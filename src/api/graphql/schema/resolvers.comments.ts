@@ -1055,7 +1055,7 @@ export const commentQueries = {
     if (target.nodeType === COMMENT_NODE_TYPE) {
       throw commentError('COMMENT_TARGET_IS_COMMENT', 'A comment has no threads of its own; read its thread through its target.');
     }
-    const limit = Math.min(Math.max(args.limit ?? 50, 0), 200);
+    const limit = Math.min(Math.max(args.limit ?? 20, 0), 200);
     const offset = Math.max(args.offset ?? 0, 0);
     const where: Prisma.CommentMetaWhereInput = {
       targetNodeId: target.id,

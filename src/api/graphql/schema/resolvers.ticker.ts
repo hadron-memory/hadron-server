@@ -1012,7 +1012,7 @@ export const tickerFieldResolvers = {
     },
     owner: (t: TickerRow, _: unknown, ctx: Context) => actorRef(ctx, t.ownerWorkerId, t.ownerUserId),
     subscribers: async (t: TickerRow, a: { first?: number | null; after?: string | null }, ctx: Context) => {
-      const take = Math.min(Math.max(a.first ?? 50, 1), 200);
+      const take = Math.min(Math.max(a.first ?? 20, 1), 200);
       const rows = await ctx.db.tickerSubscription.findMany({
         where: { tickerId: t.id, endedAt: null },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
