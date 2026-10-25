@@ -1415,6 +1415,19 @@ export const typeDefs = `#graphql
   type RecoveryGraphEdge { id: ID!, name: String, source: RecoveryEndpoint!, target: RecoveryEndpoint! }
   type RecoveryEdgesPage { items: [RecoveryGraphEdge!]!, total: Int! }
 
+  """#2046 — the result of a compile: the new unapproved revision of the compiled node."""
+  type CompiledBootPrompt {
+    node: Node!
+    "The revision this compile wrote."
+    revNo: Int!
+    "SHA-256 hex of the compiled text."
+    contentHash: String!
+    "Whether this compile wrote the pointer."
+    pointerSet: Boolean!
+    "Always false: a compile never approves or signs."
+    approvalIssued: Boolean!
+  }
+
   type Node {
     "Deletion marker. Ordinary reads still omit tombstones; explicit recovery is writer-only."
     deletedAt: DateTime
@@ -1431,6 +1444,8 @@ export const typeDefs = `#graphql
     approvalStatus: NodeApprovalStatus!
     "#1591 — whether this node is minted, and the record of it."
     mintStatus: NodeMintStatus!
+    "#2048 (hrn:node:hadronmemory.com:specs:cor:agt:040:13) — link lint for a boot-prompt source: the warnings that hold for this node as it is now, read as the caller (a target the caller cannot read is a position-only BROKEN_INCLUDE). An empty page is a real answer; null means the warnings are unavailable (a fault, or a compiled boot prompt, whose warnings read its recorded provenance). Lint never blocks a write, and nothing is stored or pushed. Pages default to 50 and clamp at 100."
+    lintWarnings(first: Int = 50, after: String): LintWarningPage
     "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:06) — the node's signatures and their derived states, current signers first. Batch-loaded on list and search reads. An encrypted node reads NOT_APPLICABLE and lists none."
     signatureStatus: NodeSignatureStatus!
     "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — the node's signing requests, newest first, including ended ones (#10019). state filters on the effective state (an open request past its deadline is EXPIRED). first: 1–100, default 20."
@@ -2225,6 +2240,49 @@ export const typeDefs = `#graphql
     urn: String!
     loc: String!
     approval: NodeApproval!
+    "#2048 — the link-lint warnings for this node as they hold now; the same data as Node.lintWarnings. Approving never blocks on a warning."
+    lintWarnings(first: Int = 50, after: String): LintWarningPage
+  }
+
+  "#2048 (hrn:node:hadronmemory.com:specs:cor:agt:040:13) — what link lint warns about."
+  enum LintKind {
+    "The include's target is soft-deleted (hrn:node:hadronmemory.com:specs:cor:agt:040:13, R20 A)."
+    RETIRED_TARGET
+    "The target is readable but has no revision that meets the include's settings (approved and/or rev=N)."
+    NO_QUALIFYING_REVISION
+    "The include pins a revision and a newer revision is approved."
+    PINNED_NEWER_APPROVED
+    "The include says signed; signing is not checked yet."
+    SIGNING_NOT_CHECKED
+    "The target is missing or the caller cannot read it. Position only: it never says which, or anything about the target."
+    BROKEN_INCLUDE
+  }
+
+  "#2048 — one link-lint warning. A fixed set of fields: there is no free-form detail."
+  type LintWarning {
+    kind: LintKind!
+    "0-based offset of the include tag in the node's source text."
+    position: Int!
+    text: String!
+    "The target's URN, only for a target the caller can read; null for BROKEN_INCLUDE."
+    targetUrn: String
+    "The revision the include pins, when it pins one."
+    pinnedRevision: Int
+    "The newest approved revision, for PINNED_NEWER_APPROVED."
+    newerRevision: Int
+    "Reserved for the policy-agent override notice; null for source lint."
+    overriddenNodeLoc: String
+    "Reserved for the worker signature/trailer lint; null for source lint."
+    workerField: String
+  }
+
+  "#2048 — one page of warnings, ordered by position."
+  type LintWarningPage {
+    items: [LintWarning!]!
+    "All warnings that hold, not just this page."
+    total: Int!
+    "Pass as after for the next page; null on the last."
+    nextCursor: String
   }
 
   "#1591 — the outcome of approving every node of a memory."
@@ -4404,6 +4462,11 @@ export const typeDefs = `#graphql
     """
     orgGrants: [AgentOrgGrant!]!
     createdAt: DateTime!
+
+    "#2024 — the tickers this Agent declares. Casting a worker from it creates them for the worker (a snapshot: later edits reach only future casts). Readable by anyone who can read the Agent."
+    tickerTemplates: [AgentTickerTemplate!]!
+    "#2024 — whether the caller may create, change or delete this Agent's ticker templates (the Agent ADMIN door, the same as editing the Agent). Null when it cannot be decided."
+    viewerMayEditTickerTemplates: Boolean
   }
 
   """
@@ -5048,6 +5111,22 @@ export const typeDefs = `#graphql
     prompt: String
     "Always null. The name-placeholder check was retired with the old variable logic (#2049)."
     hasNamePlaceholder: Boolean @deprecated(reason: "Retired (#2049); always null.")
+    "#2024 — the tickers this cast would create, each at its effective cadence (the larger of the template's and the App's floor). Non-reserving: nothing is written or held, so a later cast may differ if the App changes. Empty when the Agent declares none."
+    tickers: [CastPreviewTicker!]!
+  }
+
+  "#2024 — one ticker a cast would create from an Agent ticker template."
+  type CastPreviewTicker {
+    "The generated name: the template name, a middle dot, then the worker name."
+    name: String!
+    templateId: ID!
+    templateRevision: Int!
+    "What the template asks for."
+    requestedCadenceSeconds: Int!
+    "What the ticker gets: the larger of the requested cadence and the App's floor."
+    effectiveCadenceSeconds: Int!
+    relevance: TickerRelevance!
+    reasons: [TickerReason!]!
   }
 
   """
@@ -5896,11 +5975,13 @@ export const typeDefs = `#graphql
     failed — strictly more than a sum over the hops trail, which has no element
     for a hop that did not complete.
 
-    KNOWN GAP: a hop aborted by the TOOL LOOP (a tool denied by policy, or a
-    tool handler that threw) is NOT counted. The provider has already billed
-    that call, but the tool-loop helper discards the accumulated usage when a
-    tool throws, so the number is not available at the failure site. Such a run
-    under-reports. Do not treat this as a billing figure.
+    A tool-loop call that is REJECTED (a provider or transport error, a tool
+    denied by policy, a handler that threw, hadron_fail) counts the steps the
+    SDK had already completed, once: the provider billed them. Usage the SDK
+    did not report is not counted: the step that failed, and any completed step
+    without token counts. Such a run can still under-report. A rejection before
+    any step completed counts nothing, and unknown is never recorded as zero.
+    Do not treat this as a billing figure.
 
     NULL means UNKNOWN: a run minted before the counter existed, with no hop
     trail to back-fill from. 0 means it genuinely spent nothing.
@@ -7285,8 +7366,12 @@ export const typeDefs = `#graphql
     openQuestions: [SpecOpenQuestionGroup!]!
     "#1591 — how many nodes this call minted (0 on a dry run or refusal)."
     mintedCount: Int!
-    "#1591 — the locs this call minted, or would mint on a dry run, ordered by loc."
+    "#1591 — the locs of NEW nodes this call minted, or would mint on a dry run, ordered by loc."
     mintLocs: [String!]!
+    "#1612 — the locs of already-minted nodes this call re-minted (edited since, or minted with no recorded revision), or would on a dry run, ordered by loc. A re-mint keeps the first mint's time and minter."
+    remintLocs: [String!]!
+    "#1612 — how many of mintedCount were re-mints."
+    remintedCount: Int!
     "#1607 — nodes in mintLocs with open discussion: a WARNING, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Ordered by loc."
     unresolvedFeedback: [UnresolvedFeedback!]!
   }
@@ -8896,6 +8981,12 @@ export const typeDefs = `#graphql
     teamRoles(appRef: ID!, teamAgentRef: ID, limit: Int, offset: Int): TeamRolesPage!
 
     """
+    #2024 — the live ticker templates of an Agent, by name. Anyone who can read the Agent. An Agent the caller cannot read answers
+    as absent (AGENT_NOT_FOUND).
+    """
+    agentTickerTemplates(agentRef: String!): [AgentTickerTemplate!]!
+
+    """
     Dry-run castWorker (#964): run the cast's exact resolution — same
     arguments, same typed refusals (WORKER_AGENT_NOT_FOUND / _AMBIGUOUS /
     _NOT_INSTALLED, WORKER_NAME_REQUIRED, WORKER_NAME_TAKEN,
@@ -9199,6 +9290,22 @@ export const typeDefs = `#graphql
     TICKER_LIMIT_REACHED, TICKER_QUIET_HOURS_INVALID, APP_NOT_FOUND, APP_UNINSTALLED.
     """
     createTicker(appRef: String!, input: TickerInput!): Ticker!
+
+    """
+    #2024 — declare a ticker on an Agent. Whoever may edit the Agent (ADMIN on it); an App manager is not thereby an Agent editor.
+    Affects only FUTURE casts. Refusals: TICKER_TEMPLATE_NAME_TAKEN, TICKER_TEMPLATE_LIMIT_REACHED, TICKER_CADENCE_OUT_OF_RANGE,
+    TICKER_QUIET_HOURS_INVALID, BAD_USER_INPUT (reasons), AGENT_NOT_FOUND, FORBIDDEN.
+    """
+    createAgentTickerTemplate(agentRef: String!, input: AgentTickerTemplateInput!): AgentTickerTemplate!
+
+    """
+    #2024 — change a template; absent fields are unchanged. expectedRevision must be the revision you read, else
+    TICKER_TEMPLATE_REVISION_MISMATCH and nothing is written. Affects only future casts.
+    """
+    updateAgentTickerTemplate(id: ID!, expectedRevision: Int!, input: AgentTickerTemplatePatch!): AgentTickerTemplate!
+
+    "#2024 — remove a template (it stays as history; its name may be reused). expectedRevision as for update. Tickers already generated from it are untouched."
+    deleteAgentTickerTemplate(id: ID!, expectedRevision: Int!): Boolean!
 
     "#1747 — change a ticker. Its owner, the holder of its owning worker, or whoever manages the App. The slug never changes."
     updateTicker(ref: String!, input: TickerPatch!): Ticker!
@@ -9569,18 +9676,21 @@ export const typeDefs = `#graphql
     """
     renumberSpec(memoryRef: ID!, fromLoc: String!, toLoc: String!, dryRun: Boolean): SpecRenumberResult!
     """
-    #1591 — mint the unminted live nodes of a memory, at once, excluding
-    comment nodes and the decision role family. Each node is
+    #1591 — mint the live nodes of a memory in the mint scope, at once,
+    excluding comment nodes and the decision role family. The scope is the
+    unminted nodes plus (#1612) minted nodes whose content changed since their
+    minted revision or that have no recorded minted revision; a re-mint keeps
+    the first mint's time and minter. Each node is
     stamped with its current revision and that revision's approval hash
     (Node.mintStatus); a minted node's moves then record URN aliases. Refuses
-    SPEC_CORPUS_MINT_BLOCKED while any blocker remains among the unminted
-    nodes: a placeholder, an unresolved reference, a structural lint error over
+    SPEC_CORPUS_MINT_BLOCKED while any blocker remains among the nodes in
+    scope: a placeholder, an unresolved reference, a structural lint error over
     spec-marked or citation-shaped nodes (nodetype-info, tag-spec, serialization-leak,
     duplicate-loc), a stale abstract once staleAbstractsBlock is true,
     NOT_APPROVED (the current revision is not approved), TAMPERED (approved
     text changed outside the revision system), or CITES_UNMINTED (an
-    edge into another memory's node that is not minted). Nodes minted earlier
-    are not re-checked. dryRun returns the full report without minting. Any
+    edge into another memory's node that is not minted). Minted nodes outside
+    the scope are not re-checked. dryRun returns the full report without minting. Any
     writer of the memory. memoryRef accepts the ID or URN. A real run holds
     every write to the memory off while it checks and stamps, and refuses
     SPEC_CORPUS_BUSY (retryable) if a write is already in flight. Encrypted
@@ -9858,7 +9968,7 @@ export const typeDefs = `#graphql
     requestNodeSignature(nodeRef: ID!, expectedRevision: Int, signerRef: ID): SigningRequest!
     "#1632 — withdraw an open signing request. Only the requester account, from any of its sessions (#10397). Refusals (hrn:node:hadronmemory.com:specs:cor:dmo:130:03, Holger #10430): SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
     withdrawSigningRequest(id: ID!): SigningRequest!
-    "#1591 — approve the current revision of every live, unminted node of a memory (ID or fully-qualified URN) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
+    "#1591 — approve the current revision of every live node of a memory (ID or fully-qualified URN) in the mint scope (unminted, or minted and changed since or with no recorded minted revision, #1612) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
     approveMemoryNodes(memoryRef: String!): ApproveMemoryNodesResult!
 
     """
@@ -11853,6 +11963,32 @@ export const typeDefs = `#graphql
     setWorkerBootPrompt(workerRef: ID!, nodeRef: String): Worker!
 
     """
+    #2046 (S9-4, hrn:node:hadronmemory.com:specs:cor:agt:040:12) — compile an Agent's boot prompt from its source ('boot:source') in the Agent's
+    system memory into the compiled node 'boot:compiled' there, as a NEW unapproved revision (every compile writes
+    one, even when the text is unchanged), with its provenance and a derived 'compiled-from' edge to the source.
+    Sets 'Agent.bootPromptRef' unless 'setPointer: false'. Never approves or signs ('approvalIssued' is always false).
+
+    Whoever manages the Agent, as themselves: a request bound to a worker session, a non-manager, an App key, an
+    impersonation, a run, and a target that does not exist are alike refused BOOT_PROMPT_COMPILE_NOT_PERMITTED. Only then: BOOT_PROMPT_TARGET_RETIRED, BOOT_PROMPT_NO_SOURCE, BOOT_PROMPT_SOURCE_INVALID, the
+    include refusals (BOOT_PROMPT_INCLUDE_*, _GRANT_REQUIRED, _COMPILE_LIMIT_EXCEEDED, with the tag's 'position'),
+    and CONFLICT when the compile could not settle inside its 30-second budget (retry).
+    A refusal changes nothing. No MCP twin.
+    """
+    compileAgentBootPrompt(agentRef: String!, setPointer: Boolean = true): CompiledBootPrompt!
+    """
+    #2046 — compile an installed Agent's boot prompt for one App into 'boot:compiled' in the App's install memory
+    (the App's own 'boot:source' if it has a live one, else the Agent's, with the App's replacing nodes). Always sets
+    'AppAgent.bootPromptRef'. Whoever manages the App; otherwise as compileAgentBootPrompt.
+    """
+    compileAppAgentBootPrompt(appRef: String!, agentRef: String!): CompiledBootPrompt!
+    """
+    #2046 — compile a customised worker's boot prompt from 'boot:workers:<workerId>:source' into
+    'boot:workers:<workerId>:compiled' in the App's install memory. Sets the worker's pointer unless 'setPointer: false'.
+    Whoever manages the worker's App; otherwise as compileAgentBootPrompt. workerRef is the worker's id or URN.
+    """
+    compileWorkerBootPrompt(workerRef: ID!, setPointer: Boolean = true): CompiledBootPrompt!
+
+    """
     #1162 — hard-delete a never-referenced miscast only.
     hrn:node:hadronmemory.com:specs:cor:dmo:050:11
     Empty normally ended and released stints are repairable; persisted
@@ -13024,6 +13160,49 @@ export const typeDefs = `#graphql
     items: [DashboardWidgetPreset!]!
     total: Int!
     hasMore: Boolean!
+  }
+
+  """
+  #2024 — one ticker an Agent declares. Casting a worker from the Agent into an App creates the worker's tickers from the live
+  templates and subscribes it, in the cast's own transaction. A SNAPSHOT: a later edit or removal reaches only future casts;
+  existing workers and tickers are untouched. Identity is the id, never the name or the position. The cadence is the requested
+  one; the cast raises it to the App's floor. Reasons are never empty.
+  """
+  type AgentTickerTemplate {
+    id: ID!
+    agent: Agent!
+    "Counts edits; an update or delete must name the revision it saw, and a stale one is refused with TICKER_TEMPLATE_REVISION_MISMATCH."
+    revision: Int!
+    "The shape of this record. Only 1 exists."
+    shapeVersion: Int!
+    name: String!
+    cadenceSeconds: Int!
+    "A timezone and weekly windows; null when none."
+    quietHours: JSON
+    relevance: TickerRelevance!
+    reasons: [TickerReason!]!
+    createdAt: DateTime!
+    updatedAt: DateTime
+  }
+
+  input AgentTickerTemplateInput {
+    name: String!
+    cadenceSeconds: Int!
+    quietHours: JSON
+    relevance: TickerRelevance
+    "Absent = [READ_TEAM_CHANNEL]; an empty list is refused."
+    reasons: [TickerReason!]
+  }
+
+  "Absent fields are unchanged. Use clearQuietHours to remove the quiet hours."
+  input AgentTickerTemplatePatch {
+    name: String
+    cadenceSeconds: Int
+    quietHours: JSON
+    clearQuietHours: Boolean
+    relevance: TickerRelevance
+    "An empty list is refused."
+    reasons: [TickerReason!]
   }
 
   """

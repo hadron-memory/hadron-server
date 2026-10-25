@@ -223,6 +223,21 @@ describe('mintSpecCorpus: an edge into another memory can point at a placeholder
     })]);
   });
 
+  it('checks CITES_UNMINTED only for sources in the mint scope (#1612): a minted unchanged source is skipped, an edited one blocks', async () => {
+    const other = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'other-specs' }, as());
+    const target = await db.node.create({ data: {
+      id: generateId(), memoryId: other.id, loc: 'cor:010', name: 'cor:010', role: 'spec', nodeType: 'info', tags: ['spec'], content: 'Draft.',
+    } });
+    await edgeFrom010To(target.id);
+    const source = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010' } });
+    await db.node.update({ where: { id: source.id }, data: { mintedAt: new Date(), mintedByInfo: 'test', mintedRevNo: 1, mintedHash: 'h', contentRevSeq: 1 } });
+    expect((await mint(true)).blockers.filter((b: { kind: string }) => b.kind === 'CITES_UNMINTED')).toEqual([]);
+    await db.node.update({ where: { id: source.id }, data: { contentRevSeq: 2 } });
+    expect((await mint(true)).blockers).toContainEqual(expect.objectContaining({
+      kind: 'CITES_UNMINTED', loc: 'pas:010', targetLoc: `hrn:node:${other.urn}:cor:010`,
+    }));
+  });
+
   it('blocks uniformly, revealing nothing, on edges into a memory the caller cannot read', async () => {
     await db.orgMember.create({ data: { organizationId: org.id, userId: outsider.id, role: 'READER' } });
     const hidden = await db.memory.create({ data: {

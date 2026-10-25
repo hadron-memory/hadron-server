@@ -560,10 +560,9 @@ describe('AppRun spend counters (#832)', () => {
     expect(after.tokensSpent).toBe(100);
   });
 
-  it('DOCUMENTS the known gap: a TOOL-LOOP abort is not counted', async () => {
-    // generateWithTools discards accumulated usage when a tool throws, so the
-    // provider's already-billed tokens are unavailable at the failure site.
-    // Pinned so the gap is visible and a future fix has a target to flip.
+  it('a tool-loop abort that carries no measured usage counts nothing (unknown is not zero, #862)', async () => {
+    // A rejection with no completed step has no partialUsage, so nothing is
+    // counted. (With completed steps the kernel counts them: appRuns.test.ts.)
     const run = await mintFlow();
     const { deps } = flowDeps(0.92);
     (deps as { llmObject: unknown }).llmObject = vi.fn(async () => {
@@ -572,7 +571,7 @@ describe('AppRun spend counters (#832)', () => {
     await executeAppRun(db, run.id, deps);
     const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
     expect(after.status).toBe('FAILED');
-    // Under-reports by construction — see AppRun.tokensSpent's KNOWN GAP note.
+    // Nothing measured, so nothing counted — see AppRun.tokensSpent's docs.
     expect(after.tokensSpent).toBe(0);
   });
 

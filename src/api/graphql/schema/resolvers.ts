@@ -60,6 +60,7 @@ import { agentCloneMutations } from './resolvers.mutation.agentClone.js';
 import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
 import { bootPromptPointerFieldResolvers } from './resolvers.bootPromptPointer.js';
 import { bootPromptPointerMutations } from './resolvers.mutation.bootPromptPointer.js';
+import { compileBootPromptMutations } from './resolvers.mutation.compileBootPrompt.js';
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamSpecQueries } from './resolvers.teamSpec.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
@@ -67,6 +68,7 @@ import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAt
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from './resolvers.agentTask.js';
 import { tickerMutations, tickerQueries, tickerFieldResolvers } from './resolvers.ticker.js';
+import { agentTickerTemplateFieldResolvers, agentTickerTemplateMutations, agentTickerTemplateQueries } from './resolvers.agentTickerTemplate.js';
 import { deliverySettingsQueries, deliverySettingsMutations } from './resolvers.deliverySettings.js';
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
 import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.js';
@@ -121,6 +123,7 @@ export const resolvers = {
   ...workerFieldResolvers,
   ...agentTaskFieldResolvers,
   ...tickerFieldResolvers,
+  AgentTickerTemplate: agentTickerTemplateFieldResolvers.AgentTickerTemplate,
   ...appKeyScopeFieldResolvers,
   ...hostOperationFieldResolvers,
   // #1706 — alarm wakes and availability. AgentTeamEvent already has a block
@@ -134,7 +137,7 @@ export const resolvers = {
   // `Agent` already has a block in typeResolvers; the register's field joins
   // it rather than replacing it (a bare spread would clobber the AI-config
   // and relation fields).
-  Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent, ...agentExtendedByFieldResolvers.Agent, ...agentClonedFromFieldResolvers.Agent, ...agentOfferReadinessFieldResolvers.Agent, ...bootPromptPointerFieldResolvers.Agent },
+  Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent, ...agentExtendedByFieldResolvers.Agent, ...agentClonedFromFieldResolvers.Agent, ...agentOfferReadinessFieldResolvers.Agent, ...bootPromptPointerFieldResolvers.Agent, ...agentTickerTemplateFieldResolvers.Agent },
   // #2045: the boot-prompt pointer read fields join the existing blocks.
   AppAgent: { ...typeResolvers.AppAgent, ...bootPromptPointerFieldResolvers.AppAgent },
   Worker: { ...workerFieldResolvers.Worker, ...bootPromptPointerFieldResolvers.Worker },
@@ -184,6 +187,7 @@ export const resolvers = {
     ...teamWorkQueries,
     ...agentTaskQueries,
     ...tickerQueries,
+    ...agentTickerTemplateQueries,
     ...deliverySettingsQueries,
     ...wakeQueries,
     ...stopSignalQueries,
@@ -234,12 +238,14 @@ export const resolvers = {
     ...agentCloneMutations,
     ...workerMutations,
     ...bootPromptPointerMutations,
+    ...compileBootPromptMutations,
     ...teamRoleMutations,
     ...teamChatMutations,
     ...teamAttentionMutations,
     ...teamWorkMutations,
     ...agentTaskMutations,
     ...tickerMutations,
+    ...agentTickerTemplateMutations,
     ...deliverySettingsMutations,
     ...stopSignalMutations,
     ...wakeMutations,
