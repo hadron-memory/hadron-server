@@ -48,10 +48,49 @@ password isn't echoed):
 
 ```bash
 ssh root@alpha   # holger is not in the docker group; root for docker/pg ops
+# App-user query: DATABASE_URL, the SERVE credential
 URL=$(docker exec hadron-server sh -c 'doppler run -- printenv DATABASE_URL' | tr -d '\r' | sed 's/host.docker.internal/localhost/')
 psql "$URL" -c 'SELECT ...'
-# Superuser ops (DDL you don't own, P3009 recovery): sudo -u postgres psql -d hadron
+# Owner work (migrate, P3009 recovery, ownership fixes, DDL): MIGRATE_DATABASE_URL, the OWNER credential
+# (a key that exists in Doppler only after the cutover's config step; until then use the `hadron` URL above)
+OWNER_URL=$(docker exec hadron-server sh -c 'doppler run -- printenv MIGRATE_DATABASE_URL' | tr -d '\r' | sed 's/host.docker.internal/localhost/')
+# Superuser only for what needs one (CREATE EXTENSION, creating the serve role): sudo -u postgres psql -d hadron
 ```
+
+### Two credentials (#2413)
+
+The server image boots through `scripts/docker-start.sh`: it runs `prisma generate`,
+`prisma migrate deploy`, the post-migrate revoke of the serve role's grant on
+`_prisma_migrations`, and the runtime-role verifier **as the owner**
+(`MIGRATE_DATABASE_URL`), then starts the server under `DATABASE_URL` with
+`MIGRATE_DATABASE_URL` unset. The grants for the serve role (default name
+`hadron_app`, override with `RUNTIME_ROLE_NAME`) live in `prisma/runtime-role.sql`;
+CI proves a non-owner role can serve in the `serve-role-smoke` lane
+(`.github/workflows/migration-smoke-test.yml`).
+
+**Where production stands.** The repo side is merged (S1 #2451, S2 #2453, S3 #2454), but the
+production cutover has **not** happened: Doppler `prd` has no `MIGRATE_DATABASE_URL` yet, so the
+container boots in the legacy single-role mode and logs `db.runtime_role.owner_serving`, and
+`DATABASE_URL` is still the owner (`hadron`) URL. R1 (the second, catalog-only production
+read) is NOT done, and R4 (the cutover window that moves `DATABASE_URL` to the serve role) is
+NOT done. Each needs its own register grant; do not run either on the strength of this
+guide. Never put the owner URL into `DATABASE_URL` yourself: restoring it after a
+cutover is the rollback in the runbook, and also needs a grant.
+
+Which URL each procedure uses (after the cutover; before it both are the owner URL):
+
+| Procedure | URL |
+|---|---|
+| App-user query (snippet above), `scripts/dev-from-prod-snapshot.sh` (SELECT only), every hand-run job under `src/jobs` | `DATABASE_URL` (serve) |
+| `prisma migrate deploy`, `prisma migrate resolve` (P3009 recovery) | `MIGRATE_DATABASE_URL` (owner) |
+| Ownership fixes (`ALTER ... OWNER TO hadron`) and any hand-run DDL | `MIGRATE_DATABASE_URL` (owner) |
+| `psql "$MIGRATE_DATABASE_URL" -f prisma/runtime-role.sql`, `pnpm tsx scripts/db/verify-runtime-role.ts` | `MIGRATE_DATABASE_URL` (owner) |
+
+Recovery DDL starts as the owner (`SET ROLE hadron;` or the owner URL); use `postgres` only for
+objects that need a superuser, then `ALTER ... OWNER TO hadron`. Run `runtime-role.sql` as the
+owner, never as `postgres`: its default privileges attach to whichever role runs it, and the
+owner must stay the only creator of tables. The file refuses a serve role that is the runner,
+is a superuser, or is a member of the owner (or the reverse); it does not create the role.
 
 Full runbook (SSH accounts, Prisma/P3009 recovery, ownership fixes, Komodo
 layout, network notes): [`ops:alpha:db-access`](https://hadronmemory.com/app/u/hrn:node:hadronmemory.com:dev:ops:alpha:db-access).
@@ -61,6 +100,12 @@ layout, network notes): [`ops:alpha:db-access`](https://hadronmemory.com/app/u/h
 The trust boundary is the LX container. The OS user (`root`) and the Postgres
 user (`holger`) are intentionally different — that arrangement is fine and
 should not be changed.
+
+Local dev, the test databases and the disposable E2E stacks run **single-role**: `holger` owns
+and serves, `.env` holds only `DATABASE_URL`, and `MIGRATE_DATABASE_URL` stays unset (the
+entrypoint's legacy mode; `pnpm db:dev-setup`, `db:dev-reset` and the test harness never read it).
+The owner/serve split is exercised in CI, not locally, and in production after the cutover; see
+"Two credentials" under Production DB.
 
 | DB | Purpose | Owner | Connection string |
 |---|---|---|---|
@@ -195,7 +240,8 @@ pnpm admin:mint-token --email you@example.com
 
 | Variable | Used by | Default | Notes |
 |---|---|---|---|
-| `DATABASE_URL` | Prisma client | (none, required) | Per-DB connection string. `.env` sets the dev value; `vitest.config.ts` overrides for tests. |
+| `DATABASE_URL` | Prisma client | (none, required) | Per-DB connection string; **the SERVE credential** wherever `MIGRATE_DATABASE_URL` is also set (the server reads only this). `.env` sets the dev value; `vitest.config.ts` overrides for tests. |
+| `MIGRATE_DATABASE_URL` / `RUNTIME_ROLE_NAME` | #2413 role split — `scripts/docker-start.sh`, `scripts/db/revoke-runtime-migrations.ts`, `scripts/db/verify-runtime-role.ts`, grants in `prisma/runtime-role.sql` | MIGRATE: unset (legacy single-role boot). ROLE: `hadron_app`. | The OWNER credential: the one role that owns every `public` relation. The container entrypoint uses it for `prisma generate`/`migrate deploy`, the post-migrate revoke of the serve role's grant on `_prisma_migrations`, and the verifier, then **unsets it before starting the server**, so the server never holds it. **Unset** (or empty): everything runs under `DATABASE_URL`, exactly as before the split, and boot logs `db.runtime_role.owner_serving`. The verifier is warn-only at boot in this phase (`db.runtime_role.verify_warning`); revoke, migrate and generate failures stop boot and print only a phase, exit status and Prisma code, never a URL. `RUNTIME_ROLE_NAME` names the serve role for the revoke and verifier; the revoke skips a role that is the connected user or owns the ledger, so naming the owner never strips its own access. Verifier exit codes: 0 ok, 1 rule violated, 2 usage, 3 connect, 4 role missing. `SERVE_DATABASE_URL` is read only by `scripts/db/serve-role-smoke.ts` (CI). **Production: not set yet** (cutover R1/R4 not done); local dev keeps ONE role and must leave it unset, and it is never registered in Doppler `dev`. |
 | `DB_POOL_CONNECTION_LIMIT` / `DB_POOL_TIMEOUT_SECONDS` | #448 — Prisma client pool (`src/integrations/db/poolUrl.ts`) | unset (existing Prisma behavior) | Optional positive safe integers for connection count / pool-wait seconds. Existing `connection_limit` / `pool_timeout` URL parameters independently win. Invalid configured settings refuse boot without echoing values or the URL. No production values are selected; no global statement timeout is set. |
 | `JWT_SECRET` | `src/auth/jwt.ts`, `src/api/webhooks.ts`; fallback for `TEAM_ATTENTION_TOKEN_SECRET` and `CSRF_SECRET` | (none, required for signing) | HS256 secret. Per-host; `.env`-managed. **#421: production refuses to boot when it is missing or under 32 UTF-8 bytes** (`src/auth/signingSecret.ts`, first thing in `createServer`). Bytes, not characters; the refusal never prints the value or its length. One check covers every fallback, since each falls back to this value, and a strong dedicated secret never excuses a weak one. Dev/test keep short non-empty fixtures. Every `jwtVerify` on it pins `algorithms: ['HS256']`. Confirm prod's length privately before deploying a server that carries the guard. |
 | `JWT_EXPIRY` | `src/auth/jwt.ts` | `7d` | jose-style duration string; the GitHub-OAuth callback's Option-C `hadron_token` cookie derives `maxAge` from the issued JWT's `exp` claim (so they expire together). |

@@ -33,8 +33,8 @@ describe.each(['CLAUDE.md', 'AGENTS.md'])('%s', (file) => {
       expect(prod, procedure).toContain(procedure);
     }
     expect(prod).toContain('printenv MIGRATE_DATABASE_URL');
-    expect(prod).toMatch(/R1[^\n]*NOT done/);
-    expect(prod).toMatch(/R4[^\n]*NOT done/);
+    expect(prod).toMatch(/R1[\s\S]{0,120}NOT done/);
+    expect(prod).toMatch(/R4[\s\S]{0,120}NOT done/);
     expect(prod).toMatch(/register grant/i);
   });
 
