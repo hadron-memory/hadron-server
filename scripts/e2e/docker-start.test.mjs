@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -23,10 +23,11 @@ fi
 if [ "$NOISE" = yes ]; then printf '%s\\n' "$DATABASE_URL"; fi
 `, { mode: 0o700 });
   const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, DATABASE_URL: serve,
-    CALL_LOG: log, FAIL_STEP: fail, NOISE: noise ? 'yes' : 'no' };
+    TMPDIR: dir, CALL_LOG: log, FAIL_STEP: fail, NOISE: noise ? 'yes' : 'no' };
   delete env.MIGRATE_DATABASE_URL;
   if (migrate !== undefined && migrate !== null) env.MIGRATE_DATABASE_URL = migrate;
   const run = spawnSync('sh', [entrypoint], { encoding: 'utf8', env });
+  assert(!readdirSync(dir).some(name => name.startsWith('hadron-start.')), 'private startup output was not cleaned up');
   const calls = (() => { try { return readFileSync(log, 'utf8').trim().split('\n').map(row => row.split('|')); } catch { return []; } })();
   return { ...run, calls };
 }
