@@ -184,6 +184,45 @@ describe('projection secrecy and the caller read gate (§10 P3 pins)', () => {
   });
 });
 
+describe('the list SQL authorization arms (§10 P3 pins)', () => {
+  async function mixed() {
+    const f = await fixture();
+    await db.appMember.create({ data: { appId: f.app.id, userId: f.otherCtx.userId, role: 'member' } });
+    const mk = (userId: string | null, name: string) => db.agentSchedule.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId, name, cron: '* * * * *', entryNodeUrn: f.entryNodeUrn } });
+    return { f, theirs: await mk(f.otherCtx.userId, 'theirs'), appOnly: await mk(null, 'app-only') };
+  }
+  it('a non-ADMIN member who is the run-as user sees only their own trigger: no App-only row, no other member\'s', async () => {
+    const { f, theirs } = await mixed();
+    const page = await Q.automationApprovals({}, { appRef: f.app.id }, f.otherCtx);
+    expect(page.rows.map((r: any) => r.triggerRef)).toEqual([theirs.id]);
+  });
+  it('rows the caller may not adopt never occupy a page slot (limit 1 still returns their trigger)', async () => {
+    const { f, theirs } = await mixed();
+    const page = await Q.automationApprovals({}, { appRef: f.app.id, limit: 1 }, f.otherCtx);
+    expect(page.rows.map((r: any) => r.triggerRef)).toEqual([theirs.id]);
+    expect(page.nextCursor).toBeNull();
+  });
+  it('an ADMIN sees the App-only and their own triggers, never another member\'s', async () => {
+    const { f, theirs, appOnly } = await mixed();
+    const refs = (await Q.automationApprovals({}, { appRef: f.app.id }, f.ctx)).rows.map((r: any) => r.triggerRef);
+    expect(refs).toContain(appOnly.id);
+    expect(refs).toEqual(expect.arrayContaining([f.ref.SCHEDULE, f.ref.WEBHOOK]));
+    expect(refs).not.toContain(theirs.id);
+  });
+  it('a member without the App relationship sees nothing, even for a trigger that names them', async () => {
+    const { f, theirs } = await mixed();
+    await db.appMember.delete({ where: { appId_userId: { appId: f.app.id, userId: f.otherCtx.userId } } });
+    expect((await Q.automationApprovals({}, { appRef: f.app.id }, f.otherCtx)).rows.map((r: any) => r.triggerRef)).not.toContain(theirs.id);
+  });
+  it('a trigger in another organization than an org-owned App is not listed', async () => {
+    const f = await fixture();
+    const org2 = await db.organization.create({ data: { name: 'Other', urn: 'adopt.other' } });
+    const stray = await db.agentSchedule.create({ data: { id: generateId(), organizationId: org2.id, appId: f.app.id, userId: f.user.id, name: 'stray', cron: '* * * * *', entryNodeUrn: f.entryNodeUrn } });
+    expect((await Q.automationApprovals({}, { appRef: f.app.id }, f.ctx)).rows.map((r: any) => r.triggerRef)).not.toContain(stray.id);
+    await expect(Q.automationApproval({}, { triggerKind: 'SCHEDULE', triggerRef: stray.id }, f.ctx)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  });
+});
+
 describe('paging', () => {
   it('a small page reads and authorizes a bounded set, not the whole collection', async () => {
     const f = await fixture();
