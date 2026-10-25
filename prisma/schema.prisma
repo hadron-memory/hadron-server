@@ -3378,6 +3378,7 @@ model App {
   wakeDays                AppWakeDay[]
   wakeReservations        AppWakeReservation[]
   agentTeamEvents         AgentTeamEvent[]
+  automationAdoptionEvents AutomationAdoptionEvent[]
   /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
   agentTaskStallSchedule  AgentTaskStallSchedule?
@@ -5471,6 +5472,36 @@ model MemoryConfigTemplateRule {
 enum AutomationTier {
   PERSON
   APP
+}
+
+/// #2441 — append-only record of every approval, decline and revocation of an
+/// automation's consent (cor:agt:010:01). Written in the SAME transaction as
+/// the pin change by `adoptionDoor` (resolvers.automationPin.ts) and nowhere
+/// else. The trigger id, the actor and the org carry no FK on purpose: history
+/// must survive trigger deletion and user erasure, and an FK action would have
+/// to UPDATE a row the trigger refuses to update. The App FK cascades so a hard
+/// delete still works (the trigger lets a DELETE through once the App is gone).
+model AutomationAdoptionEvent {
+  id             String   @id @default(cuid())
+  appId          String   @map("app_id")
+  organizationId String   @map("organization_id")
+  /// SCHEDULE | WEBHOOK | MANUAL (CHECK in automation-adoption-invariants.sql).
+  triggerKind    String   @map("trigger_kind")
+  /// The trigger row id; for MANUAL, the origin run id. Plain text, no FK.
+  triggerRef     String   @map("trigger_ref")
+  /// APPROVE | DECLINE | REVOKE (CHECK).
+  action         String
+  actorUserId    String   @map("actor_user_id")
+  /// APPROVE: the adopted hash. REVOKE: the hash of the removed pin. DECLINE
+  /// with nothing adopted: null.
+  pinHash        String?  @map("pin_hash")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt])
+  @@index([triggerKind, triggerRef, createdAt])
+  @@map("automation_adoption_events")
 }
 
 model AutomationVersion {

@@ -140,6 +140,8 @@ async function applyTemplateConstraints(client: Client) {
   // #1632 — signing requests, append-only signature records, the content-change marker.
   await client.query(readFileSync(new URL('../../prisma/signing-invariants.sql', import.meta.url), 'utf8'));
   await client.query(readFileSync(new URL('../../prisma/automation-invariants.sql', import.meta.url), 'utf8'));
+  // #2441 — append-only automation adoption events.
+  await client.query(readFileSync(new URL('../../prisma/automation-adoption-invariants.sql', import.meta.url), 'utf8'));
   // #1705 — agent task shape + append-only team events.
   await client.query(readFileSync(new URL('../../prisma/agent-task-invariants.sql', import.meta.url), 'utf8'));
   // #1706 — stall alarm episodes, alarm wakes, availability, stall windows.
