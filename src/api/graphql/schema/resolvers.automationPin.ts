@@ -20,6 +20,12 @@ export type AutomationTriggerKind = 'SCHEDULE' | 'WEBHOOK' | 'MANUAL';
 export interface AutomationTriggerRef { triggerKind: AutomationTriggerKind; triggerRef: string }
 type AdoptionState = 'UNADOPTED' | 'ADOPTED' | 'CHANGED';
 const denied = () => new GraphQLError('Only the run-as user may preview and re-adopt this automation; an App-only trigger requires its manager.', { extensions: { code: 'FORBIDDEN' } });
+/** Cause 4: the CALLER cannot read a graph memory. Never names it: a caller who cannot read a memory is not told it exists. */
+const callerCannotRead = () => new GraphQLError('You cannot read a memory this automation uses, so you cannot preview or adopt it. Ask someone who manages that memory to give you read access.', { extensions: { code: 'FORBIDDEN' } });
+/** Cause 5: the RUN principal (the App, plus the run-as user when there is one) cannot read a graph memory. The memory is named only to a caller who can read it themselves. */
+const principalCannotRead = (urn: string | null) => new GraphQLError(
+  `A run of this automation could not read ${urn ? urn : 'a memory it uses'}: its principal (the App, plus the run-as user when there is one) cannot read it. Grant the App read access to that memory, then re-adopt.`,
+  { extensions: { code: 'FORBIDDEN' } });
 const workerRefused = () => new GraphQLError('A worker session cannot approve or decline an automation; the person who manages it does that as themselves.', { extensions: { code: 'FORBIDDEN' } });
 const badInput = (message: string) => new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
 
@@ -71,7 +77,7 @@ async function load(ctx: Context, input: AutomationTriggerRef) {
 async function preview(ctx: Context, row: Awaited<ReturnType<typeof load>>) {
   const pin = await captureAutomationPin(ctx.db, row.appId, row.userId, row.entryNodeUrn, row.organizationId, ctx, configSelection(row));
   const memories = new Set(Object.values(pin.nodes).map(n => String(n.state.memoryId)));
-  for (const id of memories) if (!await canReadMemory(ctx.db, ctx, id)) throw denied();
+  for (const id of memories) if (!await canReadMemory(ctx.db, ctx, id)) throw callerCannotRead();
   return pin;
 }
 
@@ -205,7 +211,13 @@ function adopt(ctx: Context, input: AutomationTriggerRef & { expectedHash: strin
   return adoptionDoor(ctx, input, async (tx, txCtx, row) => {
     const pin = await preview(txCtx, row);
     if (pin.hash !== input.expectedHash) throw new GraphQLError('Automation changed since preview; preview and re-adopt again.', { extensions: { code: 'AUTOMATION_CHANGED' } });
-    for (const node of Object.values(pin.nodes)) if (!await canReadMemory(txCtx.db, runAuthContext({ ...row, id: 'setup' }), String(node.state.memoryId))) throw denied();
+    const principal = runAuthContext({ ...row, id: 'setup' });
+    for (const node of Object.values(pin.nodes)) {
+      const memoryId = String(node.state.memoryId);
+      if (await canReadMemory(txCtx.db, principal, memoryId)) continue;
+      const named = await canReadMemory(txCtx.db, txCtx, memoryId) ? await txCtx.db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } }) : null;
+      throw principalCannotRead(named?.urn ?? null);
+    }
     const data = { automationPin: storedAutomationPin(pin) as never, updatedBy: ctx.userId };
     if (input.triggerKind === 'SCHEDULE') await tx.agentSchedule.update({ where: { id: row.id }, data });
     else if (input.triggerKind === 'WEBHOOK') await tx.agentWebhook.update({ where: { id: row.id }, data });
