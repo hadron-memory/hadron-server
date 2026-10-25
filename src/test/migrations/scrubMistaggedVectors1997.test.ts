@@ -4,7 +4,9 @@
  *
  * The shipped file is the thing under test: whole-file runs go through psql, and
  * the race pins run its `-- @step` statements one by one in one transaction so a
- * competing transaction can act between them.
+ * competing transaction can act between them. The step runner has no retry
+ * loop, so a busy lock surfaces there as the NOWAIT error the loop catches;
+ * the loop itself is pinned by whole-file runs racing a lock holder.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { execFile } from 'node:child_process';
@@ -16,32 +18,56 @@ import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { waitForLockWaiters } from '../lockWait.js';
 import { upsertAbstractVector } from '../../services/embedding/vectors.js';
+import { restampFailedEmbeddings } from '../../services/embedding/enqueue.js';
+import { endApprovalsOnEncryptedEntry } from '../../lib/nodeApproval.js';
 import { RAW_CHAT_TURN_LOC_PATTERN } from '../../services/embedding/rawChat.js';
 
 const run = promisify(execFile);
 const FILE = resolve('prisma/migrations/20261025030000_scrub_mistagged_node_embeddings/migration.sql');
 const read = () => readFileSync(FILE, 'utf8');
 
-/** The file's statements between BEGIN and COMMIT, keyed by their `-- @step` name. */
+/** One attempt's statements, `-- @step` to `-- @end`, keyed by step name; PERFORM read as SELECT. */
 function steps(): Array<{ name: string; sql: string }> {
-  const body = read().split(/^BEGIN;$/m)[1].split(/^COMMIT;$/m)[0];
-  return body.split(/^-- @step /m).slice(1).map((chunk) => ({
+  const body = read().split(/^\s*-- @end$/m)[0];
+  return body.split(/^\s*-- @step /m).slice(1).map((chunk) => ({
     name: /^[\w-]+/.exec(chunk)![0],
-    sql: chunk.replace(/^.*$/m, '').replace(/^\s*--.*$/gm, '').trim(),
+    sql: chunk.replace(/^.*$/m, '').replace(/^\s*--.*$/gm, '').trim().replace(/^PERFORM\b/, 'SELECT'),
   }));
 }
 
+const APP = 'scrub-1997-file';
+
 /** Run the whole shipped file, BEGIN to COMMIT, as migrate deploy would. */
-async function runFile(): Promise<void> {
+async function runFile(opts: { attempts?: number } = {}): Promise<void> {
   const url = new URL(process.env.DATABASE_URL!);
   expect(['localhost', '127.0.0.1', '[::1]']).toContain(url.hostname);
   await run('psql', ['--no-psqlrc', '-q', '-v', 'ON_ERROR_STOP=1', '-f', FILE], {
     env: {
       ...process.env, PGHOST: url.hostname, PGPORT: url.port || '5432', PGDATABASE: url.pathname.slice(1),
-      PGUSER: decodeURIComponent(url.username), PGPASSWORD: decodeURIComponent(url.password),
+      PGUSER: decodeURIComponent(url.username), PGPASSWORD: decodeURIComponent(url.password), PGAPPNAME: APP,
+      ...(opts.attempts ? { PGOPTIONS: `-c hadron.scrub_1997_attempts=${opts.attempts}` } : {}),
     },
     timeout: 30_000,
   });
+}
+
+/** Resolve once the file's retry loop has yielded at least once: it is sleeping between attempts. */
+async function waitForScrubRetry(timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [{ sleeping }] = await db.$queryRaw<Array<{ sleeping: number }>>`
+      SELECT count(*)::int AS sleeping FROM pg_stat_activity
+      WHERE datname = current_database() AND application_name = ${APP} AND wait_event = 'PgSleep'`;
+    if (sleeping > 0) return;
+    if (Date.now() > deadline) throw new Error(`waitForScrubRetry: the scrub never yielded within ${timeoutMs}ms`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+/** The SQLSTATE a rejected Prisma raw query carries. */
+function sqlstate(e: unknown): string | undefined {
+  const m = /Code: `(\w{5})`|SQLSTATE (\w{5})|"code":"(\w{5})"/.exec(String((e as Error)?.message ?? e));
+  return (e as { meta?: { code?: string } })?.meta?.code ?? (m ? m[1] ?? m[2] ?? m[3] : undefined);
 }
 
 /** Run the steps in one transaction, calling `after[name]` once that step has run. */
@@ -254,6 +280,14 @@ describe('#1997 scrub: the shipped SQL', () => {
   it('is split into the four steps the race pins drive, in lock order', () => {
     expect(steps().map((s) => s.name)).toEqual(['discover', 'lock-nodes', 'lock-memories', 'scrub']);
   });
+
+  it('never waits for a row lock: both lock steps are NOWAIT, every other wait is bounded below deadlock_timeout', () => {
+    const byName = Object.fromEntries(steps().map((s) => [s.name, s.sql]));
+    expect(byName['lock-nodes']).toMatch(/FOR NO KEY UPDATE OF n NOWAIT;$/);
+    expect(byName['lock-memories']).toMatch(/FOR SHARE OF m NOWAIT;$/);
+    expect(read()).toMatch(/^SET LOCAL lock_timeout = '100ms';$/m);
+    expect(read()).toMatch(/EXCEPTION WHEN lock_not_available OR deadlock_detected THEN/);
+  });
 });
 
 describe('#1997 scrub: concurrency (both orders, no deadlock)', { timeout: 30_000 }, () => {
@@ -288,15 +322,15 @@ describe('#1997 scrub: concurrency (both orders, no deadlock)', { timeout: 30_00
     expectCleared(m); // the post-move memory's policy
   });
 
-  it('move first: the scrub waits on the Node, holding no Memory lock, then sees the post-move state', async () => {
+  it('move first: the scrub yields on the Node, holding nothing, retries and sees the post-move state', async () => {
     const src = await memory();
     const idx = await memory({ indexed: true });
     const unidx = await memory();
     const id = await node(idx, { tagged: src, markers: true });
     let scrub!: Promise<void>;
     await relocate([id], idx, unidx, async () => {
-      scrub = runSteps();
-      await waitForLockWaiters(db, 1); // scrub blocked on our Node lock
+      scrub = runFile();
+      await waitForScrubRetry(); // its NOWAIT met our Node lock
     });
     await scrub;
     const s = await state(id);
@@ -386,5 +420,92 @@ describe('#1997 scrub: concurrency (both orders, no deadlock)', { timeout: 30_00
     });
     expect(await write).toBe(false);
     expect((await state(id)).rows).toEqual([]);
+  });
+
+  /** encryptMemory's initial flip: Memory FOR UPDATE, the flag, then the real approval cleanup on its Nodes. */
+  async function flip(mem: Mem, beforeNodes?: () => Promise<void>): Promise<void> {
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${mem.id} FOR UPDATE`;
+      await tx.memory.update({ where: { id: mem.id }, data: { isEncrypted: true, vectorIndexEncryptedAckAt: new Date() } });
+      await beforeNodes?.();
+      await endApprovalsOnEncryptedEntry(tx, { memoryId: mem.id });
+    }, { timeout: 30_000, maxWait: 10_000 });
+  }
+
+  async function approve(id: string): Promise<void> {
+    await db.node.update({
+      where: { id }, data: { approvedRevNo: 1, approvedAt: new Date(), approvedByInfo: 'synthetic-reviewer', approvalHash: 'synthetic' },
+    });
+  }
+
+  it('encryption flip first (Memory, then an approved Node): the scrub yields, the flip commits, no 40P01', async () => {
+    const src = await memory();
+    const idx = await memory({ indexed: true });
+    const id = await node(idx, { tagged: src, markers: true });
+    await approve(id);
+    const before = await state(id);
+    let scrub!: Promise<void>;
+    await flip(idx, async () => {
+      scrub = runFile();
+      await waitForScrubRetry(); // it took the Node, met our Memory, and let the Node go
+    });
+    await scrub;
+    const s = await state(id);
+    expect(s.rows).toEqual([]);
+    expect(markers(s)).toEqual(markers(before)); // judged under the now-encrypted memory
+    expect((await db.node.findUniqueOrThrow({ where: { id } })).approvalHash).toBeNull();
+  });
+
+  it('scrub holding Nodes when a flip takes the Memory: the Memory step fails at once (55P03), freeing the flip', async () => {
+    const src = await memory();
+    const idx = await memory({ indexed: true });
+    const id = await node(idx, { tagged: src, markers: true });
+    await approve(id);
+    let flipping!: Promise<void>;
+    const attempt = runSteps({
+      'lock-nodes': async () => {
+        flipping = flip(idx);
+        await waitForLockWaiters(db, 1); // the flip holds the Memory and waits on our Node
+      },
+    }).then(() => undefined, (e: unknown) => e);
+    const err = await attempt;
+    expect(sqlstate(err)).toBe('55P03'); // not 40P01, and not a wait
+    await flipping; // our rollback released the Node
+    await runFile(); // the next attempt finds the memory free
+    expect((await state(id)).rows).toEqual([]);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: idx.id } })).isEncrypted).toBe(true);
+  });
+
+  it('retryFailedEmbeddings first (Memory FOR UPDATE, then UPDATE nodes): the scrub yields, the restamp commits', async () => {
+    const src = await memory();
+    const idx = await memory({ indexed: true });
+    const id = await node(idx, { tagged: src, markers: true });
+    let scrub!: Promise<void>;
+    let restamped = -1;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${idx.id} FOR UPDATE`;
+      scrub = runFile();
+      await waitForScrubRetry();
+      restamped = await restampFailedEmbeddings(tx, idx.id);
+    }, { timeout: 30_000, maxWait: 10_000 });
+    await scrub;
+    expect(restamped).toBe(1);
+    const s = await state(id);
+    expect(s.rows).toEqual([]);
+    expect(s.token).not.toBe(OLD_TOKEN);
+  });
+
+  it('a lock held past every attempt stops the file loudly and changes nothing', async () => {
+    const src = await memory();
+    const idx = await memory({ indexed: true });
+    const id = await node(idx, { tagged: src, markers: true });
+    const before = await state(id);
+    let failure: unknown;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
+      failure = await runFile({ attempts: 3 }).then(() => undefined, (e: unknown) => e);
+    }, { timeout: 30_000, maxWait: 10_000 });
+    expect(String((failure as { stderr?: string })?.stderr ?? failure)).toContain('rows stayed locked through 3 attempts');
+    expect(await state(id)).toEqual(before);
   });
 });
