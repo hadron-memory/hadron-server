@@ -281,7 +281,7 @@ describe('#1997 scrub: the shipped SQL', () => {
     expect(steps().map((s) => s.name)).toEqual(['discover', 'lock-nodes', 'lock-memories', 'scrub']);
   });
 
-  it('never waits for a row lock: both lock steps are NOWAIT, every other wait is bounded below deadlock_timeout', () => {
+  it('does not queue on the row locks: both lock steps are NOWAIT, other lock waits are bounded by lock_timeout', () => {
     const byName = Object.fromEntries(steps().map((s) => [s.name, s.sql]));
     expect(byName['lock-nodes']).toMatch(/FOR NO KEY UPDATE OF n NOWAIT;$/);
     expect(byName['lock-memories']).toMatch(/FOR SHARE OF m NOWAIT;$/);

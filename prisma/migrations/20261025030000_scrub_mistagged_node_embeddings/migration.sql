@@ -14,15 +14,20 @@
 -- the policy flags until COMMIT. No fixed order is cycle-free here: subtree
 -- move takes Node then Memory, while the encryption flip, retryFailedEmbeddings
 -- and most memory mutations take Memory FOR UPDATE then write Nodes. So the
--- scrub never WAITS for a row lock: both lock steps are NOWAIT and
--- lock_timeout bounds every other wait below deadlock_timeout. A busy lock
--- rolls the attempt back to its savepoint, releasing everything it took, and
--- retries after a short jittered sleep. A transaction that never waits cannot
--- be in a deadlock cycle, so the concurrent writer always proceeds. When the
--- attempts run out (300 by default, about 20 s; the session setting
--- hadron.scrub_1997_attempts overrides it for tests) the migration RAISEs and
--- deploy stops; recovery is `prisma migrate resolve --rolled-back
--- 20261025030000_scrub_mistagged_node_embeddings` and a restart.
+-- scrub does not queue on those row locks: both row-lock steps are NOWAIT, and
+-- lock_timeout (100ms, per lock wait) bounds any other lock wait in the
+-- attempt. A busy lock (55P03), or a 40P01 caught as a fallback, rolls the
+-- attempt back to its savepoint, releasing everything it took, and retries
+-- after a 30-90ms jittered sleep. This removes the Node->Memory versus
+-- Memory->Node cycle; it is not a global liveness or runtime guarantee.
+-- Attempts are bounded (300 by default; the session setting
+-- hadron.scrub_1997_attempts overrides it for tests): the count bounds
+-- attempts, not total elapsed time. On exhaustion the migration RAISEs, the
+-- outer transaction commits nothing, and deploy stops. Recovering is an
+-- operator runbook step once the failed-migration state is confirmed
+-- (`prisma migrate resolve --rolled-back
+-- 20261025030000_scrub_mistagged_node_embeddings`, then a restart), never an
+-- automatic retry.
 --
 -- `-- @step` lines split the attempt for the race pins
 -- (src/test/migrations/scrubMistaggedVectors1997.test.ts), which run each
