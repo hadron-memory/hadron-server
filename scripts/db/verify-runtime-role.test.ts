@@ -211,6 +211,109 @@ describe('runtime-role.sql + verify-runtime-role (#2413 S1)', { timeout: 60_000 
     });
   });
 
+  describe('fix head for the #2451 seats', () => {
+    beforeAll(async () => {
+      await resetDb();
+      await migrate();
+      applyGrants();
+    });
+
+    const pgVersion = async () => Number((await asOwner((c) => c.query('SHOW server_version_num'))).rows[0].server_version_num);
+
+    it('MAINTAIN on _prisma_migrations fails on PG17+ (and a MAINTAIN on an ordinary table too)', async (ctx) => {
+      if ((await pgVersion()) < 170000) return ctx.skip();
+      await asOwner((c) => c.query(`GRANT MAINTAIN ON _prisma_migrations TO ${SERVE}`));
+      const v = await verify();
+      expect(v.map((x) => x.rule)).toEqual(['migrations-table-granted']);
+      expect(v[0].detail).toContain('MAINTAIN');
+      await entrypointRevoke();
+      expect(await verify()).toEqual([]);
+
+      await asOwner((c) => c.query(`GRANT MAINTAIN ON nodes TO ${SERVE}`));
+      expect(await rules()).toEqual(['forbidden-table-privilege']);
+      applyGrants();
+    });
+
+    it('missing USAGE on schema public fails even though table checks pass, and the server really cannot read', async () => {
+      await asOwner(async (c) => {
+        await c.query(`REVOKE USAGE ON SCHEMA public FROM PUBLIC`);
+        await c.query(`REVOKE USAGE ON SCHEMA public FROM ${SERVE}`);
+      });
+      try {
+        expect(await rules()).toEqual(['missing-schema-usage']);
+        const c = new Client({ connectionString: urlFor(SERVE, DB) });
+        await c.connect();
+        try {
+          await expect(c.query('SELECT * FROM public.nodes')).rejects.toMatchObject({ code: '42501' });
+        } finally {
+          await c.end();
+        }
+      } finally {
+        await asOwner(async (c) => {
+          await c.query(`GRANT USAGE ON SCHEMA public TO PUBLIC`);
+          await c.query(`GRANT USAGE ON SCHEMA public TO ${SERVE}`);
+        });
+      }
+      expect(await verify()).toEqual([]);
+    });
+
+    it('a column-level REFERENCES grant on an ordinary table fails', async () => {
+      await asOwner((c) => c.query(`GRANT REFERENCES (id) ON nodes TO ${SERVE}`));
+      const v = await verify();
+      expect(v.map((x) => x.rule)).toEqual(['forbidden-table-privilege']);
+      expect(v[0].detail).toContain('REFERENCES');
+      applyGrants(); // REVOKE ALL on the table clears column grants too
+      expect(await verify()).toEqual([]);
+    });
+
+    it.each(['SUPERUSER', 'BYPASSRLS', 'REPLICATION', 'CREATEROLE', 'CREATEDB'])('role attribute %s fails', async (attr) => {
+      await admin((c) => c.query(`ALTER ROLE ${SERVE} ${attr}`));
+      try {
+        expect(await rules()).toContain('role-attributes');
+      } finally {
+        await admin((c) => c.query(`ALTER ROLE ${SERVE} NO${attr}`));
+      }
+      expect(await verify()).toEqual([]);
+    });
+
+    it('a sequence without USAGE/SELECT, a missing CONNECT and a database CREATE each fail', async () => {
+      await asOwner((c) => c.query(`REVOKE USAGE ON SEQUENCE edges_id_seq FROM ${SERVE}`));
+      expect(await rules()).toEqual(['missing-sequence-privilege']);
+      applyGrants();
+
+      await asOwner((c) => c.query(`REVOKE CONNECT ON DATABASE ${DB} FROM PUBLIC`));
+      await asOwner((c) => c.query(`REVOKE CONNECT ON DATABASE ${DB} FROM ${SERVE}`));
+      expect(await rules()).toEqual(['missing-connect']);
+      applyGrants();
+      await asOwner((c) => c.query(`GRANT CONNECT ON DATABASE ${DB} TO PUBLIC`));
+
+      await asOwner((c) => c.query(`GRANT CREATE ON DATABASE ${DB} TO ${SERVE}`));
+      expect(await rules()).toEqual(['create-privilege']);
+      applyGrants();
+      expect(await verify()).toEqual([]);
+    });
+
+    it('the grants file refuses the migrator as the serve role and leaves its privileges alone', async () => {
+      const acl = () => asOwner((c) => c.query(`SELECT relacl::text AS a FROM pg_class WHERE relname = '_prisma_migrations'`));
+      const before = (await acl()).rows[0].a;
+      expect(() => applyGrants(OWNER)).toThrow(/migrator/);
+      expect((await acl()).rows[0].a).toBe(before);
+      await asOwner((c) => c.query(`INSERT INTO _prisma_migrations (id) VALUES ('still-works')`));
+    });
+
+    it('the grants file refuses a superuser serve role and one tied to the migrator by membership', async () => {
+      await admin((c) => c.query(`ALTER ROLE ${SERVE} SUPERUSER`));
+      expect(() => applyGrants()).toThrow(/superuser/);
+      await admin((c) => c.query(`ALTER ROLE ${SERVE} NOSUPERUSER`));
+
+      await admin((c) => c.query(`GRANT ${OWNER} TO ${SERVE}`));
+      expect(() => applyGrants()).toThrow(/members of each other|member/);
+      await admin((c) => c.query(`REVOKE ${OWNER} FROM ${SERVE}`));
+      applyGrants();
+      expect(await verify()).toEqual([]);
+    });
+  });
+
   describe('role-before-migrate', () => {
     beforeAll(async () => {
       await resetDb();
@@ -273,6 +376,15 @@ describe('runtime-role.sql + verify-runtime-role (#2413 S1)', { timeout: 60_000 
       expect(text).not.toContain('hunter2-secret');
       expect(text).not.toContain('postgres://');
       expect(text).not.toContain('postgresql://');
+    });
+
+    it('a secret echoed by the server in a connection error is scrubbed (database named like the password)', async () => {
+      const lines: string[] = [];
+      const u = new URL(urlFor(OWNER, DB));
+      u.pathname = `/${PASSWORD}`; // pg echoes `database "<name>" does not exist`
+      expect(await main([], { MIGRATE_DATABASE_URL: u.toString() }, (l) => lines.push(l))).toBe(EXIT.CONNECT);
+      expect(lines.join('\n')).not.toContain(PASSWORD);
+      expect(lines.join('\n')).toContain('<redacted>');
     });
 
     it('redact strips URLs and known passwords from arbitrary text', () => {

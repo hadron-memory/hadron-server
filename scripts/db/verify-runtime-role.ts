@@ -34,6 +34,7 @@ export type Rule =
   | 'role-membership'
   | 'role-owns-objects'
   | 'create-privilege'
+  | 'missing-schema-usage'
   | 'missing-connect'
   | 'missing-table-privilege'
   | 'forbidden-table-privilege'
@@ -61,7 +62,6 @@ export function redact(text: string, secrets: string[] = []): string {
 
 const FORBIDDEN_TABLE_PRIVS = ['TRUNCATE', 'TRIGGER', 'REFERENCES'];
 const REQUIRED_TABLE_PRIVS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'];
-const ANY_PRIV_ON_MIGRATIONS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'TRIGGER', 'REFERENCES'];
 
 /** Names only ever reach SQL as bind parameters; the cap keeps a log line short. */
 function names(rows: { rel: string }[], max = 5): string {
@@ -112,12 +112,14 @@ export async function verifyRuntimeRole(client: Client, role: string): Promise<V
     await client.query(
       `SELECT has_schema_privilege($1, 'public', 'CREATE') AS schema_create,
               has_database_privilege($1, current_database(), 'CREATE') AS db_create,
+              has_schema_privilege($1, 'public', 'USAGE') AS schema_usage,
               has_database_privilege($1, current_database(), 'CONNECT') AS db_connect`,
       [role],
     )
   ).rows[0];
   if (priv.schema_create) add('create-privilege', `${role} can CREATE in schema public`);
   if (priv.db_create) add('create-privilege', `${role} can CREATE in the database`);
+  if (!priv.schema_usage) add('missing-schema-usage', `${role} cannot USE schema public`);
   if (!priv.db_connect) add('missing-connect', `${role} cannot CONNECT to the database`);
 
   const tables = (
@@ -143,7 +145,10 @@ export async function verifyRuntimeRole(client: Client, role: string): Promise<V
     );
     if (!q.rows[0].ok) missing.push({ rel: `public.${t.relname}` });
     const f = await client.query(
-      `SELECT string_agg(p, '/') AS held FROM unnest($3::text[]) p WHERE has_table_privilege($1, $2::oid, p)`,
+      // REFERENCES can also be granted per column, which has_table_privilege does not see.
+      `SELECT string_agg(p, '/') AS held FROM unnest($3::text[]) p
+        WHERE has_table_privilege($1, $2::oid, p)
+           OR (p = 'REFERENCES' AND has_any_column_privilege($1, $2::oid, p))`,
       [role, t.oid, forbidden],
     );
     if (f.rows[0].held) extra.push({ rel: `public.${t.relname} (${f.rows[0].held})` });
@@ -152,13 +157,14 @@ export async function verifyRuntimeRole(client: Client, role: string): Promise<V
   if (extra.length) add('forbidden-table-privilege', `${role} holds ${names(extra)}`);
 
   if (migrationsPresent) {
+    const anyPrivOnMigrations = [...REQUIRED_TABLE_PRIVS, ...forbidden];
     const m = (
       await client.query(
         `SELECT string_agg(p, '/') AS held FROM unnest($2::text[]) p
           WHERE has_table_privilege($1, 'public.${MIGRATIONS_TABLE}'::regclass, p)
              OR (p IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
                  AND has_any_column_privilege($1, 'public.${MIGRATIONS_TABLE}'::regclass, p))`,
-        [role, ANY_PRIV_ON_MIGRATIONS],
+        [role, anyPrivOnMigrations],
       )
     ).rows[0];
     if (m.held) add('migrations-table-granted', `${role} holds ${m.held} on ${MIGRATIONS_TABLE}; revoke it (the server never reads it)`);

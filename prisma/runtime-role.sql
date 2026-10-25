@@ -49,6 +49,21 @@ BEGIN
       USING ERRCODE = 'undefined_object';
   END IF;
 
+  -- Naming the migrator (or a role tied to it) would revoke the owner's own
+  -- privileges below and break the next `migrate deploy`; refuse before any change.
+  IF serve = owner THEN
+    RAISE EXCEPTION 'runtime-role: serve role "%" is the role running this script (the migrator); refusing to revoke its own privileges', serve
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = serve AND rolsuper) THEN
+    RAISE EXCEPTION 'runtime-role: serve role "%" is a superuser; the serve role must not be', serve
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF pg_has_role(serve, owner, 'MEMBER') OR pg_has_role(owner, serve, 'MEMBER') THEN
+    RAISE EXCEPTION 'runtime-role: serve role "%" and the migrator "%" are members of each other', serve, owner
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
   EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), serve);
   EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', serve);
   -- Revokes only what was granted to the serve role itself. A CREATE that
