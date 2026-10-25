@@ -17,6 +17,7 @@ function boot(t, { migrate = owner, fail = '', noise = false } = {}) {
 printf '%s|%s|%s\\n' "$*" "$DATABASE_URL" "\${MIGRATE_DATABASE_URL-unset}" >> "$CALL_LOG"
 if [ "$*" = "$FAIL_STEP" ]; then
   printf '%s\\n' "$DATABASE_URL" >&2
+  printf '%s\\n' 'Error: P1001: fixture connection failure' >&2
   exit 42
 fi
 if [ "$NOISE" = yes ]; then printf '%s\\n' "$DATABASE_URL"; fi
@@ -78,5 +79,12 @@ test('successful setup command output cannot disclose URLs either', t => {
   // The server is intentionally not noisy: only startup setup output is suppressed.
   const run = boot(t, { noise: true, fail: 'prisma migrate deploy' });
   assert.notEqual(run.status, 0);
+  noSecrets(run);
+});
+
+test('failed migration reports exit status and Prisma code without raw connection output', t => {
+  const run = boot(t, { fail: 'prisma migrate deploy' });
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /db\.runtime_role\.migrate_failed.*exit=42.*prisma=P1001/);
   noSecrets(run);
 });
