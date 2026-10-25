@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const entrypoint = fileURLToPath(new URL('./docker-start.sh', import.meta.url));
+const entrypoint = fileURLToPath(new URL('../docker-start.sh', import.meta.url));
 const serve = 'postgresql://hadron_app:serve-fixture-password@db/app';
 const owner = 'postgresql://hadron:migrate-fixture-password@db/app';
 function boot(t, { migrate = owner, fail = '', noise = false } = {}) {
@@ -35,7 +35,7 @@ function noSecrets(run) {
   }
 }
 test('Docker CMD runs the checked-in entrypoint under Doppler and copies its helpers', () => {
-  const dockerfile = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8');
+  const dockerfile = readFileSync(new URL('../../Dockerfile', import.meta.url), 'utf8');
   assert.match(dockerfile, /COPY scripts \.\/scripts\//);
   assert.match(dockerfile, /CMD \["doppler", "run", "--", "sh", "scripts\/docker-start.sh"\]/);
 });
