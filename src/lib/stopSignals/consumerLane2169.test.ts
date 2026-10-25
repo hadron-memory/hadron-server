@@ -300,3 +300,19 @@ describe('fix head 2 — #2432 cycle-2 findings', () => {
     expect(e?.extensions).toMatchObject({ code: 'STOP_SIGNAL_UNAVAILABLE', workers: 1, lanes: ['orca2'] });
   });
 });
+
+describe('fix head 3 — §10 delta pins (Ralion, test-only)', () => {
+  it('both host keys declare their OWN registration, whichever row the App lists first', async () => {
+    const reg1 = await db.hostRegistration.findFirstOrThrow({ where: { appId: app.id, hostId: 'orca1' }, select: { id: true } });
+    await dueWakes(keyCtx(orca1Key), { accepts: ['STOP'] });
+    await dueWakes(keyCtx(orca2Key), { accepts: ['STOP'] });
+    expect((await declarations()).map((d) => d.lane).sort()).toEqual([reg1.id, (await orca2Reg()).id].sort());
+  });
+
+  it('covered workers a PAUSE_DISPATCH does not tell are checked: orca1 declared, TEAM Ada refused for Liam', async () => {
+    await dueWakes(keyCtx(orca1Key), { accepts: ['STOP'] });
+    const e = await refusal(set(ctx(max.id), { level: 'PAUSE_DISPATCH', scope: 'TEAM', worker: 'Ada' }));
+    expect(e?.extensions).toMatchObject({ code: 'STOP_SIGNAL_UNAVAILABLE', workers: 1, lanes: ['unhosted'] });
+    expect(await signals()).toBe(0);
+  });
+});
