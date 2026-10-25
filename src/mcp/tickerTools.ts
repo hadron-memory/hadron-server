@@ -604,7 +604,7 @@ const SHAPE_HADRON_DUE_WAKES = {
   after: z.string().optional().describe('The previous page\'s endCursor.'),
   accepts: z.array(z.enum(['MENTION', 'TICK', 'TASK', 'STOP'])).optional().describe(
     'The reason kinds you can deliver. Omit it and no stop notice is ever returned. Include STOP only if you type stop notices into the worker\'s terminal: ' +
-      'you are then offered the worker\'s newest undelivered stop notice, and the lane you serve is recorded as taking them (setting a stop signal is refused until one is).'),
+      'you are then offered the worker\'s newest undelivered stop notice, and the lane you serve is recorded as taking them when you read it to its end (no workerRefs, last page); setting a stop signal is refused until one is.'),
   session: SESSION_READ,
 };
 

@@ -134,7 +134,9 @@ export async function dueWakesFor(
   if (key) await decideKeyAnswer(ctx, app, key, workerIds.length, tx => authorize!(tx, selectedWorkerIds));
   // #2169 (R95): a call that takes stop notices declares the lane it serves, once its own answer is authorized. Written
   // whether or not anything is due, because an idle consumer is still a serving one.
-  if (acceptsStop(a.accepts)) await declareStopLane(ctx, app, key ? { hostId: keyHostId } : reader.manager ? { hostId: null } : null);
+  // Only a call that read the lane to its end: a narrowed poll (workerRefs) or a page with more behind it served part of it (#2432 BLIND).
+  const wholeLane = !(a.workerRefs && a.workerRefs.length > 0) && result.nextAfter === null;
+  if (acceptsStop(a.accepts) && wholeLane) await declareStopLane(ctx, app, key ? { hostId: keyHostId } : reader.manager ? { hostId: null } : null);
   // The budget notice is posted by the platform itself, once a day per App, whoever's read triggered it: a person's or an
   // App key's (#1791, cor:agt:080:15). Posted only once an App key's answer is decided: a read that is refused posts nothing (Rook #1799).
   if (result.budgetNotice) await postBudgetNotice(ctx, app, result.budgetNotice);

@@ -127,9 +127,14 @@ describe('A3.2 — a declared, served lane', () => {
     expect(await set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Dan' })).toMatchObject({ live: true });
   });
 
-  it('a signal that covers nobody is not refused (a worker scope on a retired worker is not found, a team of one with no lane)', async () => {
-    await dueWakes(ctx(max.id), { accepts: ['STOP'] });
-    expect(await set(ctx(max.id), { level: 'PAUSE_DISPATCH', scope: 'WORKER', worker: 'Liam' })).toMatchObject({ live: true });
+  it('a signal that covers nobody is not refused: a HOST signal on a registration that lists no worker, with nothing declared', async () => {
+    const orca3Key = await mkKey('orca3');
+    await M.grantAppKeyScope({}, { id: orca3Key.id, scope: 'host:operate', hostId: 'orca3' }, ctx(max.id));
+    await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 3', pollIntervalSeconds: 600, workers: [] } }, keyCtx(orca3Key));
+    const s = await set(ctx(max.id), { level: 'PAUSE', scope: 'HOST', host: 'orca3' });
+    expect(s).toMatchObject({ live: true });
+    expect(await covered()).toEqual([]);
+    expect(await declarations()).toEqual([]);
   });
 
   it('a declaration is recorded even when nothing is due (an idle consumer must still count as serving)', async () => {
@@ -154,18 +159,16 @@ describe('A3.3 — per lane', () => {
     await dueWakes(ctx(max.id), { accepts: ['STOP'] });
     const e = await refusal(set(ctx(max.id), { level: 'PAUSE', scope: 'TEAM', worker: 'Ada' }));
     expect(e?.extensions?.code).toBe('STOP_SIGNAL_UNAVAILABLE'); // Ada and Dan are on orca1, which has not declared
-    const reg1 = await db.hostRegistration.findFirstOrThrow({ where: { appId: app.id, hostId: 'orca1' }, select: { id: true } });
-    expect(JSON.stringify(e?.extensions)).toContain(reg1.id);
-    expect(JSON.stringify(e?.extensions)).not.toContain(await orca2Reg().then((r) => r.id));
+    expect(e?.extensions).toMatchObject({ workers: 2, lanes: ['orca1'] });
     await dueWakes(keyCtx(orca1Key), { accepts: ['STOP'] });
     expect(await set(ctx(max.id), { level: 'PAUSE', scope: 'TEAM', worker: 'Ada' })).toMatchObject({ live: true });
   });
 
-  it('a refusal names the count and lanes, never worker text', async () => {
+  it('a refusal names the count and the lanes by host id, never worker text', async () => {
     await dueWakes(ctx(max.id), { accepts: ['STOP'] });
     const e = await refusal(set(ctx(max.id), { level: 'PAUSE', scope: 'HOST', host: 'orca2' }));
     expect(e?.extensions?.code).toBe('STOP_SIGNAL_UNAVAILABLE');
-    expect(e?.extensions).toMatchObject({ workers: 1, lanes: [(await orca2Reg()).id] });
+    expect(e?.extensions).toMatchObject({ workers: 1, lanes: ['orca2'] });
     expect(e?.message).not.toMatch(/Kit/);
   });
 });
@@ -222,5 +225,63 @@ describe('the refusal rolls the set back whole', () => {
     expect(await signals()).toBe(0);
     expect(await db.agentTeamEvent.count({ where: { appId: app.id, type: { startsWith: 'stop.' } } })).toBe(0);
     expect(await db.teamStopCoverage.count({ where: { appId: app.id } })).toBe(0);
+  });
+});
+
+describe('fix head — #2432 findings', () => {
+  it('BLIND P2-1: a narrowed poll (workerRefs) declares nothing, and neither does a page with more behind it; the last page does', async () => {
+    await dueWakes(ctx(max.id), { accepts: ['STOP'], workerRefs: [liam.id] });
+    expect(await declarations()).toEqual([]);
+    await dueWakes(keyCtx(orca1Key), { accepts: ['STOP'], workerRefs: [dan.id] });
+    expect(await declarations()).toEqual([]);
+    const first = await dueWakes(ctx(max.id), { accepts: ['STOP'], first: 2 });
+    expect(first.pageInfo.hasNextPage).toBe(true);
+    expect(await declarations()).toEqual([]);
+    expect((await refusal(set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Liam' })))?.extensions?.code).toBe('STOP_SIGNAL_UNAVAILABLE');
+    await dueWakes(ctx(max.id), { accepts: ['STOP'], first: 2, after: first.pageInfo.endCursor });
+    expect((await declarations()).map((d) => d.lane)).toEqual(['unhosted']);
+  });
+
+  it('BLIND P2-2: a host registration keeps its id when it registers again, so a declaration names the registration its poll served', async () => {
+    const before = await orca2Reg();
+    await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 2', pollIntervalSeconds: 600, workers: [{ worker: kit.id, family: 'claude' }, { worker: liam.id, family: 'claude' }] } }, keyCtx(orca2Key));
+    expect((await orca2Reg()).id).toBe(before.id);
+  });
+
+  it('SECOND P2: a PAUSE_DISPATCH on Liam tells his coordinator Ada (orca1): refused until orca1 declares, though Liam\'s own lane is served', async () => {
+    await dueWakes(ctx(max.id), { accepts: ['STOP'] });
+    const e = await refusal(set(ctx(max.id), { level: 'PAUSE_DISPATCH', scope: 'WORKER', worker: 'Liam' }));
+    expect(e?.extensions).toMatchObject({ code: 'STOP_SIGNAL_UNAVAILABLE', lanes: ['orca1'] });
+    expect(await signals()).toBe(0);
+    await dueWakes(keyCtx(orca1Key), { accepts: ['STOP'] });
+    expect(await set(ctx(max.id), { level: 'PAUSE_DISPATCH', scope: 'WORKER', worker: 'Liam' })).toMatchObject({ live: true });
+  });
+
+  it('LOCAL P2: a worker whose only host is lost is not served by a non-host key\'s unhosted declaration, nor by a manager\'s', async () => {
+    await db.hostRegistration.update({ where: { id: (await orca2Reg()).id }, data: { lostAt: new Date() } });
+    await dueWakes(keyCtx(plainKey), { accepts: ['STOP'] });
+    await dueWakes(ctx(max.id), { accepts: ['STOP'] });
+    const e = await refusal(set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Kit' }));
+    expect(e?.extensions).toMatchObject({ code: 'STOP_SIGNAL_UNAVAILABLE', workers: 1, lanes: ['orca2'] });
+  });
+
+  it('§10 P2-1: another App\'s unhosted declaration does not serve this App', async () => {
+    const orgId = (await db.app.findUniqueOrThrow({ where: { id: app.id } })).organizationId;
+    const appB = await db.app.create({ data: { organizationId: orgId, name: 'B', urn: `b-${generateId()}` }, select: { id: true } });
+    await Q.dueWakes({}, { appRef: appB.id, accepts: ['STOP'] }, ctx(max.id));
+    expect(await declarations()).toEqual([]);
+    expect((await refusal(set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Liam' })))?.extensions?.code).toBe('STOP_SIGNAL_UNAVAILABLE');
+  });
+
+  it('§10 P2-2: a host key declares only its OWN registration', async () => {
+    await dueWakes(keyCtx(orca2Key), { accepts: ['STOP'] });
+    expect((await declarations()).map((d) => d.lane)).toEqual([(await orca2Reg()).id]);
+    expect((await refusal(set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Dan' })))?.extensions?.code).toBe('STOP_SIGNAL_UNAVAILABLE');
+  });
+
+  it('§10 P2-3: every covered worker is checked: orca1 declared, unhosted not, TEAM Ada is refused for Liam alone', async () => {
+    await dueWakes(keyCtx(orca1Key), { accepts: ['STOP'] });
+    const e = await refusal(set(ctx(max.id), { level: 'PAUSE', scope: 'TEAM', worker: 'Ada' }));
+    expect(e?.extensions).toMatchObject({ code: 'STOP_SIGNAL_UNAVAILABLE', workers: 1, lanes: ['unhosted'] });
   });
 });

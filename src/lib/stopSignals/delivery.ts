@@ -90,32 +90,37 @@ export async function recordStopConsumerDeclaration(db: Db, appId: string, lane:
 export type UnservedStopLanes = { workers: number; lanes: string[] };
 
 /**
- * The workers of `workerIds` that no fresh declaration serves (R95), and the lanes they are on. A worker's lanes are
- * the live host registrations that list it, or `unhosted` when none does; it is served when ANY of its lanes is fresh
- * (a host key sees the workers its registration lists, so one serving lane is enough for the worker to be told). Returns
- * null when every one is served, and for an empty list. Names counts and lane ids, never worker text.
+ * The workers of `workerIds` that no fresh declaration serves (R95), and the lanes they are on, named by host id (or
+ * `unhosted`). A worker's lanes are the live host registrations that list it; when it has registrations and none is live
+ * (its host was lost) they are those registrations, which no consumer can serve until the host returns, so a set that
+ * would stop it is refused (a non-host key's read scope excludes such a worker, so the shared `unhosted` lane must not
+ * stand in for it, #2432 LOCAL); `unhosted` only for a worker no registration lists. A worker is served when ANY of its
+ * lanes is fresh. Returns null when every one is served, and for an empty list. Names counts and lanes, never worker text.
  */
 export async function unservedStopLanes(db: Db, appId: string, workerIds: string[], now: Date): Promise<UnservedStopLanes | null> {
   if (workerIds.length === 0) return null;
-  const rows = await db.$queryRaw<Array<{ workerId: string; lane: string; fresh: boolean }>>(Prisma.sql`
-    WITH lanes AS (
-      SELECT w.id AS worker_id, r.id AS lane
-      FROM workers w JOIN host_registration_workers h ON h.worker_id = w.id
-      JOIN host_registrations r ON r.id = h.registration_id AND r.lost_at IS NULL
-      WHERE w.id IN (${Prisma.join(workerIds)})
+  const cutoff = toNaiveUtc(new Date(now.getTime() - stopConsumerFreshSeconds() * 1000));
+  const rows = await db.$queryRaw<Array<{ workerId: string; label: string; fresh: boolean }>>(Prisma.sql`
+    WITH reg AS (
+      SELECT h.worker_id, r.id AS reg_id, r.host_id, (r.lost_at IS NULL) AS live
+      FROM host_registration_workers h JOIN host_registrations r ON r.id = h.registration_id
+      WHERE h.worker_id IN (${Prisma.join(workerIds)})
+    ), lanes AS (
+      SELECT worker_id, reg_id AS lane, host_id AS label FROM reg WHERE live
       UNION ALL
-      SELECT w.id, ${UNHOSTED_LANE}::text FROM workers w
-      WHERE w.id IN (${Prisma.join(workerIds)})
-        AND NOT EXISTS (SELECT 1 FROM host_registration_workers h JOIN host_registrations r ON r.id = h.registration_id AND r.lost_at IS NULL
-                        WHERE h.worker_id = w.id)
+      SELECT r.worker_id, r.reg_id, r.host_id FROM reg r
+      WHERE NOT r.live AND NOT EXISTS (SELECT 1 FROM reg x WHERE x.worker_id = r.worker_id AND x.live)
+      UNION ALL
+      SELECT w.id, ${UNHOSTED_LANE}::text, ${UNHOSTED_LANE}::text FROM workers w
+      WHERE w.id IN (${Prisma.join(workerIds)}) AND NOT EXISTS (SELECT 1 FROM reg x WHERE x.worker_id = w.id)
     )
-    SELECT l.worker_id AS "workerId", l.lane,
+    SELECT l.worker_id AS "workerId", l.label,
            EXISTS (SELECT 1 FROM stop_consumer_declarations d WHERE d.app_id = ${appId} AND d.lane = l.lane
-                   AND d.declared_at > ${toNaiveUtc(new Date(now.getTime() - stopConsumerFreshSeconds() * 1000))}::timestamp) AS fresh
+                   AND d.declared_at > ${cutoff}::timestamp) AS fresh
     FROM lanes l`);
   const served = new Set(rows.filter((r) => r.fresh).map((r) => r.workerId));
   const unserved = new Set(rows.filter((r) => !served.has(r.workerId)).map((r) => r.workerId));
   if (unserved.size === 0) return null;
-  const lanes = [...new Set(rows.filter((r) => unserved.has(r.workerId)).map((r) => r.lane))].sort();
+  const lanes = [...new Set(rows.filter((r) => unserved.has(r.workerId)).map((r) => r.label))].sort();
   return { workers: unserved.size, lanes };
 }

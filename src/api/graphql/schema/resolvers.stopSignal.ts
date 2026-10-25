@@ -55,7 +55,7 @@ const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', 
  * worker the new signal would cover is on a serving lane with no fresh declaration (`unservedStopLanes`). Lifting and
  * listing are unaffected, and a signal recorded before is untouched. Placed AFTER the caller's own gates (manager, host
  * scope), so only a caller who could have set one learns the lane state; the extensions name the count and the lanes
- * (registration ids the caller may already see), never worker text.
+ * (host ids, or `unhosted`), never worker text.
  */
 const stopSignalUnavailable = (unserved: { workers: number; lanes: string[] }): GraphQLError =>
   taskError(
@@ -68,13 +68,19 @@ const stopSignalUnavailable = (unserved: { workers: number; lanes: string[] }): 
 
 /**
  * Run INSIDE the set's transaction, right after the signal is written: the coverage is the SAME function enforcement and
- * reconcile use (`coveringSignals`), so the guard can never disagree with what the signal then does. A refusal throws and
- * the whole set (the signal, its notices and its coverage rows) rolls back with it.
+ * reconcile use (`coveringSignals`), so the guard can never disagree with what the signal then does. The workers checked
+ * are the covered ones AND every worker the set just sent a notice to (a `pause-dispatch` tells its coordinators, who may
+ * be outside coverage and on another lane, #2432 SECOND). A refusal throws and the whole set (the signal, its notices and
+ * its coverage rows) rolls back with it. A notice to a person (the manager fallback) has no worker lane and is not checked.
  */
 async function requireNoticeLane(tx: Prisma.TransactionClient, appId: string, signalId: string, now: Date): Promise<void> {
   const covering = await coveringSignals(tx, appId, null, now);
-  const covered = [...covering].filter(([, list]) => list.some((s) => s.id === signalId)).map(([workerId]) => workerId);
-  const unserved = await unservedStopLanes(tx, appId, covered, now);
+  const checked = new Set([...covering].filter(([, list]) => list.some((s) => s.id === signalId)).map(([workerId]) => workerId));
+  const told = await tx.$queryRaw<Array<{ workerId: string }>>(P.sql`
+    SELECT DISTINCT e.subject_worker_id AS "workerId" FROM agent_team_events e
+    WHERE e.app_id = ${appId} AND e.type = 'stop.notice' AND e.subject_worker_id IS NOT NULL AND e.payload ->> 'signalId' = ${signalId}`);
+  for (const t of told) checked.add(t.workerId);
+  const unserved = await unservedStopLanes(tx, appId, [...checked], now);
   if (unserved) throw stopSignalUnavailable(unserved);
 }
 

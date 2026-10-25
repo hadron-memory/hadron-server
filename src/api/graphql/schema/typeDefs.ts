@@ -7428,7 +7428,8 @@ export const typeDefs = `#graphql
     accepts (#2169, hrn:node:hadronmemory.com:specs:cor:agt:090:04): the reason kinds this caller can deliver. Omit it and no STOP notice is
     ever returned (the shipped ticker-wake). A call that lists STOP is offered the worker's newest undelivered stop notice, and
     declares the lane it serves (a host key: its own registration; a person who manages the App, or a key without a host:
-    the unhosted lane) for STOP_CONSUMER_FRESH_SECONDS (default 600). Setting a stop signal is refused (STOP_SIGNAL_UNAVAILABLE)
+    the unhosted lane) for STOP_CONSUMER_FRESH_SECONDS (default 600), but only when it read the lane to its end: no workerRefs, and the
+    last page (no next page). A worker whose host is lost has no serving lane until the host returns. Setting a stop signal is refused (STOP_SIGNAL_UNAVAILABLE)
     while any worker it would cover is on a lane with no fresh declaration.
     """
     dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String, accepts: [WakeKind!]): DueWakePage!
