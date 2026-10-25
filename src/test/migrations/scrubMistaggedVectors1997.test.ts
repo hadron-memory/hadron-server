@@ -108,9 +108,15 @@ async function vec(nodeId: string, memoryId: string, kind: 'abstract' | 'chunk',
             ${idx ?? null}, ${kind === 'chunk' ? 'synthetic chunk' : null}, now())`;
 }
 
+type NodeRow = {
+  memory_id: string; content: string | null; abstract: string | null; updated_at: Date; rev_seq: number;
+  deleted_at: Date | null; embedding_pending_at: Date | null; token: string | null; embedding_failed_at: Date | null;
+  embedding_attempts: number; embedding_error: string | null;
+};
+
 /** Every row of a node: its own columns that must not move, and its vector rows' tags. */
 async function state(id: string) {
-  const [n] = await db.$queryRaw<Array<Record<string, unknown>>>`
+  const [n] = await db.$queryRaw<NodeRow[]>`
     SELECT memory_id, content, abstract, updated_at, rev_seq, deleted_at,
            embedding_pending_at, embedding_work_token::text AS token, embedding_failed_at,
            embedding_attempts, embedding_error
@@ -122,7 +128,7 @@ async function state(id: string) {
 }
 
 function markers(s: Awaited<ReturnType<typeof state>>) {
-  const { embedding_pending_at, token, embedding_failed_at, embedding_attempts, embedding_error } = s as Record<string, unknown>;
+  const { embedding_pending_at, token, embedding_failed_at, embedding_attempts, embedding_error } = s;
   return { embedding_pending_at, token, embedding_failed_at, embedding_attempts, embedding_error };
 }
 
@@ -144,7 +150,7 @@ function expectRequeued(s: Awaited<ReturnType<typeof state>>, notBefore: Date) {
 
 /** The node's own columns, everything except the four markers and the token. */
 function untouched(s: Awaited<ReturnType<typeof state>>) {
-  const { content, abstract, updated_at, rev_seq, deleted_at, memory_id, revisions } = s as Record<string, unknown>;
+  const { content, abstract, updated_at, rev_seq, deleted_at, memory_id, revisions } = s;
   return { content, abstract, updated_at, rev_seq, deleted_at, memory_id, revisions };
 }
 
@@ -221,7 +227,7 @@ describe('#1997 scrub: which rows go and what each affected node carries afterwa
     const idx = await memory({ indexed: true });
     const id = await node(idx, { tagged: src, markers: true });
     await runFile();
-    const { token } = await state(id) as { token: string };
+    const token = (await state(id)).token!;
     const row = { nodeId: id, provider: 'synthetic', model: 'synthetic', dim: 768, embedding: Array(768).fill(0.01) };
     expect(await upsertAbstractVector(db, { ...row, memoryId: idx.id }, OLD_TOKEN)).toBe(false);
     expect(await upsertAbstractVector(db, { ...row, memoryId: src.id }, token)).toBe(false);
@@ -339,7 +345,7 @@ describe('#1997 scrub: concurrency (both orders, no deadlock)', { timeout: 30_00
     let flip!: Promise<unknown>;
     await runSteps({
       'lock-memories': async () => {
-        flip = db.memory.update({ where: { id: idx.id }, data: { vectorIndexEnabled: false } });
+        flip = db.memory.update({ where: { id: idx.id }, data: { vectorIndexEnabled: false } }).then((m) => m); // a PrismaPromise runs only once observed
         await waitForLockWaiters(db, 1);
       },
     });
@@ -365,7 +371,7 @@ describe('#1997 scrub: concurrency (both orders, no deadlock)', { timeout: 30_00
     expect((await state(id)).rows).toEqual([]);
   });
 
-  it('a stale vector writer queued behind the scrub is refused and writes no mistagged row', async () => {
+  it('a writer holding the old token, queued behind the scrub, is refused once it gets the Node', async () => {
     const src = await memory();
     const idx = await memory({ indexed: true });
     const id = await node(idx, { tagged: src, markers: true });
@@ -373,7 +379,7 @@ describe('#1997 scrub: concurrency (both orders, no deadlock)', { timeout: 30_00
     await runSteps({
       'lock-memories': async () => {
         write = upsertAbstractVector(db, {
-          nodeId: id, memoryId: src.id, provider: 'synthetic', model: 'synthetic', dim: 768, embedding: Array(768).fill(0.01),
+          nodeId: id, memoryId: idx.id, provider: 'synthetic', model: 'synthetic', dim: 768, embedding: Array(768).fill(0.01),
         }, OLD_TOKEN);
         await waitForLockWaiters(db, 1);
       },
