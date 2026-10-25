@@ -117,11 +117,59 @@ describe('serve-role-smoke (#2413 S3)', { timeout: 120_000 }, () => {
     } finally {
       grant();
     }
-    await asOwner((c) => c.query(`GRANT TRUNCATE ON TABLE nodes TO ${SERVE}`));
+    await asOwner((c) => c.query(`GRANT TRUNCATE ON TABLE worker_reference_fences TO ${SERVE}`));
     try {
       expect((await smoke()).out).toContain('FAIL TRUNCATE is refused');
     } finally {
       grant();
+    }
+  });
+
+  it('a negative probe that unexpectedly SUCCEEDS is rolled back, not committed (P2, Andi)', async () => {
+    await asOwner(async (c) => {
+      await c.query(`INSERT INTO worker_reference_fences (subject_id) VALUES ('keep_fence')`);
+      await c.query(`GRANT TRUNCATE ON TABLE worker_reference_fences TO ${SERVE}`);
+      await c.query(`GRANT CREATE ON SCHEMA public TO ${SERVE}`);
+    });
+    try {
+      const { code, out } = await smoke();
+      expect(code).toBe(EXIT.FAILED);
+      expect(out).toContain('FAIL TRUNCATE is refused');
+      expect(out).toContain('FAIL CREATE TABLE is refused');
+      const after = await asOwner((c) =>
+        c.query(`SELECT (SELECT count(*) FROM worker_reference_fences WHERE subject_id = 'keep_fence')::int AS kept,
+                        (SELECT count(*) FROM pg_class WHERE relname LIKE 'smoke_serve_made_%')::int AS made`),
+      );
+      expect(after.rows[0]).toEqual({ kept: 1, made: 0 });
+    } finally {
+      // A table the serve role (wrongly) created is owned by it; the superuser clears that before regranting.
+      await admin(async (c) => {
+        const made = await c.query(`SELECT relname FROM pg_class WHERE relname LIKE 'smoke_serve_made_%'`);
+        for (const r of made.rows) await c.query(`DROP TABLE public."${r.relname}"`);
+      }, DB);
+      await asOwner(async (c) => {
+        await c.query(`DELETE FROM worker_reference_fences WHERE subject_id = 'keep_fence'`);
+        await c.query(`REVOKE CREATE ON SCHEMA public FROM ${SERVE}`);
+      });
+      grant();
+    }
+  });
+
+  it('a cleanup error fails the lane instead of yielding success (P2, Andi)', async () => {
+    await asOwner((c) =>
+      c.query(`
+        CREATE FUNCTION smk_block_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'cleanup blocked'; END $$;
+        CREATE TRIGGER smk_block_cleanup BEFORE DELETE ON organizations FOR EACH ROW EXECUTE FUNCTION smk_block_cleanup();`),
+    );
+    try {
+      const { code, out } = await smoke();
+      expect(out).toContain('FAIL cleanup');
+      expect(code).toBe(EXIT.FAILED);
+    } finally {
+      await asOwner((c) =>
+        c.query(`DROP TRIGGER smk_block_cleanup ON organizations; DROP FUNCTION smk_block_cleanup();
+                 DELETE FROM organizations WHERE name LIKE 'smk-%'`),
+      );
     }
   });
 
