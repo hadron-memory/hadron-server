@@ -2,7 +2,7 @@
 CREATE TABLE "automation_adoption_events" (
     "id" TEXT NOT NULL,
     "app_id" TEXT NOT NULL,
-    "organization_id" TEXT NOT NULL,
+    "organization_id" TEXT,
     "trigger_kind" TEXT NOT NULL,
     "trigger_ref" TEXT NOT NULL,
     "action" TEXT NOT NULL,

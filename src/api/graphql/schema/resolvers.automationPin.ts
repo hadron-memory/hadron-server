@@ -48,8 +48,10 @@ async function canAdopt(ctx: Context, app: App, row: TriggerRow, memo: { appOnly
   }
   return memo.appOnly;
 }
+/** The live App behind a trigger. An org-owned App must be the trigger's own org; a user-owned App has no organization (#2441), so any trigger org is accepted and the owner's strict-owner gate decides. */
 async function liveApp(ctx: Context, row: { appId: string; organizationId: string }) {
-  return ctx.db.app.findFirst({ where: { id: row.appId, organizationId: row.organizationId, deletedAt: null, uninstalledAt: null } });
+  const app = await ctx.db.app.findFirst({ where: { id: row.appId, deletedAt: null, uninstalledAt: null } });
+  return app && (app.organizationId === null || app.organizationId === row.organizationId) ? app : null;
 }
 async function load(ctx: Context, input: AutomationTriggerRef) {
   const actorId = await requireAdopterContext(ctx);
@@ -118,14 +120,15 @@ export const automationPinQueries = {
     catch (e) { if (e instanceof AppNotFoundError) return empty; throw e; }
     const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null, uninstalledAt: null } });
     const actor = await ctx.db.user.findFirst({ where: { id: actorId, deletedAt: null }, select: { id: true } });
-    if (!app || !actor || !app.organizationId) return empty;
+    if (!app || !actor) return empty;
     // Authorization is a property of the caller, not of each row: the run-as user's own triggers (when they hold the
     // App relationship) and, for an App manager, the App-only ones. So it goes into the WHERE, and the order and the
     // cursor are keyset predicates over (name, kind, id) in the database (byte order, so the JS cursor and SQL agree).
     // A small page therefore reads at most size + 1 slim rows and authorizes nothing per row.
     const own = isStrictOwner(ctx, actorId) && await hasAppRelationship(ctx.db, appId, actorId);
-    const manages = await canAdopt(ctx, app, { id: '', appId, organizationId: app.organizationId, userId: null, entryNodeUrn: '' });
+    const manages = await canAdopt(ctx, app, { id: '', appId, organizationId: app.organizationId ?? '', userId: null, entryNodeUrn: '' });
     if (!own && !manages) return empty;
+    const inOrg = app.organizationId ? Prisma.sql`organization_id = ${app.organizationId}` : Prisma.sql`TRUE`;
     const who = own && manages ? Prisma.sql`(user_id IS NULL OR user_id = ${actorId})` : own ? Prisma.sql`user_id = ${actorId}` : Prisma.sql`user_id IS NULL`;
     const cursor = after
       ? Prisma.sql`WHERE ROW(name COLLATE "C", kind COLLATE "C", id COLLATE "C") > ROW(${after[0]}::text COLLATE "C", ${after[1]}::text COLLATE "C", ${after[2]}::text COLLATE "C")`
@@ -133,17 +136,21 @@ export const automationPinQueries = {
     const keys = await ctx.db.$queryRaw<Array<{ id: string; name: string; kind: 'SCHEDULE' | 'WEBHOOK' }>>(Prisma.sql`
       SELECT id, name, kind FROM (
         SELECT id, name, 'SCHEDULE' AS kind FROM agent_schedules
-         WHERE app_id = ${appId} AND organization_id = ${app.organizationId} AND deleted_at IS NULL AND ${who}
+         WHERE app_id = ${appId} AND ${inOrg} AND deleted_at IS NULL AND ${who}
         UNION ALL
         SELECT id, name, 'WEBHOOK' AS kind FROM agent_webhooks
-         WHERE app_id = ${appId} AND organization_id = ${app.organizationId} AND deleted_at IS NULL AND ${who}
+         WHERE app_id = ${appId} AND ${inOrg} AND deleted_at IS NULL AND ${who}
       ) t ${cursor}
       ORDER BY name COLLATE "C", kind COLLATE "C", id COLLATE "C" LIMIT ${size + 1}`);
     const page = keys.slice(0, size);
     const ids = (kind: string) => page.filter(k => k.kind === kind).map(k => k.id);
+    // The second stage repeats the first stage's live, org and ownership predicates, so a row that changed or was
+    // deleted between the two reads is dropped rather than shown.
+    const still = (kind: string) => ({ id: { in: ids(kind) }, appId, deletedAt: null, ...(app.organizationId ? { organizationId: app.organizationId } : {}),
+      OR: [...(own ? [{ userId: actorId }] : []), ...(manages ? [{ userId: null }] : [])] });
     const [schedules, webhooks] = await Promise.all([
-      ids('SCHEDULE').length ? ctx.db.agentSchedule.findMany({ where: { id: { in: ids('SCHEDULE') }, appId } }) : [],
-      ids('WEBHOOK').length ? ctx.db.agentWebhook.findMany({ where: { id: { in: ids('WEBHOOK') }, appId } }) : [],
+      ids('SCHEDULE').length ? ctx.db.agentSchedule.findMany({ where: still('SCHEDULE') }) : [],
+      ids('WEBHOOK').length ? ctx.db.agentWebhook.findMany({ where: still('WEBHOOK') }) : [],
     ]);
     const byKey = new Map<string, Record<string, unknown>>([...schedules.map(r => [`SCHEDULE|${r.id}`, r] as const), ...webhooks.map(r => [`WEBHOOK|${r.id}`, r] as const)]);
     const rows = page.flatMap(k => {
@@ -187,8 +194,11 @@ async function adoptionDoor<T>(ctx: Context, input: AutomationTriggerRef, write:
       else await tx.$queryRaw`SELECT id FROM app_runs WHERE id = ${observed.id} FOR UPDATE`;
     } });
 }
-const recordEvent = (tx: Prisma.TransactionClient, row: Row, input: AutomationTriggerRef, action: 'APPROVE' | 'DECLINE' | 'REVOKE', actorUserId: string, pinHash: string | null) =>
-  tx.automationAdoptionEvent.create({ data: { appId: row.appId, organizationId: row.organizationId, triggerKind: input.triggerKind, triggerRef: row.id, action, actorUserId, pinHash } });
+/** The event's organization is the APP's (null for a user-owned App), not the trigger row's. */
+const recordEvent = async (tx: Prisma.TransactionClient, row: Row, input: AutomationTriggerRef, action: 'APPROVE' | 'DECLINE' | 'REVOKE', actorUserId: string, pinHash: string | null) => {
+  const app = await tx.app.findUnique({ where: { id: row.appId }, select: { organizationId: true } });
+  await tx.automationAdoptionEvent.create({ data: { appId: row.appId, organizationId: app?.organizationId ?? null, triggerKind: input.triggerKind, triggerRef: row.id, action, actorUserId, pinHash } });
+};
 
 /** Rebind only the actor's exact preview hash; graph drift rejects adoption. */
 function adopt(ctx: Context, input: AutomationTriggerRef & { expectedHash: string }) {

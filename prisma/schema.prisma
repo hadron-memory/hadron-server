@@ -5484,7 +5484,8 @@ enum AutomationTier {
 model AutomationAdoptionEvent {
   id             String   @id @default(cuid())
   appId          String   @map("app_id")
-  organizationId String   @map("organization_id")
+  /// The App's organization; null for a user-owned App.
+  organizationId String?  @map("organization_id")
   /// SCHEDULE | WEBHOOK | MANUAL (CHECK in automation-adoption-invariants.sql).
   triggerKind    String   @map("trigger_kind")
   /// The trigger row id; for MANUAL, the origin run id. Plain text, no FK.

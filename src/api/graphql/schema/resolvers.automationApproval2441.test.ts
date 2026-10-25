@@ -363,3 +363,38 @@ describe('migration', () => {
     expect(migration.endsWith(source)).toBe(true);
   });
 });
+
+describe('user-owned Apps (CHECKED contract: covered, nullable organization, strict-owner authorization)', () => {
+  async function personalApp() {
+    const f = await fixture();
+    await db.memory.update({ where: { id: f.memory.id }, data: { class: 'app', appId: f.app.id } });
+    await db.app.update({ where: { id: f.app.id }, data: { organizationId: null, ownerUserId: f.user.id } });
+    const appOnly = await db.agentSchedule.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: null, name: 'App-only', cron: '* * * * *', entryNodeUrn: f.entryNodeUrn } });
+    return { f, appOnly };
+  }
+  it('lists the owner their own and App-only triggers on every door, and a stranger nothing', async () => {
+    const { f, appOnly } = await personalApp();
+    const page = await Q.automationApprovals({}, { appRef: f.app.id }, f.ctx);
+    expect(page.rows.map((r: any) => r.triggerRef).sort()).toEqual([f.ref.SCHEDULE, f.ref.WEBHOOK, appOnly.id].sort());
+    expect((await Q.automationApprovals({}, { appRef: f.app.id }, f.otherCtx)).rows).toEqual([]);
+    expect((await Q.automationApproval({}, { triggerKind: 'SCHEDULE', triggerRef: appOnly.id }, f.ctx)).state).toBe('UNADOPTED');
+    await expect(Q.automationApproval({}, { triggerKind: 'SCHEDULE', triggerRef: appOnly.id }, f.otherCtx)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  });
+  it('approve and decline work for the owner and record the App\'s null organization', async () => {
+    const { f, appOnly } = await personalApp();
+    const d = await Q.automationApproval({}, { triggerKind: 'SCHEDULE', triggerRef: appOnly.id }, f.ctx);
+    expect(await M.approveAutomation({}, { triggerKind: 'SCHEDULE', triggerRef: appOnly.id, expectedHash: d.hash }, f.ctx)).toBe(true);
+    expect(await M.declineAutomation({}, { triggerKind: 'SCHEDULE', triggerRef: appOnly.id }, f.ctx)).toBe(true);
+    expect((await events(f.app.id)).map(r => [r.action, r.organizationId])).toEqual([['APPROVE', null], ['REVOKE', null]]);
+    await expect(M.declineAutomation({}, { triggerKind: 'SCHEDULE', triggerRef: appOnly.id }, f.otherCtx)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  });
+  it('the second stage drops a row that changed or was deleted between the two reads', async () => {
+    const f = await fixture();
+    const spy = vi.spyOn(db.agentSchedule, 'findMany');
+    const real = db.agentSchedule.findMany.bind(db.agentSchedule);
+    spy.mockImplementationOnce(((args: never) => db.agentSchedule.update({ where: { id: f.ref.SCHEDULE }, data: { deletedAt: new Date() } }).then(() => real(args))) as never);
+    const page = await Q.automationApprovals({}, { appRef: f.app.id }, f.ctx);
+    expect(page.rows.map((r: any) => r.triggerRef)).not.toContain(f.ref.SCHEDULE);
+    spy.mockRestore();
+  });
+});
