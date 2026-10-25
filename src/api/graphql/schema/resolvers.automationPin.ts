@@ -8,6 +8,7 @@ import { runAuthContext, isRunPrincipal } from '../../../lib/auth/runPrincipal.j
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { boundWorkerId } from '../../../lib/bootPrompt.js';
+import { currentActorAmbiguity } from '../../../lib/requestActor.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -29,7 +30,9 @@ const badInput = (message: string) => new GraphQLError(message, { extensions: { 
  */
 export async function requireAdopterContext(ctx: Context): Promise<string> {
   if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) throw denied();
-  if (boundWorkerId()) throw workerRefused();
+  // An ambiguous MCP actor (several live worker bindings, none named) and a refused session binding are worker
+  // shapes too: the same refusals as the boot-prompt pointer gate (assertMayWriteBootPromptPointer).
+  if (boundWorkerId() || currentActorAmbiguity() !== null || ctx.sessionBindingRefused) throw workerRefused();
   if (ctx.sessionId && await ctx.db.session.findFirst({ where: { id: ctx.sessionId, workerId: { not: null } }, select: { id: true } })) throw workerRefused();
   return ctx.userId;
 }
@@ -96,8 +99,6 @@ function decodeCursor(after: string): [string, string, string] {
   } catch { /* fall through */ }
   throw badInput('after is not a cursor returned by automationApprovals.');
 }
-const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
-const compareKey = (a: [string, string, string], b: [string, string, string]) => cmp(a[0], b[0]) || cmp(a[1], b[1]) || cmp(a[2], b[2]);
 const MANUAL_OMISSION = [{ triggerKind: 'MANUAL' as const, reason: 'approved from the run that needs it' }];
 
 export const automationPinQueries = {
@@ -118,29 +119,42 @@ export const automationPinQueries = {
     const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null, uninstalledAt: null } });
     const actor = await ctx.db.user.findFirst({ where: { id: actorId, deletedAt: null }, select: { id: true } });
     if (!app || !actor || !app.organizationId) return empty;
+    // Authorization is a property of the caller, not of each row: the run-as user's own triggers (when they hold the
+    // App relationship) and, for an App manager, the App-only ones. So it goes into the WHERE, and the order and the
+    // cursor are keyset predicates over (name, kind, id) in the database (byte order, so the JS cursor and SQL agree).
+    // A small page therefore reads at most size + 1 slim rows and authorizes nothing per row.
+    const own = isStrictOwner(ctx, actorId) && await hasAppRelationship(ctx.db, appId, actorId);
+    const manages = await canAdopt(ctx, app, { id: '', appId, organizationId: app.organizationId, userId: null, entryNodeUrn: '' });
+    if (!own && !manages) return empty;
+    const who = own && manages ? Prisma.sql`(user_id IS NULL OR user_id = ${actorId})` : own ? Prisma.sql`user_id = ${actorId}` : Prisma.sql`user_id IS NULL`;
+    const cursor = after
+      ? Prisma.sql`WHERE ROW(name COLLATE "C", kind COLLATE "C", id COLLATE "C") > ROW(${after[0]}::text COLLATE "C", ${after[1]}::text COLLATE "C", ${after[2]}::text COLLATE "C")`
+      : Prisma.empty;
+    const keys = await ctx.db.$queryRaw<Array<{ id: string; name: string; kind: 'SCHEDULE' | 'WEBHOOK' }>>(Prisma.sql`
+      SELECT id, name, kind FROM (
+        SELECT id, name, 'SCHEDULE' AS kind FROM agent_schedules
+         WHERE app_id = ${appId} AND organization_id = ${app.organizationId} AND deleted_at IS NULL AND ${who}
+        UNION ALL
+        SELECT id, name, 'WEBHOOK' AS kind FROM agent_webhooks
+         WHERE app_id = ${appId} AND organization_id = ${app.organizationId} AND deleted_at IS NULL AND ${who}
+      ) t ${cursor}
+      ORDER BY name COLLATE "C", kind COLLATE "C", id COLLATE "C" LIMIT ${size + 1}`);
+    const page = keys.slice(0, size);
+    const ids = (kind: string) => page.filter(k => k.kind === kind).map(k => k.id);
     const [schedules, webhooks] = await Promise.all([
-      ctx.db.agentSchedule.findMany({ where: { appId, organizationId: app.organizationId, deletedAt: null } }),
-      ctx.db.agentWebhook.findMany({ where: { appId, organizationId: app.organizationId, deletedAt: null } }),
+      ids('SCHEDULE').length ? ctx.db.agentSchedule.findMany({ where: { id: { in: ids('SCHEDULE') }, appId } }) : [],
+      ids('WEBHOOK').length ? ctx.db.agentWebhook.findMany({ where: { id: { in: ids('WEBHOOK') }, appId } }) : [],
     ]);
-    const memo: { appOnly?: boolean } = {};
-    const rows: Array<{ key: [string, string, string]; row: Record<string, unknown> }> = [];
-    for (const [kind, list] of [['SCHEDULE', schedules], ['WEBHOOK', webhooks]] as const) {
-      for (const row of list) {
-        if (!await canAdopt(ctx, app, row, memo)) continue;
-        const { facts, name } = factsOf(kind, row as never);
-        const { state } = storedState(row.automationPin);
-        rows.push({ key: [name ?? '', kind, row.id], row: { triggerKind: kind, triggerRef: row.id, name, state, headline: headlineOf(name ?? kind, facts, state) } });
-      }
-    }
-    rows.sort((a, b) => compareKey(a.key, b.key));
-    const rest = after ? rows.filter(r => compareKey(r.key, after) > 0) : rows;
-    const page = rest.slice(0, size);
-    const more = rest.length > size;
-    return {
-      rows: page.map(r => r.row),
-      nextCursor: more ? encodeCursor(...page[page.length - 1].key) : null,
-      omitted: MANUAL_OMISSION,
-    };
+    const byKey = new Map<string, Record<string, unknown>>([...schedules.map(r => [`SCHEDULE|${r.id}`, r] as const), ...webhooks.map(r => [`WEBHOOK|${r.id}`, r] as const)]);
+    const rows = page.flatMap(k => {
+      const row = byKey.get(`${k.kind}|${k.id}`);
+      if (!row) return [];
+      const { facts, name } = factsOf(k.kind, row);
+      const { state } = storedState(row.automationPin);
+      return [{ triggerKind: k.kind, triggerRef: k.id, name, state, headline: headlineOf(name ?? k.kind, facts, state) }];
+    });
+    const last = page[page.length - 1];
+    return { rows, nextCursor: keys.length > size ? encodeCursor(last.name, last.kind, last.id) : null, omitted: MANUAL_OMISSION };
   },
 
   /** #2441: what the adopter reviews: state, the hash the Approve button carries, a plain summary, and the graph depth. */

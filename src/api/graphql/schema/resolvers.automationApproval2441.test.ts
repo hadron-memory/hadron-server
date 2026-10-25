@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { runAsActor } from '../../../lib/requestActor.js';
+import { runAsActor, requestActorStorage, emptyActor, publishAmbiguousActor } from '../../../lib/requestActor.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
@@ -49,7 +49,7 @@ async function fixture() {
   return { user, org, app, memory, entry, next, ctx, otherCtx, schedule, webhook, manual, ref, deps, llm, entryNodeUrn };
 }
 type F = Awaited<ReturnType<typeof fixture>>;
-const events = (appId: string) => db.automationAdoptionEvent.findMany({ where: { appId }, orderBy: { createdAt: 'asc' } });
+const events = (appId: string) => db.automationAdoptionEvent.findMany({ where: { appId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
 const detail = (f: F, kind: Kind, ctx: unknown = f.ctx) => Q.automationApproval({}, { triggerKind: kind, triggerRef: f.ref[kind] }, ctx);
 const approve = async (f: F, kind: Kind, ctx: unknown = f.ctx) => {
   const d = await detail(f, kind, ctx);
@@ -85,6 +85,23 @@ describe('who may see and decide', () => {
     for (const door of doors({ ...f.ctx, impersonation: { adminUserId: 'x', orgId: f.org.id } })) await expect(door()).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     const run = runAuthContext({ id: generateId(), appId: f.app.id, userId: f.user.id, organizationId: f.org.id });
     for (const door of doors({ db, ...run })) await expect(door()).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await events(f.app.id)).toHaveLength(0);
+  });
+  it('refuses an ambiguous MCP actor and a refused session binding on every door (§10 P2)', async () => {
+    const f = await fixture();
+    const input = { triggerKind: 'SCHEDULE', triggerRef: f.ref.SCHEDULE };
+    const doors = (ctx: unknown) => [
+      () => Q.automationApprovals({}, { appRef: f.app.id }, ctx),
+      () => Q.automationApproval({}, input, ctx),
+      () => Q.previewAutomation({}, input, ctx),
+      () => M.approveAutomation({}, { ...input, expectedHash: 'a'.repeat(64) }, ctx),
+      () => M.reAdoptAutomation({}, { ...input, expectedHash: 'a'.repeat(64) }, ctx),
+      () => M.declineAutomation({}, input, ctx),
+    ];
+    for (const door of doors(f.ctx)) {
+      await expect(requestActorStorage.run(emptyActor(), async () => { publishAmbiguousActor(['s1', 's2']); return door(); })).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    }
+    for (const door of doors({ ...f.ctx, sessionBindingRefused: true })) await expect(door()).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(await events(f.app.id)).toHaveLength(0);
   });
   it('a plain human session with a sessionId and no worker is admitted', async () => {
@@ -147,7 +164,37 @@ describe('state and projection', () => {
   });
 });
 
+describe('projection secrecy and the caller read gate (§10 P3 pins)', () => {
+  it('depth strips userinfo and query from a registered server URL', async () => {
+    const f = await fixture();
+    await db.node.update({ where: { id: f.entry.id }, data: { data: { tools: ['mcp__docs__search'] } } });
+    await db.mcpServer.create({ data: { organizationId: f.org.id, slug: 'docs', name: 'Docs', url: 'https://user:hunter2@mcp.example.test/v1?token=SECRET', toolAllowlist: ['search'], enabled: true } as never });
+    const d = await detail(f, 'SCHEDULE');
+    const text = JSON.stringify(d);
+    expect(text).toContain('mcp.example.test/v1');
+    expect(text).not.toMatch(/hunter2|SECRET|user:/);
+  });
+  it('detail refuses a graph with a memory the CALLER cannot read, and returns no depth', async () => {
+    const f = await fixture();
+    const owner = await db.user.create({ data: { handle: 'hidden-owner-2441' } });
+    const hidden = await db.memory.create({ data: { name: 'Hidden', urn: 'adopt.test:hidden', class: 'personal', userId: owner.id, ownerUserId: owner.id } });
+    await db.node.update({ where: { id: f.next.id }, data: { memoryId: hidden.id, content: 'SECRET-NEVER-RETURNED' } });
+    await expect(detail(f, 'SCHEDULE')).rejects.toBeDefined();
+    await expect(Q.previewAutomation({}, { triggerKind: 'SCHEDULE', triggerRef: f.ref.SCHEDULE }, f.ctx)).rejects.toBeDefined();
+  });
+});
+
 describe('paging', () => {
+  it('a small page reads and authorizes a bounded set, not the whole collection', async () => {
+    const f = await fixture();
+    for (let i = 0; i < 30; i++) await db.agentSchedule.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, name: `B${String(i).padStart(2, '0')}`, cron: '* * * * *', entryNodeUrn: f.entryNodeUrn } });
+    const sched = vi.spyOn(db.agentSchedule, 'findMany'); const hook = vi.spyOn(db.agentWebhook, 'findMany');
+    const page = await Q.automationApprovals({}, { appRef: f.app.id, limit: 2 }, f.ctx);
+    expect(page.rows).toHaveLength(2);
+    const rowsRead = [...sched.mock.calls, ...hook.mock.calls].map(([args]: any[]) => args?.where?.id?.in?.length ?? Infinity);
+    expect(rowsRead.every(n => n <= 2)).toBe(true);
+    sched.mockRestore(); hook.mockRestore();
+  });
   it('pages after authorization, stable across tied names and colliding refs', async () => {
     const f = await fixture();
     const id = generateId();
@@ -291,7 +338,7 @@ describe('the audit stream', () => {
     expect(rows[0]).toMatchObject({ actorUserId: f.user.id, action: 'APPROVE' });
     expect(Object.keys(rows[0]).sort()).toEqual(['action', 'actorUserId', 'appId', 'createdAt', 'id', 'organizationId', 'pinHash', 'triggerKind', 'triggerRef']);
   });
-  it('concurrent approve and decline serialize: two events, final state matches the last committed', async () => {
+  it('concurrent approve and decline serialize: one APPROVE and one REVOKE, and the final state agrees with the stored pin', async () => {
     const f = await fixture();
     const d = await detail(f, 'SCHEDULE');
     const results = await Promise.allSettled([
@@ -299,11 +346,12 @@ describe('the audit stream', () => {
       decline(f, 'SCHEDULE'),
     ]);
     expect(results.every(r => r.status === 'fulfilled')).toBe(true);
-    const rows = await events(f.app.id);
-    expect(rows).toHaveLength(2);
-    const last = rows[rows.length - 1].action;
-    const state = (await detail(f, 'SCHEDULE')).state;
-    expect(state).toBe(last === 'APPROVE' ? 'ADOPTED' : 'UNADOPTED');
+    // Either order is a valid serialization. Commit order is not inferred from timestamps (a transaction's
+    // createdAt is its start time): the events are a set, and the end state is checked against the stored pin.
+    expect((await events(f.app.id)).map(r => r.action).sort()).toEqual(['APPROVE', 'REVOKE']);
+    const pin = (await db.agentSchedule.findUniqueOrThrow({ where: { id: f.ref.SCHEDULE } })).automationPin as { hash?: string } | null;
+    expect((await detail(f, 'SCHEDULE')).state).toBe(pin ? 'ADOPTED' : 'UNADOPTED');
+    if (pin) expect(pin.hash).toBe(d.hash);
   });
 });
 
