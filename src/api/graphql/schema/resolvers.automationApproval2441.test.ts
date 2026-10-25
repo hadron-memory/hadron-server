@@ -281,6 +281,16 @@ describe('the audit stream', () => {
     await db.agentSchedule.delete({ where: { id: f.ref.SCHEDULE } });
     expect(await db.automationAdoptionEvent.count({ where: { triggerRef: f.ref.SCHEDULE } })).toBe(1);
   });
+  it('an actor\'s account erasure leaves their events in place, with the id and nothing copied (no FK to refuse or rewrite)', async () => {
+    const f = await fixture();
+    await approve(f, 'SCHEDULE');
+    const { resolvers } = await import('./resolvers.js');
+    await resolvers.Mutation.deleteUser({}, {}, { db, userId: f.user.id, roles: ['READER'] } as never);
+    const rows = await events(f.app.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ actorUserId: f.user.id, action: 'APPROVE' });
+    expect(Object.keys(rows[0]).sort()).toEqual(['action', 'actorUserId', 'appId', 'createdAt', 'id', 'organizationId', 'pinHash', 'triggerKind', 'triggerRef']);
+  });
   it('concurrent approve and decline serialize: two events, final state matches the last committed', async () => {
     const f = await fixture();
     const d = await detail(f, 'SCHEDULE');
