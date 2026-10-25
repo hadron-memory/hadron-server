@@ -3,10 +3,20 @@ import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Client, escapeIdentifier } from 'pg';
-import { beforeAll, afterAll, it, expect } from 'vitest';
+import { beforeAll, afterAll, it, expect, vi } from 'vitest';
 import { maintenanceUrl } from '../../src/test/dbWorkers.js';
 import { main, revokeRuntimeMigrations } from './revoke-runtime-migrations.js';
 import { verifyRuntimeRole } from './verify-runtime-role.js';
+
+// Observe actual fixture SQL so a per-file database clone cannot return.
+const fixtureSql: string[] = [];
+const originalQuery = Client.prototype.query;
+const querySpy = vi.spyOn(Client.prototype, 'query').mockImplementation(function(this: Client, ...args: unknown[]) {
+  const first = args[0];
+  fixtureSql.push(typeof first === 'string' ? first : (first as { text?: string })?.text ?? '');
+  return Reflect.apply(originalQuery, this, args);
+});
+afterAll(() => querySpy.mockRestore());
 
 const suffix = randomBytes(5).toString('hex');
 const owner = `s2_owner_${suffix}`, serve = `s2_serve_${suffix}`, database = `s2_db_${suffix}`;
@@ -42,6 +52,9 @@ afterAll(async () => {
     for (const role of [serve, quotedServe, owner]) await c.query(`DROP ROLE IF EXISTS ${q(role)}`);
   });
 }, 60_000);
+it('uses the existing worker database without per-file database DDL', () => {
+  expect(fixtureSql.filter(sql => /^\s*(?:CREATE|DROP)\s+DATABASE\b/i.test(sql))).toEqual([]);
+});
 it('role-before-migrate: revoke closes default-grant leak, preserves application grants, and is idempotent', async () => {
   grants();
   await using(url(owner), async c => {
