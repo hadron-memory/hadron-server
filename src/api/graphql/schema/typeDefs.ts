@@ -7330,7 +7330,7 @@ export const typeDefs = `#graphql
     NOT_APPROVED
     "#1591 — the approved revision's text changed outside the revision system, so it no longer matches its approval hash. Re-approve it."
     TAMPERED
-    "#1591 — an edge into another memory's node that is not minted yet (targetLoc is its URN)."
+    "#1591 — an edge, live pending edge or text citation (a prefixed node URN) into another memory's node that is not minted yet (targetLoc is its URN)."
     CITES_UNMINTED
   }
 
