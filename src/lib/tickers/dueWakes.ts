@@ -20,7 +20,7 @@
 // and budget, and are acknowledged per event through the v2 proof.
 
 import { coveringSignals, timeStoppedWorkers } from '../stopSignals/state.js';
-import { pendingStopNotices, s6NoticesAvailable, type PendingStopNotice } from '../stopSignals/delivery.js';
+import { pendingStopNotices, type PendingStopNotice } from '../stopSignals/delivery.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { batchTiming, loadDeliverySettings } from './batchTiming.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
@@ -353,6 +353,8 @@ export async function computeDueWakes(args: {
   authorize?: (tx: Prisma.TransactionClient, workerIds: string[]) => Promise<void>;
   /** App-key registration prefilter; the deciding authorize checks the whole selected page again. */
   workerWhere?: Prisma.WorkerWhereInput;
+  /** #2169: the reason kinds this call can deliver. A STOP notice is offered only to a call that lists STOP. */
+  acceptsStop?: boolean;
   onWorkersSelected?: (workerIds: string[]) => void;
 }): Promise<DueWakesResult> {
   const { ctx, app, reader, requester } = args;
@@ -408,8 +410,8 @@ export async function computeDueWakes(args: {
   const pendingOf = await loadPendingReasons(db, app.id, workers.map((w) => w.id), now);
   // #2022 (R68): a worker a `pause` or `halt` covers is due no tick. Live coverage, worked out in this read.
   const tickStopped = timeStoppedWorkers(await coveringSignals(db, app.id, ids, now));
-  // #2022 (cor:agt:090:04): the one stop notice each worker is due, offered only while the notice lane is on (DARK).
-  const stopOf = s6NoticesAvailable() ? await pendingStopNotices(db, app.id, ids) : new Map<string, PendingStopNotice>();
+  // #2022 (cor:agt:090:04): the one stop notice each worker is due, offered only to a call that declared it takes them (#2169).
+  const stopOf = args.acceptsStop ? await pendingStopNotices(db, app.id, ids) : new Map<string, PendingStopNotice>();
 
   // Registers: the channels each worker watches (not POST-only).
   const registers = await Promise.all(ids.map(async (id) => [id, await collectRegisterRows(db, { workerId: id })] as const));

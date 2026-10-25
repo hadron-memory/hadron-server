@@ -7423,8 +7423,16 @@ export const typeDefs = `#graphql
 
     "#1747 — one worker's wake settings (defaults when it has none), readable by the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:080:03)."
     workerWakeSettings(workerRef: String!): WorkerWakeSettings!
-    "#1748 — the wakes due now (hrn:node:hadronmemory.com:specs:cor:agt:080:08). Counts and seq ranges only; reads nothing it does not return."
-    dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String): DueWakePage!
+    """
+    #1748 — the wakes due now (hrn:node:hadronmemory.com:specs:cor:agt:080:08). Counts and seq ranges only; reads nothing it does not return.
+    accepts (#2169, hrn:node:hadronmemory.com:specs:cor:agt:090:04): the reason kinds this caller can deliver. Omit it and no STOP notice is
+    ever returned (the shipped ticker-wake). A call that lists STOP is offered the worker's newest undelivered stop notice, and
+    declares the lane it serves (a host key: its own registration; a person who manages the App, or a key without a host:
+    the unhosted lane) for STOP_CONSUMER_FRESH_SECONDS (default 600), but only when it read the lane from its start to its end in one call:
+    no workerRefs, no after, and no next page (ask for first: 200; a lane larger than a page cannot declare). A worker whose host is lost has no serving lane until the host returns. Setting a stop signal is refused (STOP_SIGNAL_UNAVAILABLE)
+    while any worker it would cover is on a lane with no fresh declaration.
+    """
+    dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String, accepts: [WakeKind!]): DueWakePage!
     """
     #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:07) — an App's stop signals, oldest set first. A person in the App sees
     every signal (worker narrows to those covering that worker now); a worker's session sees the live ones covering it; a
@@ -9333,8 +9341,9 @@ export const typeDefs = `#graphql
     #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:01, :06) — set a stop signal. Whoever manages the App: any level and
     scope. A host key: a HALT on its own host only. Never replaces another signal. Refusals: APP_MANAGER_REQUIRED,
     HOST_SCOPE_REQUIRED, STOP_SIGNAL_SCOPE_FORBIDDEN, STOP_SIGNAL_NOT_FOUND (the target), BAD_USER_INPUT, APP_NOT_FOUND.
-    #2173 (R95): until the stop-notice lane is in effect, setting ANY signal is refused with STOP_SIGNAL_UNAVAILABLE (a worker
-    would be stopped without being told); lifting and listing are unaffected, and the refusal lifts when the lane is turned on.
+    #2173/#2169 (R95): setting ANY signal is refused with STOP_SIGNAL_UNAVAILABLE while a worker it would cover is on a lane with
+    no fresh stop-consumer declaration (a worker would be stopped without being told; the extensions name the worker count and the
+    lanes). A consumer declares a lane by polling dueWakes with accepts: [STOP]. Lifting and listing are unaffected.
     """
     setTeamStopSignal(input: SetTeamStopSignalInput!): StopSignal!
     """
@@ -12881,7 +12890,7 @@ export const typeDefs = `#graphql
     TICK
     "#1708 — a task event the worker must act on (an assignment, a child's finish, an alarm's woken position, #1709 a request to end its session). Wakes at once, like a mention."
     TASK
-    "#2022 — a stop-signal notice (hrn:node:hadronmemory.com:specs:cor:agt:090:04): ahead of everything else, past the floor, the busy delay and the budget's refusal. Not yet offered (DARK until the host consumer ships)."
+    "#2022 — a stop-signal notice (hrn:node:hadronmemory.com:specs:cor:agt:090:04): ahead of everything else, past the floor, the busy delay and the budget's refusal. Offered only to a dueWakes call that lists STOP in accepts (#2169)."
     STOP
   }
 
@@ -13039,11 +13048,11 @@ export const typeDefs = `#graphql
 
   "#2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:01) — a stop signal's level. Each stops everything the one before it does."
   enum StopSignalLevel {
-    "Stops assignment only: matching skips the covered workers and a manual assignment to one is refused (TASK_STOPPED). Its coordinators are told (the notice is recorded but not yet delivered)."
+    "Stops assignment only: matching skips the covered workers and a manual assignment to one is refused (TASK_STOPPED). Its coordinators are told, by a consumer that has declared their lane (a set is refused until one has)."
     PAUSE_DISPATCH
-    "Also stops ticks and stall time. Each covered worker is told to finish or stop at its next sub-task (the notice is recorded but not yet delivered)."
+    "Also stops ticks and stall time. Each covered worker is told to finish or stop at its next sub-task, by a consumer that has declared its lane (a set is refused until one has)."
     PAUSE
-    "Also interrupts each covered worker, to save its work and write a hand-off (the notice is recorded but not yet delivered: no interrupt happens yet)."
+    "Also tells each covered worker to save its work and write a hand-off now. The notice is typed as an ordinary message into a verified-empty input, with no interrupt key (Holger, option A, 2026-10-24); one that cannot be typed is logged and flagged to the coordinator."
     HALT
   }
 

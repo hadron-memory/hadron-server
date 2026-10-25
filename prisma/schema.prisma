@@ -3388,6 +3388,7 @@ model App {
   contextResets           ContextReset[]
   /// #2022 (S6, cor:agt:090) — the App's stop signals, live and ended.
   stopSignals             TeamStopSignal[]
+  stopConsumerDeclarations StopConsumerDeclaration[]
   launchGrants            LaunchGrant[]
   /// #1956 — resume claims written before a deliberate context reset (cor:agt:020:03).
   resumeClaims            ResumeClaim[]
@@ -6345,6 +6346,22 @@ model TeamStopSignal {
   @@index([targetWorkerId])
   @@index([targetHostRegistrationId])
   @@map("team_stop_signals")
+}
+
+/// #2169 (S6b, R95) — one serving lane's declaration that its consumer takes stop notices: a `dueWakes` call that
+/// passes `accepts: [STOP]` upserts the row of the lane it serves (a host registration id for a host key, `unhosted` for a
+/// person who manages the App or a non-host key). A declaration is FRESH for STOP_CONSUMER_FRESH_SECONDS; setting a stop
+/// signal is refused while any worker it would cover has no fresh lane. `lane` is deliberately not a foreign key: it is
+/// either a registration id or the literal `unhosted`, and a stale row for a deleted registration is simply never read.
+model StopConsumerDeclaration {
+  appId      String   @map("app_id")
+  lane       String
+  declaredAt DateTime @map("declared_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@id([appId, lane])
+  @@map("stop_consumer_declarations")
 }
 
 /// #2022 (R95) — when a stop signal covered a worker: the HISTORY that stall clocks and notices read. Enforcement never
