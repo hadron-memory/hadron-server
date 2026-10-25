@@ -92,7 +92,7 @@ export type UnservedStopLanes = { workers: number; lanes: string[] };
 /**
  * The workers of `workerIds` that no fresh declaration serves (R95), and the lanes they are on, named by host id (or
  * `unhosted`). A worker's lanes are the live host registrations that list it; when it has registrations and none is live
- * (its host was lost) they are those registrations, which no consumer can serve until the host returns, so a set that
+ * (its host was lost) they are those registrations, which no consumer can serve until the host returns (a declaration made before the loss does not count, #2432 SECOND/QA), so a set that
  * would stop it is refused (a non-host key's read scope excludes such a worker, so the shared `unhosted` lane must not
  * stand in for it, #2432 LOCAL); `unhosted` only for a worker no registration lists. A worker is served when ANY of its
  * lanes is fresh. Returns null when every one is served, and for an empty list. Names counts and lanes, never worker text.
@@ -106,17 +106,17 @@ export async function unservedStopLanes(db: Db, appId: string, workerIds: string
       FROM host_registration_workers h JOIN host_registrations r ON r.id = h.registration_id
       WHERE h.worker_id IN (${Prisma.join(workerIds)})
     ), lanes AS (
-      SELECT worker_id, reg_id AS lane, host_id AS label FROM reg WHERE live
+      SELECT worker_id, reg_id AS lane, host_id AS label, true AS usable FROM reg WHERE live
       UNION ALL
-      SELECT r.worker_id, r.reg_id, r.host_id FROM reg r
+      SELECT r.worker_id, r.reg_id, r.host_id, false FROM reg r
       WHERE NOT r.live AND NOT EXISTS (SELECT 1 FROM reg x WHERE x.worker_id = r.worker_id AND x.live)
       UNION ALL
-      SELECT w.id, ${UNHOSTED_LANE}::text, ${UNHOSTED_LANE}::text FROM workers w
+      SELECT w.id, ${UNHOSTED_LANE}::text, ${UNHOSTED_LANE}::text, true FROM workers w
       WHERE w.id IN (${Prisma.join(workerIds)}) AND NOT EXISTS (SELECT 1 FROM reg x WHERE x.worker_id = w.id)
     )
     SELECT l.worker_id AS "workerId", l.label,
-           EXISTS (SELECT 1 FROM stop_consumer_declarations d WHERE d.app_id = ${appId} AND d.lane = l.lane
-                   AND d.declared_at > ${cutoff}::timestamp) AS fresh
+           (l.usable AND EXISTS (SELECT 1 FROM stop_consumer_declarations d WHERE d.app_id = ${appId} AND d.lane = l.lane
+                                 AND d.declared_at > ${cutoff}::timestamp)) AS fresh
     FROM lanes l`);
   const served = new Set(rows.filter((r) => r.fresh).map((r) => r.workerId));
   const unserved = new Set(rows.filter((r) => !served.has(r.workerId)).map((r) => r.workerId));
