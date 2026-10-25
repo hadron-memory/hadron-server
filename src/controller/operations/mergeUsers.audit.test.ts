@@ -23,6 +23,9 @@ const EXEMPT_AUDIT_COLUMNS = new Set([
   // is a sealed record of the time. Pinned in agentTasks/agentTasks.test.ts.
   'agent_team_events.actor_user_id',
   'agent_team_events.acknowledged_by_user_id',
+  // #2441 — adoption events are append-only history of who approved, declined
+  // or revoked an automation; sealed like the stream above.
+  'automation_adoption_events.actor_user_id',
   // #1632 — signing requests and signature records are guarded history (a
   // trigger refuses any change to a request's pins and any update of a
   // record): who asked, who was named and who signed are sealed. A merged-away
@@ -59,6 +62,7 @@ describe('mergeUsers audit actor registry', () => {
           OR (table_name = 'app_grants' AND column_name = 'granted_by')
           OR (table_name = 'app_key_scopes' AND column_name IN ('granted_by_user_id', 'revoked_by_user_id'))
           OR (table_name = 'agent_team_events' AND column_name IN ('actor_user_id', 'acknowledged_by_user_id'))
+          OR (table_name = 'automation_adoption_events' AND column_name = 'actor_user_id')
           OR (table_name = 'signing_requests' AND column_name IN ('requester_user_id', 'named_signer_id'))
           OR (table_name = 'node_signatures' AND column_name = 'signer_id'))
     `;

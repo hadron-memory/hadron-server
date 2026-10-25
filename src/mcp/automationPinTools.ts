@@ -12,7 +12,7 @@ export function registerAutomationPinTools(server: McpServer, deps: { db: Prisma
   };
   server.tool('hadron_preview_automation', 'Review the exact graph and hash before re-adopting a changed automation. Trigger refs are row IDs.', AUTOMATION_TRIGGER_SHAPE,
     args => wrap(() => automationPinQueries.previewAutomation({}, args, ctx())));
-  server.tool('hadron_re_adopt_automation', 'Re-adopt a trigger using the hash from hadron_preview_automation. Only the run-as user can adopt their automation.', SHAPE_HADRON_RE_ADOPT_AUTOMATION,
+  server.tool('hadron_re_adopt_automation', 'Re-adopt a trigger using the hash from hadron_preview_automation. The run-as user adopts their own automation; an App-only trigger (no run-as user) is adopted by its manager: the owner of the App, or an organization ADMIN or OWNER.', SHAPE_HADRON_RE_ADOPT_AUTOMATION,
     args => wrap(() => automationPinMutations.reAdoptAutomation({}, args, ctx())));
 }
 

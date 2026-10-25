@@ -38,6 +38,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.appRuns",
   "Query.apps",
   "Query.assets",
+  "Query.automationApprovals",
   "Query.calendarEvents",
   "Query.channelMessages",
   "Query.channels",
