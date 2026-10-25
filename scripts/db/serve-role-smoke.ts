@@ -36,16 +36,24 @@ interface Check {
   run: (serve: Client) => Promise<void>;
 }
 
-/** The serve role must be refused with 42501; any other outcome (including success) is a failure. */
+/**
+ * The serve role must be refused with 42501; any other outcome (including success) is a failure. The probe runs
+ * inside a transaction that is ALWAYS rolled back, so a statement that unexpectedly succeeds (a serve role that is
+ * too privileged) is undone instead of committed into the lane's database.
+ */
 async function expectRefused(serve: Client, sql: string): Promise<void> {
+  let outcome: string | undefined;
+  await serve.query('BEGIN');
   try {
     await serve.query(sql);
+    outcome = 'expected 42501, but the statement succeeded (rolled back)';
   } catch (err) {
     const code = (err as { code?: string }).code;
-    if (code === INSUFFICIENT_PRIVILEGE) return;
-    throw new Error(`expected 42501, got ${code ?? 'a non-database error'}`);
+    if (code !== INSUFFICIENT_PRIVILEGE) outcome = `expected 42501, got ${code ?? 'a non-database error'}`;
+  } finally {
+    await serve.query('ROLLBACK');
   }
-  throw new Error('expected 42501, but the statement succeeded');
+  if (outcome) throw new Error(outcome);
 }
 
 async function inTx<T>(serve: Client, fn: () => Promise<T>): Promise<T> {
@@ -192,7 +200,7 @@ export function buildChecks(f: Fixture, owner: Client): Check[] {
         if (r.rowCount !== 1) throw new Error('delete touched no row');
       },
     },
-    { name: 'TRUNCATE is refused (42501)', run: (s) => expectRefused(s, 'TRUNCATE nodes') },
+    { name: 'TRUNCATE is refused (42501)', run: (s) => expectRefused(s, 'TRUNCATE worker_reference_fences') },
     { name: 'ALTER TABLE is refused (42501)', run: (s) => expectRefused(s, 'ALTER TABLE nodes ADD COLUMN smoke_x integer') },
     { name: 'DROP TRIGGER is refused (42501)', run: (s) => expectRefused(s, 'DROP TRIGGER nodes_comment_insert ON nodes') },
     { name: 'CREATE TABLE is refused (42501)', run: (s) => expectRefused(s, `CREATE TABLE smoke_serve_made_${f.tag} (id int)`) },
@@ -200,8 +208,11 @@ export function buildChecks(f: Fixture, owner: Client): Check[] {
   ];
 }
 
-/** Owner-side removal. Each step is independent so a missing fixture never hides the rest. */
-export async function cleanup(owner: Client, f: Fixture): Promise<void> {
+/**
+ * Owner-side removal. Each step is independent so a failed one never hides the rest, and every failure is
+ * RETURNED: a lane that cannot clean up after itself leaves fixtures in the database and must not pass.
+ */
+export async function cleanup(owner: Client, f: Fixture): Promise<string[]> {
   const steps: [string, unknown[]][] = [
     [`DROP TABLE IF EXISTS ${f.probeTable}`, []],
     [`DELETE FROM sessions WHERE id = $1`, [f.sessionId]],
@@ -211,7 +222,15 @@ export async function cleanup(owner: Client, f: Fixture): Promise<void> {
     [`DELETE FROM organizations WHERE id = $1`, [f.orgId]],
     [`DELETE FROM users WHERE id = $1`, [f.userId]],
   ];
-  for (const [sql, params] of steps) await owner.query(sql, params).catch(() => undefined);
+  const errors: string[] = [];
+  for (const [sql, params] of steps) {
+    try {
+      await owner.query(sql, params);
+    } catch (err) {
+      errors.push(`${sql.split(' WHERE')[0]}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return errors;
 }
 
 export async function main(env: NodeJS.ProcessEnv, log: (line: string) => void): Promise<number> {
@@ -235,6 +254,7 @@ export async function main(env: NodeJS.ProcessEnv, log: (line: string) => void):
   const serve = new Client({ connectionString: serveUrl });
   const f = newFixture();
   let failed = 0;
+  let fixturesStarted = false;
   try {
     try {
       await owner.connect();
@@ -250,6 +270,7 @@ export async function main(env: NodeJS.ProcessEnv, log: (line: string) => void):
       return EXIT.USAGE;
     }
 
+    fixturesStarted = true;
     await owner.query(`INSERT INTO users (id, updated_at) VALUES ($1, now())`, [f.userId]);
     await owner.query(`INSERT INTO organizations (id, name, urn, updated_at) VALUES ($1, $2, $3, now())`, [f.orgId, `smk-${f.tag}`, `smk-${f.tag}`]);
 
@@ -262,16 +283,21 @@ export async function main(env: NodeJS.ProcessEnv, log: (line: string) => void):
         log(redact(`FAIL ${check.name}: ${err instanceof Error ? err.message : String(err)}`, secrets));
       }
     }
-    log(failed ? `${failed} check(s) failed` : 'ok: the serve role passes every smoke check');
-    return failed ? EXIT.FAILED : EXIT.OK;
   } catch (err) {
-    log(redact(`smoke setup failed: ${err instanceof Error ? err.message : String(err)}`, secrets));
-    return EXIT.FAILED;
+    failed++;
+    log(redact(`FAIL smoke setup: ${err instanceof Error ? err.message : String(err)}`, secrets));
   } finally {
-    await cleanup(owner, f).catch(() => undefined);
+    if (fixturesStarted) {
+      for (const e of await cleanup(owner, f)) {
+        failed++;
+        log(redact(`FAIL cleanup: ${e}`, secrets));
+      }
+    }
     await serve.end().catch(() => undefined);
     await owner.end().catch(() => undefined);
   }
+  log(failed ? `${failed} check(s) failed` : 'ok: the serve role passes every smoke check');
+  return failed ? EXIT.FAILED : EXIT.OK;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
