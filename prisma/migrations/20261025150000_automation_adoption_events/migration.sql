@@ -17,7 +17,7 @@ CREATE TABLE "automation_adoption_events" (
 CREATE INDEX "automation_adoption_events_app_id_created_at_idx" ON "automation_adoption_events"("app_id", "created_at");
 
 -- CreateIndex
-CREATE INDEX "automation_adoption_events_trigger_kind_trigger_ref_created_at_idx" ON "automation_adoption_events"("trigger_kind", "trigger_ref", "created_at");
+CREATE INDEX "automation_adoption_events_trigger_kind_trigger_ref_created_idx" ON "automation_adoption_events"("trigger_kind", "trigger_ref", "created_at");
 
 -- AddForeignKey
 ALTER TABLE "automation_adoption_events" ADD CONSTRAINT "automation_adoption_events_app_id_fkey" FOREIGN KEY ("app_id") REFERENCES "apps"("id") ON DELETE CASCADE ON UPDATE CASCADE;

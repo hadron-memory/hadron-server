@@ -42,7 +42,7 @@ async function fixture() {
   const manual = await mintAppRun(db, { appId: app.id, organizationId: org.id, userId: user.id, triggerKind: 'MANUAL', entryNodeUrn });
   const llm = vi.fn(async () => ({ text: 'ok', tokensIn: 1, tokensOut: 1, provider: 'test', model: 'test' }));
   const deps: RunExecutionDeps = { ...makeProdRunDeps(db), resolveConfig: vi.fn(async () => ({ config: {} }) as never), llm, writeOutput: vi.fn(async () => null) };
-  const ref = { SCHEDULE: schedule.id, WEBHOOK: webhook.id, MANUAL: manual.id } as Record<Kind, string>;
+  const ref = { SCHEDULE: schedule.id, WEBHOOK: webhook.webhook.id, MANUAL: manual.id } as Record<Kind, string>;
   const other = await db.user.create({ data: { handle: 'adopt-other' } });
   await db.orgMember.create({ data: { userId: other.id, organizationId: org.id, role: 'CONTRIBUTOR' } });
   const otherCtx = { db, userId: other.id, roles: [] as never[] };
@@ -90,7 +90,7 @@ describe('who may see and decide', () => {
   it('a plain human session with a sessionId and no worker is admitted', async () => {
     const f = await fixture();
     const session = await db.session.create({ data: { appId: f.app.id, userId: f.user.id } as never });
-    await expect(Q.automationApproval({}, { triggerKind: 'SCHEDULE', triggerRef: f.ref.SCHEDULE }, { ...f.ctx, sessionId: session.id })).resolves.toMatchObject({ state: 'UNADOPTED' });
+    await expect(Q.automationApproval({}, { triggerKind: 'SCHEDULE', triggerRef: f.ref.SCHEDULE }, { ...f.ctx, sessionId: session.id })).resolves.toMatchObject({ state: 'ADOPTED' });
   });
 });
 
@@ -99,7 +99,7 @@ describe('state and projection', () => {
     const f = await fixture();
     const page = await Q.automationApprovals({}, { appRef: f.app.id }, f.ctx);
     expect(page.rows.map((r: any) => [r.triggerKind, r.triggerRef, r.name, r.state]).sort()).toEqual(
-      [['SCHEDULE', f.schedule.id, 'Weekly', 'ADOPTED'], ['WEBHOOK', f.webhook.id, 'inbound', 'ADOPTED']].sort());
+      [['SCHEDULE', f.schedule.id, 'Weekly', 'ADOPTED'], ['WEBHOOK', f.webhook.webhook.id, 'inbound', 'ADOPTED']].sort());
     expect(page.rows.every((r: any) => typeof r.headline === 'string' && r.headline.length > 0)).toBe(true);
     expect(page.omitted).toEqual([{ triggerKind: 'MANUAL', reason: 'approved from the run that needs it' }]);
     expect(JSON.stringify(page)).not.toContain(f.manual.id);
@@ -107,7 +107,7 @@ describe('state and projection', () => {
   it('classifies by the parser: no pin or a corrupt pin is UNADOPTED, never truthiness', async () => {
     const f = await fixture();
     await db.agentSchedule.update({ where: { id: f.schedule.id }, data: { automationPin: { format: 'hadron-automation-unadopted-v1', message: 'x' } as never } });
-    await db.agentWebhook.update({ where: { id: f.webhook.id }, data: { automationPin: { hash: 'junk', format: 'bogus' } as never } });
+    await db.agentWebhook.update({ where: { id: f.webhook.webhook.id }, data: { automationPin: { hash: 'junk', format: 'bogus' } as never } });
     const page = await Q.automationApprovals({}, { appRef: f.app.id }, f.ctx);
     expect(Object.fromEntries(page.rows.map((r: any) => [r.triggerKind, r.state]))).toEqual({ SCHEDULE: 'UNADOPTED', WEBHOOK: 'UNADOPTED' });
     const legacy = await db.agentSchedule.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, name: 'Legacy', cron: '* * * * *', entryNodeUrn: f.entryNodeUrn } });
@@ -152,7 +152,7 @@ describe('paging', () => {
     const f = await fixture();
     const id = generateId();
     await db.agentSchedule.create({ data: { id, organizationId: f.org.id, appId: f.app.id, userId: f.user.id, name: 'Tied', cron: '* * * * *', entryNodeUrn: f.entryNodeUrn } });
-    await db.agentWebhook.create({ data: { id, organizationId: f.org.id, appId: f.app.id, userId: f.user.id, name: 'Tied', entryNodeUrn: f.entryNodeUrn } as never });
+    await db.agentWebhook.create({ data: { id, secret: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, name: 'Tied', entryNodeUrn: f.entryNodeUrn } as never });
     for (let i = 0; i < 3; i++) await db.agentSchedule.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, name: 'Tied', cron: '* * * * *', entryNodeUrn: f.entryNodeUrn } });
     // Triggers the caller may not adopt (another user's, in the same App) never shift a page.
     await db.agentSchedule.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: (await db.user.create({ data: { handle: 'someone-else' } })).id, name: 'Aardvark', cron: '* * * * *', entryNodeUrn: f.entryNodeUrn } });
@@ -294,5 +294,14 @@ describe('the audit stream', () => {
     const last = rows[rows.length - 1].action;
     const state = (await detail(f, 'SCHEDULE')).state;
     expect(state).toBe(last === 'APPROVE' ? 'ADOPTED' : 'UNADOPTED');
+  });
+});
+
+describe('migration', () => {
+  it('the adoption-events migration carries a byte-identical copy of the invariants file', async () => {
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('../../../../prisma/automation-adoption-invariants.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../../prisma/migrations/20261025150000_automation_adoption_events/migration.sql', import.meta.url), 'utf8');
+    expect(migration.endsWith(source)).toBe(true);
   });
 });

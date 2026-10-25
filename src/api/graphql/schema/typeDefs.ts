@@ -7386,6 +7386,56 @@ export const typeDefs = `#graphql
 
   enum AutomationTriggerKind { SCHEDULE WEBHOOK MANUAL }
 
+  "#2441: UNADOPTED = no valid adoption; ADOPTED = a valid adoption; CHANGED = the automation differs from what was adopted (computed on open only), so the next run fails AUTOMATION_CHANGED."
+  enum AutomationAdoptionState { UNADOPTED ADOPTED CHANGED }
+
+  "#2441: one flow of an automation (the entry flow or a flow it routes to)."
+  type AutomationFlowSummary {
+    urn: String!
+    name: String!
+    tools: [String!]!
+    writes: [String!]!
+  }
+
+  "#2441: plain-language facts derived from the previewed automation. A fact the pin cannot show says not stated; nothing here is a maximum the approval enforces."
+  type AutomationSummary {
+    name: String!
+    flows: [AutomationFlowSummary!]!
+    reads: [String!]!
+    writes: [String!]!
+    tools: [String!]!
+    schedule: String
+    limits: [String!]!
+    cannotDo: [String!]!
+  }
+
+  "#2441: what an adopter reviews before approving. depth carries only what previewAutomation returns to the same caller, plus the registered resources with URL userinfo and query removed."
+  type AutomationApproval {
+    state: AutomationAdoptionState!
+    hash: String!
+    summary: AutomationSummary!
+    depth: JSON!
+  }
+
+  type AutomationApprovalRow {
+    triggerKind: AutomationTriggerKind!
+    triggerRef: String!
+    name: String!
+    state: AutomationAdoptionState!
+    headline: String!
+  }
+
+  type AutomationApprovalOmission {
+    triggerKind: AutomationTriggerKind!
+    reason: String!
+  }
+
+  type AutomationApprovalPage {
+    rows: [AutomationApprovalRow!]!
+    nextCursor: String
+    omitted: [AutomationApprovalOmission!]!
+  }
+
   type Query {
     "Read a retained deleted node in a live memory that you can read and write. Returns the stored body without expanding templates or includes. hrn:node:hadronmemory.com:specs:cor:dmo:010:04"
     recoveryNode(nodeRef: ID!): RecoveryNode
@@ -7395,6 +7445,10 @@ export const typeDefs = `#graphql
     recoveryEdges(memoryRef: ID!, limit: Int = 20, offset: Int = 0): RecoveryEdgesPage!
     "#1719: review exact automation graph bytes and digest. triggerRef is the trigger row ID; MANUAL uses the origin AppRun ID. Only its run-as user or the manager of an App-only trigger may preview."
     previewAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): JSON!
+    "#2441: the schedules and webhooks of an App that the caller may adopt, with their adoption state. Authorization first, then ordered by (name, kind, id) and paged: limit defaults to 20, maximum 50; after is the previous page's nextCursor. MANUAL triggers are never listed (consent is per run); omitted says so. Only an adopter sees any row."
+    automationApprovals(appRef: String!, limit: Int = 20, after: String): AutomationApprovalPage!
+    "#2441: state, hash, plain summary and graph depth for one trigger. MANUAL takes the origin run id. Same gate as approveAutomation."
+    automationApproval(triggerKind: AutomationTriggerKind!, triggerRef: String!): AutomationApproval!
 
     """
     #1705 — one agent task, or null when it does not exist or the caller may
@@ -9269,6 +9323,10 @@ export const typeDefs = `#graphql
     restoreNode(nodeRef: ID!): Node!
     "#1719: rebind a trigger to its reviewed graph. expectedHash must match previewAutomation; edits since preview refuse adoption."
     reAdoptAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!, expectedHash: String!): Boolean!
+    "#2441: adopt the automation by the hash the adopter reviewed (automationApproval.hash). Same door as reAdoptAutomation: one APPROVE event per successful call, even when nothing changed. A changed automation answers AUTOMATION_CHANGED."
+    approveAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!, expectedHash: String!): Boolean!
+    "#2441: decline. An adopted trigger is revoked, so its next run fails AUTOMATION_UNADOPTED (REVOKE event); with nothing adopted it changes no state (DECLINE event). A MANUAL origin deletes its consent row. Runs already started keep their snapshot."
+    declineAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): Boolean!
 
     """
     #1705 — create an agent task (hrn:node:hadronmemory.com:specs:cor:agt:050:06 root, :07 child). Writes
