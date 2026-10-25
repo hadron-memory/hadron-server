@@ -5,8 +5,16 @@ import { DEFAULT_SERVE_ROLE } from './verify-runtime-role.js';
 
 /** Owner-only, psql-free. Absent serve role preserves legacy single-role installs. */
 export async function revokeRuntimeMigrations(client: Client, role: string): Promise<void> {
-  const found = await client.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [role]);
-  if (found.rowCount) {
+  const found = await client.query<{ is_current_user: boolean; owns_migrations: boolean }>(`
+    SELECT r.rolname = current_user AS is_current_user,
+      EXISTS (SELECT 1 FROM pg_class c
+        WHERE c.oid = to_regclass('public._prisma_migrations') AND c.relowner = r.oid) AS owns_migrations
+    FROM pg_roles r WHERE r.rolname = $1`, [role]);
+  const target = found.rows[0];
+  // Legacy/self-hosted installs may use the configured serve name as OWNER.
+  // Owners can revoke their own ordinary privileges: preserve migration access
+  // on both the current connection and future boots, including rollback.
+  if (target && !target.is_current_user && !target.owns_migrations) {
     // Role is configurable like S1; escapeIdentifier quotes it as ONE identifier.
     // The relation is fixed, and no other grants/default privileges are touched.
     await client.query(`REVOKE ALL PRIVILEGES ON TABLE public._prisma_migrations FROM ${escapeIdentifier(role)}`);
