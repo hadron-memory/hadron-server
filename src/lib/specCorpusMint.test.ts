@@ -20,7 +20,7 @@ vi.mock('../api/graphql/schema/resolvers.nodeRefAccess.js', async (importActual)
   return {
     ...actual,
     resolveNodeRefForCaller: (...args: Parameters<typeof actual.resolveNodeRefForCaller>) => {
-      if (resolverFault.on) throw new Error('simulated resolver outage');
+      if (resolverFault.on) return Promise.reject(new Error('simulated resolver outage'));
       return actual.resolveNodeRefForCaller(...args);
     },
   };
