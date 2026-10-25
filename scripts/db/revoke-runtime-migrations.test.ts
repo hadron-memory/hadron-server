@@ -33,12 +33,15 @@ beforeAll(async () => {
     await c.query(`CREATE DATABASE ${q(database)} OWNER ${q(owner)}`);
   });
 });
+// Full-suite four-worker QA exceeded the default 10s while dropping this DB.
+// Bound cleanup separately; assertions keep their original test timeout and
+// cleanup/query errors still reject this hook and fail the suite.
 afterAll(async () => {
   await using(adminUrl(), async c => {
     await c.query(`DROP DATABASE IF EXISTS ${q(database)} WITH (FORCE)`);
     for (const role of [serve, quotedServe, owner]) await c.query(`DROP ROLE IF EXISTS ${q(role)}`);
   });
-});
+}, 60_000);
 it('role-before-migrate: revoke closes default-grant leak, preserves application grants, and is idempotent', async () => {
   grants();
   await using(url(owner), async c => {
