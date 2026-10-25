@@ -229,7 +229,7 @@ describe('the refusal rolls the set back whole', () => {
 });
 
 describe('fix head — #2432 findings', () => {
-  it('BLIND P2-1: a narrowed poll (workerRefs) declares nothing, and neither does a page with more behind it; the last page does', async () => {
+  it('BLIND P2-1 / LOCAL P2 (pagination): a narrowed poll, a page with more behind it and a tail-only page declare nothing; only a call that read the lane from its start to its end does', async () => {
     await dueWakes(ctx(max.id), { accepts: ['STOP'], workerRefs: [liam.id] });
     expect(await declarations()).toEqual([]);
     await dueWakes(keyCtx(orca1Key), { accepts: ['STOP'], workerRefs: [dan.id] });
@@ -237,8 +237,12 @@ describe('fix head — #2432 findings', () => {
     const first = await dueWakes(ctx(max.id), { accepts: ['STOP'], first: 2 });
     expect(first.pageInfo.hasNextPage).toBe(true);
     expect(await declarations()).toEqual([]);
+    // The tail alone (Andi's probe): it reads to the end but skipped the prefix.
+    const tail = await dueWakes(ctx(max.id), { accepts: ['STOP'], first: 2, after: first.pageInfo.endCursor });
+    expect(tail.pageInfo.hasNextPage).toBe(false);
+    expect(await declarations()).toEqual([]);
     expect((await refusal(set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Liam' })))?.extensions?.code).toBe('STOP_SIGNAL_UNAVAILABLE');
-    await dueWakes(ctx(max.id), { accepts: ['STOP'], first: 2, after: first.pageInfo.endCursor });
+    await dueWakes(ctx(max.id), { accepts: ['STOP'], first: 200 });
     expect((await declarations()).map((d) => d.lane)).toEqual(['unhosted']);
   });
 
@@ -283,5 +287,16 @@ describe('fix head — #2432 findings', () => {
     await dueWakes(keyCtx(orca1Key), { accepts: ['STOP'] });
     const e = await refusal(set(ctx(max.id), { level: 'PAUSE', scope: 'TEAM', worker: 'Ada' }));
     expect(e?.extensions).toMatchObject({ code: 'STOP_SIGNAL_UNAVAILABLE', workers: 1, lanes: ['unhosted'] });
+  });
+});
+
+describe('fix head 2 — #2432 cycle-2 findings', () => {
+  it('SECOND / QA P2: a fresh declaration does not survive its host being lost', async () => {
+    await dueWakes(keyCtx(orca2Key), { accepts: ['STOP'] });
+    expect(await set(ctx(max.id), { level: 'PAUSE_DISPATCH', scope: 'WORKER', worker: 'Kit' })).toMatchObject({ live: true }); // served while live (Kit's coordinator is none: he is covered and told nobody)
+    await db.teamStopSignal.deleteMany({ where: { appId: app.id } });
+    await db.hostRegistration.update({ where: { id: (await orca2Reg()).id }, data: { lostAt: new Date() } });
+    const e = await refusal(set(ctx(max.id), { level: 'PAUSE', scope: 'WORKER', worker: 'Kit' }));
+    expect(e?.extensions).toMatchObject({ code: 'STOP_SIGNAL_UNAVAILABLE', workers: 1, lanes: ['orca2'] });
   });
 });
