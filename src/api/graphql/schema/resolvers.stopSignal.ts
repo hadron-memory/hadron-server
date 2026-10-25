@@ -8,7 +8,8 @@
  * - **A host key** (`host:operate`, cor:agt:070:04): a `halt` on its OWN host only, the host taken from the key's
  *   binding and never from the request (a named host that isn't the key's refuses); and lift a `halt` on its own
  *   host (Proposed). Every call is recorded as a host-key use with action `stop`, refusals included (cor:agt:070:07).
- * - **Not yet (#2173, R95):** until the stop-notice lane is in effect, setting ANY signal answers STOP_SIGNAL_UNAVAILABLE.
+ * - **Only where a consumer serves (#2173/#2169, R95):** setting a signal answers STOP_SIGNAL_UNAVAILABLE while any worker it
+ *   would cover is on a lane with no fresh stop-consumer declaration.
  * - **A worker's session** acts with the worker's own rights, never its holder's (H26 reading A, Proposed): refused.
  *
  * Who may see (090:07, Proposed): a person who participates in the App sees every signal; a worker through its own
@@ -36,7 +37,7 @@ import { keyHostId, recordHostKeyUse } from '../../../lib/hostOperations/hostKey
 import { currentActor } from '../../../lib/requestActor.js';
 import { lockStopFence, isLive, coveringSignals, SIGNAL_COLUMNS, type StopLevel, type StopScope, type StopSignal } from '../../../lib/stopSignals/state.js';
 import { liftStopSignal, setStopSignal } from '../../../lib/stopSignals/lifecycle.js';
-import { s6NoticesAvailable } from '../../../lib/stopSignals/delivery.js';
+import { unservedStopLanes } from '../../../lib/stopSignals/delivery.js';
 import type { StopActor } from '../../../lib/stopSignals/notices.js';
 import { Prisma as P } from '../../../generated/prisma/index.js';
 
@@ -49,19 +50,33 @@ const PAGE_MAX = 200;
 
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
 /**
- * #2173 (S6d, R95): a stop signal must not take effect before a consumer can tell the worker. Enforcement is live while
- * the notice lane is dark (#2166), so setting ANY signal (every level, every scope, a person or a host key) is refused
- * until the lane is in effect, behind the SAME switch the notice delivery reads (`s6NoticesAvailable`): the change that
- * turns #2169 on lifts this refusal with it. Lifting and listing are unaffected, and a signal recorded before is untouched.
- * Placed AFTER the caller's own gates (manager, host scope), so only a caller who could have set one learns the lane state.
+ * #2173 (S6d, R95), keyed by #2169: a stop signal must not take effect before a consumer can tell the worker. Enforcement
+ * is live whether or not anyone delivers, so a set is refused (every level, every scope, a person or a host key) when ANY
+ * worker the new signal would cover is on a serving lane with no fresh declaration (`unservedStopLanes`). Lifting and
+ * listing are unaffected, and a signal recorded before is untouched. Placed AFTER the caller's own gates (manager, host
+ * scope), so only a caller who could have set one learns the lane state; the extensions name the count and the lanes
+ * (registration ids the caller may already see), never worker text.
  */
-const stopSignalUnavailable = (): GraphQLError =>
+const stopSignalUnavailable = (unserved: { workers: number; lanes: string[] }): GraphQLError =>
   taskError(
     'STOP_SIGNAL_UNAVAILABLE',
-    'Stop signals cannot be set yet: a stopped worker would not be told (R95), because the stop-notice lane is not in effect (hadron-server#2169). ' +
-      'The refusal lifts when the notice lane is turned on. Lifting a signal and listing signals still work.',
+    `Stop signals cannot be set for ${unserved.workers} worker${unserved.workers === 1 ? '' : 's'} yet: no consumer that tells a stopped worker (R95) has declared the lane${unserved.lanes.length === 1 ? '' : 's'} ` +
+      'it is on (hadron-server#2169). A consumer declares a lane by polling dueWakes with accepts: [STOP]; the declaration lapses when it stops. ' +
+      'Lifting a signal and listing signals still work.',
+    { workers: unserved.workers, lanes: unserved.lanes },
   );
-const requireNoticeLane = (): void => { if (!s6NoticesAvailable()) throw stopSignalUnavailable(); };
+
+/**
+ * Run INSIDE the set's transaction, right after the signal is written: the coverage is the SAME function enforcement and
+ * reconcile use (`coveringSignals`), so the guard can never disagree with what the signal then does. A refusal throws and
+ * the whole set (the signal, its notices and its coverage rows) rolls back with it.
+ */
+async function requireNoticeLane(tx: Prisma.TransactionClient, appId: string, signalId: string, now: Date): Promise<void> {
+  const covering = await coveringSignals(tx, appId, null, now);
+  const covered = [...covering].filter(([, list]) => list.some((s) => s.id === signalId)).map(([workerId]) => workerId);
+  const unserved = await unservedStopLanes(tx, appId, covered, now);
+  if (unserved) throw stopSignalUnavailable(unserved);
+}
 
 const notFound = (): GraphQLError => taskError('STOP_SIGNAL_NOT_FOUND', 'No stop signal with that id in this App.');
 const targetNotFound = (): GraphQLError => taskError('STOP_SIGNAL_NOT_FOUND', 'No such worker or host in this App.');
@@ -203,7 +218,6 @@ async function setSignal(input: SetTeamStopSignalInput, ctx: Context): Promise<S
       const { app, host, authorize } = await hostKeyEntry(ctx, input.appRef);
       if (level !== 'halt' || scope !== 'host') throw scopeForbidden();
       if (hostRef && hostRef !== host.hostId) throw hostScopeRequired();
-      requireNoticeLane(); // #2173: after the key's own gates, inside the recorded call, so the refusal is a recorded stop use
       const view = await ctx.db.$transaction(async (tx) => {
         await authorize(tx);
         await lockStopFence(tx, app.id, 'exclusive');
@@ -215,6 +229,7 @@ async function setSignal(input: SetTeamStopSignalInput, ctx: Context): Promise<S
           appId: app.id, level, scope, targetWorkerId: null, targetHostRegistrationId: regId, until,
           by: { appKeyId: host.appKeyId },
         }, now);
+        await requireNoticeLane(tx, app.id, s.id, now); // #2173/#2169: inside the recorded call, so the refusal is a recorded stop use
         return viewOf(tx, s, now);
       });
       await afterCommit(ctx, app.id);
@@ -228,13 +243,13 @@ async function setSignal(input: SetTeamStopSignalInput, ctx: Context): Promise<S
   const { app, actor } = await personEntry(ctx, input.appRef);
   const view = await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
     if (!(await actorManagesApp(txCtx, fresh, actor))) throw managerRequired();
-    requireNoticeLane(); // #2173: after the manager gate, before anything is read or written
     const now = new Date();
     const until = parseUntil(input.until, now);
     const targetWorkerId = scope === 'host' ? null : await targetWorker(txCtx, fresh.id, workerRef as string);
     const targetHostRegistrationId = scope === 'host' ? await targetHost(tx, fresh.id, hostRef as string) : null;
     const by: StopActor = { userId: actor.userId, actor: eventActor(actor.userId) };
     const s = await setStopSignal(tx, { appId: fresh.id, level, scope, targetWorkerId, targetHostRegistrationId, until, by }, now);
+    await requireNoticeLane(tx, fresh.id, s.id, now); // #2173/#2169: after the manager gate and the target checks
     return viewOf(tx, s, now);
   }, { stopFence: 'exclusive' });
   await afterCommit(ctx, app.id);

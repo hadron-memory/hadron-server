@@ -153,10 +153,10 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
   server.tool(
     'hadron_stop_signal_set',
     'Set a STOP SIGNAL on an App (cor:agt:090): PAUSE_DISPATCH stops assignment; PAUSE also stops ticks and stall time; ' +
-      'HALT also interrupts (its notices are recorded but not yet delivered, so no interrupt happens yet). Scope WORKER (one worker), TEAM (a head and its whole reporting tree) or HOST (the workers a ' +
+      'HALT also tells the worker to save its work and write a hand-off now (typed as an ordinary notice into a verified-empty input; no interrupt key is sent). Scope WORKER (one worker), TEAM (a head and its whole reporting tree) or HOST (the workers a ' +
       'host registration lists). Whoever manages the App, any level and scope; a host key, a HALT on its own host only. ' +
-      'Never replaces another signal. NOT AVAILABLE YET (R95, #2173): until the stop-notice lane is in effect (#2169) every set is refused with ' +
-      'STOP_SIGNAL_UNAVAILABLE, because a stopped worker would not be told; lifting and listing still work.',
+      'Never replaces another signal. Refused with STOP_SIGNAL_UNAVAILABLE (R95, #2173/#2169) while a worker it would cover is on a lane no stop-notice consumer ' +
+      'has declared fresh (a consumer declares by polling hadron_due_wakes with accepts including STOP), because a stopped worker would not be told; lifting and listing still work.',
     SHAPE_HADRON_STOP_SIGNAL_SET,
     async ({ session, ...input }) => write('hadron_stop_signal_set', session, async (ctx) => {
       const s = await M.setTeamStopSignal({}, { input }, ctx);
