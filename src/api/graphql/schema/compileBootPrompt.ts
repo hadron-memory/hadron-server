@@ -20,7 +20,7 @@
  * has been approved, so serving keeps the last approved one until a manager approves.
  */
 import { GraphQLError } from 'graphql';
-import type { Prisma } from '../../../generated/prisma/index.js';
+import type { Node as NodeRow, Prisma } from '../../../generated/prisma/index.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, BOOT_PROMPT_ROLE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import {
@@ -83,6 +83,8 @@ export const APP_COMPILED_LOC = 'boot:compiled';
 export const workerCompiledLoc = (workerId: string): string => `boot:workers:${workerId}:compiled`;
 
 export interface CompiledBootPromptResult {
+  /** The committed compiled node, read inside the deciding transaction: no read after the commit can fail the answer (#2424). */
+  node: NodeRow;
   nodeId: string;
   memoryId: string;
   loc: string;
@@ -178,6 +180,21 @@ async function preFence<T>(work: Promise<T>): Promise<T> {
     if (isBudgetFault(e)) throw compileConflict();
     throw e;
   }
+}
+
+/** The operation's single deadline (#2424): the target-ref resolution and the compile share one budget. */
+export const compileDeadline = (budgetMs: number = COMPILE_BUDGET_MS): number => performance.now() + budgetMs;
+
+/** What is left of the operation budget, at least 1 ms (a spent budget is then refused by the compile itself). */
+export const remainingBudgetMs = (deadline: number): number => Math.max(1, Math.floor(deadline - performance.now()));
+
+/**
+ * Resolve the compile's target ref under the operation deadline (#2424, cor:agt:040:12): a budget or pool fault,
+ * or a stalled read, is the same sanitized CONFLICT as inside the compile. Any other error passes through
+ * unchanged, so a ref that names nothing is still the caller's to map and a programming error is not a denial.
+ */
+export function resolveWithinBudget<T>(deadline: number, resolve: () => Promise<T>): Promise<T> {
+  return preFence(withinBudget(deadline, resolve()));
 }
 
 /** The compile could not settle inside its budget or the owner kept changing: retry. Says nothing about the target. */
@@ -374,7 +391,7 @@ async function decide(
         forceRevision: true,
       },
     ));
-    const node = await tx.node.findUniqueOrThrow({ where: { id: written.id }, select: { id: true, loc: true, memoryId: true, revSeq: true } });
+    const node = await tx.node.findUniqueOrThrow({ where: { id: written.id } });
 
     await tx.compiledPromptRevision.create({
       data: {
@@ -414,11 +431,14 @@ async function decide(
     }
 
     return {
-      nodeId: node.id, memoryId: node.memoryId, loc: node.loc, revNo: node.revSeq,
+      node, nodeId: node.id, memoryId: node.memoryId, loc: node.loc, revNo: node.revSeq,
       contentHash: plan.contentHash, pointerSet: setPointer,
     };
   }, { timeoutMs: remaining - poolWait, maxWaitMs: poolWait });
-  for (const effect of effects) effect();
+  // The compile has committed: a failing best-effort effect must not turn it into an error (#2424).
+  for (const effect of effects) {
+    try { effect(); } catch (e) { console.error('[compileBootPrompt] a post-commit effect failed:', e instanceof Error ? e.message : e); }
+  }
   return result;
 }
 
