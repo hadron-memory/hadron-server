@@ -9,6 +9,7 @@ import { computeApprovalHash } from './approvalHash.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { specCorpusMintMutations } from '../api/graphql/schema/resolvers.specCorpus.js';
 import { pendingEdgeStableTargetKey } from './pendingEdgePromotion.js';
+import { resolveNodeRef } from './entityRef/nodeRef.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -648,12 +649,25 @@ describe('mintSpecCorpus: a text citation into another memory is a CITES_UNMINTE
     expect(n.id).toBeTruthy();
   });
 
-  it('gates on the RESOLVED node: an alias into an unreadable memory reports nothing', async () => {
+  it('gates on the RESOLVED node: a real NODE alias into an unreadable memory reports nothing, into a readable one reports', async () => {
     const t = await foreign('open-specs', 'cor:010');
     const hidden = await hiddenMemory();
-    await db.node.update({ where: { id: t.n.id }, data: { memoryId: hidden.id } });
+    const dest = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'dest-specs' }, as());
+    const aliasUrn = `${t.m.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:cor:010`;
+    await db.urnAlias.create({ data: {
+      urn: aliasUrn, entityType: 'NODE', entityId: t.n.id, reason: 'RENAME', replacedByUrn: `${hidden.urn}:moved:010`,
+    } });
     await cite(t.urn);
+    // The old address is now only an alias: it must still resolve to the moved node.
+    await db.node.update({ where: { id: t.n.id }, data: { memoryId: hidden.id, loc: 'moved:010' } });
+    expect((await resolveNodeRef(db, t.urn)).id).toBe(t.n.id);
     expect((await blockersOf()).filter((b) => b.kind === 'CITES_UNMINTED')).toEqual([]);
+    expect(JSON.stringify(await blockersOf())).not.toContain('moved:010');
+    // Control: the same alias resolving into a readable memory does report.
+    await db.node.update({ where: { id: t.n.id }, data: { memoryId: dest.id, loc: 'moved:010' } });
+    expect(await blockersOf()).toEqual([expect.objectContaining({
+      kind: 'CITES_UNMINTED', loc: 'pas:010:01', targetLoc: `hrn:node:${dest.urn}:moved:010`,
+    })]);
   });
 
   it('leaves UNRESOLVED_REFERENCE output unchanged by foreign text citations', async () => {
