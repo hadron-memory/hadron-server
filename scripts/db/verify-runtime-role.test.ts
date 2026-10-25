@@ -25,8 +25,11 @@ const PASSWORD = randomBytes(12).toString('hex');
 
 function urlFor(user: string, db: string): string {
   const u = new URL(maintenanceUrl());
-  u.username = user;
-  u.password = user === new URL(maintenanceUrl()).username ? '' : PASSWORD;
+  // Keep the admin's own credentials (CI's carry a password); the throwaway roles get the throwaway one.
+  if (user !== u.username) {
+    u.username = user;
+    u.password = PASSWORD;
+  }
   u.pathname = `/${db}`;
   return u.toString();
 }
