@@ -26,13 +26,14 @@ import {
   parseOpenQuestions,
 } from '../../../lib/specMint.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { legacyMemoryUrnToCanonical, normalizeUrnForLookup, parseUrnInput } from '../../../lib/urn.js';
+import { legacyMemoryUrnToCanonical, normalizeUrnForLookup, parseUrnInput, UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../../lib/nodeSubtreeLock.js';
 import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../../../lib/tombstoneArchive.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
 import { pendingEdgeStableTargetId } from '../../../lib/pendingEdgePromotion.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { editorFromAuth, reconcileNodeWithIncludeHistory } from '../../../lib/nodeRevisionSnapshot.js';
 import { mayMintNodes } from './resolvers.nodeApproval.js';
@@ -1391,7 +1392,15 @@ async function mintMemoryNodes(
         for (const urn of findNodeUrnTokens(n[field])) {
           let targetId = resolvedByUrn.get(urn);
           if (targetId === undefined) {
-            targetId = await resolveNodeRefForCaller(txCtx, urn).then((r) => r.id, () => null);
+            targetId = await resolveNodeRefForCaller(txCtx, urn).then((r) => r.id, (e: unknown) => {
+              // Only the resolver's documented "no such citation" refusals are
+              // dropped (they must look like nothing is there). Anything else
+              // is an infrastructure fault: abort, never mint past a citation
+              // we could not check.
+              if (e instanceof NodeNotFoundError || e instanceof AmbiguousLegacyUrnError
+                || e instanceof UrnNotQualifiedError || e instanceof UrnParseError) return null;
+              throw e;
+            });
             resolvedByUrn.set(urn, targetId);
           }
           if (targetId !== null) noteCiting(targetId, n.loc, `${field} cites`);

@@ -14,6 +14,17 @@ import { resolveNodeRef } from './entityRef/nodeRef.js';
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
 }));
+const resolverFault = vi.hoisted(() => ({ on: false }));
+vi.mock('../api/graphql/schema/resolvers.nodeRefAccess.js', async (importActual) => {
+  const actual = await importActual<typeof import('../api/graphql/schema/resolvers.nodeRefAccess.js')>();
+  return {
+    ...actual,
+    resolveNodeRefForCaller: (...args: Parameters<typeof actual.resolveNodeRefForCaller>) => {
+      if (resolverFault.on) throw new Error('simulated resolver outage');
+      return actual.resolveNodeRefForCaller(...args);
+    },
+  };
+});
 vi.mock('../integrations/github/mirrorNodeMove.js', () => ({
   mirrorNodeMoveToGit: vi.fn().mockResolvedValue(undefined),
 }));
@@ -668,6 +679,18 @@ describe('mintSpecCorpus: a text citation into another memory is a CITES_UNMINTE
     expect(await blockersOf()).toEqual([expect.objectContaining({
       kind: 'CITES_UNMINTED', loc: 'pas:010:01', targetLoc: `hrn:node:${dest.urn}:moved:010`,
     })]);
+  });
+
+  it('aborts the mint on an unexpected resolver failure, but drops the documented refusals (#1594 BLIND P2)', async () => {
+    const t = await foreign('other-specs', 'cor:010');
+    await cite(`See ${t.urn}, hrn:node:${org.urn}:no-such-memory:cor:010 and hrn:node:${org.urn}::x.`);
+    resolverFault.on = true;
+    try {
+      await expect(mint(true)).rejects.toThrow('simulated resolver outage');
+      await expect(mint()).rejects.toThrow('simulated resolver outage');
+    } finally { resolverFault.on = false; }
+    expect(await stateOf()).toBe('DRAFT');
+    expect(await blockersOf()).toEqual([expect.objectContaining({ kind: 'CITES_UNMINTED', targetLoc: t.urn })]);
   });
 
   it('leaves UNRESOLVED_REFERENCE output unchanged by foreign text citations', async () => {
