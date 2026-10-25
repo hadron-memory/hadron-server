@@ -606,7 +606,7 @@ describe('mintSpecCorpus: a text citation into another memory is a CITES_UNMINTE
     const t = await foreign('other-specs', 'cor:010');
     await cite(`[x](https://h/app/u/${t.urn})`);
     expect((await blockersOf()).map((b) => b.targetLoc)).toContain(t.urn);
-    await cite(`see hrn:node:${t.m.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}::cor:010.`);
+    await cite(`see hrn:node:${t.m.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '').replace(':', '::')}::cor:010.`);
     expect((await blockersOf()).map((b) => b.targetLoc)).toContain(t.urn);
   });
 

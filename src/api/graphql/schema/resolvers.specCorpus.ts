@@ -32,6 +32,7 @@ import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../../l
 import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../../../lib/tombstoneArchive.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
 import { pendingEdgeStableTargetId } from '../../../lib/pendingEdgePromotion.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { editorFromAuth, reconcileNodeWithIncludeHistory } from '../../../lib/nodeRevisionSnapshot.js';
 import { mayMintNodes } from './resolvers.nodeApproval.js';
@@ -46,6 +47,7 @@ import {
   SCANNED_FIELDS,
   corpusReferencePattern,
   findCorpusReferences,
+  findNodeUrnTokens,
   findTextCitations,
   renumberedLoc,
   rewriteCorpusReferences,
@@ -842,7 +844,7 @@ async function unresolvedReferencesIn(
         kind: 'EDGE', sourceNodeId: p.source.id, sourceLoc: p.source.loc, field: 'pendingEdge',
         targetLoc: !target ? p.targetId
           : target.memoryId === corpus.id ? target.loc
-          : `hrn:node:${target.memory.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${target.loc}`,
+          : foreignNodeUrn(target.memory.urn, target.loc),
         text: p.name,
         reason: live ? 'PLACEHOLDER' : 'MISSING',
       });
@@ -1237,6 +1239,10 @@ async function fenceCorpusForMint(tx: Prisma.TransactionClient, memoryId: string
  * @throws GraphQLError `SPEC_CORPUS_BUSY` (retryable) when a node of the
  *   memory stays locked by an in-flight write.
  */
+/** The canonical node URN naming `loc` in the memory published as `memoryUrn`. */
+const foreignNodeUrn = (memoryUrn: string, loc: string) =>
+  `hrn:node:${memoryUrn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${loc}`;
+
 async function mintMemoryNodes(
   ctx: Context,
   memoryRef: string,
@@ -1362,11 +1368,68 @@ async function mintMemoryNodes(
     });
     for (const e of foreignTargets) {
       if (!(await isMemoryReadableCached(txCtx, e.target.memoryId))) continue;
-      const targetUrn = `hrn:node:${e.target.memory.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${e.target.loc}`;
+      const targetUrn = foreignNodeUrn(e.target.memory.urn, e.target.loc);
       blockers.push({
         kind: 'CITES_UNMINTED', loc: e.source.loc, rule: null, targetLoc: targetUrn,
         message: `edge points at ${targetUrn}, which is not minted yet`,
       });
+    }
+    // #1594 (cor:dmo:120:07, R205) — a text citation or a live pending edge
+    // with a stable `@node-id:` target counts like an edge. A target the
+    // caller cannot read is skipped with NO finding (not MISSING, unlike the
+    // edge above): the mint result must not reveal whether it exists
+    // (cor:api:140:03). Every resolver failure is dropped for the same reason.
+    const citing = new Map<string, Array<{ sourceLoc: string; what: string }>>();
+    const noteCiting = (targetId: string, sourceLoc: string, what: string) => {
+      const list = citing.get(targetId) ?? [];
+      list.push({ sourceLoc, what });
+      citing.set(targetId, list);
+    };
+    const resolvedByUrn = new Map<string, string | null>();
+    for (const n of inScope) {
+      for (const field of SCANNED_FIELDS) {
+        for (const urn of findNodeUrnTokens(n[field])) {
+          let targetId = resolvedByUrn.get(urn);
+          if (targetId === undefined) {
+            targetId = await resolveNodeRefForCaller(txCtx, urn).then((r) => r.id, () => null);
+            resolvedByUrn.set(urn, targetId);
+          }
+          if (targetId !== null) noteCiting(targetId, n.loc, `${field} cites`);
+        }
+      }
+    }
+    const scopeLocById = new Map(inScope.map((n) => [n.id, n.loc]));
+    const pendingStable = await tx.pendingEdge.findMany({
+      where: { deletedAt: null, sourceId: { in: [...inScopeIds] } },
+      select: { sourceId: true, targetId: true },
+      orderBy: { id: 'asc' },
+    });
+    for (const p of pendingStable) {
+      const stableId = pendingEdgeStableTargetId(p.targetId);
+      if (stableId !== null) noteCiting(stableId, scopeLocById.get(p.sourceId) ?? '', 'pending edge points at');
+    }
+    if (citing.size > 0) {
+      const targets = await tx.node.findMany({
+        where: { id: { in: [...citing.keys()] }, memoryId: { not: id }, deletedAt: null, isPlaceholder: false, mintedAt: null },
+        select: { id: true, loc: true, memoryId: true, memory: { select: { urn: true } } },
+        orderBy: { id: 'asc' },
+      });
+      for (const t of targets) {
+        // The RESOLVED node's own memory decides, never the memory the
+        // address named: an alias can point anywhere.
+        if (!(await isMemoryReadableCached(txCtx, t.memoryId))) continue;
+        const targetUrn = foreignNodeUrn(t.memory.urn, t.loc);
+        const seen = new Set<string>();
+        for (const c of citing.get(t.id) ?? []) {
+          const key = `${c.sourceLoc} ${c.what}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          blockers.push({
+            kind: 'CITES_UNMINTED', loc: c.sourceLoc, rule: null, targetLoc: targetUrn,
+            message: `${c.what} ${targetUrn}, which is not minted yet`,
+          });
+        }
+      }
     }
     const staleAbstracts: MintFinding[] = citedInScope
       .filter((n) => isAbstractUnverified(n))
