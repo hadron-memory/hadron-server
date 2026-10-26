@@ -35,7 +35,12 @@ const SRC = join(import.meta.dirname, '..');
  * decision, and the test below proves the path still exists so a stale
  * exemption cannot quietly widen the allow-list.
  */
-const UNGOVERNED_BULK_WRITERS: ReadonlyArray<{ file: string; why: string }> = [];
+const UNGOVERNED_BULK_WRITERS: ReadonlyArray<{ file: string; why: string }> = [
+  {
+    file: 'api/graphql/schema/resolvers.mutation.session.ts',
+    why: 'createRevision inserts the one fixed `revisions` system parent (skipDuplicates) — a literal row, not a copy of any node, so there is no governed role to carry.',
+  },
+];
 
 /** The sites we know must be found — the positive control. */
 const KNOWN_CARRIERS = [

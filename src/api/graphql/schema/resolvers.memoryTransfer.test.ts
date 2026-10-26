@@ -255,13 +255,18 @@ describe('transferMemoryOwnership', () => {
       id: generateId(), name: 'Next Channel Owner', urn: 'next-channel-owner',
     } });
     const transaction = db.$transaction.bind(db);
+    let transferred = false;
     const raceDb = new Proxy(db, {
       get(target, key) {
         if (key === '$transaction') {
           return async (work: Parameters<typeof transaction>[0]) => {
-            await resolvers.Mutation.transferMemoryOwnership(null, {
-              memoryRef: memory.id, orgRef: nextOrg.id,
-            }, { db, userId: outsider.id, roles: ['ADMIN'] });
+            // The write opens more than one transaction; the race is the FIRST only.
+            if (!transferred) {
+              transferred = true;
+              await resolvers.Mutation.transferMemoryOwnership(null, {
+                memoryRef: memory.id, orgRef: nextOrg.id,
+              }, { db, userId: outsider.id, roles: ['ADMIN'] });
+            }
             return transaction(work as never);
           };
         }
@@ -425,13 +430,18 @@ describe('transferMemoryOwnership', () => {
       id: generateId(), name: 'Next Restored Owner', urn: 'next-restored-owner',
     } });
     const transaction = db.$transaction.bind(db);
+    let transferred = false;
     const raceDb = new Proxy(db, {
       get(target, key) {
         if (key === '$transaction') {
           return async (work: Parameters<typeof transaction>[0]) => {
-            await resolvers.Mutation.transferMemoryOwnership(null, {
-              memoryRef: memory.id, orgRef: nextOrg.id,
-            }, { db, userId: outsider.id, roles: ['ADMIN'] });
+            // The write opens more than one transaction; the race is the FIRST only.
+            if (!transferred) {
+              transferred = true;
+              await resolvers.Mutation.transferMemoryOwnership(null, {
+                memoryRef: memory.id, orgRef: nextOrg.id,
+              }, { db, userId: outsider.id, roles: ['ADMIN'] });
+            }
             return transaction(work as never);
           };
         }
