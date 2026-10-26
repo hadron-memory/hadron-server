@@ -67,3 +67,18 @@ it.each(['hadron_find_nodes','hadron_list_nodes'])('keeps a colon loc scoped to 
  const text=await srv.callToolText(tool,{query:'*',parentRel:'notes:ideas',memoryUrn:`hrn:mem:${other.urn}`});
  expect(text).toContain('scoped-only'); expect(text).not.toContain('discovery-only');
 });
+it.each(['hrn:node:foo', 'urn:node:foo:bar', 'hrn:node:parent2526.example:tree', 'hrn:memory:parent2526.example:tree'])('refuses malformed/wrong-kind parent %s', async parentRel => {
+ const {srv}=await fixture();
+ expect(await srv.callTool('hadron_find_nodes',{query:'*',parentRel})).toMatchObject({isError:true});
+});
+it('authorizes dual references before diagnosing a mismatch', async () => {
+ const {srv,memory,org,user}=await fixture();
+ const parentRel=`hrn:node:${memory.urn}:qa-facts`;
+ expect(await srv.callToolText('hadron_find_nodes',{query:'*',parentRel,memoryUrn:`hrn:mem:${memory.urn}`})).toContain('alpha-note');
+ const other=await db.memory.create({data:{urn:'parent2526.example:other',name:'other',class:'private',userId:user.id,organizationId:org.id}});
+ expect(await srv.callTool('hadron_find_nodes',{query:'*',parentRel,memoryUrn:`hrn:mem:${other.urn}`})).toMatchObject({isError:true,content:[{type:'text',text:'parentRel and memoryUrn must name the same memory.'}]});
+ const foreign=await db.user.create({data:{handle:'foreign-scope'}});
+ await db.memory.update({where:{id:other.id},data:{userId:foreign.id}});
+ const denied=await srv.callToolText('hadron_find_nodes',{query:'*',parentRel,memoryUrn:`hrn:mem:${other.urn}`});
+ expect(denied).toBe(`Memory not found or invalid: 'hrn:mem:${other.urn}'. Use hadron_list_memories to see what is available.`);
+});
