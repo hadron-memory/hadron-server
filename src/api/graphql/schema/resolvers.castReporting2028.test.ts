@@ -185,7 +185,7 @@ describe('S12 DARK boundary and atomic S8 join', () => {
   it('conceals foreign/missing/malformed head identities after the manager gate', async () => {
     const other = await db.app.create({ data: { ownerUserId: user.id, name: 'Other', urn: `s12-${generateId()}:other` } });
     const foreign = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: other.id, agentId: agent.id, name: 'Foreign', slug: 'foreign' } });
-    for (const ref of [foreign.id, generateId(), 'hrn:worker:bad', 'Missing']) {
+    for (const ref of [foreign.id, foreign.name, generateId(), 'hrn:worker:bad', 'Missing']) {
       for (const operation of [M.castWorker, Q.castWorkerPreview]) {
         await expect(operation({}, args({ reportsTo: ref }), ctx())).rejects.toMatchObject({ message: 'Worker not found in this App.', extensions: { code: 'WORKER_NOT_FOUND' } });
       }
@@ -565,4 +565,52 @@ it('self-leave winning its row lock is rechecked after the cast waits, with no m
   expect(await outcome).toBe('FORBIDDEN');
   expect(await db.worker.count()).toBe(0);
   expect(await db.agentTeamEvent.count()).toBe(0);
+});
+
+for (const model of ['app', 'agent'] as const) {
+  it(`returns a typed retryable refusal when ${model} ownership changes after anchor planning`, async () => {
+    const changedOwner = user.id;
+    // Inject only the deciding read, after the real transaction acquired its locks.
+    // Planning and all other authorization reads use the actual database.
+    const wrapped = new Proxy(db, { get(target, key) {
+      if (key !== '$transaction') return Reflect.get(target, key);
+      return (callback: any, options: any) => target.$transaction(async tx => callback(new Proxy(tx, {
+        get(client, field) {
+          const value = Reflect.get(client, field);
+          if (field !== model) return typeof value === 'function' ? value.bind(client) : value;
+          return new Proxy(value, { get(delegate, method) {
+            if (method !== 'findUniqueOrThrow') return Reflect.get(delegate, method);
+            return async (query: any) => ({ ...await delegate.findUniqueOrThrow(query), ownerUserId: changedOwner });
+          } });
+        },
+      })), options);
+    } });
+    await expect(M.castWorker({}, args({ noTeam: true }), { ...ctx(), db: wrapped })).rejects.toMatchObject({
+      message: 'The cast target changed; retry the cast.',
+      extensions: { code: 'CAST_TARGET_CHANGED', retryable: true },
+    });
+    expect(await db.worker.count()).toBe(0);
+    expect(await db.agentTeamEvent.count()).toBe(0);
+    expect(await db.ticker.count()).toBe(0);
+  });
+}
+
+it('an omitted or null reporting choice at bind preserves legacy UNSET without a choice event', async () => {
+  for (const input of [{}, { reportsTo: null }]) {
+    const worker = await M.castWorker({}, args({ name: `Bind${Object.keys(input).length}` }), ctx());
+    await M.startSession({}, { input: { workerRef: worker.id, ...input } }, ctx());
+    const row = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    expect(row.explicitNoTeam).toBe(false);
+    expect(row.reportsToWorkerId).toBeNull();
+    expect(await db.agentTeamEvent.count({ where: { subjectWorkerId: row.id, type: 'worker.reports-to' } })).toBe(0);
+  }
+});
+
+it('the delegated MCP list distinguishes stored NO_TEAM from legacy UNSET', async () => {
+  await M.castWorker({}, args({ name: 'Explicit', noTeam: true }), ctx());
+  await M.castWorker({}, args({ name: 'Legacy' }), ctx());
+  const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
+  const text = await mcp.callToolText('hadron_list_workers', {});
+  expect(text.split('\n').find(line => line.includes('Explicit'))).toContain('team placement NO_TEAM');
+  expect(text.split('\n').find(line => line.includes('Legacy'))).toContain('team placement UNSET');
 });
