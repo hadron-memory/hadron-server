@@ -11,7 +11,7 @@ import { automationPinQueries, automationPinMutations } from '../api/graphql/sch
 import { appRunMutations } from '../api/graphql/schema/resolvers.appRun.js';
 import { nodeMutations } from '../api/graphql/schema/resolvers.mutation.node.js';
 import { mintAppRun, executeAppRun, type RunExecutionDeps } from './appRuns.js';
-import { storedAutomationPin } from '../lib/automation/pins.js';
+import { captureAutomationPin, storedAutomationPin } from '../lib/automation/pins.js';
 import { makeProdRunDeps } from './appRunDeps.js';
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
@@ -82,5 +82,26 @@ describe('#2438 entry keyed by node id', () => {
     const run = await f.run();
     expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).entryNodeId).toBe(f.entry.id);
   });
-});
 
+  it('a stored v3 pin keeps verifying under v3 semantics — never a silent unadopt', async () => {
+    const f = await fixture();
+    // A legacy adoption, as pre-#2438 code stored it. No code path writes v3
+    // anymore, so writing the crafted pin to the consent column is the
+    // honest simulation of a trigger that predates the format change.
+    const v3 = storedAutomationPin(await captureAutomationPin(db, f.app.id, f.user.id,
+      'hrn:node:pin.test:flow:entry', f.org.id, f.ctx, {}, { format: 'hadron-automation-pin-v3' }));
+    expect(v3.format).toBe('hadron-automation-pin-v3');
+    await db.agentSchedule.update({ where: { id: f.schedule.id }, data: { automationPin: v3 as never } });
+    const input = { triggerKind: 'SCHEDULE' as const, triggerRef: f.schedule.id };
+    expect((await automationPinQueries.automationApproval({}, input, f.ctx)).state).toBe('ADOPTED');
+    expect(await executeAppRun(db, (await f.run()).id, f.deps)).toBe('completed');
+    // v3 keys the entry by its literal URN, so the same rename v4 shrugs at
+    // is a loud change under the frozen v3 contract — not a silent unadopt,
+    // and not silently relaxed to v4 semantics either.
+    await renameEntry(f);
+    expect((await automationPinQueries.automationApproval({}, input, f.ctx)).state).toBe('CHANGED');
+    const run = await f.run();
+    expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure).toMatchObject({ code: 'AUTOMATION_CHANGED' });
+  });
+});

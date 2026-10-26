@@ -1290,7 +1290,14 @@ export const typeResolvers = {
       if (!(await canSeeUserPersonalFields(ctx, r.userId))) return null;
       return ctx.db.user.findFirst({ where: { id: r.userId, deletedAt: null } });
     },
-    entryNode: async (r: { entryNodeUrn?: string | null }, _: unknown, ctx: Context) => {
+    entryNode: async (r: { entryNodeUrn?: string | null; entryNodeId?: string | null }, _: unknown, ctx: Context) => {
+      // #2438: prefer the stable id — entryNodeUrn is the address at mint and
+      // goes stale after a rename or move; the id keeps pointing at the node.
+      // Legacy rows (null id) keep the URN path.
+      if (r.entryNodeId) {
+        const byId = await ctx.db.node.findFirst({ where: { id: r.entryNodeId, deletedAt: null } });
+        return byId && await isMemoryReadableCached(ctx, byId.memoryId) ? byId : null;
+      }
       if (!r.entryNodeUrn) return null;
       // Request-memoized: resolving a URN is a memory lookup PLUS a node
       // lookup, and runs of one App overwhelmingly share an entry node
