@@ -52,20 +52,13 @@ const badInput = (message: string) =>
 async function endSessionAs(ctx: Context, sessionId: string, endedBy: string | null): Promise<void> {
   await ctx.db.$transaction(async (tx) => {
     // A key-authenticated platform admin records the session's own admin, so that User.id is the ender and takes
-    // the same anchor. The admin is read, locked, then re-read: a merge that committed while the anchor was awaited
-    // moved it, and the lock must be on the value that gets written.
-    let ender = endedBy;
-    for (let attempt = 0; ; attempt++) {
-      const candidate = ender ?? (await tx.impersonationSession.findUnique({ where: { id: sessionId }, select: { adminUserId: true } }))?.adminUserId ?? null;
-      if (!candidate) return; // no such session: nothing to end
-      await lockAuthorityAnchors(tx, [{ kind: 'user', id: candidate }], 'shared');
-      const live = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${candidate} AND deleted_at IS NULL FOR SHARE`;
-      if (live.length === 0) throw forbidden();
-      if (endedBy) { ender = candidate; break; }
-      const again = (await tx.impersonationSession.findUnique({ where: { id: sessionId }, select: { adminUserId: true } }))?.adminUserId;
-      if (again === candidate) { ender = candidate; break; }
-      if (attempt >= 2) throw forbidden();
-    }
+    // the same anchor. One read is enough: the only writer of `admin_user_id` is the merge, which soft-deletes the
+    // source in the same transaction, so a changed admin is already refused by the live check below.
+    const ender = endedBy ?? (await tx.impersonationSession.findUnique({ where: { id: sessionId }, select: { adminUserId: true } }))?.adminUserId ?? null;
+    if (!ender) return; // no such session: nothing to end
+    await lockAuthorityAnchors(tx, [{ kind: 'user', id: ender }], 'shared');
+    const live = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${ender} AND deleted_at IS NULL FOR SHARE`;
+    if (live.length === 0) throw forbidden();
     await tx.impersonationSession.updateMany({
       where: { id: sessionId, endedAt: null },
       data: { endedAt: new Date(), endedBy: ender },
