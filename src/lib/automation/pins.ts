@@ -221,18 +221,23 @@ export async function checkAutomationRevisions(db: PrismaClient, run: AppRun, pr
   } });
   const metadata = (state: Record<string, unknown>) => ({ id: state.id, memoryId: state.memoryId, loc: state.loc,
     revSeq: state.revSeq, deletedAt: state.deletedAt, memory: state.memory });
-  const changed = new AutomationPinError('AUTOMATION_CHANGED', 'Automation revision, dependency edges or read authority changed during the hop');
-  if (rows.length !== Object.keys(proof.nodes).length) throw changed;
+  const message = 'Automation revision, dependency edges or read authority changed during the hop';
+  const changed = new AutomationPinError('AUTOMATION_CHANGED', message);
+  // #2439: losing read access mid-hop is typed like the pre-hop path; a missing node reads the same (indistinguishable).
+  const unreadable = new AutomationPinError('AUTOMATION_CHANGED', message, 'MEMORY_UNREADABLE');
+  const principal = runAuthContext(run);
+  if (rows.length !== Object.keys(proof.nodes).length) throw unreadable;
   const touched: string[] = [];
   const edges: Record<string, string> = {};
   for (const row of rows) {
-    if (hash(json(metadata(row))) !== hash(metadata(proof.nodes[row.id].state))) throw changed;
+    if (hash(json(metadata(row))) !== hash(metadata(proof.nodes[row.id].state))) {
+      throw await canReadMemory(db, principal, row.memoryId) ? changed : unreadable;
+    }
     if (json(row.updatedAt) !== proof.nodes[row.id].state.updatedAt) touched.push(row.id);
     if (proof.flows.includes(row.id)) for (const edge of row.outgoingEdges) edges[edge.id] = hash(json(edge));
   }
   if (hash(edges) !== hash(proof.edges)) throw changed;
-  const principal = runAuthContext(run);
-  for (const memoryId of new Set(rows.map(row => row.memoryId))) if (!await canReadMemory(db, principal, memoryId)) throw changed;
+  for (const memoryId of new Set(rows.map(row => row.memoryId))) if (!await canReadMemory(db, principal, memoryId)) throw unreadable;
   // An operational embedding update moves updatedAt without a definition
   // revision. Re-hash just touched rows instead of rejecting an unchanged hop.
   if (touched.length) {

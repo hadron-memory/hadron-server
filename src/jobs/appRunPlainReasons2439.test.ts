@@ -20,6 +20,7 @@ async function fixture() {
   await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'owner' } });
   const memory = await db.memory.create({ data: { name: 'Flow', urn: 'plain.test:flow', class: 'knowledge', organizationId: org.id } });
   await db.node.create({ data: { memoryId: memory.id, loc: 'entry', name: 'Entry', isRunnable: true, content: 'approved' } });
+    await db.aiModelPrice.create({ data: { id: generateId(), provider: 'test', model: 'test', tier: 1, inputMicroCentsPerMTok: 300_000_000n, outputMicroCentsPerMTok: 1_500_000_000n, effectiveAt: new Date('2020-01-01') } as never });
   const ctx = { db, userId: user.id, roles: [] };
   const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: app.id, name: 'Plain', cron: '* * * * *', entryNodeUrn: 'hrn:node:plain.test:flow:entry', runAsSelf: true } }, ctx);
   const run = () => mintAppRun(db, { appId: app.id, organizationId: org.id, userId: user.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn });
@@ -120,9 +121,32 @@ describe('review fixes (#2492)', () => {
     expect((await reasonOf(run.id, f.ctx) as { kind: string }).kind).toBe('MEMORY_UNREADABLE');
     expect(f.llm).not.toHaveBeenCalled();
   });
+  it('losing read access MID-hop (after a priced hop) reports MEMORY_UNREADABLE too', async () => {
+    const f = await fixture();
+    const other = await db.user.create({ data: { handle: 'mid-hop-owner' } });
+    const run = await f.run();
+    f.llm.mockImplementationOnce(async () => {
+      await db.memory.update({ where: { id: f.memory.id }, data: { class: 'private', userId: other.id } });
+      return { text: 'ok', tokensIn: 1000, tokensOut: 500, provider: 'test', model: 'test' };
+    });
+    expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
+    const row = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(row.tokensSpent).toBe(1500); // the hop really ran before access was lost
+    expect((await reasonOf(run.id, f.ctx) as { kind: string }).kind).toBe('MEMORY_UNREADABLE');
+    // and an edit that keeps the memory readable is still CHANGED
+  });
+  it('an edit mid-hop that keeps the memory readable stays CHANGED', async () => {
+    const f = await fixture();
+    const run = await f.run();
+    f.llm.mockImplementationOnce(async () => {
+      await db.node.updateMany({ where: { memoryId: f.memory.id, loc: 'entry' }, data: { content: 'edited mid-hop' } });
+      return { text: 'ok', tokensIn: 10, tokensOut: 10, provider: 'test', model: 'test' };
+    });
+    expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
+    expect((await reasonOf(run.id, f.ctx) as { kind: string }).kind).toBe('CHANGED');
+  });
   it('a failed rollup rolls the usage event back together with it and the run still finishes', async () => {
     const f = await fixture();
-    await db.aiModelPrice.create({ data: { id: generateId(), provider: 'test', model: 'test', tier: 1, inputMicroCentsPerMTok: 300_000_000n, outputMicroCentsPerMTok: 1_500_000_000n, effectiveAt: new Date('2020-01-01') } as never });
     const run = await f.run();
     const spy = vi.spyOn(db, '$transaction').mockRejectedValueOnce(new Error('injected counter failure') as never);
     const outcome = await executeAppRun(db, run.id, f.deps);
@@ -133,7 +157,6 @@ describe('review fixes (#2492)', () => {
   });
   it('cost keeps accumulating across hops and a legacy NULL run stays unknown', async () => {
     const f = await fixture();
-    await db.aiModelPrice.create({ data: { id: generateId(), provider: 'test', model: 'test', tier: 1, inputMicroCentsPerMTok: 300_000_000n, outputMicroCentsPerMTok: 1_500_000_000n, effectiveAt: new Date('2020-01-01') } as never });
     const legacy = await f.run();
     await db.appRun.update({ where: { id: legacy.id }, data: { costMicroCents: null } });
     await executeAppRun(db, legacy.id, f.deps);
@@ -153,7 +176,6 @@ describe('per-run cost', () => {
   });
   it('executing a priced hop adds its usage-event cost to the run', async () => {
     const f = await fixture();
-    await db.aiModelPrice.create({ data: { id: generateId(), provider: 'test', model: 'test', tier: 1, inputMicroCentsPerMTok: 300_000_000n, outputMicroCentsPerMTok: 1_500_000_000n, effectiveAt: new Date('2020-01-01') } as never });
     const run = await f.run();
     await executeAppRun(db, run.id, f.deps);
     const events = await db.usageEvent.findMany({ where: { appId: f.app.id, type: 'app-run' } });
