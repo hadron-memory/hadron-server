@@ -9073,7 +9073,8 @@ export const typeDefs = `#graphql
     Dry-run castWorker (#964): run the cast's exact resolution — same
     arguments, same typed refusals (WORKER_AGENT_NOT_FOUND / _AMBIGUOUS /
     _NOT_INSTALLED, WORKER_NAME_REQUIRED, WORKER_NAME_TAKEN,
-    WORKER_NAME_CONFUSABLE, WORKER_NAME_RESERVED, APP_UNINSTALLED),
+    WORKER_NAME_CONFUSABLE, WORKER_NAME_RESERVED, WORKER_NAME_RESERVED_TEAM_PREFIX
+    (only while TEAM_TAGS_ENABLED), APP_UNINSTALLED),
     same MINT gate — up to but not
     including the writes, and return what would be created. A Query, not a
     dryRun flag: casting a name is the one irreversible act in the team
@@ -11891,8 +11892,10 @@ export const typeDefs = `#graphql
     user-owned App. Pure App-key principals are denied.
 
     Error codes (extensions.code): WORKER_NAME_TAKEN, WORKER_NAME_CONFUSABLE,
-    WORKER_NAME_REQUIRED, WORKER_NAME_RESERVED, WORKER_AGENT_NOT_INSTALLED,
-    WORKER_AGENT_NOT_FOUND, WORKER_AGENT_AMBIGUOUS, APP_UNINSTALLED.
+    WORKER_NAME_REQUIRED, WORKER_NAME_RESERVED, WORKER_NAME_RESERVED_TEAM_PREFIX
+    (a mention token starting team., refused only while TEAM_TAGS_ENABLED),
+    WORKER_AGENT_NOT_INSTALLED, WORKER_AGENT_NOT_FOUND, WORKER_AGENT_AMBIGUOUS,
+    APP_UNINSTALLED.
 
     #1050 also removed WORKER_ROLE_NOT_FOUND from this mutation: it fired only
     because a nameless cast had to find a roles:<role> node to read a register.
@@ -12231,7 +12234,9 @@ export const typeDefs = `#graphql
     Spec 049 Phase 8 — post into ANY Channel by ref (its id, or its address —
     \`Channel.chatRootUrn\`, #1171): the
     createTeamChatMessage contract (author derivation, mentions, replyToSeq,
-    the body cap, item J) addressed by Channel. createTeamChatMessage is the
+    the body cap, item J) addressed by Channel. While TEAM_TAGS_ENABLED (default
+    off) a post also carries the sender's team tags, and an invalid
+    \`@team.<head>.all\` target refuses the whole post TEAM_CHAT_TEAM_HEAD_INVALID. createTeamChatMessage is the
     appRef → App.defaultChannel convenience over this — one gate, two entry
     points. A Channel you may not read is CHANNEL_NOT_FOUND; one you may read
     but not post into is FORBIDDEN.
