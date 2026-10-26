@@ -271,6 +271,9 @@ describe('cost (graphql-query-complexity), enforce', () => {
     expect(cost('{ agentTaskList(ref: "a", limit: 1) { node { id } } }')).toBe(21);
     expect(cost('{ agentTaskList(ref: "a", symptom: null, limit: 1) { node { id } } }')).toBe(21);
     expect(cost('{ agentTaskList(ref: "a", symptom: "failure", limit: 1) { node { id } } }')).toBe(3);
+    // Admission intentionally ignores resolver caps: conservative overestimates.
+    expect(cost('{ agentTaskList(ref: "a", symptom: "failure") { node { id } } }')).toBe(201);
+    expect(cost('{ agentTaskList(ref: "a", symptom: "failure", limit: 99) { node { id } } }')).toBe(199);
   });
 
   it('inventory: the schema\'s paged fields are exactly the reviewed set (a new one must be checked against its resolver default and listed here)', async () => {

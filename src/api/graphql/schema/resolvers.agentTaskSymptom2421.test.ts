@@ -19,6 +19,9 @@ async function task(memoryId: string, loc: string, abstract: string | null, extr
   return db.node.create({ data: { memoryId, loc, name: loc, isRunnable: true, abstract, ...extra } });
 }
 beforeEach(async () => {
+  vi.stubEnv('EMBEDDING_API_URL', '');
+  vi.stubEnv('EMBEDDING_BACKEND', 'http');
+  resetEmbeddingClientForTests();
   await cleanDb(db);
   const org = await db.organization.create({ data: { urn: 'symptom2421.example', name: 'symptom' } });
   const user = await db.user.create({ data: { handle: 'reader2421', roles: ['READER'] } });
@@ -71,8 +74,12 @@ it.each(['', '   '])('refuses empty symptom %j as BAD_USER_INPUT', async symptom
 it('keeps unfiltered GraphQL and MCP lists byte-identical when symptom is absent', async () => {
   const before = await list();
   expect(await list({ limit: 1 })).toEqual(before);
+  const locs = taskSymptoms2421.map(row=>row.loc).sort();
+  expect(before.map((entry:any)=>[entry.node.loc,entry.trigger])).toEqual(locs.map(loc=>[loc,null]));
   const srv = createTestableMcpServer({ ...ctx, clientId: `user:${ctx.userId}` });
   expect(await srv.callToolText('hadron_agent_tasks', { agentRef: child.id, limit: 1 })).toBe(await srv.callToolText('hadron_agent_tasks', { agentRef: child.id }));
+  const legacyText = [`10 task(s) for Agent ${child.id}:`, ...locs.map(loc=>`- ${loc} — hrn:node:symptom2421.example:child:${loc}`)].join('\n');
+  expect(await srv.callToolText('hadron_agent_tasks',{agentRef:child.id})).toBe(legacyText);
 });
 it('keeps the missing-system-memory refusal rather than an empty ranked list', async () => {
   await db.agent.update({ where: { id: child.id }, data: { systemMemoryId: null } });
@@ -122,4 +129,52 @@ it('defaults to three, clamps a larger limit and honors a smaller limit', async 
   expect(await list({symptom:'common unique symptom'})).toHaveLength(3);
   expect(await list({symptom:'common unique symptom',limit:100})).toHaveLength(3);
   expect(await list({symptom:'common unique symptom',limit:1})).toHaveLength(1);
+});
+
+it('abstract-only lexical ranking preserves stemming and relevance order', async () => {
+  const strong = await task(child.memoryId, 'tasks:strong-abstract', 'migrations failing migrations failing');
+  const weak = await task(child.memoryId, 'tasks:weak-abstract', 'unrelated words '.repeat(100) + 'migration failure');
+  const hits = await list({symptom:'migration'});
+  expect(hits.findIndex((h:any)=>h.node.id===strong.id)).toBeLessThan(hits.findIndex((h:any)=>h.node.id===weak.id));
+  expect(hits.some((h:any)=>h.node.id===strong.id)).toBe(true);
+  expect(hits.some((h:any)=>h.node.id===weak.id)).toBe(true);
+});
+it('MCP omits task abstracts when membership is revoked during embedding retrieval', async () => {
+  await task(child.memoryId, 'tasks:secret', 'zebra outage secretabstract');
+  vi.stubEnv('EMBEDDING_API_URL', 'http://stub.invalid');
+  const embedding = Array.from({length:768}, (_,i) => i===0 ? 1 : 0);
+  setEmbeddingClientForTests({provider:'test',model:'revocation',dim:768,embed:async texts=>{
+    await db.appMember.deleteMany({where:{userId:ctx.userId}});
+    await db.orgMember.deleteMany({where:{userId:ctx.userId}});
+    return texts.map(()=>embedding);
+  }});
+  const srv = createTestableMcpServer({...ctx,clientId:`user:${ctx.userId}`});
+  const text = await srv.callToolText('hadron_agent_tasks',{agentRef:child.id,symptom:'zebra outage'});
+  expect(text).not.toContain('secretabstract');
+});
+it.each([0, -1])('refuses a non-positive ranked limit %s', async limit => {
+  await expect(list({symptom:'migration failure',limit})).rejects.toMatchObject({extensions:{code:'BAD_USER_INPUT'}});
+});
+it('does not relax the keyword half of a true-hybrid task search', async () => {
+  vi.stubEnv('EMBEDDING_API_URL','http://stub.invalid');
+  const embedding = Array.from({length:768},(_,i)=>i===0?1:0);
+  setEmbeddingClientForTests({provider:'test',model:'no-relax',dim:768,embed:async texts=>texts.map(()=>embedding)});
+  await task(child.memoryId,'tasks:keyword-partial','alpha partial');
+  const vector = await task(child.memoryId,'tasks:vector-recall','galactic repair');
+  await upsertAbstractVector(db,{nodeId:vector.id,memoryId:vector.memoryId,provider:'test',model:'no-relax',dim:768,embedding});
+  const hits = await list({symptom:'alpha zzmissing'});
+  expect(hits.map((h:any)=>[h.node.id,h.matchedBy])).toEqual([[vector.id,'VECTOR']]);
+});
+it('filters vector candidates before their ANN window rather than losing the eligible task', async () => {
+  const {getRetrievalProvider} = await import('../../../lib/retrieval/postgres.js');
+  const queryEmbedding = Array.from({length:768},(_,i)=>i===0?1:0);
+  const weaker = Array.from({length:768},(_,i)=>i===0?0.8:i===1?0.6:0);
+  const eligible = await task(child.memoryId,'tasks:eligible-vector','eligible abstract');
+  await upsertAbstractVector(db,{nodeId:eligible.id,memoryId:eligible.memoryId,provider:'test',model:'window',dim:768,embedding:weaker});
+  for(let i=0;i<12;i++) {
+    const distractor = await task(child.memoryId,`notes:closer-${i}`,'closer abstract',{isRunnable:false});
+    await upsertAbstractVector(db,{nodeId:distractor.id,memoryId:distractor.memoryId,provider:'test',model:'window',dim:768,embedding:queryEmbedding});
+  }
+  const hits = await getRetrievalProvider().vectorSearch({db,memoryIds:[child.memoryId],candidateNodeIds:[eligible.id],abstractOnly:true,queryEmbedding,limit:1,contentScope:'CONTENT'});
+  expect(hits.map(h=>h.nodeId)).toEqual([eligible.id]);
 });
