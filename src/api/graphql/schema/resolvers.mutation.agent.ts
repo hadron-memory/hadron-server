@@ -80,6 +80,7 @@ import { withAuthorizedTx } from './authorizedTx.js';
 import { backfillMemoryEmbeddings } from '../../../services/embedding/enqueue.js';
 import { assertNoLiveAgentReferences } from '../../../lib/agentLiveReferences.js';
 import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
+import { DEFAULT_MEMBER_ROLES, normalizeMemberRoles } from '../../../lib/memberRoles.js';
 
 /**
  * #928/#929 review: persona role is trimmed, and a blank-after-trim
@@ -127,6 +128,8 @@ export interface CreateAgentCoreInput {
   usesTasks?: boolean | null;
   /** #2162 (cor:agt:050:27): reset a worker's context when its task ends. Default false; null means the default. */
   resetContextAfterTask?: boolean | null;
+  /** #2171 (R211): omitted/null = the default, owner and member. */
+  memberRoles?: string[] | null;
 }
 
 /**
@@ -154,6 +157,8 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // #929 review: normalize persona dressing inputs before anything touches
   // them.
   const personaRoleNorm = normalizePersonaField(input.personaRole);
+  // #2171: validated before anything is written.
+  const memberRolesNorm = input.memberRoles == null ? [...DEFAULT_MEMBER_ROLES] : normalizeMemberRoles(input.memberRoles);
   // #574: slugify the display name — a raw name would persist a
   // case-sensitive / space-bearing URN (and the system memory URN derives
   // from this one, so it inherits the clean slug).
@@ -281,6 +286,9 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
 
     return tx.agent.create({
       data: {
+        // #2171 (R211): a NEW Agent offers owner and member unless told otherwise.
+        // The column default stays owner-only so no existing row changes meaning.
+        installationPolicy: { maxMembers: 'unlimited', memberRoles: memberRolesNorm } as Prisma.InputJsonValue,
         organizationId: resolvedOrgId, ownerUserId, urn: agentUrn, name, description, systemPrompt, systemMemoryId: resolvedSystemMemoryId,
         visibility: agentVisibility,
         type: inferredType,
@@ -416,7 +424,7 @@ async function requireKnownImportedAgent(
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null },
+      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, memberRoles }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
@@ -476,12 +484,13 @@ export const agentMutations = {
         personaRole,
         usesTasks,
         resetContextAfterTask,
+        memberRoles,
       });
     },
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, registerDefaults }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; registerDefaults?: { mentionOnly?: boolean | null } | null },
+      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, registerDefaults, memberRoles }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // #929 review: normalize persona dressing (blank-after-trim clears).
@@ -494,6 +503,9 @@ export const agentMutations = {
       const agent = await resolveReadableAgentRef(ctx, ref);
       const { id } = agent;
       await requireAgentAccess(ctx, agent, 'ADMIN');
+      // #2171 (R211): validated after the gate, so a caller who may not edit sees the refusal, not a shape error.
+      // Omitted and null both mean unchanged; an empty list is refused, not a reset.
+      const memberRolesNorm = memberRoles == null ? undefined : normalizeMemberRoles(memberRoles);
       // spec 047 (codex review, #682): a user-owned agent is owner-only in v1 —
       // it must NEVER become non-PERSONAL. The create-time guard alone is
       // insufficient: without this, an owner could create a PERSONAL agent and
@@ -673,6 +685,20 @@ export const agentMutations = {
           SELECT urn FROM agents WHERE id = ${id} FOR UPDATE
         `;
         predecessorUrn = lockedRow?.urn;
+        // #2171: the roles edit is a read-modify-write of the policy JSON, so it
+        // reads the stored policy HERE, under the agent row lock, and merges
+        // memberRoles only: maxMembers and selfJoinRole survive, and a concurrent
+        // edit cannot be lost. The same row is what an admission holds FOR SHARE.
+        let mergedPolicy: Prisma.InputJsonValue | undefined;
+        if (memberRolesNorm !== undefined) {
+          const stored = await tx.agent.findUniqueOrThrow({ where: { id }, select: { installationPolicy: true } });
+          const current = (stored.installationPolicy ?? {}) as Record<string, unknown>;
+          mergedPolicy = {
+            ...current,
+            maxMembers: current.maxMembers ?? 'unlimited',
+            memberRoles: memberRolesNorm,
+          } as Prisma.InputJsonValue;
+        }
         if (visibility === 'PUBLIC') {
           // Re-scan the link set now that the agent row is LOCKED (#1364,
           // @codex on PR #1357). The scan above happened before this lock, so
@@ -814,6 +840,7 @@ export const agentMutations = {
           ...(resetContextAfterTask != null ? { resetContextAfterTask } : {}),
           // Spec 049 Phase 5: the install-row defaults — a scalar declaration,
           // stored as given; null clears to the platform defaults.
+          ...(mergedPolicy !== undefined ? { installationPolicy: mergedPolicy } : {}),
           ...(registerDefaults !== undefined
             ? { registerDefaults: registerDefaults === null ? Prisma.JsonNull : { mentionOnly: registerDefaults.mentionOnly === true } }
             : {}),

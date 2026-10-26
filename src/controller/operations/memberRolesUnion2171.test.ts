@@ -152,7 +152,7 @@ describe('races: the deciding union is read under the install/editor fences', ()
       // Every admitted 'guide' must have been decided against a union that still held it,
       // i.e. committed BEFORE the editor's write. With the editor committed last, a guide
       // row is legal; what must never happen is a guide row inserted AFTER the drop.
-      const dropAt = (await db.agent.findUniqueOrThrow({ where: { id: a } })).updatedAt;
+      const dropAt = (await db.agent.findUniqueOrThrow({ where: { id: a } })).updatedAt!;
       const late = await db.appMember.count({ where: { appId, role: 'guide', createdAt: { gt: dropAt } } });
       expect(late).toBe(0);
     }
