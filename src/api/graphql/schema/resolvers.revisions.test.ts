@@ -135,6 +135,34 @@ describe('createRevision', () => {
     );
     expect(result.revisionLoc).toBe('revisions:rev-1');
   });
+
+  // #2498: the slot (`rev-N`) used to be chosen from a count taken BEFORE the insert
+  // transaction's lock, so concurrent saves chose the same loc and the loser died on a raw P2002.
+  it('concurrent saves allocate distinct revision slots (#2498)', async () => {
+    for (let round = 0; round < 5; round++) {
+      const before = await db.node.count({ where: { memoryId: systemMemory.id, loc: { startsWith: 'revisions:' }, deletedAt: null } });
+      const results = await Promise.allSettled(
+        Array.from({ length: 4 }, () => resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx())),
+      );
+      expect(results.filter((r) => r.status === 'rejected')).toEqual([]);
+      const locs = results.map((r) => (r as PromiseFulfilledResult<{ revisionLoc: string }>).value.revisionLoc);
+      expect(new Set(locs).size).toBe(4);
+      const after = await db.node.count({ where: { memoryId: systemMemory.id, loc: { startsWith: 'revisions:' }, deletedAt: null } });
+      expect(after).toBe(before + 4);
+    }
+  });
+
+  it('concurrent restores each auto-save into their own slot (#2498)', async () => {
+    const rev = await resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
+    const results = await Promise.allSettled(
+      Array.from({ length: 3 }, () => resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: rev.revisionLoc }, adminCtx())),
+    );
+    expect(results.filter((r) => r.status === 'rejected')).toEqual([]);
+    const autoSaves = await db.node.findMany({
+      where: { memoryId: systemMemory.id, loc: { startsWith: 'revisions:' }, deletedAt: null, description: { startsWith: 'Auto-save before restoring' } },
+    });
+    expect(autoSaves).toHaveLength(3);
+  });
 });
 
 describe('publishRevision', () => {

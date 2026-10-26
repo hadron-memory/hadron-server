@@ -17,7 +17,7 @@ import {
   revisionStateHashRefreshMarker,
 } from '../../../lib/nodeRevisionSnapshot.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
-import { lockAncestorsForCreate, lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
+import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
@@ -2143,14 +2143,6 @@ export const sessionMutations = {
         data: e.data,
       }));
 
-      // Count existing revisions to auto-increment
-      const existingRevisions = await ctx.db.node.count({
-        where: { memoryId: sysMemId, loc: { startsWith: 'revisions:' }, deletedAt: null },
-      });
-      const revNum = existingRevisions + 1;
-      const label = `rev-${revNum}`;
-      const revLoc = `revisions:${label}`;
-
       // Ensure revisions parent exists
       try {
         await ctx.db.node.upsert({
@@ -2164,7 +2156,18 @@ export const sessionMutations = {
       // delete of the `revisions` parent could count zero descendants and then
       // orphan this row. Hold the ancestor-path lock across the insert (advisory
       // before row; READ COMMITTED so the delete's count sees this post-commit).
-      await ctx.db.$transaction(async (tx) => {
+      // #2498: the slot is allocated INSIDE the serialized section. The `revisions` path lock is
+      // taken first (the key every `revisions:<label>` create takes) and the count is read after it
+      // is granted, on READ COMMITTED's fresh statement snapshot, so concurrent saves (a restore's
+      // auto-save included) each see the previous save's row and take distinct slots.
+      const { label, revLoc } = await ctx.db.$transaction(async (tx) => {
+        await lockPathForCreateUnder(tx, sysMemId, 'revisions');
+        const existingRevisions = await tx.node.count({
+          where: { memoryId: sysMemId, loc: { startsWith: 'revisions:' }, deletedAt: null },
+        });
+        const revNum = existingRevisions + 1;
+        const label = `rev-${revNum}`;
+        const revLoc = `revisions:${label}`;
         await lockAncestorsForCreate(tx, sysMemId, revLoc);
         await tx.node.create({
           data: {
@@ -2180,6 +2183,7 @@ export const sessionMutations = {
             } as InputJsonValue,
           },
         });
+        return { label, revLoc };
       });
 
       return { revisionLoc: revLoc, label, published: false, createdAt: new Date().toISOString() };
