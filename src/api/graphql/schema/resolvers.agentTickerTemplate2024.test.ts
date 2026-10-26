@@ -117,6 +117,22 @@ describe('#2429 isNameClash', () => {
   });
 });
 
+describe('#2429 resolver error mapping', () => {
+  const p2002 = (meta?: Record<string, unknown>) =>
+    new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test', meta });
+
+  it('create rethrows a P2002 that names no model, or another, unchanged; the Agent\'s own model maps', async () => {
+    for (const meta of [undefined, { modelName: 'Ticker' }]) {
+      const raised = p2002(meta);
+      const spy = vi.spyOn(db, '$transaction').mockRejectedValueOnce(raised);
+      await expect(declare('Fresh')).rejects.toBe(raised);
+      spy.mockRestore();
+    }
+    vi.spyOn(db, '$transaction').mockRejectedValueOnce(p2002({ modelName: 'AgentTickerTemplate' }));
+    expect(await refusal(declare('Fresh'))).toBe('TICKER_TEMPLATE_NAME_TAKEN');
+  });
+});
+
 describe('#2024 authority', () => {
   it('writes need the Agent ADMIN door: a plain member and an outsider are refused, nothing written', async () => {
     const t = await declare('Mine');
@@ -447,6 +463,14 @@ describe('#2024 lock protocol (two-connection barriers)', () => {
       await new Promise((r) => setTimeout(r, 10));
     }
   }
+  /** Start the operation, then return the pid of the NEW backend that blocks on `key`: waiters already there (holders, decoys) never count. */
+  async function startBlockedOn<T>(key: string, start: () => Promise<T>, exclude: number[] = []): Promise<{ pid: number; done: Promise<T> }> {
+    const before = [...exclude, ...(await waitersOnKey(key))];
+    const done = start();
+    done.catch(() => undefined);
+    const pid = await waitForWaiterOnKey(key, before);
+    return { pid, done };
+  }
   async function hold(take: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<void>, after?: () => Promise<void>) {
     let release!: () => void;
     const done = new Promise<void>((r) => { release = r; });
@@ -470,39 +494,41 @@ describe('#2024 lock protocol (two-connection barriers)', () => {
       await lockAgentTemplates(tx, agentId, 'exclusive');
       await tx.agentTickerTemplate.create({ data: { agentId, name: 'Uncommitted', cadenceSeconds: 600, reasons: ['read-team-channel'] } });
     });
-    const casting = cast('Iris');
-    expect(await waitForWaiterOnKey(`agent-ticker-templates:${agentId}`, [h.pid])).not.toBe(h.pid);
+    const op = await startBlockedOn(`agent-ticker-templates:${agentId}`, () => cast('Iris'), [h.pid]);
+    expect(op.pid).not.toBe(h.pid);
     h.release(); await h.holder;
-    await casting;
+    await op.done;
     expect((await liveTickers()).map((t) => t.name)).toEqual(['Uncommitted \u00b7 Iris']);
   });
 
-  it('a waiter on another advisory key never satisfies the barrier: only the operation\'s own backend does', async () => {
+  it('a decoy waiter on the same key never stands in for the operation\'s own backend', async () => {
     await declare('Base');
     const operationKey = `tickers:${appId}`;
-    const decoyKey = `tickers:decoy-${generateId()}`;
-    const lockDecoy = async (tx: any) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${decoyKey}, 0))`; };
-    const decoyHolder = await hold(lockDecoy);
-    const decoyWaiter = hold(lockDecoy);
-    const decoyPid = await waitForWaiterOnKey(decoyKey, [decoyHolder.pid]);
-    // The decoy is blocked, yet nothing waits on the operation's key: the barrier sees none.
-    expect(await waitersOnKey(operationKey)).toEqual([]);
-    const h = await hold(async (tx) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${operationKey}, 0))`; });
-    const casting = cast('Iris').then(() => 'cast');
-    const operationPid = await waitForWaiterOnKey(operationKey, [h.pid]);
-    expect([h.pid, decoyHolder.pid, decoyPid]).not.toContain(operationPid);
-    expect(await waitersOnKey(decoyKey, [decoyHolder.pid])).toEqual([decoyPid]);
+    const lockOn = (key: string) => async (tx: any) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`; };
+    const h = await hold(lockOn(operationKey));
+    // A decoy blocked on the SAME key as the operation.
+    const sameKeyDecoy = hold(lockOn(operationKey));
+    const sameKeyDecoyPid = await waitForWaiterOnKey(operationKey, [h.pid]);
+    // Decoys alone are visible as waiters but are not the operation: nothing new waits yet.
+    expect(await waitersOnKey(operationKey, [h.pid, sameKeyDecoyPid])).toEqual([]);
+    const op = await startBlockedOn(operationKey, () => cast('Iris').then(() => 'cast'), [h.pid]);
+    expect([h.pid, sameKeyDecoyPid]).not.toContain(op.pid);
+    expect(await waitersOnKey(operationKey, [h.pid])).toEqual(expect.arrayContaining([sameKeyDecoyPid, op.pid]));
+    expect(await db.worker.count({ where: { appId } })).toBe(0);
     h.release(); await h.holder;
-    expect(await casting).toBe('cast');
-    decoyHolder.release(); await decoyHolder.holder;
-    await decoyWaiter;
+    // The same-key decoy now holds the lock; the operation is still blocked behind it.
+    const decoyNow = await sameKeyDecoy;
+    expect(await waitersOnKey(operationKey)).toEqual([op.pid]);
+    expect(await db.worker.count({ where: { appId } })).toBe(0);
+    decoyNow.release(); await decoyNow.holder;
+    expect(await op.done).toBe('cast');
   });
 
   it('an Agent uninstalled while a cast waits for the template lock refuses the cast and writes nothing', async () => {
     await declare('Base');
     const h = await hold(async (tx) => { await lockAgentTemplates(tx, agentId, 'exclusive'); });
-    const casting = refusal(cast('Iris'));
-    await waitForWaiterOnKey(`agent-ticker-templates:${agentId}`);
+    const op = await startBlockedOn(`agent-ticker-templates:${agentId}`, () => refusal(cast('Iris')), [h.pid]);
+    const casting = op.done;
     await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
     h.release(); await h.holder;
     expect(await casting).toBe('WORKER_AGENT_NOT_INSTALLED');
@@ -514,19 +540,20 @@ describe('#2024 lock protocol (two-connection barriers)', () => {
   it('a cast waits for the App ticker lock, as every ticker write does', async () => {
     await declare('Base');
     const h = await hold(async (tx) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tickers:${appId}`}, 0))`; });
-    const casting = cast('Iris').then(() => 'cast');
-    expect(await waitForWaiterOnKey(`tickers:${appId}`, [h.pid])).not.toBe(h.pid);
+    const op = await startBlockedOn(`tickers:${appId}`, () => cast('Iris').then(() => 'cast'), [h.pid]);
+    expect(op.pid).not.toBe(h.pid);
     expect(await db.worker.count({ where: { appId } })).toBe(0);
     h.release(); await h.holder;
-    expect(await casting).toBe('cast');
+    expect(await op.done).toBe('cast');
   });
 
   it('a retirement takes the App ticker lock before it touches the worker row', async () => {
     await declare('Base');
     const iris = await cast('Iris');
     const h = await hold(async (tx) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tickers:${appId}`}, 0))`; });
-    const retiring = M.retireWorker({}, { workerRef: iris.id }, ctx).then(() => 'retired');
-    expect(await waitForWaiterOnKey(`tickers:${appId}`, [h.pid])).not.toBe(h.pid);
+    const op = await startBlockedOn(`tickers:${appId}`, () => M.retireWorker({}, { workerRef: iris.id }, ctx).then(() => 'retired'), [h.pid]);
+    const retiring = op.done;
+    expect(op.pid).not.toBe(h.pid);
     expect((await db.worker.findUniqueOrThrow({ where: { id: iris.id } })).retiredAt).toBeNull();
     h.release(); await h.holder;
     expect(await retiring).toBe('retired');
