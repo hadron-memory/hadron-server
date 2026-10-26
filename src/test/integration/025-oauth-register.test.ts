@@ -98,6 +98,18 @@ describe('POST /oauth/register — happy path + validation', () => {
     expect(row.redirectUris).toEqual(['https://example.com/callback']);
   });
 
+  it('#155: a registered client expires 30 days from registration unless it is used', async () => {
+    const before = Date.now();
+    const res = await postRegister({ client_name: 'Expiring Client', redirect_uris: ['https://example.com/cb'] });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { client_id: string };
+    const row = await db.oAuthClient.findUniqueOrThrow({ where: { clientId: body.client_id } });
+    const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+    expect(row.expiresAt).not.toBeNull();
+    expect(row.expiresAt!.getTime()).toBeGreaterThanOrEqual(before + thirtyDays);
+    expect(row.expiresAt!.getTime()).toBeLessThanOrEqual(Date.now() + thirtyDays);
+  });
+
   it('falls back to "Unnamed MCP Client" when client_name is absent', async () => {
     const res = await postRegister({ redirect_uris: ['https://example.com/cb'] });
     expect(res.status).toBe(201);
