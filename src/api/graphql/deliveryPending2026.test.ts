@@ -93,6 +93,14 @@ describe('#2026 count boundaries and omission',()=>{
   expect(await deliveryPending(context() as any)).toEqual(metadata(13));
   expect(await snapshot()).toEqual(before);
  });
+ it('enforces no effects in PostgreSQL even if a future count helper attempts a write',async()=>{
+  const before=await snapshot();
+  const spy=vi.spyOn(deliveryBatchModule,'loadPendingDeliverySummary').mockImplementation(async args=>{
+   await args.ctx.db.worker.update({where:{id:worker.id},data:{name:'accidental footer write'}});return 13;
+  });
+  try {expect(await deliveryPending(context() as any)).toBeUndefined();expect(await snapshot()).toEqual(before);}
+  finally {spy.mockRestore();}
+ });
  it('counts a complete empty set as zero and never emits a zero attention line',async()=>{
   await db.channelReadState.create({data:{workerId:worker.id,channelId:channel.id,lastSeenSeq:13}});
   const result={content:[{type:'text',text:'original'}],structuredContent:{ok:true},_meta:{old:1}};

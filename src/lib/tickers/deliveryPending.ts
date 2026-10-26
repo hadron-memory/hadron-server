@@ -1,10 +1,8 @@
 /** #2026: optional post-operation self-only metadata. Every refusal/fault/deadline is omission, with no writes. */
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
-import { withoutRequestCaches } from '../../api/graphql/schema/resolvers.helpers.js';
-import { liveTxContext } from '../../api/graphql/schema/authorizedTx.js';
+import { liveReadSnapshotContext } from '../../api/graphql/schema/authorizedTx.js';
 import { ownBatchSession } from '../../api/graphql/schema/resolvers.deliveryBatch.js';
 import { loadApp } from '../../api/graphql/schema/resolvers.agentTask.js';
-import { lockAuthorityAnchors, type AuthorityAnchor } from '../auth/authorityAnchors.js';
 import { isRunPrincipal } from '../auth/runPrincipal.js';
 import { currentActorAmbiguity } from '../requestActor.js';
 import { loadPendingDeliverySummary } from './deliveryBatch.js';
@@ -22,22 +20,14 @@ export async function deliveryPending(ctx: Context, namedSession?: string): Prom
   try {
     // No uncancelled Promise.race: pool acquisition, transaction lifetime and backend statements are bounded.
     const result = await ctx.db.$transaction(async tx => {
+      await tx.$executeRaw`SET TRANSACTION READ ONLY`;
       await tx.$executeRaw`SET LOCAL statement_timeout = '180ms'`;
-      let txCtx = withoutRequestCaches(ctx, tx);
-      const initial = await ownBatchSession(txCtx);
-      const app = await loadApp(txCtx, initial.worker.appId);
+      // Pure metadata is authorized at this coherent snapshot. The database refuses any accidental write;
+      // credential refresh and the shared self gate use that same snapshot, without write-door audit paths.
+      const txCtx = await liveReadSnapshotContext(ctx, tx);
+      const bound = await ownBatchSession(txCtx);
+      const app = await loadApp(txCtx, bound.worker.appId);
       if (!app || app.deletedAt || app.uninstalledAt) throw new Error('Unavailable footer App');
-      const anchors: AuthorityAnchor[] = [{ kind: 'app', id: app.id },
-        ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
-        ...[...new Set([app.ownerUserId, ctx.userId].filter((v): v is string => !!v))].map(id => ({ kind: 'user' as const, id }))];
-      await lockAuthorityAnchors(tx, anchors, 'shared');
-      // Same owner/App -> Worker -> Session row order as the self-batch gate. A stale locking snapshot aborts/omits.
-      if (app.organizationId) await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${app.organizationId} FOR SHARE`;
-      for (const id of anchors.filter(a => a.kind === 'user').map(a => a.id).sort()) await tx.$queryRaw`SELECT id FROM users WHERE id = ${id} FOR SHARE`;
-      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${app.id} FOR SHARE`;
-      txCtx = await liveTxContext(ctx, tx);
-      const bound = await ownBatchSession(txCtx, app.id, true);
-      if (bound.worker.id !== initial.worker.id) throw new Error('Footer binding changed');
       const count = await loadPendingDeliverySummary({ ctx: txCtx, app, hostId: null, workerIds: [bound.worker.id], now });
       await ownBatchSession(txCtx, app.id);
       if (!Number.isSafeInteger(count) || count < 0) throw new Error('Unsafe footer count');
