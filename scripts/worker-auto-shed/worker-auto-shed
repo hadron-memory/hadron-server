@@ -1,4 +1,5 @@
 #!/bin/bash
+# Bash entrypoint: recovery must exit before the hook side effects below.
 # worker-auto-shed — PreCompact(auto) hook: turn an imminent auto-compaction into
 # a SHED (fresh session via worker-supervise) instead of a lossy compression.
 # Context: Ada's 2026-10-10 compression-induced routing mistakes; Holger's ask

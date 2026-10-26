@@ -16,6 +16,7 @@ function stage(codes: number[], whoamiExit = 0) {
   roots.push(root);
   const bin = join(root, 'bin'); mkdirSync(bin);
   const home = join(root, 'home'); mkdirSync(home);
+  const cwd = join(root, 'cwd'); mkdirSync(cwd);
   const emptyBin = join(root, 'empty-bin'); mkdirSync(emptyBin);
   const calls = join(root, 'calls'); writeFileSync(calls, '');
   const remaining = join(root, 'codes'); writeFileSync(remaining, codes.join('\n') + '\n');
@@ -38,14 +39,14 @@ exit "$code"
   chmodSync(join(bin, 'hadron'), 0o755);
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home };
   const run = (command: string, args: string[], path = env.PATH) => spawnSync(command, args, {
-    encoding: 'utf8', input: '', timeout: 5000, env: { ...env, PATH: path },
+    encoding: 'utf8', input: '', timeout: 5000, cwd, env: { ...env, PATH: path },
   });
   return {
     run: (...args: string[]) => run('/bin/bash', [hook, '--resume-unbound', ...args]),
     runErrexit: (...args: string[]) => run('/bin/bash', ['-e', hook, '--resume-unbound', ...args]),
     runDirect: (...args: string[]) => run(hook, ['--resume-unbound', ...args]),
     runWithoutCli: () => run('/bin/bash', [hook, '--resume-unbound', '--tool', 'codex'], emptyBin),
-    home, env,
+    home, cwd, env,
     calls: () => readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean),
   };
 }
@@ -121,12 +122,13 @@ describe('unbound shed recovery (#2360)', () => {
     expect(r.stdout).toContain('whoami evidence');
     expect(r.stderr).toMatch(/STOP.*ask the human/i);
     expect(readdirSync(s.home)).toEqual([]);
+    expect(readdirSync(s.cwd)).toEqual([]);
     expect(s.calls()).toEqual(['team session start --tool codex', 'team session whoami --check']);
   });
 
   it('direct recovery returns with stdin held open, leaving no hook state, log or prompt', async () => {
     const s = stage([4]);
-    const child = spawn(hook, ['--resume-unbound', '--tool', 'codex'], { env: s.env, stdio: ['pipe', 'ignore', 'ignore'] });
+    const child = spawn(hook, ['--resume-unbound', '--tool', 'codex'], { cwd: s.cwd, env: s.env, stdio: ['pipe', 'ignore', 'ignore'] });
     const timer = setTimeout(() => child.kill(), 3000);
     try {
       const status = await new Promise<number | null>((resolve, reject) => {
@@ -135,6 +137,7 @@ describe('unbound shed recovery (#2360)', () => {
       });
       expect(status, 'recovery read hook stdin or failed direct execution').toBe(4);
       expect(readdirSync(s.home), 'recovery created hook state under HOME').toEqual([]);
+      expect(readdirSync(s.cwd), 'recovery wrote to the working directory').toEqual([]);
       expect(s.calls()).toEqual(['team session start --tool codex', 'team session whoami --check']);
     } finally {
       clearTimeout(timer);
