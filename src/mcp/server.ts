@@ -149,7 +149,7 @@ import {
   mcpPrincipalKey,
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
-import { toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
 import { textResult } from './textResult.js';
 import { tagsInputSchema } from './tagsInput.js';
 import { foreignIdentityScopedMemoryFilter } from '../lib/auth/memoryOwnership.js';
@@ -2925,7 +2925,7 @@ export function createMcpServerInstance(
       try {
         scopeRes = await mcpSearchScope(scope, false);
       } catch (e) {
-        if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'error').toLowerCase()}] ${e.message}`);
+        if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'error').toLowerCase()}] ${e.message}`);
         throw e;
       }
       const principal: SearchPrincipal = {
@@ -3532,10 +3532,7 @@ export function createMcpServerInstance(
   /** A resolver refusal as `[<code>] <message>` text, the app-selection envelope convention. */
   const scopeErrorText = (e: unknown) => {
     if (e instanceof ScopeGraphQLError) {
-      return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
-    }
-    if (e instanceof Error && (e.message === 'Forbidden' || e.message === 'Unauthenticated')) {
-      return textResult(`[${e.message.toLowerCase()}] ${e.message}.`);
+      return refusalResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
     }
     // A ref that names nothing is the caller's input, not a server fault
     // (Copilot on PR #1160): keep it inside the `[code]` envelope.
@@ -3545,9 +3542,9 @@ export function createMcpServerInstance(
       e instanceof OrganizationNotFoundError ||
       e instanceof MemoryNotFoundError
     ) {
-      return textResult(`[not_found] No match for "${(e as { ref?: string }).ref ?? ''}".`);
+      return refusalResult(`[not_found] No match for "${(e as { ref?: string }).ref ?? ''}".`);
     }
-    if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${e.message}`);
+    if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${e.message}`);
     throw e;
   };
 
@@ -3921,7 +3918,7 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
@@ -3987,7 +3984,7 @@ export function createMcpServerInstance(
           // door performs.
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
         throw e;
       }
 
@@ -4109,17 +4106,17 @@ export function createMcpServerInstance(
           return row.id;
         });
       } catch (e) {
-        if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
-        if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
-        if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
-        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
-        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
+        if (e instanceof LocProtectedError) return refusalResult(`[loc_protected] ${e.message}`);
+        if (e instanceof NodeMovedDuringWriteError) return refusalResult(e.message);
+        if (e instanceof MemoryEncryptionChangedDuringWriteError) return refusalResult(e.message);
+        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
         const includeText = includeRefusalText(e);
-        if (includeText) return textResult(includeText);
+        if (includeText) return refusalResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
-        if (writerRefusal) return textResult(writerRefusal);
+        if (writerRefusal) return refusalResult(writerRefusal);
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
-          return textResult(`[spec_minted_permanent] ${e.message}`);
+          return refusalResult(`[spec_minted_permanent] ${e.message}`);
         }
         throw e;
       }
@@ -4143,7 +4140,7 @@ export function createMcpServerInstance(
       try {
         validateParentRel(parentRel);
       } catch (e) {
-        if (e instanceof InvalidParentRelError) return textResult(e.message);
+        if (e instanceof InvalidParentRelError) return refusalResult(e.message);
         throw e;
       }
 
@@ -4238,7 +4235,7 @@ export function createMcpServerInstance(
         try {
           assertFullyQualifiedUrn(memoryUrn, 'memory');
         } catch (e) {
-          if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+          if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
           throw e;
         }
         const mem = await resolveMemoryByUrn(memoryUrn);
@@ -4350,7 +4347,7 @@ export function createMcpServerInstance(
       try {
         scopeRes = await mcpSearchScope(scope, memSelectors.length > 0 || !!trimmedParentRel);
       } catch (e) {
-        if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'error').toLowerCase()}] ${e.message}`);
+        if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'error').toLowerCase()}] ${e.message}`);
         throw e;
       }
       if (scopeRes?.memoryIds) {
@@ -4402,7 +4399,7 @@ export function createMcpServerInstance(
       } catch (e) {
         // findNodes throws BAD_USER_INPUT for a malformed boolean query, an
         // invalid regex, etc. The MCP contract surfaces tool errors as text.
-        if (e instanceof ScopeGraphQLError && e.extensions?.code === 'BAD_USER_INPUT') return textResult(e.message);
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === 'BAD_USER_INPUT') return refusalResult(e.message);
         // #415: anything else, such as a regex statement the database
         // cancelled at its budget, goes through the #1695 boundary, so a
         // Prisma message (driver internals, the SQL shape) never reaches the
@@ -4652,7 +4649,7 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
@@ -5331,14 +5328,14 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawParent, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(`Parent: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Parent: ${e.message}`);
         throw e;
       }
       if (rawCurrent) {
         try {
           assertFullyQualifiedUrn(rawCurrent, 'node');
         } catch (e) {
-          if (e instanceof UrnNotQualifiedError) return textResult(`Current: ${e.message}`);
+          if (e instanceof UrnNotQualifiedError) return refusalResult(`Current: ${e.message}`);
           throw e;
         }
       }
@@ -5454,7 +5451,7 @@ export function createMcpServerInstance(
       try {
         validateParentRel(parentRel);
       } catch (e) {
-        if (e instanceof InvalidParentRelError) return textResult(e.message);
+        if (e instanceof InvalidParentRelError) return refusalResult(e.message);
         throw e;
       }
 
@@ -5493,7 +5490,7 @@ export function createMcpServerInstance(
           try {
             assertFullyQualifiedUrn(memoryUrn, 'memory');
           } catch (e) {
-            if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+            if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
             throw e;
           }
           const mem = await resolveMemoryByUrn(memoryUrn);
@@ -5779,10 +5776,9 @@ export function createMcpServerInstance(
         const key = await resolveSuppliedKey(row, { passphrase, dataKey });
         sessionKeyCache.set(`mcp:${sid}`, row.id, key);
       } catch (err) {
-        if (err instanceof MemoryUnlockError) return textResult(err.message);
-        // Key conflict (another live session holds a DIFFERENT key) or
-        // unexpected — surface the message, never the stack.
-        return textResult(String((err as Error).message));
+        if (err instanceof MemoryUnlockError) return refusalResult(err.message);
+        // Key conflict (another live session holds a DIFFERENT key) or unexpected: anything not typed is a fault (#1789).
+        return toolErrorResult(err, () => String((err as Error).message), 'hadron_unlock_memory');
       }
       return textResult(
         `Memory unlocked for this session: ${row.urn}. Reads now return plaintext; writes encrypt. ` +
@@ -5874,7 +5870,7 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
@@ -5950,7 +5946,7 @@ export function createMcpServerInstance(
               },
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
         throw e;
       }
 
@@ -6038,7 +6034,7 @@ export function createMcpServerInstance(
       try {
         normalizedAbstract = normalizeAbstract(abstract) ?? null;
       } catch (e) {
-        if (e instanceof NodeAbstractTooLongError) return textResult(e.message);
+        if (e instanceof NodeAbstractTooLongError) return refusalResult(e.message);
         throw e;
       }
 
@@ -6359,21 +6355,21 @@ export function createMcpServerInstance(
           return written;
         });
       } catch (e) {
-        if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
+        if (e instanceof NodeSchemaViolation) return refusalResult(`Schema violation: ${e.message}`);
         if (e === LIVE_LOC_CONFLICT) {
           return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
-        if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+        if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
         const includeText = includeRefusalText(e);
-        if (includeText) return textResult(includeText);
+        if (includeText) return refusalResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
-        if (writerRefusal) return textResult(writerRefusal);
-        if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
-        if (e instanceof EdgeLocConflictError) return textResult(e.message);
-        if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
-        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        if (writerRefusal) return refusalResult(writerRefusal);
+        if (e instanceof InlineEdgeEndpointError) return refusalResult(e.message);
+        if (e instanceof EdgeLocConflictError) return refusalResult(e.message);
+        if (e instanceof MemoryEncryptionChangedDuringWriteError) return refusalResult(e.message);
+        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
-          return textResult(`[spec_minted_permanent] ${e.message}`);
+          return refusalResult(`[spec_minted_permanent] ${e.message}`);
         }
         throw e;
       }
@@ -6444,7 +6440,7 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
@@ -6468,8 +6464,8 @@ export function createMcpServerInstance(
       try {
         await assertLocWritable(db, memory.id, loc, 'update');
       } catch (e) {
-        if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
-        if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
+        if (e instanceof LocProtectedError) return refusalResult(`[loc_protected] ${e.message}`);
+        if (e instanceof NodeMovedDuringWriteError) return refusalResult(e.message);
         throw e;
       }
 
@@ -6504,7 +6500,7 @@ export function createMcpServerInstance(
             : {},
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
         throw e;
       }
 
@@ -6558,7 +6554,7 @@ export function createMcpServerInstance(
       try {
         normalizedAbstract = normalizeAbstract(abstract);
       } catch (e) {
-        if (e instanceof NodeAbstractTooLongError) return textResult(e.message);
+        if (e instanceof NodeAbstractTooLongError) return refusalResult(e.message);
         throw e;
       }
 
@@ -6785,20 +6781,20 @@ export function createMcpServerInstance(
             existing.abstract = embeddedPlaintext.abstract;
           });
         } catch (e) {
-          if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
-          if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
-          if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
-          if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
-          if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
-          if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
-          if (e instanceof EdgeLocConflictError) return textResult(e.message);
-          if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+          if (e instanceof NodeSchemaViolation) return refusalResult(`Schema violation: ${e.message}`);
+          if (e instanceof LocProtectedError) return refusalResult(`[loc_protected] ${e.message}`);
+          if (e instanceof NodeMovedDuringWriteError) return refusalResult(e.message);
+          if (e instanceof MemoryEncryptionChangedDuringWriteError) return refusalResult(e.message);
+          if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
+          if (e instanceof InlineEdgeEndpointError) return refusalResult(e.message);
+          if (e instanceof EdgeLocConflictError) return refusalResult(e.message);
+          if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
           const includeText = includeRefusalText(e);
-        if (includeText) return textResult(includeText);
+        if (includeText) return refusalResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
-          if (writerRefusal) return textResult(writerRefusal);
+          if (writerRefusal) return refusalResult(writerRefusal);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
-            return textResult(`[spec_minted_permanent] ${e.message}`);
+            return refusalResult(`[spec_minted_permanent] ${e.message}`);
           }
           if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
             return textResult(`[node_write_conflict] ${e.message}`);
@@ -7321,7 +7317,7 @@ export function createMcpServerInstance(
           )}`,
         );
       } catch (err) {
-        return textResult(roleWriterRefusalText(err) ?? String((err as Error)?.message ?? err));
+        return roleWriterRefusalText(err) !== null ? refusalResult(roleWriterRefusalText(err) as string) : toolErrorResult(err, () => String((err as Error)?.message ?? err), 'hadron_update_edge');
       }
     },
   );
@@ -7335,7 +7331,7 @@ export function createMcpServerInstance(
         await resolvers.Mutation.deleteEdge({}, { edgeRef }, objectCtx());
         return textResult(`Edge deleted: ${edgeRef}`);
       } catch (err) {
-        return textResult(roleWriterRefusalText(err) ?? String((err as Error)?.message ?? err));
+        return roleWriterRefusalText(err) !== null ? refusalResult(roleWriterRefusalText(err) as string) : toolErrorResult(err, () => String((err as Error)?.message ?? err), 'hadron_delete_edge');
       }
     },
   );
@@ -7390,7 +7386,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
@@ -7600,7 +7596,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
           return textResult(`Node "${rawUrn}" moved while this delete waited; re-read it and retry.`);
         }
         if (result.refused === 'mintedSpec') {
-          return textResult(`[spec_minted_permanent] ${result.message}`);
+          return refusalResult(`[spec_minted_permanent] ${result.message}`);
         }
         if (result.refused === 'comment') {
           return textResult(`[role_governed] ${result.message}`);
@@ -7673,13 +7669,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       try {
         assertFullyQualifiedUrn(rawFrom, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(`Source: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Source: ${e.message}`);
         throw e;
       }
       try {
         assertFullyQualifiedUrn(rawTo, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(`Target: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Target: ${e.message}`);
         throw e;
       }
 
@@ -7709,7 +7705,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       try {
         validateLoc(toLoc);
       } catch (e) {
-        return textResult((e as Error).message);
+        return toolErrorResult(e, () => (e as Error).message, 'hadron_move_node:validateLoc');
       }
 
       const existing = await db.node.findUnique({
@@ -7982,8 +7978,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         relocated = completed.relocated;
         linkWarnings = completed.linkWarnings;
       } catch (e) {
-        if (e instanceof ArchivePlanExhaustedError) return textResult('The node was moved concurrently; re-read it and retry.');
-        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        if (e instanceof ArchivePlanExhaustedError) return refusalResult('The node was moved concurrently; re-read it and retry.');
+        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
         // A descendant-slot collision (or a move-into-own-subtree) aborts the
         // whole transaction — including any overwrite eviction — and surfaces as
         // a refusal, not a partial move.
@@ -7997,7 +7993,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           return textResult('Cannot move a node into its own subtree.');
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
-          return textResult(`[spec_minted_permanent] ${e.message}`);
+          return refusalResult(`[spec_minted_permanent] ${e.message}`);
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === 'ROLE_GOVERNED' && e.extensions?.op === 'overwrite') {
           return textResult(`[role_governed] ${e.message}`);
@@ -8006,9 +8002,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           return textResult('The node was moved concurrently; re-read it and retry.');
         }
         const includeText = includeRefusalText(e);
-        if (includeText) return textResult(includeText);
+        if (includeText) return refusalResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
-        if (writerRefusal) return textResult(writerRefusal);
+        if (writerRefusal) return refusalResult(writerRefusal);
         if (
           e instanceof CrossMemoryMoveUnsupportedError ||
           e instanceof SubtreeMoveSchemaViolationError
@@ -8641,7 +8637,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               `Run started: ${runId}\nRead its status, output and path with hadron_get_run(ref: "${runId}").`,
             );
           } catch (err) {
-            return textResult(`Could not start run: ${(err as Error).message}`);
+            return toolErrorResult(err, () => `Could not start run: ${(err as Error).message}`, 'hadron_run_task');
           }
         }
         const loaded = await loadNodeForRun(nodeUrn);
@@ -8954,7 +8950,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const receipt = await bindReceipt(session, mcpCtx);
         return textResult(`Session started: ${session.id}\n> ${description}${receipt}`);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'session start failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'session start failed'}`, 'hadron_start_session');
       }
     },
   );
@@ -8985,7 +8981,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         );
       } catch (e) {
         const code = e instanceof ScopeGraphQLError ? String(e.extensions?.code ?? '') : '';
-        return textResult(`Error${code ? ` [${code}]` : ''}: ${e instanceof Error ? e.message : 'the claim could not be written'}`);
+        return toolErrorResult(e, () => `Error${code ? ` [${code}]` : ''}: ${e instanceof Error ? e.message : 'the claim could not be written'}`, 'hadron_create_resume_claim');
       }
     },
   );
@@ -9015,7 +9011,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         );
       } catch (e) {
         const code = e instanceof ScopeGraphQLError ? String(e.extensions?.code ?? '') : '';
-        return textResult(`Error${code ? ` [${code}]` : ''}: ${e instanceof Error ? e.message : 'resume failed'}`);
+        return toolErrorResult(e, () => `Error${code ? ` [${code}]` : ''}: ${e instanceof Error ? e.message : 'resume failed'}`, 'hadron_resume_session');
       }
       if (r.outcome === 'CHOOSE') {
         const lines = (r.candidates as ResumeCandidate[]).map(
@@ -9120,10 +9116,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         try {
           await writeSessionHandoff(mcpCtx, session.id, session.workerId, handoffBody);
         } catch (e) {
-          return textResult(
-            `The handoff could not be written, so the session is STILL OPEN and was not ended — retry, or end without a handoff. ` +
-              `Cause: ${e instanceof Error ? e.message : 'unknown'}`,
-          );
+          // The session-still-open guidance stays; the Cause is shown only for a typed refusal, never a fault's detail (#1789).
+          const failure = toolErrorResult(e, () => e instanceof Error ? e.message : 'unknown', 'hadron_end_session:handoff');
+          return {
+            ...failure,
+            content: [{ type: 'text' as const, text:
+              `The handoff could not be written, so the session is STILL OPEN and was not ended — retry, or end without a handoff. ` +
+              `Cause: ${failure.content[0].text}` }],
+          };
         }
       }
 
@@ -9481,8 +9481,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             `\nBoot briefing:\n\n${prompt ?? ''}`,
         );
       } catch (e) {
-        if (e instanceof ScopeGraphQLError) return textResult(`Error: [${String(e.extensions?.code ?? 'ERROR')}] ${e.message}`);
-        return textResult(`Error: ${e instanceof Error ? e.message : 'worker casting failed'}`);
+        if (e instanceof ScopeGraphQLError) return refusalResult(`Error: [${String(e.extensions?.code ?? 'ERROR')}] ${e.message}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'worker casting failed'}`, 'hadron_cast_worker');
       }
     },
   );
@@ -9520,8 +9520,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         `Posted message #${msg.seq} in Channel ${ch ? `${ch.name} (${ch.loc})` : channelRef} as ${msg.authorName ?? 'unknown'}${extras.length ? ` (${extras.join('; ')})` : ''}.`,
       );
     } catch (e) {
-      if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
-      return textResult(`Error: ${e instanceof Error ? e.message : 'channel post failed'}`);
+      if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
+      return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'channel post failed'}`, 'hadron_channel_post');
     }
   };
 
@@ -9586,8 +9586,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       });
       return textResult(`${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}${envelope}`);
     } catch (e) {
-      if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
-      return textResult(`Error: ${e instanceof Error ? e.message : 'channel read failed'}`);
+      if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
+      return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'channel read failed'}`, 'hadron_channel_read');
     }
   };
 
@@ -9633,8 +9633,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           return worker.appId === app.id ? worker : null;
         } catch (e) {
           if (
-            (e instanceof ScopeGraphQLError && ['WORKER_NOT_FOUND', 'FORBIDDEN'].includes(String(e.extensions?.code))) ||
-            (e instanceof Error && e.message === 'Forbidden')
+            e instanceof ScopeGraphQLError && ['WORKER_NOT_FOUND', 'FORBIDDEN'].includes(String(e.extensions?.code))
           ) return null;
           throw e;
         }
@@ -10056,7 +10055,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           `Posted team-chat message #${msg.seq}${where} as ${msg.authorName ?? 'unknown'}${extras.length ? ` (${extras.join('; ')})` : ''}.`,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat post failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'team-chat post failed'}`, 'hadron_team_chat_post');
       }
     },
   );
@@ -10163,7 +10162,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           `${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}${envelope}`,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat read failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'team-chat read failed'}`, 'hadron_team_chat_read');
       }
     },
   );
@@ -10502,7 +10501,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             'Work as one with hadron_start_session(description: "<task>", workerRef: "<name>") — it returns that worker\'s boot briefing.',
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'listing workers failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'listing workers failed'}`, 'hadron_list_workers');
       }
     },
   );
@@ -10725,7 +10724,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             renderWorkerContinuity(continuity as RenderableContinuity | null),
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'reading the worker failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'reading the worker failed'}`, 'hadron_get_worker');
       }
     },
   );
@@ -10843,7 +10842,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
               : ''),
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'updating the worker failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'updating the worker failed'}`, 'hadron_update_worker');
       }
     },
   );
@@ -10888,7 +10887,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         const to = worker.reportsToWorkerId ? await db.worker.findUnique({ where: { id: worker.reportsToWorkerId }, select: { name: true } }) : null;
         return textResult(to ? `**${worker.name}** now reports to **${to.name}**.` : `**${worker.name}** now reports to nobody.`);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'changing who the worker reports to failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'changing who the worker reports to failed'}`, 'hadron_set_worker_reports_to');
       }
     },
   );
@@ -10980,7 +10979,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             endedNote,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'work record failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'work record failed'}`, 'hadron_record_work');
       }
     },
   );
@@ -11048,7 +11047,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           `${page.total} record(s) total, showing ${page.items.length}:\n\n${lines.join('\n')}`,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'worklog read failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'worklog read failed'}`, 'hadron_team_work_items');
       }
     },
   );
@@ -11064,7 +11063,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       try {
         assertFullyQualifiedUrn(memoryUrn, 'memory');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
@@ -11111,7 +11110,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       try {
         assertFullyQualifiedUrn(memoryUrn, 'memory');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
