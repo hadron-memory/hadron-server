@@ -46,6 +46,7 @@ vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({
 
 import { mintAppRun, executeAppRun, type RunExecutionDeps } from './appRuns.js';
 import { makeProdRunDeps } from './appRunDeps.js';
+import { formatWriteToRunTime } from '../lib/runner/writeToPattern.js';
 
 const ORG_URN = 'writeto-int-org';
 const MEM_URN = `${ORG_URN}:writemem`;
@@ -206,5 +207,12 @@ describe('data.output.writeTo destination patterns (#2437)', () => {
       where: { loc_memoryId: { loc: 'flow:alerts', memoryId } },
     });
     expect(node.content).toBe('first\n\n---\n\nsecond');
+  });
+
+  // Fixed dates, not the wall clock: the derived-loc pin above can only catch
+  // a padding mutant when the current minute happens to be single-digit.
+  it('{runTime} stamp: UTC YYYY-MM-DD-HHMM, every field zero-padded (direct)', () => {
+    expect(formatWriteToRunTime(new Date(Date.UTC(2026, 0, 2, 3, 4, 56)))).toBe('2026-01-02-0304');
+    expect(formatWriteToRunTime(new Date(Date.UTC(2026, 10, 20, 13, 7, 8)))).toBe('2026-11-20-1307');
   });
 });
