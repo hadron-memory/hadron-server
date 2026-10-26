@@ -7,7 +7,7 @@
  */
 
 /** A DIRECT slot: `revisions:rev-<N>`, or that loc archived by `archivedTombstoneLoc` (`…__deleted-<id>`). No descendants, no other shapes. */
-const SLOT_LOC = /^revisions:rev-([1-9][0-9]{0,8})(?:__deleted-[^:]+)?$/;
+const SLOT_LOC = /^revisions:rev-([1-9][0-9]{0,14})(?:__deleted-[^:]+)?$/;
 
 /** The N of a direct revision slot loc, or null for anything else (descendants, other names, malformed numbers). */
 export function revisionSlotNumber(loc: string): number | null {
