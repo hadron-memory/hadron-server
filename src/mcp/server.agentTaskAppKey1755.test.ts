@@ -33,6 +33,7 @@ afterAll(async () => {
 
 let appId: string;
 let taskId: string;
+let userId: string;
 let key: string;
 let plainSession: string;
 let workerSession: string;
@@ -46,6 +47,7 @@ beforeEach(async () => {
   const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, { db, userId: user.id, roles: ['READER'] });
   const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   appId = app.id;
+  userId = user.id;
   await db.appMember.create({ data: { appId, userId: user.id, role: 'member' } });
   const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: agent.id, name: 'Anne', slug: 'anne' }, select: { id: true } });
   taskId = (await M.createAgentTask({}, { input: { appRef: appId, title: 'visible' } }, { db, userId: user.id, roles: ['READER'] })).id;
@@ -102,6 +104,9 @@ describe('an App key reads tasks and events over MCP, and never through a sessio
       expect(r.text).not.toContain('app_key_session_bound');
     }
     expect((await call(m, 'hadron_task_list', { appRef: appId })).text).toContain('visible');
+    // #2370: the creator filter rides the same key read gate.
+    expect((await call(m, 'hadron_task_list', { appRef: appId, creator: { user: userId } })).text).toContain('visible');
+    expect((await call(m, 'hadron_task_list', { appRef: appId, creator: { worker: 'Anne' } })).text).toBe('No tasks match.');
   });
 
   it.each([

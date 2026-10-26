@@ -185,6 +185,10 @@ export interface LlmUsageParams {
   tier?: number;
   /** Audit column passthrough (existing createdBy semantics untouched). */
   createdBy?: string | null;
+  /** #2439: the AppRun this spend belongs to. Its priced cost is added to the
+   * run's `costMicroCents` in the SAME transaction as the event, so the run's
+   * total and its usage events can never disagree. */
+  appRunId?: string | null;
 }
 
 /**
@@ -210,21 +214,21 @@ export async function recordLlmUsage(
     // #1660 review (local P2-1): the event is stamped at the instant its
     // activity was judged, so it cannot count for a session that lapsed after.
     const at = new Date();
-    const event = await db.usageEvent.create({
-      data: {
+    // #1653 / DY-2: counts toward liveness only for a live, owned session.
+    // The same door as every attributed request (#1660 review, Cloe P3):
+    // counts for a live owned session, and a pure App key's own lapsed
+    // worker session resumes through the locked verdict (DY-1).
+    const countsAsActivity = await attributedRequestActivity(
+      db, { userId: params.userId ?? null, appId: params.appId ?? null }, params.sessionId, { at },
+    );
+    const data = {
         id: generateId(),
         type: params.type,
         nodeLoc: params.nodeLoc ?? null,
         nodeId: params.nodeId ?? null,
         memoryId: params.memoryId ?? null,
         sessionId: params.sessionId ?? null,
-        // #1653 / DY-2: counts toward liveness only for a live, owned session.
-        // The same door as every attributed request (#1660 review, Cloe P3):
-        // counts for a live owned session, and a pure App key's own lapsed
-        // worker session resumes through the locked verdict (DY-1).
-        countsAsActivity: await attributedRequestActivity(
-          db, { userId: params.userId ?? null, appId: params.appId ?? null }, params.sessionId, { at },
-        ),
+        countsAsActivity,
         createdAt: at,
         appId: params.appId ?? null,
         userId: params.userId ?? null,
@@ -236,8 +240,15 @@ export async function recordLlmUsage(
         keyOwnerType: params.keyOwnerType ?? null,
         costMicroCents: cost,
         createdBy: params.createdBy ?? null,
-      },
-    });
+    };
+    const event = params.appRunId && cost != null
+      ? await db.$transaction(async (tx) => {
+          const created = await tx.usageEvent.create({ data });
+          // A run minted before the column keeps NULL (unknown): `not: null` skips it.
+          await tx.appRun.updateMany({ where: { id: params.appRunId!, costMicroCents: { not: null } }, data: { costMicroCents: { increment: cost } } });
+          return created;
+        })
+      : await db.usageEvent.create({ data });
     if (
       debitEnabled() &&
       params.keyOwnerType === 'HADRON_SERVER' &&

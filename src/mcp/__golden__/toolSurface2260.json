@@ -106,7 +106,7 @@
   ],
   [
    "hadron_task_list",
-   "f8f3444db9b0d2e5cd603bdfb2e46b78e1bbbe18d73ab525b53588fe78c90e5e"
+   "c9ee361fa017266e8cc81c707656bcbe242bf16ced6778a34d8fbc4ef3b7cfa3"
   ],
   [
    "hadron_team_events",
@@ -238,7 +238,7 @@
   ],
   [
    "hadron_re_adopt_automation",
-   "2e121b22d64e8593650bb32ed6c31730d96d65c517e2a178e508ff434bb300a7"
+   "8e1d258a5d7ea0d1a3d7991fe30011165fa27db1db8938a0e981aa6048801f20"
   ],
   [
    "hadron_agent_tasks",
@@ -454,7 +454,7 @@
   ],
   [
    "hadron_cast_worker",
-   "0c2d2495a6af839064c3fe0a81354edb41ef008ba2084ada4769b15607f8cf32"
+   "6d5aef2318311103af426c057995688460de04205876dc77ef7149e3aca9f9d8"
   ],
   [
    "hadron_channel_post",
@@ -502,7 +502,11 @@
   ],
   [
    "hadron_update_worker",
-   "fb911abef3a3fbc861a76d16c2b7425eefb9a999fae2608f421ab31363adca3f"
+   "cea7f9a378eb30bdbe8981dafa47c76af989302f0830ca5fa90973965489dc3a"
+  ],
+  [
+   "hadron_change_worker_agent",
+   "7c877547d05ef157baf0d4342024823af3fd1b0a31481682b07d63ab8df6619d"
   ],
   [
    "hadron_set_worker_reports_to",
@@ -632,7 +636,7 @@
   ],
   [
    "hadron_task_list",
-   "f8f3444db9b0d2e5cd603bdfb2e46b78e1bbbe18d73ab525b53588fe78c90e5e"
+   "c9ee361fa017266e8cc81c707656bcbe242bf16ced6778a34d8fbc4ef3b7cfa3"
   ],
   [
    "hadron_team_events",
@@ -764,7 +768,7 @@
   ],
   [
    "hadron_re_adopt_automation",
-   "2e121b22d64e8593650bb32ed6c31730d96d65c517e2a178e508ff434bb300a7"
+   "8e1d258a5d7ea0d1a3d7991fe30011165fa27db1db8938a0e981aa6048801f20"
   ],
   [
    "hadron_agent_tasks",
@@ -980,7 +984,7 @@
   ],
   [
    "hadron_cast_worker",
-   "0c2d2495a6af839064c3fe0a81354edb41ef008ba2084ada4769b15607f8cf32"
+   "6d5aef2318311103af426c057995688460de04205876dc77ef7149e3aca9f9d8"
   ],
   [
    "hadron_channel_post",
@@ -1028,7 +1032,11 @@
   ],
   [
    "hadron_update_worker",
-   "fb911abef3a3fbc861a76d16c2b7425eefb9a999fae2608f421ab31363adca3f"
+   "cea7f9a378eb30bdbe8981dafa47c76af989302f0830ca5fa90973965489dc3a"
+  ],
+  [
+   "hadron_change_worker_agent",
+   "7c877547d05ef157baf0d4342024823af3fd1b0a31481682b07d63ab8df6619d"
   ],
   [
    "hadron_set_worker_reports_to",
@@ -1158,7 +1166,7 @@
   ],
   [
    "hadron_task_list",
-   "f8f3444db9b0d2e5cd603bdfb2e46b78e1bbbe18d73ab525b53588fe78c90e5e"
+   "c9ee361fa017266e8cc81c707656bcbe242bf16ced6778a34d8fbc4ef3b7cfa3"
   ],
   [
    "hadron_team_events",
@@ -1290,7 +1298,7 @@
   ],
   [
    "hadron_re_adopt_automation",
-   "2e121b22d64e8593650bb32ed6c31730d96d65c517e2a178e508ff434bb300a7"
+   "8e1d258a5d7ea0d1a3d7991fe30011165fa27db1db8938a0e981aa6048801f20"
   ],
   [
    "hadron_agent_tasks",
@@ -1506,7 +1514,7 @@
   ],
   [
    "hadron_cast_worker",
-   "0c2d2495a6af839064c3fe0a81354edb41ef008ba2084ada4769b15607f8cf32"
+   "6d5aef2318311103af426c057995688460de04205876dc77ef7149e3aca9f9d8"
   ],
   [
    "hadron_channel_post",
@@ -1538,7 +1546,11 @@
   ],
   [
    "hadron_update_worker",
-   "fb911abef3a3fbc861a76d16c2b7425eefb9a999fae2608f421ab31363adca3f"
+   "cea7f9a378eb30bdbe8981dafa47c76af989302f0830ca5fa90973965489dc3a"
+  ],
+  [
+   "hadron_change_worker_agent",
+   "7c877547d05ef157baf0d4342024823af3fd1b0a31481682b07d63ab8df6619d"
   ],
   [
    "hadron_set_worker_reports_to",
@@ -1668,7 +1680,7 @@
   ],
   [
    "hadron_task_list",
-   "f8f3444db9b0d2e5cd603bdfb2e46b78e1bbbe18d73ab525b53588fe78c90e5e"
+   "c9ee361fa017266e8cc81c707656bcbe242bf16ced6778a34d8fbc4ef3b7cfa3"
   ],
   [
    "hadron_team_events",
@@ -1800,7 +1812,7 @@
   ],
   [
    "hadron_re_adopt_automation",
-   "2e121b22d64e8593650bb32ed6c31730d96d65c517e2a178e508ff434bb300a7"
+   "8e1d258a5d7ea0d1a3d7991fe30011165fa27db1db8938a0e981aa6048801f20"
   ],
   [
    "hadron_agent_tasks",
@@ -2016,7 +2028,7 @@
   ],
   [
    "hadron_cast_worker",
-   "0c2d2495a6af839064c3fe0a81354edb41ef008ba2084ada4769b15607f8cf32"
+   "6d5aef2318311103af426c057995688460de04205876dc77ef7149e3aca9f9d8"
   ],
   [
    "hadron_channel_post",
@@ -2048,7 +2060,11 @@
   ],
   [
    "hadron_update_worker",
-   "fb911abef3a3fbc861a76d16c2b7425eefb9a999fae2608f421ab31363adca3f"
+   "cea7f9a378eb30bdbe8981dafa47c76af989302f0830ca5fa90973965489dc3a"
+  ],
+  [
+   "hadron_change_worker_agent",
+   "7c877547d05ef157baf0d4342024823af3fd1b0a31481682b07d63ab8df6619d"
   ],
   [
    "hadron_set_worker_reports_to",

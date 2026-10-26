@@ -15,7 +15,7 @@ import { resolveNodeRef } from '../entityRef/nodeRef.js';
 import { emitNodeUrnV2 } from '../urnEmit.js';
 
 export class AutomationPinError extends Error {
-  constructor(readonly code: 'AUTOMATION_CHANGED' | 'AUTOMATION_UNADOPTED', changed: string) {
+  constructor(readonly code: 'AUTOMATION_CHANGED' | 'AUTOMATION_UNADOPTED', changed: string, readonly reason?: 'MEMORY_UNREADABLE') {
     super(`${changed}. Nothing further will execute; the run-as user must preview and re-adopt the automation.`);
   }
 }
@@ -69,7 +69,7 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
     }
     const anchor = await db.node.findUnique({ where: { id }, select: { memoryId: true } });
     if (!anchor || !await canReadMemory(db, principal, anchor.memoryId)) {
-      throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation definition is not readable by its principal');
+      throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation definition is not readable by its principal', 'MEMORY_UNREADABLE');
     }
     const node = await db.node.findUnique({ where: { id }, select: { ...DEFINITION_SELECT, outgoingEdges: { orderBy: { id: 'asc' } } } });
     if (!node || node.deletedAt || node.memory.deletedAt || node.memory.isEncrypted || node.memory.organizationId !== organizationId) {
@@ -140,13 +140,13 @@ export async function captureSetupConsent(...args: Parameters<typeof captureAuto
     // Consent needs both the creator's reach and the actual execution principal's reach.
     const principal = runAuthContext({ id: 'setup', appId, userId, organizationId });
     for (const node of Object.values(preview.nodes)) {
-      if (!await canReadMemory(db, principal, String(node.state.memoryId))) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation definition is not readable by its run principal');
+      if (!await canReadMemory(db, principal, String(node.state.memoryId))) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation definition is not readable by its run principal', 'MEMORY_UNREADABLE');
     }
     return storedAutomationPin(preview);
   }
   catch (e) {
     if (e instanceof NodeNotFoundError || e instanceof AutomationPinError) {
-      return { format: 'hadron-automation-unadopted-v1', message: 'Setup graph is missing, unreadable, encrypted or exceeds the consent bounds' };
+      return { format: 'hadron-automation-unadopted-v1', message: 'Setup graph is missing, unreadable, encrypted or exceeds the consent bounds', ...((e instanceof NodeNotFoundError ? 'MEMORY_UNREADABLE' : e.reason) ? { reason: 'MEMORY_UNREADABLE' } : {}) };
     }
     throw e;
   }
@@ -154,7 +154,7 @@ export async function captureSetupConsent(...args: Parameters<typeof captureAuto
 
 /** Invalid persisted consent is never treated as an absent optional gate. */
 export function parseAutomationPin(raw: unknown): AutomationPin {
-  if ((raw as { format?: string })?.format === 'hadron-automation-unadopted-v1') throw new AutomationPinError('AUTOMATION_UNADOPTED', `Setup could not be adopted: ${(raw as { message: string }).message}`);
+  if ((raw as { format?: string })?.format === 'hadron-automation-unadopted-v1') throw new AutomationPinError('AUTOMATION_UNADOPTED', `Setup could not be adopted: ${(raw as { message: string }).message}`, (raw as { reason?: string }).reason === 'MEMORY_UNREADABLE' ? 'MEMORY_UNREADABLE' : undefined);
   const p = raw as AutomationPin | null;
   if (!p || p.format !== 'hadron-automation-pin-v3' || !p.hash || !p.entry || !p.entryId ||
       !p.nodes || !Array.isArray(p.flows) || !Array.isArray(p.absentPartials) || !p.edges || !p.resources || !p.resources.mcp || !p.resources.ha || !Array.isArray(p.resources.tools)) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation has no valid setup pin');
@@ -172,7 +172,12 @@ export async function verifyAutomationPin(db: PrismaClient, run: AppRun, nodeUrn
       (['SCHEDULE', 'WEBHOOK', 'MANUAL'].includes(run.triggerKind) && pin.entry !== run.entryNodeUrn)) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation identity changed');
   let current: AutomationPreview;
   try { current = await captureAutomationPin(db, run.appId, run.userId, pin.entry, run.organizationId, runAuthContext(run), configSelection(run)); }
-  catch (e) { if (!(e instanceof AutomationPinError || e instanceof NodeNotFoundError)) throw e; throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph is no longer available or readable'); }
+  catch (e) {
+    if (!(e instanceof AutomationPinError || e instanceof NodeNotFoundError)) throw e;
+    // A missing and a foreign (unreadable) memory stay indistinguishable: both carry the same typed reason (#2439).
+    const unreadable = e instanceof NodeNotFoundError || e.reason === 'MEMORY_UNREADABLE';
+    throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph is no longer available or readable', unreadable ? 'MEMORY_UNREADABLE' : undefined);
+  }
   if (current.hash !== pin.hash) {
     const changedNodes = [...new Set([...Object.keys(pin.nodes), ...Object.keys(current.nodes)])]
       .filter(id => pin.nodes[id]?.hash !== current.nodes[id]?.hash).map(id => pin.nodes[id]?.urn ?? current.nodes[id]?.urn);
@@ -216,18 +221,23 @@ export async function checkAutomationRevisions(db: PrismaClient, run: AppRun, pr
   } });
   const metadata = (state: Record<string, unknown>) => ({ id: state.id, memoryId: state.memoryId, loc: state.loc,
     revSeq: state.revSeq, deletedAt: state.deletedAt, memory: state.memory });
-  const changed = new AutomationPinError('AUTOMATION_CHANGED', 'Automation revision, dependency edges or read authority changed during the hop');
-  if (rows.length !== Object.keys(proof.nodes).length) throw changed;
+  const message = 'Automation revision, dependency edges or read authority changed during the hop';
+  const changed = new AutomationPinError('AUTOMATION_CHANGED', message);
+  // #2439: losing read access mid-hop is typed like the pre-hop path; a missing node reads the same (indistinguishable).
+  const unreadable = new AutomationPinError('AUTOMATION_CHANGED', message, 'MEMORY_UNREADABLE');
+  const principal = runAuthContext(run);
+  if (rows.length !== Object.keys(proof.nodes).length) throw unreadable;
   const touched: string[] = [];
   const edges: Record<string, string> = {};
   for (const row of rows) {
-    if (hash(json(metadata(row))) !== hash(metadata(proof.nodes[row.id].state))) throw changed;
+    if (hash(json(metadata(row))) !== hash(metadata(proof.nodes[row.id].state))) {
+      throw await canReadMemory(db, principal, row.memoryId) ? changed : unreadable;
+    }
     if (json(row.updatedAt) !== proof.nodes[row.id].state.updatedAt) touched.push(row.id);
     if (proof.flows.includes(row.id)) for (const edge of row.outgoingEdges) edges[edge.id] = hash(json(edge));
   }
   if (hash(edges) !== hash(proof.edges)) throw changed;
-  const principal = runAuthContext(run);
-  for (const memoryId of new Set(rows.map(row => row.memoryId))) if (!await canReadMemory(db, principal, memoryId)) throw changed;
+  for (const memoryId of new Set(rows.map(row => row.memoryId))) if (!await canReadMemory(db, principal, memoryId)) throw unreadable;
   // An operational embedding update moves updatedAt without a definition
   // revision. Re-hash just touched rows instead of rejecting an unchanged hop.
   if (touched.length) {

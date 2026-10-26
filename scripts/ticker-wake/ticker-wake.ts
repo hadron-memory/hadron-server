@@ -818,10 +818,10 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
         };
 
         // An unreconciled earlier request is reconciled with ITS OWN identity. Reissuing it can still perform input, so it
-        // needs the same receiver and composer safety. An id-less accepted request may only be displaced by NEW ticks
+        // needs the same receiver and composer safety. An unresolved request may only be displaced by NEW ticks
         // after two cadences; the old request is never replayed without its id.
         const allowFreshTick = (p: Ambiguous): boolean => {
-          if (dry || now - p.at < NEEDS_PERSON_AFTER_MS || !wasAccepted(p.detail)
+          if (dry || now - p.at < NEEDS_PERSON_AFTER_MS
             || p.receiver !== receiver || typeof term0?.incarnationId !== 'string' || !term0.incarnationId) return false;
           const old = [...unresolved, ...p.coverage];
           if (!work.some((t) => tickParts(t) && !unresolvedCovers(t, old))) return false;

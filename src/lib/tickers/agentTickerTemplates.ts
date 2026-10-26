@@ -9,7 +9,7 @@
 // The functions take a TRANSACTION and never open one, so the cast that owns the transaction (castWorker today,
 // the S12 cast tomorrow) composes them under its own lock order:
 //
-//   worker-name lock  ->  (reportsTo graph)  ->  App ticker lock  ->  Agent template lock (shared)  ->  rows
+//   authority anchors -> early Agent template lock (shared) -> stop fence -> name -> reportsTo graph -> ticker -> Worker rows
 //
 // Template writers take the Agent template lock EXCLUSIVE and never an App lock, so the two cannot cycle, and a
 // cast either sees a template that committed first or waits for the writer: the lock is what fences the
@@ -141,8 +141,9 @@ export async function planGeneratedTickers(
 
 /**
  * Create the worker's tickers from the Agent's live templates and subscribe it, inside the caller's transaction.
- * The caller has already taken the worker-name lock and holds the worker row it just created. Takes the App
- * ticker lock, then the Agent template lock shared, and plans against what is then committed. Any refusal throws
+ * The cast caller has already acquired both advisory resources BEFORE any Worker row, under its authority
+ * anchors and early template snapshot. These acquisitions are re-entrant, never new late locks. It plans against
+ * the template set held by that snapshot. Any refusal throws
  * and the caller's transaction rolls the whole cast back, name allocation included (no orphan worker, ticker
  * or subscription).
  *

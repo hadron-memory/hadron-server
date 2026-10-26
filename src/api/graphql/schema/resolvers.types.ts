@@ -1,4 +1,6 @@
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
+import { plainRunFailure } from '../../../lib/automation/plainReason.js';
+import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { lintWarningPage, lintWarningPageForNodeId } from '../../../lib/bootPromptLint.js';
@@ -1194,6 +1196,9 @@ export const typeResolvers = {
       resolveRevisionEditor(ctx, [nv.approvedBy]),
   },
   AppRun: {
+    // #2439: BigInt over the wire as a string, like UsageEvent.costMicroCents; NULL = unknown.
+    costMicroCents: (r: { costMicroCents?: bigint | null }) => r.costMicroCents != null ? r.costMicroCents.toString() : null,
+    failureReason: (r: { status: string; failure: unknown; budgetTokens: number | null; budgetActions: number | null }) => plainRunFailure(r),
     /**
      * Spec 049 Phase 3b — the run's scope as the CALLER may read it: the mint
      * snapshot ∩ the caller's current access (a lens never grants), or null
@@ -1558,6 +1563,9 @@ export const typeResolvers = {
     },
   },
   App: {
+    /** #2171 (R211): the union reader every admission decides with. */
+    availableMemberRoles: async (a: { id: string }, _: unknown, ctx: Context) =>
+      (await loadOfferedMemberRoles(ctx.db, a.id)).roles,
     /** #2109 — whether the caller manages this App; the shared managesApp predicate as a read-time fact. */
     viewerManages: (a: { id: string }, _: unknown, ctx: Context) => loadViewerManages(ctx, a.id),
     /**

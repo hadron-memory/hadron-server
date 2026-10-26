@@ -12,6 +12,7 @@ import {
   resolveAssetTargetMemoryId,
   requireReadableAgentForAssetOp,
 } from './resolvers.helpers.js';
+import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 export const assetQueries = {
     agentAssets: async (
@@ -25,12 +26,12 @@ export const assetQueries = {
       },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // #876 (HIGH) — see memoryAssets below. This one resolves the target's
       // private per-user holding memory (userMemoryOfAgentId + createdBy) and
       // then filters `uploadedBy: caller.userId`, so every row is by
       // construction identity-scoped to the target.
-      if (ctx.impersonation) throw new Error('Forbidden');
+      if (ctx.impersonation) throw forbiddenError();
       // #1946: an Agent the caller can't read answers the op's own "agent not found".
       await requireReadableAgentForAssetOp(ctx, input.agentUrn, () => new AssetUploadError('NOT_FOUND', 'agent not found'));
       const result = await listAgentAssets(
@@ -59,7 +60,7 @@ export const assetQueries = {
       },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // #876 (HIGH): the asset surface builds an ad-hoc caller principal that
       // cannot carry ctx.impersonation, and routes its memory check through
       // the MCP gate (src/mcp/access-control.ts canReadMemory) rather than the
@@ -76,7 +77,7 @@ export const assetQueries = {
       // gate leaked. That filter is gone (listing is now gated on the memory,
       // per cor:dmo:060:10), so DO NOT relax this throw without first
       // narrowing the gate itself.
-      if (ctx.impersonation) throw new Error('Forbidden');
+      if (ctx.impersonation) throw forbiddenError();
       const result = await listMemoryAssets(
         ctx.db,
         {
@@ -101,7 +102,7 @@ export const assetQueries = {
       input: ListAssetsInput,
       ctx: Context,
     ) => {
-      if (!ctx.userId && !ctx.appId) throw new Error('Unauthenticated');
+      if (!ctx.userId && !ctx.appId) throw unauthenticatedError();
       // #876 (HIGH): same denial as every other asset read surface, and it
       // has to be stated HERE rather than inherited — this is a NEW
       // surface, and cor:acl:100:03 makes uploaded assets and their
@@ -112,7 +113,7 @@ export const assetQueries = {
       // would enumerate the target's files across every org they belong
       // to, and an asset id is the credential for the unauthenticated
       // GET /assets/:id hotlink.
-      if (ctx.impersonation) throw new Error('Forbidden');
+      if (ctx.impersonation) throw forbiddenError();
       return listAssets(ctx, input);
     },
 
@@ -121,7 +122,7 @@ export const assetQueries = {
       { assetId, ttlSeconds }: { assetId: string; ttlSeconds?: number },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // #876 (HIGH): this mints a presigned object-store GET URL valid for up
       // to an hour that KEEPS WORKING after stopImpersonation, defeating the
       // "session row is the revocation source of truth" guarantee the whole
@@ -130,7 +131,7 @@ export const assetQueries = {
       // audit trail's ability to revoke it. (The gate below is now the
       // memory's read gate rather than `uploadedBy === caller.userId`, which
       // makes this throw more important, not less.)
-      if (ctx.impersonation) throw new Error('Forbidden');
+      if (ctx.impersonation) throw forbiddenError();
       const result = await mintAssetDownloadUrl(
         ctx.db,
         {

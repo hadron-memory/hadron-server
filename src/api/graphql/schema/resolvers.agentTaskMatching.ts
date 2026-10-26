@@ -17,13 +17,13 @@ import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import { loadTeamRoster, type RosterEntry } from '../../../lib/agentTasks/roster.js';
 import type { WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
 import { loadAppWorkerCheckStatuses, maySeeWorkerInternals } from './resolvers.worker.js';
+import { groupComposition } from '../../../lib/agentTasks/composition.js';
 import { canSeeUserPersonalFieldsMany } from '../../../lib/auth/userVisibility.js';
 
 const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
 
-export const agentTaskMatchingQueries = {
-  /** #1707 — every worker's derived state in an App (plan §7.4), for its task audience. */
-  teamRoster: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
+/** Shared admission and projected rows: both reads use one bounded RepeatableRead snapshot. */
+async function readTeamRoster(ctx: Context, appRef: string) {
     // Admission, status and assignment projections share one read snapshot, including MCP callers.
     return ctx.db.$transaction(async (tx) => {
       const readCtx = withoutRequestCaches(ctx, tx);
@@ -41,17 +41,25 @@ export const agentTaskMatchingQueries = {
         canReadTasks ? loadRosterTaskSummaries(tx, app.id, workerIds) : new Map<string, RosterTaskSummary>(),
       ]);
       const pauses = new Map(settings.map((s) => [s.workerId, s.pausedUntil]));
-      const holders = await loadRosterHolders(readCtx, tx, app.id, workerIds);
+      const workingStateVisible = workerIds.length > 0 && await maySeeWorkerInternals(readCtx, app.id);
+      const holders = await loadRosterHolders(readCtx, tx, app.id, workerIds, workingStateVisible);
       return {
         appId: app.id,
         asOf,
-        workers: entries.map((e) => ({ ...e, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
+        workers: entries.map((e) => ({ ...e, teamPlacement: workingStateVisible ? e.teamPlacement : null, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
           pausedUntil: pauses.get(e.workerId) ?? null, currentTask: tasks.get(e.workerId) ?? null,
           heldBy: holders.get(e.workerId)?.heldBy ?? null, heldAt: holders.get(e.workerId)?.heldAt ?? null })),
       };
     // An explicit, bounded read budget avoids imposing Prisma's implicit 5s interactive-transaction default
     // on the now-serialized bulk roster loaders. This does not change query/lock or test timeouts.
     }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 20_000 });
+}
+
+export const agentTaskMatchingQueries = {
+  teamRoster: (_: unknown, { appRef }: { appRef: string }, ctx: Context) => readTeamRoster(ctx, appRef),
+  teamComposition: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
+    const roster = await readTeamRoster(ctx, appRef);
+    return { appId: roster.appId, asOf: roster.asOf, lanes: groupComposition(roster.workers) };
   },
 };
 
@@ -73,9 +81,10 @@ async function loadRosterHolders(
   tx: Prisma.TransactionClient,
   appId: string,
   workerIds: string[],
+  workingStateVisible: boolean,
 ): Promise<Map<string, { heldBy: RosterHolder; heldAt: Date | null }>> {
   const out = new Map<string, { heldBy: RosterHolder; heldAt: Date | null }>();
-  if (workerIds.length === 0 || !(await maySeeWorkerInternals(readCtx, appId))) return out;
+  if (workerIds.length === 0 || !workingStateVisible) return out;
   const holds = await tx.worker.findMany({
     where: { id: { in: workerIds }, heldByUserId: { not: null } },
     select: { id: true, heldByUserId: true, heldAt: true },
@@ -96,7 +105,8 @@ async function loadRosterHolders(
   return out;
 }
 
-type RosterRow = RosterEntry & {
+type RosterRow = Omit<RosterEntry, 'teamPlacement'> & {
+  teamPlacement: RosterEntry['teamPlacement'] | null;
   appUrn: string; checkStatus: WorkerCheckStatus | null; pausedUntil: Date | null; currentTask: RosterTaskSummary | null;
   heldBy: RosterHolder | null; heldAt: Date | null;
 };

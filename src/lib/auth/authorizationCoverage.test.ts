@@ -33,6 +33,8 @@ const DIRECT = [
   ['resolvers.mutation.app.ts', 'createApp'],
   ['resolvers.mutation.app.ts', 'joinApp'],
   ['resolvers.mutation.chat.ts', 'startChat'],
+  // #2458: changing a worker's agent provisions a missing same-org grant, inside withAuthorizedTx.
+  ['resolvers.worker.ts', 'changeWorkerAgent'],
 ] as const;
 
 // These public mutations deliberately delegate to one shared implementation.
@@ -123,6 +125,7 @@ describe('#1551 authority writer ratchet', () => {
       ['resolvers.mutation.app.ts', 3],
       ['resolvers.mutation.chat.ts', 1],
       ['resolvers.helpers.ts', 2],
+      ['resolvers.worker.ts', 1], // #2458 changeWorkerAgent (anchored; in DIRECT)
     ]);
     const files = execFileSync('git', ['ls-files', 'src/api/graphql/schema/resolvers*.ts'], { encoding: 'utf8' })
       .split('\n').filter((file) => file && !file.endsWith('.test.ts'));
