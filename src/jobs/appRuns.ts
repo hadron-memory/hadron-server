@@ -592,6 +592,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       // budget" — the two columns above are live-decremented remainders.
       budgetTokensInitial: DEFAULT_RUN_TOKEN_BUDGET,
       budgetActionsInitial: DEFAULT_RUN_ACTION_BUDGET,
+      costMicroCents: 0n,
       timeoutMs: args.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
       createdBy: args.createdBy ?? null,
     },
@@ -751,12 +752,12 @@ async function executeAppRunInner(
   if (claimed.count === 0) return 'skipped';
   const run = await db.appRun.findUniqueOrThrow({ where: { id: runId } });
 
-  const fail = async (code: string, message: string): Promise<RunOutcome> => {
+  const fail = async (code: string, message: string, reason?: string): Promise<RunOutcome> => {
     // Guarded transition: a concurrent cancelAppRun must not be overwritten
     // to FAILED — the audit log keeps CANCELLED (PR-493 review, Gemini).
     const res = await db.appRun.updateMany({
       where: { id: runId, status: 'RUNNING' },
-      data: { status: 'FAILED', failure: { code, message }, finishedAt: new Date() },
+      data: { status: 'FAILED', failure: { code, message, ...(reason ? { reason } : {}) }, finishedAt: new Date() },
     });
     return res.count === 1 ? 'failed' : 'skipped';
   };
@@ -828,7 +829,7 @@ async function executeAppRunInner(
       } catch (err) {
         // A mid-flow node that can't be loaded is the D20 entry-missing
         // analog: an OBSERVABLE failed run, position preserved on the row.
-        if (err instanceof AutomationPinError) return fail(err.code, err.message);
+        if (err instanceof AutomationPinError) return fail(err.code, err.message, err.reason);
         await checkConsent();
         return fail('NODE_LOAD_FAILED', String((err as Error)?.message ?? err));
       }
@@ -876,7 +877,7 @@ async function executeAppRunInner(
         // One usage event per hop — a failed flow still shows what it spent.
         // Spec 046: recordLlmUsage enriches with attribution (user + org),
         // the cost snapshot, and BYOK classification; it is throw-safe.
-        await recordLlmUsage(db, {
+        const usage = await recordLlmUsage(db, {
           type: 'app-run',
           nodeLoc: cur,
           appId: run.appId,
@@ -889,6 +890,11 @@ async function executeAppRunInner(
           keyOwnerType: resolved.ownerType,
           createdBy: run.userId ?? null,
         });
+        // #2439: roll the priced cost onto the run (an unpriced event adds nothing;
+        // a run minted before the column stays NULL = unknown, which increment keeps).
+        if (usage?.costMicroCents != null) {
+          await db.appRun.updateMany({ where: { id: runId, costMicroCents: { not: null } }, data: { costMicroCents: { increment: usage.costMicroCents } } });
+        }
       };
       let result: LlmResult;
       let extracted: Record<string, unknown> | null = null;
@@ -975,7 +981,7 @@ async function executeAppRunInner(
           }
         }
         // Tool-loop terminal errors (plan-tools D-TL-6) — never retried:
-        if (err instanceof AutomationPinError) return fail(err.code, err.message);
+        if (err instanceof AutomationPinError) return fail(err.code, err.message, err.reason);
         if (err instanceof AuthorFailError) {
           return fail('AUTHOR_FAIL', err.message); // the author's deliberate abort
         }
@@ -983,7 +989,7 @@ async function executeAppRunInner(
           return fail('ACTIVATION_DENIED', err.message); // gate said no, mid-hop
         }
         if (err instanceof ToolExecutionError) {
-          if (err.cause instanceof AutomationPinError) return fail(err.cause.code, err.cause.message);
+          if (err.cause instanceof AutomationPinError) return fail(err.cause.code, err.cause.message, err.cause.reason);
           return fail('TOOL_FAILED', err.message); // handler threw (D21)
         }
         if (err instanceof LlmInvocationError && err.transient && Date.now() < deadline) {
@@ -1103,7 +1109,7 @@ async function executeAppRunInner(
     }
   } catch (err) {
     // Unexpected infra error: record, don't crash the listener.
-    return fail(err instanceof AutomationPinError ? err.code : 'INTERNAL', String((err as Error)?.message ?? err));
+    return fail(err instanceof AutomationPinError ? err.code : 'INTERNAL', String((err as Error)?.message ?? err), err instanceof AutomationPinError ? err.reason : undefined);
   } finally { deps.releaseAutomationProof?.(run); }
 }
 

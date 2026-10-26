@@ -15,7 +15,7 @@ import { resolveNodeRef } from '../entityRef/nodeRef.js';
 import { emitNodeUrnV2 } from '../urnEmit.js';
 
 export class AutomationPinError extends Error {
-  constructor(readonly code: 'AUTOMATION_CHANGED' | 'AUTOMATION_UNADOPTED', changed: string) {
+  constructor(readonly code: 'AUTOMATION_CHANGED' | 'AUTOMATION_UNADOPTED', changed: string, readonly reason?: 'MEMORY_UNREADABLE') {
     super(`${changed}. Nothing further will execute; the run-as user must preview and re-adopt the automation.`);
   }
 }
@@ -140,13 +140,13 @@ export async function captureSetupConsent(...args: Parameters<typeof captureAuto
     // Consent needs both the creator's reach and the actual execution principal's reach.
     const principal = runAuthContext({ id: 'setup', appId, userId, organizationId });
     for (const node of Object.values(preview.nodes)) {
-      if (!await canReadMemory(db, principal, String(node.state.memoryId))) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation definition is not readable by its run principal');
+      if (!await canReadMemory(db, principal, String(node.state.memoryId))) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation definition is not readable by its run principal', 'MEMORY_UNREADABLE');
     }
     return storedAutomationPin(preview);
   }
   catch (e) {
     if (e instanceof NodeNotFoundError || e instanceof AutomationPinError) {
-      return { format: 'hadron-automation-unadopted-v1', message: 'Setup graph is missing, unreadable, encrypted or exceeds the consent bounds' };
+      return { format: 'hadron-automation-unadopted-v1', message: 'Setup graph is missing, unreadable, encrypted or exceeds the consent bounds', ...(e instanceof AutomationPinError && e.reason ? { reason: e.reason } : {}) };
     }
     throw e;
   }
@@ -154,7 +154,7 @@ export async function captureSetupConsent(...args: Parameters<typeof captureAuto
 
 /** Invalid persisted consent is never treated as an absent optional gate. */
 export function parseAutomationPin(raw: unknown): AutomationPin {
-  if ((raw as { format?: string })?.format === 'hadron-automation-unadopted-v1') throw new AutomationPinError('AUTOMATION_UNADOPTED', `Setup could not be adopted: ${(raw as { message: string }).message}`);
+  if ((raw as { format?: string })?.format === 'hadron-automation-unadopted-v1') throw new AutomationPinError('AUTOMATION_UNADOPTED', `Setup could not be adopted: ${(raw as { message: string }).message}`, (raw as { reason?: string }).reason === 'MEMORY_UNREADABLE' ? 'MEMORY_UNREADABLE' : undefined);
   const p = raw as AutomationPin | null;
   if (!p || p.format !== 'hadron-automation-pin-v3' || !p.hash || !p.entry || !p.entryId ||
       !p.nodes || !Array.isArray(p.flows) || !Array.isArray(p.absentPartials) || !p.edges || !p.resources || !p.resources.mcp || !p.resources.ha || !Array.isArray(p.resources.tools)) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation has no valid setup pin');
