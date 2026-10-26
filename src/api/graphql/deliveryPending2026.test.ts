@@ -231,6 +231,7 @@ describe('#2026 review closure controls', () => {
   } finally {spy.mockRestore();}
  });
  it('emits a fixed diagnostic class on count faults without raw error details', async () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000);
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   const spy = vi.spyOn(deliveryBatchModule, 'loadPendingDeliverySummary').mockRejectedValue(new Error('PRIVATE_FOOTER_ERROR_SENTINEL'));
   try {
@@ -239,7 +240,7 @@ describe('#2026 review closure controls', () => {
    expect(log).toContain('delivery.pending.omitted');
    expect(log).not.toContain('PRIVATE_FOOTER_ERROR_SENTINEL');
    expect(log).not.toContain(session.id);
-  } finally {spy.mockRestore();warn.mockRestore();}
+  } finally {spy.mockRestore();warn.mockRestore();clock.mockRestore();}
  });
  it('omits run principals and ambiguous unnamed callers, while a valid named session stays self-only', async () => {
   expect(await deliveryPending({...context(),clientId:'run:synthetic-footer-run'} as any)).toBeUndefined();

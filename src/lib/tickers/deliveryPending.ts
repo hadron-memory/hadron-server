@@ -30,9 +30,9 @@ export async function deliveryPending(ctx: Context, namedSession?: string): Prom
       const now = new Date();
       const bound = await ownBatchSession(txCtx);
       const app = await loadApp(txCtx, bound.worker.appId);
-      if (!app || app.deletedAt || app.uninstalledAt) throw new Error('Unavailable footer App');
+      if (!app || app.deletedAt || app.uninstalledAt) throw Object.assign(new Error('Unavailable footer App'), { code: 'FOOTER_APP_UNAVAILABLE' });
       const count = await loadPendingDeliverySummary({ ctx: txCtx, app, hostId: null, workerIds: [bound.worker.id], now });
-      if (!Number.isSafeInteger(count) || count < 0) throw new Error('Unsafe footer count');
+      if (!Number.isSafeInteger(count) || count < 0) throw Object.assign(new Error('Unsafe footer count'), { code: 'FOOTER_UNSAFE_COUNT' });
       return { v: 1 as const, count, complete: true as const, asOf: now.toISOString() };
     }, { isolationLevel: 'RepeatableRead', maxWait: 20, timeout: 210 });
     if (performance.now() - start <= DELIVERY_PENDING_BUDGET_MS) return result;

@@ -252,9 +252,9 @@ export async function loadPendingDeliverySummary(args: DeliverySelectionArgs): P
       SELECT COUNT(*)::bigint AS total, MIN(n.created_at) AS oldest FROM nodes n
       WHERE ${Prisma.join(predicates, ' OR ')}`);
     const count = Number(row?.total);
-    if (!Number.isSafeInteger(count) || count < 0) throw new Error('Unsafe footer count');
+    if (!Number.isSafeInteger(count) || count < 0) throw Object.assign(new Error('Unsafe footer count'), { code: 'FOOTER_UNSAFE_COUNT' });
     if (row.oldest && batchTiming(settings, { oldestPostedAt: row.oldest }).deliverAfter <= now) total += count;
-    if (!Number.isSafeInteger(total)) throw new Error('Unsafe footer count');
+    if (!Number.isSafeInteger(total)) throw Object.assign(new Error('Unsafe footer count'), { code: 'FOOTER_UNSAFE_COUNT' });
   }
   return total;
 }

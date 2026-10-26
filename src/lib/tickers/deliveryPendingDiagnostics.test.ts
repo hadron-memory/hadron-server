@@ -26,6 +26,13 @@ describe('footer omission telemetry', () => {
     now++; report('pool');
     expect(JSON.parse(write.mock.calls[2][0])).toEqual({ event: 'delivery.pending.omitted', reason: 'pool', suppressed: 1001 });
   });
+  it('keeps deadline distinct and bounded even when the diagnostic sink throws', () => {
+    const write = vi.fn((_line: string) => { throw new Error('sink'); });
+    const report = createFooterOmissionReporter(write, () => 0);
+    report('deadline'); report('deadline');
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(write.mock.calls[0][0]).toBe('{"event":"delivery.pending.omitted","reason":"deadline"}');
+  });
   it('never admits arbitrary reason text, error objects, or failing sinks', () => {
     const write = vi.fn();
     const report = createFooterOmissionReporter(write);
