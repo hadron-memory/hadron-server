@@ -305,6 +305,8 @@ const syncGraphFromGithubAsSystem = async (
 ): Promise<{
   error?: string;
   errorCode?: 'BAD_USER_INPUT' | typeof ENCRYPTED_GIT_SYNC_UNAVAILABLE;
+  /** #1789: `error` is an unexpected exception's text (driver, filesystem, git), not a typed refusal; callers must not echo it. */
+  fault?: true;
   nodeCount?: number;
   /**
    * #1061 — the nodes this run actually wrote, for a caller that HAS a
@@ -1681,7 +1683,7 @@ const syncGraphFromGithubAsSystem = async (
       error: (error as Error).message,
       ...(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError
         ? { errorCode: 'BAD_USER_INPUT' as const }
-        : error instanceof GitSyncEncryptedMemoryError ? { errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE } : {}),
+        : error instanceof GitSyncEncryptedMemoryError ? { errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE } : { fault: true as const }),
     };
   }
 };

@@ -35,6 +35,25 @@ describe('MCP refusals are failed calls (#1789)', () => {
     expect(result.isError).toBe(true);
   });
 
+  it('an unauthenticated or impersonated caller is refused with isError', async () => {
+    const impersonated = (await createTestableMcpServer({ userId, roles: ['READER'], impersonation: { orgId: 'org-1789' } } as never)
+      .callTool('hadron_set_active_scope', { clear: true })) as { isError?: boolean; content: { text: string }[] };
+    expect(impersonated.isError).toBe(true);
+    expect(impersonated.content[0].text).toMatch(/impersonation/i);
+    const anonymous = (await createTestableMcpServer({ appId: 'app-1789', roles: [] } as never)
+      .callTool('hadron_set_active_scope', { clear: true })) as { isError?: boolean; content: { text: string }[] };
+    expect(anonymous.isError).toBe(true);
+    expect(anonymous.content[0].text).toMatch(/Not authenticated/);
+  });
+
+  it('an invalid move_node destination keeps its loc message (a refusal, not a fault)', async () => {
+    await call('hadron_create_node', { urn: 'hrn:node:refusal1789.example:mem:src', name: 'Src', content: 'c' });
+    const result = await call('hadron_move_node', { urn: 'hrn:node:refusal1789.example:mem:src', targetUrn: 'hrn:node:refusal1789.example:mem:bad loc!' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/Invalid loc/);
+    expect(result.content[0].text).not.toMatch(/Request id/i);
+  });
+
   it('control: a success is not flagged', async () => {
     const created = await call('hadron_create_node', { urn: 'hrn:node:refusal1789.example:mem:fine', name: 'Fine', content: 'c' });
     expect(created.isError).toBeUndefined();

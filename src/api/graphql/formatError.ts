@@ -230,8 +230,10 @@ export function formatGraphQLError(
   // refusal either maps above or carries an explicit code of its own (GRAPHQL_VALIDATION_FAILED, UNAUTHENTICATED,
   // FORBIDDEN, ...), and those keep their text. A fault shows the generic code and a request id; the complete exception,
   // including a Prisma message with query arguments (#1688), goes to the log under that id.
-  const code = formattedError.extensions?.code;
-  if ((code === undefined || code === INTERNAL_ERROR_CODE) && !isTrustedRefusal(original)) {
+  // The wrapper's public code never overrides the classification of what it wraps (LOCAL P2-1): a GraphQLError that
+  // wears a code around a foreign driver Error is still a fault. Errors built directly as GraphQLError (Apollo's own
+  // validation/parse/bad-request failures) unwrap to themselves and stay trusted through their explicit code.
+  if (!isTrustedRefusal(original)) {
     const requestId = faultRequestId();
     logInternalFault('graphql', Array.isArray(formattedError.path) ? formattedError.path.join('.') : 'request', requestId, original);
     return {

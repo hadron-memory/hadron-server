@@ -26,7 +26,7 @@ A plain `Error` is a fault whatever its text; there is no prose allowlist. Refus
 
 - `new Error('Forbidden' | 'Unauthenticated')`, 84 sites in 22 files, now `forbiddenError()` / `unauthenticatedError()` (`lib/refusals.ts`). Same message; the wire code becomes `FORBIDDEN` / `UNAUTHENTICATED` instead of `INTERNAL_SERVER_ERROR`.
 - Attaching a system memory as a memory item: `BAD_USER_INPUT`.
-- `syncMemory` failure: `SYNC_FAILED`; the text is the stored `Memory.syncError`, already readable by the caller.
+- `syncMemory` failure with no typed code of its own: `SYNC_FAILED` (a known refusal such as a missing organization). An unexpected exception from the sync (`fault: true` on the helper result: driver, filesystem, git) is a fault on GraphQL and MCP alike: generic envelope plus request id, text only in the log.
 - `GitCommandError`: mapped, `GIT_COMMAND_FAILED`, fixed message by design (#1578).
 
 Every other `throw new Error(...)` (about 450) is now a fault on the wire. The test suite is the discovery mechanism: the refusals it showed as user-facing are the four above. A refusal not covered by a test would surface as the generic envelope; the log line carries its text.

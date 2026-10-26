@@ -190,7 +190,7 @@ import { nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
 import { enqueueNodeEmbedding, pendingAtForRevival } from '../services/embedding/enqueue.js';
-import { sessionKeyCache } from '../lib/sessionKeyCache.js';
+import { sessionKeyCache, SessionKeyConflictError } from '../lib/sessionKeyCache.js';
 import {
   isSessionLive,
   loadLastEventBySession,
@@ -2903,7 +2903,7 @@ export function createMcpServerInstance(
     "Global cross-entity search across organizations, memories, nodes, agents, apps, AI service configs, and users — returns one ranked, flat list. By default the query shape is smart-sniffed: a PK-shaped input does an exact id lookup, a URN-shaped input matches URNs, free text matches name + URN. Pass `fields` to force which fields to match (overrides the sniff) and `entityTypes` to restrict the kinds. `pk` is exact-match; the rest are case-insensitive substring — including `content` (node bodies), which is a LITERAL substring match (NOT stemmed): 'report abuse' won't match 'reports abusive behavior'. `content` is opt-in and skips encrypted memories. For a stemmed, ranked, concept/multi-word search over node text — and the cross-memory 'does anyone know about X?' probe — use hadron_find_nodes (keyword mode, allMemories: true) instead; this tool is best for locating a known entity by name/URN/id across kinds.",
     SHAPE_HADRON_SEARCH,
     async ({ query, entityTypes, fields, limit, scope }) => {
-      if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+      if (!auth.clientId && !auth.appId && !auth.userId) return refusalResult('Not authenticated.');
 
       // createTestableMcpServer bypasses zod — normalize args defensively.
       const q = typeof query === 'string' ? query : '';
@@ -2973,7 +2973,7 @@ export function createMcpServerInstance(
       // auth.userId is set (multi-App OAuth caller without selection),
       // getMemoryAccess unions memory access across the user's
       // accessible Apps. No requireAppScope() gate on purpose.
-      if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+      if (!auth.clientId && !auth.appId && !auth.userId) return refusalResult('Not authenticated.');
 
       // Effective access level per memory. The App/org access map is
       // personal-free by design (it also backs getAccessibleMemoryIds, which
@@ -3249,7 +3249,7 @@ export function createMcpServerInstance(
       // unauthenticated call can't flip the flag and influence a later
       // re-authed request.
       if (!auth.userId && !auth.clientId && !auth.appId) {
-        return textResult('Not authenticated.');
+        return refusalResult('Not authenticated.');
       }
       engagedWithNewSurface = true;
       // AppKey callers (appId set, no userId) — list returns the single App
@@ -3311,7 +3311,7 @@ export function createMcpServerInstance(
         );
       }
       if (!auth.userId) {
-        return textResult('Not authenticated.');
+        return refusalResult('Not authenticated.');
       }
       engagedWithNewSurface = true;
 
@@ -3384,11 +3384,11 @@ export function createMcpServerInstance(
           'AppKey callers carry their organization in the credential; hadron_set_active_org is not applicable.',
         );
       }
-      if (!auth.userId) return textResult('Not authenticated.');
+      if (!auth.userId) return refusalResult('Not authenticated.');
       // A support view sees into ONE org already and must not re-point itself
       // (belt and braces — /mcp rejects impersonation at session init).
       if (auth.impersonation) {
-        return textResult('Not available in an impersonation session.');
+        return refusalResult('Not available in an impersonation session.');
       }
       const sid = getSessionId();
 
@@ -3600,7 +3600,7 @@ export function createMcpServerInstance(
     'List the named search scopes ("lenses", spec 049) you may read — an ORDERED memory list with exactly one owner (organization | Agent | App). With no filter, lists the active App\'s resolution CONTEXT: the App\'s own scopes, its installed Agents\', and its organization\'s — what a bare scope name resolves against there (App › Agent › organization, never unioned). A scope never grants: each shows only the memories YOU may read, plus a count of the rest. Names `global` and `app` are the ladder\'s built-in views, not scopes.',
     SHAPE_HADRON_LIST_SCOPES,
     async ({ app, ownerType, ownerRef, name, limit, offset }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       const appRef = app ?? (ownerRef ? undefined : auth.appId);
       try {
@@ -3625,7 +3625,7 @@ export function createMcpServerInstance(
     'Create a named search scope (spec 049): an ORDERED list of memories owned by exactly one of an organization, an Agent, or an App. Pass one owner ref, or none to own it by the active App. Every memory must be one you can read (an unreadable one reads as "no match"). Names: 1–64 of [a-z0-9_-], unique per owner; `global` and `app` are reserved. Auth: organization CONTRIBUTOR+; App / Agent ADMIN of the owning org or the owner of a user-owned one.',
     SHAPE_HADRON_CREATE_SCOPE,
     async ({ name, memoryUrns, description, organizationRef, agentRef, appRef }) => {
-      if (!auth.userId) return textResult('Not authenticated — scopes are created by a user, not an App key.');
+      if (!auth.userId) return refusalResult('Not authenticated — scopes are created by a user, not an App key.');
       const ctx = scopeCtx();
       const owner = { organizationRef, agentRef, appRef: appRef ?? (organizationRef || agentRef ? undefined : auth.appId) };
       if (!owner.organizationRef && !owner.agentRef && !owner.appRef) {
@@ -3645,7 +3645,7 @@ export function createMcpServerInstance(
     'Update a scope you may write (auth as hadron_create_scope): rename, re-describe, or REPLACE its ordered memory list.',
     SHAPE_HADRON_UPDATE_SCOPE,
     async ({ scope, name, description, memoryUrns }) => {
-      if (!auth.userId) return textResult('Not authenticated.');
+      if (!auth.userId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       try {
         const updated = await resolvers.Mutation.updateScope({}, { ref: scope, input: { name, description, memoryRefs: memoryUrns } }, ctx);
@@ -3661,7 +3661,7 @@ export function createMcpServerInstance(
     'Soft-delete a scope you may write; its name is free again at once. Deleting a scope attaches or detaches nothing — it was only ever a lens.',
     SHAPE_HADRON_DELETE_SCOPE,
     async ({ scope }) => {
-      if (!auth.userId) return textResult('Not authenticated.');
+      if (!auth.userId) return refusalResult('Not authenticated.');
       try {
         await resolvers.Mutation.deleteScope({}, { ref: scope }, scopeCtx());
         return textResult(`Scope ${scope} deleted.`);
@@ -3676,7 +3676,7 @@ export function createMcpServerInstance(
     'Explain what a scope resolves to FOR YOU (spec 049): the readable memories in scope order, how many were dropped for access (a count — a lens never grants and never names what you cannot read), which owner tier won when resolved by NAME in an App\'s context (App › Agent › organization, never unioned; two installed Agents each owning the name is ambiguous and you choose by id), the scopes it shadowed, and — with `loc` — which memory would win for that address.',
     SHAPE_HADRON_SCOPE_EXPLAIN,
     async ({ scope, name, app, loc }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       try {
         const ex = await resolvers.Query.scopeExplain({}, { scopeRef: scope, name, appRef: app ?? auth.appId, loc }, ctx);
@@ -3733,7 +3733,7 @@ export function createMcpServerInstance(
     'List the Channels (spec 049 — durable, server-ordered message streams; each hosted at ONE reserved address in ONE memory) whose host memory you may read. Default: the active App\'s. Every App has a default Channel `team` at chats:team — what hadron_team_chat_post writes to. A Channel\'s address is PROTECTED: generic node writes under it are refused ([loc_protected]).',
     SHAPE_HADRON_LIST_CHANNELS,
     async ({ app, memory, limit, offset }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       const appRef = memory ? undefined : (app ?? auth.appId ?? undefined);
       if (!appRef && !memory) return refusalResult('[bad_user_input] Pass app or memory, or select an App with hadron_set_active_app first.');
@@ -3753,7 +3753,7 @@ export function createMcpServerInstance(
     'Create a named Channel WITH its chat root (spec 049), in ANY memory class you may write — the host memory\'s own audience decides who reads and posts (cor:acl:030:01), so a Channel in a private memory is private. `loc` is the reserved address (e.g. chats:release) — it must not overlap an existing Channel\'s. Every App already has `team` at chats:team. Creating at a DELETED Channel\'s address reuses it and starts CLEAN: the old transcript is tombstoned, the empty Channel watermarks reset, and its first new message resumes above the old seq maximum so old read cursors cannot hide it (#1226).',
     SHAPE_HADRON_CREATE_CHANNEL,
     async ({ memory, loc, name, description }) => {
-      if (!auth.userId) return textResult('Not authenticated — Channels are created by a user, not an App key.');
+      if (!auth.userId) return refusalResult('Not authenticated — Channels are created by a user, not an App key.');
       const ctx = scopeCtx();
       try {
         const row = await resolvers.Mutation.createChannel({}, { input: { memoryRef: memory, loc, name, description } }, ctx);
@@ -3818,7 +3818,7 @@ export function createMcpServerInstance(
     'List the chat REGISTER (spec 049): which attendee (a Worker, or an Agent in an App — or everyone in the owner\'s context) takes part in which Channel, as declared by the App or its organization. Intent, never permission: what an attendee may actually read or post is the Channel\'s host memory\'s decision. Default: the active App\'s rows. Every install carries a materialised default row for the App\'s `team` Channel.',
     SHAPE_HADRON_REGISTER_LIST,
     async ({ owner, channel, attendee, limit, offset }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       const ownerRef = owner ?? (channel || attendee ? undefined : (auth.appId ?? undefined));
       if (!ownerRef && !channel && !attendee) return refusalResult('[bad_user_input] Pass owner, channel or attendee, or select an App with hadron_set_active_app first.');
@@ -3838,7 +3838,7 @@ export function createMcpServerInstance(
     'Declare that an attendee takes part in a Channel (spec 049 register). Owner: an App (org ADMIN, or the owner of a user-owned App) or an organization (CONTRIBUTOR+); defaults to the active App. attendee: a Worker or an Agent in the owner\'s context; omit it for every attendee there. Intent, never permission — the row grants nothing.',
     SHAPE_HADRON_REGISTER_ADD,
     async ({ channel, attendee, owner, role, mentionOnly, description }) => {
-      if (!auth.userId) return textResult('Not authenticated — register rows are written by a user, not an App key.');
+      if (!auth.userId) return refusalResult('Not authenticated — register rows are written by a user, not an App key.');
       const ctx = scopeCtx();
       const ownerRef = owner ?? auth.appId;
       if (!ownerRef) return refusalResult('[bad_user_input] No owner: pass owner, or select an App with hadron_set_active_app first.');
@@ -3861,7 +3861,7 @@ export function createMcpServerInstance(
     'Remove a register entry you own (spec 049): each owner removes its own rows — an App may remove its install-created default, never an organization\'s row.',
     SHAPE_HADRON_REGISTER_REMOVE,
     async ({ entry }) => {
-      if (!auth.userId) return textResult('Not authenticated — register rows are written by a user, not an App key.');
+      if (!auth.userId) return refusalResult('Not authenticated — register rows are written by a user, not an App key.');
       try {
         await resolvers.Mutation.deleteRegisterEntry({}, { ref: entry }, scopeCtx());
         return textResult('Removed.');
@@ -3878,8 +3878,8 @@ export function createMcpServerInstance(
     'Set — or with clear:true, drop — the ACTIVE SCOPE for this client (spec 049): the named search scope hadron_find_nodes / hadron_search run under when the call names no scope and no memory. Rung 2 of the ladder: a scope named in the call › this › the active App (`app`, its attached memories) › the active organization (`global`) › your user-owned memories. Persisted per client instance like hadron_set_active_app and re-authorized on restore. A scope never grants: results are its memories ∩ what you may read, and every result says which scope it ran under.',
     SHAPE_HADRON_SET_ACTIVE_SCOPE,
     async ({ scope, clear }) => {
-      if (!auth.userId) return textResult('Not authenticated — an App key\'s scope is its App.');
-      if (auth.impersonation) return textResult('Not available in an impersonation session.');
+      if (!auth.userId) return refusalResult('Not authenticated — an App key\'s scope is its App.');
+      if (auth.impersonation) return refusalResult('Not available in an impersonation session.');
       const ctx = scopeCtx();
       if (!scope) {
         if (!clear) return refusalResult('[bad_user_input] Pass scope (an id or a name), or clear: true.');
@@ -3938,7 +3938,7 @@ export function createMcpServerInstance(
       try {
         validateLoc(loc);
       } catch (e) {
-        return toolErrorResult(e, () => (e as Error).message, 'hadron_create_parent_node:validateLoc');
+        return e instanceof InvalidLocError ? refusalResult(e.message) : toolErrorResult(e, () => (e as Error).message, 'hadron_create_parent_node:validateLoc');
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
@@ -5777,8 +5777,8 @@ export function createMcpServerInstance(
         const key = await resolveSuppliedKey(row, { passphrase, dataKey });
         sessionKeyCache.set(`mcp:${sid}`, row.id, key);
       } catch (err) {
-        if (err instanceof MemoryUnlockError) return refusalResult(err.message);
-        // Key conflict (another live session holds a DIFFERENT key) or unexpected: anything not typed is a fault (#1789).
+        if (err instanceof MemoryUnlockError || err instanceof SessionKeyConflictError) return refusalResult(err.message);
+        // Anything not typed is a fault (#1789).
         return toolErrorResult(err, () => String((err as Error).message), 'hadron_unlock_memory');
       }
       return textResult(
@@ -5889,7 +5889,7 @@ export function createMcpServerInstance(
       try {
         validateLoc(loc);
       } catch (e) {
-        return toolErrorResult(e, () => (e as Error).message, 'hadron_create_node:validateLoc');
+        return e instanceof InvalidLocError ? refusalResult(e.message) : toolErrorResult(e, () => (e as Error).message, 'hadron_create_node:validateLoc');
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
@@ -6924,7 +6924,7 @@ export function createMcpServerInstance(
     try {
       validateLoc(loc);
     } catch (e) {
-      return toolErrorResult(e, () => (e as Error).message, `hadron_${mode}_${kind}:validateLoc`);
+      return e instanceof InvalidLocError ? refusalResult(e.message) : toolErrorResult(e, () => (e as Error).message, `hadron_${mode}_${kind}:validateLoc`);
     }
 
     // `name` is optional in the shared arg set because an UPDATE preserves it,
@@ -7706,7 +7706,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       try {
         validateLoc(toLoc);
       } catch (e) {
-        return toolErrorResult(e, () => (e as Error).message, 'hadron_move_node:validateLoc');
+        return e instanceof InvalidLocError ? refusalResult(e.message) : toolErrorResult(e, () => (e as Error).message, 'hadron_move_node:validateLoc');
       }
 
       const existing = await db.node.findUnique({
@@ -8568,7 +8568,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     "Read an app run you started (or may read): its status, where it is or stopped (curNodeUrn), why it failed (failure), what it extracted (data, the run envelope) and the path it walked (hops: one entry per completed hop, with the edge it took). Pass the run id or hrn:apprun URN that hadron_run_task printed. Gated like appRun: you may read a run if you are a READER in its organization; if it runs on your behalf or you started it manually, while you keep a live relationship with its App (App member or active subscriber); or if you hold that App's own key. A run you cannot read answers 'not found', the same as one that does not exist. Read-only.",
     SHAPE_HADRON_GET_RUN,
     async ({ ref }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const runRef = typeof ref === 'string' ? ref.trim() : '';
       if (!runRef) return textResult('Pass the run id or hrn:apprun URN that hadron_run_task printed.');
       let run: Record<string, unknown> | null;
@@ -8616,7 +8616,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // RENDER the assembled prompt like hadron_run_action. Both modes now share
       // MCP's resolution UX — execute mode gets the picker too.
       const runOrRender = async (nodeUrn: string): Promise<ToolText> => {
-        if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+        if (!auth.clientId && !auth.appId && !auth.userId) return refusalResult('Not authenticated.');
         if (appRef) {
           const ctx: Context = {
             db,
@@ -8651,7 +8651,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         return runOrRender(directUrn);
       }
 
-      if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+      if (!auth.clientId && !auth.appId && !auth.userId) return refusalResult('Not authenticated.');
 
       const mem = await resolveRunTaskMemory(memoryHint);
       if ('done' in mem) return mem.done;
@@ -9245,7 +9245,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         : auth.appId
           ? { appId: auth.appId, userId: null }
           : null;
-      if (!scope) return textResult('Not authenticated — no sessions to report.');
+      if (!scope) return refusalResult('Not authenticated — no sessions to report.');
 
       // createTestableMcpServer bypasses zod — normalize defensively (a NaN
       // would reach Prisma's `take` as a raw driver error rather than a clamp).
@@ -11135,6 +11135,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
       const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
 
+      if (result.error && result.fault) throw new Error(result.error);
       if (result.error) return refusalResult(`Sync failed${result.errorCode ? ` [${result.errorCode}]` : ''}: ${result.error}`);
       // #1061 — one write per node the sync actually wrote. This tool is the
       // ONE entry point to a git sync that has a principal to attribute to; the

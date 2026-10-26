@@ -82,6 +82,17 @@ describe('GraphQL internal-fault envelope (#1789)', () => {
     expect(formatGraphQLError(formatted, error).extensions?.requestId).toMatch(UUID);
   });
 
+  it('a public code on the wrapper never overrides a foreign original (coded-wrapper bypass)', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const original = new Error(secret);
+    const error = new GraphQLError(original.message, { originalError: original, extensions: { code: 'BAD_USER_INPUT' } });
+    const formatted: GraphQLFormattedError = { message: original.message, extensions: { code: 'BAD_USER_INPUT' }, path: ['someField'] };
+    const { result, requestId } = inRequest(() => formatGraphQLError(formatted, error));
+    expect(result.message).toBe('Internal server error.');
+    expect(result.extensions).toEqual({ code: 'INTERNAL_SERVER_ERROR', requestId });
+    expect(JSON.stringify(result)).not.toContain('private');
+  });
+
   describe('controls: typed refusals and framework refusals keep their code and text', () => {
     it('a mapped domain class keeps message and code', () => {
       const original = new UrnParseError('bad slug', 'reserved-word-slug', 'user');
