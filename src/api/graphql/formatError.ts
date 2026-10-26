@@ -24,7 +24,7 @@
  */
 import { Kind, type GraphQLError, type GraphQLFormattedError } from 'graphql';
 import { publicErrorExtensions } from '../../lib/errorDiagnostics.js';
-import { isPrismaClientError, REDACTED_DB_ERROR_MESSAGE } from '../../lib/prismaErrors.js';
+import { faultRequestId, INTERNAL_ERROR_CODE, INTERNAL_ERROR_MESSAGE, logInternalFault } from '../../lib/internalFault.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
 import { AmbiguousLegacyUrnError } from '../../lib/entityRef/errors.js';
 import { EntityNotFoundError } from '../../lib/entityRef/entityNotFound.js';
@@ -200,15 +200,19 @@ export function formatGraphQLError(
       extensions: { ...formattedError.extensions, ...m.extensionsFor(original) },
     };
   }
-  // #1688: Prisma messages contain query arguments and schema internals.
-  // Keep the original exception for server reporting; expose only the stable
-  // failure code. Domain errors above retain their expected client messages.
-  if (isPrismaClientError(original)) {
+  // #1789 (cor:api:260:01): anything still carrying Apollo's default wrap code is a fault, not a typed refusal: a
+  // refusal either maps above or carries an explicit code of its own (GRAPHQL_VALIDATION_FAILED, UNAUTHENTICATED,
+  // FORBIDDEN, ...), and those keep their text. A fault shows the generic code and a request id; the complete exception,
+  // including a Prisma message with query arguments (#1688), goes to the log under that id.
+  const code = formattedError.extensions?.code;
+  if (code === undefined || code === INTERNAL_ERROR_CODE) {
+    const requestId = faultRequestId();
+    logInternalFault('graphql', Array.isArray(formattedError.path) ? formattedError.path.join('.') : 'request', requestId, original);
     return {
-      message: REDACTED_DB_ERROR_MESSAGE,
+      message: INTERNAL_ERROR_MESSAGE,
       locations: formattedError.locations,
       path: formattedError.path,
-      extensions: { code: 'INTERNAL_SERVER_ERROR' },
+      extensions: { code: INTERNAL_ERROR_CODE, requestId },
     };
   }
   return formattedError;

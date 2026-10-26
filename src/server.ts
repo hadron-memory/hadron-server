@@ -81,6 +81,8 @@ import { generateUniqueHandle, isHandleTaken } from './lib/userHandle.js';
 import { ensureUserPrincipal, RootNameTakenError } from './lib/principal/mintPrincipal.js';
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
+import { assignRequestId, bindRequestId, REQUEST_ID_HEADER } from './lib/requestContext.js';
+import { respondInternalFault } from './lib/internalFault.js';
 import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
@@ -189,6 +191,8 @@ export async function createServer(): Promise<Express> {
   // configured keyring refuses boot without echoing secret values.
   readTeamRecordKeys();
   const app = express();
+  // #1789: the request id exists before anything that can fail, including body parsing and auth.
+  app.use(assignRequestId);
 
   // Trust-proxy for spec 025-oauth-for-mcp (FR-006). Express must know
   // which upstream proxies it can trust so `req.protocol` resolves to
@@ -237,6 +241,8 @@ export async function createServer(): Promise<Express> {
     cors({
       origin: process.env.FRONTEND_URL || 'http://localhost:5173',
       credentials: true,
+      // #1789: the portal reads the request id off a failed response to show it to the person.
+      exposedHeaders: [REQUEST_ID_HEADER],
     }),
   );
   mountTeamSpecSchemaRoutes(app);
@@ -1303,6 +1309,7 @@ export async function createServer(): Promise<Express> {
     // context builder and every resolver run inside it. Keys staged here are
     // invisible to concurrent requests and vanish with the request's async
     // context — aborted responses included (PR-514 review, Codex P1 ×2).
+    bindRequestId,
     (_req, _res, next) => requestKeyStorage.run(new Map(), next),
     (_req, _res, next) => requestOperationKeyStorage.run({}, next),
     // #1610: the Worker / Agent behind this request's writes, filled by
@@ -1884,15 +1891,15 @@ export async function createServer(): Promise<Express> {
   // ---------------------------------------------------------------------------
 
   // #1610: each MCP request gets its own actor holder (see requestActor.ts).
-  app.post('/mcp', async (req, res) => {
+  app.post('/mcp', bindRequestId, async (req, res) => {
     await requestActorStorage.run(emptyActor(), () => handleMcpRequest(req, res));
   });
 
-  app.get('/mcp', async (req, res) => {
+  app.get('/mcp', bindRequestId, async (req, res) => {
     await requestActorStorage.run(emptyActor(), () => handleMcpRequest(req, res));
   });
 
-  app.delete('/mcp', async (req, res) => {
+  app.delete('/mcp', bindRequestId, async (req, res) => {
     await requestActorStorage.run(emptyActor(), () => handleMcpDelete(req, res));
   });
 
@@ -2112,6 +2119,18 @@ export async function createServer(): Promise<Express> {
   // reach here (Apollo handles them internally) — they are captured by
   // sentryApolloPlugin instead. No-op when SENTRY_DSN is unset.
   Sentry.setupExpressErrorHandler(app);
+
+  // #1789: a fault that reaches Express shows the caller the generic envelope, never Express's default page (which prints
+  // the stack outside production). A client-class status (body-parser's 400/413, ...) is a framework refusal and keeps
+  // today's handling until it is ruled on; only a fault is genericized.
+  app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const status = (err as { status?: unknown; statusCode?: unknown })?.status ?? (err as { statusCode?: unknown })?.statusCode;
+    if (res.headersSent || (typeof status === 'number' && status >= 400 && status < 500)) {
+      next(err);
+      return;
+    }
+    respondInternalFault(res, 'express', err);
+  });
 
   app.locals.stopEmbeddingWorker = () => Promise.all([
     stopEmbeddingWorker(db), stopEmbeddingPublisher(),

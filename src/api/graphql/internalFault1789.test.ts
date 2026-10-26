@@ -84,7 +84,7 @@ describe('GraphQL internal-fault envelope (#1789)', () => {
 
   describe('controls: typed refusals and framework refusals keep their code and text', () => {
     it('a mapped domain class keeps message and code', () => {
-      const original = new UrnParseError('bad slug', 'x');
+      const original = new UrnParseError('bad slug', 'reserved-word-slug', 'user');
       const error = new GraphQLError(original.message, { originalError: original });
       const out = formatGraphQLError({ message: original.message, extensions: { code: 'INTERNAL_SERVER_ERROR' } }, error);
       expect(out.message).toBe(original.message);
