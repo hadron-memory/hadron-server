@@ -4162,6 +4162,11 @@ model OAuthClient {
   updatedBy    String?   @map("updated_by")
   deletedAt    DateTime? @map("deleted_at")
   deletedBy    String?   @map("deleted_by")
+  /// #155: when an unused DCR client becomes collectable. Set to now + 30
+  /// days at registration and pushed forward by each token redemption; the
+  /// GC job (src/jobs/gcOauthClients.ts) soft-deletes a client 7 days past
+  /// it. NULL never expires (seeded and hand-made clients).
+  expiresAt    DateTime? @map("expires_at")
 
   authCodes AuthCode[]
 
