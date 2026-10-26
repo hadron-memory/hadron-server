@@ -20,6 +20,7 @@ import * as deliveryBatchModule from '../../lib/tickers/deliveryBatch.js';
 import { deliveryPending, appendDeliveryPending } from '../../lib/tickers/deliveryPending.js';
 import { loadDeliveryBatches } from '../../lib/tickers/deliveryBatch.js';
 import { generateId } from '../../lib/id.js';
+import { setS7AvailableForTest } from '../../lib/tickers/s7Availability.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -200,6 +201,22 @@ describe('#2026 per-call SDK and committed marks',()=>{
 
 
 describe('#2026 review closure controls', () => {
+ it('counts only the admitted row for a standby worker, matching the pull', async () => {
+  const head = await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:app.id,agentId:worker.agentId,name:'Head',slug:'head',heldByUserId:user.id}});
+  await db.worker.update({where:{id:worker.id},data:{reportsToWorkerId:head.id}});
+  await db.app.update({where:{id:app.id},data:{deliveryStandbyEnabled:true}});
+  const rows = await db.node.findMany({where:{messageChannelId:channel.id},orderBy:{seq:'asc'}});
+  await db.node.updateMany({where:{id:{in:rows.slice(2).map(r=>r.id)}},data:{deletedAt:new Date()}});
+  await db.node.update({where:{id:rows[0].id},data:{data:{mentions:['kit'],authorUserId:user.id}}});
+  await db.node.update({where:{id:rows[1].id},data:{data:{mentions:['kit'],authorSystem:true}}});
+  setS7AvailableForTest(true); // mechanism-only; no production activation
+  try {
+   const pull = await loadDeliveryBatches({ctx:context() as any,app,hostId:null,workerIds:[worker.id]});
+   expect(pull.batches[0].ranges[0].seqs).toEqual([rows[0].seq]);
+   expect(await deliveryPending(context() as any)).toEqual(metadata(1));
+   expect((await appendDeliveryPending({content:[]},context() as any)).content).toEqual([{type:'text',text:'1 message waiting; pull with hadron_team_chat_inbox.'}]);
+  } finally {setS7AvailableForTest(false);}
+ });
  it('preserves the ambient actor semantics of an actor-neutral callback', async () => {
   const server = createTestableMcpServer({userId:user.id,apiKeyId:key.id,appId:app.id,roles:['READER']});
   const spy = vi.spyOn(resolvers.Mutation, 'startSession').mockImplementation(async () => {

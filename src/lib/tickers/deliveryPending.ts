@@ -6,6 +6,9 @@ import { loadApp } from '../../api/graphql/schema/resolvers.agentTask.js';
 import { isRunPrincipal } from '../auth/runPrincipal.js';
 import { currentActorAmbiguity } from '../requestActor.js';
 import { loadPendingDeliverySummary } from './deliveryBatch.js';
+import { createFooterOmissionReporter, footerFailureReason } from './deliveryPendingDiagnostics.js';
+
+const omission = createFooterOmissionReporter();
 
 export type DeliveryPending = { v: 1; count: number; complete: true; asOf: string };
 export const DELIVERY_PENDING_BUDGET_MS = 250;
@@ -34,13 +37,7 @@ export async function deliveryPending(ctx: Context, namedSession?: string): Prom
     }, { isolationLevel: 'RepeatableRead', maxWait: 20, timeout: 210 });
     if (performance.now() - start <= DELIVERY_PENDING_BUDGET_MS) return result;
     omission('deadline');
-  } catch { omission('failure'); }
-}
-
-/** Fixed diagnostic classes only: never error.message, payload, credential, binding or object identity. */
-function omission(reason: 'failure' | 'deadline'): void {
-  try { console.warn(JSON.stringify({ event: 'delivery.pending.omitted', reason })); }
-  catch { /* Even a diagnostic sink failure cannot change the operation. */ }
+  } catch (error) { omission(footerFailureReason(error)); }
 }
 
 export async function appendDeliveryPending<T>(result: T, ctx: Context, namedSession?: string): Promise<T> {
