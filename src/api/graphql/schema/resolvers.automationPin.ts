@@ -19,7 +19,10 @@ import { requireOwnerOrOrgRole, type Context } from './resolvers.helpers.js';
 export type AutomationTriggerKind = 'SCHEDULE' | 'WEBHOOK' | 'MANUAL';
 export interface AutomationTriggerRef { triggerKind: AutomationTriggerKind; triggerRef: string }
 type AdoptionState = 'UNADOPTED' | 'ADOPTED' | 'CHANGED';
-const denied = () => new GraphQLError('Only the run-as user may preview and re-adopt this automation; an App-only trigger requires its manager.', { extensions: { code: 'FORBIDDEN' } });
+/** #2436: the one who-may refusal every adoption door throws — plain words naming the parties cor:agt:010:01's
+ * today-rule admits. Deliberately not cor:dmo:050:12's word "manager": it reads as promising owner-role members
+ * an admission the predicate does not grant (their widening is the open call in cor:agt:010:01). */
+const denied = () => new GraphQLError("Only the trigger's run-as user may adopt this automation; a trigger with no run-as user may be previewed, approved, declined and re-adopted only by the App's owner, or by an ADMIN or OWNER of the organization that owns the App, or by a platform admin on an organization-owned App.", { extensions: { code: 'FORBIDDEN' } });
 /** Cause 4: the CALLER cannot read a graph memory. Never names it: a caller who cannot read a memory is not told it exists. */
 const callerCannotRead = () => new GraphQLError('You cannot read a memory this automation uses, so you cannot preview or adopt it. Ask someone who manages that memory to give you read access.', { extensions: { code: 'FORBIDDEN' } });
 /** Cause 5: the RUN principal (the App, plus the run-as user when there is one) cannot read a graph memory. The memory is named only to a caller who can read it themselves. */
@@ -45,7 +48,16 @@ export async function requireAdopterContext(ctx: Context): Promise<string> {
 
 type App = NonNullable<Awaited<ReturnType<Context['db']['app']['findFirst']>>>;
 type TriggerRow = { id: string; appId: string; organizationId: string; userId: string | null; entryNodeUrn: string; entryNodeId?: string | null };
-/** May this caller adopt this trigger? The shared predicate: the run-as user, or for an App-only trigger the App's manager. */
+/**
+ * May this caller adopt this trigger? THE one admission predicate (#2436) behind every adoption surface —
+ * preview, the approval detail, approve, decline, re-adopt, and the adoptable list's run-as-user arm —
+ * implementing cor:agt:010:01's "who re-adopts" today-rule: the trigger's run-as user themself, or, for an
+ * App-only trigger, the App's owner / an org ADMIN/OWNER / a platform admin on an org-owned App — all decided
+ * by the shared tenant gate requireOwnerOrOrgRole('ADMIN'), never re-derived here. cor:dmo:050:12's wider
+ * "manager" (owner-role members) is deliberately NOT admitted yet: widening is the open call in
+ * cor:agt:010:01, and resolvers.automationPin2436.test.ts pins the refusal so the gap stays visible, not
+ * silent. `memo` caches the App-only arm across the adoption door's two loads of the same row.
+ */
 async function canAdopt(ctx: Context, app: App, row: TriggerRow, memo: { appOnly?: boolean } = {}): Promise<boolean> {
   if (row.userId !== null) return isStrictOwner(ctx, row.userId) && await hasAppRelationship(ctx.db, row.appId, row.userId);
   if (memo.appOnly === undefined) {
@@ -134,11 +146,12 @@ export const automationPinQueries = {
     const actor = await ctx.db.user.findFirst({ where: { id: actorId, deletedAt: null }, select: { id: true } });
     if (!app || !actor) return empty;
     // Authorization is a property of the caller, not of each row: the run-as user's own triggers (when they hold the
-    // App relationship) and, for an App manager, the App-only ones. So it goes into the WHERE, and the order and the
+    // App relationship) and, for a caller the predicate admits as an App-only trigger's adopter, those. So it goes into the WHERE, and the order and the
     // cursor are keyset predicates over (name, kind, id) in the database (byte order, so the JS cursor and SQL agree).
     // A small page therefore reads at most size + 1 slim rows and authorizes nothing per row.
-    const own = isStrictOwner(ctx, actorId) && await hasAppRelationship(ctx.db, appId, actorId);
-    const manages = await canAdopt(ctx, app, { id: '', appId, organizationId: app.organizationId ?? '', userId: null, entryNodeUrn: '' });
+    const synthetic = (userId: string | null) => ({ id: '', appId, organizationId: app.organizationId ?? '', userId, entryNodeUrn: '' });
+    const own = await canAdopt(ctx, app, synthetic(actorId));
+    const manages = await canAdopt(ctx, app, synthetic(null));
     if (!own && !manages) return empty;
     const inOrg = app.organizationId ? Prisma.sql`organization_id = ${app.organizationId}` : Prisma.sql`TRUE`;
     const who = own && manages ? Prisma.sql`(user_id IS NULL OR user_id = ${actorId})` : own ? Prisma.sql`user_id = ${actorId}` : Prisma.sql`user_id IS NULL`;
