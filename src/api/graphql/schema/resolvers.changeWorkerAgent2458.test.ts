@@ -133,7 +133,8 @@ describe('#2458 changeWorkerAgent: refusals change nothing', () => {
     // A worker session is refused even when its holder manages the App (R113): the manager acts as themselves.
     const result = kind === 'session' ? runAsActor({ workerId: worker.id, agentId: oldAgent.id }, call)
       : kind === 'run' ? runAsActor({ workerId: null, agentId: oldAgent.id }, call) : call();
-    await expect(result).rejects.toBeTruthy();
+    // Every kind fails the gate; none may reach (and leak) a casting refusal. An outsider cannot read the worker.
+    expect(await code(result)).toBe(kind === 'outsider' ? 'WORKER_NOT_FOUND' : 'FORBIDDEN');
     expect(await snapshot()).toEqual(before);
   });
 
@@ -151,6 +152,13 @@ describe('#2458 changeWorkerAgent: refusals change nothing', () => {
     await db.agent.update({ where: { id: newAgent.id }, data: { deletedAt: new Date() } });
     expect(await code(change(newAgent.id))).toBe('WORKER_AGENT_NOT_INSTALLED');
     expect(await snapshot()).toEqual(before);
+  });
+
+  it('provisions a missing same-org grant in the change transaction', async () => {
+    await db.agentOrgGrant.deleteMany({ where: { orgId: org.id, agentId: newAgent.id } });
+    await change();
+    expect(await db.agentOrgGrant.findUnique({ where: { orgId_agentId: { orgId: org.id, agentId: newAgent.id } } }))
+      .toMatchObject({ revokedAt: null });
   });
 
   it('refuses an inactive same-org grant and a missing foreign grant', async () => {
@@ -263,6 +271,22 @@ describe('#2458 cast uses the same checks (R222: no role override)', () => {
     );
     expect(outcome).toBe('WORKER_ROLE_OVERRIDE_REFUSED');
     expect(await db.worker.count({ where: { appId: app.id, name: 'Fay' } })).toBe(0);
+  });
+
+  it('a user-owned App: the owner\'s own agent or an active subscription licenses it, nothing else does', async () => {
+    const mine = await db.app.create({ data: { ownerUserId: admin.id, name: 'Mine', urn: `hrn:app:test:mine-${generateId()}` } });
+    const own = await M.createAgent({}, { name: 'Own', personaRole: 'own-role' }, ctx());
+    const vendor = await db.organization.create({ data: { name: 'Vendor3', urn: `vendor3-${generateId().toLowerCase()}.example` } });
+    await db.orgMember.create({ data: { organizationId: vendor.id, userId: outsider.id, role: 'ADMIN' } });
+    const theirs = await M.createAgent({}, { orgId: vendor.id, name: 'Theirs', personaRole: 'their-role', visibility: 'PUBLIC' }, ctx(outsider));
+    for (const a of [own, theirs]) await db.appAgent.create({ data: { appId: mine.id, agentId: a.id } });
+    const cast = (agentRef: string, name: string) => M.castWorker({}, { appRef: mine.id, agentRef, name }, ctx());
+    expect(await code(cast(theirs.id, 'Gus'))).toBe('AGENT_ORG_GRANT_REQUIRED');
+    await expect(cast(own.id, 'Hal')).resolves.toMatchObject({ agentId: own.id });
+    await db.agentSubscription.create({ data: { userId: admin.id, agentId: theirs.id, activatedAt: new Date(), revokedAt: new Date() } });
+    expect(await code(cast(theirs.id, 'Gus'))).toBe('AGENT_ORG_GRANT_REQUIRED');
+    await db.agentSubscription.update({ where: { userId_agentId: { userId: admin.id, agentId: theirs.id } }, data: { revokedAt: null } });
+    await expect(cast(theirs.id, 'Gus')).resolves.toMatchObject({ agentId: theirs.id });
   });
 
   it('refuses a cast without the org grant (the cast-time grant check)', async () => {
