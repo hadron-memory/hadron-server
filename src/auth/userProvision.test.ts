@@ -4,11 +4,18 @@
  * land on the catch); the concurrent tests prove the end state on a real DB.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { provisionEmailUser, provisionGithubUser, isUniqueViolationOn } from './userProvision.js';
-import { RootNameTakenError } from '../lib/principal/mintPrincipal.js';
+import { generateUniqueHandle } from '../lib/userHandle.js';
+import { RootNameTakenError, mintPrincipal } from '../lib/principal/mintPrincipal.js';
+
+// Spy on the handle generator (real implementation) so a test can occupy whatever it returned last.
+vi.mock('../lib/userHandle.js', async (orig) => {
+  const real = await orig<typeof import('../lib/userHandle.js')>();
+  return { ...real, generateUniqueHandle: vi.fn(real.generateUniqueHandle) };
+});
 
 function p2002(target: unknown): Error {
   return Object.assign(new Error('Unique constraint failed'), {
@@ -18,14 +25,14 @@ function p2002(target: unknown): Error {
 }
 
 /** `db` whose first `failures.length` interactive transactions throw before running the callback. */
-function failingFirst(failures: Error[]) {
+function failingFirst(failures: Error[], before?: () => Promise<void>) {
   const calls = { n: 0 };
   const wrapped = new Proxy(db, {
     get(t, p) {
       if (p === '$transaction') {
         return (...args: unknown[]) => {
           const f = failures[calls.n++];
-          if (f) return Promise.reject(f);
+          if (f) return (before ? before() : Promise.resolve()).then(() => Promise.reject(f));
           return (t.$transaction as (...a: unknown[]) => unknown).apply(t, args);
         };
       }
@@ -68,7 +75,9 @@ describe('provisionEmailUser', () => {
   });
 
   it('converges under concurrent first contacts: one user, one principal', async () => {
+    const principalsBefore = await db.principal.count();
     const results = await Promise.all(Array.from({ length: 10 }, () => provisionEmailUser(db, 'conc@442.test')));
+    expect(await db.principal.count()).toBe(principalsBefore + 1); // no orphan principal from a lost attempt
     expect(new Set(results.map((r) => r.id)).size).toBe(1);
     expect(await db.user.count({ where: { email: 'conc@442.test' } })).toBe(1);
     const row = await db.user.findUniqueOrThrow({ where: { id: results[0].id } });
@@ -122,7 +131,9 @@ describe('provisionGithubUser', () => {
   });
 
   it('converges under concurrent first contacts: one user, one principal', async () => {
+    const principalsBefore = await db.principal.count();
     const results = await Promise.all(Array.from({ length: 10 }, () => provisionGithubUser(db, gh({ id: 4420002, login: 'conc442' }))));
+    expect(await db.principal.count()).toBe(principalsBefore + 1); // no orphan principal from a lost attempt
     expect(new Set(results.map((r) => r.id)).size).toBe(1);
     expect(await db.user.count({ where: { githubId: 4420002 } })).toBe(1);
     const row = await db.user.findUniqueOrThrow({ where: { id: results[0].id } });
@@ -161,7 +172,7 @@ describe('provisionGithubUser', () => {
     expect(calls.n).toBe(2);
   });
 
-  it('keeps the handle-collision retry (once) and the pool-name retry (once)', async () => {
+  it('a free handle with a handle-target P2002 rethrows; the pool-name retry is once', async () => {
     await db.user.create({ data: { handle: 'taken442', identityProvider: 'GITHUB', githubId: 4420006 } });
     // P2002 on handle only retries when the handle IS taken; a free handle rethrows.
     const free = p2002(['handle']);
@@ -183,5 +194,58 @@ describe('provisionGithubUser', () => {
     const { wrapped, calls } = failingFirst([p2002(['githubId']), new RootNameTakenError('x'), again]);
     await expect(provisionGithubUser(wrapped, gh({ id: 4420010, login: 'combo442' }))).rejects.toBe(again);
     expect(calls.n).toBe(3);
+  });
+
+  describe('handle collision (the name is taken between generation and the insert)', () => {
+    // Occupy the handle the helper generated last, in the principal pool, after generation and
+    // before the transaction fails (so isHandleTaken sees it taken on every attempt).
+    const occupy = (_login: string) => async () => {
+      const last = vi.mocked(generateUniqueHandle).mock.results.at(-1)!.value as Promise<string>;
+      await mintPrincipal(db, { kind: 'user', name: await last });
+    };
+
+    it.each([['handle'], ['lower(handle)'], ['users_handle_lower_uniq']])(
+      'retries once with a new handle when the %s unique is lost and the name is occupied',
+      async (target) => {
+        const login = `hc${target.replace(/\W/g, '')}`.slice(0, 20).toLowerCase();
+        const { wrapped, calls } = failingFirst([p2002([target])], occupy(login));
+        const u = await provisionGithubUser(wrapped, gh({ id: 4420020 + target.length, login, name: null }));
+        expect(calls.n).toBe(2);
+        expect(u.handle).not.toBe(login);
+      },
+    );
+
+    it('rethrows an unknown or unrelated target even though the name is occupied', async () => {
+      for (const [i, err] of [p2002(undefined), p2002(['githubUsername']), Object.assign(new Error('x'), { code: 'P2002' })].entries()) {
+        const login = `unk${i}442`;
+        const { wrapped, calls } = failingFirst([err], occupy(login));
+        await expect(provisionGithubUser(wrapped, gh({ id: 4420040 + i, login, name: null }))).rejects.toBe(err);
+        expect(calls.n).toBe(1);
+      }
+    });
+
+    it('an exhausted githubId retry cannot borrow the handle budget', async () => {
+      const login = 'borrow442';
+      const second = p2002(['githubId']);
+      const { wrapped, calls } = failingFirst([p2002(['githubId']), second], occupy(login));
+      await expect(provisionGithubUser(wrapped, gh({ id: 4420050, login, name: null }))).rejects.toBe(second);
+      expect(calls.n).toBe(2);
+    });
+
+    it('a handle retry is bounded to one', async () => {
+      const login = 'hbound442';
+      const second = p2002(['handle']);
+      const { wrapped, calls } = failingFirst([p2002(['handle']), second], occupy(login));
+      await expect(provisionGithubUser(wrapped, gh({ id: 4420060, login, name: null }))).rejects.toBe(second);
+      expect(calls.n).toBe(2);
+    });
+
+    it('mixed: handle collision, then a githubId race, then success', async () => {
+      const login = 'mixed442';
+      const { wrapped, calls } = failingFirst([p2002(['handle']), p2002(['githubId'])], occupy(login));
+      const u = await provisionGithubUser(wrapped, gh({ id: 4420070, login, name: null }));
+      expect(calls.n).toBe(3);
+      expect(u.githubId).toBe(4420070);
+    });
   });
 });

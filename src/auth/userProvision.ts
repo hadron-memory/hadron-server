@@ -23,6 +23,8 @@ import { ensureUserPrincipal, RootNameTakenError } from '../lib/principal/mintPr
 /** `meta.target` spellings for each identity unique (the engine emits either mapping). */
 const EMAIL_TARGETS = ['email', 'users_email_key'];
 const GITHUB_ID_TARGETS = ['githubId', 'github_id', 'users_github_id_key'];
+/** The handle uniques: the column unique and the `lower(handle)` functional index (what the engine reports for a case-variant). */
+const HANDLE_TARGETS = ['handle', 'lower(handle)', 'users_handle_key', 'users_handle_lower_uniq'];
 
 /**
  * True when `err` is a P2002 whose constraint is one of `targets`. A missing or
@@ -110,8 +112,10 @@ export async function provisionGithubUser(db: PrismaClient, ghUser: ProvisionGit
         retriedGithubId = true;
         continue;
       }
-      // Only a genuine handle collision is retryable (once).
-      if (err?.code === 'P2002' && !retriedHandle && (await isHandleTaken(db, ghHandle))) {
+      // Only a genuine handle collision is retryable (once): the error must name a handle
+      // unique AND the name must be occupied now. Occupancy alone proves nothing about
+      // which constraint fired, so an unknown or unrelated target never lands here.
+      if (isUniqueViolationOn(err, HANDLE_TARGETS) && !retriedHandle && (await isHandleTaken(db, ghHandle))) {
         retriedHandle = true;
         continue;
       }
