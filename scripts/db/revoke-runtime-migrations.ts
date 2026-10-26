@@ -3,6 +3,14 @@ import { Client, escapeIdentifier } from 'pg';
 import { pathToFileURL } from 'node:url';
 import { DEFAULT_SERVE_ROLE } from './verify-runtime-role.js';
 
+/**
+ * How long the revoke helper waits to establish its connection (TCP connect and startup handshake). Without it
+ * pg waits indefinitely on a stalled server and boot hangs before the server starts. A timeout is the same
+ * typed `revoke_failed` result as any other connection failure; no query deadline is set here, and the
+ * verifier's warn-only policy is unchanged.
+ */
+export const CONNECT_TIMEOUT_MS = 10_000;
+
 /** Owner-only, psql-free. Absent serve role preserves legacy single-role installs. */
 export async function revokeRuntimeMigrations(client: Client, role: string): Promise<void> {
   const found = await client.query<{ is_current_user: boolean; owns_migrations: boolean }>(`
@@ -21,13 +29,17 @@ export async function revokeRuntimeMigrations(client: Client, role: string): Pro
   }
 }
 
-export async function main(env: NodeJS.ProcessEnv, log: (line: string) => void): Promise<number> {
+export async function main(
+  env: NodeJS.ProcessEnv,
+  log: (line: string) => void,
+  { connectionTimeoutMillis = CONNECT_TIMEOUT_MS }: { connectionTimeoutMillis?: number } = {},
+): Promise<number> {
   const connectionString = env.MIGRATE_DATABASE_URL || env.DATABASE_URL;
   if (!connectionString) {
     log('db.runtime_role.revoke_database_url_missing');
     return 2;
   }
-  const client = new Client({ connectionString });
+  const client = new Client({ connectionString, connectionTimeoutMillis });
   try {
     await client.connect();
     await revokeRuntimeMigrations(client, env.RUNTIME_ROLE_NAME || DEFAULT_SERVE_ROLE);

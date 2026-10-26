@@ -1,8 +1,9 @@
 /** S2 uses the harness-owned worker DB; only its temporary roles/tables are owned here. */
 import { randomBytes } from 'node:crypto';
+import { createServer, type Socket } from 'node:net';
 import { Client, escapeIdentifier } from 'pg';
 import { beforeAll, beforeEach, afterAll, it, expect, vi } from 'vitest';
-import { main, revokeRuntimeMigrations } from './revoke-runtime-migrations.js';
+import { CONNECT_TIMEOUT_MS, main, revokeRuntimeMigrations } from './revoke-runtime-migrations.js';
 
 // Observe actual fixture SQL, including teardown, so database cloning cannot return.
 const fixtureSql: string[] = [];
@@ -23,7 +24,7 @@ afterAll(() => {
 // perWorkerDb.ts sets this before imports; use its existing disposable clone.
 const workerUrl = process.env.DATABASE_URL!;
 const suffix = randomBytes(5).toString('hex');
-const owner = `s2_owner_${suffix}`, serve = `s2_serve_${suffix}`;
+const owner = `s2_owner_${suffix}`, serve = `s2_serve_${suffix}`, member = `s2_member_${suffix}`;
 const quotedServe = `s2 serve "${suffix}`;
 const nodeTable = `s2_nodes_${suffix}`;
 const password = randomBytes(16).toString('hex');
@@ -45,11 +46,14 @@ beforeAll(async () => {
     // db-push worker clones have no Prisma migration history. Never adopt or
     // delete a pre-existing table belonging to another fixture.
     expect((await c.query("SELECT to_regclass('public._prisma_migrations') AS relation")).rows[0].relation).toBeNull();
-    for (const role of [owner, serve, quotedServe]) {
+    for (const role of [owner, serve, quotedServe, member]) {
       await c.query(`CREATE ROLE ${q(role)} LOGIN NOSUPERUSER NOINHERIT PASSWORD '${password}'`);
       createdRoles.push(role);
     }
     await c.query(`GRANT USAGE, CREATE ON SCHEMA public TO ${q(owner)}`);
+    // INHERIT member of the table owner: acts as the owner for REVOKE, so a skipped revoke is observable in the ACL.
+    await c.query(`ALTER ROLE ${q(member)} INHERIT`);
+    await c.query(`GRANT ${q(owner)} TO ${q(member)}`);
     await c.query(`GRANT USAGE ON SCHEMA public TO ${q(serve)}, ${q(quotedServe)}`);
   });
 });
@@ -110,15 +114,39 @@ it('migrate-before-role grants and revoke compose; absent role is a no-op', asyn
     await expectFixtureGrants(c);
   });
 });
+const migrationAclOf = async (c: Client) =>
+  (await c.query("SELECT relacl::text AS acl FROM pg_class WHERE oid = 'public._prisma_migrations'::regclass")).rows[0].acl as string;
+/** Each CLI case grants the serve role what it needs itself, so it passes alone or in any order. */
+async function grantServeMigrations() {
+  await using(url(owner), c => c.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON public._prisma_migrations TO ${q(serve)}`));
+}
+const serveMigrationAccess = () => using(workerUrl, async c =>
+  (await c.query("SELECT has_table_privilege($1, 'public._prisma_migrations', 'SELECT') AS held", [serve])).rows[0].held as boolean);
 it('CLI env contract uses owner URL and RUNTIME_ROLE_NAME', async () => {
+  await grantServeMigrations();
   const logs: string[] = [];
   expect(await main({ DATABASE_URL: 'not-used', MIGRATE_DATABASE_URL: url(owner), RUNTIME_ROLE_NAME: serve }, l => logs.push(l))).toBe(0);
   expect(logs).toEqual([]);
+  expect(await serveMigrationAccess()).toBe(false);
 });
-it('missing config has a typed nonzero result without credentials', async () => {
+it('CLI works with DATABASE_URL alone (legacy single-role boot)', async () => {
+  await grantServeMigrations();
   const logs: string[] = [];
-  expect(await main({}, l => logs.push(l))).toBe(2);
+  expect(await main({ DATABASE_URL: url(owner), RUNTIME_ROLE_NAME: serve }, l => logs.push(l))).toBe(0);
+  expect(logs).toEqual([]);
+  expect(await serveMigrationAccess()).toBe(false);
+});
+it('an empty MIGRATE_DATABASE_URL falls back to DATABASE_URL', async () => {
+  await grantServeMigrations();
+  expect(await main({ DATABASE_URL: url(owner), MIGRATE_DATABASE_URL: '', RUNTIME_ROLE_NAME: serve }, () => undefined)).toBe(0);
+  expect(await serveMigrationAccess()).toBe(false);
+});
+it.each([{}, { DATABASE_URL: '' }, { MIGRATE_DATABASE_URL: '' }])('missing or empty URLs (%j) refuse with the typed result and revoke nothing', async (env) => {
+  await grantServeMigrations();
+  const logs: string[] = [];
+  expect(await main(env, l => logs.push(l))).toBe(2);
   expect(logs).toEqual(['db.runtime_role.revoke_database_url_missing']);
+  expect(await serveMigrationAccess()).toBe(true);
 });
 it('connection failure never prints URL or password', async () => {
   const logs: string[] = [];
@@ -148,4 +176,46 @@ it('a role requiring identifier quoting gets only its migration-table grant revo
     expect((await c.query("SELECT has_table_privilege($1, 'public._prisma_migrations', 'SELECT') AS held", [quotedServe])).rows[0].held).toBe(false);
     expect((await c.query('SELECT has_table_privilege($1, $2, \'SELECT\') AS held', [quotedServe, `public.${q(nodeTable)}`])).rows[0].held).toBe(true);
   });
+});
+it('is_current_user is pinned apart from table ownership: a connected non-owner skips its own revoke', async () => {
+  // `member` is not the table owner but inherits it, so a REVOKE it issued WOULD remove its own ACL entry.
+  await using(url(owner), c => c.query(`GRANT SELECT ON public._prisma_migrations TO ${q(member)}`));
+  await using(url(member), async c => {
+    const before = await migrationAclOf(c);
+    expect(before).toContain(`${member}=r/`);
+    await revokeRuntimeMigrations(c, member);
+    expect(await migrationAclOf(c)).toBe(before);
+  });
+});
+it('the same role is still revoked when someone else is connected', async () => {
+  await using(url(owner), async c => {
+    await c.query(`GRANT SELECT ON public._prisma_migrations TO ${q(member)}`);
+    await revokeRuntimeMigrations(c, member);
+    expect(await migrationAclOf(c)).not.toContain(`${member}=`);
+  });
+});
+it('a stalled connection times out with the typed result and no credentials', async () => {
+  // A server that accepts TCP and never answers the startup packet: deterministic, unlike a refused/filtered port.
+  const sockets: Socket[] = [];
+  let accepted!: () => void;
+  const sawConnection = new Promise<void>(resolve => { accepted = resolve; });
+  const stalled = createServer(socket => { sockets.push(socket); accepted(); });
+  await new Promise<void>(resolve => stalled.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = stalled.address() as { port: number };
+    const logs: string[] = [];
+    const started = Date.now();
+    const result = await main({ DATABASE_URL: `postgresql://fixture:private-secret@127.0.0.1:${port}/missing` }, l => logs.push(l), { connectionTimeoutMillis: 300 });
+    await sawConnection; // it really connected and stalled, rather than being refused
+    expect(result).toBe(1);
+    expect(logs).toEqual(['db.runtime_role.revoke_failed']);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  } finally {
+    sockets.forEach(socket => socket.destroy());
+    await new Promise(resolve => stalled.close(resolve));
+  }
+});
+it('has a finite default connection timeout', () => {
+  expect(CONNECT_TIMEOUT_MS).toBeGreaterThan(0);
+  expect(Number.isFinite(CONNECT_TIMEOUT_MS)).toBe(true);
 });
