@@ -223,12 +223,16 @@ export async function loadDeliveryBatches(args: DeliverySelectionArgs): Promise<
   return { batches, nextAfter };
 }
 
-/** One admitted row/count definition for both capped pull rendering and the response footer. No body is projected. */
+/** One admission definition for rendering and exact counting. Both use the same alias and snapshot. */
+function admittedDeliveryPredicate(ch: EligibleDeliveryChannel, standby: EligibleDeliveryWorker['standby']): Prisma.Sql {
+  return Prisma.sql`(${ch.predicate})
+    ${standby ? Prisma.sql`AND ${standbyAdmitsSql(Prisma.sql`n.data`, Prisma.sql`${[standby.token]}::text[]`, standby.headWorkerId)}` : Prisma.empty}`;
+}
+
 function admittedDeliveryRows(ch: EligibleDeliveryChannel, standby: EligibleDeliveryWorker['standby']): Prisma.Sql {
   return Prisma.sql`SELECT n.id, n.seq, n.created_at,
     MIN(n.created_at) OVER() AS oldest_posted_at, COUNT(*) OVER() AS total_eligible
-    FROM nodes n WHERE ${ch.predicate}
-      ${standby ? Prisma.sql`AND ${standbyAdmitsSql(Prisma.sql`n.data`, Prisma.sql`${[standby.token]}::text[]`, standby.headWorkerId)}` : Prisma.empty}`;
+    FROM nodes n WHERE ${admittedDeliveryPredicate(ch, standby)}`;
 }
 
 /** Exact pre-cap C7 total for one authorized self selection, at the caller's snapshot/asOf. Never renders or signs. */
@@ -240,18 +244,16 @@ export async function loadPendingDeliverySummary(args: DeliverySelectionArgs): P
   const settings = await loadDeliverySettings(args.ctx.db, args.app.id);
   let total = 0;
   for (const worker of workers) {
-    let count = 0;
-    let oldest: Date | null = null;
-    for (const channel of worker.channels) {
-      const [row] = await args.ctx.db.$queryRaw<Array<{ total: bigint; oldest: Date | null }>>(Prisma.sql`
-        SELECT COALESCE(MAX(e.total_eligible), 0)::bigint AS total, MIN(e.oldest_posted_at) AS oldest
-        FROM (${admittedDeliveryRows(channel, worker.standby)}) e`);
-      const n = Number(row?.total);
-      if (!Number.isSafeInteger(n) || n < 0 || !Number.isSafeInteger(count + n)) throw new Error('Unsafe footer count');
-      count += n;
-      if (row.oldest && (!oldest || row.oldest < oldest)) oldest = row.oldest;
-    }
-    if (oldest && batchTiming(settings, { oldestPostedAt: oldest }).deliverAfter <= now) total += count;
+    if (worker.channels.length === 0) continue;
+    // Channel predicates are disjoint (each fixes n.message_channel_id); OR counts every reached row once.
+    // One plain aggregate avoids per-channel round trips and windowing every row of a large backlog.
+    const predicates = worker.channels.map(channel => Prisma.sql`(${admittedDeliveryPredicate(channel, worker.standby)})`);
+    const [row] = await args.ctx.db.$queryRaw<Array<{ total: bigint; oldest: Date | null }>>(Prisma.sql`
+      SELECT COUNT(*)::bigint AS total, MIN(n.created_at) AS oldest FROM nodes n
+      WHERE ${Prisma.join(predicates, ' OR ')}`);
+    const count = Number(row?.total);
+    if (!Number.isSafeInteger(count) || count < 0) throw new Error('Unsafe footer count');
+    if (row.oldest && batchTiming(settings, { oldestPostedAt: row.oldest }).deliverAfter <= now) total += count;
     if (!Number.isSafeInteger(total)) throw new Error('Unsafe footer count');
   }
   return total;

@@ -232,6 +232,17 @@ describe('#2026 review closure controls', () => {
    expect(await deliveryPending(context() as any, session.id)).toEqual(metadata(13));
   });
  });
+ it('omits a foreign named session without falling back to the owned binding', async () => {
+  const foreign=await db.user.create({data:{handle:'named-foreign-footer'}});
+  const foreignSession=await db.session.create({data:{id:generateId(),userId:foreign.id,appId:app.id,agentId:worker.agentId}});
+  expect(await deliveryPending(context() as any, foreignSession.id)).toBeUndefined();
+  expect(await deliveryPending({...context(),sessionBindingRefused:true} as any, session.id)).toBeUndefined();
+ });
+ it('respects the delivery window for reached messages already posted', async () => {
+  await db.node.updateMany({where:{messageChannelId:channel.id},data:{createdAt:new Date(Date.now()-1000)}});
+  expect((await loadDeliveryBatches({ctx:context() as any,app,hostId:null,workerIds:[worker.id]})).batches).toEqual([]);
+  expect(await deliveryPending(context() as any)).toEqual(metadata(0));
+ });
  it('counts two admitted channels in one aggregate, with the same total as pull', async () => {
   const made=await ensureChannelWithRoot(db,{memoryId:channel.memoryId,loc:'chats:second',name:'Second',createdBy:user.id});
   await db.registerEntry.create({data:{appId:app.id,channelId:made.channel.id,attendeeWorkerId:worker.id,role:'BOTH'}});

@@ -2296,13 +2296,15 @@ export function createMcpServerInstance(
         const index = args.length - 1;
         const callback = args[index] as ToolCallback;
         const shape = args.find((a, i) => i > 0 && i < index && typeof a === 'object' && a !== null) as Record<string, unknown> | undefined;
-        args[index] = (input: unknown, extra: unknown) => runInChildActorScope(async () => {
+        args[index] = async (input: unknown, extra: unknown) => {
+          // Preserve the neutral callback's original actor scope. Only the optional finalizer gets a child scope.
+          const result = await callback(input, extra);
           const named = shape && 'session' in shape ? (input as Record<string, unknown> | undefined)?.session : undefined;
-          return appendDeliveryPending(await callback(input, extra), {
+          return runInChildActorScope(() => appendDeliveryPending(result, {
             ...scopeCtx(), ...mcpRequestSessionContext(auth), appKeyId: auth.appKeyId ?? undefined,
             impersonation: auth.impersonation ?? undefined,
-          }, typeof named === 'string' && named.length > 0 ? named : undefined);
-        });
+          }, typeof named === 'string' && named.length > 0 ? named : undefined));
+        };
         return registerTool(...args);
       }
       const cbIndex = args.length - 1;

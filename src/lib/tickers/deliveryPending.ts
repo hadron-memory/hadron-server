@@ -16,7 +16,6 @@ export async function deliveryPending(ctx: Context, namedSession?: string): Prom
   if (namedSession) ctx = { ...ctx, sessionId: namedSession };
   if (!ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation || isRunPrincipal(ctx) || (!namedSession && currentActorAmbiguity())) return;
   const start = performance.now();
-  const now = new Date();
   try {
     // No uncancelled Promise.race: pool acquisition, transaction lifetime and backend statements are bounded.
     const result = await ctx.db.$transaction(async tx => {
@@ -25,16 +24,23 @@ export async function deliveryPending(ctx: Context, namedSession?: string): Prom
       // Pure metadata is authorized at this coherent snapshot. The database refuses any accidental write;
       // credential refresh and the shared self gate use that same snapshot, without write-door audit paths.
       const txCtx = await liveReadSnapshotContext(ctx, tx);
+      const now = new Date();
       const bound = await ownBatchSession(txCtx);
       const app = await loadApp(txCtx, bound.worker.appId);
       if (!app || app.deletedAt || app.uninstalledAt) throw new Error('Unavailable footer App');
       const count = await loadPendingDeliverySummary({ ctx: txCtx, app, hostId: null, workerIds: [bound.worker.id], now });
-      await ownBatchSession(txCtx, app.id);
       if (!Number.isSafeInteger(count) || count < 0) throw new Error('Unsafe footer count');
       return { v: 1 as const, count, complete: true as const, asOf: now.toISOString() };
     }, { isolationLevel: 'RepeatableRead', maxWait: 20, timeout: 210 });
     if (performance.now() - start <= DELIVERY_PENDING_BUDGET_MS) return result;
-  } catch { /* A footer never changes the operation's data, errors or outcome. */ }
+    omission('deadline');
+  } catch { omission('failure'); }
+}
+
+/** Fixed diagnostic classes only: never error.message, payload, credential, binding or object identity. */
+function omission(reason: 'failure' | 'deadline'): void {
+  try { console.warn(JSON.stringify({ event: 'delivery.pending.omitted', reason })); }
+  catch { /* Even a diagnostic sink failure cannot change the operation. */ }
 }
 
 export async function appendDeliveryPending<T>(result: T, ctx: Context, namedSession?: string): Promise<T> {
@@ -43,5 +49,5 @@ export async function appendDeliveryPending<T>(result: T, ctx: Context, namedSes
   if (!pending) return result;
   const r = result as { _meta?: Record<string, unknown>; content?: unknown[] };
   return { ...result, _meta: { ...r._meta, 'hadron/deliveryPending': pending },
-    ...(pending.count > 0 && Array.isArray(r.content) ? { content: [...r.content, { type: 'text', text: `${pending.count} messages waiting; pull with hadron_team_chat_inbox.` }] } : {}) };
+    ...(pending.count > 0 && Array.isArray(r.content) ? { content: [...r.content, { type: 'text', text: `${pending.count} ${pending.count === 1 ? 'message' : 'messages'} waiting; pull with hadron_team_chat_inbox.` }] } : {}) };
 }
