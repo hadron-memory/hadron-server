@@ -99,7 +99,10 @@ export function hadronListEstimator(limits: Pick<GraphqlAdmissionConfig, 'maxCos
   return ({ type, field, args, childComplexity }) => {
     if (field.name === '__schema' || field.name === '__type' || field.name === '__typename') return 0;
     const isList = isListType(getNullableType(field.type));
-    const declared = field.args.find((a) => PAGE_ARG.test(a.name))?.name;
+    // #2421: agentTaskList's limit is conditional on symptom. Its legacy
+    // unfiltered form ignores limit, so keep that form's unpaged cost too.
+    const unfilteredTaskList = type.name === 'Query' && field.name === 'agentTaskList' && args.symptom == null;
+    const declared = unfilteredTaskList ? undefined : field.args.find((a) => PAGE_ARG.test(a.name))?.name;
     if (!isList && declared === undefined) return undefined;
     const size = pageSizeOf(`${type.name}.${field.name}`, declared, args) ?? limits.listFactor;
     // A list multiplies its children by its size; a wrapper around a list corrects the factor its list child was
