@@ -84,6 +84,7 @@ import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.j
 import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
+import { startOauthClientGcLoop } from './jobs/gcOauthClients.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
@@ -1933,6 +1934,12 @@ export async function createServer(): Promise<Express> {
   // (cor:api:010:02), in bounded batches. Live proofs and sealed receipts stay.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
     startMergeConsentSweepLoop(db);
+  }
+
+  // #155 — collect unused DCR OAuth clients 7 days past their expiry (soft delete). Dry run, logging
+  // the count it would collect, until OAUTH_CLIENT_GC_ENABLED=true (R220).
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_OAUTH_CLIENT_GC !== 'true') {
+    startOauthClientGcLoop(db);
   }
 
   // #1647 — resume pending notices of admin-initiated account erasures (restart-safe outbox).
