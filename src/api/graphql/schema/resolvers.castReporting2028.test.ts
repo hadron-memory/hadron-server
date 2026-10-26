@@ -1,5 +1,7 @@
 /** S12: explicit reporting choice, legacy omission, and permanent-mint atomicity. */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { setS7AvailableForTest } from '../../../lib/tickers/s7Availability.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -20,7 +22,7 @@ beforeEach(async () => {
   app = await db.app.create({ data: { organizationId: org.id, name: 'S12 app', urn: `s12-${generateId()}:team` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
 });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.unstubAllEnvs(); setS7AvailableForTest(false); });
 
 describe('S12 cast choice', () => {
   it('records explicit no-team and returns the same placement in preview', async () => {
@@ -71,5 +73,326 @@ describe('S12 cast choice', () => {
       });
     }
     expect(await db.worker.count()).toBe(0);
+  });
+});
+
+// Executable schema pins distinguish omitted variables from explicit literal nulls.
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
+import { formatGraphQLError } from '../formatError.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
+import { writeReportsTo } from '../../../lib/workerReportsTo.js';
+import { eventActor } from '../../../lib/agentTasks/events.js';
+import { readFileSync } from 'node:fs';
+const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
+async function wire(operation: 'castWorker' | 'castWorkerPreview', choice: Record<string, unknown>, literal = '') {
+  const query = `${operation === 'castWorker' ? 'mutation' : 'query'}($app:ID!,$agent:ID!,$name:String,$reports:ID,$none:Boolean) {
+    ${operation}(appRef:$app,agentRef:$agent,name:$name,${literal || 'reportsTo:$reports,noTeam:$none'}) { teamPlacement reportsToWorkerId }
+  }`;
+  // Literal pins omit variable definitions that would be unused.
+  const actualQuery = literal ? query.replace(',$reports:ID,$none:Boolean', '') : query;
+  const result = await server.executeOperation({ query: actualQuery, variables: { app: app.id, agent: agent.id, name: 'Wire', ...choice } }, { contextValue: ctx() });
+  if (result.body.kind !== 'single') throw new Error('Expected single result');
+  return result.body.singleResult;
+}
+for (const required of [false, true]) {
+  describe(`S12 real transports enforcement ${required}`, () => {
+    it('shares fixed invalid/conflict envelopes and creates nothing', async () => {
+      vi.stubEnv('CAST_REPORTING_CHOICE_REQUIRED', String(required));
+      const cases: Array<[Record<string, unknown>, string, string]> = [
+        [{ reports: null }, 'INVALID', 'reportsTo must be a non-empty worker reference, or noTeam must be true.'],
+        [{ reports: '' }, 'INVALID', 'reportsTo must be a non-empty worker reference, or noTeam must be true.'],
+        [{ none: false }, 'INVALID', 'reportsTo must be a non-empty worker reference, or noTeam must be true.'],
+        [{ none: null }, 'INVALID', 'reportsTo must be a non-empty worker reference, or noTeam must be true.'],
+        [{ reports: null, none: null }, 'CONFLICT', 'Supply reportsTo or noTeam, never both.'],
+        [{ reports: 'secret-foreign-name', none: false }, 'CONFLICT', 'Supply reportsTo or noTeam, never both.'],
+        [{ reports: null, none: true }, 'CONFLICT', 'Supply reportsTo or noTeam, never both.'],
+      ];
+      const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
+      for (const [input, suffix, message] of cases) {
+        for (const op of ['castWorker', 'castWorkerPreview'] as const) {
+          expect((await wire(op, input)).errors?.[0]).toMatchObject({ message, extensions: { code: `WORKER_TEAM_CHOICE_${suffix}` } });
+        }
+        const choice = { ...('reports' in input ? { reportsTo: input.reports } : {}), ...('none' in input ? { noTeam: input.none } : {}) };
+        expect(await mcp.callToolText('hadron_cast_worker', { app: app.id, agent: agent.id, name: 'Wire', ...choice }))
+          .toBe(`Error: [WORKER_TEAM_CHOICE_${suffix}] ${message}`);
+      }
+      const literal = await wire('castWorker', {}, 'reportsTo:null');
+      expect(literal.errors?.[0].extensions?.code).toBe('WORKER_TEAM_CHOICE_INVALID');
+      expect(await db.worker.count()).toBe(0);
+      expect(await db.agentTeamEvent.count()).toBe(0);
+    });
+    it('preserves actual old GraphQL/MCP request omission', async () => {
+      vi.stubEnv('CAST_REPORTING_CHOICE_REQUIRED', String(required));
+      const result = await wire('castWorkerPreview', {});
+      if (required) expect(result.errors?.[0].extensions?.code).toBe('WORKER_TEAM_CHOICE_REQUIRED');
+      else expect(result.data?.castWorkerPreview).toMatchObject({ teamPlacement: 'UNSET' });
+      const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
+      const text = await mcp.callToolText('hadron_cast_worker', { agent: agent.id, name: 'Old MCP' });
+      expect(text).toContain(required ? '[WORKER_TEAM_CHOICE_REQUIRED]' : 'Team placement: UNSET');
+      expect(await db.worker.count()).toBe(required ? 0 : 1);
+    });
+  });
+}
+
+describe('S12 lifecycle and invariant', () => {
+  it('legacy null and reporting pointers retain intent; explicit clears are attributable and idempotent', async () => {
+    const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
+    const worker = await M.castWorker({}, args(), ctx());
+    await db.$transaction(tx => writeReportsTo(tx, { workerId: worker.id, appId: app.id, to: null, actor: eventActor(user.id), setBy: 'app-manager' }));
+    await db.$transaction(tx => writeReportsTo(tx, { workerId: worker.id, appId: app.id, to: null, actor: eventActor(user.id), setBy: 'app-manager' }));
+    expect(await db.agentTeamEvent.count({ where: { subjectWorkerId: worker.id } })).toBe(1);
+    await M.setWorkerReportsTo({}, { workerRef: worker.id, reportsTo: head.id }, ctx());
+    let row = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    expect((row as any).explicitNoTeam).toBe(false);
+    expect(await W.teamPlacement(row, {}, ctx())).toBe('REPORTS_TO');
+    await M.setWorkerReportsTo({}, { workerRef: worker.id, reportsTo: null }, ctx());
+    row = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    expect(await W.teamPlacement(row, {}, ctx())).toBe('NO_TEAM');
+    await M.retireWorker({}, { workerRef: worker.id }, ctx());
+    row = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    expect(await W.teamPlacement(row, {}, ctx())).toBe('UNSET');
+  });
+  it('CHECK rejects contradictory marker with real23514, and replay retains both legal states', async () => {
+    const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
+    const worker = await M.castWorker({}, args({ noTeam: true }), ctx());
+    await expect(db.$executeRaw`UPDATE workers SET reports_to_worker_id = ${head.id} WHERE id = ${worker.id}`).rejects.toMatchObject({ meta: { code: '23514' } });
+    const source = readFileSync('prisma/worker-team-choice-invariants.sql', 'utf8');
+    await db.$transaction(async tx => {
+      for (const statement of source.replace(/--[^\n]*/g, '').split(';').filter(s => s.trim())) await tx.$executeRawUnsafe(statement);
+    });
+    expect((await db.worker.findUniqueOrThrow({ where: { id: worker.id } }) as any).explicitNoTeam).toBe(true);
+    expect(await W.teamPlacement(await db.worker.findUniqueOrThrow({ where: { id: head.id } }), {}, ctx())).toBe('UNSET');
+  });
+  it('masks placement to null for an unauthorized viewer', async () => {
+    const worker = await M.castWorker({}, args({ noTeam: true }), ctx());
+    const stranger = await db.user.create({ data: { githubId: 2028002, githubUsername: 's12-stranger' } });
+    expect(await W.teamPlacement(worker, {}, { db, userId: stranger.id, roles: ['READER'] })).toBeNull();
+  });
+});
+
+describe('S12 DARK boundary and atomic S8 join', () => {
+  it('fails closed for head casts if future standby becomes available', async () => {
+    const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
+    vi.stubEnv('CAST_REPORTING_CHOICE_REQUIRED', 'true');
+    setS7AvailableForTest(true);
+    for (const operation of [M.castWorker, Q.castWorkerPreview]) {
+      await expect(operation({}, args({ reportsTo: head.id }), ctx())).rejects.toMatchObject({ extensions: { code: 'WORKER_REPORTING_CAST_UNAVAILABLE' } });
+    }
+    expect(await db.worker.count()).toBe(1);
+    expect(await db.agentTeamEvent.count()).toBe(0);
+  });
+  it('conceals foreign/missing/malformed head identities after the manager gate', async () => {
+    const other = await db.app.create({ data: { ownerUserId: user.id, name: 'Other', urn: `s12-${generateId()}:other` } });
+    const foreign = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: other.id, agentId: agent.id, name: 'Foreign', slug: 'foreign' } });
+    for (const ref of [foreign.id, generateId(), 'hrn:worker:bad', 'Missing']) {
+      for (const operation of [M.castWorker, Q.castWorkerPreview]) {
+        await expect(operation({}, args({ reportsTo: ref }), ctx())).rejects.toMatchObject({ message: 'Worker not found in this App.', extensions: { code: 'WORKER_NOT_FOUND' } });
+      }
+    }
+    expect(await db.worker.count({ where: { appId: app.id } })).toBe(0);
+  });
+  it('staffing alone permits no-team but never grants head placement authority', async () => {
+    const member = await db.user.create({ data: { githubId: 2028003, githubUsername: 's12-member' } });
+    await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+    const c = { ...ctx(), userId: member.id };
+    await expect(M.castWorker({}, args({ reportsTo: 'Missing' }), c)).rejects.toMatchObject({ extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN' } });
+    const made = await M.castWorker({}, args({ noTeam: true }), c);
+    expect(await W.teamPlacement(made, {}, c)).toBe('NO_TEAM');
+  });
+  it('rolls back worker, event, first ticker and subscription on a late template failure; retry keeps the name', async () => {
+    for (const name of ['A', 'B']) await db.agentTickerTemplate.create({ data: { agentId: agent.id, name, cadenceSeconds: 600, reasons: ['read-team-channel'] } });
+    let n = 0;
+    const failing = db.$extends({ query: { ticker: { async create({ args, query }) {
+      if (++n === 2) throw new Error('injected second ticker failure');
+      return query(args);
+    } } } });
+    await expect(M.castWorker({}, args({ noTeam: true }), { ...ctx(), db: failing })).rejects.toThrow('injected second ticker failure');
+    expect(n).toBe(2);
+    expect(await db.worker.count()).toBe(0);
+    expect(await db.agentTeamEvent.count()).toBe(0);
+    expect(await db.ticker.count()).toBe(0);
+    expect(await db.tickerSubscription.count()).toBe(0);
+    const made = await M.castWorker({}, args({ noTeam: true }), ctx());
+    expect(made.name).toBe('Newcomer');
+    expect(await db.ticker.count()).toBe(2);
+    expect(await db.tickerSubscription.count()).toBe(2);
+  });
+  it('rolls back a marker event failure, before memory provisioning', async () => {
+    const failing = db.$extends({ query: { agentTeamEvent: { async create() { throw new Error('injected choice event failure'); } } } });
+    const memories = await db.memory.count();
+    await expect(M.castWorker({}, args({ noTeam: true }), { ...ctx(), db: failing })).rejects.toThrow('injected choice event failure');
+    expect(await db.worker.count()).toBe(0);
+    expect(await db.memory.count()).toBe(memories);
+    const made = await M.castWorker({}, args({ noTeam: true }), ctx());
+    expect(made.name).toBe('Newcomer');
+  });
+});
+
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { observeTransactionBackend, waitForAdvisoryWaiter } from '../../../test/advisoryWaiter.js';
+
+describe('S12 deciding transaction fences', () => {
+  it('a revocation winning the authority anchor causes fresh refusal with no mint', async () => {
+    const owner = await db.app.findUniqueOrThrow({ where: { id: app.id } });
+    let release!: () => void;
+    let ready!: () => void;
+    const held = new Promise<void>(r => { release = r; });
+    const started = new Promise<void>(r => { ready = r; });
+    const revoker = db.$transaction(async tx => {
+      await lockAuthorityAnchors(tx, [{ kind: 'org', id: owner.organizationId! }], 'exclusive');
+      await tx.orgMember.update({ where: { organizationId_userId: { organizationId: owner.organizationId!, userId: user.id } }, data: { role: 'READER' } });
+      ready(); await held;
+    }, { timeout: 30000 });
+    await started;
+    const observed = observeTransactionBackend(db);
+    const casting = M.castWorker({}, args({ noTeam: true }), { ...ctx(), db: observed.db });
+    const result = casting.then(() => null, (e: any) => e.extensions?.code);
+    try {
+      const pid = await observed.backendFor(casting);
+      await waitForAdvisoryWaiter(db, { pid, key: { form: 'int-pair', first: 'authorization:org', second: owner.organizationId! } }, 2500);
+    } finally { release(); await revoker; }
+    expect(await result).toBe('FORBIDDEN');
+    expect(await db.worker.count()).toBe(0);
+    expect(await db.agentTeamEvent.count()).toBe(0);
+  });
+  it('a cast winning the authority anchor holds it through event/ticker commit', async () => {
+    const owner = await db.app.findUniqueOrThrow({ where: { id: app.id } });
+    let release!: () => void; let ready!: () => void;
+    const held = new Promise<void>(r => { release = r; });
+    const started = new Promise<void>(r => { ready = r; });
+    const paused = db.$extends({ query: { agentTeamEvent: { async create({ args, query }) {
+      const row = await query(args); ready(); await held; return row;
+    } } } });
+    const casting = M.castWorker({}, args({ noTeam: true }), { ...ctx(), db: paused });
+    await started;
+    const observed = observeTransactionBackend(db);
+    const revoking = observed.db.$transaction(async tx => {
+      await lockAuthorityAnchors(tx, [{ kind: 'org', id: owner.organizationId! }], 'exclusive');
+      await tx.orgMember.update({ where: { organizationId_userId: { organizationId: owner.organizationId!, userId: user.id } }, data: { role: 'READER' } });
+    });
+    try {
+      const pid = await observed.backendFor(revoking);
+      await waitForAdvisoryWaiter(db, { pid, key: { form: 'int-pair', first: 'authorization:org', second: owner.organizationId! } }, 2500);
+      expect(await db.worker.count()).toBe(0); // uncommitted birth is invisible
+    } finally { release(); }
+    await casting; await revoking;
+    expect(await db.worker.count()).toBe(1);
+    expect(await db.agentTeamEvent.count()).toBe(1);
+  });
+  it('dual casts serialize before the App row upgrade and only one name is minted', async () => {
+    const result = await Promise.allSettled([M.castWorker({}, args({ noTeam: true }), ctx()), M.castWorker({}, args({ noTeam: true }), ctx())]);
+    expect(result.filter(r => r.status === 'fulfilled')).toHaveLength(1);
+    expect(result.find(r => r.status === 'rejected')).toMatchObject({ reason: { extensions: { code: 'WORKER_NAME_TAKEN' } } });
+    expect(await db.worker.count()).toBe(1);
+    expect(await db.agentTeamEvent.count()).toBe(1);
+  });
+  it('shared reporting graph is never upgraded after the new Worker exists', async () => {
+    // Hold exclusive graph; the cast must wait before inserting the worker.
+    const { lockAppReportsTo } = await import('../../../lib/workerReportsTo.js');
+    let release!: () => void; let ready!: () => void;
+    const held = new Promise<void>(r => { release = r; }); const started = new Promise<void>(r => { ready = r; });
+    const holder = db.$transaction(async tx => { await lockAppReportsTo(tx, app.id); ready(); await held; }, { timeout: 30000 });
+    await started;
+    let created = false;
+    const tracked = db.$extends({ query: { worker: { async create({ args, query }) { created = true; return query(args); } } } });
+    const observed = observeTransactionBackend(tracked as unknown as typeof db);
+    const casting = M.castWorker({}, args({ noTeam: true }), { ...ctx(), db: observed.db });
+    try {
+      const pid = await observed.backendFor(casting);
+      await waitForAdvisoryWaiter(db, { pid, key: { form: 'hashed-bigint', value: `worker-reports-to:${app.id}` } });
+      expect(created).toBe(false);
+      expect(await db.worker.count()).toBe(0);
+    } finally { release(); await holder; }
+    await casting;
+  });
+});
+
+it('migration preserves legacy pointers and null UNSET without backfilled events', async () => {
+  const head = await M.castWorker({}, args({ name: 'Legacy head' }), ctx());
+  const child = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Legacy child', slug: 'legacy-child', reportsToWorkerId: head.id } });
+  const migration = readFileSync('prisma/migrations/20261026030000_worker_team_choice/migration.sql', 'utf8');
+  await db.$transaction(async tx => {
+    await tx.$executeRawUnsafe('ALTER TABLE workers DROP COLUMN explicit_no_team');
+    for (const statement of migration.split(';').filter(s => s.trim())) await tx.$executeRawUnsafe(statement);
+    const rows = await tx.worker.findMany({ where: { id: { in: [head.id, child.id] } } });
+    expect(rows.find(w => w.id === head.id)).toMatchObject({ reportsToWorkerId: null, explicitNoTeam: false });
+    expect(rows.find(w => w.id === child.id)).toMatchObject({ reportsToWorkerId: head.id, explicitNoTeam: false });
+    expect(await tx.agentTeamEvent.count()).toBe(0);
+  });
+});
+
+it('does not disguise an infrastructure failure resolving a head as not-found', async () => {
+  const failing = db.$extends({ query: { worker: { async findFirst() { throw new Error('synthetic database outage'); } } } });
+  for (const operation of [M.castWorker, Q.castWorkerPreview]) {
+    await expect(operation({}, args({ reportsTo: generateId() }), { ...ctx(), db: failing })).rejects.toThrow('synthetic database outage');
+  }
+});
+
+it('round-trips roster placement and masks it under the shared working-state gate', async () => {
+  const none = await M.castWorker({}, args({ noTeam: true }), ctx());
+  const unset = await M.castWorker({}, args({ name: 'Unset' }), ctx());
+  const roster = await Q.teamRoster({}, { appRef: app.id }, ctx());
+  expect(roster.workers.find((w: any) => w.workerId === none.id).teamPlacement).toBe('NO_TEAM');
+  expect(roster.workers.find((w: any) => w.workerId === unset.id).teamPlacement).toBe('UNSET');
+  const gate = await import('./resolvers.worker.js');
+  const spy = vi.spyOn(gate, 'maySeeWorkerInternals').mockResolvedValue(false);
+  try {
+    const masked = await Q.teamRoster({}, { appRef: app.id }, ctx());
+    expect(masked.workers.every((w: any) => w.teamPlacement === null)).toBe(true);
+  } finally { spy.mockRestore(); }
+});
+
+it('bind naming a head replaces explicit no-team through the shared reporting writer', async () => {
+  const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
+  const worker = await M.castWorker({}, args({ noTeam: true }), ctx());
+  await M.startSession({}, { input: { id: generateId(), workerRef: worker.id, reportsTo: head.id } }, ctx());
+  const row = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+  expect(row.reportsToWorkerId).toBe(head.id);
+  expect((row as any).explicitNoTeam).toBe(false);
+  expect(await W.teamPlacement(row, {}, ctx())).toBe('REPORTS_TO');
+});
+
+it('a marker-only clear cannot bypass the existing setter authorization', async () => {
+  const worker = await M.castWorker({}, args(), ctx());
+  const member = await db.user.create({ data: { githubId: 2028004, githubUsername: 's12-reader' } });
+  await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+  await expect(M.setWorkerReportsTo({}, { workerRef: worker.id, reportsTo: null }, { ...ctx(), userId: member.id })).rejects.toMatchObject({ extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN' } });
+  expect(await db.agentTeamEvent.count()).toBe(0);
+  expect((await db.worker.findUniqueOrThrow({ where: { id: worker.id } }) as any).explicitNoTeam).toBe(false);
+});
+
+describe('S12 head casts while standby is inert (Ada36559)', () => {
+  for (const required of [false, true]) {
+    it(`records a selected live head atomically with enforcement ${required}`, async () => {
+      const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
+      vi.stubEnv('CAST_REPORTING_CHOICE_REQUIRED', String(required));
+      const preview = await Q.castWorkerPreview({}, args({ reportsTo: head.id }), ctx());
+      expect(preview).toMatchObject({ teamPlacement: 'REPORTS_TO', reportsToWorkerId: head.id });
+      expect(await db.worker.count()).toBe(1);
+      const made = await M.castWorker({}, args({ reportsTo: head.id }), ctx());
+      expect(made).toMatchObject({ reportsToWorkerId: head.id, explicitNoTeam: false });
+      expect(await W.teamPlacement(made, {}, ctx())).toBe('REPORTS_TO');
+      expect(await db.agentTeamEvent.findMany({ where: { subjectWorkerId: made.id } })).toMatchObject([
+        { type: 'worker.reports-to', payload: { from: null, to: head.id, setBy: 'cast' } },
+      ]);
+    });
+  }
+  it('resolves the same head by ID, URN and same-App name', async () => {
+    const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
+    const urn = await W.urn(head, {}, ctx());
+    for (const [i, ref] of [head.id, urn, 'Head'].entries()) {
+      const made = await M.castWorker({}, args({ reportsTo: ref, name: `Report${i}` }), ctx());
+      expect(made.reportsToWorkerId).toBe(head.id);
+    }
+  });
+  it('refuses retired heads in preview and cast with no partial Worker or event', async () => {
+    const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
+    await M.retireWorker({}, { workerRef: head.id }, ctx());
+    for (const operation of [M.castWorker, Q.castWorkerPreview]) {
+      await expect(operation({}, args({ reportsTo: head.id }), ctx())).rejects.toMatchObject({ extensions: { code: 'WORKER_REPORTS_TO_RETIRED' } });
+    }
+    expect(await db.worker.count()).toBe(1);
+    expect(await db.agentTeamEvent.count()).toBe(0);
   });
 });
