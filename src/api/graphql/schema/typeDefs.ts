@@ -9749,6 +9749,17 @@ export const typeDefs = `#graphql
     """
     reserveSpecCitation(memoryRef: ID!, loc: String!, name: String): Node!
     """
+    #1178 — allocate the next citation under parentLoc and reserve it as a
+    placeholder, in one transaction: mint-or-refuse, so a client never reads
+    sibling numbers and writes the next. Numbers follow hadron spec new:
+    features in tens (010..990), rules and flows by one (01..99), rule 00 never,
+    after lands strictly above it. A number ever minted is never handed out
+    again (R216) while a row or alias of it remains, and a loc held by a row of
+    any state is skipped. Refuses SPEC_PARENT_NOT_FOUND, SPEC_PARENT_NOT_NUMBERED
+    and SPEC_NUMBER_SPACE_EXHAUSTED; an unreadable memory is not found.
+    """
+    allocateSpecNode(memoryRef: ID!, parentLoc: String!, after: Int, name: String): Node!
+    """
     #1449 — renumber an UNMINTED spec (#1591: draft rights are per node): move
     it and its subtree from fromLoc to toLoc with no URN alias, refusing
     NODE_MINTED { locs } if any moved node is minted, then rewrite every node
