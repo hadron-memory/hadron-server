@@ -2828,3 +2828,18 @@ describe('#2252 — Worker.model / modelReportedAt / tier', () => {
     }
   });
 });
+
+
+describe('S3 default-OFF prefix reservation and G4 safe bare names', () => {
+  afterEach(() => vi.unstubAllEnvs());
+  it('leaves dotted names available OFF and refuses canonical team. prefixes ON in cast and preview', async () => {
+    vi.stubEnv('TEAM_TAGS_ENABLED','false');
+    await expect(cast({role:'backend-engineer',name:'team.legacy'})).resolves.toMatchObject({name:'team.legacy'});
+    vi.stubEnv('TEAM_TAGS_ENABLED','true');
+    await expectCode(cast({role:'backend-engineer',name:'TEAM.New'}),'WORKER_NAME_RESERVED_TEAM_PREFIX');
+    const Q = resolvers.Query as any;
+    await expectCode(Q.castWorkerPreview({}, {appRef:app.id,role:'backend-engineer',name:'Team.Preview'},ctx(admin.id)),'WORKER_NAME_RESERVED_TEAM_PREFIX');
+    await expectCode(cast({role:'backend-engineer',name:'TEAM'}),'WORKER_NAME_RESERVED');
+    await expect(cast({role:'backend-engineer',name:'other.dotted'})).resolves.toMatchObject({name:'other.dotted'});
+  });
+});

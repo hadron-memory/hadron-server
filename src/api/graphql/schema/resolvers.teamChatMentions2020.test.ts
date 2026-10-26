@@ -10,7 +10,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
  * `wakeStampsFor`), except the legacy-shape rows, which are the point.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -293,4 +293,128 @@ describe('one eligibility set (every wake gate open)', () => {
     expect(await mentionsOf(liam)).toEqual([m.seq]);
     expect(await mentionsOf(rook)).toEqual([m.seq]);
   });
+});
+
+
+afterEach(() => vi.unstubAllEnvs());
+describe('S3 real post/filter/history integration', () => {
+  it('stamps a head/subtree without global authority and filters before paging', async () => {
+    vi.stubEnv('TEAM_TAGS_ENABLED', 'true');
+    const { writeReportsTo } = await import('../../../lib/workerReportsTo.js');
+    await db.$transaction(tx => writeReportsTo(tx, { appId: app.id, workerId: liam.id, to: rook.id, actor: { userId: manager.id, workerId: null, agentId: null }, setBy: 'app-manager' }));
+    const outsider = await mkWorker('Solo', holderA.id);
+    const post = await humanSays(holderA.id, '@team.rook.all @all');
+    expect(post.broadcastWakes).toBe(false);
+    expect(post.teamBroadcastWorkerIds?.sort()).toEqual([liam.id, rook.id].sort());
+    expect(post.teamTags).toEqual([{headId: rook.id, label: '@team.rook'}]);
+    expect(await mentionsOf(liam)).toEqual([post.seq]);
+    expect(await attentionMentions(liam)).toBe(1);
+    expect(await mentionsOf(outsider)).toEqual([]);
+    expect(await attentionMentions(outsider)).toBe(0);
+    const page = await Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: rook.id, limit: 0}, ctx(holderA.id));
+    expect(page).toMatchObject({items: [], total: 1});
+    expect((await Q.teamChatMessages({}, {appRef: app.id, untagged: true}, ctx(holderA.id))).total).toBe(0);
+    await db.channelReadState.create({data:{id:generateId(),workerId:liam.id,appId:app.id,channelId:channel.id,lastSeenSeq:0}});
+    await Q.teamChatMessages({}, {appRef:app.id,sinceSeq:0,teamHeadRef:rook.id,advanceReadState:true},ctx(holderA.id,{sessionId:liam.session}));
+    expect((await db.channelReadState.findFirstOrThrow({where:{workerId:liam.id,channelId:channel.id}})).lastSeenSeq).toBe(0);
+  });
+  it('preserves absent/empty and legacy reach through ON and rollback; invalid heads roll back allocation', async () => {
+    vi.stubEnv('TEAM_TAGS_ENABLED', 'false');
+    const old = await humanSays(manager.id, '@team legacy');
+    vi.stubEnv('TEAM_TAGS_ENABLED', 'true');
+    const modern = await humanSays(manager.id, '@team modern');
+    expect(modern.teamTags).toEqual([]);
+    const before = await db.channel.findUniqueOrThrow({where: {id: channel.id}});
+    await expect(humanSays(holderA.id, '@team.missing.all')).rejects.toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
+    expect((await db.channel.findUniqueOrThrow({where: {id: channel.id}})).lastSeq).toBe(before.lastSeq);
+    for (const mode of ['true', 'false']) {
+      vi.stubEnv('TEAM_TAGS_ENABLED', mode);
+      expect(await mentionsOf(liam)).toEqual([old.seq]);
+      const page = await Q.teamChatMessages({}, {appRef: app.id, untagged: true}, ctx(holderA.id));
+      expect(page.items.map((m: any) => m.teamTags)).toEqual([null, []]);
+    }
+  });
+});
+
+
+describe('S3 filter audience and transport boundaries', () => {
+  it('refuses incompatible or foreign head filters before returning count/page', async () => {
+    await expect(Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: rook.id, untagged: true, limit: 0}, ctx(holderA.id))).rejects.toMatchObject({extensions: {code: 'BAD_USER_INPUT'}});
+    await expect(Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: 'foreign-or-missing', limit: 0}, ctx(holderA.id))).rejects.toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
+  });
+  it('masks metadata and denies all tag/count probes on an authorized App-less Channel', async () => {
+    vi.stubEnv('TEAM_TAGS_ENABLED','true');
+    const { writeReportsTo } = await import('../../../lib/workerReportsTo.js');
+    await db.$transaction(tx=>writeReportsTo(tx,{appId:app.id,workerId:liam.id,to:rook.id,actor:{userId:manager.id,workerId:null,agentId:null},setBy:'app-manager'}));
+    const populated = await humanSays(manager.id, 'hello @rook');
+    expect(populated.teamTags).toHaveLength(1);
+    await db.memory.update({where: {id: memory.id}, data: {class: 'knowledge', appId: null, sharedMemoryOfAgentId: null}});
+    const page = await Q.channelMessages({}, {channelRef: channel.id}, ctx(manager.id));
+    expect(page.items[0].teamTags).toBeNull();
+    for (const filter of [{untagged: true}, {untagged: false}, {teamHeadRef: rook.id}]) {
+      await expect(Q.channelMessages({}, {channelRef: channel.id, limit: 0, ...filter}, ctx(manager.id))).rejects.toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_METADATA_FORBIDDEN'}});
+    }
+  });
+  it('carries nullable structured pairs through actual GraphQL and applies the MCP filter without fallback', async () => {
+    vi.stubEnv('TEAM_TAGS_ENABLED', 'true');
+    await humanSays(manager.id, 'known empty');
+    const { graphql, buildSchema, defaultFieldResolver } = await import('graphql');
+    const { typeDefs } = await import('./typeDefs.js');
+    const result = await graphql({schema: buildSchema(typeDefs), fieldResolver: (parent, args, context, info) => { const fields = resolvers[info.parentType.name as keyof typeof resolvers] as Record<string, Function> | undefined; const fn = fields?.[info.fieldName]; return typeof fn === 'function' ? fn(parent,args,context,info) : defaultFieldResolver(parent,args,context,info); }, source: 'query($app:ID!){teamChatMessages(appRef:$app,untagged:true){total items{teamTags{headId label}}}}', variableValues: {app: app.id}, contextValue: ctx(manager.id)});
+    expect(result.errors).toBeUndefined();
+    expect(JSON.parse(JSON.stringify(result.data))).toEqual({teamChatMessages:{total:1,items:[{teamTags:[]}]}});
+    const { createTestableMcpServer } = await import('../../../mcp/server.js');
+    const server = createTestableMcpServer({userId: manager.id, appId: app.id, roles: ['READER'], clientId: `user:${manager.id}`});
+    expect(await server.callToolText('hadron_team_chat_read', {untagged:true})).toContain('known empty');
+    expect(await server.callToolText('hadron_team_chat_read', {untagged:true, teamHeadRef:rook.id})).toContain('[bad_user_input]');
+  });
+});
+
+
+describe('S3 graph snapshot concurrency', () => {
+  it('waits for a graph writer and stamps the committed nearest team rather than its stale input', async () => {
+    vi.stubEnv('TEAM_TAGS_ENABLED','true');
+    const { writeReportsTo } = await import('../../../lib/workerReportsTo.js');
+    const { waitForLockWaiters } = await import('../../../test/lockWait.js');
+    let unlock!: () => void;
+    let ready!: () => void;
+    const held = new Promise<void>(resolve => {ready=resolve;});
+    const gate = new Promise<void>(resolve => {unlock=resolve;});
+    const writer = db.$transaction(async tx => {
+      await writeReportsTo(tx,{appId:app.id,workerId:liam.id,to:rook.id,actor:{userId:manager.id,workerId:null,agentId:null},setBy:'app-manager'});
+      ready(); await gate;
+    },{timeout:20000});
+    await held;
+    const posting = workerSays(liam,'snapshot after reparent');
+    try { await waitForLockWaiters(db,1,3000); } finally {unlock();}
+    await writer;
+    const message = await posting;
+    expect(message.teamTags).toEqual([{headId:rook.id,label:'@team.rook'}]);
+    await db.$transaction(tx=>writeReportsTo(tx,{appId:app.id,workerId:liam.id,to:null,actor:{userId:manager.id,workerId:null,agentId:null},setBy:'app-manager'}));
+    const old = await Q.teamChatMessages({}, {appRef:app.id,teamHeadRef:rook.id},ctx(manager.id));
+    expect(old.items.map((m:any)=>m.seq)).toEqual([message.seq]);
+    expect(old.items[0].teamTags).toEqual(message.teamTags);
+  });
+});
+
+it('S3 refuses atomically if App uninstall wins before the early graph bracket', async () => {
+  vi.stubEnv('TEAM_TAGS_ENABLED','true');
+  const { lockAuthorityAnchors } = await import('../../../lib/auth/authorityAnchors.js');
+  const { waitForLockWaiters } = await import('../../../test/lockWait.js');
+  let release!: () => void;
+  let ready!: () => void;
+  const held = new Promise<void>(resolve=>{ready=resolve;});
+  const gate = new Promise<void>(resolve=>{release=resolve;});
+  const writer = db.$transaction(async tx=>{
+    await lockAuthorityAnchors(tx,[{kind:'app',id:app.id}],'exclusive');
+    await tx.app.update({where:{id:app.id},data:{uninstalledAt:new Date()}});
+    ready(); await gate;
+  },{timeout:20000});
+  await held;
+  const outcome = humanSays(manager.id,'must not append').then(value=>({value,error:null}),error=>({value:null,error}));
+  try {await waitForLockWaiters(db,1,3000);} finally {release();}
+  await writer;
+  expect((await outcome).error).toMatchObject({extensions:{code:'APP_UNINSTALLED'}});
+  expect(await db.node.count({where:{messageChannelId:channel.id,nodeType:'chat-message'}})).toBe(0);
+  expect((await db.channel.findUniqueOrThrow({where:{id:channel.id}})).lastSeq).toBe(0);
 });

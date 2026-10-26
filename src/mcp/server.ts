@@ -9528,7 +9528,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
   /** Read a Channel by id or address — the team-chat read's Channel-addressed twin. */
   const readChannel = async (
     channelRef: string,
-    args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; limit?: number; offset?: number; session?: string; expectedIncarnation?: number },
+    args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; teamHeadRef?: string; untagged?: boolean; limit?: number; offset?: number; session?: string; expectedIncarnation?: number },
   ) => {
     try {
       // #1353: capture applies to any user-principal session read — the pilot
@@ -9550,7 +9550,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         : chatCtx();
       const page = await resolvers.Query.channelMessages(
         {},
-        { channelRef, sinceSeq: args.sinceSeq ?? null, beforeSeq: args.beforeSeq ?? null, mentionsRef: args.mentions ?? null, limit: args.limit ?? null, offset: args.offset ?? null, expectedIncarnation: args.expectedIncarnation ?? null },
+        { channelRef, sinceSeq: args.sinceSeq ?? null, beforeSeq: args.beforeSeq ?? null, mentionsRef: args.mentions ?? null, teamHeadRef: args.teamHeadRef ?? null, untagged: args.untagged ?? null, limit: args.limit ?? null, offset: args.offset ?? null, expectedIncarnation: args.expectedIncarnation ?? null },
         resolverCtx,
       );
       if (captured && args.session) {
@@ -9562,6 +9562,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             sinceSeq: args.sinceSeq,
             beforeSeq: args.beforeSeq,
             mentionsRef: args.mentions,
+            teamHeadRef: args.teamHeadRef,
+            untagged: args.untagged,
             limit: args.limit,
             offset: args.offset,
             expectedIncarnation: args.expectedIncarnation,
@@ -9582,7 +9584,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const lines = page.items.map((m) => {
         const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
         const cross = m.authorAppId ? ' [cross-App]' : '';
-        return `#${m.seq} ${chatByline(m)}${cross} ${m.at.toISOString()}${reply}:\n${m.body}`;
+        const tags = m.teamTags?.length ? ` [${m.teamTags.map(t => `${t.label} (headId: ${t.headId})`).join(', ')}]` : '';
+        return `#${m.seq} ${chatByline(m)}${cross}${tags} ${m.at.toISOString()}${reply}:\n${m.body}`;
       });
       return textResult(`${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}${envelope}`);
     } catch (e) {
@@ -9850,7 +9853,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           if (message.authorWorkerId === watcher.workerId) return false;
           if (!watcher.mentionOnly) return true;
           // #2020: its names, or a broadcast stamped at post time.
-          return mentionReach(message, [...watcher.mentionTokens]) !== null;
+          return mentionReach(message, [...watcher.mentionTokens], [watcher.workerId]) !== null;
         });
         if (routes.length === 0) continue;
         const reply = message.replyToSeq != null ? ` (reply to #${message.replyToSeq})` : '';
@@ -9947,11 +9950,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     'hadron_channel_read',
     'Read a Channel by id or ADDRESS (the chat-root URN hadron_list_channels prints; spec 049). With no cursor or offset, returns the newest page, ascending by seq; sinceSeq reads forward and beforeSeq pages backward. A Channel you may not read is [channel_not_found].',
     SHAPE_HADRON_CHANNEL_READ,
-    async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession, expectedIncarnation }) => {
+    async ({ channel, sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session: rawSession, expectedIncarnation }) => {
       // A blank session is no session, for every consumer below (#1362 review).
       const session = typeof rawSession === 'string' ? rawSession.trim() || undefined : rawSession;
       await heartbeatSession(session);
-      return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session, expectedIncarnation });
+      return readChannel(channel, { sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session, expectedIncarnation });
     },
   );
 
@@ -10065,7 +10068,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     'hadron_team_chat_read',
     'Read the team App\'s chat (#939), newest page by default, ascending within the page. sinceSeq (including 0) reads forward; beforeSeq pages backward; explicit offset retains oldest-first paging. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and never routes a message back to its Worker author. It NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned acknowledge checkpoint. This makes a restart duplicate work rather than skip it. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
     SHAPE_HADRON_TEAM_CHAT_READ,
-    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession, app, channel, expectedIncarnation, monitor, monitorFor, acknowledge }) => {
+    async ({ sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session: rawSession, app, channel, expectedIncarnation, monitor, monitorFor, acknowledge }) => {
       // A blank session is no session, for every consumer below (#1362 review):
       // otherwise the MCP layer drops the bound session as "explicit" while
       // maybeAdvanceOwnChannelRead's trim falls back to it.
@@ -10073,7 +10076,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (!monitor && (monitorFor !== undefined || acknowledge !== undefined)) {
         return textResult('[bad_user_input] monitorFor and acknowledge require monitor:true.');
       }
-      if (monitor && (sinceSeq !== undefined || beforeSeq !== undefined || mentions !== undefined || offset !== undefined)) {
+      if (monitor && (teamHeadRef !== undefined || untagged !== undefined || sinceSeq !== undefined || beforeSeq !== undefined || mentions !== undefined || offset !== undefined)) {
         return textResult('[bad_user_input] monitor:true owns the cursor and mention routing; do not pass sinceSeq, beforeSeq, mentions or offset.');
       }
       if (monitor && limit !== undefined && limit < 1) {
@@ -10086,7 +10089,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // contract: it needs no active App. Monitor mode still needs an App to
       // decide which of this operator's live Worker sessions participate.
       if (!monitor && channel !== undefined) {
-        return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session, expectedIncarnation });
+        return readChannel(channel, { sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session, expectedIncarnation });
       }
 
       let appRef = app;
@@ -10125,6 +10128,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             sinceSeq: sinceSeq ?? null,
             beforeSeq: beforeSeq ?? null,
             mentionsRef: mentions ?? null,
+            teamHeadRef: teamHeadRef ?? null,
+            untagged: untagged ?? null,
             limit: limit ?? null,
             offset: offset ?? null,
           },
@@ -10145,6 +10150,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               sinceSeq,
               beforeSeq,
               mentionsRef: mentions,
+              teamHeadRef,
+              untagged,
               limit,
               offset,
               page,
@@ -10157,12 +10164,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (page.total === 0) return textResult(`The team chat has no matching messages.${envelope}`);
         const lines = page.items.map((m) => {
           const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
-          return `#${m.seq} ${chatByline(m)} ${m.at.toISOString()}${reply}:\n${m.body}`;
+          const tags = m.teamTags?.length ? ` [${m.teamTags.map(t => `${t.label} (headId: ${t.headId})`).join(', ')}]` : '';
+          return `#${m.seq} ${chatByline(m)}${tags} ${m.at.toISOString()}${reply}:\n${m.body}`;
         });
         return textResult(
           `${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}${envelope}`,
         );
       } catch (e) {
+        if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
         return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat read failed'}`);
       }
     },
@@ -12598,7 +12607,9 @@ const SHAPE_HADRON_CHANNEL_READ = {
   channel: z.string().describe('The Channel — its id, or its address (the chat root node URN hadron_list_channels prints). Copy one of those; a ref naming nothing reads as a Channel you may not see.'),
   sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
   beforeSeq: z.number().int().optional().describe('Page BACKWARD: only messages with seq strictly less than this, newest page of those. Ignores offset.'),
-  mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id) of the host App. For a worker this includes @all/@team broadcasts from an author who could wake everyone (decided at post time), and never its own posts.'),
+  teamHeadRef: z.string().optional().describe('Filter by an authorized stable team-head ID; mutually exclusive with untagged.'),
+  untagged: z.boolean().optional().describe('Filter for no stored head identity, including historical absent snapshots. Requires team metadata access.'),
+  mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id) of the host App. For a worker this includes its stored team-broadcast recipients and qualifying global broadcasts (including legacy @team), decided at post time; never its own posts.'),
   limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
   session: z.string().optional().describe('Your session id — passing it keeps that session alive (#1081).'),
@@ -12617,7 +12628,9 @@ const SHAPE_HADRON_TEAM_CHAT_POST = {
 const SHAPE_HADRON_TEAM_CHAT_READ = {
   sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
   beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),
-  mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id). For a worker this includes @all/@team broadcasts from an author who could wake everyone (decided at post time), and never its own posts.'),
+  teamHeadRef: z.string().optional().describe('Filter by an authorized stable team-head ID; mutually exclusive with untagged.'),
+  untagged: z.boolean().optional().describe('Filter for no stored head identity, including historical absent snapshots. Requires team metadata access.'),
+  mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id). For a worker this includes its stored team-broadcast recipients and qualifying global broadcasts (including legacy @team), decided at post time; never its own posts.'),
   limit: z.number().int().optional().describe('Page size (default 20, cap 200).'),
   offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
   session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. On an ordinary read, passing it keeps that session alive (#1081). Monitor mode uses it only as an App hint and does not heartbeat or wake the session.'),
