@@ -16,7 +16,12 @@ import {
  * sole reliance gate; (2) verifyIncludeCoverage is REQUIRED before any ACTIVE
  * transition in R3, under the same fence; (3) no R4 caller may land before R2
  * atomically maintains coverage or dirty-stamps the generation. This split
- * does not establish activation or complete production coverage.
+ * does not establish activation or complete production coverage. Ralion ruling
+ * 6408559830 extends (3): every address-graph change (node appearance, rename,
+ * move, delete, restore or purge; memory rename/move/delete; alias add/remove)
+ * must atomically rebind affected references or dirty the generation in R2.
+ * The R3 verifier re-resolves even NULL bindings before ACTIVE; it cannot make
+ * an already-ACTIVE inventory safe against subsequent unstamped changes.
  */
 export async function reliedRevisionsOf(
   tx: Prisma.TransactionClient,

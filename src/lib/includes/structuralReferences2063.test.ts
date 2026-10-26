@@ -129,6 +129,8 @@ describe('structural references (#2063 R1)', () => {
     await expect(relied()).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
     await db.includeRetentionGeneration.update({ where: { id: 'singleton' }, data: { bindingGeneration: 0, parserVersion: 99 } });
     await expect(relied()).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
+    await db.includeRetentionGeneration.update({ where: { id: 'singleton' }, data: { parserVersion: 1, schemaVersion: 99 } });
+    await expect(relied()).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
     await db.includeRetentionGeneration.deleteMany();
     await expect(relied()).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
   });
@@ -195,6 +197,39 @@ describe('structural references (#2063 R1)', () => {
     await activate();
     expect(await fenced(verifyIncludeCoverage)).toBe(true);
     await db.memory.update({ where: { id: memory.id }, data: { urn: 'retention2063.example:renamed' } });
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+  });
+
+  it('P2: verifier notices resolved-to-deleted and unresolved-to-restored targets', async () => {
+    const text = `{{> hrn:node:${memory.urn}:target rev=3}}`;
+    await db.node.update({ where: { id: source.id }, data: { content: text } });
+    await activate();
+    await db.node.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+    await capture(source.id, text);
+    expect(await fenced(verifyIncludeCoverage)).toBe(true);
+    await db.node.update({ where: { id: target.id }, data: { deletedAt: null } });
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+  });
+
+  it('P2: verifier follows live-address precedence after an alias-bound address is reused', async () => {
+    const ref = `hrn:node:${memory.urn}:historical`;
+    await db.$transaction(tx => recordUrnRename(tx, { entityType: 'NODE', entityId: target.id, oldUrn: ref.slice(9), newUrn: `${memory.urn}:target` }));
+    await db.node.update({ where: { id: source.id }, data: { content: `{{> ${ref} rev=3}}` } });
+    await activate();
+    expect(await fenced(verifyIncludeCoverage)).toBe(true);
+    const occupant = await db.node.create({ data: { memoryId: memory.id, loc: 'historical', name: 'New occupant' } });
+    await capture(occupant.id, null);
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+  });
+
+  it('binding verification exhausts bounded pages, including a mismatch beyond page one', async () => {
+    const text = Array.from({ length: 130 }, (_, i) => `{{> part:${i} rev=1}}`).join(' ');
+    await db.node.update({ where: { id: source.id }, data: { content: text } });
+    await activate();
+    expect(await fenced(verifyIncludeCoverage)).toBe(true);
+    const last = await db.includeReference.findFirstOrThrow({ orderBy: { id: 'desc' } });
+    await db.includeReference.update({ where: { id: last.id }, data: { targetLoc: 'stale' } });
     expect(await fenced(verifyIncludeCoverage)).toBe(false);
   });
 

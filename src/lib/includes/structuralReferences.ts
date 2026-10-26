@@ -14,6 +14,15 @@ export class IncludeRetentionInactiveError extends Error {
   }
 }
 
+/** Input refusal, distinct from inventory availability; contains no source data. */
+export class IncludeRevisionInvalidError extends Error {
+  readonly code = 'INCLUDE_REVISION_INVALID';
+  constructor() {
+    super('Include revision must be an integer between 1 and 2147483647');
+    this.name = 'IncludeRevisionInvalidError';
+  }
+}
+
 /**
  * #2063 / cor:dmo:150:07, cor:sec:040:03: capture ALL tags from supplied
  * plaintext, including unresolved addresses, with the sole S1 parser. References,
@@ -45,10 +54,10 @@ export async function replaceStructuralReferences(
   if (!stored) throw new IncludeRetentionInactiveError();
   const references: Prisma.IncludeReferenceCreateManyInput[] = [];
   for (const [ordinal, tag] of tags.entries()) {
-    // The parser permits arbitrary numeric syntax; PostgreSQL revision numbers
-    // are int32. Never silently turn an unrepresentable pin into an unpinned tag.
-    if (tag.settings.rev !== undefined && (!Number.isSafeInteger(tag.settings.rev) || tag.settings.rev > 2_147_483_647)) {
-      throw new IncludeRetentionInactiveError();
+    // Independently enforce the storage domain even if the parser evolves.
+    // PostgreSQL revision numbers are int32. Never silently turn an unrepresentable pin into an unpinned tag.
+    if (tag.settings.rev !== undefined && (!Number.isSafeInteger(tag.settings.rev) || tag.settings.rev < 1 || tag.settings.rev > 2_147_483_647)) {
+      throw new IncludeRevisionInvalidError();
     }
     const binding = tag.kind === 'loc'
       ? { memoryId: source.memoryId, loc: tag.target }
