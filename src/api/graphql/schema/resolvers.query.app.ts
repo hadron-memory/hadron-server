@@ -16,6 +16,7 @@ import {
   resolveOrgScope,
   APP_INCLUDE,
 } from './resolvers.helpers.js';
+import { forbiddenError } from '../../../lib/refusals.js';
 
 export const appQueries = {
     serverInfo: async (_: unknown, __: unknown, ___: Context) => getDeploymentInfo(),
@@ -209,7 +210,7 @@ export const appQueries = {
       // #876 class sweep: the target's personal API-credential inventory
       // (previews, labels, last-used stamps, active AND revoked) is
       // identity-scoped — never part of a shared-org support view.
-      if (ctx.impersonation) throw new Error('Forbidden');
+      if (ctx.impersonation) throw forbiddenError();
       return ctx.db.userApiKey.findMany({
         // #2298: keys the owner hid stay out of the default list.
         where: { userId: ctx.userId, ...(includeHidden ? {} : { hiddenAt: null }) },

@@ -1,4 +1,5 @@
 import { committedSyncReport, failedSyncReport, type SyncReportEntry, type SyncReportCode } from './syncReport.js';
+import { GitCommandError } from './execGit.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, withSyncCaller } from '../../lib/bootPrompt.js';
 import { currentActor } from '../../lib/requestActor.js';
@@ -305,6 +306,8 @@ const syncGraphFromGithubAsSystem = async (
 ): Promise<{
   error?: string;
   errorCode?: 'BAD_USER_INPUT' | typeof ENCRYPTED_GIT_SYNC_UNAVAILABLE;
+  /** #1789: `error` is an unexpected exception's text (driver, filesystem, git), not a typed refusal; callers must not echo it. */
+  fault?: true;
   nodeCount?: number;
   /**
    * #1061 — the nodes this run actually wrote, for a caller that HAS a
@@ -1681,7 +1684,9 @@ const syncGraphFromGithubAsSystem = async (
       error: (error as Error).message,
       ...(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError
         ? { errorCode: 'BAD_USER_INPUT' as const }
-        : error instanceof GitSyncEncryptedMemoryError ? { errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE } : {}),
+        : error instanceof GitSyncEncryptedMemoryError ? { errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE }
+          // A git failure's message is fixed and credential-free by design (execGit), so it stays a typed refusal.
+          : error instanceof GitCommandError ? {} : { fault: true as const }),
     };
   }
 };

@@ -111,6 +111,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
+import { forbiddenError } from '../../../lib/refusals.js';
 
 /**
  * Strip explicit GraphQL nulls from a CalendarEventTimeInput so the tool's
@@ -1857,7 +1858,7 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       const appId = ctx.appId;
-      if (!appId) throw new Error('Forbidden: App Key required');
+      if (!appId) throw forbiddenError('Forbidden: App Key required');
       const hasSuppliedKey = hasRequestOperationKey();
       // Lock the App before provisioning any dependent row. The lock and all
       // writes commit together, so uninstall cannot pass the check mid-flight.
@@ -1871,7 +1872,7 @@ export const sessionMutations = {
         // 023-app-shape Phase 2b: App↔Agent goes through AppAgent. Check
         // that the requested Agent is installed in the calling App.
         if (!(await isAgentInstalled(tx, app.id, agentId))) {
-          throw new Error('Forbidden: App is not allowed to operate this agent');
+          throw forbiddenError('Forbidden: App is not allowed to operate this agent');
         }
 
         const agent = await tx.agent.findUniqueOrThrow({ where: { id: agentId } });
@@ -2088,7 +2089,7 @@ export const sessionMutations = {
     },
 
     endAgentSession: async (_: unknown, { sessionId }: { sessionId: string }, ctx: Context) => {
-      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      if (!ctx.appId) throw forbiddenError('Forbidden: App Key required');
       const session = await ctx.db.session.findUnique({ where: { id: sessionId } });
       if (!session || session.appId !== ctx.appId) {
         throw new Error('Session not found');

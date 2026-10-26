@@ -30,6 +30,7 @@ import { withAuthorizedMemoryTx } from '../../api/graphql/schema/authorizedTx.js
 import { canReadMemory } from '../../mcp/access-control.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
 import { logAssetEvent } from './audit.js';
+import { unauthenticatedError } from '../refusals.js';
 
 /** The Memory columns the manager decision reads. */
 export type PublicLinkMemory = {
@@ -137,7 +138,7 @@ async function lockDecidingMemberships(txCtx: Context, memory: PublicLinkMemory)
  * the flag unchanged, writes one audit row in the same transaction.
  */
 export async function setAssetPublicLink(ctx: Context, assetRef: string, enabled: boolean): Promise<Asset> {
-  if (!ctx.userId) throw new Error('Unauthenticated');
+  if (!ctx.userId) throw unauthenticatedError();
   const notFound = () => new AssetUploadError('NOT_FOUND', 'asset not found');
   if (ctx.impersonation) throw notFound();
 

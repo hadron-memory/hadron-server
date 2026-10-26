@@ -5953,6 +5953,17 @@ export const typeDefs = `#graphql
   snapshot, live budgets (zeroing halts the run), lifecycle, trigger
   provenance. Spec cor:agt:010:02.
   """
+  type AppRunFailureReason {
+    "Stable category: NOT_ADOPTED, MEMORY_UNREADABLE, CHANGED, OVER_BUDGET, NO_AI_CONFIG, TIMED_OUT, CANCELLED or OTHER."
+    kind: String!
+    "What happened, in plain words."
+    summary: String!
+    "Who can fix it."
+    whoCanFix: String!
+    "What to do, and where."
+    nextStep: String!
+  }
+
   type AppRun {
     id: ID!
     "Computed grammar-v2 URN hrn:apprun:<root>:<app>:<run-id> (#696). Null for the rare multi-segment App URN the flat shape cannot express."
@@ -6008,6 +6019,20 @@ export const typeDefs = `#graphql
     budgetActions.
     """
     actionsSpent: Int
+    """
+    Priced LLM cost of this run in micro-cents (1e-8 USD), as a string (#2439):
+    the sum of its usage events' cost. Events with no known price add nothing.
+    NULL means UNKNOWN (a run minted before the counter existed), not zero.
+    """
+    costMicroCents: String
+    """
+    A failed run's cause in plain words (#2439): what happened, who can fix it
+    and where. Null when the run has no failure. Static text derived from the
+    failure and the run's budgets; it names no memory, id or tool, so it
+    discloses nothing the caller does not already read. The raw failure stays
+    available on the failure field.
+    """
+    failureReason: AppRunFailureReason
     """
     Spec 049 (D-2026-09-13-004): the scope this run carries, as YOU may read it —
     the snapshot taken at mint (the trigger's scope, or a spawned parent's)
