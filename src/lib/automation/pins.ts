@@ -69,7 +69,7 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
     }
     const anchor = await db.node.findUnique({ where: { id }, select: { memoryId: true } });
     if (!anchor || !await canReadMemory(db, principal, anchor.memoryId)) {
-      throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation definition is not readable by its principal');
+      throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation definition is not readable by its principal', 'MEMORY_UNREADABLE');
     }
     const node = await db.node.findUnique({ where: { id }, select: { ...DEFINITION_SELECT, outgoingEdges: { orderBy: { id: 'asc' } } } });
     if (!node || node.deletedAt || node.memory.deletedAt || node.memory.isEncrypted || node.memory.organizationId !== organizationId) {
@@ -146,7 +146,7 @@ export async function captureSetupConsent(...args: Parameters<typeof captureAuto
   }
   catch (e) {
     if (e instanceof NodeNotFoundError || e instanceof AutomationPinError) {
-      return { format: 'hadron-automation-unadopted-v1', message: 'Setup graph is missing, unreadable, encrypted or exceeds the consent bounds', ...(e instanceof AutomationPinError && e.reason ? { reason: e.reason } : {}) };
+      return { format: 'hadron-automation-unadopted-v1', message: 'Setup graph is missing, unreadable, encrypted or exceeds the consent bounds', ...((e instanceof NodeNotFoundError ? 'MEMORY_UNREADABLE' : e.reason) ? { reason: 'MEMORY_UNREADABLE' } : {}) };
     }
     throw e;
   }
@@ -172,7 +172,12 @@ export async function verifyAutomationPin(db: PrismaClient, run: AppRun, nodeUrn
       (['SCHEDULE', 'WEBHOOK', 'MANUAL'].includes(run.triggerKind) && pin.entry !== run.entryNodeUrn)) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation identity changed');
   let current: AutomationPreview;
   try { current = await captureAutomationPin(db, run.appId, run.userId, pin.entry, run.organizationId, runAuthContext(run), configSelection(run)); }
-  catch (e) { if (!(e instanceof AutomationPinError || e instanceof NodeNotFoundError)) throw e; throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph is no longer available or readable'); }
+  catch (e) {
+    if (!(e instanceof AutomationPinError || e instanceof NodeNotFoundError)) throw e;
+    // A missing and a foreign (unreadable) memory stay indistinguishable: both carry the same typed reason (#2439).
+    const unreadable = e instanceof NodeNotFoundError || e.reason === 'MEMORY_UNREADABLE';
+    throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph is no longer available or readable', unreadable ? 'MEMORY_UNREADABLE' : undefined);
+  }
   if (current.hash !== pin.hash) {
     const changedNodes = [...new Set([...Object.keys(pin.nodes), ...Object.keys(current.nodes)])]
       .filter(id => pin.nodes[id]?.hash !== current.nodes[id]?.hash).map(id => pin.nodes[id]?.urn ?? current.nodes[id]?.urn);

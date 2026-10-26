@@ -60,7 +60,7 @@ describe('plain failure reasons', () => {
   it('over budget: a distinct kind and a next step', async () => {
     const f = await fixture();
     const run = await f.run();
-    await db.appRun.update({ where: { id: run.id }, data: { status: 'FAILED', budgetActions: 0, failure: { code: 'ACTIVATION_DENIED', message: 'memory.write denied (policy, cancellation, or action budget).' } } });
+    await db.appRun.update({ where: { id: run.id }, data: { status: 'FAILED', budgetActions: 0, failure: { code: 'ACTIVATION_DENIED', reason: 'DENIED_BUDGET', message: 'memory.write denied (policy, cancellation, or action budget).' } } });
     const r = await reasonOf(run.id, f.ctx) as { kind: string; nextStep: string };
     expect(r.kind).toBe('OVER_BUDGET');
     expect(r.nextStep.length).toBeGreaterThan(10);
@@ -71,7 +71,7 @@ describe('plain failure reasons', () => {
     const kinds = [
       plainRunFailure({ failure: { code: 'AUTOMATION_UNADOPTED', message: 'x' }, budgetTokens: 5, budgetActions: 5, status: 'FAILED' } as never)?.kind,
       plainRunFailure({ failure: { code: 'AUTOMATION_UNADOPTED', reason: 'MEMORY_UNREADABLE', message: 'x' }, budgetTokens: 5, budgetActions: 5, status: 'FAILED' } as never)?.kind,
-      plainRunFailure({ failure: { code: 'ACTIVATION_DENIED', message: 'x' }, budgetTokens: 0, budgetActions: 5, status: 'FAILED' } as never)?.kind,
+      plainRunFailure({ failure: { code: 'ACTIVATION_DENIED', reason: 'DENIED_BUDGET', message: 'x' }, budgetTokens: 0, budgetActions: 5, status: 'FAILED' } as never)?.kind,
     ];
     expect(new Set(kinds).size).toBe(3);
   });
@@ -79,6 +79,65 @@ describe('plain failure reasons', () => {
     const r = plainRunFailure({ failure: { code: 'SOMETHING_NEW', message: 'boom' }, budgetTokens: 5, budgetActions: 5, status: 'FAILED' } as never)!;
     expect(r.kind).toBe('OTHER');
     expect(r.nextStep).toMatch(/\w/);
+  });
+});
+
+describe('review fixes (#2492)', () => {
+  it('a policy denial with an exhausted budget is a policy reason, not a budget one', () => {
+    const r = plainRunFailure({ failure: { code: 'ACTIVATION_DENIED', reason: 'DENIED_POLICY', message: 'x' }, budgetTokens: 0, budgetActions: 0, status: 'FAILED' } as never)!;
+    expect(r.kind).toBe('POLICY_DENIED');
+    expect(plainRunFailure({ failure: { code: 'ACTIVATION_DENIED', message: 'x' }, budgetTokens: 0, budgetActions: 0, status: 'FAILED' } as never)!.kind).toBe('OTHER');
+  });
+  it('a real policy denial at execution records its cause at the source', async () => {
+    const f = await fixture();
+    const run = await f.run();
+    await db.appRun.update({ where: { id: run.id }, data: { policy: { chain: [{ allow: [] }] } as never, budgetTokens: 0 } });
+    expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
+    const failure = (await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure as { code: string; reason?: string };
+    expect(failure.code).toBe('ACTIVATION_DENIED');
+    expect(failure.reason).toBe('DENIED_POLICY');
+  });
+  it('a real budget denial records DENIED_BUDGET', async () => {
+    const f = await fixture();
+    const run = await f.run();
+    await db.appRun.update({ where: { id: run.id }, data: { budgetTokens: 0 } });
+    expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
+    expect((await reasonOf(run.id, f.ctx) as { kind: string }).kind).toBe('OVER_BUDGET');
+  });
+  it('no unadopted/changed/unreadable text claims that nothing ran', () => {
+    for (const reason of [undefined, 'MEMORY_UNREADABLE'] as const) for (const code of ['AUTOMATION_UNADOPTED', 'AUTOMATION_CHANGED']) {
+      const r = plainRunFailure({ failure: { code, reason, message: 'x' }, status: 'FAILED' } as never)!;
+      expect(`${r.summary} ${r.nextStep}`).not.toMatch(/nothing ran|before doing anything/i);
+      expect(r.nextStep).toMatch(/already did/i);
+    }
+  });
+  it('real execution after the memory became unreadable reports MEMORY_UNREADABLE, not CHANGED', async () => {
+    const f = await fixture();
+    const run = await f.run();
+    const other = await db.user.create({ data: { handle: 'other-plain-owner' } });
+    await db.memory.update({ where: { id: f.memory.id }, data: { class: 'private', userId: other.id } });
+    expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
+    expect((await reasonOf(run.id, f.ctx) as { kind: string }).kind).toBe('MEMORY_UNREADABLE');
+    expect(f.llm).not.toHaveBeenCalled();
+  });
+  it('a failed rollup rolls the usage event back together with it and the run still finishes', async () => {
+    const f = await fixture();
+    await db.aiModelPrice.create({ data: { id: generateId(), provider: 'test', model: 'test', tier: 1, inputMicroCentsPerMTok: 300_000_000n, outputMicroCentsPerMTok: 1_500_000_000n, effectiveAt: new Date('2020-01-01') } as never });
+    const run = await f.run();
+    const spy = vi.spyOn(db, '$transaction').mockRejectedValueOnce(new Error('injected counter failure') as never);
+    const outcome = await executeAppRun(db, run.id, f.deps);
+    spy.mockRestore();
+    expect(outcome).not.toBe('failed');
+    expect(await db.usageEvent.count({ where: { appId: f.app.id, type: 'app-run' } })).toBe(0);
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).costMicroCents).toBe(0n);
+  });
+  it('cost keeps accumulating across hops and a legacy NULL run stays unknown', async () => {
+    const f = await fixture();
+    await db.aiModelPrice.create({ data: { id: generateId(), provider: 'test', model: 'test', tier: 1, inputMicroCentsPerMTok: 300_000_000n, outputMicroCentsPerMTok: 1_500_000_000n, effectiveAt: new Date('2020-01-01') } as never });
+    const legacy = await f.run();
+    await db.appRun.update({ where: { id: legacy.id }, data: { costMicroCents: null } });
+    await executeAppRun(db, legacy.id, f.deps);
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: legacy.id } })).costMicroCents).toBeNull();
   });
 });
 

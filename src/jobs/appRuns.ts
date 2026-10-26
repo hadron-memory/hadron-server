@@ -762,6 +762,7 @@ async function executeAppRunInner(
     return res.count === 1 ? 'failed' : 'skipped';
   };
 
+  let lastToolDenial: ActivationDenial | null = null;
   const checkConsent = () => deps.checkAutomationEffect ? deps.checkAutomationEffect(run) : deps.verifyAutomation(run, run.curNodeUrn ?? run.entryNodeUrn);
   try {
     await deps.verifyAutomation(run, run.curNodeUrn ?? run.entryNodeUrn);
@@ -814,10 +815,12 @@ async function executeAppRunInner(
       // budget (the kill-switch contract). Entering an ADDITIONAL hop
       // consumes one action (D-MN-3: budgetActions is the LLM-hop ceiling);
       // the first hop is covered by run.execute at mint — today's behavior.
-      if (!(await checkActivation(db, runId, 'llm.invoke', hop === 0 ? {} : { actionCost: 1 }))) {
+      const entryDenial = await activationVerdict(db, runId, 'llm.invoke', hop === 0 ? {} : { actionCost: 1 });
+      if (entryDenial) {
         return fail(
           'ACTIVATION_DENIED',
           'Run cancelled, expired, action budget exhausted, or llm.invoke denied by policy.',
+          `DENIED_${entryDenial}`,
         );
       }
 
@@ -877,7 +880,7 @@ async function executeAppRunInner(
         // One usage event per hop — a failed flow still shows what it spent.
         // Spec 046: recordLlmUsage enriches with attribution (user + org),
         // the cost snapshot, and BYOK classification; it is throw-safe.
-        const usage = await recordLlmUsage(db, {
+        await recordLlmUsage(db, {
           type: 'app-run',
           nodeLoc: cur,
           appId: run.appId,
@@ -889,12 +892,8 @@ async function executeAppRunInner(
           tokensOut,
           keyOwnerType: resolved.ownerType,
           createdBy: run.userId ?? null,
+          appRunId: runId,
         });
-        // #2439: roll the priced cost onto the run (an unpriced event adds nothing;
-        // a run minted before the column stays NULL = unknown, which increment keeps).
-        if (usage?.costMicroCents != null) {
-          await db.appRun.updateMany({ where: { id: runId, costMicroCents: { not: null } }, data: { costMicroCents: { increment: usage.costMicroCents } } });
-        }
       };
       let result: LlmResult;
       let extracted: Record<string, unknown> | null = null;
@@ -919,7 +918,8 @@ async function executeAppRunInner(
             {
               onToolCall: async (action, cost) => {
                 await checkConsent();
-                return checkActivation(db, runId, action, cost > 0 ? { actionCost: cost } : {});
+                lastToolDenial = await activationVerdict(db, runId, action, cost > 0 ? { actionCost: cost } : {});
+                return lastToolDenial === null;
               },
               log: (message) => hopLogs.push(message),
             },
@@ -986,7 +986,7 @@ async function executeAppRunInner(
           return fail('AUTHOR_FAIL', err.message); // the author's deliberate abort
         }
         if (err instanceof ToolDeniedError) {
-          return fail('ACTIVATION_DENIED', err.message); // gate said no, mid-hop
+          return fail('ACTIVATION_DENIED', err.message, lastToolDenial ? `DENIED_${lastToolDenial}` : undefined); // gate said no, mid-hop
         }
         if (err instanceof ToolExecutionError) {
           if (err.cause instanceof AutomationPinError) return fail(err.cause.code, err.cause.message, err.cause.reason);
@@ -1044,8 +1044,9 @@ async function executeAppRunInner(
       let writtenRef: string | null = null;
       if (spec.hasOutput || next === null) {
         // Output write — its own activation re-check (memory.write) + action budget.
-        if (!(await checkActivation(db, runId, 'memory.write', { actionCost: 1 }))) {
-          return fail('ACTIVATION_DENIED', 'memory.write denied (policy, cancellation, or action budget).');
+        const writeDenial = await activationVerdict(db, runId, 'memory.write', { actionCost: 1 });
+        if (writeDenial) {
+          return fail('ACTIVATION_DENIED', 'memory.write denied (policy, cancellation, or action budget).', `DENIED_${writeDenial}`);
         }
         try {
           writtenRef = await deps.writeOutput(run, cur, result.text);
@@ -1133,19 +1134,23 @@ export function parseRunPolicySnapshot(raw: unknown): Array<{ allow: string[] } 
  * (optionally) action budget headroom, decremented atomically on the same
  * statement so cancellation/zeroing halts the run at its next action.
  */
-async function checkActivation(
+type ActivationDenial = 'CANCELLED' | 'POLICY' | 'BUDGET';
+
+/** The activation re-check's verdict: null = allowed, else the FIRST check that
+ * failed (#2439 records it, so a denial's cause is never guessed from balances). */
+async function activationVerdict(
   db: PrismaClient,
   runId: string,
   action: PolicyAction,
   opts: { actionCost?: number } = {},
-): Promise<boolean> {
+): Promise<ActivationDenial | null> {
   const run = await db.appRun.findUnique({
     where: { id: runId },
     select: { status: true, policy: true, budgetActions: true, budgetTokens: true },
   });
-  if (!run || run.status !== 'RUNNING') return false;
-  if (!evaluatePolicyChain(action, parseRunPolicySnapshot(run.policy))) return false;
-  if (run.budgetTokens != null && run.budgetTokens <= 0) return false; // zeroed = kill switch
+  if (!run || run.status !== 'RUNNING') return 'CANCELLED';
+  if (!evaluatePolicyChain(action, parseRunPolicySnapshot(run.policy))) return 'POLICY';
+  if (run.budgetTokens != null && run.budgetTokens <= 0) return 'BUDGET'; // zeroed = kill switch
   const cost = opts.actionCost ?? 0;
   if (cost > 0) {
     const res = await db.appRun.updateMany({
@@ -1155,9 +1160,23 @@ async function checkActivation(
       // `gte: cost` guard failing) increments nothing.
       data: { budgetActions: { decrement: cost }, actionsSpent: { increment: cost } },
     });
-    return res.count === 1;
+    if (res.count !== 1) return 'BUDGET';
   }
-  return true;
+  return null;
+}
+
+/**
+ * The activation re-check (cor:agt:010:02): status live + policy allows +
+ * (optionally) action budget headroom, decremented atomically on the same
+ * statement so cancellation/zeroing halts the run at its next action.
+ */
+async function checkActivation(
+  db: PrismaClient,
+  runId: string,
+  action: PolicyAction,
+  opts: { actionCost?: number } = {},
+): Promise<boolean> {
+  return (await activationVerdict(db, runId, action, opts)) === null;
 }
 
 // ── Spawn lifecycle (plan-spawn D-SP-3/-4) ──────────────────────────────────

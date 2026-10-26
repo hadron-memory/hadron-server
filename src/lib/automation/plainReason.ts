@@ -7,37 +7,40 @@
  */
 export type PlainRunFailureKind =
   | 'NOT_ADOPTED' | 'MEMORY_UNREADABLE' | 'CHANGED' | 'OVER_BUDGET'
-  | 'NO_AI_CONFIG' | 'TIMED_OUT' | 'CANCELLED' | 'OTHER';
+  | 'POLICY_DENIED' | 'NO_AI_CONFIG' | 'TIMED_OUT' | 'CANCELLED' | 'OTHER';
 
 export interface PlainRunFailure { kind: PlainRunFailureKind; summary: string; whoCanFix: string; nextStep: string }
 
 interface RunLike {
   status: string;
   failure: unknown;
-  budgetTokens: number | null;
-  budgetActions: number | null;
 }
 
 const REASONS: Record<PlainRunFailureKind, Omit<PlainRunFailure, 'kind'>> = {
   NOT_ADOPTED: {
-    summary: 'This automation has not been approved to run yet, so nothing ran.',
+    summary: 'The run stopped because this automation has not been approved to run. Anything it did before it stopped is kept.',
     whoCanFix: 'The run-as user of the trigger.',
-    nextStep: 'Open the automation, preview what it will do, and adopt it. Then run it again.',
+    nextStep: 'Open the automation, preview what it will do, and adopt it. Before running it again, check what this run already did in its details, so nothing is done twice.',
   },
   MEMORY_UNREADABLE: {
-    summary: 'The automation uses a memory that the user it runs as cannot read, so nothing ran.',
+    summary: 'The run stopped because the automation uses a memory that is missing or that the user it runs as cannot read. Anything it did before it stopped is kept.',
     whoCanFix: 'An owner or manager of that memory, or the App owner.',
-    nextStep: 'Give the run-as user read access to the memory, or move the automation to one they can read. Then adopt it again and run it.',
+    nextStep: 'Give the run-as user read access to the memory, or move the automation to one they can read. Then adopt it again. Before running it again, check what this run already did in its details.',
   },
   CHANGED: {
-    summary: 'The automation was edited after it was approved, so it stopped before doing anything.',
+    summary: 'The run stopped because the automation was edited after it was approved. Anything it did before it stopped is kept.',
     whoCanFix: 'The run-as user of the trigger.',
-    nextStep: 'Preview the changed automation and adopt it again. Then run it again.',
+    nextStep: 'Preview the changed automation and adopt it again. Before running it again, check what this run already did in its details, so nothing is done twice.',
   },
   OVER_BUDGET: {
     summary: 'The run used up its token or action budget and was stopped.',
     whoCanFix: 'The App owner.',
     nextStep: 'Check the run’s spend against its budget. Simplify the automation, or raise the budget and run it again.',
+  },
+  POLICY_DENIED: {
+    summary: 'The run stopped because a policy does not allow one of the steps it tried.',
+    whoCanFix: 'The App owner or an organization admin.',
+    nextStep: 'Review the App’s policy for what this automation is allowed to do, then run it again.',
   },
   NO_AI_CONFIG: {
     summary: 'No AI provider is set up for this automation, so it could not run.',
@@ -61,8 +64,6 @@ const REASONS: Record<PlainRunFailureKind, Omit<PlainRunFailure, 'kind'>> = {
   },
 };
 
-const exhausted = (n: number | null) => n != null && n <= 0;
-
 export function plainRunFailure(run: RunLike): PlainRunFailure | null {
   const f = run.failure as { code?: unknown; reason?: unknown } | null;
   if (!f || typeof f !== 'object') return null;
@@ -71,7 +72,10 @@ export function plainRunFailure(run: RunLike): PlainRunFailure | null {
   if (f.reason === 'MEMORY_UNREADABLE') kind = 'MEMORY_UNREADABLE';
   else if (code === 'AUTOMATION_UNADOPTED') kind = 'NOT_ADOPTED';
   else if (code === 'AUTOMATION_CHANGED') kind = 'CHANGED';
-  else if (code === 'ACTIVATION_DENIED' && (exhausted(run.budgetActions) || exhausted(run.budgetTokens))) kind = 'OVER_BUDGET';
+  // The denial's cause is recorded where it happened; never inferred from balances.
+  else if (code === 'ACTIVATION_DENIED' && f.reason === 'DENIED_BUDGET') kind = 'OVER_BUDGET';
+  else if (code === 'ACTIVATION_DENIED' && f.reason === 'DENIED_POLICY') kind = 'POLICY_DENIED';
+  else if (code === 'ACTIVATION_DENIED' && f.reason === 'DENIED_CANCELLED') kind = 'CANCELLED';
   else if (code === 'NO_AI_CONFIG') kind = 'NO_AI_CONFIG';
   else if (code === 'TIMEOUT' || run.status === 'TIMED_OUT') kind = 'TIMED_OUT';
   else if (code === 'CANCELLED' || run.status === 'CANCELLED') kind = 'CANCELLED';
