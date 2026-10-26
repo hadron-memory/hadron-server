@@ -97,6 +97,25 @@ async function storedId(f: F, field: Field) {
 }
 
 describe('#2045 8b setters', () => {
+  it('WORKER: the set holds the worker assignment lock, its Agent row and the Worker row before it writes (#2458 slice 2)', async () => {
+    const f = await fixture();
+    const seen: { advisory?: boolean; worker?: string; agent?: string } = {};
+    pointerHook.beforeSet = async () => {
+      // A second connection: what a concurrent changeWorkerAgent would contend on.
+      seen.advisory = (await db.$queryRaw<{ got: boolean }[]>`SELECT pg_try_advisory_xact_lock(hashtext('agent-task-matcher:worker'), hashtext(${f.worker.id})) AS got`)[0]!.got;
+      const probe = (table: string, mode: string) => db.$transaction(async (tx) => {
+        try { await tx.$executeRawUnsafe(`SELECT id FROM ${table} WHERE id = '${table === 'workers' ? f.worker.id : f.agent.id}' FOR ${mode} NOWAIT`); return 'free'; } catch { return 'locked'; }
+      });
+      seen.worker = await probe('workers', 'UPDATE');
+      seen.agent = await probe('agents', 'UPDATE');
+    };
+    try {
+      await setters.WORKER(f, f.installNode.id, ctxOf(f.admin.id));
+    } finally { pointerHook.beforeSet = null; }
+    // The advisory probe runs on its own pooled connection and, where the lock is free, takes it for that probe.
+    expect(seen).toEqual({ advisory: false, worker: 'locked', agent: 'locked' });
+  });
+
   it.each(FIELDS)('%s: the manager sets (returning the owner, whose field reads the pointer) and an explicit null clears', async (field) => {
     const f = await fixture();
     const owner = await setters[field](f, nodeFor(f, field).id, ctxOf(f.admin.id));
