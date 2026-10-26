@@ -1,3 +1,4 @@
+import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
@@ -209,19 +210,6 @@ async function provisionAppSharedMemory(
 }
 
 
-/**
- * #2403: an App's session timeout stamps every session's expiry, which cor:agt:020:03 makes a promise, so a
- * non-positive ceiling would be past before the session began. Refuses it with BAD_USER_INPUT; null/omitted
- * passes (the caller keeps or defaults it). No floor or cap: a range is a product ruling. Callers run it after
- * their access gate and before any write, so it adds no oracle.
- */
-function assertPositiveSessionTimeout(seconds: number | null | undefined): void {
-  if (seconds != null && seconds <= 0) {
-    throw new GraphQLError('sessionTimeoutSeconds must be a positive number of seconds.', {
-      extensions: { code: 'BAD_USER_INPUT' },
-    });
-  }
-}
 
 export const appMutations = {
     regenerateAppKey: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
