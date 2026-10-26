@@ -7508,8 +7508,10 @@ export const typeDefs = `#graphql
 
     """
     #1705 — a team App's agent tasks, newest first. Party filters combine with the other selectors;
-    owner / assignee name a party of the App (a ref naming nobody matches
-    nothing). queued selects pending tasks with no assignee; rootsOnly selects roots. These
+    owner / assignee / creator name a party of the App (a ref naming nobody matches
+    nothing; a retired worker is no party to name, so it matches nothing). creator is
+    the task's creator as createdBy projects it: a worker, or a person for a task they created
+    themselves (not one their worker created, #2370). queued selects pending tasks with no assignee; rootsOnly selects roots. These
     take precedence over status and parentTaskId respectively. limit defaults to 20 (cap 200).
     Readers: the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:050:21), or the App's own live key
     without a session binding (#1755).
@@ -7521,6 +7523,7 @@ export const typeDefs = `#graphql
       status: [AgentTaskStatus!]
       owner: AgentTaskPartyInput
       assignee: AgentTaskPartyInput
+      creator: AgentTaskPartyInput
       tag: String
       parentTaskId: ID
       rootsOnly: Boolean
