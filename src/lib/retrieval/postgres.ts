@@ -16,6 +16,7 @@ import type {
   RegexSearchOpts,
   VectorSearchOpts,
   FilterSearchOpts,
+  FilterCountOpts,
   FilterWhereOpts,
   NodeSqlFilter,
   LexicalSort,
@@ -229,6 +230,23 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
     `;
     const rows = await opts.db.$queryRawUnsafe<{ id: string }[]>(sql, ...params);
     return rows.map((r) => r.id);
+  },
+
+  async filterCount(opts: FilterCountOpts): Promise<number> {
+    if (opts.memoryIds.length === 0) return 0;
+    const { params, bind } = paramBuilder();
+    const memPh = opts.memoryIds.map((m) => bind(m)).join(', ');
+    const deletedClause = opts.includeDeleted ? '' : 'AND deleted_at IS NULL';
+    const filterSql = filterClause(opts.filter, bind);
+    const excluded = opts.excludeNodeIds?.length
+      ? `AND id <> ALL(${bind(opts.excludeNodeIds)}::text[])` : '';
+    const rows = await opts.db.$queryRawUnsafe<{ total: bigint }[]>(`
+      SELECT COUNT(*) AS total FROM nodes
+      WHERE memory_id IN (${memPh}) ${deletedClause}${filterSql} ${excluded}
+    `, ...params);
+    const total = Number(rows[0]!.total);
+    if (!Number.isSafeInteger(total)) throw new Error('Object match count exceeds the safe integer range.');
+    return total;
   },
 
   async filterWhere(opts: FilterWhereOpts): Promise<string[]> {

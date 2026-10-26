@@ -101,6 +101,8 @@ import { INDEXED_MEMORY_WHERE } from '../../../lib/embedding/indexing.js';
 
 /** findNodes' arguments (cor:api:090), shared by the resolver and its spec-049 scope wrapper. */
 export interface FindNodesArgs {
+  /** Internal object-store request only, not a GraphQL/MCP search argument. Counts no-query browse matches. */
+  includeTotal?: boolean;
   query?: string | null;
   mode?: 'keyword' | 'vector' | 'hybrid' | 'regex' | null;
   minScore?: number | null;
@@ -1006,7 +1008,7 @@ export const nodeQueries = {
       // at the bottom can re-enter it without a self-reference (which would
       // leave TypeScript unable to infer the return type).
       const core = async ({
-        query, mode, filter, fields, sort, sortProperty, expand, granularity, orgId, limit, offset, minScore,
+        query, mode, filter, fields, sort, sortProperty, expand, granularity, orgId, limit, offset, minScore, includeTotal,
       }: FindNodesArgs) => {
       const f = filter ?? {};
 
@@ -1240,6 +1242,12 @@ export const nodeQueries = {
 
       // ── No query → filtered list (subsumes `nodes`) ──
       if (!hasQuery) {
+        // #2514: object queries promise an exact count before paging. Ordinary
+        // search remains uncounted; reuse the already admitted scope and filters.
+        const total = includeTotal ? await provider.filterCount({
+          db: ctx.db, memoryIds: scopeIds, filter: sqlFilter,
+          includeDeleted: !!f.includeDeleted, excludeNodeIds: inheritance.excludeNodeIds,
+        }) : null;
         // A `where` predicate (JSONB the Prisma query can't express) OR a
         // property-path sort (an ORDER BY over a JSON path Prisma can't express)
         // → run the filtered browse in SQL (ordered ids), then hydrate. The plain
@@ -1269,7 +1277,7 @@ export const nodeQueries = {
           const ordered = ids.map((id) => byId.get(id)).filter((n): n is NonNullable<typeof n> => !!n);
           const browseHits = ordered.map((n) => ({ node: n, score: null, vector: null }));
           await recordSearchHits(browseHits);
-          return { hits: browseHits, passages: [], total: null, reason: null, degraded: null };
+          return { hits: browseHits, passages: [], total, reason: null, degraded: null };
         }
         const orderBy =
           sort === 'seq' ? { seq: 'asc' as const }
@@ -1288,7 +1296,7 @@ export const nodeQueries = {
         return {
           hits: listHits,
           passages: [],
-          total: null,
+          total,
           reason: null,
           degraded: null,
         };
