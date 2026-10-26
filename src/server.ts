@@ -82,7 +82,7 @@ import { ensureUserPrincipal, RootNameTakenError } from './lib/principal/mintPri
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { assignRequestId, bindRequestId, REQUEST_ID_HEADER } from './lib/requestContext.js';
-import { respondInternalFault } from './lib/internalFault.js';
+import { internalFaultErrorHandler, respondInternalFault } from './lib/internalFault.js';
 import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
@@ -327,9 +327,8 @@ export async function createServer(): Promise<Express> {
       await createPendingLoginState(state, login);
       return true;
     } catch (err) {
-      console.error(`[auth] ${provider} login start failed to persist state:`, err);
       Sentry.captureException(err);
-      res.status(500).json({ error: 'Failed to start sign-in — please try again.' });
+      respondInternalFault(res, `auth/${provider}/start`, err);
       return false;
     }
   };
@@ -968,9 +967,8 @@ export async function createServer(): Promise<Express> {
         await sendMagicLink(emailSend.email, db, redirect, clientStateHash);
         res.json({ ok: true });
       } catch (err) {
-        console.error('Email auth error:', err);
         Sentry.captureException(err);
-        res.status(500).json({ error: 'Failed to send verification email' });
+        respondInternalFault(res, 'auth/email', err);
       }
     },
   );
@@ -1130,9 +1128,8 @@ export async function createServer(): Promise<Express> {
       callbackUrl.searchParams.set('code', code);
       res.redirect(callbackUrl.toString());
     } catch (err) {
-      console.error('Email verify error:', err);
       Sentry.captureException(err);
-      res.status(500).json({ error: 'Email verification failed' });
+      respondInternalFault(res, 'auth/email/verify', err);
     }
   });
 
@@ -1462,7 +1459,6 @@ export async function createServer(): Promise<Express> {
       });
       res.json({ ok: true });
     } catch (err) {
-      console.error('Outcome report error:', err);
       // Distinguish "no such session" from "something else went wrong".
       // This catch used to answer 404 for EVERY failure, which was survivable
       // while the only statement inside it was the update — but the auth
@@ -1475,7 +1471,7 @@ export async function createServer(): Promise<Express> {
         return;
       }
       Sentry.captureException(err);
-      res.status(500).json({ error: 'Failed to record outcome' });
+      respondInternalFault(res, 'sessions/outcome', err);
     }
   });
 
@@ -1576,9 +1572,8 @@ export async function createServer(): Promise<Express> {
       }
       res.json({ ok: true });
     } catch (err) {
-      console.error('Reload error:', err);
       Sentry.captureException(err);
-      res.status(500).json({ error: 'Reload failed' });
+      respondInternalFault(res, 'reload', err);
     }
   });
 
@@ -2120,17 +2115,8 @@ export async function createServer(): Promise<Express> {
   // sentryApolloPlugin instead. No-op when SENTRY_DSN is unset.
   Sentry.setupExpressErrorHandler(app);
 
-  // #1789: a fault that reaches Express shows the caller the generic envelope, never Express's default page (which prints
-  // the stack outside production). A client-class status (body-parser's 400/413, ...) is a framework refusal and keeps
-  // today's handling until it is ruled on; only a fault is genericized.
-  app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const status = (err as { status?: unknown; statusCode?: unknown })?.status ?? (err as { statusCode?: unknown })?.statusCode;
-    if (res.headersSent || (typeof status === 'number' && status >= 400 && status < 500)) {
-      next(err);
-      return;
-    }
-    respondInternalFault(res, 'express', err);
-  });
+  // #1789: a fault that reaches Express shows the caller the generic envelope, not Express's default stack page.
+  app.use(internalFaultErrorHandler);
 
   app.locals.stopEmbeddingWorker = () => Promise.all([
     stopEmbeddingWorker(db), stopEmbeddingPublisher(),

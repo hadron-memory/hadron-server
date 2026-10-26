@@ -62,6 +62,7 @@ import {
   mintUserApiKeyInTx,
   type OAuthScope,
 } from '../middleware/auth.js';
+import { respondInternalFault, respondOAuthServerError } from '../lib/internalFault.js';
 
 /**
  * Validate a `BASE_URL` env-var value for OAuth-metadata use. Exported
@@ -448,10 +449,7 @@ export async function handleClientRegistration(
     // Don't echo the DB error message back — it may name internal
     // identifiers or constraints. `server_error` is RFC 7591 §3.2.2's
     // catch-all error code.
-    res.status(500).json({
-      error: 'server_error',
-      error_description: 'Failed to persist registration',
-    });
+    respondOAuthServerError(res, 'Failed to persist registration', err);
     return;
   }
 
@@ -1184,10 +1182,7 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
     // Same posture as /oauth/register: a thrown Prisma error must
     // not become an unhandled rejection. 500 is the catch-all per
     // RFC 7591 §3.2.2.
-    res.status(500).json({
-      error: 'server_error',
-      error_description: 'Failed to issue authorization code',
-    });
+    respondOAuthServerError(res, 'Failed to issue authorization code', error);
     return;
   }
 
@@ -1369,8 +1364,7 @@ function buildHandleAuthorizeEmailPost(_csrf: DoubleCsrfUtilities) {
     // Option-C legs).
     await sendMagicLink(email, db, undefined, undefined, returnTo);
   } catch (err) {
-    console.error('OAuth email-entry send error:', err);
-    res.status(500).json({ error: 'Failed to send verification email' });
+    respondInternalFault(res, 'oauth/email-entry', err);
     return;
   }
 
@@ -1442,8 +1436,7 @@ async function handleAuthorizeEmailCodePost(req: Request, res: Response): Promis
     });
     res.redirect(returnTo as string);
   } catch (err) {
-    console.error('OAuth demo-code sign-in error:', err);
-    res.status(500).json({ error: 'Sign-in failed' });
+    respondInternalFault(res, 'oauth/demo-code', err);
   }
 }
 
@@ -1744,10 +1737,7 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
     if (error instanceof SignInNotLive) {
       outcome = { kind: 'ended' };
     } else {
-      res.status(500).json({
-        error: 'server_error',
-        error_description: 'failed to issue access token',
-      });
+      respondOAuthServerError(res, 'failed to issue access token', error);
       return;
     }
   }

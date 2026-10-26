@@ -6,7 +6,7 @@
  * the id, never the text.
  */
 import { randomUUID } from 'node:crypto';
-import type { Response } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import { currentRequestId } from './requestContext.js';
 
 export const INTERNAL_ERROR_CODE = 'INTERNAL_SERVER_ERROR';
@@ -48,4 +48,29 @@ export function respondInternalFault(res: Response, site: string, error: unknown
   logInternalFault('http', site, requestId, error);
   if (res.headersSent) return;
   res.status(status).json({ error: INTERNAL_ERROR_MESSAGE, code: INTERNAL_ERROR_CODE, requestId });
+}
+
+/**
+ * The same fault on an OAuth endpoint, whose body shape RFC 6749 §5.2 / RFC 7591 §3.2.2 fixes: `error: server_error` plus
+ * a description. The description stays a fixed phrase; `request_id` is the additive correlation field.
+ */
+export function respondOAuthServerError(res: Response, description: string, error: unknown): void {
+  const requestId = typeof res.locals?.requestId === 'string' ? res.locals.requestId : faultRequestId();
+  logInternalFault('oauth', description, requestId, error);
+  if (res.headersSent) return;
+  res.status(500).json({ error: 'server_error', error_description: description, request_id: requestId });
+}
+
+/**
+ * Express's final error handler. A client-class status (body-parser's 400/413, ...) is a framework refusal and keeps
+ * today's handling until it is ruled on; only a fault is genericized.
+ */
+export function internalFaultErrorHandler(err: unknown, _req: Request, res: Response, next: NextFunction): void {
+  const e = err as { status?: unknown; statusCode?: unknown } | null;
+  const status = e?.status ?? e?.statusCode;
+  if (res.headersSent || (typeof status === 'number' && status >= 400 && status < 500)) {
+    next(err);
+    return;
+  }
+  respondInternalFault(res, 'express', err);
 }
