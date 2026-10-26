@@ -1,3 +1,4 @@
+import { appendDeliveryPending } from '../lib/tickers/deliveryPending.js';
 import { mcpRequestSessionContext } from './requestSession.js';
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
@@ -2239,10 +2240,12 @@ export function createMcpServerInstance(
     toolName: string,
     named: unknown,
     toolOwnsArgument: boolean,
+    onBound?: (id: string) => void,
   ): Promise<{ isError: true; content: Array<{ type: 'text'; text: string }> } | null> => {
     if (typeof named === 'string' && named.length > 0) {
       const valid = await validateSessionBinding(db, auth, named);
       if (valid) {
+        onBound?.(valid.sessionId);
         publishActor(valid.actor);
         return null;
       }
@@ -2289,7 +2292,19 @@ export function createMcpServerInstance(
     };
     (server as unknown as { tool: (...args: unknown[]) => unknown }).tool = (...args: unknown[]) => {
       const name = args[0] as string;
-      if (ACTOR_NEUTRAL_TOOLS.has(name)) return registerTool(...args);
+      if (ACTOR_NEUTRAL_TOOLS.has(name)) {
+        const index = args.length - 1;
+        const callback = args[index] as ToolCallback;
+        const shape = args.find((a, i) => i > 0 && i < index && typeof a === 'object' && a !== null) as Record<string, unknown> | undefined;
+        args[index] = (input: unknown, extra: unknown) => runInChildActorScope(async () => {
+          const named = shape && 'session' in shape ? (input as Record<string, unknown> | undefined)?.session : undefined;
+          return appendDeliveryPending(await callback(input, extra), {
+            ...scopeCtx(), ...mcpRequestSessionContext(auth), appKeyId: auth.appKeyId ?? undefined,
+            impersonation: auth.impersonation ?? undefined,
+          }, typeof named === 'string' && named.length > 0 ? named : undefined);
+        });
+        return registerTool(...args);
+      }
       const cbIndex = args.length - 1;
       const callback = args[cbIndex] as ToolCallback;
       // The parameter shape is the first plain object after the name (a
@@ -2321,7 +2336,8 @@ export function createMcpServerInstance(
             publishActor({ workerId: null, agentId: null });
             return await callback(input, extra);
           }
-          const refusal = await settleCallerSession(name, named, toolOwnsArgument);
+          let footerSession = typeof named === 'string' && named.length ? undefined : mcpRequestSessionContext(auth).sessionId;
+          const refusal = await settleCallerSession(name, named, toolOwnsArgument, id => { footerSession = id; });
           if (refusal) return refusal;
           // #1769: the gate's own argument is spent once the actor is settled.
           // A tool that spreads its args into a write (the governed doors) would
@@ -2329,9 +2345,15 @@ export function createMcpServerInstance(
           // a tool that declares the argument itself still receives it.
           if (!toolOwnsArgument && input && typeof input === 'object') {
             const { [argumentName]: _settled, ...rest } = input as Record<string, unknown>;
-            return await callback(rest, extra);
+            return await appendDeliveryPending(await callback(rest, extra), {
+              ...scopeCtx(), ...mcpRequestSessionContext(auth), sessionId: footerSession ?? undefined, appKeyId: auth.appKeyId ?? undefined,
+              impersonation: auth.impersonation ?? undefined,
+            });
           }
-          return await callback(input, extra);
+          return await appendDeliveryPending(await callback(input, extra), {
+            ...scopeCtx(), ...mcpRequestSessionContext(auth), sessionId: footerSession ?? undefined, appKeyId: auth.appKeyId ?? undefined,
+            impersonation: auth.impersonation ?? undefined,
+          });
         });
       return registerTool(...args);
     };

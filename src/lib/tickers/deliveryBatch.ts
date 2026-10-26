@@ -223,14 +223,46 @@ export async function loadDeliveryBatches(args: DeliverySelectionArgs): Promise<
   return { batches, nextAfter };
 }
 
+/** One admitted row/count definition for both capped pull rendering and the response footer. No body is projected. */
+function admittedDeliveryRows(ch: EligibleDeliveryChannel, standby: EligibleDeliveryWorker['standby']): Prisma.Sql {
+  return Prisma.sql`SELECT n.id, n.seq, n.created_at,
+    MIN(n.created_at) OVER() AS oldest_posted_at, COUNT(*) OVER() AS total_eligible
+    FROM nodes n WHERE ${ch.predicate}
+      ${standby ? Prisma.sql`AND ${standbyAdmitsSql(Prisma.sql`n.data`, Prisma.sql`${[standby.token]}::text[]`, standby.headWorkerId)}` : Prisma.empty}`;
+}
+
+/** Exact pre-cap C7 total for one authorized self selection, at the caller's snapshot/asOf. Never renders or signs. */
+export async function loadPendingDeliverySummary(args: DeliverySelectionArgs): Promise<number> {
+  if (args.hostId !== null || args.workerIds?.length !== 1) throw new Error('Footer requires one self worker');
+  const { workers, nextAfter } = await loadDeliveryEligibility({ ...args, first: 1 });
+  if (nextAfter !== null) throw new Error('Incomplete footer selection');
+  const now = args.now ?? new Date();
+  const settings = await loadDeliverySettings(args.ctx.db, args.app.id);
+  let total = 0;
+  for (const worker of workers) {
+    let count = 0;
+    let oldest: Date | null = null;
+    for (const channel of worker.channels) {
+      const [row] = await args.ctx.db.$queryRaw<Array<{ total: bigint; oldest: Date | null }>>(Prisma.sql`
+        SELECT COALESCE(MAX(e.total_eligible), 0)::bigint AS total, MIN(e.oldest_posted_at) AS oldest
+        FROM (${admittedDeliveryRows(channel, worker.standby)}) e`);
+      const n = Number(row?.total);
+      if (!Number.isSafeInteger(n) || n < 0 || !Number.isSafeInteger(count + n)) throw new Error('Unsafe footer count');
+      count += n;
+      if (row.oldest && (!oldest || row.oldest < oldest)) oldest = row.oldest;
+    }
+    if (oldest && batchTiming(settings, { oldestPostedAt: oldest }).deliverAfter <= now) total += count;
+    if (!Number.isSafeInteger(total)) throw new Error('Unsafe footer count');
+  }
+  return total;
+}
+
 /** The messages of a plaintext channel above `lo` that reach the worker, with their reply parent when it is in the channel. */
 async function eligibleMessages(db: Context['db'], ch: EligibleDeliveryChannel, standby: EligibleDeliveryWorker['standby']): Promise<{ messages: BatchMessage[]; totalEligible: number; oldestPostedAt: Date | null }> {
   const rows = await db.$queryRaw<Row[]>(Prisma.sql`
-    SELECT n.seq::int AS seq, n.content, n.data, n.created_at, MIN(n.created_at) OVER() AS oldest_posted_at, COUNT(*) OVER() AS total_eligible
-    FROM nodes n WHERE ${ch.predicate}
-      ${standby ? Prisma.sql`AND ${standbyAdmitsSql(Prisma.sql`n.data`, Prisma.sql`${[standby.token]}::text[]`, standby.headWorkerId)}` : Prisma.empty}
-    ORDER BY n.seq
-    LIMIT ${ELIGIBLE_READ_LIMIT}`);
+    SELECT e.seq::int AS seq, n.content, n.data, e.created_at, e.oldest_posted_at, e.total_eligible
+    FROM (${admittedDeliveryRows(ch, standby)}) e JOIN nodes n ON n.id = e.id
+    ORDER BY e.seq LIMIT ${ELIGIBLE_READ_LIMIT}`);
   const eligible = rows;
   const parentSeqs = [...new Set(eligible.map((r) => replyToOf(r.data)).filter((s): s is number => s !== null))];
   const parents = parentSeqs.length === 0 ? [] : await db.$queryRaw<Array<{ seq: number; content: string | null; data: unknown }>>(Prisma.sql`
