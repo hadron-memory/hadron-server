@@ -130,7 +130,7 @@ describe('#2061 teamComposition', () => {
       expect(load).toHaveBeenCalledTimes(1);
       expect(transaction).toHaveBeenCalledTimes(1);
       expect(transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'RepeatableRead', timeout: 20_000 });
-      expect(load.mock.calls[0][0]).not.toBe(db);
+      expect(Object.is(load.mock.calls[0][0], db)).toBe(false);
       expect(load.mock.calls[0][1]).toBe(appId);
     } finally {
       load.mockRestore(); transaction.mockRestore();
