@@ -12,6 +12,7 @@ import { collectRegisterRows } from '../../../lib/resolveRegister.js';
 import { loadWorkerWorkStates, matchQueuedTasks } from '../../../lib/agentTasks/matcher.js';
 import { openSessionPlacement } from '../../../lib/sessionPlacement.js';
 import { setUpResetFixture, M as ResetM, ctx as resetCtx } from '../../../test/contextResetFixture.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
 
@@ -129,5 +130,29 @@ describe('#2493 context reset reads the open session\'s agent (c)', () => {
     await db.worker.update({ where: { id: f.kit.id }, data: { agentId: other.id, role: 'other' } });
     await f.finish(t.id);
     expect((await db.contextReset.findUnique({ where: { taskId: t.id } }))?.phase ?? null).toBe(phase);
+  });
+});
+
+describe('#2493 hadron_get_worker recovery: the explicit session argument selects the placement', () => {
+  const asUser = (u: { id: string }) => createTestableMcpServer({ userId: u.id, appId: app.id, roles: ['READER'], clientId: `user:${u.id}` } as any);
+  const read = (u: { id: string }, session: string) => asUser(u).callToolText('hadron_get_worker', { workerRef: worker.id, session });
+
+  it('the owner of the open session, reconnected with no session id, gets A\'s briefing and register', async () => {
+    const open = await bind();
+    await change();
+    const text = await read(admin, open.id);
+    expect(text).toContain('A-PROMPT Ruin security-engineer Security');
+    expect(text).not.toContain('B-PROMPT');
+  });
+
+  it('a bare id is never trusted: another admin naming that session, an ended session and an unknown id read the live row', async () => {
+    const open = await bind();
+    await change();
+    const other = await db.user.create({ data: { githubId: 94_000_000 + Math.floor(Math.random() * 1_000_000), githubUsername: `other-${generateId()}`, roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: other.id, role: 'ADMIN' } });
+    expect(await read(other, open.id)).toContain('B-PROMPT Ruin specs-engineer Specs');
+    expect(await read(admin, generateId())).toContain('B-PROMPT');
+    await db.session.update({ where: { id: open.id }, data: { endedAt: new Date() } });
+    expect(await read(admin, open.id)).toContain('B-PROMPT');
   });
 });
