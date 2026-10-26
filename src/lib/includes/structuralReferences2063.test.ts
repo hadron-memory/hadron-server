@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
+import * as nodeApproval from '../nodeApproval.js';
 import { computeApprovalHash } from '../approvalHash.js';
 import { generateDataKey } from '../crypto.js';
 import { encryptNodeFields } from '../nodeCrypto.js';
@@ -72,7 +73,6 @@ describe('structural references (#2063 R1)', () => {
     const result = await relied();
     expectTypeOf(result).toEqualTypeOf<Set<number>>();
     expect(result).toEqual(new Set([3]));
-    expect(Object.keys(result)).toEqual([]);
     expect([...result].every(n => typeof n === 'number')).toBe(true);
     await db.node.delete({ where: { id: hidden.id } });
     expect(await relied()).toEqual(new Set());
@@ -156,23 +156,15 @@ describe('structural references (#2063 R1)', () => {
     expect(await db.includeReference.findFirst({ where: { includerId: source.id } })).toMatchObject({ reference: ref, targetMemoryId: memory.id, targetLoc: 'moved' });
   });
 
-  // A dirty binding generation may refuse retention; it must never return a
-  // successful empty set while the shared reader can still serve this pin.
-  async function expectPinOrInactive(work: Promise<Set<number>>, pin: number) {
-    try { expect(await work).toContain(pin); }
-    catch (error) {
-      if ((error as { code?: string }).code !== 'INCLUDE_RETENTION_INACTIVE') throw error;
-    }
-  }
-
-  it('P2: a dangling URN becoming live cannot silently release its pin', async () => {
+  it('P2: verifier rejects a dangling URN becoming live even after its source coverage is captured', async () => {
     await db.node.update({ where: { id: source.id }, data: { content: `{{> hrn:node:${memory.urn}:later rev=4}}` } });
     await activate();
     const later = await db.node.create({ data: { memoryId: memory.id, loc: 'later', name: 'Later' } });
-    await expectPinOrInactive(relied(later.id), 4);
+    await capture(later.id, null);
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
   });
 
-  it('P2: a post-capture node alias cannot silently release its pin', async () => {
+  it('P2: verifier rejects a post-capture target rename despite refreshed target coverage', async () => {
     const ref = `hrn:node:${memory.urn}:target`;
     await db.node.update({ where: { id: source.id }, data: { content: `{{> ${ref} rev=3}}` } });
     await activate();
@@ -180,7 +172,30 @@ describe('structural references (#2063 R1)', () => {
       await recordUrnRename(tx, { entityType: 'NODE', entityId: target.id, oldUrn: ref.slice(9), newUrn: `${memory.urn}:moved` });
       await tx.node.update({ where: { id: target.id }, data: { loc: 'moved' } });
     });
-    await expectPinOrInactive(relied(), 3);
+    await capture(target.id, 'draft');
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+  });
+
+  it('P2: verifier rejects alias appearance and removal, and accepts unchanged resolution', async () => {
+    const ref = `hrn:node:${memory.urn}:historical`;
+    const text = `{{> ${ref} rev=3}}`;
+    await db.node.update({ where: { id: source.id }, data: { content: text } });
+    await activate();
+    expect(await fenced(verifyIncludeCoverage)).toBe(true);
+    await db.$transaction(tx => recordUrnRename(tx, { entityType: 'NODE', entityId: target.id, oldUrn: ref.slice(9), newUrn: `${memory.urn}:target` }));
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+    await capture(source.id, text);
+    expect(await fenced(verifyIncludeCoverage)).toBe(true);
+    await db.urnAlias.deleteMany({ where: { entityType: 'NODE', entityId: target.id } });
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
+  });
+
+  it('P2: verifier rejects memory-address changes that remove a binding', async () => {
+    await db.node.update({ where: { id: source.id }, data: { content: `{{> hrn:node:${memory.urn}:target rev=3}}` } });
+    await activate();
+    expect(await fenced(verifyIncludeCoverage)).toBe(true);
+    await db.memory.update({ where: { id: memory.id }, data: { urn: 'retention2063.example:renamed' } });
+    expect(await fenced(verifyIncludeCoverage)).toBe(false);
   });
 
   it('P2: capture rejects unrepresentable pins with an input error and preserves prior rows', async () => {
@@ -200,6 +215,35 @@ describe('structural references (#2063 R1)', () => {
       ]);
       try { await expect(capture(source.id, '{{> target}}')).rejects.toMatchObject({ code: 'INCLUDE_REVISION_INVALID' }); }
       finally { parser.mockRestore(); }
+    }
+  });
+
+  it('capture fails closed for unavailable/incompatible inventory and absent stored bytes', async () => {
+    for (const delta of [{ schemaVersion: 99 }, { schemaVersion: 1, parserVersion: 99 }]) {
+      await db.includeRetentionGeneration.update({ where: { id: 'singleton' }, data: delta });
+      await expect(capture(source.id, null)).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
+    }
+    await db.includeRetentionGeneration.update({ where: { id: 'singleton' }, data: { parserVersion: 1 } });
+    await expect(fenced(async tx => {
+      const stored = vi.spyOn(tx, '$queryRaw').mockResolvedValueOnce([]);
+      try { await replaceStructuralReferences(tx, source.id, null); }
+      finally { stored.mockRestore(); }
+    })).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
+    await db.includeRetentionGeneration.deleteMany();
+    await expect(capture(source.id, null)).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' });
+  });
+
+  it('refuses a truncated approval search rather than releasing unknown reliance', async () => {
+    await db.node.update({ where: { id: source.id }, data: { content: '{{> target approved}}' } });
+    await activate();
+    const selection = vi.spyOn(nodeApproval, 'newestApprovedRevisionOf').mockResolvedValueOnce({ found: null, truncated: true });
+    try { await expect(relied()).rejects.toMatchObject({ code: 'INCLUDE_RETENTION_INACTIVE' }); }
+    finally { selection.mockRestore(); }
+  });
+
+  it('the shared parser rejects nonpositive or fractional authored pins', async () => {
+    for (const rev of ['-3', '0', '1.5']) {
+      await expect(capture(source.id, `{{> target rev=${rev}}}`)).rejects.toBeInstanceOf(includeParser.IncludeSyntaxError);
     }
   });
 
