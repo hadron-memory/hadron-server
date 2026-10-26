@@ -1222,6 +1222,57 @@ async function edgeUrn(loc: string, memoryId: string): Promise<string> {
 // and produce the same typed InvalidLocError.
 
 /**
+ * Resolve subtree selectors for both tree tools (#2512/#2526).
+ * Explicit references identify a memory independently of discovery, then pass
+ * the shared read gate (cor:acl:010:02). Missing/unreadable references share a
+ * result kind so each tool preserves its envelope (cor:api:140:03).
+ * Bare unscoped locs remain discovery; they never acquire explicit authority.
+ */
+async function resolveParentForRead(
+  parentRel: string,
+  memoryUrn: string | undefined,
+  accessibleMemoryIds: string[] | null,
+  auth: AuthContext,
+  sessionMemoryIds: Set<string> | null = null,
+): Promise<
+  | { ok: true; loc: string; memoryId?: string }
+  | { ok: false; kind: 'invalid' | 'notFound'; message: string }
+> {
+  const missing = () => ({ ok: false as const, kind: 'notFound' as const, message: `Node "${parentRel}" not found.` });
+  const readable = async (id: string) =>
+    await canReadMemory(db, auth, id, EXPLICIT_REF) && (!sessionMemoryIds || sessionMemoryIds.has(id));
+  try {
+    const qualified = parseUrnInput(parentRel).type === 'node';
+    if (hasSchemePrefix(parentRel) && !qualified) {
+      return { ok: false, kind: 'invalid', message: 'parentRel must be a node URN or a bare loc.' };
+    }
+    if (memoryUrn) assertFullyQualifiedUrn(memoryUrn, 'memory');
+    let resolved: { loc: string; memoryId?: string };
+    if (qualified || memoryUrn) {
+      const parent = qualified ? splitNodeUrn(parentRel) : { memoryUrn: memoryUrn!, loc: parentRel };
+      const mem = await resolveMemoryByUrn(parent.memoryUrn);
+      if (!mem) return missing();
+      resolved = { loc: parent.loc, memoryId: mem.id };
+    } else {
+      resolved = await resolveLocFromUrn(parentRel, accessibleMemoryIds);
+    }
+    if (resolved.memoryId && !await readable(resolved.memoryId)) return missing();
+    // Both references authorize before mismatch diagnostics can reveal identity.
+    if (qualified && memoryUrn) {
+      const scoped = await resolveMemoryByUrn(memoryUrn);
+      if (!scoped || !await readable(scoped.id)) return missing();
+      if (scoped.id !== resolved.memoryId) {
+        return { ok: false, kind: 'invalid', message: 'parentRel and memoryUrn must name the same memory.' };
+      }
+    }
+    return { ok: true, ...resolved };
+  } catch (e) {
+    if (e instanceof UrnNotQualifiedError) return { ok: false, kind: 'invalid', message: e.message };
+    throw e;
+  }
+}
+
+/**
  * If the user passes a full URN (e.g. "hadronmemory.com:dev:architecture"),
  * try to strip the memory URN prefix and return just the loc.
  * Also returns the matched memoryId for scoping.
@@ -4345,29 +4396,17 @@ export function createMcpServerInstance(
           ).map((m) => m.id);
       }
 
-      // Scope to subtree if parentRel provided. #188: same BOLA shape as the
-      // memoryUrn branch — resolveLocFromUrn already gates the URN-typed path on
-      // the accessible set, but ADMIN/OWNER pass null there, so canReadMemory
-      // enforces the personal/private gate uniformly.
+      // #2526: the explicit-parent gate is shared with list_nodes; discovery
+      // cannot hide a directly readable owner memory before authorization.
       if (trimmedParentRel) {
-        const resolvedParent = await resolveLocFromUrn(trimmedParentRel, accessibleMemoryIds);
-        // A qualified parent hidden by the session scope resolves no memory
-        // id. Give it the same not-found envelope as a resolved-but-denied
-        // parent, rather than an empty search response that distinguishes the
-        // two cases.
-        if (!resolvedParent.memoryId && /^(?:hrn|urn):node:/.test(trimmedParentRel)) {
-          return textResult(`No nodes found matching "${safeQuery}".`);
+        const parent = await resolveParentForRead(trimmedParentRel, memoryUrn, accessibleMemoryIds, auth, sessionMemoryIds);
+        if (!parent.ok) {
+          return parent.kind === 'notFound'
+            ? textResult(`No nodes found matching "${safeQuery}".`)
+            : refusalResult(parent.message);
         }
-        filterLocPrefix = resolvedParent.loc;
-        if (resolvedParent.memoryId) {
-          if (
-            !(await canReadMemory(db, auth, resolvedParent.memoryId, EXPLICIT_REF)) ||
-            (sessionMemoryIds && !sessionMemoryIds.has(resolvedParent.memoryId))
-          ) {
-            return textResult(`No nodes found matching "${safeQuery}".`);
-          }
-          filterMemoryIds = [resolvedParent.memoryId];
-        }
+        filterLocPrefix = parent.loc;
+        if (parent.memoryId) filterMemoryIds = [parent.memoryId];
       }
 
       // Build a GraphQL Context from the MCP auth, including appId + sessionId so
@@ -5518,50 +5557,10 @@ export function createMcpServerInstance(
       let prefix: string;
       let memoryId: string | undefined;
       if (trimmedParentRel) {
-        // #2512: discovery scope is not the explicit-read gate. A caller naming
-        // a Memory or Node may read their own identity-scoped memory even when
-        // it is absent from discovery; the canReadMemory check below still decides.
-        let qualifiedParent = false;
-        try {
-          qualifiedParent = parseUrnInput(trimmedParentRel).type === 'node';
-          if (hasSchemePrefix(trimmedParentRel) && !qualifiedParent) {
-            return refusalResult('parentRel must be a node URN or a bare loc.');
-          }
-          if (memoryUrn) assertFullyQualifiedUrn(memoryUrn, 'memory');
-          if (qualifiedParent || memoryUrn) {
-            const parent = qualifiedParent
-              ? splitNodeUrn(trimmedParentRel)
-              : { memoryUrn: memoryUrn!, loc: trimmedParentRel };
-            const mem = await resolveMemoryByUrn(parent.memoryUrn);
-            // Uniform parent refusal deliberately conceals which referenced
-            // memory was absent/unreadable; qualified misses never fall back.
-            if (!mem) return refusalResult(`Node "${trimmedParentRel}" not found.`);
-            prefix = parent.loc;
-            memoryId = mem.id;
-          } else {
-            const resolved = await resolveLocFromUrn(trimmedParentRel, memoryIds);
-            prefix = resolved.loc;
-            memoryId = resolved.memoryId;
-          }
-        } catch (e) {
-          if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
-          throw e;
-        }
-        // #188 (Gemini): canReadMemory gate matches hadron_find_nodes.
-        // Explicit resolution identifies the memory; it never authorizes it.
-        // ADMIN/OWNER must also pass the strict-owner/App/license checks.
-        if (memoryId && !(await canReadMemory(db, auth, memoryId, EXPLICIT_REF))) {
-          return refusalResult(`Node "${trimmedParentRel}" not found.`);
-        }
-        // Both caller-supplied references must authorize before conflict
-        // diagnostics can distinguish their identities (cor:acl:020:01).
-        if (qualifiedParent && memoryUrn) {
-          const scoped = await resolveMemoryByUrn(memoryUrn);
-          if (!scoped || !(await canReadMemory(db, auth, scoped.id, EXPLICIT_REF))) {
-            return refusalResult(`Node "${trimmedParentRel}" not found.`);
-          }
-          if (scoped.id !== memoryId) return refusalResult('parentRel and memoryUrn must name the same memory.');
-        }
+        const parent = await resolveParentForRead(trimmedParentRel, memoryUrn, memoryIds, auth);
+        if (!parent.ok) return refusalResult(parent.message);
+        prefix = parent.loc;
+        memoryId = parent.memoryId;
       } else {
         prefix = '';
         // Find memory by URN. #100 #3: route through resolveMemoryByUrn so
