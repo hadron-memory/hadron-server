@@ -648,3 +648,33 @@ for (const choice of [{}, { noTeam: true }]) {
     } finally { release(); await blocker; await result; }
   });
 }
+
+it('a head cast waits for the exclusive stop fence before minting or coverage writes', async () => {
+  const head = await M.castWorker({}, args({ name: 'FenceHead' }), ctx());
+  let release!: () => void; let ready!: () => void;
+  const held = new Promise<void>(r => { release = r; });
+  const started = new Promise<void>(r => { ready = r; });
+  const blocker = db.$transaction(async tx => {
+    await lockStopFence(tx, app.id, 'exclusive'); ready(); await held;
+  }, { timeout: 30000 });
+  await started;
+  const observed = observeTransactionBackend(db);
+  const casting = M.castWorker({}, args({ reportsTo: head.id }), { ...ctx(), db: observed.db });
+  // Always settle the operation after releasing the holder, without replacing
+  // an earlier barrier assertion with a cleanup-time rejection.
+  const result = casting.then((worker: any) => ({ worker, error: null }), (error: unknown) => ({ worker: null, error }));
+  try {
+    const pid = await observed.backendFor(casting);
+    await Promise.race([
+      waitForAdvisoryWaiter(db, { pid, key: { form: 'hashed-bigint', value: `stop-signals:${app.id}` } }),
+      result.then(() => { throw new Error('head cast finished before the held stop fence was released'); }),
+    ]);
+    expect(await db.worker.count({ where: { appId: app.id } })).toBe(1);
+    expect(await db.agentTeamEvent.count({ where: { appId: app.id, type: 'worker.reports-to' } })).toBe(0);
+  } finally { release(); await blocker; await result; }
+  const settled = await result;
+  expect(settled.error).toBeNull();
+  expect(settled.worker?.id).toBeTruthy();
+  expect(await db.worker.count({ where: { appId: app.id } })).toBe(2);
+  expect(await db.agentTeamEvent.count({ where: { appId: app.id, type: 'worker.reports-to' } })).toBe(1);
+});
