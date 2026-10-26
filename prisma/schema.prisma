@@ -1606,6 +1606,7 @@ model Edge {
   @@unique([loc, memoryId])
   @@index([memoryId])
   @@index([targetId])
+  @@index([sourceId])
   // Graph-view scale path (#466): memoryEdges runs
   // `WHERE memory_id = ? ORDER BY loc LIMIT/OFFSET` (plus endpoint-liveness
   // joins). Same memory-scoped, loc-ordered seek as nodes_memory_id_loc_idx.
