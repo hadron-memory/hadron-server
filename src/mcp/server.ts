@@ -5534,8 +5534,16 @@ export function createMcpServerInstance(
           const resolved = await resolveLocFromUrn(trimmedParentRel, [mem.id]);
           prefix = resolved.loc;
           memoryId = mem.id;
+        } else if (qualifiedParent) {
+          const parent = splitNodeUrn(trimmedParentRel);
+          const mem = await resolveMemoryByUrn(parent.memoryUrn);
+          // Unknown and unreadable explicit parents share the same refusal;
+          // never fall back to an unscoped loc search after a qualified miss.
+          if (!mem) return refusalResult(`Node "${trimmedParentRel}" not found.`);
+          prefix = parent.loc;
+          memoryId = mem.id;
         } else {
-          const resolved = await resolveLocFromUrn(trimmedParentRel, qualifiedParent ? null : memoryIds);
+          const resolved = await resolveLocFromUrn(trimmedParentRel, memoryIds);
           prefix = resolved.loc;
           memoryId = resolved.memoryId;
         }
