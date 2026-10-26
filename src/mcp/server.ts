@@ -9424,7 +9424,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     'hadron_cast_worker',
     'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole + the systemPrompt template with {{name}}/{{role}} placeholders); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. The name is REQUIRED (#1050): a worker\'s name is permanent within the App, so it is chosen, never derived — a nameless cast refuses WORKER_NAME_REQUIRED rather than inventing a permanent identifier nobody picked. Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). NFKC-normalized Unicode 16 UTS #39 skeletons (original-case and caseless) must also be distinct here, retired workers included: WORKER_NAME_CONFUSABLE names the colliding worker; display spelling is preserved. Returns the worker\'s id, name, URN (hrn:worker:<root>:<app-slug>:<slug>, #991) and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the URN (or the id) as workerRef when starting sessions. Casting is a one-time mint, so record the URN: it is the ref that gets you back to this worker later.',
     SHAPE_HADRON_CAST_WORKER,
-    async ({ role, name, agent, app, promptOverride, session }) => {
+    async ({ role, name, agent, app, promptOverride, reportsTo, noTeam, session }) => {
       // #1081 — the caller just drove this session, so it is alive. The
       // touch is explicit here rather than a side effect of whichever tool
       // happens to write the Session row (see heartbeatSession).
@@ -9461,7 +9461,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         };
         const worker = await resolvers.Mutation.castWorker(
           {},
-          { appRef, role: role ?? null, agentRef: agent ?? null, name: name ?? null, promptOverride: promptOverride ?? null },
+          { appRef, role: role ?? null, agentRef: agent ?? null, name: name ?? null, promptOverride: promptOverride ?? null,
+            ...(reportsTo !== undefined ? { reportsTo } : {}), ...(noTeam !== undefined ? { noTeam } : {}),
+          },
           ctx,
         );
         const prompt = await resolvers.Worker.prompt(worker, {}, ctx);
@@ -9473,9 +9475,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // #1026: the cast is a one-time mint whose receipt is the record a
         // human keeps, so the link ships with the URN it is built from.
         const workerUrl = workerPortalUrl(workerUrn);
+        const placement = await resolvers.Worker.teamPlacement(worker, {}, ctx);
+        const reportingHeadId = await resolvers.Worker.reportsToWorkerId(worker, {}, ctx);
         return textResult(
           `Worker cast: **${worker.name}**${worker.role ? ` (${worker.role})` : ''}\n` +
             `Worker id: ${worker.id}\n` +
+            (placement !== null ? `Team placement: ${placement}\n` : '') +
+            (reportingHeadId ? `Reports to worker: ${reportingHeadId}\n` : '') +
             (workerUrn ? `Worker URN: ${workerUrn}\n` : '') +
             (workerUrl ? `URL: ${workerUrl}\n` : '') +
             `\nBoot briefing:\n\n${prompt ?? ''}`,
@@ -10441,7 +10447,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           page.items.map(async (w: {
             id: string; name: string; slug: string; role: string | null;
             agentId: string; retiredAt: Date | null;
-            heldByUserId: string | null;
+            heldByUserId: string | null; appId: string; reportsToWorkerId: string | null; explicitNoTeam: boolean;
           }) => {
             const urn = workerUrn(w.slug);
             const agentName = await agentNameFor(w.agentId);
@@ -10458,6 +10464,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // reads as unavailable regardless of liveness — that is the point:
             // an idle held worker is not up for adjudication.
             const flags: string[] = [];
+            const placement = await resolvers.Worker.teamPlacement(w, {}, ctx);
+            if (placement !== null) flags.push(`team placement ${placement}`);
             if (w.retiredAt) flags.push('RETIRED');
             if (w.heldByUserId && w.heldByUserId !== auth.userId) {
               flags.push(`held by ${holderName(w.heldByUserId)}`);
@@ -10609,6 +10617,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
         const prompt = briefing.text;
         const agentName = (agent as { name?: string } | null)?.name ?? null;
         const readUrl = workerPortalUrl(workerUrn as string | null);
+        const placement = await resolvers.Worker.teamPlacement(worker, {}, ctx);
+        const reportingHeadId = await resolvers.Worker.reportsToWorkerId(worker, {}, ctx);
 
         // Liveness is derived from real rows, never a lease (cor:agt:020:03) —
         // the same predicate hadron_start_session refuses WORKER_TAKEN on, and
@@ -10697,6 +10707,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // its own identity line, so the link ships beside the URN rather
             // than being assembled from it.
             (readUrl ? `URL: ${readUrl}\n` : '') +
+            (placement !== null ? `Team placement: ${placement}\n` : '') +
+            (reportingHeadId ? `Reports to worker: ${reportingHeadId}\n` : '') +
             (agentName ? `Role agent: ${agentName}\n` : '') +
             (checkStatus ? `${renderCheckStatusLong(checkStatus)}\n` : '') +
             // Only the caller's OWN driving session is named. Whose session it
@@ -10886,7 +10898,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         const toId = target ? await resolveRef(target) : null;
         const worker = await resolvers.Mutation.setWorkerReportsTo({}, { workerRef: workerId, reportsTo: toId }, ctx);
         const to = worker.reportsToWorkerId ? await db.worker.findUnique({ where: { id: worker.reportsToWorkerId }, select: { name: true } }) : null;
-        return textResult(to ? `**${worker.name}** now reports to **${to.name}**.` : `**${worker.name}** now reports to nobody.`);
+        return textResult(to ? `**${worker.name}** now reports to **${to.name}**.` : `**${worker.name}** now has explicit no team.`);
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'changing who the worker reports to failed'}`);
       }
@@ -12578,6 +12590,8 @@ const SHAPE_HADRON_WHOAMI = {
 };
 
 const SHAPE_HADRON_CAST_WORKER = {
+  reportsTo: z.string().nullable().optional().describe('Same-App reporting head reference; supply this or noTeam:true, never both. Only omission is compatible while choice enforcement is OFF.'),
+  noTeam: z.boolean().nullable().optional().describe('true explicitly records No team; false and null are invalid. Omit reportsTo entirely when choosing this arm.'),
   role: z.string().optional().describe('The role ("backend-engineer") — picks the installed agent by its personaRole when agent is omitted, and becomes the casting\'s role label. Not validated against defined roles: cast lists are ergonomics, never a gate (cor:agt:020:00).'),
   name: z.string().optional().describe('The worker\'s name — REQUIRED in effect (#1050): omitting it refuses WORKER_NAME_REQUIRED rather than deriving one, because a name is permanent within the App. Optional in the schema only so that refusal carries its reason instead of arriving as a bare validation error.'),
   agent: z.string().optional().describe('The agent to cast (Agent URN or ID) — must be installed in the App. Omit to resolve it from role.'),

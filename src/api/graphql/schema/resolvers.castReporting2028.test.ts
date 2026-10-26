@@ -396,3 +396,110 @@ describe('S12 head casts while standby is inert (Ada36559)', () => {
     expect(await db.agentTeamEvent.count()).toBe(0);
   });
 });
+
+it('a head cast enters existing S6 team stop coverage atomically', async () => {
+  const { lockStopFence } = await import('../../../lib/stopSignals/state.js');
+  const { setStopSignal } = await import('../../../lib/stopSignals/lifecycle.js');
+  const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
+  const signal = await db.$transaction(async tx => {
+    await lockStopFence(tx, app.id, 'exclusive');
+    return setStopSignal(tx, { appId: app.id, level: 'pause', scope: 'team', targetWorkerId: head.id, targetHostRegistrationId: null, until: null,
+      by: { userId: user.id, actor: { userId: user.id, workerId: null, agentId: null } } }, new Date());
+  });
+  const made = await M.castWorker({}, args({ reportsTo: head.id }), ctx());
+  expect(await db.teamStopCoverage.count({ where: { signalId: signal.id, workerId: made.id, leftAt: null } })).toBe(1);
+  expect(await db.agentTeamEvent.count({ where: { subjectWorkerId: made.id, type: 'worker.reports-to' } })).toBe(1);
+});
+
+it('returns selected head identity through GraphQL and delegated MCP receipts', async () => {
+  const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
+  expect((await wire('castWorkerPreview', { reports: head.id })).data?.castWorkerPreview).toMatchObject({ teamPlacement: 'REPORTS_TO', reportsToWorkerId: head.id });
+  expect((await wire('castWorker', { reports: head.id })).data?.castWorker).toMatchObject({ teamPlacement: 'REPORTS_TO', reportsToWorkerId: head.id });
+  const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
+  const receipt = await mcp.callToolText('hadron_cast_worker', { agent: agent.id, name: 'McpReport', reportsTo: head.id });
+  expect(receipt).toContain('Team placement: REPORTS_TO');
+  expect(receipt).toContain(`Reports to worker: ${head.id}`);
+});
+
+it('a late template failure rolls back reporting and S6 coverage/notices together', async () => {
+  const { lockStopFence } = await import('../../../lib/stopSignals/state.js');
+  const { setStopSignal } = await import('../../../lib/stopSignals/lifecycle.js');
+  const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
+  await db.$transaction(async tx => {
+    await lockStopFence(tx, app.id, 'exclusive');
+    await setStopSignal(tx, { appId: app.id, level: 'pause', scope: 'team', targetWorkerId: head.id, targetHostRegistrationId: null, until: null,
+      by: { userId: user.id, actor: { userId: user.id, workerId: null, agentId: null } } }, new Date());
+  });
+  for (const name of ['A', 'B']) await db.agentTickerTemplate.create({ data: { agentId: agent.id, name, cadenceSeconds: 600, reasons: ['read-team-channel'] } });
+  const events = await db.agentTeamEvent.count();
+  const coverage = await db.teamStopCoverage.count();
+  let n = 0;
+  const failing = db.$extends({ query: { ticker: { async create({ args, query }) {
+    if (++n === 2) throw new Error('late head ticker failure');
+    return query(args);
+  } } } });
+  await expect(M.castWorker({}, args({ reportsTo: head.id }), { ...ctx(), db: failing })).rejects.toThrow('late head ticker failure');
+  expect(n).toBe(2);
+  expect(await db.worker.count()).toBe(1);
+  expect(await db.agentTeamEvent.count()).toBe(events);
+  expect(await db.teamStopCoverage.count()).toBe(coverage);
+  expect(await db.ticker.count()).toBe(0);
+  expect(await db.tickerSubscription.count()).toBe(0);
+  await expect(M.castWorker({}, args({ reportsTo: head.id }), ctx())).resolves.toMatchObject({ name: 'Newcomer', reportsToWorkerId: head.id });
+});
+
+it('retirement winning the shared App anchor refuses the later head cast without residue', async () => {
+  const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
+  let release!: () => void; let ready!: () => void;
+  const held = new Promise<void>(r => { release = r; }); const started = new Promise<void>(r => { ready = r; });
+  const paused = db.$extends({ query: { worker: { async updateMany({ args, query }) { const row = await query(args); ready(); await held; return row; } } } });
+  const retiring = M.retireWorker({}, { workerRef: head.id }, { ...ctx(), db: paused });
+  await started;
+  const observed = observeTransactionBackend(db);
+  const casting = M.castWorker({}, args({ reportsTo: head.id }), { ...ctx(), db: observed.db });
+  const result = casting.then(() => null, (e: any) => e.extensions?.code);
+  try {
+    const pid = await observed.backendFor(casting);
+    await waitForAdvisoryWaiter(db, { pid, key: { form: 'int-pair', first: 'authorization:app', second: app.id } }, 2500);
+  } finally { release(); await retiring; }
+  expect(await result).toBe('WORKER_REPORTS_TO_RETIRED');
+  expect(await db.worker.count()).toBe(1);
+  expect(await db.agentTeamEvent.count()).toBe(0);
+});
+
+it('cast winning the App anchor commits first; later head retirement preserves the historical line', async () => {
+  const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
+  let release!: () => void; let ready!: () => void;
+  const held = new Promise<void>(r => { release = r; }); const started = new Promise<void>(r => { ready = r; });
+  const paused = db.$extends({ query: { agentTeamEvent: { async create({ args, query }) { const row = await query(args); ready(); await held; return row; } } } });
+  const casting = M.castWorker({}, args({ reportsTo: head.id }), { ...ctx(), db: paused });
+  await started;
+  const observed = observeTransactionBackend(db);
+  const retiring = M.retireWorker({}, { workerRef: head.id }, { ...ctx(), db: observed.db });
+  try {
+    const pid = await observed.backendFor(retiring);
+    await waitForAdvisoryWaiter(db, { pid, key: { form: 'int-pair', first: 'authorization:app', second: app.id } }, 2500);
+  } finally { release(); }
+  const made = await casting; await retiring;
+  const row = await db.worker.findUniqueOrThrow({ where: { id: made.id } });
+  expect(row.reportsToWorkerId).toBe(head.id);
+  expect(await W.reportsToRetired(row, {}, ctx())).toBe(true);
+});
+
+it('an empty template set is fenced through cast commit; an editor adds only to future casts', async () => {
+  let release!: () => void; let ready!: () => void;
+  const held = new Promise<void>(r => { release = r; }); const started = new Promise<void>(r => { ready = r; });
+  const paused = db.$extends({ query: { agentTeamEvent: { async create({ args, query }) { const row = await query(args); ready(); await held; return row; } } } });
+  const casting = M.castWorker({}, args({ noTeam: true }), { ...ctx(), db: paused });
+  await started;
+  const observed = observeTransactionBackend(db);
+  const editing = M.createAgentTickerTemplate({}, { agentRef: agent.id, input: { name: 'Later', cadenceSeconds: 600 } }, { ...ctx(), db: observed.db });
+  try {
+    const pid = await observed.backendFor(editing);
+    await waitForAdvisoryWaiter(db, { pid, key: { form: 'int-pair', first: 'authorization:agent', second: agent.id } }, 2500);
+  } finally { release(); }
+  const made = await casting; await editing;
+  expect(await db.ticker.count({ where: { generatedForWorkerId: made.id } })).toBe(0);
+  const future = await M.castWorker({}, args({ name: 'Future', noTeam: true }), ctx());
+  expect(await db.ticker.count({ where: { generatedForWorkerId: future.id } })).toBe(1);
+});

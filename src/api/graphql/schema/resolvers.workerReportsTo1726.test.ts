@@ -94,7 +94,7 @@ describe('the value: same App, not itself, not retired, no cycle', () => {
     expect(await reportsToOf(dan)).toBeNull();
     expect((await events(dan)).map((e) => e.payload)).toEqual([
       { from: null, to: ada.id, setBy: 'app-manager' },
-      { from: ada.id, to: null, setBy: 'app-manager' },
+      { from: ada.id, to: null, setBy: 'app-manager', oldExplicitNoTeam: false, newExplicitNoTeam: true },
     ]);
   });
 

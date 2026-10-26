@@ -782,3 +782,6 @@ CREATE TRIGGER agent_clone_audits_immutable
 
 -- #1162: newly introduced typed Worker/session references fence hard deletion.
 \ir worker-reference-invariants.sql
+
+-- S12 explicit reporting choice (legacy UNSET retained).
+\ir worker-team-choice-invariants.sql

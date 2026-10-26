@@ -32,6 +32,7 @@
  */
 
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
+import { teamPlacement } from '../workerTeamChoice.js';
 import { tierOf, type ModelTier } from './family.js';
 import type { AvailabilityRecord } from './availability.js';
 import { loadWorkerWorkStates, type WorkerWorkState } from './matcher.js';
@@ -47,6 +48,7 @@ const OPEN_STATUSES = ['pending', 'started'];
 
 export type RosterEntry = {
   workerId: string;
+  teamPlacement: ReturnType<typeof teamPlacement>;
   name: string;
   slug: string;
   role: string | null;
@@ -144,7 +146,7 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
     loadStallInputs(db, { appId, OR: [{ assigneeWorkerId: { not: null } }, { assigneeUserId: { not: null } }] }, now),
     loadWokenAlarms(db, appId, now),
     // #1726: every worker of the App, retired too, so a claim on a retired one resolves.
-    db.worker.findMany({ where: { appId }, select: { id: true, name: true, slug: true, retiredAt: true, reportsToWorkerId: true } }),
+    db.worker.findMany({ where: { appId }, select: { id: true, name: true, slug: true, retiredAt: true, reportsToWorkerId: true, explicitNoTeam: true } }),
   ]);
   const byId = new Map(structure.map((w) => [w.id, w]));
   const reportsToOf = (workerId: string): RosterEntry['reportsTo'] => {
@@ -220,6 +222,7 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
         lastActiveAt: w.lastActiveAt,
         lastAssignedAt: w.lastAssignedAt,
         reportsTo: reportsToOf(w.id),
+        teamPlacement: teamPlacement(byId.get(w.id)!),
       };
     })
     .sort((a, b) => {

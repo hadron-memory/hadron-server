@@ -4916,6 +4916,8 @@ export const typeDefs = `#graphql
     the register). Three senses of one word across two types.
     """
     heldAt: DateTime
+    "S12 placement; null is withheld, UNSET is no recorded choice (including OFF-era casts)."
+    teamPlacement: WorkerTeamPlacement
     """
     #1726 — the one Worker this worker reports to: a non-retired Worker of the
     same App, never itself, never a cycle. Null reports to nobody. A property of
@@ -5094,7 +5096,15 @@ export const typeDefs = `#graphql
   here are attribution-level facts the mint-gate audience already sees, so no
   nested entity hands out its field resolvers.
   """
+  enum WorkerTeamPlacement {
+    UNSET
+    NO_TEAM
+    REPORTS_TO
+  }
+
   type CastWorkerPreview {
+    teamPlacement: WorkerTeamPlacement!
+    reportsToWorkerId: ID
     "The name the cast would take — the caller's, checked free against the App's FULL roster (retired names stay taken). Required since #1050; a nameless preview refuses exactly where the cast would."
     name: String!
     "The casting's role: explicit, else the agent's personaRole dressing."
@@ -9073,6 +9083,10 @@ export const typeDefs = `#graphql
       agentRef: ID
       role: String
       name: String
+      "S12 head choice: requires staffing and App management; refuses WORKER_REPORTING_CAST_UNAVAILABLE if standby becomes available without cast coverage integration."
+      reportsTo: ID
+      "S12 explicit no-team choice; omit reportsTo. Both keys conflict, single null/blank/false is invalid. Omission remains UNSET while enforcement is OFF."
+      noTeam: Boolean
       promptOverride: String
     ): CastWorkerPreview!
 
@@ -11905,6 +11919,10 @@ export const typeDefs = `#graphql
       keep the typed refusal. One rule, one message, both paths.
       """
       name: String
+      "S12 head choice: requires staffing and App management; refuses WORKER_REPORTING_CAST_UNAVAILABLE if standby becomes available without cast coverage integration."
+      reportsTo: ID
+      "S12 explicit no-team choice; omit reportsTo. Both keys conflict, single null/blank/false is invalid. Omission remains UNSET while enforcement is OFF."
+      noTeam: Boolean
       promptOverride: String
     ): Worker!
 
@@ -11930,7 +11948,7 @@ export const typeDefs = `#graphql
     when one person holds both, or placed under any worker by its own holder
     (interim, pending a ruling). WORKER_REPORTS_TO_FORBIDDEN otherwise. A worker acts through its bound
     session, with a person behind the request. Each change is a
-    \`worker.reports-to\` team event; setting the current value changes nothing.
+    \`worker.reports-to\` team event. An explicit clear records NO_TEAM, including a previously UNSET line; repeating the recorded choice changes nothing.
     """
     setWorkerReportsTo(workerRef: ID!, reportsTo: ID): Worker!
     """
@@ -14012,6 +14030,8 @@ export const typeDefs = `#graphql
     lastActiveAt: DateTime
     "When it was last assigned a task; the matcher picks the least recent (hrn:node:hadronmemory.com:specs:cor:agt:060:06)."
     lastAssignedAt: DateTime
+    "S12 recorded choice; null means withheld, never UNSET or NO_TEAM."
+    teamPlacement: WorkerTeamPlacement
     "#1726 — the worker it reports to; group by this for the team's structure. Read it with lastActiveAt: nothing clears a claim automatically."
     reportsTo: AgentTaskParty
     "#1726 — it reports to a worker that has since retired (retirement leaves the claim; the roster flags it)."
