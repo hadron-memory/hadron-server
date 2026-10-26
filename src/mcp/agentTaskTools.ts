@@ -33,6 +33,7 @@ import { type AuthContext, validateSessionBinding } from '../middleware/auth.js'
 import { runAsActor } from '../lib/requestActor.js';
 import { UrnNotQualifiedError } from '../lib/urn.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { isTrustedRefusal } from '../api/graphql/formatError.js';
 
 type TaskRow = Record<string, any> & { id: string; status: string };
 type EventRow = Record<string, any> & { id: string; type: string; createdAt: Date };
@@ -58,7 +59,8 @@ const QA = resolvers.Query as unknown as {
   agentTaskStallSchedule: Resolver<{ appRef: string }, StallScheduleView>;
 };
 type StallScheduleView = Record<StallScheduleKey, number> & { updatedAt: Date | null };
-type RosterRow = import('../lib/agentTasks/roster.js').RosterEntry & {
+type RosterRow = Omit<import('../lib/agentTasks/roster.js').RosterEntry, 'teamPlacement'> & {
+  teamPlacement: import('../lib/agentTasks/roster.js').RosterEntry['teamPlacement'] | null;
   appUrn: string;
   currentTask?: import('../lib/agentTasks/rosterSummary.js').RosterTaskSummary | null;
   pausedUntil?: Date | null;
@@ -103,7 +105,7 @@ function textResult(text: string, isError = false) {
 
 /** A resolver refusal as `[<code>] <message>` plus its extensions; anything else is a server fault. */
 function refusal(e: unknown) {
-  if (e instanceof GraphQLError) {
+  if (e instanceof GraphQLError && isTrustedRefusal(e)) {
     const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'), true);
@@ -132,6 +134,7 @@ export function renderRosterEntry(r: RosterRow, asOf: Date): string {
     r.unreactedChildTaskId ? `child ${r.unreactedChildTaskId} ended (finished or cancelled)` : null,
     r.lastAssignedAt ? `last assigned ${r.lastAssignedAt.toISOString()}` : 'never assigned',
     // #1726: beside last activity, so a stale claim is easy to spot.
+    r.teamPlacement != null ? `team placement ${r.teamPlacement}` : null,
     r.reportsTo ? `reports to ${r.reportsTo.name}${r.reportsTo.retired ? ' (retired)' : ''}` : null,
     r.lastActiveAt ? `last active ${r.lastActiveAt.toISOString()}` : null,
     // #2138 §3.4

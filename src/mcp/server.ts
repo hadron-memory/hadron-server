@@ -149,7 +149,7 @@ import {
   mcpPrincipalKey,
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
-import { toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
 import { textResult } from './textResult.js';
 import { tagsInputSchema } from './tagsInput.js';
 import { foreignIdentityScopedMemoryFilter } from '../lib/auth/memoryOwnership.js';
@@ -190,7 +190,7 @@ import { nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
 import { enqueueNodeEmbedding, pendingAtForRevival } from '../services/embedding/enqueue.js';
-import { sessionKeyCache } from '../lib/sessionKeyCache.js';
+import { sessionKeyCache, SessionKeyConflictError } from '../lib/sessionKeyCache.js';
 import {
   isSessionLive,
   loadLastEventBySession,
@@ -2903,7 +2903,7 @@ export function createMcpServerInstance(
     "Global cross-entity search across organizations, memories, nodes, agents, apps, AI service configs, and users — returns one ranked, flat list. By default the query shape is smart-sniffed: a PK-shaped input does an exact id lookup, a URN-shaped input matches URNs, free text matches name + URN. Pass `fields` to force which fields to match (overrides the sniff) and `entityTypes` to restrict the kinds. `pk` is exact-match; the rest are case-insensitive substring — including `content` (node bodies), which is a LITERAL substring match (NOT stemmed): 'report abuse' won't match 'reports abusive behavior'. `content` is opt-in and skips encrypted memories. For a stemmed, ranked, concept/multi-word search over node text — and the cross-memory 'does anyone know about X?' probe — use hadron_find_nodes (keyword mode, allMemories: true) instead; this tool is best for locating a known entity by name/URN/id across kinds.",
     SHAPE_HADRON_SEARCH,
     async ({ query, entityTypes, fields, limit, scope }) => {
-      if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+      if (!auth.clientId && !auth.appId && !auth.userId) return refusalResult('Not authenticated.');
 
       // createTestableMcpServer bypasses zod — normalize args defensively.
       const q = typeof query === 'string' ? query : '';
@@ -2925,7 +2925,7 @@ export function createMcpServerInstance(
       try {
         scopeRes = await mcpSearchScope(scope, false);
       } catch (e) {
-        if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'error').toLowerCase()}] ${e.message}`);
+        if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'error').toLowerCase()}] ${e.message}`);
         throw e;
       }
       const principal: SearchPrincipal = {
@@ -2973,7 +2973,7 @@ export function createMcpServerInstance(
       // auth.userId is set (multi-App OAuth caller without selection),
       // getMemoryAccess unions memory access across the user's
       // accessible Apps. No requireAppScope() gate on purpose.
-      if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+      if (!auth.clientId && !auth.appId && !auth.userId) return refusalResult('Not authenticated.');
 
       // Effective access level per memory. The App/org access map is
       // personal-free by design (it also backs getAccessibleMemoryIds, which
@@ -3114,7 +3114,7 @@ export function createMcpServerInstance(
       // #1316: an unreadable memory takes the missing branch, not "Access denied".
       const mem = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'read');
       if (!mem) {
-        return textResult(`Memory not found: '${memoryUrn}'. Use hadron_list_memories to see what's available.`);
+        return refusalResult(`Memory not found: '${memoryUrn}'. Use hadron_list_memories to see what's available.`);
       }
 
       // Store the bare URN from the DB row (the canonical form for downstream
@@ -3249,7 +3249,7 @@ export function createMcpServerInstance(
       // unauthenticated call can't flip the flag and influence a later
       // re-authed request.
       if (!auth.userId && !auth.clientId && !auth.appId) {
-        return textResult('Not authenticated.');
+        return refusalResult('Not authenticated.');
       }
       engagedWithNewSurface = true;
       // AppKey callers (appId set, no userId) — list returns the single App
@@ -3311,7 +3311,7 @@ export function createMcpServerInstance(
         );
       }
       if (!auth.userId) {
-        return textResult('Not authenticated.');
+        return refusalResult('Not authenticated.');
       }
       engagedWithNewSurface = true;
 
@@ -3384,11 +3384,11 @@ export function createMcpServerInstance(
           'AppKey callers carry their organization in the credential; hadron_set_active_org is not applicable.',
         );
       }
-      if (!auth.userId) return textResult('Not authenticated.');
+      if (!auth.userId) return refusalResult('Not authenticated.');
       // A support view sees into ONE org already and must not re-point itself
       // (belt and braces — /mcp rejects impersonation at session init).
       if (auth.impersonation) {
-        return textResult('Not available in an impersonation session.');
+        return refusalResult('Not available in an impersonation session.');
       }
       const sid = getSessionId();
 
@@ -3532,10 +3532,7 @@ export function createMcpServerInstance(
   /** A resolver refusal as `[<code>] <message>` text, the app-selection envelope convention. */
   const scopeErrorText = (e: unknown) => {
     if (e instanceof ScopeGraphQLError) {
-      return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
-    }
-    if (e instanceof Error && (e.message === 'Forbidden' || e.message === 'Unauthenticated')) {
-      return textResult(`[${e.message.toLowerCase()}] ${e.message}.`);
+      return refusalResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
     }
     // A ref that names nothing is the caller's input, not a server fault
     // (Copilot on PR #1160): keep it inside the `[code]` envelope.
@@ -3545,9 +3542,9 @@ export function createMcpServerInstance(
       e instanceof OrganizationNotFoundError ||
       e instanceof MemoryNotFoundError
     ) {
-      return textResult(`[not_found] No match for "${(e as { ref?: string }).ref ?? ''}".`);
+      return refusalResult(`[not_found] No match for "${(e as { ref?: string }).ref ?? ''}".`);
     }
-    if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${e.message}`);
+    if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${e.message}`);
     throw e;
   };
 
@@ -3603,7 +3600,7 @@ export function createMcpServerInstance(
     'List the named search scopes ("lenses", spec 049) you may read — an ORDERED memory list with exactly one owner (organization | Agent | App). With no filter, lists the active App\'s resolution CONTEXT: the App\'s own scopes, its installed Agents\', and its organization\'s — what a bare scope name resolves against there (App › Agent › organization, never unioned). A scope never grants: each shows only the memories YOU may read, plus a count of the rest. Names `global` and `app` are the ladder\'s built-in views, not scopes.',
     SHAPE_HADRON_LIST_SCOPES,
     async ({ app, ownerType, ownerRef, name, limit, offset }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       const appRef = app ?? (ownerRef ? undefined : auth.appId);
       try {
@@ -3628,11 +3625,11 @@ export function createMcpServerInstance(
     'Create a named search scope (spec 049): an ORDERED list of memories owned by exactly one of an organization, an Agent, or an App. Pass one owner ref, or none to own it by the active App. Every memory must be one you can read (an unreadable one reads as "no match"). Names: 1–64 of [a-z0-9_-], unique per owner; `global` and `app` are reserved. Auth: organization CONTRIBUTOR+; App / Agent ADMIN of the owning org or the owner of a user-owned one.',
     SHAPE_HADRON_CREATE_SCOPE,
     async ({ name, memoryUrns, description, organizationRef, agentRef, appRef }) => {
-      if (!auth.userId) return textResult('Not authenticated — scopes are created by a user, not an App key.');
+      if (!auth.userId) return refusalResult('Not authenticated — scopes are created by a user, not an App key.');
       const ctx = scopeCtx();
       const owner = { organizationRef, agentRef, appRef: appRef ?? (organizationRef || agentRef ? undefined : auth.appId) };
       if (!owner.organizationRef && !owner.agentRef && !owner.appRef) {
-        return textResult('[bad_user_input] No owner: pass organizationRef, agentRef or appRef, or select an App with hadron_set_active_app first.');
+        return refusalResult('[bad_user_input] No owner: pass organizationRef, agentRef or appRef, or select an App with hadron_set_active_app first.');
       }
       try {
         const scope = await resolvers.Mutation.createScope({}, { input: { name, description, ...owner, memoryRefs: memoryUrns } }, ctx);
@@ -3648,7 +3645,7 @@ export function createMcpServerInstance(
     'Update a scope you may write (auth as hadron_create_scope): rename, re-describe, or REPLACE its ordered memory list.',
     SHAPE_HADRON_UPDATE_SCOPE,
     async ({ scope, name, description, memoryUrns }) => {
-      if (!auth.userId) return textResult('Not authenticated.');
+      if (!auth.userId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       try {
         const updated = await resolvers.Mutation.updateScope({}, { ref: scope, input: { name, description, memoryRefs: memoryUrns } }, ctx);
@@ -3664,7 +3661,7 @@ export function createMcpServerInstance(
     'Soft-delete a scope you may write; its name is free again at once. Deleting a scope attaches or detaches nothing — it was only ever a lens.',
     SHAPE_HADRON_DELETE_SCOPE,
     async ({ scope }) => {
-      if (!auth.userId) return textResult('Not authenticated.');
+      if (!auth.userId) return refusalResult('Not authenticated.');
       try {
         await resolvers.Mutation.deleteScope({}, { ref: scope }, scopeCtx());
         return textResult(`Scope ${scope} deleted.`);
@@ -3679,7 +3676,7 @@ export function createMcpServerInstance(
     'Explain what a scope resolves to FOR YOU (spec 049): the readable memories in scope order, how many were dropped for access (a count — a lens never grants and never names what you cannot read), which owner tier won when resolved by NAME in an App\'s context (App › Agent › organization, never unioned; two installed Agents each owning the name is ambiguous and you choose by id), the scopes it shadowed, and — with `loc` — which memory would win for that address.',
     SHAPE_HADRON_SCOPE_EXPLAIN,
     async ({ scope, name, app, loc }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       try {
         const ex = await resolvers.Query.scopeExplain({}, { scopeRef: scope, name, appRef: app ?? auth.appId, loc }, ctx);
@@ -3736,10 +3733,10 @@ export function createMcpServerInstance(
     'List the Channels (spec 049 — durable, server-ordered message streams; each hosted at ONE reserved address in ONE memory) whose host memory you may read. Default: the active App\'s. Every App has a default Channel `team` at chats:team — what hadron_team_chat_post writes to. A Channel\'s address is PROTECTED: generic node writes under it are refused ([loc_protected]).',
     SHAPE_HADRON_LIST_CHANNELS,
     async ({ app, memory, limit, offset }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       const appRef = memory ? undefined : (app ?? auth.appId ?? undefined);
-      if (!appRef && !memory) return textResult('[bad_user_input] Pass app or memory, or select an App with hadron_set_active_app first.');
+      if (!appRef && !memory) return refusalResult('[bad_user_input] Pass app or memory, or select an App with hadron_set_active_app first.');
       try {
         const page = await resolvers.Query.channels({}, { filter: { appRef, memoryRef: memory }, limit, offset }, ctx);
         if (page.total === 0) return textResult('No channels you may read there.');
@@ -3756,7 +3753,7 @@ export function createMcpServerInstance(
     'Create a named Channel WITH its chat root (spec 049), in ANY memory class you may write — the host memory\'s own audience decides who reads and posts (cor:acl:030:01), so a Channel in a private memory is private. `loc` is the reserved address (e.g. chats:release) — it must not overlap an existing Channel\'s. Every App already has `team` at chats:team. Creating at a DELETED Channel\'s address reuses it and starts CLEAN: the old transcript is tombstoned, the empty Channel watermarks reset, and its first new message resumes above the old seq maximum so old read cursors cannot hide it (#1226).',
     SHAPE_HADRON_CREATE_CHANNEL,
     async ({ memory, loc, name, description }) => {
-      if (!auth.userId) return textResult('Not authenticated — Channels are created by a user, not an App key.');
+      if (!auth.userId) return refusalResult('Not authenticated — Channels are created by a user, not an App key.');
       const ctx = scopeCtx();
       try {
         const row = await resolvers.Mutation.createChannel({}, { input: { memoryRef: memory, loc, name, description } }, ctx);
@@ -3821,10 +3818,10 @@ export function createMcpServerInstance(
     'List the chat REGISTER (spec 049): which attendee (a Worker, or an Agent in an App — or everyone in the owner\'s context) takes part in which Channel, as declared by the App or its organization. Intent, never permission: what an attendee may actually read or post is the Channel\'s host memory\'s decision. Default: the active App\'s rows. Every install carries a materialised default row for the App\'s `team` Channel.',
     SHAPE_HADRON_REGISTER_LIST,
     async ({ owner, channel, attendee, limit, offset }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const ctx = scopeCtx();
       const ownerRef = owner ?? (channel || attendee ? undefined : (auth.appId ?? undefined));
-      if (!ownerRef && !channel && !attendee) return textResult('[bad_user_input] Pass owner, channel or attendee, or select an App with hadron_set_active_app first.');
+      if (!ownerRef && !channel && !attendee) return refusalResult('[bad_user_input] Pass owner, channel or attendee, or select an App with hadron_set_active_app first.');
       try {
         const page = await resolvers.Query.registerEntries({}, { filter: { ownerRef, channelRef: channel, attendeeRef: attendee }, limit, offset }, ctx);
         if (page.total === 0) return textResult('No register entries you may read there.');
@@ -3841,10 +3838,10 @@ export function createMcpServerInstance(
     'Declare that an attendee takes part in a Channel (spec 049 register). Owner: an App (org ADMIN, or the owner of a user-owned App) or an organization (CONTRIBUTOR+); defaults to the active App. attendee: a Worker or an Agent in the owner\'s context; omit it for every attendee there. Intent, never permission — the row grants nothing.',
     SHAPE_HADRON_REGISTER_ADD,
     async ({ channel, attendee, owner, role, mentionOnly, description }) => {
-      if (!auth.userId) return textResult('Not authenticated — register rows are written by a user, not an App key.');
+      if (!auth.userId) return refusalResult('Not authenticated — register rows are written by a user, not an App key.');
       const ctx = scopeCtx();
       const ownerRef = owner ?? auth.appId;
-      if (!ownerRef) return textResult('[bad_user_input] No owner: pass owner, or select an App with hadron_set_active_app first.');
+      if (!ownerRef) return refusalResult('[bad_user_input] No owner: pass owner, or select an App with hadron_set_active_app first.');
       try {
         const row = await resolvers.Mutation.createRegisterEntry(
           {},
@@ -3864,7 +3861,7 @@ export function createMcpServerInstance(
     'Remove a register entry you own (spec 049): each owner removes its own rows — an App may remove its install-created default, never an organization\'s row.',
     SHAPE_HADRON_REGISTER_REMOVE,
     async ({ entry }) => {
-      if (!auth.userId) return textResult('Not authenticated — register rows are written by a user, not an App key.');
+      if (!auth.userId) return refusalResult('Not authenticated — register rows are written by a user, not an App key.');
       try {
         await resolvers.Mutation.deleteRegisterEntry({}, { ref: entry }, scopeCtx());
         return textResult('Removed.');
@@ -3881,11 +3878,11 @@ export function createMcpServerInstance(
     'Set — or with clear:true, drop — the ACTIVE SCOPE for this client (spec 049): the named search scope hadron_find_nodes / hadron_search run under when the call names no scope and no memory. Rung 2 of the ladder: a scope named in the call › this › the active App (`app`, its attached memories) › the active organization (`global`) › your user-owned memories. Persisted per client instance like hadron_set_active_app and re-authorized on restore. A scope never grants: results are its memories ∩ what you may read, and every result says which scope it ran under.',
     SHAPE_HADRON_SET_ACTIVE_SCOPE,
     async ({ scope, clear }) => {
-      if (!auth.userId) return textResult('Not authenticated — an App key\'s scope is its App.');
-      if (auth.impersonation) return textResult('Not available in an impersonation session.');
+      if (!auth.userId) return refusalResult('Not authenticated — an App key\'s scope is its App.');
+      if (auth.impersonation) return refusalResult('Not available in an impersonation session.');
       const ctx = scopeCtx();
       if (!scope) {
-        if (!clear) return textResult('[bad_user_input] Pass scope (an id or a name), or clear: true.');
+        if (!clear) return refusalResult('[bad_user_input] Pass scope (an id or a name), or clear: true.');
         activeScopeId = undefined;
         await saveActiveScope(db, auth, clientKey, null);
         const now = await mcpSearchScope(undefined, false).catch(() => null);
@@ -3895,12 +3892,12 @@ export function createMcpServerInstance(
       if (!row && auth.appId) {
         const r = await resolveScopeByNameInApp(ctx, scope.trim(), auth.appId);
         if (r.ambiguousAmong.length) {
-          return textResult(`[scope_name_ambiguous] "${scope}" is owned by ${r.ambiguousAmong.length} Agents installed in this App; pass an id: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`);
+          return refusalResult(`[scope_name_ambiguous] "${scope}" is owned by ${r.ambiguousAmong.length} Agents installed in this App; pass an id: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`);
         }
         row = r.winner;
       }
       if (!row || !(await canReadScope(ctx, row))) {
-        return textResult(`[not_found] No readable scope matches "${scope}"${auth.appId ? '' : ' — a bare name needs an active App; pass the scope id or select an App first'}. See hadron_list_scopes.`);
+        return refusalResult(`[not_found] No readable scope matches "${scope}"${auth.appId ? '' : ' — a bare name needs an active App; pass the scope id or select an App first'}. See hadron_list_scopes.`);
       }
       activeScopeId = row.id;
       await saveActiveScope(db, auth, clientKey, row.id);
@@ -3921,17 +3918,17 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
-      if (fragRefusal) return textResult(fragRefusal);
+      if (fragRefusal) return refusalResult(fragRefusal);
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult(`Memory not found: "${memoryUrn}".`);
       }
       const memoryId = memory.id;
       // Default name to the last loc atom (e.g. `services:db-helpers` → `db-helpers`).
@@ -3941,11 +3938,11 @@ export function createMcpServerInstance(
       try {
         validateLoc(loc);
       } catch (e) {
-        return toolErrorResult(e, () => (e as Error).message, 'hadron_create_parent_node:validateLoc');
+        return e instanceof InvalidLocError ? refusalResult(e.message) : toolErrorResult(e, () => (e as Error).message, 'hadron_create_parent_node:validateLoc');
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
-        return textResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
+        return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
 
       const parentMemoryState = await db.memory.findUniqueOrThrow({
@@ -3987,7 +3984,7 @@ export function createMcpServerInstance(
           // door performs.
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
         throw e;
       }
 
@@ -4109,17 +4106,17 @@ export function createMcpServerInstance(
           return row.id;
         });
       } catch (e) {
-        if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
-        if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
-        if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
-        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
-        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
+        if (e instanceof LocProtectedError) return refusalResult(`[loc_protected] ${e.message}`);
+        if (e instanceof NodeMovedDuringWriteError) return refusalResult(e.message);
+        if (e instanceof MemoryEncryptionChangedDuringWriteError) return refusalResult(e.message);
+        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
         const includeText = includeRefusalText(e);
-        if (includeText) return textResult(includeText);
+        if (includeText) return refusalResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
-        if (writerRefusal) return textResult(writerRefusal);
+        if (writerRefusal) return refusalResult(writerRefusal);
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
-          return textResult(`[spec_minted_permanent] ${e.message}`);
+          return refusalResult(`[spec_minted_permanent] ${e.message}`);
         }
         throw e;
       }
@@ -4143,7 +4140,7 @@ export function createMcpServerInstance(
       try {
         validateParentRel(parentRel);
       } catch (e) {
-        if (e instanceof InvalidParentRelError) return textResult(e.message);
+        if (e instanceof InvalidParentRelError) return refusalResult(e.message);
         throw e;
       }
 
@@ -4238,7 +4235,7 @@ export function createMcpServerInstance(
         try {
           assertFullyQualifiedUrn(memoryUrn, 'memory');
         } catch (e) {
-          if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+          if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
           throw e;
         }
         const mem = await resolveMemoryByUrn(memoryUrn);
@@ -4282,7 +4279,7 @@ export function createMcpServerInstance(
           }),
         );
         const bad = resolved.find((r): r is { error: string } => 'error' in r);
-        if (bad) return textResult(bad.error);
+        if (bad) return refusalResult(bad.error);
         filterMemoryIds = resolved.map((r) => (r as { id: string }).id);
       }
 
@@ -4350,7 +4347,7 @@ export function createMcpServerInstance(
       try {
         scopeRes = await mcpSearchScope(scope, memSelectors.length > 0 || !!trimmedParentRel);
       } catch (e) {
-        if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'error').toLowerCase()}] ${e.message}`);
+        if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'error').toLowerCase()}] ${e.message}`);
         throw e;
       }
       if (scopeRes?.memoryIds) {
@@ -4403,7 +4400,7 @@ export function createMcpServerInstance(
       } catch (e) {
         // findNodes throws BAD_USER_INPUT for a malformed boolean query, an
         // invalid regex, etc. The MCP contract surfaces tool errors as text.
-        if (e instanceof ScopeGraphQLError && e.extensions?.code === 'BAD_USER_INPUT') return textResult(e.message);
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === 'BAD_USER_INPUT') return refusalResult(e.message);
         // #415: anything else, such as a regex statement the database
         // cancelled at its budget, goes through the #1695 boundary, so a
         // Prisma message (driver internals, the SQL shape) never reaches the
@@ -4653,7 +4650,7 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
@@ -4671,7 +4668,7 @@ export function createMcpServerInstance(
         throw error;
       });
       const sourceReadable = !!memory && await canReadMemory(db, auth, memory.id, EXPLICIT_REF);
-      const missing = () => textResult(sourceReadable
+      const missing = () => refusalResult(sourceReadable
         ? `Node "${rawUrn}" not found.`
         : `Memory not found: "${memoryUrn}".`);
 
@@ -4784,7 +4781,7 @@ export function createMcpServerInstance(
         contentScope !== 'all'
       ) {
         const err = new InvalidContentScopeError(String(contentScope));
-        return textResult(err.message);
+        return refusalResult(err.message);
       }
       const scope = contentScope ?? 'content';
       // Reconcile + fetch under one row lock. The first lookup selects the
@@ -4798,12 +4795,12 @@ export function createMcpServerInstance(
         // An inherited node was admitted through the child's memory above.
         (!inheritedFrom && !(await canReadMemory(db, auth, current.memoryId, EXPLICIT_REF)))
       ) {
-        return textResult(`Node "${rawUrn}" not found.`);
+        return refusalResult(`Node "${rawUrn}" not found.`);
       }
       // The version actually served must still be the child's to show
       // (Diego, #1891 P2-1): not turned boot prompt, not overridden since.
       if (inheritedFrom && !(await stillInherited(db, inheritedFrom, current))) {
-        return textResult(`Node "${rawUrn}" not found.`);
+        return refusalResult(`Node "${rawUrn}" not found.`);
       }
       if (inheritedFrom) markInherited([current], new Map([[current.memoryId, inheritedFrom]]));
       // Spec 041: decrypt when this session holds the key; mark locked
@@ -4882,7 +4879,7 @@ export function createMcpServerInstance(
         contentScope !== 'abstract' &&
         contentScope !== 'all'
       ) {
-        return textResult(new InvalidContentScopeError(String(contentScope)).message);
+        return refusalResult(new InvalidContentScopeError(String(contentScope)).message);
       }
       const scope = contentScope ?? 'content';
 
@@ -4914,7 +4911,7 @@ export function createMcpServerInstance(
         const mem = await resolveMemoryByUrn(memoryUrn!);
         if (!mem || !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
           // Don't leak existence — mirror the single read's phrasing.
-          return textResult(`Memory not found: "${memoryUrn}".`);
+          return refusalResult(`Memory not found: "${memoryUrn}".`);
         }
         prefixReadMemoryId = mem.id;
         // Count cap (cor:api:040:02): take MAX+1 to detect overflow, then fail
@@ -5332,14 +5329,14 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawParent, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(`Parent: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Parent: ${e.message}`);
         throw e;
       }
       if (rawCurrent) {
         try {
           assertFullyQualifiedUrn(rawCurrent, 'node');
         } catch (e) {
-          if (e instanceof UrnNotQualifiedError) return textResult(`Current: ${e.message}`);
+          if (e instanceof UrnNotQualifiedError) return refusalResult(`Current: ${e.message}`);
           throw e;
         }
       }
@@ -5347,10 +5344,10 @@ export function createMcpServerInstance(
       const { memoryUrn, loc: parentLoc } = splitNodeUrn(rawParent);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult(`Memory not found: "${memoryUrn}".`);
       }
       if (!(await canReadMemory(db, auth, memory.id, EXPLICIT_REF))) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult(`Memory not found: "${memoryUrn}".`);
       }
       const prefix = parentLoc + ':';
 
@@ -5384,7 +5381,7 @@ export function createMcpServerInstance(
         }
         const idx = children.findIndex((n) => n.loc === currentLoc);
         if (idx === -1) {
-          return textResult(`Current node "${currentLoc}" not found among children of "${parentLoc}".`);
+          return refusalResult(`Current node "${currentLoc}" not found among children of "${parentLoc}".`);
         }
         if (idx + 1 >= children.length) {
           return textResult(`No more nodes after "${currentLoc}".`);
@@ -5406,7 +5403,7 @@ export function createMcpServerInstance(
           },
         },
       });
-      if (!nextRow) return textResult('Node not found.');
+      if (!nextRow) return refusalResult('Node not found.');
       const node = await concealUnreadableEdgeEnds(auth, nextRow); // #1647
 
       // #1061 — this tool returns the node's full content, exactly as
@@ -5455,7 +5452,7 @@ export function createMcpServerInstance(
       try {
         validateParentRel(parentRel);
       } catch (e) {
-        if (e instanceof InvalidParentRelError) return textResult(e.message);
+        if (e instanceof InvalidParentRelError) return refusalResult(e.message);
         throw e;
       }
 
@@ -5483,7 +5480,7 @@ export function createMcpServerInstance(
         // admin scope, but ADMIN/OWNER pass null and would otherwise
         // be able to browse another user's personal/private memory.
         if (memoryId && !(await canReadMemory(db, auth, memoryId, EXPLICIT_REF))) {
-          return textResult(`Node "${trimmedParentRel}" not found.`);
+          return refusalResult(`Node "${trimmedParentRel}" not found.`);
         }
       } else {
         prefix = '';
@@ -5494,7 +5491,7 @@ export function createMcpServerInstance(
           try {
             assertFullyQualifiedUrn(memoryUrn, 'memory');
           } catch (e) {
-            if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+            if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
             throw e;
           }
           const mem = await resolveMemoryByUrn(memoryUrn);
@@ -5756,7 +5753,7 @@ export function createMcpServerInstance(
       // private memories are owner-only by class; an App-key session has no
       // business unlocking them, and unowned refs get a uniform not-found.
       if (!auth.userId) {
-        return textResult('hadron_unlock_memory requires a user-authenticated MCP connection.');
+        return refusalResult('hadron_unlock_memory requires a user-authenticated MCP connection.');
       }
       const sid = getSessionId();
       if (!sid) return textResult('No active MCP session.');
@@ -5775,7 +5772,7 @@ export function createMcpServerInstance(
           })
         : null;
       if (!row || row.userId !== auth.userId) {
-        return textResult(`Memory "${memoryUrn}" not found.`);
+        return refusalResult(`Memory "${memoryUrn}" not found.`);
       }
       if (!row.isEncrypted) {
         return textResult(`Memory "${row.urn}" is not encrypted.`);
@@ -5784,10 +5781,9 @@ export function createMcpServerInstance(
         const key = await resolveSuppliedKey(row, { passphrase, dataKey });
         sessionKeyCache.set(`mcp:${sid}`, row.id, key);
       } catch (err) {
-        if (err instanceof MemoryUnlockError) return textResult(err.message);
-        // Key conflict (another live session holds a DIFFERENT key) or
-        // unexpected — surface the message, never the stack.
-        return textResult(String((err as Error).message));
+        if (err instanceof MemoryUnlockError || err instanceof SessionKeyConflictError) return refusalResult(err.message);
+        // Anything not typed is a fault (#1789).
+        return toolErrorResult(err, () => String((err as Error).message), 'hadron_unlock_memory');
       }
       return textResult(
         `Memory unlocked for this session: ${row.urn}. Reads now return plaintext; writes encrypt. ` +
@@ -5807,7 +5803,7 @@ export function createMcpServerInstance(
       // (PR-517 review, Codex P2): without it, the existing-vs-missing
       // response split makes lock an existence oracle for private URNs.
       if (!auth.userId) {
-        return textResult('hadron_lock_memory requires a user-authenticated MCP connection.');
+        return refusalResult('hadron_lock_memory requires a user-authenticated MCP connection.');
       }
       // #2122: these two tools accept IDs per Vera's disposition (cor:api:010:01);
       // keep other tools on their existing URN-only resolver and preserve the owner gate below.
@@ -5818,7 +5814,7 @@ export function createMcpServerInstance(
         ? await db.memory.findUnique({ where: { id: mem.id }, select: { id: true, userId: true } })
         : null;
       if (!row || row.userId !== auth.userId) {
-        return textResult(`Memory "${memoryUrn}" not found.`);
+        return refusalResult(`Memory "${memoryUrn}" not found.`);
       }
       sessionKeyCache.release(`mcp:${sid}`, row.id);
       return textResult(`Memory locked for this session: ${memoryUrn}.`);
@@ -5883,29 +5879,29 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
       // Split into memory URN + loc and resolve the memory.
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
-      if (fragRefusal) return textResult(fragRefusal);
+      if (fragRefusal) return refusalResult(fragRefusal);
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult(`Memory not found: "${memoryUrn}".`);
       }
       const memoryId = memory.id;
 
       try {
         validateLoc(loc);
       } catch (e) {
-        return toolErrorResult(e, () => (e as Error).message, 'hadron_create_node:validateLoc');
+        return e instanceof InvalidLocError ? refusalResult(e.message) : toolErrorResult(e, () => (e as Error).message, 'hadron_create_node:validateLoc');
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
-        return textResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
+        return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
 
       // #1201 — the GOVERNED-KIND gate, on the state this create would PRODUCE.
@@ -5959,7 +5955,7 @@ export function createMcpServerInstance(
               },
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
         throw e;
       }
 
@@ -5996,7 +5992,7 @@ export function createMcpServerInstance(
           memoryId,
           auth,
         );
-        if ('error' in r) return textResult(r.error);
+        if ('error' in r) return refusalResult(r.error);
         resolvedEdges = r.resolved;
       }
 
@@ -6047,7 +6043,7 @@ export function createMcpServerInstance(
       try {
         normalizedAbstract = normalizeAbstract(abstract) ?? null;
       } catch (e) {
-        if (e instanceof NodeAbstractTooLongError) return textResult(e.message);
+        if (e instanceof NodeAbstractTooLongError) return refusalResult(e.message);
         throw e;
       }
 
@@ -6368,21 +6364,21 @@ export function createMcpServerInstance(
           return written;
         });
       } catch (e) {
-        if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
+        if (e instanceof NodeSchemaViolation) return refusalResult(`Schema violation: ${e.message}`);
         if (e === LIVE_LOC_CONFLICT) {
-          return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
+          return refusalResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
-        if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+        if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
         const includeText = includeRefusalText(e);
-        if (includeText) return textResult(includeText);
+        if (includeText) return refusalResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
-        if (writerRefusal) return textResult(writerRefusal);
-        if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
-        if (e instanceof EdgeLocConflictError) return textResult(e.message);
-        if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
-        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        if (writerRefusal) return refusalResult(writerRefusal);
+        if (e instanceof InlineEdgeEndpointError) return refusalResult(e.message);
+        if (e instanceof EdgeLocConflictError) return refusalResult(e.message);
+        if (e instanceof MemoryEncryptionChangedDuringWriteError) return refusalResult(e.message);
+        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
-          return textResult(`[spec_minted_permanent] ${e.message}`);
+          return refusalResult(`[spec_minted_permanent] ${e.message}`);
         }
         throw e;
       }
@@ -6453,17 +6449,17 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
-      if (fragRefusal) return textResult(fragRefusal);
+      if (fragRefusal) return refusalResult(fragRefusal);
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult(`Memory not found: "${memoryUrn}".`);
       }
 
       // Auth BEFORE any node-existence probe: returning "not found" for an
@@ -6471,14 +6467,14 @@ export function createMcpServerInstance(
       // a membership oracle (Gemini review). Gate on the resolved memory.id
       // first — matches hadron_create_node's auth-first ordering.
       if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
-        return textResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memory.id)}`);
+        return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memory.id)}`);
       }
       // Spec 049 S4: an in-place update takes no lock, so the gate is explicit.
       try {
         await assertLocWritable(db, memory.id, loc, 'update');
       } catch (e) {
-        if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
-        if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
+        if (e instanceof LocProtectedError) return refusalResult(`[loc_protected] ${e.message}`);
+        if (e instanceof NodeMovedDuringWriteError) return refusalResult(e.message);
         throw e;
       }
 
@@ -6513,7 +6509,7 @@ export function createMcpServerInstance(
             : {},
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
         throw e;
       }
 
@@ -6523,7 +6519,7 @@ export function createMcpServerInstance(
       // a partial update, not a resurrect — a caller who wants a deleted loc
       // back must recreate it via hadron_create_node (which resurrects).
       if (!existing || existing.deletedAt) {
-        return textResult(`Node not found: "${rawUrn}"`);
+        return refusalResult(`Node not found: "${rawUrn}"`);
       }
 
       // Resolve edge targets BEFORE the revision snapshot + node update
@@ -6556,7 +6552,7 @@ export function createMcpServerInstance(
           existing.memoryId,
           auth,
         );
-        if ('error' in r) return textResult(r.error);
+        if ('error' in r) return refusalResult(r.error);
         resolvedEdges = r.resolved;
       }
 
@@ -6567,7 +6563,7 @@ export function createMcpServerInstance(
       try {
         normalizedAbstract = normalizeAbstract(abstract);
       } catch (e) {
-        if (e instanceof NodeAbstractTooLongError) return textResult(e.message);
+        if (e instanceof NodeAbstractTooLongError) return refusalResult(e.message);
         throw e;
       }
 
@@ -6794,23 +6790,23 @@ export function createMcpServerInstance(
             existing.abstract = embeddedPlaintext.abstract;
           });
         } catch (e) {
-          if (e instanceof NodeSchemaViolation) return textResult(`Schema violation: ${e.message}`);
-          if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
-          if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
-          if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
-          if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
-          if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
-          if (e instanceof EdgeLocConflictError) return textResult(e.message);
-          if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+          if (e instanceof NodeSchemaViolation) return refusalResult(`Schema violation: ${e.message}`);
+          if (e instanceof LocProtectedError) return refusalResult(`[loc_protected] ${e.message}`);
+          if (e instanceof NodeMovedDuringWriteError) return refusalResult(e.message);
+          if (e instanceof MemoryEncryptionChangedDuringWriteError) return refusalResult(e.message);
+          if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
+          if (e instanceof InlineEdgeEndpointError) return refusalResult(e.message);
+          if (e instanceof EdgeLocConflictError) return refusalResult(e.message);
+          if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
           const includeText = includeRefusalText(e);
-        if (includeText) return textResult(includeText);
+        if (includeText) return refusalResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
-          if (writerRefusal) return textResult(writerRefusal);
+          if (writerRefusal) return refusalResult(writerRefusal);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
-            return textResult(`[spec_minted_permanent] ${e.message}`);
+            return refusalResult(`[spec_minted_permanent] ${e.message}`);
           }
           if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
-            return textResult(`[node_write_conflict] ${e.message}`);
+            return refusalResult(`[node_write_conflict] ${e.message}`);
           }
           throw e;
         }
@@ -6927,16 +6923,16 @@ export function createMcpServerInstance(
       return toolErrorResult(e, () => (e as Error).message, `hadron_${mode}_${kind}:parseUrn`);
     }
     const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
-    if (fragRefusal) return textResult(fragRefusal);
+    if (fragRefusal) return refusalResult(fragRefusal);
     // #1316: hidden from this caller ⇒ the missing branch. Before this the door's
     // own concealment answered instead, echoing the RESOLVED id it was handed —
     // the victim memory's internal id, to a caller who cannot read it.
     const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
-    if (!memory) return textResult(`Memory not found: "${memoryUrn}".`);
+    if (!memory) return refusalResult(`Memory not found: "${memoryUrn}".`);
     try {
       validateLoc(loc);
     } catch (e) {
-      return toolErrorResult(e, () => (e as Error).message, `hadron_${mode}_${kind}:validateLoc`);
+      return e instanceof InvalidLocError ? refusalResult(e.message) : toolErrorResult(e, () => (e as Error).message, `hadron_${mode}_${kind}:validateLoc`);
     }
 
     // `name` is optional in the shared arg set because an UPDATE preserves it,
@@ -7118,7 +7114,7 @@ export function createMcpServerInstance(
     async ({ ref }) => {
       try {
         const obj = await resolvers.Query.object({}, { ref }, objectCtx());
-        return obj ? textResult(JSON.stringify(obj, null, 2)) : textResult('Object not found.');
+        return obj ? textResult(JSON.stringify(obj, null, 2)) : refusalResult('Object not found.');
       } catch (e) {
         return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'read failed'}`, 'hadron_get_object:resolver');
       }
@@ -7285,7 +7281,7 @@ export function createMcpServerInstance(
     SHAPE_HADRON_CREATE_EDGE,
     async ({ sourceUrn, targetUrn, name, loc, description, isRunnable }) => {
       const result = await addEdge({ sourceUrn, targetUrn, name, loc, description, isRunnable, auth });
-      if ('error' in result) return textResult(result.error);
+      if ('error' in result) return refusalResult(result.error);
       return textResult(
         `Edge saved: ${result.edgeUrn}${result.name ? ` (${result.name})` : ''}\n  ${result.sourceUrn} → ${result.targetUrn}`,
       );
@@ -7330,7 +7326,7 @@ export function createMcpServerInstance(
           )}`,
         );
       } catch (err) {
-        return textResult(roleWriterRefusalText(err) ?? String((err as Error)?.message ?? err));
+        return roleWriterRefusalText(err) !== null ? refusalResult(roleWriterRefusalText(err) as string) : toolErrorResult(err, () => String((err as Error)?.message ?? err), 'hadron_update_edge');
       }
     },
   );
@@ -7344,7 +7340,7 @@ export function createMcpServerInstance(
         await resolvers.Mutation.deleteEdge({}, { edgeRef }, objectCtx());
         return textResult(`Edge deleted: ${edgeRef}`);
       } catch (err) {
-        return textResult(roleWriterRefusalText(err) ?? String((err as Error)?.message ?? err));
+        return roleWriterRefusalText(err) !== null ? refusalResult(roleWriterRefusalText(err) as string) : toolErrorResult(err, () => String((err as Error)?.message ?? err), 'hadron_delete_edge');
       }
     },
   );
@@ -7399,21 +7395,21 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
-      if (fragRefusal) return textResult(fragRefusal);
+      if (fragRefusal) return refusalResult(fragRefusal);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
-        return textResult(`Node "${rawUrn}" not found.`);
+        return refusalResult(`Node "${rawUrn}" not found.`);
       }
       if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
         // Match the "not found" phrasing used elsewhere on access denial
         // so the response doesn't distinguish absence from denial.
-        return textResult(`Node "${rawUrn}" not found.`);
+        return refusalResult(`Node "${rawUrn}" not found.`);
       }
 
       // Find the node by (loc, memoryId). Already-tombstoned nodes are
@@ -7422,7 +7418,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       const existing = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: memory.id } },
       });
-      if (!existing) return textResult(`Node "${rawUrn}" not found.`);
+      if (!existing) return refusalResult(`Node "${rawUrn}" not found.`);
       if (existing.deletedAt && !hard) {
         return textResult(
           `Node "${rawUrn}" is already soft-deleted. Pass hard: true to remove the row entirely.`,
@@ -7598,7 +7594,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
 
       if ('refused' in result) {
         if (result.refused === 'access') {
-          return textResult(`Node "${rawUrn}" not found.`);
+          return refusalResult(`Node "${rawUrn}" not found.`);
         }
         if (result.refused === 'crossMemAccess') {
           return textResult(
@@ -7609,16 +7605,16 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
           return textResult(`Node "${rawUrn}" moved while this delete waited; re-read it and retry.`);
         }
         if (result.refused === 'mintedSpec') {
-          return textResult(`[spec_minted_permanent] ${result.message}`);
+          return refusalResult(`[spec_minted_permanent] ${result.message}`);
         }
         if (result.refused === 'comment') {
-          return textResult(`[role_governed] ${result.message}`);
+          return refusalResult(`[role_governed] ${result.message}`);
         }
         if (result.refused === 'decision') {
-          return textResult(`[decision_contained] ${result.message}`);
+          return refusalResult(`[decision_contained] ${result.message}`);
         }
         if (result.refused === 'governed') {
-          return textResult(`[role_governed] ${result.message}`);
+          return refusalResult(`[role_governed] ${result.message}`);
         }
         if (result.refused === 'writerLevel') {
           return textResult(result.message);
@@ -7682,13 +7678,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       try {
         assertFullyQualifiedUrn(rawFrom, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(`Source: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Source: ${e.message}`);
         throw e;
       }
       try {
         assertFullyQualifiedUrn(rawTo, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(`Target: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Target: ${e.message}`);
         throw e;
       }
 
@@ -7699,7 +7695,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // parent's loc and silently drop the "#data" the caller wrote.
       const moveRefusal =
         nodeFragmentRefusal(rawFrom, fromFrag) ?? nodeFragmentRefusal(rawTo, toFrag);
-      if (moveRefusal) return textResult(moveRefusal);
+      if (moveRefusal) return refusalResult(moveRefusal);
 
       // #1316: BOTH ends conceal at the point their missing branch answers —
       // a later refusal would leak through the loc validation and the source
@@ -7708,29 +7704,29 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // #2206 (B): a move carries the node's content (and its render, below) to the caller, so a source memory the
       // caller may write but not read answers as one it cannot see.
       if (!fromMemory || (await isWriteBeyondRead(db, auth, fromMemory.id))) {
-        return textResult(`Source memory not found: "${fromMemoryUrn}".`);
+        return refusalResult(`Source memory not found: "${fromMemoryUrn}".`);
       }
       const toMemory = await resolveVisibleMemoryByUrn(auth, toMemoryUrn, 'write');
       if (!toMemory) {
-        return textResult(`Target memory not found: "${toMemoryUrn}".`);
+        return refusalResult(`Target memory not found: "${toMemoryUrn}".`);
       }
 
       try {
         validateLoc(toLoc);
       } catch (e) {
-        return textResult((e as Error).message);
+        return e instanceof InvalidLocError ? refusalResult(e.message) : toolErrorResult(e, () => (e as Error).message, 'hadron_move_node:validateLoc');
       }
 
       const existing = await db.node.findUnique({
         where: { loc_memoryId: { loc: fromLoc, memoryId: fromMemory.id } },
       });
-      if (!existing) return textResult(`Node "${rawFrom}" not found.`);
+      if (!existing) return refusalResult(`Node "${rawFrom}" not found.`);
 
       if (!(await canWriteToMemory(db, auth, fromMemory.id, EXPLICIT_REF))) {
-        return textResult(`Write access denied for source memory.${await explainWriteRefusal(db, auth, fromMemory.id)}`);
+        return refusalResult(`Write access denied for source memory.${await explainWriteRefusal(db, auth, fromMemory.id)}`);
       }
       if (toMemory.id !== fromMemory.id && !(await canWriteToMemory(db, auth, toMemory.id, EXPLICIT_REF))) {
-        return textResult(`Write access denied for target memory.${await explainWriteRefusal(db, auth, toMemory.id)}`);
+        return refusalResult(`Write access denied for target memory.${await explainWriteRefusal(db, auth, toMemory.id)}`);
       }
 
       const isSameSlot = toLoc === fromLoc && toMemory.id === fromMemory.id;
@@ -7991,8 +7987,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         relocated = completed.relocated;
         linkWarnings = completed.linkWarnings;
       } catch (e) {
-        if (e instanceof ArchivePlanExhaustedError) return textResult('The node was moved concurrently; re-read it and retry.');
-        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        if (e instanceof ArchivePlanExhaustedError) return refusalResult('The node was moved concurrently; re-read it and retry.');
+        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
         // A descendant-slot collision (or a move-into-own-subtree) aborts the
         // whole transaction — including any overwrite eviction — and surfaces as
         // a refusal, not a partial move.
@@ -8003,21 +7999,21 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           );
         }
         if (e instanceof SubtreeMoveIntoSelfError) {
-          return textResult('Cannot move a node into its own subtree.');
+          return refusalResult('Cannot move a node into its own subtree.');
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
-          return textResult(`[spec_minted_permanent] ${e.message}`);
+          return refusalResult(`[spec_minted_permanent] ${e.message}`);
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === 'ROLE_GOVERNED' && e.extensions?.op === 'overwrite') {
-          return textResult(`[role_governed] ${e.message}`);
+          return refusalResult(`[role_governed] ${e.message}`);
         }
         if (e instanceof SubtreeMoveSourceChangedError) {
           return textResult('The node was moved concurrently; re-read it and retry.');
         }
         const includeText = includeRefusalText(e);
-        if (includeText) return textResult(includeText);
+        if (includeText) return refusalResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
-        if (writerRefusal) return textResult(writerRefusal);
+        if (writerRefusal) return refusalResult(writerRefusal);
         if (
           e instanceof CrossMemoryMoveUnsupportedError ||
           e instanceof SubtreeMoveSchemaViolationError
@@ -8105,7 +8101,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // Spec 022 qualification + loading + rendering are shared with hadron_run_task
       // (cor:api:060) via loadNodeForRun / renderRunNode below.
       const loaded = await loadNodeForRun(rawUrn);
-      if ('error' in loaded) return textResult(loaded.error);
+      if ('error' in loaded) return refusalResult(loaded.error);
       return textResult(await renderRunNode(loaded.node, loaded.loc, args));
     },
   );
@@ -8580,7 +8576,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     "Read an app run you started (or may read): its status, where it is or stopped (curNodeUrn), why it failed (failure), what it extracted (data, the run envelope) and the path it walked (hops: one entry per completed hop, with the edge it took). Pass the run id or hrn:apprun URN that hadron_run_task printed. Gated like appRun: you may read a run if you are a READER in its organization; if it runs on your behalf or you started it manually, while you keep a live relationship with its App (App member or active subscriber); or if you hold that App's own key. A run you cannot read answers 'not found', the same as one that does not exist. Read-only.",
     SHAPE_HADRON_GET_RUN,
     async ({ ref }) => {
-      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
       const runRef = typeof ref === 'string' ? ref.trim() : '';
       if (!runRef) return textResult('Pass the run id or hrn:apprun URN that hadron_run_task printed.');
       let run: Record<string, unknown> | null;
@@ -8591,7 +8587,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (/^(Forbidden|Unauthenticated)/.test((e as Error)?.message ?? '')) run = null;
         else throw e;
       }
-      if (!run) return textResult(`Run "${runRef}" not found.`);
+      if (!run) return refusalResult(`Run "${runRef}" not found.`);
       return textResult(renderAppRun(run));
     },
   );
@@ -8628,7 +8624,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // RENDER the assembled prompt like hadron_run_action. Both modes now share
       // MCP's resolution UX — execute mode gets the picker too.
       const runOrRender = async (nodeUrn: string): Promise<ToolText> => {
-        if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+        if (!auth.clientId && !auth.appId && !auth.userId) return refusalResult('Not authenticated.');
         if (appRef) {
           const ctx: Context = {
             db,
@@ -8650,11 +8646,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               `Run started: ${runId}\nRead its status, output and path with hadron_get_run(ref: "${runId}").`,
             );
           } catch (err) {
-            return textResult(`Could not start run: ${(err as Error).message}`);
+            return toolErrorResult(err, () => `Could not start run: ${(err as Error).message}`, 'hadron_run_task');
           }
         }
         const loaded = await loadNodeForRun(nodeUrn);
-        if ('error' in loaded) return textResult(loaded.error);
+        if ('error' in loaded) return refusalResult(loaded.error);
         return textResult(await renderRunNode(loaded.node, loaded.loc, args));
       };
 
@@ -8663,7 +8659,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         return runOrRender(directUrn);
       }
 
-      if (!auth.clientId && !auth.appId && !auth.userId) return textResult('Not authenticated.');
+      if (!auth.clientId && !auth.appId && !auth.userId) return refusalResult('Not authenticated.');
 
       const mem = await resolveRunTaskMemory(memoryHint);
       if ('done' in mem) return mem.done;
@@ -8963,7 +8959,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const receipt = await bindReceipt(session, mcpCtx);
         return textResult(`Session started: ${session.id}\n> ${description}${receipt}`);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'session start failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'session start failed'}`, 'hadron_start_session');
       }
     },
   );
@@ -8994,7 +8990,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         );
       } catch (e) {
         const code = e instanceof ScopeGraphQLError ? String(e.extensions?.code ?? '') : '';
-        return textResult(`Error${code ? ` [${code}]` : ''}: ${e instanceof Error ? e.message : 'the claim could not be written'}`);
+        return toolErrorResult(e, () => `Error${code ? ` [${code}]` : ''}: ${e instanceof Error ? e.message : 'the claim could not be written'}`, 'hadron_create_resume_claim');
       }
     },
   );
@@ -9024,7 +9020,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         );
       } catch (e) {
         const code = e instanceof ScopeGraphQLError ? String(e.extensions?.code ?? '') : '';
-        return textResult(`Error${code ? ` [${code}]` : ''}: ${e instanceof Error ? e.message : 'resume failed'}`);
+        return toolErrorResult(e, () => `Error${code ? ` [${code}]` : ''}: ${e instanceof Error ? e.message : 'resume failed'}`, 'hadron_resume_session');
       }
       if (r.outcome === 'CHOOSE') {
         const lines = (r.candidates as ResumeCandidate[]).map(
@@ -9066,7 +9062,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (appScopeError) return appScopeError;
 
       const session = await db.session.findUnique({ where: { id } });
-      if (!session) return textResult(`Session "${id}" not found.`);
+      if (!session) return refusalResult(`Session "${id}" not found.`);
       // #931: same write gate as the GraphQL endSession — previously this raw
       // update was ungated, so any App-scoped caller holding a session id
       // could end another App's (or user's) session. Allowed: a PURE App-key
@@ -9083,7 +9079,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         ? session.userId === auth.userId
         : await appPrincipalSessionWriteAllowed(db, auth, session); // #1969: a host key's refusal is recorded
       if (!mayEnd) {
-        return textResult(`Forbidden: session "${id}" belongs to a different App or user.`);
+        return refusalResult(`Forbidden: session "${id}" belongs to a different App or user.`);
       }
 
       // #1956: a resume claim needs the caller's own open worker session. Judged BEFORE the handoff is written, so a
@@ -9129,10 +9125,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         try {
           await writeSessionHandoff(mcpCtx, session.id, session.workerId, handoffBody);
         } catch (e) {
-          return textResult(
-            `The handoff could not be written, so the session is STILL OPEN and was not ended — retry, or end without a handoff. ` +
-              `Cause: ${e instanceof Error ? e.message : 'unknown'}`,
-          );
+          // The session-still-open guidance stays; the Cause is shown only for a typed refusal, never a fault's detail (#1789).
+          const failure = toolErrorResult(e, () => e instanceof Error ? e.message : 'unknown', 'hadron_end_session:handoff');
+          return {
+            ...failure,
+            content: [{ type: 'text' as const, text:
+              `The handoff could not be written, so the session is STILL OPEN and was not ended — retry, or end without a handoff. ` +
+              `Cause: ${failure.content[0].text}` }],
+          };
         }
       }
 
@@ -9253,7 +9253,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         : auth.appId
           ? { appId: auth.appId, userId: null }
           : null;
-      if (!scope) return textResult('Not authenticated — no sessions to report.');
+      if (!scope) return refusalResult('Not authenticated — no sessions to report.');
 
       // createTestableMcpServer bypasses zod — normalize defensively (a NaN
       // would reach Prisma's `take` as a raw driver error rather than a clamp).
@@ -9433,7 +9433,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     'hadron_cast_worker',
     'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole + the systemPrompt template with {{name}}/{{role}} placeholders); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. The name is REQUIRED (#1050): a worker\'s name is permanent within the App, so it is chosen, never derived — a nameless cast refuses WORKER_NAME_REQUIRED rather than inventing a permanent identifier nobody picked. Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). NFKC-normalized Unicode 16 UTS #39 skeletons (original-case and caseless) must also be distinct here, retired workers included: WORKER_NAME_CONFUSABLE names the colliding worker; display spelling is preserved. Returns the worker\'s id, name, URN (hrn:worker:<root>:<app-slug>:<slug>, #991) and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the URN (or the id) as workerRef when starting sessions. Casting is a one-time mint, so record the URN: it is the ref that gets you back to this worker later.',
     SHAPE_HADRON_CAST_WORKER,
-    async ({ role, name, agent, app, promptOverride, session }) => {
+    async ({ role, name, agent, app, promptOverride, reportsTo, noTeam, session }) => {
       // #1081 — the caller just drove this session, so it is alive. The
       // touch is explicit here rather than a side effect of whichever tool
       // happens to write the Session row (see heartbeatSession).
@@ -9470,7 +9470,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         };
         const worker = await resolvers.Mutation.castWorker(
           {},
-          { appRef, role: role ?? null, agentRef: agent ?? null, name: name ?? null, promptOverride: promptOverride ?? null },
+          { appRef, role: role ?? null, agentRef: agent ?? null, name: name ?? null, promptOverride: promptOverride ?? null,
+            ...(reportsTo !== undefined ? { reportsTo } : {}), ...(noTeam !== undefined ? { noTeam } : {}),
+          },
           ctx,
         );
         const prompt = await resolvers.Worker.prompt(worker, {}, ctx);
@@ -9482,16 +9484,20 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // #1026: the cast is a one-time mint whose receipt is the record a
         // human keeps, so the link ships with the URN it is built from.
         const workerUrl = workerPortalUrl(workerUrn);
+        const placement = await resolvers.Worker.teamPlacement(worker, {}, ctx);
+        const reportingHeadId = await resolvers.Worker.reportsToWorkerId(worker, {}, ctx);
         return textResult(
           `Worker cast: **${worker.name}**${worker.role ? ` (${worker.role})` : ''}\n` +
             `Worker id: ${worker.id}\n` +
+            (placement !== null ? `Team placement: ${placement}\n` : '') +
+            (reportingHeadId ? `Reports to worker: ${reportingHeadId}\n` : '') +
             (workerUrn ? `Worker URN: ${workerUrn}\n` : '') +
             (workerUrl ? `URL: ${workerUrl}\n` : '') +
             `\nBoot briefing:\n\n${prompt ?? ''}`,
         );
       } catch (e) {
-        if (e instanceof ScopeGraphQLError) return textResult(`Error: [${String(e.extensions?.code ?? 'ERROR')}] ${e.message}`);
-        return textResult(`Error: ${e instanceof Error ? e.message : 'worker casting failed'}`);
+        if (e instanceof ScopeGraphQLError) return refusalResult(`Error: [${String(e.extensions?.code ?? 'ERROR')}] ${e.message}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'worker casting failed'}`, 'hadron_cast_worker');
       }
     },
   );
@@ -9529,8 +9535,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         `Posted message #${msg.seq} in Channel ${ch ? `${ch.name} (${ch.loc})` : channelRef} as ${msg.authorName ?? 'unknown'}${extras.length ? ` (${extras.join('; ')})` : ''}.`,
       );
     } catch (e) {
-      if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
-      return textResult(`Error: ${e instanceof Error ? e.message : 'channel post failed'}`);
+      if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
+      return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'channel post failed'}`, 'hadron_channel_post');
     }
   };
 
@@ -9595,8 +9601,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       });
       return textResult(`${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}${envelope}`);
     } catch (e) {
-      if (e instanceof ScopeGraphQLError) return textResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
-      return textResult(`Error: ${e instanceof Error ? e.message : 'channel read failed'}`);
+      if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
+      return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'channel read failed'}`, 'hadron_channel_read');
     }
   };
 
@@ -9615,7 +9621,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     limit?: number;
   }) => {
     if (!auth.userId || auth.impersonation) {
-      return textResult('[forbidden] Team-chat monitoring is available only to an ordinary user driving their own live Worker sessions.');
+      return refusalResult('[forbidden] Team-chat monitoring is available only to an ordinary user driving their own live Worker sessions.');
     }
 
     try {
@@ -9624,7 +9630,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         where: { id: appId, deletedAt: null, uninstalledAt: null },
         select: { id: true, organizationId: true, ownerUserId: true, defaultChannelId: true },
       });
-      if (!app) return textResult('[app_not_found] App not found.');
+      if (!app) return refusalResult('[app_not_found] App not found.');
 
       const ctx: Context = {
         ...chatCtx(),
@@ -9634,7 +9640,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // create a UsageEvent that makes the transport-bound session live.
         sessionId: undefined,
       };
-      if (!(await isAppParticipant(ctx, app))) return textResult('[forbidden] You do not participate in that App.');
+      if (!(await isAppParticipant(ctx, app))) return refusalResult('[forbidden] You do not participate in that App.');
 
       const resolveWorkerInApp = async (ref: string) => {
         try {
@@ -9642,8 +9648,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           return worker.appId === app.id ? worker : null;
         } catch (e) {
           if (
-            (e instanceof ScopeGraphQLError && ['WORKER_NOT_FOUND', 'FORBIDDEN'].includes(String(e.extensions?.code))) ||
-            (e instanceof Error && e.message === 'Forbidden')
+            e instanceof ScopeGraphQLError && ['WORKER_NOT_FOUND', 'FORBIDDEN'].includes(String(e.extensions?.code))
           ) return null;
           throw e;
         }
@@ -9652,7 +9657,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         ? await resolveWorkerInApp(args.monitorFor)
         : null;
       if (args.monitorFor !== undefined && !requestedWorker) {
-        return textResult('[monitor_target_not_live] That Worker is not in one of your live sessions in this App.');
+        return refusalResult('[monitor_target_not_live] That Worker is not in one of your live sessions in this App.');
       }
 
       // A monitor is an operator-owned relay, not a presence board. Enumerate
@@ -9673,7 +9678,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         take: requestedWorker ? OPEN_SESSION_SCAN_CAP : OPEN_SESSION_SCAN_CAP + 1,
       });
       if (!requestedWorker && open.length > OPEN_SESSION_SCAN_CAP) {
-        return textResult(`[monitor_scope_too_large] More than ${OPEN_SESSION_SCAN_CAP} recent Worker sessions match. Pass monitorFor to narrow the monitor.`);
+        return refusalResult(`[monitor_scope_too_large] More than ${OPEN_SESSION_SCAN_CAP} recent Worker sessions match. Pass monitorFor to narrow the monitor.`);
       }
       const lastEvents = await loadLastEventBySession(db as never, open.map((s) => s.id));
       const liveWorkerIds = [...new Set(
@@ -9703,7 +9708,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let targetWorkerIds = liveWorkerIds;
       if (requestedWorker) {
         if (!liveWorkerSet.has(requestedWorker.id)) {
-          return textResult('[monitor_target_not_live] That Worker is not in one of your live sessions in this App.');
+          return refusalResult('[monitor_target_not_live] That Worker is not in one of your live sessions in this App.');
         }
         targetWorkerIds = [requestedWorker.id];
       }
@@ -9714,15 +9719,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const channelId = args.channel !== undefined
         ? await resolveChannelRefId(db, args.channel)
         : app.defaultChannelId;
-      if (!channelId) return textResult('[channel_not_found] No matching Channel.');
+      if (!channelId) return refusalResult('[channel_not_found] No matching Channel.');
       const selectedChannel = await db.channel.findFirst({
         where: { id: channelId, deletedAt: null },
         select: { id: true, name: true, loc: true, lastSeq: true },
       });
-      if (!selectedChannel) return textResult('[channel_not_found] No matching Channel.');
+      if (!selectedChannel) return refusalResult('[channel_not_found] No matching Channel.');
 
       if ((args.acknowledge?.length ?? 0) > TEAM_CHAT_MONITOR_MAX_TARGETS) {
-        return textResult(`[bad_user_input] acknowledge accepts at most ${TEAM_CHAT_MONITOR_MAX_TARGETS} checkpoints.`);
+        return refusalResult(`[bad_user_input] acknowledge accepts at most ${TEAM_CHAT_MONITOR_MAX_TARGETS} checkpoints.`);
       }
       const ackByWorker = new Map<string, { workerId: string; seq: number }>();
       const targetWorkerSet = new Set(targetWorkerIds);
@@ -9736,10 +9741,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           checkpoint.channelId !== ack.channel ||
           checkpoint.seq !== ack.seq
         ) {
-          return textResult('[invalid_checkpoint] The acknowledgement was not issued for this Worker, Channel and sequence. Poll again.');
+          return refusalResult('[invalid_checkpoint] The acknowledgement was not issued for this Worker, Channel and sequence. Poll again.');
         }
         if (!liveWorkerSet.has(checkpoint.workerId) || !targetWorkerSet.has(checkpoint.workerId)) {
-          return textResult('[monitor_target_not_live] An acknowledgement named a Worker outside this monitor\'s live targets.');
+          return refusalResult('[monitor_target_not_live] An acknowledgement named a Worker outside this monitor\'s live targets.');
         }
         const held = ackByWorker.get(checkpoint.workerId);
         if (!held || checkpoint.seq > held.seq) {
@@ -9750,9 +9755,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       for (const ack of resolvedAcks) {
         const ackView = await resolveRegister(db, { attendee: { workerId: ack.workerId }, actor: ctx });
         const ackRow = ackView?.rows.find((candidate) => candidate.channel.id === selectedChannel.id);
-        if (!ackRow) return textResult('[channel_not_found] No matching Channel.');
+        if (!ackRow) return refusalResult('[channel_not_found] No matching Channel.');
         if (!ackRow.canRead || ackRow.entry.role === 'POST') {
-          return textResult('[forbidden] An acknowledgement named a Channel this Worker cannot watch.');
+          return refusalResult('[forbidden] An acknowledgement named a Channel this Worker cannot watch.');
         }
       }
       // One checkpoint is one act. If any entry is invalid or a write fails,
@@ -9821,7 +9826,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // No applicable register row means the monitor has no legitimate route
       // to this Channel. Collapse that with absence, matching every other
       // Channel read surface instead of becoming an id-existence oracle.
-      if (registeredTargets === 0) return textResult('[channel_not_found] No matching Channel.');
+      if (registeredTargets === 0) return refusalResult('[channel_not_found] No matching Channel.');
 
       const ackLine = acknowledged.length ? `Acknowledged ${acknowledged.join('; ')}.\n` : '';
       const pollStateLine = acknowledged.length
@@ -10065,7 +10070,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           `Posted team-chat message #${msg.seq}${where} as ${msg.authorName ?? 'unknown'}${extras.length ? ` (${extras.join('; ')})` : ''}.`,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat post failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'team-chat post failed'}`, 'hadron_team_chat_post');
       }
     },
   );
@@ -10080,13 +10085,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // maybeAdvanceOwnChannelRead's trim falls back to it.
       const session = typeof rawSession === 'string' ? rawSession.trim() || undefined : rawSession;
       if (!monitor && (monitorFor !== undefined || acknowledge !== undefined)) {
-        return textResult('[bad_user_input] monitorFor and acknowledge require monitor:true.');
+        return refusalResult('[bad_user_input] monitorFor and acknowledge require monitor:true.');
       }
       if (monitor && (sinceSeq !== undefined || beforeSeq !== undefined || mentions !== undefined || offset !== undefined)) {
-        return textResult('[bad_user_input] monitor:true owns the cursor and mention routing; do not pass sinceSeq, beforeSeq, mentions or offset.');
+        return refusalResult('[bad_user_input] monitor:true owns the cursor and mention routing; do not pass sinceSeq, beforeSeq, mentions or offset.');
       }
       if (monitor && limit !== undefined && limit < 1) {
-        return textResult('[bad_user_input] monitor:true requires a positive limit.');
+        return refusalResult('[bad_user_input] monitor:true requires a positive limit.');
       }
       // Monitoring observes liveness; it never creates it. Ordinary reads keep
       // the long-standing #1081 heartbeat contract when a session is passed.
@@ -10172,7 +10177,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           `${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}${envelope}`,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'team-chat read failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'team-chat read failed'}`, 'hadron_team_chat_read');
       }
     },
   );
@@ -10244,9 +10249,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           appRef = auth.appId;
         }
         if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
-        if (action === 'apply' && !proof) return textResult('[bad_user_input] action:"apply" requires the proof returned by the final preview page.');
-        if (action === 'preview' && proof !== undefined) return textResult('[bad_user_input] preview does not accept a proof.');
-        if (action === 'apply' && page !== undefined) return textResult('[bad_user_input] apply does not accept a page continuation.');
+        if (action === 'apply' && !proof) return refusalResult('[bad_user_input] action:"apply" requires the proof returned by the final preview page.');
+        if (action === 'preview' && proof !== undefined) return refusalResult('[bad_user_input] preview does not accept a proof.');
+        if (action === 'apply' && page !== undefined) return refusalResult('[bad_user_input] apply does not accept a page continuation.');
         try {
           const result = action === 'preview'
             ? await resolvers.Query.teamAttentionPreviewPage({}, { appRef, page: page ?? null, limit: limit ?? null, scanLimit: null }, chatCtx())
@@ -10450,7 +10455,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           page.items.map(async (w: {
             id: string; name: string; slug: string; role: string | null;
             agentId: string; retiredAt: Date | null;
-            heldByUserId: string | null;
+            heldByUserId: string | null; appId: string; reportsToWorkerId: string | null; explicitNoTeam: boolean;
           }) => {
             const urn = workerUrn(w.slug);
             const agentName = await agentNameFor(w.agentId);
@@ -10467,6 +10472,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // reads as unavailable regardless of liveness — that is the point:
             // an idle held worker is not up for adjudication.
             const flags: string[] = [];
+            const placement = await resolvers.Worker.teamPlacement(w, {}, ctx);
+            if (placement !== null) flags.push(`team placement ${placement}`);
             if (w.retiredAt) flags.push('RETIRED');
             if (w.heldByUserId && w.heldByUserId !== auth.userId) {
               flags.push(`held by ${holderName(w.heldByUserId)}`);
@@ -10511,7 +10518,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             'Work as one with hadron_start_session(description: "<task>", workerRef: "<name>") — it returns that worker\'s boot briefing.',
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'listing workers failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'listing workers failed'}`, 'hadron_list_workers');
       }
     },
   );
@@ -10576,7 +10583,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           { ref: trimmed, appRef: refNamesItsApp ? null : appRef },
           ctx,
         );
-        if (!worker) return textResult(`Worker not found: ${workerRef}`);
+        if (!worker) return refusalResult(`Worker not found: ${workerRef}`);
 
         // Resolved through the SAME field resolvers GraphQL serves, so this
         // surface and the briefing hadron_start_session prints cannot drift —
@@ -10618,6 +10625,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
         const prompt = briefing.text;
         const agentName = (agent as { name?: string } | null)?.name ?? null;
         const readUrl = workerPortalUrl(workerUrn as string | null);
+        const placement = await resolvers.Worker.teamPlacement(worker, {}, ctx);
+        const reportingHeadId = await resolvers.Worker.reportsToWorkerId(worker, {}, ctx);
 
         // Liveness is derived from real rows, never a lease (cor:agt:020:03) —
         // the same predicate hadron_start_session refuses WORKER_TAKEN on, and
@@ -10706,6 +10715,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // its own identity line, so the link ships beside the URN rather
             // than being assembled from it.
             (readUrl ? `URL: ${readUrl}\n` : '') +
+            (placement !== null ? `Team placement: ${placement}\n` : '') +
+            (reportingHeadId ? `Reports to worker: ${reportingHeadId}\n` : '') +
             (agentName ? `Role agent: ${agentName}\n` : '') +
             (checkStatus ? `${renderCheckStatusLong(checkStatus)}\n` : '') +
             // Only the caller's OWN driving session is named. Whose session it
@@ -10734,7 +10745,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             renderWorkerContinuity(continuity as RenderableContinuity | null),
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'reading the worker failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'reading the worker failed'}`, 'hadron_get_worker');
       }
     },
   );
@@ -10815,7 +10826,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           { ref: trimmed, appRef: refNamesItsApp ? null : appRef },
           ctx,
         );
-        if (!target) return textResult(`Worker not found: ${workerRef}`);
+        if (!target) return refusalResult(`Worker not found: ${workerRef}`);
 
         // Forward the key ONLY when the caller supplied it (PR #1019 review,
         // Copilot): the resolver distinguishes omitted-preserves from
@@ -10852,7 +10863,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
               : ''),
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'updating the worker failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'updating the worker failed'}`, 'hadron_update_worker');
       }
     },
   );
@@ -10905,10 +10916,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
             'It takes effect at the next bind.',
         );
       } catch (e) {
-        if (e instanceof GraphQLError && typeof e.extensions?.code === 'string') {
-          return { ...textResult(`[${e.extensions.code}] ${e.message}`), isError: true };
-        }
-        return { ...textResult(`Error: ${e instanceof Error ? e.message : 'changing the worker failed'}`), isError: true };
+        // #1789: a typed refusal keeps its [code] text; anything else is a fault and gets the generic envelope.
+        return toolErrorResult(e, () => `[${String((e as GraphQLError).extensions?.code ?? 'ERROR')}] ${(e as Error).message}`, 'hadron_change_worker_agent');
       }
     },
   );
@@ -10951,9 +10960,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
         const toId = target ? await resolveRef(target) : null;
         const worker = await resolvers.Mutation.setWorkerReportsTo({}, { workerRef: workerId, reportsTo: toId }, ctx);
         const to = worker.reportsToWorkerId ? await db.worker.findUnique({ where: { id: worker.reportsToWorkerId }, select: { name: true } }) : null;
-        return textResult(to ? `**${worker.name}** now reports to **${to.name}**.` : `**${worker.name}** now reports to nobody.`);
+        return textResult(to ? `**${worker.name}** now reports to **${to.name}**.` : `**${worker.name}** now has explicit no team.`);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'changing who the worker reports to failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'changing who the worker reports to failed'}`, 'hadron_set_worker_reports_to');
       }
     },
   );
@@ -11045,7 +11054,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             endedNote,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'work record failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'work record failed'}`, 'hadron_record_work');
       }
     },
   );
@@ -11113,7 +11122,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           `${page.total} record(s) total, showing ${page.items.length}:\n\n${lines.join('\n')}`,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'worklog read failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'worklog read failed'}`, 'hadron_team_work_items');
       }
     },
   );
@@ -11129,14 +11138,14 @@ function ageOf(at: Date, now: Date = new Date()): string {
       try {
         assertFullyQualifiedUrn(memoryUrn, 'memory');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
       // #1316: an unreadable memory takes the missing branch.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'read');
       if (!memory) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult(`Memory not found: "${memoryUrn}".`);
       }
 
       // #819 — the checks themselves now live in src/lib/memoryValidation.ts,
@@ -11176,22 +11185,22 @@ function ageOf(at: Date, now: Date = new Date()): string {
       try {
         assertFullyQualifiedUrn(memoryUrn, 'memory');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return textResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
         throw e;
       }
 
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memoryRef = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
-      if (!memoryRef) return textResult(`Memory not found: "${memoryUrn}".`);
+      if (!memoryRef) return refusalResult(`Memory not found: "${memoryUrn}".`);
       if (!(await canWriteToMemory(db, auth, memoryRef.id, EXPLICIT_REF))) {
-        return textResult('Access denied.');
+        return refusalResult('Access denied.');
       }
 
       const memory = await db.memory.findUnique({
         where: { id: memoryRef.id },
         include: { organization: true },
       });
-      if (!memory) return textResult('Memory not found.');
+      if (!memory) return refusalResult('Memory not found.');
       // R206 / cor:sec:040:05: an encrypted memory gets the typed refusal from the sync itself
       // even with no source, so the no-source reply never reads as a healthy sync.
       if (!memory.source && !memory.isEncrypted) return textResult('Memory has no source repository configured.');
@@ -11200,7 +11209,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
       const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
       const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
 
-      if (result.error) return textResult(`Sync failed${result.errorCode ? ` [${result.errorCode}]` : ''}: ${result.error}`);
+      if (result.fault) throw new Error(result.error ?? 'sync fault');
+      if (result.error) return refusalResult(`Sync failed${result.errorCode ? ` [${result.errorCode}]` : ''}: ${result.error}`);
       // #1061 — one write per node the sync actually wrote. This tool is the
       // ONE entry point to a git sync that has a principal to attribute to; the
       // webhook and startup batch-loop callers deliberately drop `writtenNodes`
@@ -12644,6 +12654,8 @@ const SHAPE_HADRON_WHOAMI = {
 };
 
 const SHAPE_HADRON_CAST_WORKER = {
+  reportsTo: z.string().nullable().optional().describe('Same-App reporting head reference; supply this or noTeam:true, never both. Only omission is compatible while choice enforcement is OFF.'),
+  noTeam: z.boolean().nullable().optional().describe('true explicitly records No team; false and null are invalid. Omit reportsTo entirely when choosing this arm.'),
   role: z.string().optional().describe('The role ("backend-engineer") — picks the installed agent by its personaRole when agent is omitted, and becomes the casting\'s role label. Not validated against defined roles: cast lists are ergonomics, never a gate (cor:agt:020:00).'),
   name: z.string().optional().describe('The worker\'s name — REQUIRED in effect (#1050): omitting it refuses WORKER_NAME_REQUIRED rather than deriving one, because a name is permanent within the App. Optional in the schema only so that refusal carries its reason instead of arriving as a bare validation error.'),
   agent: z.string().optional().describe('The agent to cast (Agent URN or ID) — must be installed in the App. Omit to resolve it from role.'),

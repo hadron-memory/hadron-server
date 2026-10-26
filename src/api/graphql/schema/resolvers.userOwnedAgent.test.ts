@@ -496,7 +496,7 @@ it('conceals a response-rendering Prisma fault without rolling back the committe
     expect(response.body.kind).toBe('single');
     if (response.body.kind !== 'single') throw new Error('Unexpected incremental response');
     expect(response.body.singleResult.errors).toHaveLength(1);
-    expect(response.body.singleResult.errors![0]).toMatchObject({ message: 'Unable to complete this request. Please try again.', extensions: { code: 'INTERNAL_SERVER_ERROR' } });
+    expect(response.body.singleResult.errors![0]).toMatchObject({ message: 'Internal server error.', extensions: { code: 'INTERNAL_SERVER_ERROR' } });
     expect(JSON.stringify(response.body.singleResult)).not.toMatch(/private-id|orgMember|stacktrace/);
     const committed = await db.agent.findUniqueOrThrow({ where: { urn: 'owner-one:committed-response' } });
     expect(committed.ownerUserId).toBe(ownerId);

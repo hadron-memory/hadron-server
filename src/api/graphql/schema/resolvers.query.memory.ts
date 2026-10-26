@@ -30,6 +30,7 @@ import { activeAgentInstallLicenseIds, isGrantedAgentMemoryRole } from '../../..
 import { findInstallMemory, resolveInstallTarget } from './installMemory.js';
 import { listableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
 
 /** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
 function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
@@ -676,7 +677,7 @@ export const memoryQueries = {
           ],
         });
       }
-      throw new Error('Unauthenticated');
+      throw unauthenticatedError();
     },
 
     // #466: slim, paginated node list for the graph view. Phase one — the

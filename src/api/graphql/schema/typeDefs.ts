@@ -4921,6 +4921,8 @@ export const typeDefs = `#graphql
     the register). Three senses of one word across two types.
     """
     heldAt: DateTime
+    "S12 placement; null is withheld, UNSET is no recorded choice (including OFF-era casts)."
+    teamPlacement: WorkerTeamPlacement
     """
     #1726 — the one Worker this worker reports to: a non-retired Worker of the
     same App, never itself, never a cycle. Null reports to nobody. A property of
@@ -5099,7 +5101,15 @@ export const typeDefs = `#graphql
   here are attribution-level facts the mint-gate audience already sees, so no
   nested entity hands out its field resolvers.
   """
+  enum WorkerTeamPlacement {
+    UNSET
+    NO_TEAM
+    REPORTS_TO
+  }
+
   type CastWorkerPreview {
+    teamPlacement: WorkerTeamPlacement!
+    reportsToWorkerId: ID
     "The name the cast would take — the caller's, checked free against the App's FULL roster (retired names stay taken). Required since #1050; a nameless preview refuses exactly where the cast would."
     name: String!
     "The casting's role: the agent's personaRole (it cannot be overridden, R222)."
@@ -5953,6 +5963,17 @@ export const typeDefs = `#graphql
   snapshot, live budgets (zeroing halts the run), lifecycle, trigger
   provenance. Spec cor:agt:010:02.
   """
+  type AppRunFailureReason {
+    "Stable category: NOT_ADOPTED, MEMORY_UNREADABLE, CHANGED, OVER_BUDGET, NO_AI_CONFIG, TIMED_OUT, CANCELLED or OTHER."
+    kind: String!
+    "What happened, in plain words."
+    summary: String!
+    "Who can fix it."
+    whoCanFix: String!
+    "What to do, and where."
+    nextStep: String!
+  }
+
   type AppRun {
     id: ID!
     "Computed grammar-v2 URN hrn:apprun:<root>:<app>:<run-id> (#696). Null for the rare multi-segment App URN the flat shape cannot express."
@@ -6008,6 +6029,20 @@ export const typeDefs = `#graphql
     budgetActions.
     """
     actionsSpent: Int
+    """
+    Priced LLM cost of this run in micro-cents (1e-8 USD), as a string (#2439):
+    the sum of its usage events' cost. Events with no known price add nothing.
+    NULL means UNKNOWN (a run minted before the counter existed), not zero.
+    """
+    costMicroCents: String
+    """
+    A failed run's cause in plain words (#2439): what happened, who can fix it
+    and where. Null when the run has no failure. Static text derived from the
+    failure and the run's budgets; it names no memory, id or tool, so it
+    discloses nothing the caller does not already read. The raw failure stays
+    available on the failure field.
+    """
+    failureReason: AppRunFailureReason
     """
     Spec 049 (D-2026-09-13-004): the scope this run carries, as YOU may read it —
     the snapshot taken at mint (the trigger's scope, or a spawned parent's)
@@ -9086,6 +9121,10 @@ export const typeDefs = `#graphql
       agentRef: ID
       role: String
       name: String
+      "S12 head choice: requires staffing and App management; refuses WORKER_REPORTING_CAST_UNAVAILABLE if standby becomes available without cast coverage integration."
+      reportsTo: ID
+      "S12 explicit no-team choice; omit reportsTo. Both keys conflict, single null/blank/false is invalid. Omission remains UNSET while enforcement is OFF."
+      noTeam: Boolean
       promptOverride: String
     ): CastWorkerPreview!
 
@@ -11937,6 +11976,10 @@ export const typeDefs = `#graphql
       keep the typed refusal. One rule, one message, both paths.
       """
       name: String
+      "S12 head choice: requires staffing and App management; refuses WORKER_REPORTING_CAST_UNAVAILABLE if standby becomes available without cast coverage integration."
+      reportsTo: ID
+      "S12 explicit no-team choice; omit reportsTo. Both keys conflict, single null/blank/false is invalid. Omission remains UNSET while enforcement is OFF."
+      noTeam: Boolean
       promptOverride: String
     ): Worker!
 
@@ -11962,7 +12005,7 @@ export const typeDefs = `#graphql
     when one person holds both, or placed under any worker by its own holder
     (interim, pending a ruling). WORKER_REPORTS_TO_FORBIDDEN otherwise. A worker acts through its bound
     session, with a person behind the request. Each change is a
-    \`worker.reports-to\` team event; setting the current value changes nothing.
+    \`worker.reports-to\` team event. An explicit clear records NO_TEAM, including a previously UNSET line; repeating the recorded choice changes nothing.
     """
     setWorkerReportsTo(workerRef: ID!, reportsTo: ID): Worker!
     """
@@ -14112,6 +14155,8 @@ export const typeDefs = `#graphql
     lastActiveAt: DateTime
     "When it was last assigned a task; the matcher picks the least recent (hrn:node:hadronmemory.com:specs:cor:agt:060:06)."
     lastAssignedAt: DateTime
+    "S12 recorded choice; null means withheld, never UNSET or NO_TEAM."
+    teamPlacement: WorkerTeamPlacement
     "#1726 — the worker it reports to; group by this for the team's structure. Read it with lastActiveAt: nothing clears a claim automatically."
     reportsTo: AgentTaskParty
     "#1726 — it reports to a worker that has since retired (retirement leaves the claim; the roster flags it)."

@@ -3890,6 +3890,8 @@ model Worker {
   /// leaves it alone. Written only by `src/lib/workers/reportsTo.ts`, which
   /// also appends the `worker.reports-to` event that keeps its history.
   reportsToWorkerId String?   @map("reports_to_worker_id")
+  /// S12: explicit human choice; false + null reportsTo is UNSET, never inferred NO_TEAM.
+  explicitNoTeam Boolean @default(false) @map("explicit_no_team")
 
   app                  App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// SetNull: a worker row is never hard-deleted in normal operation, but an
@@ -4688,6 +4690,12 @@ model AppRun {
   /// GraphQL field docs.
   tokensSpent          Int?                 @default(0) @map("tokens_spent")
   actionsSpent         Int?                 @default(0) @map("actions_spent")
+  /// #2439 — priced LLM cost of this run in micro-cents (1e-8 USD): the sum of
+  /// its usage events' `costMicroCents`, incremented where each event is
+  /// recorded. Unpriced events add nothing. NULL = UNKNOWN for a run minted
+  /// before the column existed (no usage-event link to back-fill from); new
+  /// runs start at 0.
+  costMicroCents       BigInt?              @map("cost_micro_cents")
   status               AppRunStatus         @default(PENDING)
   curNodeUrn           String?              @map("cur_node_urn")
   /// Spec 049 Phase 3b (D-2026-09-13-004): the trigger's scope, SNAPSHOTTED at mint as

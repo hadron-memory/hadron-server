@@ -16,6 +16,7 @@ import {
   purgeCollectedAssetObjects,
   type CollectedAssetKeys,
 } from '../../lib/asset/purge.js';
+import { forbiddenError } from '../../lib/refusals.js';
 
 /**
  * Thrown when account deletion is blocked because the target is the only
@@ -196,7 +197,7 @@ async function runDeletionTxn(
         await tx.$queryRaw`SELECT id FROM users WHERE id = ${actorUserId} FOR SHARE`;
         const actor = await tx.user.findUnique({ where: { id: actorUserId }, select: { roles: true, deletedAt: true } });
         if (!actor || actor.deletedAt || !actor.roles.some((r) => r === 'ADMIN' || r === 'OWNER')) {
-          throw new Error('Forbidden');
+          throw forbiddenError();
         }
       }
       // Lock + liveness re-check under the lock (mergeUsers precedent):

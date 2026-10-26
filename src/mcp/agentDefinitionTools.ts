@@ -17,6 +17,7 @@
  * arguments' shape.
  */
 import { z } from 'zod';
+import { toolErrorResult } from './toolError.js';
 import { GraphQLError } from 'graphql';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
@@ -33,7 +34,7 @@ function textResult(text: string) {
 }
 
 function errorResult(e: unknown) {
-  return { isError: true, content: [{ type: 'text' as const, text: e instanceof Error ? e.message : String(e) }] };
+  return toolErrorResult(e, () => (e instanceof Error ? e.message : String(e)), 'agent_definition');
 }
 
 /**
