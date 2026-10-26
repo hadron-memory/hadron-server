@@ -160,6 +160,8 @@ describe('isNodeLocUniqueViolation', () => {
   it('refuses a partial or foreign target', () => {
     expect(isNodeLocUniqueViolation(known('P2002', ['loc']))).toBe(false);
     expect(isNodeLocUniqueViolation(known('P2002', ['memory_id']))).toBe(false);
+    expect(isNodeLocUniqueViolation(known('P2002', ['loc', 'urn']))).toBe(false);
+    expect(isNodeLocUniqueViolation(known('P2002', ['memory_id', 'name']))).toBe(false);
     expect(isNodeLocUniqueViolation(known('P2002', ['loc', 'memory_id', 'urn']))).toBe(false);
     expect(isNodeLocUniqueViolation(known('P2002', 'edges_loc_memory_id_key'))).toBe(false);
     expect(isNodeLocUniqueViolation(known('P2003', ['loc', 'memory_id']))).toBe(false);

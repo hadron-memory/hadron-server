@@ -110,6 +110,7 @@ import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
+import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 
 /**
  * Strip explicit GraphQL nulls from a CalendarEventTimeInput so the tool's
@@ -2140,7 +2141,10 @@ export const sessionMutations = {
           create: { id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' },
           update: {},
         });
-      } catch { /* exists */ }
+      } catch (err) {
+        // #2476: only the cold-path race loss means the parent exists.
+        if (!isNodeLocUniqueViolation(err)) throw err;
+      }
 
       // #664/#752: revLoc is `revisions:<label>`, so a concurrent non-recursive
       // delete of the `revisions` parent could count zero descendants and then
