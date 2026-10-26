@@ -17,13 +17,13 @@ import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import { loadTeamRoster, type RosterEntry } from '../../../lib/agentTasks/roster.js';
 import type { WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
 import { loadAppWorkerCheckStatuses, maySeeWorkerInternals } from './resolvers.worker.js';
+import { groupComposition } from '../../../lib/agentTasks/composition.js';
 import { canSeeUserPersonalFieldsMany } from '../../../lib/auth/userVisibility.js';
 
 const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
 
-export const agentTaskMatchingQueries = {
-  /** #1707 — every worker's derived state in an App (plan §7.4), for its task audience. */
-  teamRoster: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
+/** Shared admission and projected rows: both reads use one bounded RepeatableRead snapshot. */
+async function readTeamRoster(ctx: Context, appRef: string) {
     // Admission, status and assignment projections share one read snapshot, including MCP callers.
     return ctx.db.$transaction(async (tx) => {
       const readCtx = withoutRequestCaches(ctx, tx);
@@ -52,6 +52,13 @@ export const agentTaskMatchingQueries = {
     // An explicit, bounded read budget avoids imposing Prisma's implicit 5s interactive-transaction default
     // on the now-serialized bulk roster loaders. This does not change query/lock or test timeouts.
     }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 20_000 });
+}
+
+export const agentTaskMatchingQueries = {
+  teamRoster: (_: unknown, { appRef }: { appRef: string }, ctx: Context) => readTeamRoster(ctx, appRef),
+  teamComposition: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
+    const roster = await readTeamRoster(ctx, appRef);
+    return { appId: roster.appId, asOf: roster.asOf, lanes: groupComposition(roster.workers) };
   },
 };
 
