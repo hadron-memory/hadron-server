@@ -5760,7 +5760,11 @@ export function createMcpServerInstance(
       }
       const sid = getSessionId();
       if (!sid) return textResult('No active MCP session.');
-      const mem = await resolveMemoryByUrn(memoryUrn);
+      // #2122: these two tools accept IDs per Vera's disposition (cor:api:010:01);
+      // keep other tools on their existing URN-only resolver and preserve the owner gate below.
+      const mem = isId(memoryUrn)
+        ? await db.memory.findFirst({ where: { id: memoryUrn, deletedAt: null }, select: { id: true, urn: true } })
+        : await resolveMemoryByUrn(memoryUrn);
       const row = mem
         ? await db.memory.findUnique({
             where: { id: mem.id },
@@ -5805,7 +5809,11 @@ export function createMcpServerInstance(
       if (!auth.userId) {
         return textResult('hadron_lock_memory requires a user-authenticated MCP connection.');
       }
-      const mem = await resolveMemoryByUrn(memoryUrn);
+      // #2122: these two tools accept IDs per Vera's disposition (cor:api:010:01);
+      // keep other tools on their existing URN-only resolver and preserve the owner gate below.
+      const mem = isId(memoryUrn)
+        ? await db.memory.findFirst({ where: { id: memoryUrn, deletedAt: null }, select: { id: true, urn: true } })
+        : await resolveMemoryByUrn(memoryUrn);
       const row = mem
         ? await db.memory.findUnique({ where: { id: mem.id }, select: { id: true, userId: true } })
         : null;
@@ -10769,7 +10777,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   server.tool(
     'hadron_update_worker',
-    "Amend a worker's promptOverride — the per-worker individuality layered over the role agent's shared template (#1010). Use it to record what a worker has become: authorship of a body of work, a standing specialisation, anything true of THIS casting and not of every casting of the same role. It reaches the worker at its next bind, live, with nothing to republish. The override was previously fixed at casting time, which sealed a worker's individuality before the work that defines it. promptOverride REPLACES the whole override (it is not appended) — to extend one, read the worker with hadron_get_worker and amend the text under 'Prompt override', NOT the composed boot briefing below it (pasting the briefing back would fold the shared template into the override, and it would then be prepended again on every render). Omit it to change nothing; pass an empty string to clear it. signature and trailer edit the per-worker signing templates (App managers only; worker-session edits provisionally refused under H26). Omit to preserve; null is refused; blank stores empty text. Everything else about a casting is immutable: the name is permanent, and a different role is a different casting. Refuses for a retired worker, which takes no new bindings and so could never receive it.",
+    "Amend a worker's promptOverride — the per-worker individuality layered over the role agent's shared template (#1010). Use it to record what a worker has become: authorship of a body of work, a standing specialisation, anything true of THIS casting and not of every casting of the same role. It reaches the worker at its next bind, live, with nothing to republish. The override was previously fixed at casting time, which sealed a worker's individuality before the work that defines it. promptOverride REPLACES the whole override (it is not appended) — to extend one, read the worker with hadron_get_worker and amend the text under 'Prompt override', NOT the composed boot briefing below it (pasting the briefing back would fold the shared template into the override, and it would then be prepended again on every render). Omit it to change nothing; pass an empty string to clear it. signature and trailer edit the per-worker signing templates (App managers only; worker-session edits provisionally refused under H26). Omit to preserve; null is refused; blank stores empty text. The name is permanent; to change the worker's agent (and with it its role) use hadron_change_worker_agent. Refuses for a retired worker, which takes no new bindings and so could never receive it.",
     SHAPE_HADRON_UPDATE_WORKER,
     async ({ workerRef, promptOverride, signature, trailer, app, session }) => {
       // This tool owns `session`, so the common actor gate leaves invalid names to us.
@@ -10857,6 +10865,62 @@ function ageOf(at: Date, now: Date = new Date()): string {
         );
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'updating the worker failed'}`);
+      }
+    },
+  );
+
+
+  // ── hadron_change_worker_agent ────────────────────────────────────────────────
+
+  server.tool(
+    'hadron_change_worker_agent',
+    "Change the agent a worker casts (#2458, cor:dmo:050:11). The worker's role follows the new agent; it is never typed in. Name, slug, URN, signature, trailer, reporting line and all past records stay, and past sessions keep the agent and role they ran under. App managers only, acting as themselves: a worker session is refused, even one its manager holds. The new agent must be installed in the App, and the App must hold the grants for it and for every Agent its boot prompt includes from. A complete change: the worker's own boot-prompt pointer is cleared, the old agent's generated tickers end and the new agent's are made, and one worker.casting event is written. It takes effect at the worker's next bind. Refused (WORKER_HAS_OPEN_SESSION) while the worker has an open session: end it first. A refused change changes nothing.",
+    SHAPE_HADRON_CHANGE_WORKER_AGENT,
+    async ({ workerRef, agent, app, session }) => {
+      if (session !== undefined && !(await validateSessionBinding(db, auth, session))) {
+        return { ...textResult('[session_not_bound] The named session cannot bind. Nothing was written.'), isError: true };
+      }
+      await heartbeatSession(session);
+      // Name-vs-self-describing ref handling, identical to hadron_update_worker: a NAME resolves through the read
+      // surface first; the resolver then decides the manager gate on the resolved row.
+      const trimmed = typeof workerRef === 'string' ? workerRef.trim() : '';
+      if (trimmed === '') return textResult('Pass workerRef — a worker name, URN, or id.');
+      const refNamesItsApp = isId(trimmed) || hasSchemePrefix(trimmed);
+      let appRef = app;
+      if (!refNamesItsApp && !appRef) {
+        await adoptAppFromSession(session);
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId;
+        if (!appRef) {
+          return textResult(
+            `"${trimmed}" is a worker name, which is only unique within an App — pass app, pass your session, or select one with hadron_set_active_app.`,
+          );
+        }
+      }
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
+        appId: auth.appId ?? undefined,
+        ...mcpRequestSessionContext(auth),
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+      try {
+        const target = await resolvers.Query.worker({}, { ref: trimmed, appRef: refNamesItsApp ? null : appRef }, ctx);
+        if (!target) return textResult(`Worker not found: ${workerRef}`);
+        const worker = await resolvers.Mutation.changeWorkerAgent({}, { workerRef: target.id, agentRef: agent }, ctx);
+        return textResult(
+          `**${worker.name}** now casts agent ${worker.agentId}${worker.role ? ` (role ${worker.role})` : ''}. ` +
+            'It takes effect at the next bind.',
+        );
+      } catch (e) {
+        if (e instanceof GraphQLError && typeof e.extensions?.code === 'string') {
+          return { ...textResult(`[${e.extensions.code}] ${e.message}`), isError: true };
+        }
+        return { ...textResult(`Error: ${e instanceof Error ? e.message : 'changing the worker failed'}`), isError: true };
       }
     },
   );
@@ -12711,6 +12775,13 @@ const SHAPE_HADRON_UPDATE_WORKER = {
   trailer: z.string().nullable().optional().describe('Per-worker trailer template, same manager and omission rules as signature.'),
   app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
   session: z.string().optional().describe('Your session id. Used to resolve which App a bare NAME belongs to when app is omitted, and — whenever you pass it — to keep that session alive: driving a session through any team tool counts as activity, so its DERIVED liveness stays current while you are working (#1081; #1114 — inactivity no longer reaps anything, it only decides whether a session reads as live).'),
+};
+
+const SHAPE_HADRON_CHANGE_WORKER_AGENT = {
+  workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN, or its id.'),
+  agent: z.string().describe('The agent the worker will cast: an Agent URN or id, installed in the App. The role is that agent\'s own.'),
+  app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),
+  session: z.string().optional().describe('Your session id: resolves which App a bare NAME belongs to, and keeps that session alive (#1081). Passing a WORKER session does not authorize the change: a worker session is refused.'),
 };
 
 const SHAPE_HADRON_SET_WORKER_REPORTS_TO = {
