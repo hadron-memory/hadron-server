@@ -4712,6 +4712,11 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
   }
 
+  type TeamTagSnapshot {
+    headId: ID!
+    label: String!
+  }
+
   """
   One message in a team App's chat (#939, Worker envelope since #974). Exactly
   one of authorUserId / authorWorkerId is set, or authorSystem is true (#1791, the
@@ -4721,11 +4726,6 @@ export const typeDefs = `#graphql
   server-side at write time (the '@worker-name / @handle' format, stored
   without the '@').
   """
-  type TeamTagSnapshot {
-    headId: ID!
-    label: String!
-  }
-
   type TeamChatMessage {
     "The message node's id."
     nodeId: ID!
@@ -5102,18 +5102,18 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
-  """
-  What castWorker WOULD do (#964) — an unsaved projection, deliberately not a
-  Worker (no fake id to mistake for a real row). Scalars only: the ids/names
-  here are attribution-level facts the mint-gate audience already sees, so no
-  nested entity hands out its field resolvers.
-  """
   enum WorkerTeamPlacement {
     UNSET
     NO_TEAM
     REPORTS_TO
   }
 
+  """
+  What castWorker WOULD do (#964) — an unsaved projection, deliberately not a
+  Worker (no fake id to mistake for a real row). Scalars only: the ids/names
+  here are attribution-level facts the mint-gate audience already sees, so no
+  nested entity hands out its field resolvers.
+  """
   type CastWorkerPreview {
     teamPlacement: WorkerTeamPlacement!
     reportsToWorkerId: ID
@@ -5965,11 +5965,6 @@ export const typeDefs = `#graphql
   enum AppRunStatus { PENDING RUNNING COMPLETED FAILED TIMED_OUT CANCELLED }
   enum AppRunTriggerKind { SCHEDULE WEBHOOK MANUAL INTEGRATION SPAWN }
 
-  """
-  One headless run — the audit record AND (v1) the activation: policy
-  snapshot, live budgets (zeroing halts the run), lifecycle, trigger
-  provenance. Spec cor:agt:010:02.
-  """
   type AppRunFailureReason {
     "Stable category: NOT_ADOPTED, MEMORY_UNREADABLE, CHANGED, OVER_BUDGET, NO_AI_CONFIG, TIMED_OUT, CANCELLED or OTHER."
     kind: String!
@@ -5981,6 +5976,11 @@ export const typeDefs = `#graphql
     nextStep: String!
   }
 
+  """
+  One headless run — the audit record AND (v1) the activation: policy
+  snapshot, live budgets (zeroing halts the run), lifecycle, trigger
+  provenance. Spec cor:agt:010:02.
+  """
   type AppRun {
     id: ID!
     "Computed grammar-v2 URN hrn:apprun:<root>:<app>:<run-id> (#696). Null for the rare multi-segment App URN the flat shape cannot express."
