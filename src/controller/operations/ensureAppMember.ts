@@ -3,9 +3,12 @@
  * FR-004 + FR-016, plus the data-model.md §"maxMembers enforcement" rules.
  *
  * Validation:
- *   1. The role MUST be one of the values in the parent Agent's
- *      `installation_policy.memberRoles`. Throws `InvalidRoleError`
- *      otherwise.
+ *   1. The role MUST be one the App offers: the union of the installed
+ *      Agents' `installation_policy.memberRoles` (#2171, R211,
+ *      cor:dmo:050:04). Decided inside the transaction, under the install
+ *      and Agent row fences, so an uninstall or a role edit cannot land
+ *      between the read and the insert. Throws `InvalidRoleError` otherwise.
+ *      `maxMembers` stays the primary Agent's.
  *   2. When creating a new member (the row does not yet exist), the App's
  *      current member count MUST be strictly less than the Agent's
  *      `installation_policy.maxMembers`. Throws `MaxMembersExceededError`
@@ -24,6 +27,7 @@
 
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { getPrimaryAgentId } from '../../lib/appAgent.js';
+import { loadOfferedMemberRoles, lockOfferedMemberRoleRows } from '../../lib/memberRoles.js';
 
 export class InvalidRoleError extends Error {
   constructor(role: string, allowed: string[]) {
@@ -70,10 +74,9 @@ export async function ensureAppMember(
     select: { id: true },
   });
   // 023-app-shape Phase 2b: App→Agent goes through AppAgent (N:M).
-  // For installation-policy enforcement at member-add time, use the
-  // primary installed Agent. Multi-Agent semantics (which Agent's
-  // policy gates which membership) will be revisited in the US1
-  // resolvers.
+  // The primary installed Agent governs capacity (maxMembers); roles are the
+  // union over every installed Agent (#2171), read below inside the
+  // transaction.
   const primaryAgentId = await getPrimaryAgentId(db, appId);
   if (primaryAgentId === null) throw new OrphanAppError(appId);
 
@@ -82,10 +85,6 @@ export async function ensureAppMember(
     select: { installationPolicy: true },
   });
   const policy = agent.installationPolicy as unknown as InstallationPolicy;
-
-  if (!policy.memberRoles.includes(role)) {
-    throw new InvalidRoleError(role, policy.memberRoles);
-  }
 
   // Updating an existing member's role: skip the maxMembers check (no new
   // seat is being consumed). Creating a new member: count + compare.
@@ -101,6 +100,12 @@ export async function ensureAppMember(
     if (maxMembers !== 'unlimited') {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('app-capacity'), hashtext(${appId}))`;
     }
+    // #2171: the deciding role check, after the capacity lock and under the
+    // install-row and Agent-row fences (lockOfferedMemberRoleRows).
+    const lockedAgentIds = await lockOfferedMemberRoleRows(tx, appId);
+    const offered = await loadOfferedMemberRoles(tx, appId, lockedAgentIds);
+    if (!offered.installed) throw new OrphanAppError(appId);
+    if (!offered.roles.includes(role)) throw new InvalidRoleError(role, offered.roles);
     const existing = await tx.appMember.findUnique({
       where: { appId_userId: { appId, userId } },
     });
