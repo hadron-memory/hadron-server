@@ -297,18 +297,16 @@ describe('#188 BOLA — hadron_list_nodes scope override is gated by canReadMemo
     expect(text).toContain(fx.nodes.archive.loc);
   });
 
-  it('returns the empty-subtree envelope (no leak) when a non-admin passes a parentRel that resolves to an inaccessible memory', async () => {
-    // Same shape as the hadron_find_nodes BOLA parentRel test: resolveLocFromUrn
-    // can't surface a memoryId for a non-admin viewer, the listing scopes
-    // to their empty access set, and hadron_list_nodes reports "No child nodes
-    // found" — same envelope it would emit against an accessible memory
-    // with no children at that prefix. No memory-existence leak.
+  it('returns the explicit not-found refusal (no leak) when a non-admin names an inaccessible parent memory', async () => {
+    // #2512: explicit references resolve independently of discovery, then
+    // canReadMemory returns the existing not-found refusal for an unreadable
+    // parent. No child metadata is rendered.
     const srv = createTestableMcpServer(viewerAuth());
     const text = await srv.callToolText('hadron_list_nodes', {
       parentRel: `urn:node:${fx.memory.urn}:archive`,
       depth: 1,
     });
-    expect(text).toMatch(/No child nodes found/i);
+    expect(text).toMatch(/Node .* not found/i);
     // No actual data from the inaccessible memory leaks into the response.
     expect(text).not.toContain('Old item');
   });
