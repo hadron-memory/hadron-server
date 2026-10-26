@@ -58,9 +58,11 @@ export function rolesOfPolicy(policy: unknown): string[] {
 export async function loadOfferedMemberRoles(
   db: Db,
   appId: string,
+  /** Restrict the union to these Agents: the ones an admission actually locked (see lockOfferedMemberRoleRows). */
+  onlyAgentIds?: readonly string[],
 ): Promise<{ installed: boolean; roles: string[] }> {
   const installs = await db.appAgent.findMany({
-    where: { appId, agent: { deletedAt: null } },
+    where: { appId, agent: { deletedAt: null }, ...(onlyAgentIds ? { agentId: { in: [...onlyAgentIds] } } : {}) },
     orderBy: [{ createdAt: 'asc' }, { agentId: 'asc' }],
     select: { agent: { select: { installationPolicy: true } } },
   });
@@ -76,16 +78,20 @@ export async function loadOfferedMemberRoles(
  * the App's install rows, then those Agents' rows, both FOR SHARE in id order.
  * An uninstall (deletes a join row) and the role editor (updates the Agent
  * row) conflict with these, so they serialize against an admission instead of
- * landing between its read and its insert. An install only widens the union
- * (an insert takes no conflicting lock), which makes a union read just before
- * it commits conservative. Order: app-capacity advisory lock (caller), then
- * join rows, then agents; the editor takes only the agent row.
+ * landing between its read and its insert. Returns the locked Agent ids: the
+ * deciding union MUST be read from exactly these (loadOfferedMemberRoles'
+ * `onlyAgentIds`). An install committed after the lock is not in the set, so
+ * its Agent, whose row this admission does not hold, can never contribute a
+ * role the editor could still remove before the insert commits. Ignoring it is
+ * conservative: the union is only narrower. Order: app-capacity advisory lock
+ * (caller), then join rows, then agents; the editor takes only the agent row.
  */
-export async function lockOfferedMemberRoleRows(tx: Prisma.TransactionClient, appId: string): Promise<void> {
+export async function lockOfferedMemberRoleRows(tx: Prisma.TransactionClient, appId: string): Promise<string[]> {
   const rows = await tx.$queryRaw<{ agent_id: string }[]>`
     SELECT agent_id FROM app_agents WHERE app_id = ${appId} ORDER BY agent_id FOR SHARE
   `;
   const ids = rows.map((r) => r.agent_id);
-  if (ids.length === 0) return;
+  if (ids.length === 0) return ids;
   await tx.$queryRaw`SELECT id FROM agents WHERE id = ANY(${ids}) ORDER BY id FOR SHARE`;
+  return ids;
 }

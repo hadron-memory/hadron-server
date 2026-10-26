@@ -9,7 +9,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { ensureAppMember, InvalidRoleError, OrphanAppError } from './ensureAppMember.js';
 import { joinApp, SelfJoinNotAllowedError } from './joinApp.js';
-import { loadOfferedMemberRoles } from '../../lib/memberRoles.js';
+import { loadOfferedMemberRoles, lockOfferedMemberRoleRows } from '../../lib/memberRoles.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -135,26 +135,107 @@ describe('joinApp self-join with a union', () => {
   });
 });
 
-describe('races: the deciding union is read under the install/editor fences', () => {
-  it('an editor dropping a role while admissions of it run never leaves a member holding a role outside the committed union', async () => {
-    for (let i = 0; i < 8; i += 1) {
+describe('serialization: the deciding union is exactly the locked rows', () => {
+  it('an install committed AFTER the lock does not contribute to the deciding union (BLIND P2)', async () => {
+    await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner'] }, { createdAt: t0 });
+    await db.$transaction(async (tx) => {
+      const locked = await lockOfferedMemberRoleRows(tx, appId);
+      // A concurrent install commits on another connection between the lock and the read.
+      await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner', 'late'] }, { createdAt: t1 });
+      expect((await loadOfferedMemberRoles(tx, appId, locked)).roles).toEqual(['owner']);
+      expect((await loadOfferedMemberRoles(db, appId)).roles).toEqual(['owner', 'late']);
+    });
+  });
+
+  it('the role editor stays blocked until an admission holding the fences commits, then wins', async () => {
+    const a = await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner', 'guide'] });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const haveLocks = new Promise<void>((r) => { locked = r; });
+    const admission = db.$transaction(async (tx) => {
+      await lockOfferedMemberRoleRows(tx, appId);
+      locked();
+      await gate;
+    });
+    await haveLocks;
+    let editorDone = false;
+    const editor = setRoles(a, ['owner']).then(() => { editorDone = true; });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(editorDone).toBe(false);
+    release();
+    await admission;
+    await editor;
+    expect(editorDone).toBe(true);
+    expect((await loadOfferedMemberRoles(db, appId)).roles).toEqual(['owner']);
+  });
+
+  it('an uninstall stays blocked until an admission holding the fences commits', async () => {
+    const a = await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner', 'guide'] });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const haveLocks = new Promise<void>((r) => { locked = r; });
+    const admission = db.$transaction(async (tx) => {
+      await lockOfferedMemberRoleRows(tx, appId);
+      locked();
+      await gate;
+    });
+    await haveLocks;
+    let done = false;
+    const uninstall = db.appAgent.delete({ where: { appId_agentId: { appId, agentId: a } } }).then(() => { done = true; });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(done).toBe(false);
+    release();
+    await admission;
+    await uninstall;
+    expect(done).toBe(true);
+  });
+
+  it('ensureAppMember itself waits for an in-flight role editor on the Agent row, then decides on the committed roles', async () => {
+    const a = await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner', 'guide'] });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const haveLock = new Promise<void>((r) => { locked = r; });
+    // Stand-in for updateAgent mid-transaction: the Agent row FOR UPDATE, roles dropped, not yet committed.
+    const editor = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM agents WHERE id = ${a} FOR UPDATE`;
+      await tx.agent.update({ where: { id: a }, data: { installationPolicy: { maxMembers: 'unlimited', memberRoles: ['owner'] } as never } });
+      locked();
+      await gate;
+    });
+    await haveLock;
+    const u = await mkUser();
+    let settled = false;
+    const admission = ensureAppMember(db, appId, u, 'guide').then(() => 'admitted', (e) => e).finally(() => { settled = true; });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(settled).toBe(false);
+    release();
+    await editor;
+    expect(await admission).toBeInstanceOf(InvalidRoleError);
+    expect(await db.appMember.findUnique({ where: { appId_userId: { appId, userId: u } } })).toBeNull();
+  });
+
+  it('concurrent editor and admissions: every settled result is inspected and no admission follows the drop', async () => {
+    for (let i = 0; i < 6; i += 1) {
       await cleanDb(db);
       orgId = (await db.organization.create({ data: { id: generateId(), name: 'o2171', urn: 'o2171.example' } })).id;
       appId = (await db.app.create({ data: { id: generateId(), organizationId: orgId, urn: 'o2171.example:app', name: 'app' } })).id;
       const a = await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner', 'guide'] });
       const users = await Promise.all([mkUser(), mkUser(), mkUser()]);
-      await Promise.allSettled([
+      const results = await Promise.allSettled([
         ...users.map((u) => ensureAppMember(db, appId, u, 'guide')),
         setRoles(a, ['owner']),
       ]);
-      const finalRoles = (await loadOfferedMemberRoles(db, appId)).roles;
-      expect(finalRoles).toEqual(['owner']);
-      // Every admitted 'guide' must have been decided against a union that still held it,
-      // i.e. committed BEFORE the editor's write. With the editor committed last, a guide
-      // row is legal; what must never happen is a guide row inserted AFTER the drop.
-      const dropAt = (await db.agent.findUniqueOrThrow({ where: { id: a } })).updatedAt!;
-      const late = await db.appMember.count({ where: { appId, role: 'guide', createdAt: { gt: dropAt } } });
-      expect(late).toBe(0);
+      // The editor must succeed; an admission may only fail by being refused the dropped role.
+      expect(results[3]!.status).toBe('fulfilled');
+      for (const r of results.slice(0, 3)) {
+        if (r.status === 'rejected') expect(r.reason).toBeInstanceOf(InvalidRoleError);
+      }
+      // Admissions decided before the drop may keep 'guide'; none may be admitted after it, so
+      // re-running one now is refused.
+      await expect(ensureAppMember(db, appId, await mkUser(), 'guide')).rejects.toBeInstanceOf(InvalidRoleError);
     }
   });
 });

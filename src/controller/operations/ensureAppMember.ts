@@ -102,8 +102,8 @@ export async function ensureAppMember(
     }
     // #2171: the deciding role check, after the capacity lock and under the
     // install-row and Agent-row fences (lockOfferedMemberRoleRows).
-    await lockOfferedMemberRoleRows(tx, appId);
-    const offered = await loadOfferedMemberRoles(tx, appId);
+    const lockedAgentIds = await lockOfferedMemberRoleRows(tx, appId);
+    const offered = await loadOfferedMemberRoles(tx, appId, lockedAgentIds);
     if (!offered.installed) throw new OrphanAppError(appId);
     if (!offered.roles.includes(role)) throw new InvalidRoleError(role, offered.roles);
     const existing = await tx.appMember.findUnique({
