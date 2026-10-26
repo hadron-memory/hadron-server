@@ -1416,6 +1416,8 @@ model Node {
   updatedByUserId     String?             @map("updated_by_user_id")
 
   memory                   Memory                        @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  includeReferences        IncludeReference[]
+  includeSourceCoverage    IncludeSourceCoverage?
   outgoingEdges            Edge[]                        @relation("SourceNode")
   incomingEdges            Edge[]                        @relation("TargetNode")
   pendingEdges             PendingEdge[]
@@ -6582,4 +6584,83 @@ model AssetPublicLinkAudit {
 
   @@index([assetId, createdAt])
   @@map("asset_public_link_audits")
+}
+
+// #2063 R1 / cor:dmo:150:07. Plaintext structural metadata, never source prose.
+// No target FK: a source's written address survives target/edge deletion.
+model IncludeReference {
+  id                 String  @id @default(cuid())
+  includerId         String  @map("includer_id")
+  ordinal            Int
+  kind               IncludeReferenceKind
+  reference          String
+  targetMemoryId     String? @map("target_memory_id")
+  targetLoc          String? @map("target_loc")
+  pinnedRevNo        Int?    @map("pinned_rev_no")
+  requiresApproved   Boolean @default(false) @map("requires_approved")
+  requiresSigned     Boolean @default(false) @map("requires_signed")
+  metadataGeneration Int     @map("metadata_generation")
+  includer           Node    @relation(fields: [includerId], references: [id], onDelete: Cascade)
+
+  @@unique([includerId, ordinal])
+  @@index([targetMemoryId, targetLoc])
+  @@index([targetMemoryId, reference])
+  @@map("include_references")
+}
+
+enum IncludeReferenceKind {
+  loc
+  urn
+}
+
+enum IncludeSourceCoverageState {
+  COMPLETE_EMPTY
+  COMPLETE_TAGS
+  NEEDS_AUTHORIZED_REWRITE
+}
+
+// Fingerprints describe STORED bytes (ciphertext when sealed); no plaintext copy.
+// Tombstones remain sources. Only an includer's purge cascades coverage away.
+model IncludeSourceCoverage {
+  id                       String @id @default(cuid())
+  includerId               String @unique @map("includer_id")
+  sourceRevision           Int    @map("source_revision")
+  sourceMemoryId           String @map("source_memory_id")
+  sourceLoc                String @map("source_loc")
+  sourceContentFingerprint String @map("source_content_fingerprint")
+  sourceEncrypted          Boolean @map("source_encrypted")
+  parserVersion            Int    @map("parser_version")
+  metadataGeneration       Int    @map("metadata_generation")
+  referenceCount           Int    @map("reference_count")
+  state                    IncludeSourceCoverageState
+  includer                 Node   @relation(fields: [includerId], references: [id], onDelete: Cascade)
+
+  @@map("include_source_coverage")
+}
+
+enum IncludeRetentionState {
+  PREPARING
+  BACKFILLING
+  VERIFYING
+  ACTIVE
+  BLOCKED
+}
+
+// Singleton is absent/inactive until separately authorized maintenance verifies it.
+// R1 adds no activator, operator command, backfill or production caller.
+model IncludeRetentionGeneration {
+  id                        String @id @default("singleton")
+  schemaVersion             Int @default(1) @map("schema_version")
+  parserVersion             Int @default(1) @map("parser_version")
+  metadataGeneration        Int @default(1) @map("metadata_generation")
+  state                     IncludeRetentionState @default(PREPARING)
+  sourceHighWaterId         String? @map("source_high_water_id")
+  replayCursor              String? @map("replay_cursor")
+  bindingGeneration         Int @default(0) @map("binding_generation")
+  verifiedBindingGeneration Int? @map("verified_binding_generation")
+  sourceCount               Int @default(0) @map("source_count")
+  coveredCount              Int @default(0) @map("covered_count")
+  blockedCount              Int @default(0) @map("blocked_count")
+
+  @@map("include_retention_generation")
 }
