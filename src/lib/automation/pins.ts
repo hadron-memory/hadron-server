@@ -19,16 +19,44 @@ export class AutomationPinError extends Error {
     super(`${changed}. Nothing further will execute; the run-as user must preview and re-adopt the automation.`);
   }
 }
-export interface AutomationPin {
-  format: 'hadron-automation-pin-v3'; appId: string; userId: string | null;
-  entry: string; entryId: string; hash: string;
-  nodes: Record<string, { urn: string; hash: string }>;
+/** Pin formats. v3 (#1719) keys the entry by its literal URN and hashes node
+ * and edge rows INCLUDING their loc — a same-memory rename or move of the
+ * entry invalidates it. v4 (#2438) keys the entry by node id and hashes
+ * content plus memoryId only (addresses are display, never identity), so a
+ * move WITHIN one memory is not a change, while a move to ANOTHER memory
+ * changes memoryId and still is (Vera's ruling on #2438 over cor:agt:010:01).
+ * Stored v3 pins verify forever under v3 semantics — never a silent unadopt —
+ * and every capture after this lands writes v4. */
+export type AutomationPinFormat = 'hadron-automation-pin-v3' | 'hadron-automation-pin-v4';
+interface PinBase {
+  appId: string; userId: string | null; entryId: string;
   edges: Record<string, string>; resources: ExecutionIdentities;
   flows: string[]; absentPartials: Array<{ urn: string; memoryId: string; loc: string }>;
 }
+export interface AutomationPin extends PinBase {
+  format: 'hadron-automation-pin-v3';
+  entry: string; hash: string;
+  nodes: Record<string, { urn: string; hash: string }>;
+}
+export interface AutomationPinV4 extends PinBase {
+  format: 'hadron-automation-pin-v4';
+  hash: string;
+  nodes: Record<string, string>;
+}
+export type ParsedAutomationPin = AutomationPin | AutomationPinV4;
 const hash = (value: unknown) => createHash('sha256').update(canonicalizeAutomationJson(value)).digest('hex');
 const json = (value: unknown) => JSON.parse(JSON.stringify(value));
+/** An edge's v4 fingerprint drops its derived loc (the address moveNode
+ * rebases); every other column — including memoryId, so a cross-memory hop
+ * stays a change — is identity. */
+const edgeState = (format: AutomationPinFormat, edge: Record<string, unknown>) =>
+  format === 'hadron-automation-pin-v3' ? edge :(({ loc: _, ...rest }) => rest)(edge);
 
+// v3's capture shape is FROZEN: stored v3 pins verify against these exact
+// fields, so any edit here desyncs every legacy adoption at once. The two
+// address fields (node loc, memory urn) stay IN the select for both formats —
+// the walk needs them (routing names, display URNs); v4 strips them from the
+// hashed and previewed state instead (stripAddresses below).
 const DEFINITION_SELECT = {
   id: true, memoryId: true, loc: true, name: true, content: true, description: true, abstract: true,
   data: true, properties: true, tags: true, seq: true, nodeType: true, role: true,
@@ -36,24 +64,54 @@ const DEFINITION_SELECT = {
   memory: { select: { urn: true, organizationId: true, class: true, userId: true,
     ownerUserId: true, appId: true, isEncrypted: true, deletedAt: true } },
 } as const;
-const definitionHash = (state: Record<string, unknown>) => {
-  const { updatedAt: _, ...authored } = state;
-  return hash(json(authored));
+/** v4 (#2438) hashes content plus memoryId only: the two address fields are
+ * display, never identity, so a same-memory rename or move of any pinned node
+ * is not a change. memoryId and the memory's trust columns stay hashed, so an
+ * ownership/class/encryption flip — or a move to ANOTHER memory — still is. */
+const stripAddresses = (format: AutomationPinFormat, state: Record<string, unknown>): Record<string, unknown> =>
+  format === 'hadron-automation-pin-v3' ? state
+    : (({ loc: _loc, memory, ...rest }) => ({ ...rest, memory: (({ urn: _urn, ...mem }) => mem)(memory as Record<string, unknown>) }))(state);
+const definitionHash = (format: AutomationPinFormat, state: Record<string, unknown>) => {
+  const { updatedAt: _, ...authored } = stripAddresses(format, state);
+  if (format === 'hadron-automation-pin-v3') return hash(json(authored));
+  // v4 also drops revSeq: it is a write counter, and a pure address move
+  // bumps it without touching content (#2438) — it stays in the previewed
+  // state, where checkAutomationRevisions still uses it as the hop tripwire.
+  const { revSeq: _rev, ...content } = authored;
+  return hash(json(content));
 };
 
 /** Capture routed flow definitions and instruction partials. Documents, data
  * references and output destinations remain mutable, read-gated data (#7894). */
-export interface AutomationPreview extends AutomationPin {
+export interface AutomationPreview extends PinBase {
+  format: AutomationPinFormat; entry: string; hash: string;
   nodes: Record<string, { urn: string; hash: string; state: Record<string, unknown> }>;
 }
 /** Persist only consent identities and digests. Preview bytes never leave the response. */
-export function storedAutomationPin(preview: AutomationPin): AutomationPin {
-  const { hash: _, nodes, ...base } = preview;
-  const value = { ...base, nodes: Object.fromEntries(Object.entries(nodes).map(([id, node]) => [id, { urn: node.urn, hash: node.hash }])) };
+/** Persist only consent identities and digests. Preview bytes never leave the
+ * response. Accepts a preview OR an already-stored pin (re-storing is the
+ * identity — same bytes, same digest), which is what adoption round-trips and
+ * the mint-time pin copy rely on. */
+export function storedAutomationPin(pin: AutomationPreview | AutomationPin | AutomationPinV4): ParsedAutomationPin {
+  if (pin.format === 'hadron-automation-pin-v3') {
+    // FROZEN v3 shape: entry is part of the hashed identity and every stored
+    // node carries its urn; do not add, drop or reorder fields here.
+    const { hash: _, nodes, ...base } = pin;
+    const value = { ...base, nodes: Object.fromEntries(Object.entries(nodes).map(([id, node]) => [id, { urn: node.urn, hash: node.hash }])) } as AutomationPin;
+    return { ...value, hash: hash(value) };
+  }
+  // v4 keys nodes by id→hash and carries no entry address at all (#2438):
+  // entry is dropped, never re-added — the row's entryNodeUrn is the display
+  // address, and entryId is the identity.
+  const { hash: _, nodes, ...rest } = pin as AutomationPreview | AutomationPinV4;
+  const { entry: _entry, ...base } = rest as typeof rest & { entry?: unknown };
+  const value = { ...base, nodes: Object.fromEntries(Object.entries(nodes).map(([id, node]) => [id, typeof node === 'string' ? node : node.hash])) } as AutomationPinV4;
   return { ...value, hash: hash(value) };
 }
 export async function captureAutomationPin(db: PrismaClient, appId: string, userId: string | null,
-  entry: string, organizationId: string, principal: AuthContext, selection: ExecutionSelection = {}): Promise<AutomationPreview> {
+  entry: string, organizationId: string, principal: AuthContext, selection: ExecutionSelection = {},
+  opts: { format?: AutomationPinFormat } = {}): Promise<AutomationPreview> {
+  const format = opts.format ?? 'hadron-automation-pin-v4';
   const { id: entryId } = await resolveNodeRef(db, entry);
   const nodes: AutomationPreview['nodes'] = {}; const edges: AutomationPin['edges'] = {};
   const flows = new Set<string>(); const processedFlows = new Set<string>();
@@ -77,14 +135,14 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
     }
     // Routing targets and instruction partials are definitions; document
     // and dot-reference inputs are mutable data, authorized at their read boundary.
-    const { outgoingEdges, ...state } = node;
-    nodes[id] = { urn: emitNodeUrnV2(node.memory.urn, node.loc), hash: definitionHash(state), state: json(state) };
+    const { outgoingEdges, ...rowState } = node;
+    nodes[id] = { urn: emitNodeUrnV2(node.memory.urn, node.loc), hash: definitionHash(format, rowState), state: json(stripAddresses(format, rowState)) };
     // Include tombstones in the edge fingerprint: add/delete/revive must not
     // erase evidence of a post-adoption graph edit.
     if (flow) {
       processedFlows.add(id);
       for (const edge of outgoingEdges) {
-        edges[edge.id] = hash(json(edge));
+        edges[edge.id] = hash(json(edgeState(format, edge)));
         if (!edge.deletedAt && isRoutingName(routingNameOf(edge, node.loc))) pending.push({ id: edge.targetId, flow: true });
       }
     }
@@ -125,8 +183,8 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
   if (Object.keys(edges).length > 1000) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph exceeds 1000 edges');
   const tools = [...flows].flatMap(id => { const node = nodes[id]; const data = node.state.data as { tools?: unknown } | null; return Array.isArray(data?.tools) ? data.tools.filter((name): name is string => typeof name === 'string') : []; });
   const resources = await executionIdentities(db, appId, organizationId, tools, selection);
-  const value = { resources, format: 'hadron-automation-pin-v3' as const, appId, userId, entry, entryId, nodes, edges, flows: [...flows].sort(), absentPartials: [...absentPartials.values()].sort((a, b) => a.urn.localeCompare(b.urn)) };
-  const result = { ...value, hash: storedAutomationPin({ ...value, hash: '' }).hash };
+  const value = { resources, format, appId, userId, entry, entryId, nodes, edges, flows: [...flows].sort(), absentPartials: [...absentPartials.values()].sort((a, b) => a.urn.localeCompare(b.urn)) };
+  const result: AutomationPreview = { ...value, hash: storedAutomationPin({ ...value, hash: '' }).hash };
   if (Buffer.byteLength(JSON.stringify(result)) > 256 * 1024) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation pin exceeds 256 KiB');
   return result;
 }
@@ -153,12 +211,16 @@ export async function captureSetupConsent(...args: Parameters<typeof captureAuto
 }
 
 /** Invalid persisted consent is never treated as an absent optional gate. */
-export function parseAutomationPin(raw: unknown): AutomationPin {
+export function parseAutomationPin(raw: unknown): ParsedAutomationPin {
   if ((raw as { format?: string })?.format === 'hadron-automation-unadopted-v1') throw new AutomationPinError('AUTOMATION_UNADOPTED', `Setup could not be adopted: ${(raw as { message: string }).message}`, (raw as { reason?: string }).reason === 'MEMORY_UNREADABLE' ? 'MEMORY_UNREADABLE' : undefined);
-  const p = raw as AutomationPin | null;
-  if (!p || p.format !== 'hadron-automation-pin-v3' || !p.hash || !p.entry || !p.entryId ||
+  const p = raw as AutomationPin | AutomationPinV4 | null;
+  if (!p || (p.format !== 'hadron-automation-pin-v3' && p.format !== 'hadron-automation-pin-v4') || !p.hash || !p.entryId ||
       !p.nodes || !Array.isArray(p.flows) || !Array.isArray(p.absentPartials) || !p.edges || !p.resources || !p.resources.mcp || !p.resources.ha || !Array.isArray(p.resources.tools)) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation has no valid setup pin');
-  if (Object.values(p.nodes).some(node => !node || typeof node.urn !== 'string' || typeof node.hash !== 'string' || Object.keys(node).some(key => !['urn', 'hash'].includes(key)))) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation pin contains unsupported node data');
+  if (p.format === 'hadron-automation-pin-v3') {
+    if (!p.entry || Object.values(p.nodes).some(node => !node || typeof node.urn !== 'string' || typeof node.hash !== 'string' || Object.keys(node).some(key => !['urn', 'hash'].includes(key)))) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation pin contains unsupported node data');
+  } else if (Object.values(p.nodes).some(node => typeof node !== 'string')) {
+    throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation pin contains unsupported node data');
+  }
   const { hash: digest, ...state } = p;
   if (hash(state) !== digest) throw new AutomationPinError('AUTOMATION_CHANGED', 'Stored automation pin is corrupt');
   return p;
@@ -168,10 +230,14 @@ export function parseAutomationPin(raw: unknown): AutomationPin {
  * A resumed run retains its original consent even if its trigger re-adopts. */
 export async function verifyAutomationPin(db: PrismaClient, run: AppRun, nodeUrn = run.entryNodeUrn): Promise<AutomationPreview> {
   const pin = parseAutomationPin(run.automationPin);
+  // v3 keys the entry by its literal URN (the address IS identity); v4 keys
+  // it by the node id, so a renamed or moved entry keeps verifying (#2438).
+  const entryRef = pin.format === 'hadron-automation-pin-v3' ? pin.entry : pin.entryId;
   if (pin.appId !== run.appId || pin.userId !== run.userId ||
-      (['SCHEDULE', 'WEBHOOK', 'MANUAL'].includes(run.triggerKind) && pin.entry !== run.entryNodeUrn)) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation identity changed');
+      (['SCHEDULE', 'WEBHOOK', 'MANUAL'].includes(run.triggerKind)
+        && (pin.format === 'hadron-automation-pin-v3' ? pin.entry !== run.entryNodeUrn : pin.entryId !== run.entryNodeId))) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation identity changed');
   let current: AutomationPreview;
-  try { current = await captureAutomationPin(db, run.appId, run.userId, pin.entry, run.organizationId, runAuthContext(run), configSelection(run)); }
+  try { current = await captureAutomationPin(db, run.appId, run.userId, entryRef, run.organizationId, runAuthContext(run), configSelection(run), { format: pin.format }); }
   catch (e) {
     if (!(e instanceof AutomationPinError || e instanceof NodeNotFoundError)) throw e;
     // A missing and a foreign (unreadable) memory stay indistinguishable: both carry the same typed reason (#2439).
@@ -179,8 +245,9 @@ export async function verifyAutomationPin(db: PrismaClient, run: AppRun, nodeUrn
     throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph is no longer available or readable', unreadable ? 'MEMORY_UNREADABLE' : undefined);
   }
   if (current.hash !== pin.hash) {
+    const storedNodeHash = (id: string) => pin.format === 'hadron-automation-pin-v3' ? pin.nodes[id]?.hash : pin.nodes[id];
     const changedNodes = [...new Set([...Object.keys(pin.nodes), ...Object.keys(current.nodes)])]
-      .filter(id => pin.nodes[id]?.hash !== current.nodes[id]?.hash).map(id => pin.nodes[id]?.urn ?? current.nodes[id]?.urn);
+      .filter(id => storedNodeHash(id) !== current.nodes[id]?.hash).map(id => current.nodes[id]?.urn ?? (pin.format === 'hadron-automation-pin-v3' ? pin.nodes[id]?.urn : id));
     const changedEdges = [...new Set([...Object.keys(pin.edges), ...Object.keys(current.edges)])].filter(id => pin.edges[id] !== current.edges[id]);
     const identities = [];
     if (hash(pin.resources.ai) !== hash(current.resources.ai)) identities.push('AI configuration');
@@ -214,13 +281,19 @@ export async function currentOriginPin(db: PrismaClient, runId: string): Promise
  * no content, template rendering, routing recursion, or per-node queries.
  * Edges are small and hashed because writes need not bump the source revision. */
 export async function checkAutomationRevisions(db: PrismaClient, run: AppRun, proof: AutomationPreview): Promise<void> {
+  // v3 proofs (legacy resumed runs) compare the frozen v3 fields; v4 drops
+  // the two address fields, matching its capture select (#2438).
+  const v3 = proof.format === 'hadron-automation-pin-v3';
   const rows = await db.node.findMany({ where: { id: { in: Object.keys(proof.nodes) } }, select: {
-    id: true, memoryId: true, loc: true, revSeq: true, updatedAt: true, deletedAt: true,
-    memory: { select: { urn: true, organizationId: true, class: true, userId: true, ownerUserId: true, appId: true, isEncrypted: true, deletedAt: true } },
+    id: true, memoryId: true, ...(v3 ? { loc: true } : {}), revSeq: true, updatedAt: true, deletedAt: true,
+    memory: { select: v3
+      ? { urn: true, organizationId: true, class: true, userId: true, ownerUserId: true, appId: true, isEncrypted: true, deletedAt: true }
+      : { organizationId: true, class: true, userId: true, ownerUserId: true, appId: true, isEncrypted: true, deletedAt: true } },
     outgoingEdges: { orderBy: { id: 'asc' } },
   } });
-  const metadata = (state: Record<string, unknown>) => ({ id: state.id, memoryId: state.memoryId, loc: state.loc,
-    revSeq: state.revSeq, deletedAt: state.deletedAt, memory: state.memory });
+  const metadata = (state: Record<string, unknown>) => v3
+    ? { id: state.id, memoryId: state.memoryId, loc: state.loc, revSeq: state.revSeq, deletedAt: state.deletedAt, memory: state.memory }
+    : { id: state.id, memoryId: state.memoryId, revSeq: state.revSeq, deletedAt: state.deletedAt, memory: state.memory };
   const message = 'Automation revision, dependency edges or read authority changed during the hop';
   const changed = new AutomationPinError('AUTOMATION_CHANGED', message);
   // #2439: losing read access mid-hop is typed like the pre-hop path; a missing node reads the same (indistinguishable).
@@ -234,7 +307,7 @@ export async function checkAutomationRevisions(db: PrismaClient, run: AppRun, pr
       throw await canReadMemory(db, principal, row.memoryId) ? changed : unreadable;
     }
     if (json(row.updatedAt) !== proof.nodes[row.id].state.updatedAt) touched.push(row.id);
-    if (proof.flows.includes(row.id)) for (const edge of row.outgoingEdges) edges[edge.id] = hash(json(edge));
+    if (proof.flows.includes(row.id)) for (const edge of row.outgoingEdges) edges[edge.id] = hash(json(edgeState(proof.format, edge)));
   }
   if (hash(edges) !== hash(proof.edges)) throw changed;
   for (const memoryId of new Set(rows.map(row => row.memoryId))) if (!await canReadMemory(db, principal, memoryId)) throw unreadable;
@@ -244,7 +317,7 @@ export async function checkAutomationRevisions(db: PrismaClient, run: AppRun, pr
     const current = await db.node.findMany({ where: { id: { in: touched } }, select: DEFINITION_SELECT });
     if (current.length !== touched.length) throw changed;
     for (const node of current) {
-      if (definitionHash(node) !== proof.nodes[node.id].hash) throw changed;
+      if (definitionHash(proof.format, node) !== proof.nodes[node.id].hash) throw changed;
       proof.nodes[node.id].state.updatedAt = json(node.updatedAt);
     }
   }

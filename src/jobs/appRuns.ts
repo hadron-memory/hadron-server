@@ -26,6 +26,7 @@ import { generateId } from '../lib/id.js';
 import { getBusClient } from '../lib/bus/index.js';
 import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '@hadron-memory/access-control';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
+import { emitNodeUrnV2 } from '../lib/urnEmit.js';
 import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/aiConfig.js';
 import { recordLlmUsage } from '../lib/metering/index.js';
 // Spec 049 Phase 3b — the trigger's scope snapshot on the run.
@@ -386,6 +387,10 @@ export interface MintAppRunArgs {
   /** Fan-out lineage (plan-spawn): set on child + callback runs. */
   parentRunId?: string | null;
   entryNodeUrn: string;
+  /** #2438: the entry's stable node id, when the caller holds it (the trigger
+   * row). Preferred over resolving `entryNodeUrn` — a renamed or moved entry
+   * keeps launching — and stamped onto the run alongside the display URN. */
+  entryNodeId?: string | null;
   eventData?: Record<string, unknown> | null;
   /** Trigger policy link, or a previously captured `{chain:[...]}` snapshot
    *  that must remain an additional restriction (integration events). */
@@ -459,9 +464,13 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // UNAVAILABLE on encrypted memories — the server never holds the key, and
   // a run has no session to supply one. Fail loud at the gate, not deep in
   // assembly. Resolved best-effort: an unresolvable entry URN falls through
-  // to the runner's normal assembly failure.
+  // to the runner's normal assembly failure. #2438: the caller's stable id,
+  // when present, resolves in preference to the (possibly stale) URN, so a
+  // renamed entry keeps passing through these gates rather than skipping them.
+  let resolvedEntryNodeId: string | null = null;
   try {
-    const { id: entryNodeId } = await resolveNodeRef(db, args.entryNodeUrn);
+    const { id: entryNodeId } = await resolveNodeRef(db, args.entryNodeId ?? args.entryNodeUrn);
+    resolvedEntryNodeId = entryNodeId;
     const entryNode = await db.node.findUnique({
       where: { id: entryNodeId },
       select: { memory: { select: { isEncrypted: true, organizationId: true } } },
@@ -555,12 +564,20 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // Consent comes from setup, never the webhook/event payload. Child runs
   // inherit the parent's artifact; poll events use the origin trigger's pin.
   let automationPin: unknown = null;
+  // #2438: the entry id this run resolves by — the trigger row's stamp when
+  // the launch carries one (authoritative at mint), else the caller's, else a
+  // fresh resolution from the URN. Null on legacy rows and unresolvable refs.
+  let entryNodeId: string | null = args.entryNodeId ?? null;
   if (args.triggerKind === 'MANUAL') {
-    automationPin = await captureSetupConsent(db, args.appId, args.userId ?? null, args.entryNodeUrn, args.organizationId, args.consentPrincipal ?? { appId: args.appId, userId: args.userId ?? undefined, organizationId: args.organizationId }, configSelection(args));
+    automationPin = await captureSetupConsent(db, args.appId, args.userId ?? null, entryNodeId ?? args.entryNodeUrn, args.organizationId, args.consentPrincipal ?? { appId: args.appId, userId: args.userId ?? undefined, organizationId: args.organizationId }, configSelection(args));
   } else if (args.triggerKind === 'SCHEDULE') {
-    automationPin = (await db.agentSchedule.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null } }))?.automationPin;
+    const schedule = await db.agentSchedule.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null }, select: { automationPin: true, entryNodeId: true } });
+    automationPin = schedule?.automationPin;
+    if (schedule?.entryNodeId) entryNodeId = schedule.entryNodeId;
   } else if (args.triggerKind === 'WEBHOOK') {
-    automationPin = (await db.agentWebhook.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null } }))?.automationPin;
+    const webhook = await db.agentWebhook.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null }, select: { automationPin: true, entryNodeId: true } });
+    automationPin = webhook?.automationPin;
+    if (webhook?.entryNodeId) entryNodeId = webhook.entryNodeId;
   } else if (args.parentRunId) {
     automationPin = args.triggerKind === 'INTEGRATION'
       ? await currentOriginPin(db, args.parentRunId)
@@ -578,6 +595,9 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       triggerId: args.triggerId ?? null,
       parentRunId: args.parentRunId ?? null,
       entryNodeUrn: args.entryNodeUrn,
+      // #2438: the stable id the pin's v4 format keys by; null keeps legacy
+      // runs on their stored pin's URN identity.
+      entryNodeId: entryNodeId ?? resolvedEntryNodeId,
       automationPin: (automationPin ?? undefined) as never,
       eventData: (args.eventData ?? undefined) as never,
       // Chain snapshot: `{chain: [...]}` since #510. checkActivation also
@@ -762,17 +782,25 @@ async function executeAppRunInner(
     return res.count === 1 ? 'failed' : 'skipped';
   };
 
+  // #2438: the entry address recorded at mint goes stale after a rename or
+  // move; the run's stable entry id (when stamped) resolves to the LIVE
+  // address, and hop 0 starts there. A resumed run's checkpoint still wins.
+  let entryAddress = run.entryNodeUrn;
+  if (!run.curNodeUrn && run.entryNodeId) {
+    const live = await db.node.findUnique({ where: { id: run.entryNodeId }, select: { loc: true, memory: { select: { urn: true } } } });
+    if (live) entryAddress = emitNodeUrnV2(live.memory.urn, live.loc);
+  }
   let lastToolDenial: ActivationDenial | null = null;
-  const checkConsent = () => deps.checkAutomationEffect ? deps.checkAutomationEffect(run) : deps.verifyAutomation(run, run.curNodeUrn ?? run.entryNodeUrn);
+  const checkConsent = () => deps.checkAutomationEffect ? deps.checkAutomationEffect(run) : deps.verifyAutomation(run, run.curNodeUrn ?? entryAddress);
   try {
-    await deps.verifyAutomation(run, run.curNodeUrn ?? run.entryNodeUrn);
+    await deps.verifyAutomation(run, run.curNodeUrn ?? entryAddress);
     // Per-ATTEMPT wall clock (D-MN-5): recomputed at each claim.
     const deadline = Date.now() + (run.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS);
 
     // D-MN-5 resume: the checkpoint (curNodeUrn + data) written after each
     // hop makes a bus redelivery continue at the failing hop, never re-run
     // completed ones. A fresh run has neither → starts at the entry.
-    let cur = run.curNodeUrn ?? run.entryNodeUrn;
+    let cur = run.curNodeUrn ?? entryAddress;
     let envelope: Record<string, unknown> =
       run.data !== null && typeof run.data === 'object' && !Array.isArray(run.data)
         ? { ...(run.data as Record<string, unknown>) }

@@ -4634,6 +4634,10 @@ model AppRun {
   automationPin        Json?                @map("automation_pin")
   manualAutomationPin  ManualAutomationPin?
   entryNodeUrn         String               @map("entry_node_urn")
+  /// #2438: the entry node's stable id — what the run resolves by once the
+  /// automation pin moved off literal URNs. NULL on runs minted before the
+  /// column existed; those keep verifying under their stored pin's URN identity.
+  entryNodeId          String?              @map("entry_node_id")
   eventData            Json?                @map("event_data")
   /// Run envelope (D-2026-05-09-013): the mutable bag of fields extracted
   /// by flow nodes as the walker advances. Bare field names — conditions
@@ -4748,6 +4752,10 @@ model AgentSchedule {
   /// #1719 R5b: owner-adopted complete graph; NULL fails closed at execution.
   automationPin  Json?     @map("automation_pin")
   entryNodeUrn   String    @map("entry_node_urn")
+  /// #2438: the entry node's stable id, stamped at adoption (and lazily at
+  /// launch) — a same-memory rename/move of the entry keeps the trigger
+  /// working; entryNodeUrn stays the immutable display/audit address.
+  entryNodeId     String?   @map("entry_node_id")
   eventData      Json?     @map("event_data")
   /// Trigger-layer allow-list (chain link; plan §4).
   policy         Json?
@@ -4917,6 +4925,10 @@ model AgentWebhook {
   /// #1719 R5b: owner-adopted complete graph; NULL fails closed at execution.
   automationPin  Json?     @map("automation_pin")
   entryNodeUrn   String    @map("entry_node_urn")
+  /// #2438: the entry node's stable id, stamped at adoption (and lazily at
+  /// launch) — a same-memory rename/move of the entry keeps the trigger
+  /// working; entryNodeUrn stays the immutable display/audit address.
+  entryNodeId     String?   @map("entry_node_id")
   eventData      Json?     @map("event_data")
   policy         Json?
   aiConfigName   String?   @map("ai_config_name")

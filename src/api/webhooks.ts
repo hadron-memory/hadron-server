@@ -135,6 +135,7 @@ async function handleWebhook(db: PrismaClient, req: Request, res: Response): Pro
       triggerKind: 'WEBHOOK',
       triggerId: webhook.id,
       entryNodeUrn: webhook.entryNodeUrn,
+      entryNodeId: webhook.entryNodeId,
       eventData: {
         ...(webhook.eventData && typeof webhook.eventData === 'object' && !Array.isArray(webhook.eventData)
           ? (webhook.eventData as Record<string, unknown>)

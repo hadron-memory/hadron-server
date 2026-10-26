@@ -2,14 +2,14 @@
  * #2441: adoption state, a plain projection, approve and decline over the same door. */
 import { configSelection } from '../../../lib/automation/identities.js';
 import { GraphQLError } from 'graphql';
-import { captureAutomationPin, storedAutomationPin, parseAutomationPin, AutomationPinError } from '../../../lib/automation/pins.js';
+import { captureAutomationPin, storedAutomationPin, parseAutomationPin, AutomationPinError, type AutomationPinFormat } from '../../../lib/automation/pins.js';
 import { approvalDepth, headlineOf, summarizeAutomation, type TriggerFacts } from '../../../lib/automation/approvalSummary.js';
 import { runAuthContext, isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { boundWorkerId } from '../../../lib/bootPrompt.js';
 import { currentActorAmbiguity } from '../../../lib/requestActor.js';
-import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AppNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
@@ -47,7 +47,7 @@ export async function requireAdopterContext(ctx: Context): Promise<string> {
 }
 
 type App = NonNullable<Awaited<ReturnType<Context['db']['app']['findFirst']>>>;
-type TriggerRow = { id: string; appId: string; organizationId: string; userId: string | null; entryNodeUrn: string };
+type TriggerRow = { id: string; appId: string; organizationId: string; userId: string | null; entryNodeUrn: string; entryNodeId?: string | null };
 /**
  * May this caller adopt this trigger? THE one admission predicate (#2436) behind every adoption surface —
  * preview, the approval detail, approve, decline, re-adopt, and the adoptable list's run-as-user arm —
@@ -86,17 +86,23 @@ async function load(ctx: Context, input: AutomationTriggerRef) {
   if (!app || !actor || !await canAdopt(ctx, app, row)) throw denied();
   return row;
 }
-async function preview(ctx: Context, row: Awaited<ReturnType<typeof load>>) {
-  const pin = await captureAutomationPin(ctx.db, row.appId, row.userId, row.entryNodeUrn, row.organizationId, ctx, configSelection(row));
+/** The entry ref a capture walks from. v3 must use the literal URN — it is
+ * part of the hashed identity, so an id here would desync the comparison.
+ * v4 (#2438) prefers the stable node id: a renamed or moved entry keeps
+ * resolving, and the id is never hashed as an address. */
+const entryRefOf = (row: TriggerRow, format: AutomationPinFormat) =>
+  format === 'hadron-automation-pin-v3' ? row.entryNodeUrn : row.entryNodeId ?? row.entryNodeUrn;
+async function preview(ctx: Context, row: Awaited<ReturnType<typeof load>>, format: AutomationPinFormat = 'hadron-automation-pin-v4') {
+  const pin = await captureAutomationPin(ctx.db, row.appId, row.userId, entryRefOf(row, format), row.organizationId, ctx, configSelection(row), { format });
   const memories = new Set(Object.values(pin.nodes).map(n => String(n.state.memoryId)));
   for (const id of memories) if (!await canReadMemory(ctx.db, ctx, id)) throw callerCannotRead();
   return pin;
 }
 
-/** Adoption state from the stored consent, by the existing parser: no pin, an unadopted marker or a corrupt pin is UNADOPTED. Never truthiness. */
-function storedState(raw: unknown): { state: 'UNADOPTED' | 'ADOPTED'; hash: string | null } {
-  try { return { state: 'ADOPTED', hash: parseAutomationPin(raw).hash }; }
-  catch (e) { if (e instanceof AutomationPinError) return { state: 'UNADOPTED', hash: null }; throw e; }
+/** Adoption state from the stored consent, by the existing parser: no pin, an unadopted marker or a corrupt pin is UNADOPTED. Never truthiness. The stored pin's FORMAT comes back too — a v3 adoption must be compared under v3 semantics (#2438). */
+function storedState(raw: unknown): { state: 'UNADOPTED' | 'ADOPTED'; hash: string | null; format: AutomationPinFormat; entryId?: string } {
+  try { const pin = parseAutomationPin(raw); return { state: 'ADOPTED', hash: pin.hash, format: pin.format, entryId: pin.entryId }; }
+  catch (e) { if (e instanceof AutomationPinError) return { state: 'UNADOPTED', hash: null, format: 'hadron-automation-pin-v4' }; throw e; }
 }
 async function storedConsent(db: Context['db'], kind: AutomationTriggerKind, id: string): Promise<unknown> {
   if (kind === 'SCHEDULE') return (await db.agentSchedule.findUnique({ where: { id }, select: { automationPin: true } }))?.automationPin;
@@ -186,9 +192,25 @@ export const automationPinQueries = {
   /** #2441: what the adopter reviews: state, the hash the Approve button carries, a plain summary, and the graph depth. */
   automationApproval: async (_: unknown, input: AutomationTriggerRef, ctx: Context) => {
     const row = await load(ctx, input);
-    const pin = await preview(ctx, row);
     const stored = storedState(await storedConsent(ctx.db, input.triggerKind, row.id));
-    const state: AdoptionState = stored.state === 'ADOPTED' && stored.hash !== pin.hash ? 'CHANGED' : stored.state;
+    // A pre-#2438 adoption has no stamped entryNodeId; once its entry moved,
+    // the fresh v4 preview would resolve the stale URN and error the whole
+    // query before the v3 comparison below could answer CHANGED (#2438 BLIND
+    // P2, Andi). The stored pin's entryId is the stable ref: preview by it,
+    // and keep the row's literal URN for the v3-semantics comparison.
+    const pin = await preview(ctx, stored.state === 'ADOPTED' && !row.entryNodeId ? { ...row, entryNodeId: stored.entryId } as typeof row : row);
+    let state: AdoptionState = stored.state;
+    if (state === 'ADOPTED') {
+      if (stored.format === 'hadron-automation-pin-v4') state = stored.hash === pin.hash ? 'ADOPTED' : 'CHANGED';
+      else {
+        // A pre-#2438 v3 adoption compares under v3 semantics: an unchanged
+        // legacy trigger is still ADOPTED — its stored digest can never be
+        // recomputed as v4. A v3 graph that no longer captures (rename, move)
+        // is CHANGED, which is what it is under v3; re-adoption then writes v4.
+        try { state = (await preview(ctx, row, stored.format)).hash === stored.hash ? 'ADOPTED' : 'CHANGED'; }
+        catch (e) { if (e instanceof NodeNotFoundError || e instanceof AutomationPinError) state = 'CHANGED'; else throw e; }
+      }
+    }
     return { state, hash: pin.hash, summary: summarizeAutomation(pin, factsOf(input.triggerKind, row as never).facts), depth: approvalDepth(pin) };
   },
 };
@@ -231,10 +253,15 @@ function adopt(ctx: Context, input: AutomationTriggerRef & { expectedHash: strin
       const named = await canReadMemory(txCtx.db, txCtx, memoryId) ? await txCtx.db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } }) : null;
       throw principalCannotRead(named?.urn ?? null);
     }
-    const data = { automationPin: storedAutomationPin(pin) as never, updatedBy: ctx.userId };
+    // #2438: adoption is the authoritative stamp of the entry's stable id —
+    // v4 pins key by it, and every later launch resolves by it first.
+    const data = { automationPin: storedAutomationPin(pin) as never, entryNodeId: pin.entryId, updatedBy: ctx.userId };
     if (input.triggerKind === 'SCHEDULE') await tx.agentSchedule.update({ where: { id: row.id }, data });
     else if (input.triggerKind === 'WEBHOOK') await tx.agentWebhook.update({ where: { id: row.id }, data });
-    else await tx.manualAutomationPin.upsert({ where: { runId: row.id }, create: { runId: row.id, pin: storedAutomationPin(pin) as never, adoptedBy: ctx.userId }, update: { pin: storedAutomationPin(pin) as never, adoptedAt: new Date(), adoptedBy: ctx.userId } });
+    else {
+      await tx.manualAutomationPin.upsert({ where: { runId: row.id }, create: { runId: row.id, pin: storedAutomationPin(pin) as never, adoptedBy: ctx.userId }, update: { pin: storedAutomationPin(pin) as never, adoptedAt: new Date(), adoptedBy: ctx.userId } });
+      await tx.appRun.update({ where: { id: row.id }, data: { entryNodeId: pin.entryId } });
+    }
     await recordEvent(tx, row, input, 'APPROVE', ctx.userId!, pin.hash);
     return true;
   });
