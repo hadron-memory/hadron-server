@@ -356,7 +356,7 @@ export async function appendHostOperationEvent(
  * reported to, a worker claiming it, its holder, whoever manages the App, the worker's own
  * bind (`startSession`), or the platform clearing it on retirement.
  */
-export type ReportsToSetter = 'current' | 'claimant' | 'holder' | 'app-manager' | 'bind' | 'retirement';
+export type ReportsToSetter = 'current' | 'claimant' | 'holder' | 'app-manager' | 'bind' | 'retirement' | 'cast';
 
 /**
  * #2458 (cor:dmo:050:11): append the one `worker.casting` event a change of a worker's agent writes, in the change's
@@ -394,7 +394,7 @@ export async function appendWorkerCastingEvent(
  */
 export async function appendReportsToEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; actor: EventActor; workerId: string; from: string | null; to: string | null; setBy: ReportsToSetter },
+  args: { appId: string; actor: EventActor; workerId: string; from: string | null; to: string | null; setBy: ReportsToSetter; oldExplicitNoTeam?: boolean; newExplicitNoTeam?: boolean },
 ): Promise<void> {
   await tx.agentTeamEvent.create({
     data: {
@@ -404,7 +404,9 @@ export async function appendReportsToEvent(
       actorWorkerId: args.actor.workerId,
       actorAgentId: args.actor.agentId,
       subjectWorkerId: args.workerId,
-      payload: { from: args.from, to: args.to, setBy: args.setBy },
+      payload: { from: args.from, to: args.to, setBy: args.setBy,
+        ...(args.oldExplicitNoTeam !== undefined ? { oldExplicitNoTeam: args.oldExplicitNoTeam, newExplicitNoTeam: args.newExplicitNoTeam } : {}),
+      },
     },
   });
 }

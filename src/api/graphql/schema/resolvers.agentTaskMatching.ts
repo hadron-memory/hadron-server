@@ -41,11 +41,12 @@ async function readTeamRoster(ctx: Context, appRef: string) {
         canReadTasks ? loadRosterTaskSummaries(tx, app.id, workerIds) : new Map<string, RosterTaskSummary>(),
       ]);
       const pauses = new Map(settings.map((s) => [s.workerId, s.pausedUntil]));
-      const holders = await loadRosterHolders(readCtx, tx, app.id, workerIds);
+      const workingStateVisible = workerIds.length > 0 && await maySeeWorkerInternals(readCtx, app.id);
+      const holders = await loadRosterHolders(readCtx, tx, app.id, workerIds, workingStateVisible);
       return {
         appId: app.id,
         asOf,
-        workers: entries.map((e) => ({ ...e, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
+        workers: entries.map((e) => ({ ...e, teamPlacement: workingStateVisible ? e.teamPlacement : null, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
           pausedUntil: pauses.get(e.workerId) ?? null, currentTask: tasks.get(e.workerId) ?? null,
           heldBy: holders.get(e.workerId)?.heldBy ?? null, heldAt: holders.get(e.workerId)?.heldAt ?? null })),
       };
@@ -80,9 +81,10 @@ async function loadRosterHolders(
   tx: Prisma.TransactionClient,
   appId: string,
   workerIds: string[],
+  workingStateVisible: boolean,
 ): Promise<Map<string, { heldBy: RosterHolder; heldAt: Date | null }>> {
   const out = new Map<string, { heldBy: RosterHolder; heldAt: Date | null }>();
-  if (workerIds.length === 0 || !(await maySeeWorkerInternals(readCtx, appId))) return out;
+  if (workerIds.length === 0 || !workingStateVisible) return out;
   const holds = await tx.worker.findMany({
     where: { id: { in: workerIds }, heldByUserId: { not: null } },
     select: { id: true, heldByUserId: true, heldAt: true },
@@ -103,7 +105,8 @@ async function loadRosterHolders(
   return out;
 }
 
-type RosterRow = RosterEntry & {
+type RosterRow = Omit<RosterEntry, 'teamPlacement'> & {
+  teamPlacement: RosterEntry['teamPlacement'] | null;
   appUrn: string; checkStatus: WorkerCheckStatus | null; pausedUntil: Date | null; currentTask: RosterTaskSummary | null;
   heldBy: RosterHolder | null; heldAt: Date | null;
 };
