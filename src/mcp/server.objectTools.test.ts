@@ -55,9 +55,8 @@ describe('object store MCP tools', () => {
     await call('hadron_create_object', { memoryUrn: memUrn, type: 'competitor', fields: { name: 'Beta', stage: 'series-a', fundingUsd: 2 } });
     const found = JSON.parse(await call('hadron_find_objects', { memoryUrn: memUrn, type: 'competitor', match: { stage: 'series-a' }, sort: { fundingUsd: 'desc' } }));
     // The tool returns { objects, total }. numeric desc: Letta(10) then Beta(2).
-    // (total is null on the browse path — findNodes doesn't count it there.)
     expect(found.objects.map((o: any) => o.name)).toEqual(['Letta', 'Beta']);
-    expect(found).toHaveProperty('total');
+    expect(found.total).toBe(2);
 
     expect(await call('hadron_delete_object', { ref: id })).toMatch(/deleted/i);
     expect(await call('hadron_get_object', { ref: id })).toMatch(/not found/i);

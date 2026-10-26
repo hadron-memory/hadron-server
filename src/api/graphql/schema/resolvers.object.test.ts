@@ -198,3 +198,12 @@ it('object counting does not enable totals for ordinary findNodes browse (#2514)
   const objects = await findObjects({ memoryRef: memId, type: 'competitor' });
   expect(objects.total).toBe(1);
 });
+
+
+it('conceals object totals from a caller outside the memory scope (#2514)', async () => {
+  await createObject({ memoryRef: memId, type: 'competitor', fields: { name: 'Hidden' } });
+  const outsider = await db.user.create({ data: { githubId: 7732, githubUsername: 'obj-outsider' } });
+  const result = await Q().findObjects(null, { memoryRef: memId, type: 'competitor' },
+    { db, roles: [], userId: outsider.id } as Context);
+  expect(result).toMatchObject({ objects: [], total: 0 });
+});
