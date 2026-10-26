@@ -508,7 +508,13 @@ export const typeDefs = `#graphql
     id: ID!
     "Host memory."
     memoryId: ID!
-    memory: Memory!
+    """
+    #2509: this memory's record, exactly as Query.memory answers it to the
+    caller, or null when the caller may not read that record (or it is
+    deleted). Seeing this channel does not grant its memory's record, so use
+    memoryId for the address.
+    """
+    memory: Memory
     "The reserved address of the chat root (e.g. chats:team)."
     loc: String!
     name: String!
@@ -3127,7 +3133,13 @@ export const typeDefs = `#graphql
   paired-with-Mentor-B Memory, each with its own MemoryShare).
   """
   type MemoryShare {
-    memory: Memory!
+    """
+    #2509: this memory's record, exactly as Query.memory answers it to the
+    caller, or null when the caller may not read that record (or it is
+    deleted). Seeing this share does not grant its memory's record, so use
+    memoryId for the address.
+    """
+    memory: Memory
     """
     The User who was granted access.
     """
@@ -3193,7 +3205,13 @@ export const typeDefs = `#graphql
   on the Memory itself.
   """
   type MemoryMember {
-    memory: Memory!
+    """
+    #2509: this memory's record, exactly as Query.memory answers it to the
+    caller, or null when the caller may not read that record (or it is
+    deleted). Seeing this membership does not grant its memory's record, so use
+    memoryId for the address.
+    """
+    memory: Memory
     user: User!
     role: MemoryMemberRole!
     createdAt: DateTime!

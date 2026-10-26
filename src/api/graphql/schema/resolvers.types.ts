@@ -1858,8 +1858,8 @@ export const typeResolvers = {
   },
   // 023-app-shape US3: asymmetric cross-user grant on personal-class memory.
   MemoryShare: {
-    memory: async (s: { memoryId: string; memory?: unknown }, _: unknown, ctx: Context) =>
-      s.memory ?? ctx.db.memory.findUnique({ where: { id: s.memoryId } }),
+    // #2509: the record as Query.memory answers it, else null; a preloaded `memory` is never trusted (#474).
+    memory: (s: { memoryId: string }, _: unknown, ctx: Context) => loadReadableMemoryRecord(ctx, s.memoryId),
     grantee: async (s: { granteeId: string; grantee?: unknown }, _: unknown, ctx: Context) =>
       s.grantee ?? ctx.db.user.findUnique({ where: { id: s.granteeId } }),
     grantor: async (s: { grantorId: string; grantor?: unknown }, _: unknown, ctx: Context) =>
@@ -1867,8 +1867,8 @@ export const typeResolvers = {
   },
   // 023-app-shape US4: symmetric team membership on group-class memory.
   MemoryMember: {
-    memory: async (m: { memoryId: string; memory?: unknown }, _: unknown, ctx: Context) =>
-      m.memory ?? ctx.db.memory.findUnique({ where: { id: m.memoryId } }),
+    // #2509: the record as Query.memory answers it, else null; a preloaded `memory` is never trusted (#474).
+    memory: (m: { memoryId: string }, _: unknown, ctx: Context) => loadReadableMemoryRecord(ctx, m.memoryId),
     user: async (m: { userId: string; user?: unknown }, _: unknown, ctx: Context) =>
       m.user ?? ctx.db.user.findUnique({ where: { id: m.userId } }),
   },
