@@ -2926,6 +2926,8 @@ export const typeDefs = `#graphql
     id: ID!
     name: String!
     urn: String!
+    "#2171 (R211): the member roles this App offers: the union over its installed Agents, primary first."
+    availableMemberRoles: [String!]!
     "#2138: when the whole team was paused (setTeamPause), or null. Separate from every worker's own pause."
     teamPausedAt: DateTime
     """
@@ -7508,8 +7510,10 @@ export const typeDefs = `#graphql
 
     """
     #1705 — a team App's agent tasks, newest first. Party filters combine with the other selectors;
-    owner / assignee name a party of the App (a ref naming nobody matches
-    nothing). queued selects pending tasks with no assignee; rootsOnly selects roots. These
+    owner / assignee / creator name a party of the App (a ref naming nobody matches
+    nothing; a retired worker is no party to name, so it matches nothing). creator is
+    the task's creator as createdBy projects it: a worker, or a person for a task they created
+    themselves (not one their worker created, #2370). queued selects pending tasks with no assignee; rootsOnly selects roots. These
     take precedence over status and parentTaskId respectively. limit defaults to 20 (cap 200).
     Readers: the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:050:21), or the App's own live key
     without a session binding (#1755).
@@ -7521,6 +7525,7 @@ export const typeDefs = `#graphql
       status: [AgentTaskStatus!]
       owner: AgentTaskPartyInput
       assignee: AgentTaskPartyInput
+      creator: AgentTaskPartyInput
       tag: String
       parentTaskId: ID
       rootsOnly: Boolean
@@ -7574,6 +7579,11 @@ export const typeDefs = `#graphql
     the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Retired workers are left out.
     """
     teamRoster(appRef: ID!): TeamRoster!
+    """
+    #2061 — direct-report lanes from the same roster projection and read gate as teamRoster.
+    One bounded RepeatableRead snapshot per call; no hierarchy rollups or role exclusions.
+    """
+    teamComposition(appRef: ID!): TeamComposition!
     "Declarative team JSON Schema (2020-12). apiVersion is the full identifier hadron.dev/team/v1alpha1; HTTP discovery uses /schemas/team/v1alpha1.json. CLIENT_INPUT additionally permits file parts for clients to inline; the server accepts SERVER only."
     teamSpecSchema(apiVersion: String!, form: TeamSpecForm = SERVER): String!
     """
@@ -10889,7 +10899,7 @@ export const typeDefs = `#graphql
 
     orgId accepts the org's ID or URN.
     """
-    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean): Agent!
+    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
     """
     Clone an Agent into an organization you administer: a new PERSONAL-draft Agent
     with its own copy of the source's system memory, its links and imports, and a recorded origin. Needs a
@@ -10920,7 +10930,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, registerDefaults: RegisterDefaultsInput): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!]): Agent!
 
     """
     Soft-delete an Agent and its owned system memory. Requires management
@@ -13979,6 +13989,46 @@ export const typeDefs = `#graphql
     id: ID!
     title: String!
     status: AgentTaskStatus!
+  }
+
+  "#2061 — active roster workers grouped by their direct reportsTo claim."
+  type TeamComposition {
+    appId: ID!
+    asOf: DateTime!
+    "Lanes ordered by coordinator name (case-insensitive), then URN; the unassigned lane is last. Empty teams have no lanes."
+    lanes: [TeamCompositionLane!]!
+  }
+
+  "A direct-report group, not a hierarchy rollup. A coordinator's own row belongs only in its own reportsTo lane."
+  type TeamCompositionLane {
+    "Sanitized coordinator identity, including retired coordinators; null for the single unassigned lane."
+    coordinator: AgentTaskParty
+    coordinatorRetired: Boolean!
+    "Non-retired workers only, retaining roster name order. No role, including saas-pm, is excluded."
+    workers: [TeamCompositionWorker!]!
+    "Plain headcounts, role ascending with null last; null is its own bucket."
+    countsByRole: [TeamRoleCount!]!
+    "Plain headcounts by role then family, null last in each dimension; nulls are retained as their own buckets."
+    countsByRoleFamily: [TeamRoleFamilyCount!]!
+  }
+
+  "A closed roster projection; no task, holder or raw Worker fields."
+  type TeamCompositionWorker {
+    worker: AgentTaskParty!
+    role: String
+    family: String
+    bound: Boolean!
+    liveSession: Boolean!
+    state: TeamRosterState!
+  }
+  type TeamRoleCount {
+    role: String
+    count: Int!
+  }
+  type TeamRoleFamilyCount {
+    role: String
+    family: String
+    count: Int!
   }
 
   "#1707 — one worker on the team roster."
