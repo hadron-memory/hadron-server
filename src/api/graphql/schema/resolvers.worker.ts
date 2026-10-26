@@ -984,6 +984,12 @@ function generatedTickerRefusal(e: unknown): GraphQLError | null {
   return null;
 }
 
+function castTargetChanged(): GraphQLError {
+  return new GraphQLError('The cast target changed; retry the cast.', {
+    extensions: { code: 'CAST_TARGET_CHANGED', retryable: true },
+  });
+}
+
 export const workerMutations = {
   /**
    * castWorker — #974 (cor:dmo:050:11): cast an installed agent into the App
@@ -1063,14 +1069,14 @@ export const workerMutations = {
             const freshApp = await tx.app.findUniqueOrThrow({ where: { id: appId } });
             if (freshApp.deletedAt) throw forbidden();
             await requireWorkerStaffAccess(txCtx, freshApp);
-            if (freshApp.organizationId !== app.organizationId || freshApp.ownerUserId !== app.ownerUserId) throw new Error('App ownership changed; retry the cast');
+            if (freshApp.organizationId !== app.organizationId || freshApp.ownerUserId !== app.ownerUserId) throw castTargetChanged();
             const freshAgent = await tx.agent.findUniqueOrThrow({ where: { id: agent.id } });
-            if (freshAgent.organizationId !== agentOwner.organizationId || freshAgent.ownerUserId !== agentOwner.ownerUserId) throw new Error('Agent ownership changed; retry the cast');
+            if (freshAgent.organizationId !== agentOwner.organizationId || freshAgent.ownerUserId !== agentOwner.ownerUserId) throw castTargetChanged();
             if (freshApp.uninstalledAt) {
               throw new GraphQLError('Cannot cast a worker in an uninstalled App.', { extensions: { code: 'APP_UNINSTALLED', appId } });
             }
             const freshTarget = await resolveCastTarget(txCtx, args);
-            if (freshTarget.agent.id !== agent.id) throw new Error('Installed role Agent changed; retry the cast');
+            if (freshTarget.agent.id !== agent.id) throw castTargetChanged();
             // Preserve PostgreSQL lower(name)'s existing typed refusal before
             // applying the additional DAP naming-equivalence check.
             if ((await takenWorkersByName(tx, appId, [candidate])).has(candidate)) return NAME_TAKEN;
@@ -1113,8 +1119,9 @@ export const workerMutations = {
             return castWorkerRow;
           }, { lockMode: 'exclusive', timeout: 30_000, afterLock: async tx => {
             await lockAgentTemplates(tx, agent.id, 'shared');
-            // S6 is live: its fence precedes name/graph/Worker resources, as on every topology writer.
-            await lockStopFence(tx, appId, 'exclusive');
+            // Only a reporting-line birth changes S6 topology. Acquire its fence
+            // before name/graph/Worker resources; no-head casts need no coverage write.
+            if (choice.kind === 'REPORTS_TO') await lockStopFence(tx, appId, 'exclusive');
           } });
         } catch (e) {
           // Order matters: a slug race is private and retried; a name
