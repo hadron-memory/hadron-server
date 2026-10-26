@@ -79,7 +79,7 @@ it.each(['hrn:node:foo', 'urn:node:foo:bar', 'hrn:node:parent2512.example:tree']
 });
 it.each([undefined, 'hrn:mem:parent2512.example:tree'])('refuses a non-node scheme as parent with memory scope %s', async memoryUrn => {
   const { srv } = await fixture();
-  const result = await srv.callTool('hadron_list_nodes', { parentRel: 'hrn:mem:parent2512.example:tree', memoryUrn }) as { isError?: boolean; content: Array<{ text: string }> };
+  const result = await srv.callTool('hadron_list_nodes', { parentRel: 'hrn:memory:parent2512.example:tree', memoryUrn }) as { isError?: boolean; content: Array<{ text: string }> };
   expect(result.isError).toBe(true);
   expect(result.content[0].text).toContain('parentRel must be');
 });
