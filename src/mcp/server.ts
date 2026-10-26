@@ -4781,7 +4781,7 @@ export function createMcpServerInstance(
         contentScope !== 'all'
       ) {
         const err = new InvalidContentScopeError(String(contentScope));
-        return textResult(err.message);
+        return refusalResult(err.message);
       }
       const scope = contentScope ?? 'content';
       // Reconcile + fetch under one row lock. The first lookup selects the
@@ -10904,10 +10904,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
             'It takes effect at the next bind.',
         );
       } catch (e) {
-        if (e instanceof GraphQLError && typeof e.extensions?.code === 'string') {
-          return { ...textResult(`[${e.extensions.code}] ${e.message}`), isError: true };
-        }
-        return { ...textResult(`Error: ${e instanceof Error ? e.message : 'changing the worker failed'}`), isError: true };
+        // #1789: a typed refusal keeps its [code] text; anything else is a fault and gets the generic envelope.
+        return toolErrorResult(e, () => `[${String((e as GraphQLError).extensions?.code ?? 'ERROR')}] ${(e as Error).message}`, 'hadron_change_worker_agent');
       }
     },
   );

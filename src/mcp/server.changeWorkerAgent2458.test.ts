@@ -49,4 +49,13 @@ describe('hadron_change_worker_agent (#2458)', () => {
     expect(await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).toMatchObject({ agentId: oldAgent.id, role: 'security-engineer' });
     expect(await db.agentTeamEvent.count({ where: { type: 'worker.casting' } })).toBe(0);
   });
+
+  it('an unexpected fault in the resolver is the generic envelope, not its message (#1789)', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(M, 'changeWorkerAgent').mockRejectedValue(new Error('/srv/private/driver canary'));
+    const res = (await createTestableMcpServer(userAuth()).callTool('hadron_change_worker_agent', { workerRef: 'Ruin', agent: newAgent.id })) as { isError?: boolean; content: { text: string }[] };
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).not.toContain('private');
+    expect(res.content[0].text).toMatch(/Request id/i);
+  });
 });
