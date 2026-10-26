@@ -31,7 +31,7 @@ beforeEach(async () => { await cleanDb(db); gate.armed = false; gate.captured = 
 
 const Q = automationPinQueries as any;
 const M = automationPinMutations as any;
-const MANAGER_TEXT = /requires its manager|Only the run-as user may/;
+const WHO_MAY_TEXT = /Only the trigger's run-as user may adopt/;
 
 async function fixture() {
   const admin = await db.user.create({ data: { handle: 'readopt-admin' } });
@@ -55,7 +55,7 @@ describe('#2434 re-adopt refusals name their own cause', () => {
     expect(err).toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(err.message).toContain(f.memory.urn);
     expect(err.message).toMatch(/grant the App read access/i);
-    expect(err.message).not.toMatch(MANAGER_TEXT);
+    expect(err.message).not.toMatch(WHO_MAY_TEXT);
     expect(await db.agentSchedule.findUniqueOrThrow({ where: { id: f.appOnly.id }, select: { automationPin: true } })).toMatchObject({ automationPin: null });
   });
 
@@ -75,7 +75,7 @@ describe('#2434 re-adopt refusals name their own cause', () => {
     expect(err).toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(err.message).not.toContain(f.memory.urn);
     expect(err.message).toMatch(/you cannot read/i);
-    expect(err.message).not.toMatch(MANAGER_TEXT);
+    expect(err.message).not.toMatch(WHO_MAY_TEXT);
     expect(pin.hash).toMatch(/^[a-f0-9]{64}$/);
   });
 
@@ -89,7 +89,7 @@ describe('#2434 re-adopt refusals name their own cause', () => {
     expect(err.message).not.toContain(f.memory.urn);
   });
 
-  it('the causes about who the caller is keep the manager message', async () => {
+  it('the causes about who the caller is keep the who-may-adopt refusal', async () => {
     const f = await fixture();
     const stranger = await db.user.create({ data: { handle: 'readopt-stranger' } });
     await db.orgMember.create({ data: { userId: stranger.id, organizationId: f.org.id, role: 'CONTRIBUTOR' } });
@@ -97,7 +97,7 @@ describe('#2434 re-adopt refusals name their own cause', () => {
     for (const ctx of [{ db, userId: stranger.id, roles: [] }, { ...f.ctx, impersonation: { orgId: f.org.id } }, { db, roles: [] }]) {
       const err = await M.reAdoptAutomation({}, { ...f.input, expectedHash: pin.hash }, ctx).catch((e: unknown) => e);
       expect(err).toMatchObject({ extensions: { code: 'FORBIDDEN' } });
-      expect(err.message).toMatch(MANAGER_TEXT);
+      expect(err.message).toMatch(WHO_MAY_TEXT);
     }
   });
 

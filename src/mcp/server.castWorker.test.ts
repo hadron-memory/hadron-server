@@ -168,13 +168,21 @@ describe('hadron_cast_worker (#974)', () => {
     // Not a regression, and worth stating rather than leaving to be
     // rediscovered: cor:agt:020:00 makes cast lists ergonomics and explicitly
     // NEVER a gate, so validating a cast against them was never the contract.
-    // With an explicit agent, `role` is the casting's label.
+    //
+    // #2458 / R222 (cor:dmo:050:11) changes what `role` beside an explicit
+    // agent means: it was the casting's free label, and a cast now takes the
+    // agent's own role, never an override. So 'astronaut' beside an agent
+    // whose role is backend-engineer refuses WORKER_ROLE_OVERRIDE_REFUSED, still
+    // without consulting any role definition; the agent's own role passes.
     const srv = createTestableMcpServer(hybridAuth(admin.id));
     const out = await srv.callToolText('hadron_cast_worker', {
       agent: roleAgent.id,
       role: 'astronaut',
       name: 'Zara',
     });
-    expect(out).toContain('Worker cast: **Zara** (astronaut)');
+    expect(out).toContain('[WORKER_ROLE_OVERRIDE_REFUSED]');
+    expect(await db.worker.count({ where: { appId: app.id, name: 'Zara' } })).toBe(0);
+    const same = await srv.callToolText('hadron_cast_worker', { agent: roleAgent.id, role: 'backend-engineer', name: 'Zara' });
+    expect(same).toContain('Worker cast: **Zara** (backend-engineer)');
   });
 });
