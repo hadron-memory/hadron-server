@@ -1,4 +1,5 @@
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
+import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { lintWarningPage, lintWarningPageForNodeId } from '../../../lib/bootPromptLint.js';
@@ -1565,6 +1566,9 @@ export const typeResolvers = {
     },
   },
   App: {
+    /** #2171 (R211): the union reader every admission decides with. */
+    availableMemberRoles: async (a: { id: string }, _: unknown, ctx: Context) =>
+      (await loadOfferedMemberRoles(ctx.db, a.id)).roles,
     /** #2109 — whether the caller manages this App; the shared managesApp predicate as a read-time fact. */
     viewerManages: (a: { id: string }, _: unknown, ctx: Context) => loadViewerManages(ctx, a.id),
     /**
