@@ -24,6 +24,8 @@ umask "$startup_umask"
 trap 'rm -f "$startup_log"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
+trap 'exit 131' QUIT
 run_setup() {
   setup_phase=$1
   setup_url=$2
@@ -47,6 +49,6 @@ if ! run_setup db.runtime_role.verify_failed "$migration_url" pnpm tsx scripts/d
   echo 'db.runtime_role.verify_warning: phase-1 warning; continuing' >&2
 fi
 rm -f "$startup_log"
-trap - EXIT INT TERM
+trap - EXIT INT TERM HUP QUIT
 unset migration_url setup_url startup_log startup_umask
 exec pnpm tsx src/index.ts

@@ -1,8 +1,9 @@
 /** S2 uses the harness-owned worker DB; only its temporary roles/tables are owned here. */
 import { randomBytes } from 'node:crypto';
+import { createServer, type Socket } from 'node:net';
 import { Client, escapeIdentifier } from 'pg';
 import { beforeAll, beforeEach, afterAll, it, expect, vi } from 'vitest';
-import { main, revokeRuntimeMigrations } from './revoke-runtime-migrations.js';
+import { CONNECT_TIMEOUT_MS, main, revokeRuntimeMigrations } from './revoke-runtime-migrations.js';
 
 // Observe actual fixture SQL, including teardown, so database cloning cannot return.
 const fixtureSql: string[] = [];
@@ -110,10 +111,38 @@ it('migrate-before-role grants and revoke compose; absent role is a no-op', asyn
     await expectFixtureGrants(c);
   });
 });
+async function holdsMigrationAccess(role: string) {
+  return using(workerUrl, async c => (await c.query("SELECT has_table_privilege($1, 'public._prisma_migrations', 'SELECT') AS held", [role])).rows[0].held as boolean);
+}
+async function grantMigrationAccess(role: string) {
+  await using(url(owner), c => c.query(`GRANT SELECT ON public._prisma_migrations TO ${q(role)}`));
+}
 it('CLI env contract uses owner URL and RUNTIME_ROLE_NAME', async () => {
+  await grantMigrationAccess(serve);
   const logs: string[] = [];
   expect(await main({ DATABASE_URL: 'not-used', MIGRATE_DATABASE_URL: url(owner), RUNTIME_ROLE_NAME: serve }, l => logs.push(l))).toBe(0);
   expect(logs).toEqual([]);
+  expect(await holdsMigrationAccess(serve)).toBe(false);
+});
+it('CLI succeeds with DATABASE_URL alone (legacy single-role boot)', async () => {
+  await grantMigrationAccess(serve);
+  const logs: string[] = [];
+  expect(await main({ DATABASE_URL: url(owner), RUNTIME_ROLE_NAME: serve }, l => logs.push(l))).toBe(0);
+  expect(logs).toEqual([]);
+  expect(await holdsMigrationAccess(serve)).toBe(false);
+});
+it('a missing or empty serving URL is refused before any connection', async () => {
+  const connect = vi.spyOn(Client.prototype, 'connect');
+  try {
+    for (const env of [{ MIGRATE_DATABASE_URL: '' }, { DATABASE_URL: '', MIGRATE_DATABASE_URL: '' }, { DATABASE_URL: '' }]) {
+      const logs: string[] = [];
+      expect(await main(env, l => logs.push(l))).toBe(2);
+      expect(logs).toEqual(['db.runtime_role.revoke_database_url_missing']);
+    }
+    expect(connect).not.toHaveBeenCalled();
+  } finally {
+    connect.mockRestore();
+  }
 });
 it('missing config has a typed nonzero result without credentials', async () => {
   const logs: string[] = [];
@@ -148,4 +177,47 @@ it('a role requiring identifier quoting gets only its migration-table grant revo
     expect((await c.query("SELECT has_table_privilege($1, 'public._prisma_migrations', 'SELECT') AS held", [quotedServe])).rows[0].held).toBe(false);
     expect((await c.query('SELECT has_table_privilege($1, $2, \'SELECT\') AS held', [quotedServe, `public.${q(nodeTable)}`])).rows[0].held).toBe(true);
   });
+});
+it('a connected non-owner role naming itself never issues a REVOKE (is_current_user alone)', async () => {
+  await grantMigrationAccess(serve);
+  await using(url(serve), async c => {
+    const before = fixtureSql.length;
+    await revokeRuntimeMigrations(c, serve);
+    expect(fixtureSql.slice(before).filter(sql => /^\s*REVOKE\b/i.test(sql))).toEqual([]);
+  });
+  // Control: the table owner is protected by owns_migrations, not by being connected.
+  await using(workerUrl, async c => {
+    const before = fixtureSql.length;
+    await revokeRuntimeMigrations(c, owner);
+    expect(fixtureSql.slice(before).filter(sql => /^\s*REVOKE\b/i.test(sql))).toEqual([]);
+  });
+  // Positive control: a different non-owner role still gets the REVOKE.
+  await using(url(owner), async c => {
+    const before = fixtureSql.length;
+    await revokeRuntimeMigrations(c, serve);
+    expect(fixtureSql.slice(before).filter(sql => /^\s*REVOKE\b/i.test(sql))).toHaveLength(1);
+  });
+  expect(await holdsMigrationAccess(serve)).toBe(false);
+});
+it('a stalled connection fails within the bounded connect timeout without printing credentials', async () => {
+  // Deterministic stall: a local listener that accepts the TCP connection and
+  // never answers the startup packet. No filtered/refused external port.
+  const sockets: Socket[] = [];
+  const server = createServer(socket => { sockets.push(socket); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address() as { port: number };
+    const logs: string[] = [];
+    const started = Date.now();
+    const code = await main({ DATABASE_URL: `postgresql://stall-user:stall-secret@127.0.0.1:${port}/db` }, l => logs.push(l), 300);
+    expect(code).toBe(1);
+    expect(logs).toEqual(['db.runtime_role.revoke_failed']);
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(sockets.length).toBe(1);
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await new Promise(resolve => server.close(resolve));
+  }
+  expect(CONNECT_TIMEOUT_MS).toBeGreaterThan(0);
+  expect(CONNECT_TIMEOUT_MS).toBeLessThanOrEqual(60_000);
 });
