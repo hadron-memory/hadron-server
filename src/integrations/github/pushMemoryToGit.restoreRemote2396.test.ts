@@ -52,14 +52,20 @@ vi.mock('./githubApp.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./githubApp.js')>()),
   getInstallationToken: vi.fn(async () => TOKEN),
 }));
-vi.mock('../../config.js', () => ({ get GRAPHS_PATH() { return env.root; } }));
+vi.mock('../../config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../config.js')>()),
+  get GRAPHS_PATH() { return env.root; },
+}));
 
 vi.mock('./execGit.js', () => ({
   execGit: vi.fn(async (args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) => {
     const isRestore = args[0] === 'remote' && args[1] === 'set-url' && args[3] === 'https://github.com/acme/repo.git';
     if (isRestore) {
       env.restoreAttempts++;
-      if (env.failRestore) throw new Error(GENERIC);
+      if (env.failRestore) {
+        // Carries the token the way a raw execFile rejection would: a raw-error log leaks it.
+        throw Object.assign(new Error(`raw ${TOKEN_URL}`), { code: 'RESTORE_SENTINEL' });
+      }
     }
     if (args.some((a) => a.includes('ghs_SYNTHETIC_INSTALLATION_TOKEN_2396'))) env.tokenInstalled = true;
     const { execFileSync } = await import('child_process');
@@ -164,6 +170,8 @@ const makeNode = (loc: string) =>
 const surface = (result: unknown) => JSON.stringify({ result, logged });
 
 beforeEach(async () => {
+  vi.stubEnv('GIT_CONFIG_GLOBAL', '/dev/null');
+  vi.stubEnv('GIT_CONFIG_SYSTEM', '/dev/null');
   env.root = mkdtempSync(join(tmpdir(), 'hadron-2396-'));
   env.bare = mkdtempSync(join(tmpdir(), 'hadron-2396-bare-'));
   env.local = '';
@@ -180,6 +188,7 @@ beforeEach(async () => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   rmSync(env.root, { recursive: true, force: true });
   rmSync(env.bare, { recursive: true, force: true });
 });
@@ -208,15 +217,20 @@ describe('pushMemoryToGit — origin is restored on every middle-phase exit (#23
       it(`${checkout} checkout, fault at ${site}: origin ends tokenless`, async () => {
         await setup(checkout, { site });
         await arm(site);
+        const seedTip = remoteTip('main');
 
         const result = await pushMemoryToGit(memoryId);
 
         // The fault really fired AFTER the tokenized URL was installed: git was handed
         // it, and (for the hooked sites) `origin` read back as it at the instant of the fault.
         expect(env.tokenInstalled).toBe(true);
-        if (site !== 'write' && site !== 'rootWrite') expect(env.originAtFault).toBe(TOKEN_URL);
-        else expect(result.error).toBeDefined();
-        expect(result.nodeCount === 0 || result.error !== undefined).toBe(true);
+        expect(result.error).toBeDefined();
+        if (site !== 'write' && site !== 'rootWrite') {
+          expect(env.originAtFault).toBe(TOKEN_URL);
+          expect(result.error).toContain(FAULT_MESSAGE);
+        }
+        expect(remoteTip('main')).toBe(seedTip);
+        expect(result.nodeCount).toBe(0);
         expect(originUrl()).toBe(SOURCE);
         expect(configText()).not.toContain(TOKEN);
         expect(surface(result)).not.toContain(TOKEN);
@@ -227,8 +241,10 @@ describe('pushMemoryToGit — origin is restored on every middle-phase exit (#23
   it('a faulted push does not publish: the remote is untouched', async () => {
     await setup('existing', { site: 'render' });
     await arm('render');
+    const before = remoteTip('main');
+    expect(before).not.toBeNull();
     await pushMemoryToGit(memoryId);
-    expect(remoteTip('main')).toBe(git(env.bare, 'rev-parse', 'refs/heads/main'));
+    expect(remoteTip('main')).toBe(before);
     expect(git(env.bare, 'log', '--oneline', 'main')).not.toContain('Push ');
   });
 });
@@ -250,6 +266,20 @@ describe('pushMemoryToGit — a failed restore never masks the primary outcome (
     const text = surface(result);
     expect(text).not.toContain(TOKEN);
     expect(text).not.toContain(TOKEN_URL);
+    expect(logged.some((l) => /restore/i.test(l) && /token/i.test(l))).toBe(true);
+  });
+});
+
+describe('pushMemoryToGit — a failed restore after a successful publish (#2396)', () => {
+  it('still reports success, publishes, and warns without leaking the token', async () => {
+    await setup('existing');
+    await makeNode('topic:leaf');
+    env.failRestore = true;
+    const result = await pushMemoryToGit(memoryId);
+    expect(result).toEqual({ nodeCount: 1 });
+    expect(git(env.bare, 'log', '--oneline', 'main')).toContain('Push 1 nodes');
+    expect(originUrl()).toBe(TOKEN_URL);
+    expect(surface(result)).not.toContain(TOKEN);
     expect(logged.some((l) => /restore/i.test(l) && /token/i.test(l))).toBe(true);
   });
 });
