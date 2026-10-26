@@ -567,7 +567,7 @@ it('self-leave winning its row lock is rechecked after the cast waits, with no m
   expect(await db.agentTeamEvent.count()).toBe(0);
 });
 
-for (const model of ['app', 'agent'] as const) {
+for (const model of ['app', 'agent', 'appAgent'] as const) {
   it(`returns a typed retryable refusal when ${model} ownership changes after anchor planning`, async () => {
     const changedOwner = user.id;
     // Inject only the deciding read, after the real transaction acquired its locks.
@@ -579,6 +579,10 @@ for (const model of ['app', 'agent'] as const) {
           const value = Reflect.get(client, field);
           if (field !== model) return typeof value === 'function' ? value.bind(client) : value;
           return new Proxy(value, { get(delegate, method) {
+            if (model === 'appAgent' && method === 'findUnique') return async (query: any) => {
+              const row = await delegate.findUnique(query);
+              return { ...row, agent: { ...row.agent, id: changedOwner } };
+            };
             if (method !== 'findUniqueOrThrow') return Reflect.get(delegate, method);
             return async (query: any) => ({ ...await delegate.findUniqueOrThrow(query), ownerUserId: changedOwner });
           } });
@@ -614,3 +618,33 @@ it('the delegated MCP list distinguishes stored NO_TEAM from legacy UNSET', asyn
   expect(text.split('\n').find(line => line.includes('Explicit'))).toContain('team placement NO_TEAM');
   expect(text.split('\n').find(line => line.includes('Legacy'))).toContain('team placement UNSET');
 });
+
+import { lockStopFence } from '../../../lib/stopSignals/state.js';
+import { advisoryWaiterPresent } from '../../../test/advisoryWaiter.js';
+for (const choice of [{}, { noTeam: true }]) {
+  it(`a cast without a reporting head does not wait for an unrelated stop fence: ${JSON.stringify(choice)}`, async () => {
+    let release!: () => void; let ready!: () => void;
+    const held = new Promise<void>(r => { release = r; });
+    const started = new Promise<void>(r => { ready = r; });
+    const blocker = db.$transaction(async tx => {
+      await lockStopFence(tx, app.id, 'exclusive'); ready(); await held;
+    }, { timeout: 30000 });
+    await started;
+    const observed = observeTransactionBackend(db);
+    let finished = false;
+    const casting = M.castWorker({}, args(choice), { ...ctx(), db: observed.db });
+    const result = casting.then((value: any) => { finished = true; return value; }, (error: unknown) => { finished = true; throw error; });
+    try {
+      const pid = await observed.backendFor(casting);
+      const deadline = Date.now() + 5000;
+      while (!finished) {
+        if (await advisoryWaiterPresent(db, { pid, key: { form: 'hashed-bigint', value: `stop-signals:${app.id}` } })) {
+          throw new Error('no-head cast waited on the unrelated stop fence');
+        }
+        if (Date.now() > deadline) throw new Error('no-head cast did not finish while the stop fence was held');
+        await new Promise(r => setTimeout(r, 25));
+      }
+      expect((await result).id).toBeTruthy();
+    } finally { release(); await blocker; await result; }
+  });
+}
