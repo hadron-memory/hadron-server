@@ -34,77 +34,120 @@ beforeEach(async () => {
 });
 
 describe('#2477 missing-loc concurrent restore', () => {
-  it('returns success or a typed outcome for both requests, never raw P2002', async () => {
+  it('restores both requests after both read the same absent node', async () => {
     expect(await db.node.count({ where: { memoryId, loc: { in: ['alpha', 'beta'] } } })).toBe(0);
-    // Isolate the restore transaction from createRevision's separate count-based
-    // label allocator: finish the two real auto-saves sequentially, then release
-    // both restores together. No production restore writes are mocked.
+
+    let releaseAutoSaves!: () => void;
+    const autoSavesDone = new Promise<void>(resolve => { releaseAutoSaves = resolve; });
+    let releaseMissingReads!: () => void;
+    const missingReadsDone = new Promise<void>(resolve => { releaseMissingReads = resolve; });
+    const missingReads: Array<{ request: number; absent: boolean }> = [];
+    const stages = new Map<Context['db'], { autoSaving: boolean; sawPrior: boolean }>();
+    let completedAutoSaves = 0;
+    // Escape hatch for an unexpected call path; the observations below then
+    // fail rather than leaving the peer waiting until transaction timeout.
+    const releaseTimer = setTimeout(() => {
+      releaseAutoSaves();
+      releaseMissingReads();
+    }, 10_000);
+
+    const requestContexts = [0, 1].map(request => {
+      const stage = { autoSaving: true, sawPrior: false };
+      const requestDb = new Proxy(db, {
+        get(target, property) {
+          if (property !== '$transaction') return Reflect.get(target, property, target);
+          return async (run: (tx: Prisma.TransactionClient) => Promise<unknown>, options?: { timeout?: number; maxWait?: number }) => {
+            if (stage.autoSaving) return db.$transaction(run, options);
+            return db.$transaction(tx => run(new Proxy(tx, {
+              get(transaction, key) {
+                if (key !== 'node') return Reflect.get(transaction, key, transaction);
+                return new Proxy(transaction.node, {
+                  get(nodes, operation) {
+                    if (operation !== 'findUnique') return Reflect.get(nodes, operation, nodes);
+                    return async (...args: Parameters<typeof nodes.findUnique>) => {
+                      const result = await Reflect.apply(nodes.findUnique, nodes, args);
+                      const query = args[0];
+                      if (!stage.sawPrior && query?.where.loc_memoryId?.loc === 'alpha'
+                        && query.where.loc_memoryId.memoryId === memoryId && query.select?.id === true) {
+                        stage.sawPrior = true;
+                        missingReads.push({ request, absent: result === null });
+                        if (missingReads.length === 2) releaseMissingReads();
+                        // Hold the REAL prior-read result, not a fabricated null.
+                        // Both restores now take the absent-row branch even if
+                        // their writes subsequently run one after the other.
+                        await missingReadsDone;
+                      }
+                      return result;
+                    };
+                  },
+                });
+              },
+            })), options);
+          };
+        },
+      });
+      stages.set(requestDb, stage);
+      return { ...context, db: requestDb };
+    });
+
+    // Isolate #2498's label allocator using two serial REAL auto-saves.
+    // Preserve exactly the context passed by restoreRevision, including its DB.
     const createRevision = sessionMutations.createRevision.bind(sessionMutations);
-    let queue = Promise.resolve();
-    let completed = 0;
-    let release!: () => void;
-    const ready = new Promise<void>(resolve => { release = resolve; });
+    let autoSaveQueue = Promise.resolve();
     const autoSave = vi.spyOn(sessionMutations, 'createRevision').mockImplementation(async (...args) => {
-      const saved = queue.then(() => createRevision(args[0], args[1], { ...args[2], db }));
-      queue = saved.then(() => undefined, () => undefined);
+      const stage = stages.get(args[2].db);
+      if (!stage) throw new Error('Unexpected auto-save database context');
+      const saved = autoSaveQueue.then(() => createRevision(...args));
+      autoSaveQueue = saved.then(() => undefined, () => undefined);
       try {
         const result = await saved;
-        if (++completed === 2) release();
-        await ready;
-        // Neither restore has started writing while the real auto-saves run.
-        expect(completed).toBe(2);
+        stage.autoSaving = false;
+        if (++completedAutoSaves === 2) releaseAutoSaves();
+        await autoSavesDone;
         return result;
       } catch (error) {
-        // Let the peer finish even if a fixture/auto-save fails.
-        release();
+        releaseAutoSaves();
+        releaseMissingReads();
         throw error;
       }
     });
-    // Hold two real DB transactions open at the missing-row precondition.
-    // Promise.all alone would also pass if the requests happened to run serially.
-    let entered = 0;
-    let startRestoring!: () => void;
-    const bothTransactions = new Promise<void>(resolve => { startRestoring = resolve; });
-    const concurrentDb = new Proxy(db, {
-      get(target, property) {
-        if (property !== '$transaction') return Reflect.get(target, property, target);
-        return async (run: (tx: Prisma.TransactionClient) => Promise<unknown>, options?: { timeout?: number; maxWait?: number }) =>
-          db.$transaction(async tx => {
-            try {
-              expect(await tx.node.count({ where: { memoryId, loc: { in: ['alpha', 'beta'] } } })).toBe(0);
-              if (++entered === 2) startRestoring();
-              await bothTransactions;
-              expect(entered).toBe(2);
-              return await run(tx);
-            } catch (error) {
-              startRestoring();
-              throw error;
-            }
-          }, options);
-      },
-    });
-    const restoreContext = { ...context, db: concurrentDb };
-    const results = await Promise.allSettled([
-      M.restoreRevision({}, { agentId, revisionLoc }, restoreContext),
-      M.restoreRevision({}, { agentId, revisionLoc }, restoreContext),
-    ]);
-    expect(entered).toBe(2);
-    expect(autoSave).toHaveBeenCalledTimes(2);
-    expect(completed).toBe(2);
-    autoSave.mockRestore();
-    for (const result of results) {
-      if (result.status === 'rejected') {
-        expect(result.reason.code, 'concurrent restore leaked raw Prisma P2002').not.toBe('P2002');
-        expect(result.reason.extensions?.code, 'restore failure must be typed').toBeTypeOf('string');
-      } else {
-        expect(result.value.revisionLoc).toBe(revisionLoc);
-      }
+
+    try {
+      const results = await Promise.allSettled(requestContexts.map(requestContext =>
+        M.restoreRevision({}, { agentId, revisionLoc }, requestContext)));
+      // Assertions live outside resolver callbacks, so an error wrapper cannot
+      // turn a failed fixture precondition into an accepted typed outcome.
+      expect(completedAutoSaves).toBe(2);
+      expect(autoSave).toHaveBeenCalledTimes(2);
+      expect(missingReads.sort((a, b) => a.request - b.request)).toEqual([
+        { request: 0, absent: true }, { request: 1, absent: true },
+      ]);
+      // Pin existing successful behavior, not an unspecified refusal contract.
+      // ANY rejection fails, including generic or nested/wrapped P2002 errors.
+      const rejections = results.flatMap(result => result.status === 'rejected' ? [{
+        code: result.reason?.code,
+        typedCode: result.reason?.extensions?.code,
+        originalCode: result.reason?.originalError?.code,
+        causeCode: result.reason?.cause?.code,
+      }] : []);
+      expect(rejections, 'Both restores must succeed, including through error wrappers').toEqual([]);
+      expect(results).toMatchObject([
+        { status: 'fulfilled', value: { revisionLoc, published: false } },
+        { status: 'fulfilled', value: { revisionLoc, published: false } },
+      ]);
+      expect(await db.node.findMany({ where: { memoryId, deletedAt: null, loc: { in: ['alpha', 'beta'] } }, select: { loc: true, content: true }, orderBy: { loc: 'asc' } }))
+        .toEqual([{ loc: 'alpha', content: 'snapshot alpha' }, { loc: 'beta', content: 'snapshot beta' }]);
+      const edges = await db.edge.findMany({ where: { memoryId, loc: 'alpha:link:beta', deletedAt: null }, include: { source: true, target: true } });
+      expect(edges).toHaveLength(1);
+      expect(edges[0].source.loc).toBe('alpha');
+      expect(edges[0].target.loc).toBe('beta');
+      // alpha/beta have no strict ancestors: this pin covers atomic upsert,
+      // not lockAncestorsForCreateMany. The separate auto-save race is #2498.
+    } finally {
+      clearTimeout(releaseTimer);
+      releaseAutoSaves();
+      releaseMissingReads();
+      autoSave.mockRestore();
     }
-    expect(results.some(r => r.status === 'fulfilled')).toBe(true);
-    expect(await db.node.findMany({ where: { memoryId, deletedAt: null, loc: { in: ['alpha', 'beta'] } }, select: { loc: true, content: true }, orderBy: { loc: 'asc' } }))
-      .toEqual([{ loc: 'alpha', content: 'snapshot alpha' }, { loc: 'beta', content: 'snapshot beta' }]);
-    const edge = await db.edge.findFirstOrThrow({ where: { memoryId, loc: 'alpha:link:beta', deletedAt: null }, include: { source: true, target: true } });
-    expect(edge.source.loc).toBe('alpha');
-    expect(edge.target.loc).toBe('beta');
-  });
+  }, 20_000);
 });
