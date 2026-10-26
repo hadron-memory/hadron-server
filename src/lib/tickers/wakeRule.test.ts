@@ -203,3 +203,14 @@ describe('#2138 §3.3 — channel checks and the ticker', () => {
     expect(run([checked(5)], [ticker({ reasons: ['every-tick'] })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
   });
 });
+
+describe('S3 versioned subtree wake routing', () => {
+  it('uses only immutable recipient IDs/global stamp and excludes own posts', () => {
+    const team = msg(1,{mentions:['team.head.all','all'],teamTagsVersion:1,teamBroadcastWorkerIds:[W]});
+    expect(run([channel('c',[team],true)])?.reasons).toEqual([{kind:'MENTION'}]);
+    expect(run([channel('c',[{...team,teamBroadcastWorkerIds:['elsewhere']}],true)])).toBeNull();
+    expect(run([channel('c',[{...team,authorWorkerId:W}],true)])).toBeNull();
+    expect(run([channel('c',[msg(2,{mentions:['team'],broadcastWakes:true,teamTagsVersion:1,teamBroadcastWorkerIds:[]})],true)])).toBeNull();
+    expect(run([channel('c',[msg(3,{mentions:['team'],broadcastWakes:true})],true)])).not.toBeNull();
+  });
+});

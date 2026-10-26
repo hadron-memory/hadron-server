@@ -1,3 +1,6 @@
+import { buildTeamSnapshot, teamTagsEnabled, teamHeadInvalid, type TeamTagSnapshot } from '../../../lib/teamTagSnapshot.js';
+import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
+import { requireWorkerReadAccess } from './resolvers.worker.js';
 // Team-chat operations — #939: createTeamChatMessage + teamChatMessages as
 // platform operations (team logic lives server-side; CLI/MCP/portal are thin
 // surfaces — the #935/#936 wrapper precedent).
@@ -31,7 +34,7 @@
 //   mentions       — lowercased mention tokens extracted server-side at write
 //   replyToSeq     — the seq this message replies to (also a `replies-to` edge)
 import { GraphQLError } from 'graphql';
-import type { Prisma } from '../../../generated/prisma/index.js';
+import { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { generateId } from '../../../lib/id.js';
 import { appendChatMessage } from '../../../lib/chatRoot.js';
@@ -369,6 +372,9 @@ export interface TeamChatMessageOut {
    * deliberately not in the SDL.
    */
   broadcastWakes: boolean;
+  teamTagsVersion?: number;
+  teamBroadcastWorkerIds?: string[];
+  teamTags?: TeamTagSnapshot[] | null;
 }
 
 type MessageRow = {
@@ -405,7 +411,7 @@ function messageUrn(memBareUrn: string | null, loc: string | null): string | nul
 }
 
 /** Decrypt a message row and project it onto the GraphQL shape. */
-function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo, memBareUrn: string | null): TeamChatMessageOut {
+function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo, memBareUrn: string | null, metadataVisible = false): TeamChatMessageOut {
   const dec = decryptOrSessionExpired({ content: row.content, data: row.data }, memEncInfo);
   const env = (dec.data as Record<string, unknown> | null) ?? {};
   return {
@@ -423,6 +429,9 @@ function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo, memBa
     replyToSeq: typeof env.replyToSeq === 'number' ? env.replyToSeq : null,
     mentions: Array.isArray(env.mentions) ? env.mentions.filter((m): m is string => typeof m === 'string') : [],
     broadcastWakes: env.broadcastWakes === true,
+    teamTagsVersion: typeof env.teamTagsVersion === 'number' ? env.teamTagsVersion : undefined,
+    teamBroadcastWorkerIds: Array.isArray(env.teamBroadcastWorkerIds) ? env.teamBroadcastWorkerIds.filter((id): id is string => typeof id === 'string') : [],
+    teamTags: metadataVisible && env.teamTagsVersion === 1 && Array.isArray(env.teamTags) ? env.teamTags.filter((t): t is TeamTagSnapshot => !!t && typeof t === 'object' && typeof t.headId === 'string' && typeof t.label === 'string') : null,
   };
 }
 
@@ -971,6 +980,8 @@ async function postToChannelRoot(
   // #1842: the body tokens are only HALF the notified set — inside the append
   // transaction the reply target's author joins it (cor:agt:020:04 rev17), so
   // `mentions` is finalized there, before authority, stamps and sealing.
+  const useTeamTags = teamTagsEnabled();
+  const metadataVisible = await canReadTeamMetadata(ctx, app?.id ?? null);
   const bodyMentions = opts.system ? [] : extractMentions(body);
   let mentions = bodyMentions;
   if (replyToSeq != null) envelope.replyToSeq = replyToSeq;
@@ -1090,7 +1101,17 @@ async function postToChannelRoot(
     // #1748 (N3): who may wake everyone is decided NOW, here, on live authority held through the commit, and
     // stamped; nothing re-decides it later. The authority is taken BEFORE the resume below (which locks the Worker
     // row FOR UPDATE) and the stamps after it, so the Worker row is never taken SHARE then upgraded (Diego, cycle 3).
-    const stampAuthority = mentions.length > 0 ? { authority: await lockStampAuthority(ctx, tx, app) } : null;
+    let teamGraphHeld = false;
+    const holdTeamGraph = async () => { await lockAppReportsTo(tx, app!.id, 'shared'); teamGraphHeld = true; };
+    const stampAuthority = mentions.length > 0 || (useTeamTags && app && !opts.system)
+      ? { authority: await lockStampAuthority(ctx, tx, app, useTeamTags && app && !opts.system ? holdTeamGraph : undefined) } : null;
+    if (useTeamTags && app && !opts.system && !teamGraphHeld) {
+      throw new GraphQLError('Cannot post team metadata for an unavailable App.', { extensions: { code: 'APP_UNINSTALLED' } });
+    }
+    if (useTeamTags) {
+      const workers = !opts.system && app ? await tx.worker.findMany({ where: { appId: app.id }, select: { id: true, name: true, reportsToWorkerId: true, retiredAt: true } }) : [];
+      Object.assign(envelope, buildTeamSnapshot(workers, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, mentions));
+    }
     // #1617 B — resume the author's lapsed session in THIS transaction, so it
     // commits with the message or not at all (#1625 review, Baloo P2-1). Every
     // condition is re-decided under the App and Worker locks.
@@ -1098,7 +1119,7 @@ async function postToChannelRoot(
       throw sessionNotLiveError(sessionRef!);
     }
     if (stampAuthority) {
-      Object.assign(envelope, await wakeStampsFor(ctx, tx, app, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, mentions, stampAuthority));
+      Object.assign(envelope, await wakeStampsFor(ctx, tx, app, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, useTeamTags ? mentions.filter(token => token !== 'team') : mentions, stampAuthority));
     }
     // The envelope is sealed after the stamps are in it.
     const msgFields = translateSessionExpired(memEncInfo, () =>
@@ -1179,6 +1200,9 @@ async function postToChannelRoot(
     replyToSeq: replyToSeq ?? null,
     mentions,
     broadcastWakes: envelope.broadcastWakes === true,
+    teamTagsVersion: envelope.teamTagsVersion as number | undefined,
+    teamBroadcastWorkerIds: envelope.teamBroadcastWorkerIds as string[] | undefined,
+    teamTags: metadataVisible ? (envelope.teamTags as TeamTagSnapshot[] | undefined) ?? null : null,
   };
 }
 
@@ -1256,6 +1280,13 @@ export async function postSystemNotice(
  * staff and members (an unresolvable or foreign ref collapses to the empty
  * page — never an existence oracle).
  */
+async function canReadTeamMetadata(ctx: Context, appId: string | null): Promise<boolean> {
+  if (!appId) return false;
+  const app = await ctx.db.app.findUnique({ where: { id: appId } });
+  if (!app || app.deletedAt) return false;
+  try { await requireWorkerReadAccess(ctx, app); return true; } catch { return false; }
+}
+
 async function readChannelRoot(
   ctx: Context,
   // #1196: null when the host memory belongs to no App. Used ONLY to resolve a
@@ -1265,9 +1296,20 @@ async function readChannelRoot(
   // P1 on PR #941). Everything else this function does is memory-scoped.
   appId: string | null,
   root: ChatRootRow,
-  args: { sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; limit?: number | null; offset?: number | null },
+  args: { sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null; limit?: number | null; offset?: number | null },
 ): Promise<{ items: TeamChatMessageOut[]; total: number }> {
-  const { sinceSeq, beforeSeq, mentionsRef, limit, offset } = args;
+  const { sinceSeq, beforeSeq, mentionsRef, teamHeadRef, untagged, limit, offset } = args;
+  const metadataVisible = await canReadTeamMetadata(ctx, appId);
+  const teamFiltered = teamHeadRef != null || untagged != null;
+  if (teamFiltered && !metadataVisible) throw new GraphQLError('Team metadata is unavailable in this Channel.', { extensions: { code: 'TEAM_CHAT_TEAM_METADATA_FORBIDDEN' } });
+  if (teamHeadRef != null && untagged != null) throw new GraphQLError('teamHeadRef and untagged are mutually exclusive.', { extensions: { code: 'BAD_USER_INPUT' } });
+  let selectedHead: string | null = null;
+  if (teamHeadRef != null) {
+    // The wire accepts stable IDs only, including authorized retired identities.
+    const head = await ctx.db.worker.findFirst({ where: { id: teamHeadRef, appId: appId! }, select: { id: true } });
+    if (!head) throw teamHeadInvalid();
+    selectedHead = head.id;
+  }
   const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
   const memBareUrn = await hostMemoryUrn(ctx, root.memoryId);
   const take = clampListTake(limit);
@@ -1336,18 +1378,25 @@ async function readChannelRoot(
     );
   };
 
-  if (mentionsRef) {
-    const resolved = appId === null ? null : await resolveMentionTokens(ctx, appId, mentionsRef);
-    if (!resolved) return { items: [], total: 0 };
-    const { tokens, workerId } = resolved;
+  if (teamFiltered && !memEncInfo.isEncrypted) {
+    const predicate: Prisma.NodeWhereInput = selectedHead
+      ? { data: { path: ['teamHeadIds'], array_contains: [selectedHead] } }
+      : { OR: [{ data: { path: ['teamHeadIds'], equals: Prisma.DbNull } }, { data: { path: ['teamHeadIds'], equals: Prisma.AnyNull } }, { data: { path: ['teamHeadIds'], equals: [] } }] };
+    const noHeads = predicate;
+    where.AND = untagged === false ? [{ NOT: noHeads }] : [predicate];
+  }
+  if (mentionsRef || (teamFiltered && memEncInfo.isEncrypted)) {
+    const resolved = mentionsRef && appId !== null ? await resolveMentionTokens(ctx, appId, mentionsRef) : null;
+    if (mentionsRef && !resolved) return { items: [], total: 0 };
+    const { tokens, workerId } = resolved ?? { tokens: [], workerId: null };
     // #2020: a worker sees what reaches it (lib/mentionReach.ts); a user, its handle.
     const matches = (msg: TeamChatMessageOut): boolean =>
-      workerId !== null ? reachesWorker(msg, [workerId], tokens) : msg.mentions.some((t) => tokens.includes(t));
+      (!mentionsRef || (workerId !== null ? reachesWorker(msg, [workerId], tokens) : msg.mentions.some((t) => tokens.includes(t)))) && (!teamFiltered || !memEncInfo.isEncrypted || (selectedHead ? !!msg.teamTags?.some(t => t.headId === selectedHead) : untagged === false ? !!msg.teamTags?.length : !msg.teamTags?.length));
     // Always scanned ASCENDING regardless of paging direction: this branch
     // filters in memory, so the direction is applied to the RESULT below.
     const rows = await ctx.db.node.findMany({ where, orderBy, select });
     const matching = rows
-      .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo, memBareUrn) }))
+      .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo, memBareUrn, metadataVisible) }))
       .filter((m) => matches(m.msg));
     const page =
       take === 0
@@ -1378,7 +1427,7 @@ async function readChannelRoot(
   // SESSION_EXPIRED — so recording first would count reads for a transcript
   // the caller never received. The mentions branch above already projects
   // first; this makes the two branches agree.
-  const items = rows.map((r) => projectMessage(r, memEncInfo, memBareUrn));
+  const items = rows.map((r) => projectMessage(r, memEncInfo, memBareUrn, metadataVisible));
   recordRead(rows);
   return { items, total };
 }
@@ -1487,7 +1536,7 @@ export const teamChatQueries = {
       advanceReadState?: boolean | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
-      mentionsRef?: string | null;
+      mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null;
       limit?: number | null;
       offset?: number | null;
     },
@@ -1555,7 +1604,7 @@ export const teamChatQueries = {
       advanceReadState?: boolean | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
-      mentionsRef?: string | null;
+      mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null;
       limit?: number | null;
       offset?: number | null;
       expectedIncarnation?: number | null;

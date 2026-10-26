@@ -1,3 +1,4 @@
+import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // Workers — #974 (re-cut): the named casting of an installed Agent into an
 // App (cor:dmo:050:11, cor:agt:020:01/:02). A persona is universal DRESSING on
 // an Agent (`personaRole` + the `systemPrompt` template); the Worker is the
@@ -39,7 +40,7 @@ import { isEmailUserRef, resolveUserRefOrEmail } from '../../../lib/entityRef/us
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { normalizeUrnForLookup, hasSchemePrefix } from '../../../lib/urn.js';
-import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from '../../../lib/mentionToken.js';
+import { RESERVED_WORKER_MENTION_TOKENS, mentionTokenOf } from '../../../lib/mentionToken.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { nextFreeWorkerSlug } from '../../../lib/workerSlug.js';
 import {
@@ -870,8 +871,9 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
   // that merely contains the word ("teamster") is not. A validation refusal
   // like WORKER_NAME_REQUIRED; a worker already so named keeps the narrow
   // reply-exception of #1867 instead (cor:agt:020:04).
+  if (requestedName && reservedTeamPrefix(requestedName)) throw new GraphQLError('Worker mention tokens starting with team. are reserved.', { extensions: { code: 'WORKER_NAME_RESERVED_TEAM_PREFIX' } });
   const token = requestedName != null ? mentionTokenOf(requestedName) : null;
-  if (token != null && (BROADCAST_MENTION_TOKENS as readonly string[]).includes(token)) {
+  if (token != null && (RESERVED_WORKER_MENTION_TOKENS as readonly string[]).includes(token)) {
     throw new GraphQLError(
       `A worker named ${JSON.stringify(requestedName)} would mention-broadcast: its token @${token} routes a reply to every registered destination. Choose another name.`,
       { extensions: { code: 'WORKER_NAME_RESERVED', token } },
