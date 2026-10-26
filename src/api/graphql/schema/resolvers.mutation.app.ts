@@ -73,6 +73,7 @@ import { assertNoMintedCorpusCascade } from '../../../lib/mintedSpecPermanence.j
 import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { forbiddenError } from '../../../lib/refusals.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -1089,7 +1090,7 @@ export const appMutations = {
       // rights, and platform admins manage org Apps. That is safe only because
       // joinApp never self-grants `owner` (#1714).
       if (!(await callerManagesAppMembers(ctx, app, resolvedAppId))) {
-        throw new Error('Forbidden: only org admins or App owners can manage members');
+        throw forbiddenError('Forbidden: only org admins or App owners can manage members');
       }
 
       // Target user resolved AFTER the authorization gate above (which keys off
@@ -1110,7 +1111,7 @@ export const appMutations = {
               throw new Error('App ownership changed; retry member management');
             }
             if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId))) {
-              throw new Error('Forbidden: only org admins or App owners can manage members');
+              throw forbiddenError('Forbidden: only org admins or App owners can manage members');
             }
           },
           (tx) => ensureAppMember(tx, resolvedAppId, resolvedUserId, role, {
@@ -1172,7 +1173,7 @@ export const appMutations = {
       const resolvedAppId = await resolveAppRefArg(ctx.db, { ref: appRef, id: appId });
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       const forbidRemove = () =>
-        new Error('Forbidden: only org admins, App owners, or the user themselves can remove members');
+        forbiddenError('Forbidden: only org admins, App owners, or the user themselves can remove members');
 
       const authorizedByRole = await callerManagesAppMembers(ctx, app, resolvedAppId);
       let resolvedUserId: string;

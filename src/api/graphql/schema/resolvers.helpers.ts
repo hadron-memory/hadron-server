@@ -87,6 +87,7 @@ import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemor
 import { isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { installWriteAllowed } from './installMemory.js';
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
  * Marks a Node row whose `content` field answers with the STORED text unless a
@@ -845,7 +846,7 @@ export async function requireAgentMemoryGrant(
   // AgentMemoryItem. Check class AFTER concealment: an unreadable memory must
   // still answer like a miss, without revealing its class (#1349, #1101).
   if (memory.class === 'system') {
-    throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
+    throw new GraphQLError('Agent system memories can only be attached via systemMemoryId, not as a memory item', { extensions: { code: 'BAD_USER_INPUT' } });
   }
   // #1101: these classes have no App audience to grant. A personal share is
   // per-user, and a private memory is not shareable.
@@ -2655,7 +2656,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   }
 
   // JWT user path
-  if (!ctx.userId) throw new Error('Unauthenticated');
+  if (!ctx.userId) throw unauthenticatedError();
 
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id: memoryId },

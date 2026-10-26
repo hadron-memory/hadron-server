@@ -27,6 +27,7 @@ import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../../lib/
 import { lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { validateLoc } from '../../../lib/validateLoc.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
+import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
  * A Channel row as a field resolver may receive it: the `channels` page
@@ -121,8 +122,8 @@ export const channelMutations = {
     { input }: { input: { memoryRef: string; loc: string; name: string; description?: string | null } },
     ctx: Context,
   ): Promise<Channel> => {
-    if (ctx.impersonation) throw new Error('Forbidden');
-    if (!ctx.userId) throw new Error('Unauthenticated');
+    if (ctx.impersonation) throw forbiddenError();
+    if (!ctx.userId) throw unauthenticatedError();
     const memoryRef = input.memoryRef.trim();
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     // #1316: a memory the caller cannot open answers as resolveMemoryRef's miss.
@@ -153,7 +154,7 @@ export const channelMutations = {
     { ref, input }: { ref: string; input: { name?: string | null; description?: string | null } },
     ctx: Context,
   ): Promise<Channel> => {
-    if (ctx.impersonation) throw new Error('Forbidden');
+    if (ctx.impersonation) throw forbiddenError();
     const row = await writableChannel(ctx, ref);
     const name = input.name != null ? input.name.trim() : undefined;
     if (name !== undefined && !name) throw new GraphQLError('name must be non-empty.', { extensions: { code: 'BAD_USER_INPUT' } });
@@ -168,7 +169,7 @@ export const channelMutations = {
   },
 
   deleteChannel: async (_: unknown, { ref }: { ref: string }, ctx: Context): Promise<boolean> => {
-    if (ctx.impersonation) throw new Error('Forbidden');
+    if (ctx.impersonation) throw forbiddenError();
     const row = await writableChannel(ctx, ref);
     const now = new Date();
     await ctx.db.$transaction(async (tx) => {
