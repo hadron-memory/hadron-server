@@ -30,6 +30,7 @@ import { AmbiguousLegacyUrnError } from '../../lib/entityRef/errors.js';
 import { EntityNotFoundError } from '../../lib/entityRef/entityNotFound.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
 import { QueryTooComplexError } from './admissionComplexity.js';
+import { GitCommandError } from '../../integrations/github/execGit.js';
 
 interface ClientErrorMapping {
   matches: (err: unknown) => boolean;
@@ -113,6 +114,13 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // inconsistency is DISCOVERED, and it does not exist yet (#1140).
   mapping(
     (err): err is AssetUploadError => err instanceof AssetUploadError,
+    (err) => ({ code: err.code }),
+    { silenceInSentry: false },
+  ),
+  // #1578/#1789: git failures carry a FIXED message by design (argv and stderr can hold the installation token), so the
+  // text is safe and the code is the class's own. Still reported: a failing sync is ours to know about.
+  mapping(
+    (err): err is GitCommandError => err instanceof GitCommandError,
     (err) => ({ code: err.code }),
     { silenceInSentry: false },
   ),
@@ -223,7 +231,7 @@ export function formatGraphQLError(
   // FORBIDDEN, ...), and those keep their text. A fault shows the generic code and a request id; the complete exception,
   // including a Prisma message with query arguments (#1688), goes to the log under that id.
   const code = formattedError.extensions?.code;
-  if (code === undefined || code === INTERNAL_ERROR_CODE) {
+  if ((code === undefined || code === INTERNAL_ERROR_CODE) && !isTrustedRefusal(original)) {
     const requestId = faultRequestId();
     logInternalFault('graphql', Array.isArray(formattedError.path) ? formattedError.path.join('.') : 'request', requestId, original);
     return {

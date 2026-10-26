@@ -109,13 +109,19 @@ describe('#2087 formatter diagnostics supplied by callers',()=>{
     const error=new Prisma.PrismaClientValidationError('PRIVATE_QUERY_2087',{clientVersion:Prisma.prismaVersion.client});
     const result=formatGraphQLError({message:error.message,extensions:{code:'INTERNAL_SERVER_ERROR',...diagnostics}},error);
     noDiagnostics(result); expect(result.extensions?.code).toBe('INTERNAL_SERVER_ERROR');
-    expect(result.message).toBe('Unable to complete this request. Please try again.');
+    expect(result.message).toBe('Internal server error.'); expect(result.extensions?.requestId).toEqual(expect.any(String));
     expect(error.message).toBe('PRIVATE_QUERY_2087');
   });
-  it.each([new UrnNotQualifiedError('bad',undefined,'app'),new GraphQLError('typed',{extensions:{code:'APP_NOT_FOUND'}}),new Error('internal')])('strips diagnostics without losing public metadata (%s)',error=>{
+  it.each([new UrnNotQualifiedError('bad',undefined,'app'),new GraphQLError('typed',{extensions:{code:'APP_NOT_FOUND'}})])('strips diagnostics without losing public metadata (%s)',error=>{
     const result=formatGraphQLError({message:error.message,extensions:{code:'INTERNAL_SERVER_ERROR',appRef:absent,...diagnostics}},error);
     noDiagnostics(result); expect(result.extensions?.appRef).toBe(absent);
     expect(result.extensions?.code).toBe(error instanceof UrnNotQualifiedError?'URN_NOT_QUALIFIED':'INTERNAL_SERVER_ERROR');
+  });
+  it('a plain Error is a fault (#1789): generic envelope, no supplied metadata, no diagnostics',()=>{
+    const error=new Error('internal');
+    const result=formatGraphQLError({message:error.message,extensions:{code:'INTERNAL_SERVER_ERROR',appRef:absent,...diagnostics}},error);
+    noDiagnostics(result); expect(result.message).toBe('Internal server error.');
+    expect(result.extensions).toEqual({code:'INTERNAL_SERVER_ERROR',requestId:expect.any(String)});
   });
 });
 

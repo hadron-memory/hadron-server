@@ -846,7 +846,7 @@ export async function requireAgentMemoryGrant(
   // AgentMemoryItem. Check class AFTER concealment: an unreadable memory must
   // still answer like a miss, without revealing its class (#1349, #1101).
   if (memory.class === 'system') {
-    throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
+    throw new GraphQLError('Agent system memories can only be attached via systemMemoryId, not as a memory item', { extensions: { code: 'BAD_USER_INPUT' } });
   }
   // #1101: these classes have no App audience to grant. A personal share is
   // per-user, and a private memory is not shareable.

@@ -191,8 +191,6 @@ export async function createServer(): Promise<Express> {
   // configured keyring refuses boot without echoing secret values.
   readTeamRecordKeys();
   const app = express();
-  // #1789: the request id exists before anything that can fail, including body parsing and auth.
-  app.use(assignRequestId);
 
   // Trust-proxy for spec 025-oauth-for-mcp (FR-006). Express must know
   // which upstream proxies it can trust so `req.protocol` resolves to
@@ -237,6 +235,9 @@ export async function createServer(): Promise<Express> {
   // #1925: before the global CORS middleware, which allows the portal's origin WITH credentials; this
   // unauthenticated read answers any origin without them. See src/api/capabilities.ts.
   mountCapabilitiesRoute(app);
+  // #1789: the request id exists before anything that can fail, including body parsing and auth. After the capabilities
+  // route on purpose: its answer is byte-identical and ETag-cached, and a per-request header would break both.
+  app.use(assignRequestId);
   app.use(
     cors({
       origin: process.env.FRONTEND_URL || 'http://localhost:5173',

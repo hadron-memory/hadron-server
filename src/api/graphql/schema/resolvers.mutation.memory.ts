@@ -2164,7 +2164,9 @@ export const memoryMutations = {
       const result = await syncGraphFromGithub(memory);
       if (result.error) {
         if (result.errorCode) throw new GraphQLError(result.error, { extensions: { code: result.errorCode } });
-        throw new Error(result.error);
+        // #1789: the text is the stored `Memory.syncError` the caller can already read, so it keeps its text; it needs a code
+        // of its own to be a typed refusal rather than a fault.
+        throw new GraphQLError(result.error, { extensions: { code: 'SYNC_FAILED' } });
       }
 
       // #1061 — one write per node the sync actually wrote. This mutation and
