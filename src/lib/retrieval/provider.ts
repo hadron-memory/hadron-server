@@ -105,6 +105,9 @@ export interface FilterWhereOpts {
 
 export interface LexicalSearchOpts {
   db: PrismaClient;
+  /** #2421: opt-in role-task candidate set and abstract-only matching; ordinary search unchanged. */
+  candidateNodeIds?: string[];
+  abstractOnly?: boolean;
   /** Boolean surface grammar (see tsquery.ts). */
   query: string;
   memoryIds: string[];
@@ -140,6 +143,9 @@ export interface RegexSearchOpts {
 
 export interface VectorSearchOpts {
   db: PrismaClient;
+  /** #2421: filter before the vector window, not after its cap. */
+  candidateNodeIds?: string[];
+  abstractOnly?: boolean;
   queryEmbedding: number[];
   memoryIds: string[];
   limit: number;

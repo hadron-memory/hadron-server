@@ -119,16 +119,16 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
     'hadron_agent_tasks',
     "List an Agent's tasks (cor:dmo:050:15): every runnable node in its effective system memory, across its base chain, and every task the tasks index (Agent.tasksIndexRef) of an Agent in the chain lists, each once. A task an index lists carries that edge's name as its Trigger; a task no index lists has none. A base's task keeps its own URN and says which Agent it is inherited from. Readable by whoever may read the Agent's system memory. Returns the same list as GraphQL agentTaskList. To act on a task, follow the Trigger that matches your situation and read the task by its URN; for an inherited one, read it at its 'Read through' address (the same loc in this Agent's own system memory), since you may be able to read the Agent and not its base.",
     SHAPE_HADRON_AGENT_TASKS,
-    async ({ agentRef: ref }) => {
+    async ({ agentRef: ref, symptom, limit }) => {
       try {
         const { id } = await resolveAgentRef(db, ref);
-        const entries = await listAgentTasks(db, auth, id, ref);
+        const entries = await listAgentTasks(db, auth, id, ref, { symptom, limit });
         if (entries.length === 0) return textResult(`No tasks for Agent ${ref}.`);
         const urns = await nodeUrns(db, entries.map((e) => e.node));
         const child = await systemMemoryUrn(db, id);
         const lines = [`${entries.length} task(s) for Agent ${ref}:`];
         for (const e of entries) {
-          lines.push(...entryLines(e.node, urns.get(e.node.id)!, e.trigger ? [`Trigger: ${e.trigger}`] : [], child));
+          lines.push(...entryLines(e.node, urns.get(e.node.id)!, [...(e.trigger ? [`Trigger: ${e.trigger}`] : []), ...(e.matchedBy ? [`Abstract: ${e.node.abstract}`, `Matched by: ${e.matchedBy}`] : [])], child));
         }
         return textResult(lines.join('\n'));
       } catch (e) {
@@ -226,7 +226,7 @@ const indexRef = (which: 'tasks' | 'processes', spec: string) => z.string().min(
 // function- or block-scoped binding, so `tsc` rejects one that captures `auth` or any other
 // per-session value). Every MCP session registers these same objects instead of rebuilding ~15 MB.
 
-const SHAPE_HADRON_AGENT_TASKS = { agentRef };
+const SHAPE_HADRON_AGENT_TASKS = { agentRef, symptom: z.string().optional().describe('Situation to match against runnable effective-chain task abstracts; omit for the unchanged full list.'), limit: z.number().int().positive().optional().describe('Symptom candidates to return (default 3, values above 3 clamp to 3); ignored without symptom.') };
 
 const SHAPE_HADRON_AGENT_PROCESSES = { agentRef };
 

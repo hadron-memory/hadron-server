@@ -66,9 +66,9 @@ export const agentQueries = {
      * index lists, each once, with the listing edge's trigger where one exists.
      * hadron_agent_tasks returns the same list (src/lib/agentDefinitionLists.ts).
      */
-    agentTaskList: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+    agentTaskList: async (_: unknown, { ref, symptom, limit }: { ref: string; symptom?: string | null; limit?: number | null }, ctx: Context) => {
       const { id } = await resolveAgentRef(ctx.db, ref);
-      return listedEntries(ctx, id, await listAgentTasks(ctx.db, ctx, id, ref));
+      return listedEntries(ctx, id, await listAgentTasks(ctx.db, ctx, id, ref, { symptom, limit }));
     },
 
     /**
