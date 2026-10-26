@@ -13,7 +13,7 @@ import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, resolveInherit
 import { chatByline } from './chatByline.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { whoamiSessionFilter } from './whoamiSessionFilter.js';
-import { appPrincipalSessionWriteAllowed, ownsSession } from '../lib/sessionOwnership.js';
+import { appPrincipalSessionWriteAllowed } from '../lib/sessionOwnership.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentGovernedError, isCommentGovernedError } from '../lib/comments/index.js';
@@ -2740,22 +2740,21 @@ export function createMcpServerInstance(
   /**
    * #2493 (cor:dmo:050:11): the explicit `session` argument of a recovery read, as the session the caller is acting as.
    * A reconnecting principal carries no `auth.sessionId`, yet its open session finishes under the agent and role it was
-   * bound with, so the argument selects that placement. It is never trusted as a bare id: the caller must own the
-   * session (the binding rule, impersonation never) and, as a user, still be entitled to drive it, exactly as the
-   * heartbeat above requires. Anything else is no session, and the read serves the live row.
+   * bound with, so the argument selects that placement. It is never trusted as a bare id: it must pass
+   * `validateSessionBinding` (the one check behind X-Hadron-Session and the connection binding) and, as a user, the
+   * caller must still be entitled to drive it, as the heartbeat above requires. Anything else is no session.
    */
   async function explicitActingSessionId(sessionRef?: string | null): Promise<string | undefined> {
     const id = typeof sessionRef === 'string' ? sessionRef.trim() : '';
-    if (!id || auth.impersonation) return undefined;
+    if (!id) return undefined;
     try {
-      const row = await db.session.findFirst({
-        where: { id, endedAt: null, deletedAt: null },
-        select: { userId: true, appId: true, launchOperationId: true },
-      });
-      if (!row || !ownsSession(auth, row)) return undefined;
+      // The ONE binding check (#934): open, not hard-expired, not dormant, the caller's own, never under impersonation.
+      const bound = await validateSessionBinding(db, auth, id);
+      if (!bound) return undefined;
       if (auth.userId && !(await callerStillDrives(id))) return undefined;
-      return id;
+      return bound.sessionId;
     } catch {
+      // Unrecoverable here: serve the live row, the same answer as no session.
       return undefined;
     }
   }

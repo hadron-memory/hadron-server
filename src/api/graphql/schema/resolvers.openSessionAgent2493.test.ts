@@ -160,4 +160,35 @@ describe('#2493 hadron_get_worker recovery: the explicit session argument select
     await db.session.update({ where: { id: open.id }, data: { endedAt: new Date() } });
     expect(await read(admin, open.id)).toContain('B-PROMPT');
   });
+
+  it('the binding rule is the shared one: a hard-expired and a dormant session read the live row (each pinned on its own)', async () => {
+    const open = await bind();
+    await change();
+    await db.session.update({ where: { id: open.id }, data: { expiresAt: new Date(Date.now() - 60_000) } });
+    expect(await read(admin, open.id)).toContain('B-PROMPT');
+    // Dormant: no hard expiry, nobody drove it for longer than the App's threshold.
+    const old = new Date(Date.now() - 400 * 24 * 3600 * 1000);
+    await db.session.update({ where: { id: open.id }, data: { expiresAt: null, startedAt: old, updatedAt: old } });
+    await db.app.update({ where: { id: app.id }, data: { sessionDormancyDays: 30 } });
+    expect(await read(admin, open.id)).toContain('B-PROMPT');
+    await db.session.update({ where: { id: open.id }, data: { startedAt: new Date(), updatedAt: new Date() } });
+    expect(await read(admin, open.id)).toContain('A-PROMPT');
+  });
+
+  it('impersonation never names a session; an App key of ANOTHER App does not own it (each pinned on its own)', async () => {
+    const open = await bind();
+    await change();
+    const imp = createTestableMcpServer({ userId: admin.id, appId: app.id, roles: [], clientId: `user:${admin.id}`, impersonation: { sessionId: generateId(), actorUserId: admin.id, orgId: org.id, expiresAt: new Date(Date.now() + 60_000) } } as any);
+    expect(await imp.callToolText('hadron_get_worker', { workerRef: worker.id, session: open.id })).not.toContain('A-PROMPT');
+    const other = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
+    const foreign = createTestableMcpServer({ appId: other.id, roles: [] } as any);
+    expect(await foreign.callToolText('hadron_get_worker', { workerRef: worker.id, session: open.id })).not.toContain('A-PROMPT');
+  });
+
+  it('a user who owns the session but is no longer a participant of its App reads the live row (callerStillDrives, on its own)', async () => {
+    const open = await bind();
+    await change();
+    await db.orgMember.deleteMany({ where: { organizationId: org.id, userId: admin.id } });
+    expect(await read(admin, open.id)).not.toContain('A-PROMPT');
+  });
 });
