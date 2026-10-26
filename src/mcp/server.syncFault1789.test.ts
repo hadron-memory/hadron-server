@@ -35,6 +35,13 @@ describe('hadron_sync_graph failure classification (#1789)', () => {
     expect(r.content[0].text).toMatch(/Request id/i);
   });
 
+  it('a fault with an empty message is still a fault, never success', async () => {
+    vi.mocked(syncGraphFromGithub).mockResolvedValue({ error: '', fault: true });
+    const r = await sync();
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toMatch(/Request id/i);
+  });
+
   it('a typed sync refusal keeps its text', async () => {
     vi.mocked(syncGraphFromGithub).mockResolvedValue({ error: 'Invalid node name in repo', errorCode: 'BAD_USER_INPUT' });
     const r = await sync();

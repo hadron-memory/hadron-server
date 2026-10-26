@@ -2162,10 +2162,10 @@ export const memoryMutations = {
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory, 'CONTRIBUTOR'));
 
       const result = await syncGraphFromGithub(memory);
+      // `fault` is judged on its own: an exception with an empty message must not read as success.
+      if (result.fault) throw new Error(result.error ?? 'sync fault');
       if (result.error) {
         if (result.errorCode) throw new GraphQLError(result.error, { extensions: { code: result.errorCode } });
-        // An unexpected exception's text (driver, filesystem, git) is a fault: plain Error => generic envelope + request id.
-        if (result.fault) throw new Error(result.error);
         // #1789: the text is the stored `Memory.syncError` the caller can already read, so it keeps its text; it needs a code
         // of its own to be a typed refusal rather than a fault.
         throw new GraphQLError(result.error, { extensions: { code: 'SYNC_FAILED' } });

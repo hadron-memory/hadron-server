@@ -11143,7 +11143,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
       const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
 
-      if (result.error && result.fault) throw new Error(result.error);
+      if (result.fault) throw new Error(result.error ?? 'sync fault');
       if (result.error) return refusalResult(`Sync failed${result.errorCode ? ` [${result.errorCode}]` : ''}: ${result.error}`);
       // #1061 — one write per node the sync actually wrote. This tool is the
       // ONE entry point to a git sync that has a principal to attribute to; the
