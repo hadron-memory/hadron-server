@@ -5979,7 +5979,7 @@ export const typeDefs = `#graphql
   """
   One headless run — the audit record AND (v1) the activation: policy
   snapshot, live budgets (zeroing halts the run), lifecycle, trigger
-  provenance. Spec cor:agt:010:02.
+  provenance. Spec hrn:node:hadronmemory.com:specs:cor:agt:010:02.
   """
   type AppRun {
     id: ID!
