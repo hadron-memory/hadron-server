@@ -17,6 +17,7 @@ import {
   getAccessibleMemoryIds,
   requireMemoryWriteAccess,
   concealUnreadableDenial,
+  loadReadableMemoryRecord,
   resolveOrgScope,
 } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -211,7 +212,9 @@ export const channelMutations = {
 
 export const channelFieldResolvers = {
   Channel: {
-    memory: (c: Channel, _: unknown, ctx: Context) => ctx.db.memory.findUnique({ where: { id: c.memoryId } }),
+    // #2509 (cor:acl:110, cor:api:140:03): the record as Query.memory answers it to this caller, else null. The
+    // channel list that handed this row out authorized the CHANNEL; a preloaded host memory authorizes nothing.
+    memory: (c: Channel, _: unknown, ctx: Context) => loadReadableMemoryRecord(ctx, c.memoryId),
 
     /**
      * #1171 — the Channel's address as ONE string every `channelRef` accepts:
