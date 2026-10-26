@@ -1375,6 +1375,18 @@ export const typeDefs = `#graphql
     node: Node!
     "The name of the index edge that lists it; null for a task no index edge lists."
     trigger: String
+    "#2421 experimental symptom search: which retriever ranked this task; null on the unfiltered list."
+    matchedBy: AgentTaskMatchedBy
+  }
+
+  "#2421 experimental symptom search: membership in the hybrid ranking inputs."
+  enum AgentTaskMatchedBy {
+    "Ranked by the vector retriever."
+    VECTOR
+    "Ranked by the keyword retriever."
+    KEYWORD
+    "Ranked by both retrievers."
+    BOTH
   }
 
   "#1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:16) - how an Agent takes part in a process."
@@ -8519,8 +8531,13 @@ export const typeDefs = `#graphql
     listed task outside the chain's memories is returned only when its own
     memory is readable too. Refused as AGENT_NOT_FOUND otherwise. The MCP tool
     hadron_agent_tasks returns the same list. Accepts the Agent's ID or URN.
+    #2421 experiment: optional symptom ranks only runnable effective-chain tasks
+    with non-empty abstracts; summary vectors and abstract-only lexical matches
+    share hybrid ranking. At most 3 candidates (limit defaults to 3, larger
+    values clamp); empty symptom or non-positive limit is BAD_USER_INPUT.
+    Without symptom the list is unchanged. matchedBy identifies ranking inputs.
     """
-    agentTaskList(ref: ID!): [AgentListedTask!]!
+    agentTaskList(ref: ID!, symptom: String, limit: Int): [AgentListedTask!]!
     """
     #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:16) - an Agent's processes: the ones its own
     processes index lists (STARTS, with the edge's trigger), then the ones with

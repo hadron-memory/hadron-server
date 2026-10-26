@@ -346,6 +346,9 @@ export async function vectorSearchNodes(
     queryEmbedding: number[];
     limit: number;
     candidateFactor?: number;
+    /** #2421: constrain summary search before ANN ranking. */
+    abstractOnly?: boolean;
+    candidateNodeIds?: string[];
     /** #1345 — told whether the raw ANN window was exhausted (see below). */
     onWindow?: (w: { exhausted: boolean }) => void;
     /** #1608 — content, comments or both (see the doc above). Absent = ALL (no restriction). */
@@ -356,6 +359,9 @@ export async function vectorSearchNodes(
     opts.onWindow?.({ exhausted: true });
     return [];
   }
+  const candidateSql = opts.candidateNodeIds == null ? Prisma.empty : opts.candidateNodeIds.length
+    ? Prisma.sql`AND ne.node_id IN (${Prisma.join(opts.candidateNodeIds)})` : Prisma.sql`AND FALSE`;
+  const abstractSql = opts.abstractOnly ? Prisma.sql`AND ne.kind = 'abstract'` : Prisma.empty;
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const k = opts.limit;
   if (opts.scope === 'COMMENTS') {
@@ -363,7 +369,7 @@ export async function vectorSearchNodes(
       SELECT ne.node_id, MIN(ne.embedding <=> ${qvec}::vector) AS distance
       FROM node_embeddings ne
       JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id AND n.deleted_at IS NULL AND n.node_type = 'comment'
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB}
+      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql}
       GROUP BY ne.node_id
       ORDER BY distance ASC
       LIMIT ${k}`;
@@ -386,7 +392,7 @@ export async function vectorSearchNodes(
       SELECT ne.node_id, ne.embedding <=> ${qvec}::vector AS distance
       FROM node_embeddings ne
       JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${scopeSql}
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB}
+      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql}
       ORDER BY ne.embedding <=> ${qvec}::vector
       LIMIT ${candidateK}
     )
@@ -407,7 +413,7 @@ export async function vectorSearchNodes(
       const [c] = await db.$queryRaw<{ n: number }[]>`
         SELECT count(*)::int AS n FROM node_embeddings ne
         JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${scopeSql}
-        WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB}`;
+        WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql}`;
       const eligibleRows = Number(c?.n ?? 0);
       exhausted = rows.length === 0 ? eligibleRows === 0 : vectorWindowExhausted({ windowRows, eligibleRows, truncated });
     }

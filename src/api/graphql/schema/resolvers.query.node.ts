@@ -20,7 +20,7 @@ import {
   getEmbeddingClient,
   isEmbeddingConfigured,
 } from '../../../lib/embedding/index.js';
-import { reciprocalRankFusionScored } from '../../../lib/rrf.js';
+import { composeHybridRanking, hybridKeywordCandidates } from '../../../lib/retrieval/hybrid.js';
 import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { BooleanQueryError, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
@@ -1609,25 +1609,9 @@ export const nodeQueries = {
           db: ctx.db, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter,
           includeDeleted: !!f.includeDeleted, sort: 'relevance' as const, offset: 0, limit: fetchN,
         };
-        try {
-          const strict = await provider.lexicalSearch({ ...args, query: q });
-          if (!opts.relax || strict.length > 0) return strict;
-          const orQuery = relaxConjunctionToOr(q);
-          if (orQuery) {
-            const relaxed = await provider.lexicalSearch({ ...args, query: orQuery });
-            if (relaxed.length > 0) {
-              lexicalDegraded = [lexicalDegraded, 'and_relaxed_to_or'].filter(Boolean).join(',');
-              return relaxed;
-            }
-          }
-          return strict;
-        } catch (e) {
-          if (e instanceof BooleanQueryError) {
-            lexicalDegraded = 'literal_fallback';
-            return safeLiteralSearch(args);
-          }
-          throw e;
-        }
+        const result = await hybridKeywordCandidates(q, query => provider.lexicalSearch({ ...args, query }), !!opts.relax);
+        lexicalDegraded = result.degraded;
+        return result.hits;
       };
 
       if (indexedIds.length === 0) {
@@ -1769,15 +1753,10 @@ export const nodeQueries = {
       // within-result-set relevance signal. The cosine similarity is still carried
       // separately on `vector.similarity` (simById below).
       const kwRanked = await runKeywordRanked();
-      const fused = reciprocalRankFusionScored(
-        [kwRanked.map((r) => r.nodeId), vecHits.map((h) => h.nodeId)],
-        (id) => id,
-        // Keep at least the (possibly widened) vector window: truncating to the
-        // original fetchN would drop the matches widening went out to find.
-      ).slice(0, Math.max(fetchN, vecHits.length));
+      const fused = composeHybridRanking(kwRanked, vecHits, Math.max(fetchN, vecHits.length));
       const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
       return await buildResult(
-        fused.map((r) => ({ nodeId: r.item, score: r.score })),
+        fused.map((r) => ({ nodeId: r.nodeId, score: r.score })),
         simById,
         null,
         mergeDegraded(null),
