@@ -632,6 +632,7 @@ const SHAPE_HADRON_TASK_LIST = {
   status: z.array(z.enum(['BACKLOG', 'PENDING', 'STARTED', 'FINISHED', 'CANCELLED'])).optional(),
   owner: party.optional(),
   assignee: party.optional(),
+  creator: party.optional().describe('Who created the task: a worker, or a person for a task they created themselves (not one their worker created).'),
   tag: z.string().optional(),
   parentTaskId: z.string().optional(),
   rootsOnly: z.boolean().optional(),

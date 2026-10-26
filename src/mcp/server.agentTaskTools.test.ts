@@ -156,6 +156,25 @@ describe('agent-task tools: reads', () => {
   });
 });
 
+describe('agent-task tools: creator filter (#2370)', () => {
+  it('P7: hadron_task_list takes creator {worker|user} and returns what the GraphQL filter does', async () => {
+    const s = mcp(authOf(member.id));
+    const plain = await session({ userId: member.id });
+    const asAnne = await session({ userId: member.id, appId: app.id, workerId: anne.id });
+    await s.callTool('hadron_task_create', { appRef: app.id, title: 'Mine', session: plain.id });
+    await s.callTool('hadron_task_create', { appRef: app.id, title: 'Hers', session: asAnne.id });
+    const byWorker = text(await s.callTool('hadron_task_list', { appRef: app.id, creator: { worker: 'Anne' } }));
+    expect(byWorker).toMatch(/Hers/);
+    expect(byWorker).not.toMatch(/Mine/);
+    const byUser = text(await s.callTool('hadron_task_list', { appRef: app.id, creator: { user: member.id } }));
+    expect(byUser).toMatch(/Mine/);
+    expect(byUser).not.toMatch(/Hers/);
+    expect(text(await s.callTool('hadron_task_list', { appRef: app.id, creator: { worker: 'Nobody' } }))).toBe('No tasks match.');
+    const out = mcp(authOf(outsider.id));
+    expect(code(text(await out.callTool('hadron_task_list', { appRef: app.id, creator: { worker: 'Anne' } })))).toBe('APP_NOT_FOUND');
+  });
+});
+
 describe('agent-task tools: backlog (#1754)', () => {
   it('create parked, park a queued task, make it ready, and filter by BACKLOG', async () => {
     const s = mcp(authOf(member.id));

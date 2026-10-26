@@ -77,8 +77,7 @@ import {
 } from './api/graphql/formatError.js';
 import { safeEqual } from './lib/constantTime.js';
 import { sourceNamesRepo } from './lib/gitSource.js';
-import { generateUniqueHandle, isHandleTaken } from './lib/userHandle.js';
-import { ensureUserPrincipal, RootNameTakenError } from './lib/principal/mintPrincipal.js';
+import { provisionEmailUser, provisionGithubUser } from './auth/userProvision.js';
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { assignRequestId, bindRequestId, REQUEST_ID_HEADER } from './lib/requestContext.js';
@@ -477,47 +476,7 @@ export async function createServer(): Promise<Express> {
               avatarUrl: ghUser.avatar_url,
             },
           })
-        : await (async () => {
-            for (let attempt = 0; ; attempt++) {
-              const ghHandle = await generateUniqueHandle(db, {
-                seeds: [ghUser.login, ghUser.name],
-              });
-              try {
-                // upsert on githubId absorbs the provider-id race (→ update
-                // branch); a P2002 here is a handle/githubUsername collision.
-                // #692: mint the pool principal in the same tx (idempotent — a
-                // no-op on the update branch of an existing user).
-                return await db.$transaction(async (tx) => {
-                  const user = await tx.user.upsert({
-                    where: { githubId: ghUser.id },
-                    create: {
-                      githubId: ghUser.id,
-                      githubUsername: ghUser.login,
-                      handle: ghHandle,
-                      identityProvider: 'GITHUB',
-                      name: ghUser.name,
-                      avatarUrl: ghUser.avatar_url,
-                      roles: ['READER'],
-                    },
-                    update: {
-                      githubUsername: ghUser.login,
-                      name: ghUser.name,
-                      avatarUrl: ghUser.avatar_url,
-                    },
-                  });
-                  await ensureUserPrincipal(tx, user);
-                  return user;
-                });
-              } catch (err: any) {
-                if (err instanceof RootNameTakenError && attempt < 1) continue; // pool race
-                // Only a genuine handle collision is retryable (once).
-                if (err?.code === 'P2002' && attempt < 1 && (await isHandleTaken(db, ghHandle))) {
-                  continue;
-                }
-                throw err;
-              }
-            }
-          })();
+        : await provisionGithubUser(db, ghUser);
 
       // #627 / spec 048: no workspace is provisioned at signup (the auto-personal
       // org is retired). `isNew` is now purely an onboarding hint for the portal.
@@ -1036,21 +995,8 @@ export async function createServer(): Promise<Express> {
         return;
       }
 
-      // Upsert user by email. #692: mint the pool principal (for the default
-      // random handle) in the same tx — idempotent on the update branch.
-      const user = await db.$transaction(async (tx) => {
-        const u = await tx.user.upsert({
-          where: { email: result.email },
-          create: {
-            email: result.email,
-            identityProvider: 'EMAIL',
-            roles: ['READER'],
-          },
-          update: {},
-        });
-        await ensureUserPrincipal(tx, u);
-        return u;
-      });
+      // Upsert user by email (+ pool principal, #692; one retry on a lost email-unique race, #442).
+      const user = await provisionEmailUser(db, result.email);
 
       // #627 / spec 048: no workspace provisioned at signup; `isNew` is an
       // onboarding hint only.

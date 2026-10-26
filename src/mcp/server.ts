@@ -5757,7 +5757,11 @@ export function createMcpServerInstance(
       }
       const sid = getSessionId();
       if (!sid) return textResult('No active MCP session.');
-      const mem = await resolveMemoryByUrn(memoryUrn);
+      // #2122: these two tools accept IDs per Vera's disposition (cor:api:010:01);
+      // keep other tools on their existing URN-only resolver and preserve the owner gate below.
+      const mem = isId(memoryUrn)
+        ? await db.memory.findFirst({ where: { id: memoryUrn, deletedAt: null }, select: { id: true, urn: true } })
+        : await resolveMemoryByUrn(memoryUrn);
       const row = mem
         ? await db.memory.findUnique({
             where: { id: mem.id },
@@ -5801,7 +5805,11 @@ export function createMcpServerInstance(
       if (!auth.userId) {
         return refusalResult('hadron_lock_memory requires a user-authenticated MCP connection.');
       }
-      const mem = await resolveMemoryByUrn(memoryUrn);
+      // #2122: these two tools accept IDs per Vera's disposition (cor:api:010:01);
+      // keep other tools on their existing URN-only resolver and preserve the owner gate below.
+      const mem = isId(memoryUrn)
+        ? await db.memory.findFirst({ where: { id: memoryUrn, deletedAt: null }, select: { id: true, urn: true } })
+        : await resolveMemoryByUrn(memoryUrn);
       const row = mem
         ? await db.memory.findUnique({ where: { id: mem.id }, select: { id: true, userId: true } })
         : null;

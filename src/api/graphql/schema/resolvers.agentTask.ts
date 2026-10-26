@@ -489,10 +489,17 @@ export async function resolveTaskWorkerId(ctx: Context, appId: string, ref: stri
   return resolveWorkerIdByName(ctx.db, appId, ref);
 }
 
-function partyColumns(prefix: 'owner' | 'assignee', p: TaskParty | null) {
-  return prefix === 'owner'
-    ? { ownerWorkerId: p?.workerId ?? null, ownerUserId: p?.userId ?? null }
-    : { assigneeWorkerId: p?.workerId ?? null, assigneeUserId: p?.userId ?? null };
+function partyColumns(prefix: 'owner' | 'assignee' | 'creator', p: TaskParty | null) {
+  if (prefix === 'owner') return { ownerWorkerId: p?.workerId ?? null, ownerUserId: p?.userId ?? null };
+  // `createdBy` projects the worker when createdByWorkerId is set, else the person (see the AgentTask
+  // resolver), and a worker-session create stamps BOTH columns. The filter matches the projection: a
+  // person is the creator only where no worker was (#2370).
+  if (prefix === 'creator') {
+    return p?.workerId
+      ? { createdByWorkerId: p.workerId }
+      : { createdBy: p?.userId ?? null, createdByWorkerId: null };
+  }
+  return { assigneeWorkerId: p?.workerId ?? null, assigneeUserId: p?.userId ?? null };
 }
 
 function sameParty(a: TaskParty, b: TaskParty): boolean {
@@ -1379,6 +1386,7 @@ type ListArgs = {
   status?: string[] | null;
   owner?: PartyInput;
   assignee?: PartyInput;
+  creator?: PartyInput;
   tag?: string | null;
   parentTaskId?: string | null;
   rootsOnly?: boolean | null;
@@ -1392,7 +1400,7 @@ const STATUS_FROM_GQL: Record<string, TaskStatus> = {
 };
 
 /** A party filter: names a party of the App, or matches nothing (never refuses — a filter, not a write). */
-async function partyFilter(ctx: Context, app: TaskApp, input: PartyInput, prefix: 'owner' | 'assignee') {
+async function partyFilter(ctx: Context, app: TaskApp, input: PartyInput, prefix: 'owner' | 'assignee' | 'creator') {
   if (!input) return {};
   try {
     const p = await resolveParty(ctx, app, input, 'TASK_ASSIGNEE_INVALID');
@@ -1423,8 +1431,9 @@ export const agentTaskQueries = {
     };
     const ownerWhere = await partyFilter(c, app, args.owner, 'owner');
     const assigneeWhere = await partyFilter(c, app, args.assignee, 'assignee');
+    const creatorWhere = await partyFilter(c, app, args.creator, 'creator');
     return c.db.agentTask.findMany({
-      where: { AND: [where, ownerWhere, assigneeWhere] },
+      where: { AND: [where, ownerWhere, assigneeWhere, creatorWhere] },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: clampListTake(args.limit),
       skip: Math.max(0, args.offset ?? 0),
