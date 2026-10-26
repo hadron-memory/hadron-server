@@ -6,7 +6,9 @@ import type { AddressInfo } from 'node:net';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../../server.js';
-import { createMcpServerInstance } from '../../mcp/server.js';
+import { createMcpServerInstance, createTestableMcpServer } from '../../mcp/server.js';
+import { resolvers } from './schema/resolvers.js';
+import { currentActor, publishActor, publishAmbiguousActor, runAsActor } from '../../lib/requestActor.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../lib/workerSignature.js';
@@ -193,5 +195,65 @@ describe('#2026 per-call SDK and committed marks',()=>{
   const result=await request(true,`mutation { endSession(id: "${session.id}") { id } }`);
   expect(result.errors).toBeUndefined();expect(result.extensions?.hadron?.deliveryPending).toBeUndefined();
   expect((await db.session.findUniqueOrThrow({where:{id:session.id}})).endedAt).not.toBeNull();
+ });
+});
+
+
+describe('#2026 review closure controls', () => {
+ it('preserves the ambient actor semantics of an actor-neutral callback', async () => {
+  const server = createTestableMcpServer({userId:user.id,apiKeyId:key.id,appId:app.id,roles:['READER']});
+  const spy = vi.spyOn(resolvers.Mutation, 'startSession').mockImplementation(async () => {
+   publishActor({workerId:worker.id,agentId:worker.agentId});
+   return session;
+  });
+  try {
+   await runAsActor({workerId:null,agentId:null}, async () => {
+    await server.callTool('hadron_start_session', {description:'neutral callback scope control'});
+    expect(currentActor().workerId).toBe(worker.id);
+   });
+  } finally {spy.mockRestore();}
+ });
+ it('emits a fixed diagnostic class on count faults without raw error details', async () => {
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const spy = vi.spyOn(deliveryBatchModule, 'loadPendingDeliverySummary').mockRejectedValue(new Error('PRIVATE_FOOTER_ERROR_SENTINEL'));
+  try {
+   expect(await deliveryPending(context() as any)).toBeUndefined();
+   const log = warn.mock.calls.map(args => args.join(' ')).join('\n');
+   expect(log).toContain('delivery.pending.omitted');
+   expect(log).not.toContain('PRIVATE_FOOTER_ERROR_SENTINEL');
+   expect(log).not.toContain(session.id);
+  } finally {spy.mockRestore();warn.mockRestore();}
+ });
+ it('omits run principals and ambiguous unnamed callers, while a valid named session stays self-only', async () => {
+  expect(await deliveryPending({...context(),clientId:'run:synthetic-footer-run'} as any)).toBeUndefined();
+  await runAsActor({workerId:null,agentId:null}, async () => {
+   publishAmbiguousActor([session.id,generateId()]);
+   expect(await deliveryPending(context() as any)).toBeUndefined();
+   expect(await deliveryPending(context() as any, session.id)).toEqual(metadata(13));
+  });
+ });
+ it('counts two admitted channels in one aggregate, with the same total as pull', async () => {
+  const made=await ensureChannelWithRoot(db,{memoryId:channel.memoryId,loc:'chats:second',name:'Second',createdBy:user.id});
+  await db.registerEntry.create({data:{appId:app.id,channelId:made.channel.id,attendeeWorkerId:worker.id,role:'BOTH'}});
+  const enc=await getMemoryEncryptionInfo(db,channel.memoryId);
+  for(let i=0;i<2;i++) await appendChatMessage(db,{id:made.rootId,memoryId:channel.memoryId,loc:made.channel.loc},enc,
+   async({tx,seq,msgNum})=>tx.node.create({data:{id:generateId(),memoryId:channel.memoryId,loc:`chats:second:messages:${msgNum}`,name:msgNum,nodeType:'chat-message',seq,messageChannelId:made.channel.id,content:'second',data:{mentions:['kit']}}}),{asChannel:true});
+  const pull=await loadDeliveryBatches({ctx:context() as any,app,hostId:null,workerIds:[worker.id]});
+  expect(pull.batches[0].overflow).toBe(5);
+  const counts:string[]=[];
+  const count=await db.$transaction(async tx=>{
+   const traced=new Proxy(tx,{get(target,prop){
+    const value=Reflect.get(target,prop);
+    if(prop!=='$queryRaw') return typeof value==='function'?value.bind(target):value;
+    return (...args:unknown[])=>{
+     const q=args[0] as {strings?:string[]};
+     const sql=(q.strings??(Array.isArray(q)?q:[])).join('');
+     if(sql.includes(' AS total')) counts.push(sql);
+     return Reflect.apply(value,target,args);
+    };
+   }});
+   return deliveryBatchModule.loadPendingDeliverySummary({ctx:{...context(),db:traced} as any,app,hostId:null,workerIds:[worker.id],now:new Date()});
+  });
+  expect(count).toBe(15);expect(counts).toHaveLength(1);
  });
 });
