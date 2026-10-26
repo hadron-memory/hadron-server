@@ -9,6 +9,7 @@ import { encryptNodeFields } from '../nodeCrypto.js';
 import { sessionKeyCache } from '../sessionKeyCache.js';
 import { recordUrnRename } from '../urnAlias.js';
 import { withIncludeHistoryTransaction, includeHistoryClient } from './includeHistoryFence.js';
+import * as includeParser from './parseIncludeTags.js';
 import { replaceStructuralReferences } from './structuralReferences.js';
 import { reliedRevisionsOf } from './reliedRevisions.js';
 import { verifyIncludeCoverage } from './verifyIncludeCoverage.js';
@@ -153,6 +154,53 @@ describe('structural references (#2063 R1)', () => {
     });
     await capture(source.id, `{{> ${ref} rev=3}}`);
     expect(await db.includeReference.findFirst({ where: { includerId: source.id } })).toMatchObject({ reference: ref, targetMemoryId: memory.id, targetLoc: 'moved' });
+  });
+
+  // A dirty binding generation may refuse retention; it must never return a
+  // successful empty set while the shared reader can still serve this pin.
+  async function expectPinOrInactive(work: Promise<Set<number>>, pin: number) {
+    try { expect(await work).toContain(pin); }
+    catch (error) {
+      if ((error as { code?: string }).code !== 'INCLUDE_RETENTION_INACTIVE') throw error;
+    }
+  }
+
+  it('P2: a dangling URN becoming live cannot silently release its pin', async () => {
+    await db.node.update({ where: { id: source.id }, data: { content: `{{> hrn:node:${memory.urn}:later rev=4}}` } });
+    await activate();
+    const later = await db.node.create({ data: { memoryId: memory.id, loc: 'later', name: 'Later' } });
+    await expectPinOrInactive(relied(later.id), 4);
+  });
+
+  it('P2: a post-capture node alias cannot silently release its pin', async () => {
+    const ref = `hrn:node:${memory.urn}:target`;
+    await db.node.update({ where: { id: source.id }, data: { content: `{{> ${ref} rev=3}}` } });
+    await activate();
+    await fenced(async tx => {
+      await recordUrnRename(tx, { entityType: 'NODE', entityId: target.id, oldUrn: ref.slice(9), newUrn: `${memory.urn}:moved` });
+      await tx.node.update({ where: { id: target.id }, data: { loc: 'moved' } });
+    });
+    await expectPinOrInactive(relied(), 3);
+  });
+
+  it('P2: capture rejects unrepresentable pins with an input error and preserves prior rows', async () => {
+    await capture(source.id, '{{> target rev=1}}');
+    for (const rev of ['2147483648', '9007199254740992', '9'.repeat(400)]) {
+      await expect(capture(source.id, `{{> target rev=${rev}}}`)).rejects.toMatchObject({ code: 'INCLUDE_REVISION_INVALID' });
+      expect(await db.includeReference.findMany({ where: { includerId: source.id }, select: { pinnedRevNo: true } })).toEqual([{ pinnedRevNo: 1 }]);
+    }
+    await capture(source.id, '{{> target rev=2147483647}}');
+    expect(await db.includeReference.findFirst({ where: { includerId: source.id } })).toMatchObject({ pinnedRevNo: 2147483647 });
+  });
+
+  it('P2: storage independently rejects nonpositive and fractional parser values', async () => {
+    for (const rev of [-3, 0, 1.5]) {
+      const parser = vi.spyOn(includeParser, 'parseIncludeTags').mockReturnValueOnce([
+        { kind: 'loc', target: 'target', settings: { rev }, raw: '{{> target}}' },
+      ]);
+      try { await expect(capture(source.id, '{{> target}}')).rejects.toMatchObject({ code: 'INCLUDE_REVISION_INVALID' }); }
+      finally { parser.mockRestore(); }
+    }
   });
 
   it('reverse lookup exhausts high fan-in rather than limiting away pins', async () => {
