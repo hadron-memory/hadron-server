@@ -2876,7 +2876,8 @@ export const typeDefs = `#graphql
     policy: JSON
     """
     Canonical \`hrn:user:<handle>\` URN (spec cor:urn:010:01). Computed from the
-    handle; null for a handle-less user (who has no URN).
+    handle; null for a handle-less user and for a user whose handle is
+    not-URN-legal (neither has a URN).
     """
     urn: String
     githubId: Int
