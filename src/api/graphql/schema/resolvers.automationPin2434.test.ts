@@ -9,7 +9,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
 
-const gate = vi.hoisted(() => ({ armed: false, captured: false }));
+const gate = vi.hoisted(() => ({ armed: false, captured: false, late: false, callerReads: 0 }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 // The caller's reach can change between the capture and the later memory check: once armed, a direct caller loses
@@ -24,10 +24,16 @@ vi.mock('../../../lib/automation/pins.js', async importOriginal => {
 });
 vi.mock('../../../mcp/access-control.js', async importOriginal => {
   const real = await importOriginal<typeof import('../../../mcp/access-control.js')>();
-  return { ...real, canReadMemory: async (...args: Parameters<typeof real.canReadMemory>) =>
-    !(gate.captured && !String(args[1].clientId ?? '').startsWith('run:')) && await real.canReadMemory(...args) };
+  // late: the caller's FIRST read after the capture (the preview gate) still succeeds, every later one fails, so the
+  // refusal comes from principalCannotRead inside the adoption transaction, not from the preview gate (#2452).
+  return { ...real, canReadMemory: async (...args: Parameters<typeof real.canReadMemory>) => {
+    const caller = !String(args[1].clientId ?? '').startsWith('run:');
+    if (gate.late && gate.captured && caller) gate.callerReads += 1;
+    const denied = gate.captured && caller && !(gate.late && gate.callerReads <= 1);
+    return !denied && await real.canReadMemory(...args);
+  } };
 });
-beforeEach(async () => { await cleanDb(db); gate.armed = false; gate.captured = false; });
+beforeEach(async () => { await cleanDb(db); gate.armed = false; gate.captured = false; gate.late = false; gate.callerReads = 0; });
 
 const Q = automationPinQueries as any;
 const M = automationPinMutations as any;
@@ -87,6 +93,22 @@ describe('#2434 re-adopt refusals name their own cause', () => {
     gate.armed = false; gate.captured = false;
     expect(err).toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(err.message).not.toContain(f.memory.urn);
+  });
+
+  it('a caller who loses read access after the preview gate gets the generic principal refusal, never the memory name, and nothing is written (#2452)', async () => {
+    const f = await fixture();
+    const pin = await Q.previewAutomation({}, f.input, f.ctx);
+    gate.armed = true; gate.late = true;
+    const err = await M.reAdoptAutomation({}, { ...f.input, expectedHash: pin.hash }, f.ctx).catch((e: unknown) => e);
+    const reads = gate.callerReads;
+    gate.armed = false; gate.captured = false; gate.late = false;
+    expect(err).toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(err.message).not.toContain(f.memory.urn);
+    expect(err.message).not.toMatch(/you cannot read/i);
+    expect(err.message).toMatch(/A run of this automation could not read a memory it uses/);
+    expect(await db.agentSchedule.findUniqueOrThrow({ where: { id: f.appOnly.id }, select: { automationPin: true } })).toMatchObject({ automationPin: null });
+    expect(await db.automationAdoptionEvent.count()).toBe(0);
+    expect(reads).toBeGreaterThan(1); // the preview gate passed; a second caller read decided the naming
   });
 
   it('the causes about who the caller is keep the who-may-adopt refusal', async () => {
