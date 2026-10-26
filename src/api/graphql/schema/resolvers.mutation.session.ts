@@ -1,3 +1,4 @@
+import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { isWorkerResetting } from '../../../lib/contextReset/contextReset.js';
@@ -1871,6 +1872,9 @@ export const sessionMutations = {
         if (app.identifyUserMethod === 'USER_ID' && hasSuppliedKey) {
           throw new GraphQLError('An operation key is only accepted in SECRET mode.', { extensions: { code: 'BAD_UNLOCK_INPUT' } });
         }
+
+        // #2406 / cor:aut:020:02: malformed caller timeouts cannot provision a session.
+        assertPositiveSessionTimeout(sessionTimeoutSeconds);
 
         // #1796: consume request-only supply before any provisioning writes.
         const parsedKey = getRequestOperationKey();
