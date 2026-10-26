@@ -13,22 +13,22 @@ export interface SessionPlacement {
   role: string;
 }
 
-type SessionReader = { session: { findFirst: (args: never) => Promise<unknown> } };
+type SessionReader = Pick<Prisma.TransactionClient, 'session'>;
 
 /**
  * The placement of `workerId`'s open session: the one named by `sessionId` when given (the acting principal), else the
  * newest open one (the binding the matcher and the context reset serve). Null when there is none, or it carries none.
  */
 export async function openSessionPlacement(
-  db: unknown,
+  db: SessionReader,
   workerId: string,
   sessionId?: string | null,
 ): Promise<SessionPlacement | null> {
-  const s = (await (db as SessionReader).session.findFirst({
+  const s = await db.session.findFirst({
     where: { workerId, endedAt: null, deletedAt: null, ...(sessionId ? { id: sessionId } : {}) },
     orderBy: [{ startedAt: 'desc' }, { id: 'desc' }],
     select: { agentId: true, role: true },
-  } as never)) as { agentId: string | null; role: string | null } | null;
+  });
   return s?.agentId && s.role ? { agentId: s.agentId, role: s.role } : null;
 }
 

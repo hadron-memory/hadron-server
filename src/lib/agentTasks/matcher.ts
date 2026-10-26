@@ -252,7 +252,7 @@ async function loadOpenSessionPlacements(db: Db, workerIds: string[]): Promise<M
  * The work state of every worker of one App that is not retired, at `now`.
  * One query per kind of input, never one per worker.
  */
-export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Promise<WorkerWorkState[]> {
+export async function loadWorkerWorkStates(db: Db, appId: string, now: Date, opts?: { bySession?: boolean }): Promise<WorkerWorkState[]> {
   const workers = await db.worker.findMany({
     where: { appId, retiredAt: null },
     select: { id: true, appId: true, name: true, slug: true, role: true, agent: { select: { usesTasks: true } } },
@@ -261,7 +261,8 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
   if (workers.length === 0) return [];
   const ids = workers.map((w) => w.id);
   // #2458: a worker with an open session is matched on that session's agent and role, not the live worker row.
-  const placed = await loadOpenSessionPlacements(db, ids);
+  // Only the matcher asks (`bySession`): a manager-facing read, the roster, shows the live row (cor:dmo:050:11).
+  const placed = opts?.bySession ? await loadOpenSessionPlacements(db, ids) : new Map<string, { role: string; usesTasks: boolean }>();
   const [activity, launchable, open, lastAssigned, ending] = await Promise.all([
     loadAppWorkerActivity({ db } as unknown as Context, appId, { now }),
     loadLaunchableFamilies(db, { appId }, now),
@@ -435,7 +436,7 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
     if (candidates === null) {
       // #2022 (cor:agt:090:03): a worker a live stop signal covers is skipped, at every level; tryAssign re-checks.
       covering = await coveringSignals(db, appId, null, now);
-      candidates = (await loadWorkerWorkStates(db, appId, now)).filter((w) => w.free && matchable(w) && !covering!.has(w.id)).sort(compareRank);
+      candidates = (await loadWorkerWorkStates(db, appId, now, { bySession: true })).filter((w) => w.free && matchable(w) && !covering!.has(w.id)).sort(compareRank);
     }
     for (const task of page) {
       if (spent.size === candidates.length) return out;
@@ -510,7 +511,7 @@ export async function recordStopHolds(db: PrismaClient, appId: string, now: Date
   if (Number(n) === 0) return;
   const covering = await coveringSignals(db, appId, null, now);
   const timeStopped = timeStoppedWorkers(covering);
-  const free = (await loadWorkerWorkStates(db, appId, now)).filter((w) => w.free && matchable(w));
+  const free = (await loadWorkerWorkStates(db, appId, now, { bySession: true })).filter((w) => w.free && matchable(w));
   const decisive = new Set<string>();
   let after: { createdAt: Date; id: string } | null = null;
   for (;;) {

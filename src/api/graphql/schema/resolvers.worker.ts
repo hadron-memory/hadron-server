@@ -2411,6 +2411,7 @@ export async function composeWorkerPrompt(
   // #2458 (cor:dmo:050:11): the worker's own open session finishes under the agent and role it was bound with, so a shed
   // recovery reloads the old briefing until the next bind. Every other reader renders the live row.
   const placed = ctx.sessionId ? await openSessionPlacement(ctx.db, worker.id, ctx.sessionId) : null;
+  // The spread is shallow on purpose: everything agent-derived below is re-read from `worker.agentId`/`role`.
   if (placed) worker = { ...worker, agentId: placed.agentId, role: placed.role };
   const agent = await ctx.db.agent.findUnique({
     where: { id: worker.agentId },

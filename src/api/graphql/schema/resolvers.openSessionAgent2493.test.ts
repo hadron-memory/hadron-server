@@ -92,8 +92,10 @@ describe('#2493 an open session finishes under its own agent and role', () => {
     const open = await bind();
     await db.agent.update({ where: { id: agentB.id }, data: { usesTasks: false } });
     await change();
-    const states = () => loadWorkerWorkStates(db, app.id, new Date());
+    const states = () => loadWorkerWorkStates(db, app.id, new Date(), { bySession: true });
     expect(await states()).toMatchObject([{ id: worker.id, role: 'security-engineer', usesTasks: true }]);
+    // (e) the roster, a manager-facing read of the same loader, shows the live row.
+    expect(await loadWorkerWorkStates(db, app.id, new Date())).toMatchObject([{ id: worker.id, role: 'specs-engineer', usesTasks: false }]);
     await db.session.update({ where: { id: open.id }, data: { endedAt: new Date() } });
     expect(await states()).toMatchObject([{ id: worker.id, role: 'specs-engineer', usesTasks: false }]);
   });
@@ -115,6 +117,9 @@ describe('#2493 an open session finishes under its own agent and role', () => {
     await db.agentTask.create({ data: { appId: app.id, title: 't', ownerUserId: admin.id }, select: { id: true } });
     const outcomes = await Promise.allSettled([change(), matchQueuedTasks(db, new Date(), { appId: app.id }), matchQueuedTasks(db, new Date(), { appId: app.id })]);
     expect(outcomes.map(o => o.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled']);
+    // And the task was assigned exactly once, to the open session's worker.
+    expect(await db.agentTask.count({ where: { appId: app.id, assigneeWorkerId: worker.id } })).toBe(1);
+    expect(await db.agentTask.count({ where: { appId: app.id, assigneeWorkerId: { not: null } } })).toBe(1);
   });
 });
 

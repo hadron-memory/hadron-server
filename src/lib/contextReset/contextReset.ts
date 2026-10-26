@@ -185,7 +185,8 @@ export async function requestContextReset(
     select: { id: true },
   });
   if (!started) return null;
-  // R115/R116: the Agent's setting, held like the matcher holds usesTasks. #2458: a worker with an open session is read
+  // R115/R116: the Agent's setting, held like the matcher holds usesTasks. The newest open session here is the one chosen
+  // just below (same ordering), and claimContextReset reads the agent of that named session, so the two agree. #2458: a worker with an open session is read
   // on the agent that session was bound under, not the live worker row.
   const [agent] = await tx.$queryRaw<{ on: boolean }[]>`
     SELECT a.reset_context_after_task AS "on" FROM workers w

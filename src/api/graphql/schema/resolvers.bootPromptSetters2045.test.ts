@@ -104,7 +104,7 @@ describe('#2045 8b setters', () => {
       // A second connection: what a concurrent changeWorkerAgent would contend on.
       seen.advisory = (await db.$queryRaw<{ got: boolean }[]>`SELECT pg_try_advisory_xact_lock(hashtext('agent-task-matcher:worker'), hashtext(${f.worker.id})) AS got`)[0]!.got;
       const probe = (table: string, mode: string) => db.$transaction(async (tx) => {
-        try { await tx.$executeRawUnsafe(`SELECT id FROM ${table} WHERE id = '${table === 'workers' ? f.worker.id : f.agent.id}' FOR ${mode} NOWAIT`); return 'free'; } catch { return 'locked'; }
+        try { await tx.$executeRawUnsafe(`SELECT id FROM ${table} WHERE id = '${table === 'workers' ? f.worker.id : f.agent.id}' FOR ${mode} NOWAIT`); return 'free'; } catch (e) { if (JSON.stringify(e).includes('55P03')) return 'locked'; throw e; }
       });
       seen.worker = await probe('workers', 'UPDATE');
       seen.agent = await probe('agents', 'UPDATE');

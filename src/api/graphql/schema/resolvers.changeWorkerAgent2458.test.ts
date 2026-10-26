@@ -202,9 +202,15 @@ describe('#2458 changeWorkerAgent: refusals change nothing', () => {
     // A hard-purged included node leaves its Agent unresolvable: the check fails closed rather than skipping it.
     const purged = await db.node.findUniqueOrThrow({ where: { id: included.id } });
     await db.node.delete({ where: { id: included.id } });
-    expect(await code(change())).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
-    expect(await snapshot()).toEqual(before);
-    await db.node.create({ data: { id: purged.id, memoryId: purged.memoryId, loc: purged.loc, name: purged.name, content: purged.content } });
+    try {
+      expect(await code(change())).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
+      expect(await snapshot()).toEqual(before);
+      // The cast runs the same check: the purge refuses it too (the cast preview and castWorker share assertCastable).
+      expect(await code(M.castWorker({}, { appRef: app.id, agentRef: newAgent.id, name: 'Zed' }, ctx()))).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
+      expect(await db.worker.count({ where: { appId: app.id, name: 'Zed' } })).toBe(0);
+    } finally {
+      await db.node.create({ data: { id: purged.id, memoryId: purged.memoryId, loc: purged.loc, name: purged.name, content: purged.content } });
+    }
     // With the grant held, the same change goes through.
     await db.agentOrgGrant.create({ data: { orgId: org.id, agentId: lib.id, activatedAt: new Date() } });
     await change();

@@ -425,7 +425,7 @@ async function decide(
     // 5. The pointer. An App compile always sets it; an Agent or worker compile unless the caller opted out.
     const setPointer = target.kind === 'APP_AGENT' || options.setPointer !== false;
     if (setPointer) {
-      const owner = await loadBootPromptPointerOwner(tx, ptr(target));
+      const owner = await loadBootPromptPointerOwner(tx, ptr(target), { lockForWrite: true });
       if (!owner) throw compileNotPermitted();
       await setBootPromptPointer(tx, txCtx, owner, node.id, (memoryId) => isMemoryReadableFresh(txCtx, memoryId, tx));
     }
