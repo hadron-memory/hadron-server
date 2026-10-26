@@ -90,9 +90,10 @@ async function writeAsAgentEditor<T>(
   );
 }
 
-const isNameClash = (e: unknown): boolean =>
+/** A unique-violation on THIS model only: a P2002 with no model, or another model's, is not a name clash. */
+export const isNameClash = (e: unknown): boolean =>
   e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002' &&
-  String((e.meta as { modelName?: string } | undefined)?.modelName ?? 'AgentTickerTemplate').includes('AgentTickerTemplate');
+  (e.meta as { modelName?: unknown } | undefined)?.modelName === 'AgentTickerTemplate';
 
 const nameTaken = (name: string): GraphQLError =>
   taskError('TICKER_TEMPLATE_NAME_TAKEN', `This Agent already has a ticker template named "${name}" (names ignore case).`, { name });
