@@ -169,7 +169,8 @@ describe('#2430 a failing post-commit effect cannot turn a committed compile int
 
     expect(thrown).toHaveBeenCalledTimes(1); // the injected effect really ran and threw (not a vacuous mock)
     expect(sentinel).toHaveBeenCalledTimes(1); // one failure does not stop the later effects
-    expect(log).toHaveBeenCalledWith('[compileBootPrompt] a post-commit effect failed:', 'effect-boom');
+    // The fixed prefix is the contract; the detail may grow (e.g. a stack), so match it by substring.
+    expect(log).toHaveBeenCalledWith('[compileBootPrompt] a post-commit effect failed:', expect.stringContaining('effect-boom'));
     expect(out.pointerSet).toBe(true);
     const rev = await db.compiledPromptRevision.findMany({ where: { compiledNodeId: out.node.id } });
     expect(rev).toHaveLength(1); // exactly the committed revision, no second one invited
