@@ -72,3 +72,48 @@ it.each(['qualified', 'scoped'] as const)('uses the same explicit not-found enve
   expect(result.isError).toBe(true);
   expect(result.content[0].text).toBe(`Node "${args.parentRel}" not found.`);
 });
+it.each(['hrn:node:foo', 'urn:node:foo:bar', 'hrn:node:parent2512.example:tree'])('returns a typed refusal for malformed node parent %s', async parentRel => {
+  const { srv } = await fixture();
+  const result = await srv.callTool('hadron_list_nodes', { parentRel }) as { isError?: boolean };
+  expect(result.isError).toBe(true);
+});
+it.each([undefined, 'hrn:mem:parent2512.example:tree'])('refuses a non-node scheme as parent with memory scope %s', async memoryUrn => {
+  const { srv } = await fixture();
+  const result = await srv.callTool('hadron_list_nodes', { parentRel: 'hrn:mem:parent2512.example:tree', memoryUrn }) as { isError?: boolean; content: Array<{ text: string }> };
+  expect(result.isError).toBe(true);
+  expect(result.content[0].text).toContain('parentRel must be');
+});
+it('pins the existing root requirement and root browsing', async () => {
+  const { srv, memory } = await fixture();
+  expect(await srv.callToolText('hadron_list_nodes', {})).toBe('Please provide a memoryUrn or parentRel.');
+  expect(await srv.callToolText('hadron_list_nodes', { memoryUrn: `hrn:mem:${memory.urn}` })).toContain('qa-facts');
+});
+it('refuses an unqualified memory scope with isError', async () => {
+  const { srv } = await fixture();
+  const result = await srv.callTool('hadron_list_nodes', { memoryUrn: 'tree', parentRel: 'qa-facts' }) as { isError?: boolean };
+  expect(result.isError).toBe(true);
+});
+it('keeps empty-subtree success for an absent loc in a readable memory', async () => {
+  const { srv, memory } = await fixture();
+  expect(await srv.callToolText('hadron_list_nodes', { parentRel: `hrn:node:${memory.urn}:absent-loc` })).toBe('No child nodes found under "absent-loc".');
+});
+it('accepts matching dual references and refuses conflicting readable memories', async () => {
+  const { srv, memory, user, org } = await fixture();
+  const parentRel = `hrn:node:${memory.urn}:qa-facts`;
+  expect(await srv.callToolText('hadron_list_nodes', { parentRel, memoryUrn: `hrn:mem:${memory.urn}` })).toContain('alpha-note');
+  const other = await db.memory.create({ data: { urn: 'parent2512.example:other-memory', name: 'other', class: 'private', userId: user.id, organizationId: org.id } });
+  const result = await srv.callTool('hadron_list_nodes', { parentRel, memoryUrn: `hrn:mem:${other.urn}` }) as { isError?: boolean; content: Array<{ text: string }> };
+  expect(result.isError).toBe(true);
+  expect(result.content[0].text).toContain('must name the same memory');
+});
+it('does not reveal an unreadable dual-reference memory through conflict diagnostics', async () => {
+  const { srv, memory, org } = await fixture();
+  const other = await db.user.create({ data: { handle: 'scope-owner' } });
+  const foreign = await db.memory.create({ data: { urn: 'parent2512.example:foreign', name: 'foreign', class: 'private', userId: other.id, organizationId: org.id } });
+  const parentRel = `hrn:node:${memory.urn}:qa-facts`;
+  for (const memoryUrn of [`hrn:mem:${foreign.urn}`, 'hrn:mem:parent2512.example:missing']) {
+    const result = await srv.callTool('hadron_list_nodes', { parentRel, memoryUrn }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toBe(`Node "${parentRel}" not found.`);
+  }
+});
