@@ -11860,8 +11860,8 @@ export const typeDefs = `#graphql
 
     The casting check (#2458) is shared with changeWorkerAgent: the App's
     holder must be licensed for the agent (AGENT_ORG_GRANT_INACTIVE /
-    AGENT_ORG_GRANT_REQUIRED; a missing same-organization grant is provisioned,
-    a revoked one never reactivated) and for every Agent its served boot prompt
+    AGENT_ORG_GRANT_REQUIRED; a missing same-organization grant is no refusal
+    and a revoked one is) and for every Agent its served boot prompt
     includes from (BOOT_PROMPT_GRANT_REQUIRED / BOOT_PROMPT_INCLUDE_UNAVAILABLE).
 
     The name (cor:agt:020:02) is REQUIRED since #1050 — one attempt, and

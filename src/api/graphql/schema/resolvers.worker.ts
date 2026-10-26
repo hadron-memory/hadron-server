@@ -1029,12 +1029,11 @@ export const workerMutations = {
             if (freshApp.uninstalledAt) {
               throw new GraphQLError('Cannot cast a worker in an uninstalled App.', { extensions: { code: 'APP_UNINSTALLED', appId } });
             }
-            // #2458: the casting check re-decided in the deciding transaction; a missing same-org grant is provisioned
-            // here, never a revoked one reactivated (cor:dmo:050:11).
-            const { provisionGrantsFor } = await assertCastable(tx, freshApp, agent.id);
-            for (const grantAgentId of provisionGrantsFor) {
-              if (freshApp.organizationId) await ensureAgentOrgGrant(tx, freshApp.organizationId, grantAgentId, { createdBy: ctx.userId ?? null });
-            }
+            // #2458: the casting check re-decided in the deciding transaction. READ-ONLY here: this transaction is not
+            // anchored (withAuthorizedTx), and a grant is an authority write that must be (#1551/#1573 ratchet), so a
+            // missing same-org grant passes unprovisioned, as casts did before #2458. Install provisions it; only the
+            // anchored changeWorkerAgent provisions at casting time. A revoked grant still refuses.
+            await assertCastable(tx, freshApp, agent.id);
             // Preserve PostgreSQL lower(name)'s existing typed refusal before
             // applying the additional DAP naming-equivalence check.
             if ((await takenWorkersByName(tx, appId, [candidate])).has(candidate)) return NAME_TAKEN;
