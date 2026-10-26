@@ -76,7 +76,8 @@ import {
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
-import { withAuthorizedTx } from './authorizedTx.js';
+import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
+import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { backfillMemoryEmbeddings } from '../../../services/embedding/enqueue.js';
 import { assertNoLiveAgentReferences } from '../../../lib/agentLiveReferences.js';
 import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
@@ -637,6 +638,33 @@ export const agentMutations = {
       for (let attempt = 1; ; attempt++) {
       try {
       published = await ctx.db.$transaction(async (tx) => {
+        // #2171 (BLIND/LOCAL on PR #2465): a memberRoles edit decides what a
+        // manager may later grant, so its authority is re-checked HERE, in the
+        // deciding transaction, behind the same anchors a revoker takes
+        // exclusively (the withAuthorizedTx protocol, whose order this keeps:
+        // advisory anchors, then org/user rows, then the memory and agent rows
+        // below). The pre-transaction gate alone left the authorize-then-write
+        // window open: a manager demoted in between still landed the edit.
+        if (memberRolesNorm !== undefined) {
+          const anchors: AuthorityAnchor[] = [
+            { kind: 'agent', id },
+            ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+            ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+            ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+          ];
+          await lockAuthorityAnchors(tx, anchors, 'shared');
+          if (agent.organizationId) await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${agent.organizationId} FOR SHARE`;
+          for (const uid of new Set(anchors.filter((a) => a.kind === 'user').map((a) => a.id)).values()) {
+            await tx.$queryRaw`SELECT id FROM users WHERE id = ${uid} FOR SHARE`;
+          }
+          const live = await liveTxContext(ctx, tx);
+          const current = await tx.agent.findUnique({ where: { id } });
+          if (!current || current.deletedAt) throw authorizationDenied();
+          if (current.organizationId !== agent.organizationId || current.ownerUserId !== agent.ownerUserId) {
+            throw new Error('Agent ownership changed; retry the update');
+          }
+          await requireAgentAccess(live, current, 'ADMIN');
+        }
         // Lock and RE-READ the urn inside the transaction (PR #1080 review,
         // Codex + Copilot P2). The row above was read before the transaction
         // opened, so two concurrent renames could both record the SAME old urn

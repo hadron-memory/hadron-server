@@ -7,6 +7,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -119,6 +120,37 @@ describe('updateAgent memberRoles', () => {
       M.updateAgent({}, { ref: agentId, description: 'd' }, ctxFor(admin.id)),
     ]);
     expect((await policyOf(agentId)).memberRoles).toEqual(['owner', 'x']);
+  });
+});
+
+describe('updateAgent memberRoles: authority is re-checked in the deciding transaction', () => {
+  it('a manager demoted while the edit is in flight (revoker holds the org anchor) is refused, and nothing is written', async () => {
+    const agentId = (await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'o2171g.example:race', name: 'race',
+        installationPolicy: { maxMembers: 'unlimited', memberRoles: ['owner'] } as never },
+    })).id;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const haveAnchor = new Promise<void>((r) => { held = r; });
+    // A revoker: takes the org anchor exclusively, demotes the manager, commits only on release.
+    const revoker = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'org', id: org.id }], 'exclusive');
+      await tx.orgMember.updateMany({ where: { organizationId: org.id, userId: admin.id }, data: { deletedAt: new Date() } });
+      held();
+      await gate;
+    });
+    await haveAnchor;
+    let settled = false;
+    const edit = M.updateAgent({}, { ref: agentId, memberRoles: ['owner', 'x'] }, ctxFor(admin.id))
+      .then(() => 'applied', (e: unknown) => e)
+      .finally(() => { settled = true; });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(settled).toBe(false);
+    release();
+    await revoker;
+    expect(await edit).not.toBe('applied');
+    expect((await policyOf(agentId)).memberRoles).toEqual(['owner']);
   });
 });
 
