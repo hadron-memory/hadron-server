@@ -8,6 +8,8 @@ import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { lockAgentTemplates } from '../../../lib/tickers/agentTickerTemplates.js';
 import { resolvers, type Context } from './resolvers.js';
+import { isNameClash } from './resolvers.agentTickerTemplate.js';
+import { Prisma } from '../../../generated/prisma/index.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn() }));
@@ -89,6 +91,29 @@ describe('#2024 template CRUD', () => {
   it('caps the live templates of one Agent', async () => {
     for (let i = 0; i < 20; i++) await declare(`T${i}`);
     expect(await refusal(declare('one too many'))).toBe('TICKER_TEMPLATE_LIMIT_REACHED');
+  });
+});
+
+describe('#2429 isNameClash', () => {
+  const p2002 = (meta?: Record<string, unknown>) =>
+    new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test', meta });
+
+  it('maps the real client\'s duplicate-name error, which carries the model name', async () => {
+    const data = { agentId, name: 'Dup', cadenceSeconds: 600, reasons: ['read-team-channel'] };
+    await db.agentTickerTemplate.create({ data });
+    const raised = await db.agentTickerTemplate.create({ data }).then(() => null, (e) => e);
+    expect(raised).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    expect(raised.code).toBe('P2002');
+    expect(isNameClash(raised)).toBe(true);
+  });
+
+  it('does not map a P2002 without a model name or for another model, and ignores non-P2002 errors', () => {
+    expect(isNameClash(p2002())).toBe(false);
+    expect(isNameClash(p2002({}))).toBe(false);
+    expect(isNameClash(p2002({ modelName: 'Ticker' }))).toBe(false);
+    expect(isNameClash(p2002({ modelName: 'AgentTickerTemplateRevision' }))).toBe(false);
+    expect(isNameClash(p2002({ modelName: 'AgentTickerTemplate' }))).toBe(true);
+    expect(isNameClash(new Error('AgentTickerTemplate'))).toBe(false);
   });
 });
 
@@ -287,6 +312,20 @@ describe('#2024 repair carve-out stays narrow', () => {
     expect(await db.worker.findUnique({ where: { id: miscast.id } })).not.toBeNull();
   });
 
+  it('a reference only the inventory sees still refuses the repair while generated tickers are skipped', async () => {
+    await declare('Base tick');
+    const miscast = await cast('Miscast');
+    const report = await cast('Report');
+    expect(await db.ticker.count({ where: { generatedForWorkerId: miscast.id, deletedAt: null } })).toBe(1);
+    await db.worker.update({ where: { id: report.id }, data: { reportsToWorkerId: miscast.id } });
+    expect(await refusal(M.deleteWorker({}, { workerRef: miscast.id, confirmNoExternalAttribution: true }, ctx))).toBe('WORKER_IN_USE');
+    expect(await db.worker.findUnique({ where: { id: miscast.id } })).not.toBeNull();
+    // Control: with the report-to cleared, the same worker is verified-empty and removable.
+    await db.worker.update({ where: { id: report.id }, data: { reportsToWorkerId: null } });
+    expect(await M.deleteWorker({}, { workerRef: miscast.id, confirmNoExternalAttribution: true }, ctx)).toBe(true);
+    expect(await db.ticker.count({ where: { generatedForWorkerId: miscast.id } })).toBe(0);
+  });
+
   it('a generated ticker that was deleted is history, not bookkeeping: the repair refuses', async () => {
     await declare('Base tick');
     const miscast = await cast('Miscast');
@@ -388,17 +427,22 @@ describe('#2024 concurrency', () => {
 
 describe('#2024 lock protocol (two-connection barriers)', () => {
   /** Hold `take` open in its own transaction until the returned release is called. */
-  const open: Array<{ release: () => void; holder: Promise<void> }> = [];
+  const open: Array<{ release: () => void; holder: Promise<void>; pid: number }> = [];
   afterEach(async () => { for (const h of open.splice(0)) { h.release(); await h.holder.catch(() => undefined); } });
-  /** Resolve once a backend is blocked on THIS advisory key (not just any advisory lock). */
-  async function waitForWaiterOnKey(key: string, timeoutMs = 10_000) {
+  /** Backends blocked on THIS advisory key (not just any advisory lock), minus the pids the caller rules out. */
+  async function waitersOnKey(key: string, exclude: number[] = []): Promise<number[]> {
+    const rows = await db.$queryRaw<Array<{ pid: number }>>`
+      SELECT l.pid::int AS pid FROM pg_locks l, (SELECT hashtextextended(${key}, 0) AS h) k
+      WHERE l.locktype = 'advisory' AND NOT l.granted
+        AND l.classid::bigint = ((k.h >> 32) & 4294967295) AND l.objid::bigint = (k.h & 4294967295)`;
+    return rows.map((r) => r.pid).filter((pid) => !exclude.includes(pid));
+  }
+  /** Resolve with the pid of the operation's backend once it is blocked on THIS key; holders and decoys never count. */
+  async function waitForWaiterOnKey(key: string, exclude: number[] = [], timeoutMs = 10_000): Promise<number> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const [{ waiting }] = await db.$queryRaw<Array<{ waiting: number }>>`
-        SELECT count(*)::int AS waiting FROM pg_locks l, (SELECT hashtextextended(${key}, 0) AS h) k
-        WHERE l.locktype = 'advisory' AND NOT l.granted
-          AND l.classid::bigint = ((k.h >> 32) & 4294967295) AND l.objid::bigint = (k.h & 4294967295)`;
-      if (waiting >= 1) return;
+      const [pid] = await waitersOnKey(key, exclude);
+      if (pid !== undefined) return pid;
       if (Date.now() > deadline) throw new Error(`no backend blocked on advisory key ${key}`);
       await new Promise((r) => setTimeout(r, 10));
     }
@@ -408,10 +452,15 @@ describe('#2024 lock protocol (two-connection barriers)', () => {
     const done = new Promise<void>((r) => { release = r; });
     let locked!: () => void;
     const ready = new Promise<void>((r) => { locked = r; });
-    const holder = db.$transaction(async (tx) => { await take(tx); locked(); await done; }, { timeout: 30_000 });
+    let pid = 0;
+    const holder = db.$transaction(async (tx) => {
+      const [row] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`;
+      pid = row.pid;
+      await take(tx); locked(); await done;
+    }, { timeout: 30_000 });
     await ready;
     await after?.();
-    const handle = { release: () => release(), holder };
+    const handle = { release: () => release(), holder, get pid() { return pid; } };
     open.push(handle);
     return handle;
   }
@@ -422,10 +471,31 @@ describe('#2024 lock protocol (two-connection barriers)', () => {
       await tx.agentTickerTemplate.create({ data: { agentId, name: 'Uncommitted', cadenceSeconds: 600, reasons: ['read-team-channel'] } });
     });
     const casting = cast('Iris');
-    await waitForWaiterOnKey(`agent-ticker-templates:${agentId}`);
+    expect(await waitForWaiterOnKey(`agent-ticker-templates:${agentId}`, [h.pid])).not.toBe(h.pid);
     h.release(); await h.holder;
     await casting;
     expect((await liveTickers()).map((t) => t.name)).toEqual(['Uncommitted \u00b7 Iris']);
+  });
+
+  it('a waiter on another advisory key never satisfies the barrier: only the operation\'s own backend does', async () => {
+    await declare('Base');
+    const operationKey = `tickers:${appId}`;
+    const decoyKey = `tickers:decoy-${generateId()}`;
+    const lockDecoy = async (tx: any) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${decoyKey}, 0))`; };
+    const decoyHolder = await hold(lockDecoy);
+    const decoyWaiter = hold(lockDecoy);
+    const decoyPid = await waitForWaiterOnKey(decoyKey, [decoyHolder.pid]);
+    // The decoy is blocked, yet nothing waits on the operation's key: the barrier sees none.
+    expect(await waitersOnKey(operationKey)).toEqual([]);
+    const h = await hold(async (tx) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${operationKey}, 0))`; });
+    const casting = cast('Iris').then(() => 'cast');
+    const operationPid = await waitForWaiterOnKey(operationKey, [h.pid]);
+    expect([h.pid, decoyHolder.pid, decoyPid]).not.toContain(operationPid);
+    expect(await waitersOnKey(decoyKey, [decoyHolder.pid])).toEqual([decoyPid]);
+    h.release(); await h.holder;
+    expect(await casting).toBe('cast');
+    decoyHolder.release(); await decoyHolder.holder;
+    await decoyWaiter;
   });
 
   it('an Agent uninstalled while a cast waits for the template lock refuses the cast and writes nothing', async () => {
@@ -445,7 +515,7 @@ describe('#2024 lock protocol (two-connection barriers)', () => {
     await declare('Base');
     const h = await hold(async (tx) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tickers:${appId}`}, 0))`; });
     const casting = cast('Iris').then(() => 'cast');
-    await waitForWaiterOnKey(`tickers:${appId}`);
+    expect(await waitForWaiterOnKey(`tickers:${appId}`, [h.pid])).not.toBe(h.pid);
     expect(await db.worker.count({ where: { appId } })).toBe(0);
     h.release(); await h.holder;
     expect(await casting).toBe('cast');
@@ -456,7 +526,7 @@ describe('#2024 lock protocol (two-connection barriers)', () => {
     const iris = await cast('Iris');
     const h = await hold(async (tx) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tickers:${appId}`}, 0))`; });
     const retiring = M.retireWorker({}, { workerRef: iris.id }, ctx).then(() => 'retired');
-    await waitForWaiterOnKey(`tickers:${appId}`);
+    expect(await waitForWaiterOnKey(`tickers:${appId}`, [h.pid])).not.toBe(h.pid);
     expect((await db.worker.findUniqueOrThrow({ where: { id: iris.id } })).retiredAt).toBeNull();
     h.release(); await h.holder;
     expect(await retiring).toBe('retired');
