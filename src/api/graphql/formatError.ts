@@ -22,7 +22,7 @@
  * — every asset NOT_FOUND — was filed as an exception. One list, two readers,
  * so a new entry cannot be half-registered.
  */
-import { Kind, type GraphQLError, type GraphQLFormattedError } from 'graphql';
+import { GraphQLError as GraphQLErrorClass, Kind, type GraphQLError, type GraphQLFormattedError } from 'graphql';
 import { publicErrorExtensions } from '../../lib/errorDiagnostics.js';
 import { faultRequestId, INTERNAL_ERROR_CODE, INTERNAL_ERROR_MESSAGE, logInternalFault } from '../../lib/internalFault.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
@@ -163,6 +163,24 @@ function unwrap(error: unknown): unknown {
  */
 export function isExpectedClientError(original: unknown): boolean {
   return CLIENT_ERROR_MAPPINGS.some((m) => m.matches(original) && m.silenceInSentry);
+}
+
+/**
+ * Whether an error is a typed domain refusal, whose code and text a caller may see (#1789, cor:api:260:01).
+ *
+ * Trusted: a mapped domain class above, or a GraphQLError this server authored with an explicit code of its own. NOT
+ * trusted: a plain Error whatever its prose (an `Error('Forbidden')` is not a refusal by sounding like one: type it, see
+ * lib/refusals.ts), or anything wearing Apollo's default INTERNAL_SERVER_ERROR. Prisma and other foreign errors never
+ * arrive as a GraphQLError of ours, so they fall to the fault side.
+ */
+export function isTrustedRefusal(error: unknown): boolean {
+  const original = unwrap(error);
+  if (CLIENT_ERROR_MAPPINGS.some((m) => m.matches(original))) return true;
+  if (original instanceof GraphQLErrorClass) {
+    const code = original.extensions?.code;
+    return typeof code === 'string' && code !== INTERNAL_ERROR_CODE;
+  }
+  return false;
 }
 
 /** Apollo error boundary: conceal diagnostics and coercion values, retaining public domain codes/fields. */

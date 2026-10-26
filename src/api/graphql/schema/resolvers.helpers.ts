@@ -87,6 +87,7 @@ import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemor
 import { isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { installWriteAllowed } from './installMemory.js';
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
  * Marks a Node row whose `content` field answers with the STORED text unless a
@@ -2655,7 +2656,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   }
 
   // JWT user path
-  if (!ctx.userId) throw new Error('Unauthenticated');
+  if (!ctx.userId) throw unauthenticatedError();
 
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id: memoryId },

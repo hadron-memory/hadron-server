@@ -44,6 +44,7 @@ import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { AuthoritySnapshotStale } from '../../../lib/auth/authorityAnchors.js';
 import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../../lib/auth/revokeOrgInvitations.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
  * Map a `RootNameTakenError` from the #692 principal pool to a user-facing
@@ -64,7 +65,7 @@ export const orgMutations = {
       { name, handle, email }: { name?: string; handle?: string | null; email?: string | null },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // A handle is the hrn:user:<handle> slug — normalize to lowercase-canonical
       // and validate (#325). `undefined` leaves it unchanged; an illegal handle
       // throws. spec 047: handle is NOT NULL, so it can no longer be cleared —
@@ -93,7 +94,7 @@ export const orgMutations = {
           const locked = await tx.$queryRaw<{ handle: string | null; principal_id: string | null; email: string | null }[]>`
             SELECT handle, principal_id, email FROM users WHERE id = ${userId} FOR UPDATE
           `;
-          if (locked.length === 0) throw new Error('Unauthenticated');
+          if (locked.length === 0) throw unauthenticatedError();
           const current = locked[0];
           // Identity addresses require proof of control. Profile edits cannot
           // establish or replace one; an unchanged form field is a no-op.
@@ -531,7 +532,7 @@ export const orgMutations = {
       },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       const slug = generateId().slice(0, 16);
       const expiresAt = expiresInDays
         ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000)

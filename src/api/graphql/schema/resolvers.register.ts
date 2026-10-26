@@ -48,6 +48,7 @@ import { isAppParticipant } from './resolvers.helpers.js';
 import { collectRegisterRows, resolveRegister, toGqlRegisterRows, type RegisterAttendee } from '../../../lib/resolveRegister.js';
 import { advanceReadState, readStateIncarnations } from '../../../lib/channelReadState.js';
 import { OPEN_SESSION_SCAN_CAP, isSessionLive, loadLastEventBySession, recentlyTouchedFilter } from '../../../lib/sessionActivity.js';
+import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 type RegisterRoleInput = 'WATCH' | 'POST' | 'BOTH';
 
@@ -61,7 +62,7 @@ async function readableEntry(ctx: Context, ref: string): Promise<RegisterEntry |
 }
 
 async function writableEntry(ctx: Context, ref: string): Promise<RegisterEntry> {
-  if (ctx.impersonation) throw new Error('Forbidden');
+  if (ctx.impersonation) throw forbiddenError();
   const row = await readableEntry(ctx, ref);
   if (!row) throw new GraphQLError(`No match for registerEntryRef "${ref}".`, { extensions: { code: 'NOT_FOUND' } });
   await requireRegisterOwnerWrite(ctx, row);
@@ -246,12 +247,12 @@ async function readableAttendee(
  * its attention.
  */
 async function requireReadStateDriver(ctx: Context, attendee: RegisterAttendee, appId: string): Promise<void> {
-  if (ctx.impersonation) throw new Error('Forbidden');
+  if (ctx.impersonation) throw forbiddenError();
   if (!ctx.userId) {
     if (ctx.appId && ctx.appId === appId) return;
-    throw new Error('Forbidden');
+    throw forbiddenError();
   }
-  if (!('workerId' in attendee)) throw new Error('Forbidden');
+  if (!('workerId' in attendee)) throw forbiddenError();
   const now = new Date();
   const open = await ctx.db.session.findMany({
     where: { workerId: attendee.workerId, userId: ctx.userId, endedAt: null, deletedAt: null, ...recentlyTouchedFilter(now) },
@@ -260,7 +261,7 @@ async function requireReadStateDriver(ctx: Context, attendee: RegisterAttendee, 
     take: OPEN_SESSION_SCAN_CAP,
   });
   const events = await loadLastEventBySession(ctx.db as never, open.map((s) => s.id));
-  if (!open.some((s) => isSessionLive(s, events.get(s.id), now))) throw new Error('Forbidden');
+  if (!open.some((s) => isSessionLive(s, events.get(s.id), now))) throw forbiddenError();
 }
 
 /**
@@ -352,8 +353,8 @@ export const registerMutations = {
     },
     ctx: Context,
   ): Promise<RegisterEntry> => {
-    if (ctx.impersonation) throw new Error('Forbidden');
-    if (!ctx.userId) throw new Error('Unauthenticated');
+    if (ctx.impersonation) throw forbiddenError();
+    if (!ctx.userId) throw unauthenticatedError();
     const owner = await resolveRegisterOwnerForWrite(ctx, input.ownerRef);
     const channel = await resolveChannelForOwner(ctx, input.channelRef, owner);
     const attendee = input.attendeeRef?.trim()

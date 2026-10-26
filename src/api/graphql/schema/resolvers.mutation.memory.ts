@@ -160,6 +160,7 @@ import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
 import { installDeleteAllowed, lockInstallAuthorityFirst } from './installMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { forbiddenError } from '../../../lib/refusals.js';
 
 /**
  * #561 — refuse a `Memory.source` that is not a GitHub repository URL.
@@ -2113,7 +2114,7 @@ export const memoryMutations = {
         chosen,
         async () => {
           if (!(await isOwnerAdmin()) && !(await isSubscriberAdmin())) {
-            throw new Error('Forbidden');
+            throw forbiddenError();
           }
         },
         () => refArgNotFoundError('memory', chosen),
@@ -2139,7 +2140,7 @@ export const memoryMutations = {
                   role: { in: ['ADMIN', 'OWNER'] } }, select: { id: true },
               })
             : null;
-          if (!platformAdmin && !ownerAdmin && !subscriberAdmin) throw new Error('Forbidden');
+          if (!platformAdmin && !ownerAdmin && !subscriberAdmin) throw forbiddenError();
           await requireMemorySubscription(txCtx, resolvedMemoryId, resolvedOrgId, chosen);
         },
         (tx) => tx.memorySubscription.delete({
