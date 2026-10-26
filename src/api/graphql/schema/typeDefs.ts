@@ -7604,6 +7604,11 @@ export const typeDefs = `#graphql
     the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Retired workers are left out.
     """
     teamRoster(appRef: ID!): TeamRoster!
+    """
+    #2061 — direct-report lanes from the same roster projection and read gate as teamRoster.
+    One bounded RepeatableRead snapshot per call; no hierarchy rollups or role exclusions.
+    """
+    teamComposition(appRef: ID!): TeamComposition!
     "Declarative team JSON Schema (2020-12). apiVersion is the full identifier hadron.dev/team/v1alpha1; HTTP discovery uses /schemas/team/v1alpha1.json. CLIENT_INPUT additionally permits file parts for clients to inline; the server accepts SERVER only."
     teamSpecSchema(apiVersion: String!, form: TeamSpecForm = SERVER): String!
     """
@@ -13998,6 +14003,46 @@ export const typeDefs = `#graphql
     id: ID!
     title: String!
     status: AgentTaskStatus!
+  }
+
+  "#2061 — active roster workers grouped by their direct reportsTo claim."
+  type TeamComposition {
+    appId: ID!
+    asOf: DateTime!
+    "Lanes ordered by coordinator name (case-insensitive), then URN; the unassigned lane is last. Empty teams have no lanes."
+    lanes: [TeamCompositionLane!]!
+  }
+
+  "A direct-report group, not a hierarchy rollup. A coordinator's own row belongs only in its own reportsTo lane."
+  type TeamCompositionLane {
+    "Sanitized coordinator identity, including retired coordinators; null for the single unassigned lane."
+    coordinator: AgentTaskParty
+    coordinatorRetired: Boolean!
+    "Non-retired workers only, retaining roster name order. No role, including saas-pm, is excluded."
+    workers: [TeamCompositionWorker!]!
+    "Plain headcounts, role ascending with null last; null is its own bucket."
+    countsByRole: [TeamRoleCount!]!
+    "Plain headcounts by role then family, null last in each dimension; nulls are retained as their own buckets."
+    countsByRoleFamily: [TeamRoleFamilyCount!]!
+  }
+
+  "A closed roster projection; no task, holder or raw Worker fields."
+  type TeamCompositionWorker {
+    worker: AgentTaskParty!
+    role: String
+    family: String
+    bound: Boolean!
+    liveSession: Boolean!
+    state: TeamRosterState!
+  }
+  type TeamRoleCount {
+    role: String
+    count: Int!
+  }
+  type TeamRoleFamilyCount {
+    role: String
+    family: String
+    count: Int!
   }
 
   "#1707 — one worker on the team roster."
