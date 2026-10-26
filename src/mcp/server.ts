@@ -5518,13 +5518,30 @@ export function createMcpServerInstance(
       let prefix: string;
       let memoryId: string | undefined;
       if (trimmedParentRel) {
-        const resolved = await resolveLocFromUrn(trimmedParentRel, memoryIds);
-        prefix = resolved.loc;
-        memoryId = resolved.memoryId;
+        // #2512: discovery scope is not the explicit-read gate. A caller naming
+        // a Memory or Node may read their own identity-scoped memory even when
+        // it is absent from discovery; the canReadMemory check below still decides.
+        const qualifiedParent = parseUrnInput(trimmedParentRel).type === 'node';
+        if (memoryUrn && !qualifiedParent) {
+          try {
+            assertFullyQualifiedUrn(memoryUrn, 'memory');
+          } catch (e) {
+            if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+            throw e;
+          }
+          const mem = await resolveMemoryByUrn(memoryUrn);
+          if (!mem) return refusalResult(`Node "${trimmedParentRel}" not found.`);
+          const resolved = await resolveLocFromUrn(trimmedParentRel, [mem.id]);
+          prefix = resolved.loc;
+          memoryId = mem.id;
+        } else {
+          const resolved = await resolveLocFromUrn(trimmedParentRel, qualifiedParent ? null : memoryIds);
+          prefix = resolved.loc;
+          memoryId = resolved.memoryId;
+        }
         // #188 (Gemini): canReadMemory gate matches hadron_find_nodes.
-        // resolveLocFromUrn's accessibleMemoryIds filter handles non-
-        // admin scope, but ADMIN/OWNER pass null and would otherwise
-        // be able to browse another user's personal/private memory.
+        // Explicit resolution identifies the memory; it never authorizes it.
+        // ADMIN/OWNER must also pass the strict-owner/App/license checks.
         if (memoryId && !(await canReadMemory(db, auth, memoryId, EXPLICIT_REF))) {
           return refusalResult(`Node "${trimmedParentRel}" not found.`);
         }
@@ -12444,8 +12461,8 @@ const SHAPE_HADRON_GET_NEXT_NODE = {
 };
 
 const SHAPE_HADRON_LIST_NODES = {
-  parentRel: z.string().optional().describe('Parent node rel path; omit to list from memory root'),
-  memoryUrn: z.string().optional().describe('Memory URN; uses active memory if not provided'),
+  parentRel: z.string().optional().describe('Parent loc (for example notes:ideas) with memoryUrn, or a fully qualified hrn:node: parent URN. A bare loc without memoryUrn searches discovery scope only; use an explicit reference for your personal/private memories. Omit to list from memory root.'),
+  memoryUrn: z.string().optional().describe('Fully qualified Memory URN. Scopes a bare parentRel; required when parentRel is omitted. No active-memory fallback.'),
   depth: z.number().optional().describe('Max depth to traverse (default: 1)'),
   isRunnable: z.boolean().optional().describe('Filter the tree to runnable status. true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to list every node. Spec cor:api:060.'),
 };

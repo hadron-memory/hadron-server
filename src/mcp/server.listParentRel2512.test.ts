@@ -3,6 +3,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { createTestableMcpServer } from './server.js';
+import type { AuthContext } from '../middleware/auth.js';
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 const children = ['alpha-note', 'office-facts', 'zeta-note'];
@@ -13,7 +14,7 @@ async function fixture(kind: 'knowledge' | 'private' = 'private') {
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   const memory = await db.memory.create({ data: { urn: 'parent2512.example:tree', name: 'tree', class: kind, organizationId: org.id, ...(kind === 'private' ? { userId: user.id } : {}) } });
   for (const loc of ['qa-facts', ...children.map(name => `qa-facts:${name}`)]) await db.node.create({ data: { memoryId: memory.id, loc, name: loc } });
-  const auth = { userId: user.id, roles: kind === 'knowledge' ? ['ADMIN'] : ['READER'], clientId: `user:${user.id}` };
+  const auth: AuthContext = { userId: user.id, roles: kind === 'knowledge' ? ['ADMIN'] : ['READER'], clientId: `user:${user.id}` };
   const srv = createTestableMcpServer(auth);
   return { user, org, memory, auth, srv };
 }
@@ -47,15 +48,19 @@ it.each(['qualified', 'scoped'] as const)('refuses a foreign private owner even 
   for (const name of children) expect(text).not.toContain(name);
 });
 it.each(['qualified', 'scoped'] as const)('rechecks revoked participation on the same connection for a %s parent', async mode => {
-  const { user, org, memory, srv } = await fixture();
+  const { user, org, memory, auth } = await fixture();
   const app = await db.app.create({ data: { organizationId: org.id, urn: 'parent2512.example:app', name: 'App' } });
   const agent = await db.agent.create({ data: { organizationId: org.id, urn: 'parent2512.example:agent', name: 'Agent' } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await db.agentSubscription.create({ data: { userId: user.id, agentId: agent.id, activatedAt: new Date() } });
   await db.memory.update({ where: { id: memory.id }, data: { appId: app.id, userMemoryOfAgentId: agent.id } });
+  // App B is selected: explicitly addressing App A must recheck its live participation.
+  const otherApp = await db.app.create({ data: { organizationId: org.id, urn: 'parent2512.example:other', name: 'Other' } });
+  const srv = createTestableMcpServer({ ...auth, appId: otherApp.id });
+  await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'owner' } });
   const args = parentArgs(memory, mode);
   expect(await srv.callToolText('hadron_list_nodes', args)).toContain('alpha-note');
-  await db.orgMember.update({ where: { organizationId_userId: { organizationId: org.id, userId: user.id } }, data: { deletedAt: new Date() } });
+  await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: user.id } } });
   const denied = await srv.callToolText('hadron_list_nodes', args);
   expect(denied).toContain('not found');
   for (const name of children) expect(denied).not.toContain(name);
