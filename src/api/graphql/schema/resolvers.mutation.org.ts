@@ -45,6 +45,7 @@ import { withAuthorizedTx } from './authorizedTx.js';
 import { AuthoritySnapshotStale } from '../../../lib/auth/authorityAnchors.js';
 import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../../lib/auth/revokeOrgInvitations.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
+import { forbiddenError } from '../../../lib/refusals.js';
 
 /**
  * Map a `RootNameTakenError` from the #692 principal pool to a user-facing
@@ -929,10 +930,10 @@ export const orgMutations = {
       { externalId, handle, name, email }: { externalId: string; handle?: string; name?: string; email?: string },
       ctx: Context,
     ) => {
-      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      if (!ctx.appId) throw forbiddenError('Forbidden: App Key required');
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
       if (app.createUserPermission === 'DENY') {
-        throw new Error('Forbidden: this app cannot create users');
+        throw forbiddenError('Forbidden: this app cannot create users');
       }
       // App-provided profile data cannot establish a verified identity.
       if (email?.trim()) {

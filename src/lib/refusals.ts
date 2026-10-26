@@ -6,8 +6,8 @@
  */
 import { GraphQLError } from 'graphql';
 
-export function forbiddenError(): GraphQLError {
-  return new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+export function forbiddenError(message = 'Forbidden'): GraphQLError {
+  return new GraphQLError(message, { extensions: { code: 'FORBIDDEN' } });
 }
 
 export function unauthenticatedError(): GraphQLError {

@@ -1264,18 +1264,18 @@ export const memoryMutations = {
             // an org admin) deletes its install memory by hand, also after the App
             // was soft-deleted. Not content access: the record is all this opens.
             if (!(await installDeleteAllowed(authCtx, current))) {
-              throw new Error('Forbidden: only whoever manages the App can delete its install memory');
+              throw forbiddenError('Forbidden: only whoever manages the App can delete its install memory');
             }
             return;
           }
           if (current.class === 'personal' || current.class === 'private') {
             if (!authCtx.userId || current.userId !== authCtx.userId) {
-              throw new Error(`Forbidden: only the owner can delete a ${current.class} memory`);
+              throw forbiddenError(`Forbidden: only the owner can delete a ${current.class} memory`);
             }
           } else if (current.ownerUserId !== null) {
             // spec 047: a user-owned memory is deletable only by its owner.
             if (authCtx.userId !== current.ownerUserId) {
-              throw new Error('Forbidden: only the owner can delete this memory');
+              throw forbiddenError('Forbidden: only the owner can delete this memory');
             }
           } else {
             // Org-owned (the XOR CHECK guarantees ownerUserId is null here ⇒ org is
@@ -1377,7 +1377,7 @@ export const memoryMutations = {
         } else if (source.ownerUserId !== null) {
           // spec 047: a user-owned source memory is cloneable only by its owner.
           if (ctx.userId !== source.ownerUserId) {
-            throw new Error('Forbidden: only the owner can clone this memory');
+            throw forbiddenError('Forbidden: only the owner can clone this memory');
           }
         } else {
           // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
@@ -1657,7 +1657,7 @@ export const memoryMutations = {
         // gates the same way. spec 047: a user-owned source is gated by its owner.
         if (source.ownerUserId !== null) {
           if (ctx.userId !== source.ownerUserId) {
-            throw new Error('Forbidden: only the owner can copy from this memory');
+            throw forbiddenError('Forbidden: only the owner can copy from this memory');
           }
         } else {
           // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
@@ -2203,7 +2203,7 @@ export const memoryMutations = {
       { memoryId, externalUserId }: { memoryId: string; externalUserId: string },
       ctx: Context,
     ) => {
-      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      if (!ctx.appId) throw forbiddenError('Forbidden: App Key required');
       // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });

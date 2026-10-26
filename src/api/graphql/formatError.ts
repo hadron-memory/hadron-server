@@ -233,7 +233,11 @@ export function formatGraphQLError(
   // The wrapper's public code never overrides the classification of what it wraps (LOCAL P2-1): a GraphQLError that
   // wears a code around a foreign driver Error is still a fault. Errors built directly as GraphQLError (Apollo's own
   // validation/parse/bad-request failures) unwrap to themselves and stay trusted through their explicit code.
-  if (!isTrustedRefusal(original)) {
+  // Apollo's own failures (validation, parse, complexity) reach here as a GraphQLError original under a coded wrapper.
+  const code = formattedError.extensions?.code;
+  const graphqlOriginal = original instanceof GraphQLErrorClass &&
+    typeof code === 'string' && code !== INTERNAL_ERROR_CODE;
+  if (!graphqlOriginal && !isTrustedRefusal(original)) {
     const requestId = faultRequestId();
     logInternalFault('graphql', Array.isArray(formattedError.path) ? formattedError.path.join('.') : 'request', requestId, original);
     return {

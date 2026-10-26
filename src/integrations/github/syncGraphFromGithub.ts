@@ -1,4 +1,5 @@
 import { committedSyncReport, failedSyncReport, type SyncReportEntry, type SyncReportCode } from './syncReport.js';
+import { GitCommandError } from './execGit.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, withSyncCaller } from '../../lib/bootPrompt.js';
 import { currentActor } from '../../lib/requestActor.js';
@@ -1683,7 +1684,9 @@ const syncGraphFromGithubAsSystem = async (
       error: (error as Error).message,
       ...(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError
         ? { errorCode: 'BAD_USER_INPUT' as const }
-        : error instanceof GitSyncEncryptedMemoryError ? { errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE } : { fault: true as const }),
+        : error instanceof GitSyncEncryptedMemoryError ? { errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE }
+          // A git failure's message is fixed and credential-free by design (execGit), so it stays a typed refusal.
+          : error instanceof GitCommandError ? {} : { fault: true as const }),
     };
   }
 };
