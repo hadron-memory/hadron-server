@@ -88,8 +88,8 @@ async function preview(ctx: Context, row: Awaited<ReturnType<typeof load>>, form
 }
 
 /** Adoption state from the stored consent, by the existing parser: no pin, an unadopted marker or a corrupt pin is UNADOPTED. Never truthiness. The stored pin's FORMAT comes back too — a v3 adoption must be compared under v3 semantics (#2438). */
-function storedState(raw: unknown): { state: 'UNADOPTED' | 'ADOPTED'; hash: string | null; format: AutomationPinFormat } {
-  try { const pin = parseAutomationPin(raw); return { state: 'ADOPTED', hash: pin.hash, format: pin.format }; }
+function storedState(raw: unknown): { state: 'UNADOPTED' | 'ADOPTED'; hash: string | null; format: AutomationPinFormat; entryId?: string } {
+  try { const pin = parseAutomationPin(raw); return { state: 'ADOPTED', hash: pin.hash, format: pin.format, entryId: pin.entryId }; }
   catch (e) { if (e instanceof AutomationPinError) return { state: 'UNADOPTED', hash: null, format: 'hadron-automation-pin-v4' }; throw e; }
 }
 async function storedConsent(db: Context['db'], kind: AutomationTriggerKind, id: string): Promise<unknown> {
@@ -179,8 +179,13 @@ export const automationPinQueries = {
   /** #2441: what the adopter reviews: state, the hash the Approve button carries, a plain summary, and the graph depth. */
   automationApproval: async (_: unknown, input: AutomationTriggerRef, ctx: Context) => {
     const row = await load(ctx, input);
-    const pin = await preview(ctx, row);
     const stored = storedState(await storedConsent(ctx.db, input.triggerKind, row.id));
+    // A pre-#2438 adoption has no stamped entryNodeId; once its entry moved,
+    // the fresh v4 preview would resolve the stale URN and error the whole
+    // query before the v3 comparison below could answer CHANGED (#2438 BLIND
+    // P2, Andi). The stored pin's entryId is the stable ref: preview by it,
+    // and keep the row's literal URN for the v3-semantics comparison.
+    const pin = await preview(ctx, stored.state === 'ADOPTED' && !row.entryNodeId ? { ...row, entryNodeId: stored.entryId } as typeof row : row);
     let state: AdoptionState = stored.state;
     if (state === 'ADOPTED') {
       if (stored.format === 'hadron-automation-pin-v4') state = stored.hash === pin.hash ? 'ADOPTED' : 'CHANGED';

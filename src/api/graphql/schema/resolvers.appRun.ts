@@ -563,7 +563,10 @@ export const appRunMutations = {
             ...(input.entryNodeUrn != null ? { entryNodeUrn: input.entryNodeUrn } : {}),
             ...(input.entryNodeUrn != null || input.runAsSelf != null || input.aiConfigName !== undefined || agentId !== undefined ? await captureSetupConsent(tx as never, existing.appId,
               input.runAsSelf != null ? resolveRunAsSelf(txCtx, input.runAsSelf) : existing.userId,
-              input.entryNodeUrn ?? existing.entryNodeUrn, existing.organizationId, txCtx, configSelection({ ...existing, ...input, agentId: agentId === undefined ? existing.agentId : agentId })).then(consent => ({
+              // #2438 BLIND P2 (Andi): with no new entry supplied, capture by
+              // the stamped id — after a rename the stored URN is stale, and
+              // re-capturing it would break a working schedule's consent.
+              input.entryNodeUrn ?? existing.entryNodeId ?? existing.entryNodeUrn, existing.organizationId, txCtx, configSelection({ ...existing, ...input, agentId: agentId === undefined ? existing.agentId : agentId })).then(consent => ({
               // #2438: a re-captured setup pin re-stamps the entry id with
               // it (the marker's absent entryId clears to null only when the
               // entry itself no longer resolves — the URN path takes over).
