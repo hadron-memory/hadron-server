@@ -14,7 +14,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
-const M = resolvers.Mutation as any, Q = resolvers.Query as any;
+const M = resolvers.Mutation as any, Q = resolvers.Query as any, W = resolvers.Worker as any;
 let org: any, app: any, oldAgent: any, newAgent: any, admin: any, staff: any, member: any, outsider: any, worker: any;
 const ctx = (u = admin, extra: Partial<Context> = {}): Context => ({ db, userId: u.id, roles: ['READER'], ...extra });
 const change = (agentRef: string = newAgent.id, c = ctx()) => M.changeWorkerAgent({}, { workerRef: worker.id, agentRef }, c);
@@ -54,7 +54,8 @@ beforeEach(async () => {
 describe('#2458 changeWorkerAgent: the change', () => {
   it('moves agent and role, keeps name/slug/URN, and the old URN still resolves', async () => {
     const before = await row();
-    const urn = (await Q.worker({}, { ref: worker.id }, ctx())).urn;
+    const urn = await W.urn(worker, {}, ctx());
+    expect(urn).toMatch(/^hrn:worker:/);
     await change();
     const after = await row();
     expect(after).toMatchObject({ agentId: newAgent.id, role: 'specs-engineer', name: before.name, slug: before.slug, appId: before.appId });
@@ -165,9 +166,17 @@ describe('#2458 changeWorkerAgent: refusals change nothing', () => {
     expect(await code(change())).toBe('BOOT_PROMPT_GRANT_REQUIRED');
     expect(await snapshot()).toEqual(before);
     // With the grant held, the same change goes through.
-    await db.agentOrgGrant.create({ data: { orgId: org.id, agentId: lib.id } });
+    await db.agentOrgGrant.create({ data: { orgId: org.id, agentId: lib.id, activatedAt: new Date() } });
     await change();
     expect((await row()).agentId).toBe(newAgent.id);
+  });
+
+  it('refuses an agent with no role of its own rather than storing a null role', async () => {
+    const roleless = await M.createAgent({}, { orgId: org.id, name: 'Roleless' }, ctx());
+    await db.appAgent.create({ data: { appId: app.id, agentId: roleless.id } });
+    const before = await snapshot();
+    expect(await code(change(roleless.id))).toBe('WORKER_AGENT_HAS_NO_ROLE');
+    expect(await snapshot()).toEqual(before);
   });
 
   it('refuses the unchanged agent and a retired worker', async () => {

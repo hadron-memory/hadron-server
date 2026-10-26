@@ -1739,6 +1739,8 @@ export const typeDefs = `#graphql
     userId: String
     "The role-agent driving the session (with workerId set, the agent behind the casting)."
     agentId: String
+    "#2458 (hrn:node:hadronmemory.com:specs:cor:dmo:050:11): the worker's role when this session was bound; it does not follow a later change of the worker's agent. Null without a worker."
+    role: String
     "#974 / cor:agt:020:03: the Worker (named casting) this session works as."
     workerId: String
     """
@@ -5098,7 +5100,7 @@ export const typeDefs = `#graphql
   type CastWorkerPreview {
     "The name the cast would take — the caller's, checked free against the App's FULL roster (retired names stay taken). Required since #1050; a nameless preview refuses exactly where the cast would."
     name: String!
-    "The casting's role: explicit, else the agent's personaRole dressing."
+    "The casting's role: the agent's personaRole (it cannot be overridden, R222)."
     role: String
     "The role-agent the casting would bind."
     agentId: ID!
@@ -11852,7 +11854,15 @@ export const typeDefs = `#graphql
     WORKER_AGENT_NOT_INSTALLED); otherwise role picks the single installed
     agent whose personaRole matches (zero / several candidates:
     WORKER_AGENT_NOT_FOUND / WORKER_AGENT_AMBIGUOUS, never a guess). The
-    casting's role defaults to the agent's personaRole when role is omitted.
+    casting's role is the agent's personaRole and cannot be overridden
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:11, R222): beside an agentRef,
+    a role that is not that agent's refuses WORKER_ROLE_OVERRIDE_REFUSED.
+
+    The casting check (#2458) is shared with changeWorkerAgent: the App's
+    holder must be licensed for the agent (AGENT_ORG_GRANT_INACTIVE /
+    AGENT_ORG_GRANT_REQUIRED; a missing same-organization grant is provisioned,
+    a revoked one never reactivated) and for every Agent its served boot prompt
+    includes from (BOOT_PROMPT_GRANT_REQUIRED / BOOT_PROMPT_INCLUDE_UNAVAILABLE).
 
     The name (cor:agt:020:02) is REQUIRED since #1050 — one attempt, and
     WORKER_NAME_TAKEN is the answer. There is no register to fall back to: a
@@ -11997,8 +12007,8 @@ export const typeDefs = `#graphql
     Omitted preserves, null refuses, whitespace-only becomes empty text; other text is raw, max 2000 characters, no NUL.
     A mixed update is atomic. These values reach the next compose/bind via S4.
 
-    The other casting identity fields stay immutable: \`name\` is permanent by law (hrn:node:hadronmemory.com:specs:cor:agt:020:02)
-    and \`role\`/\`agent\` define the casting itself. OMITTING promptOverride
+    \`name\` is permanent by law (hrn:node:hadronmemory.com:specs:cor:agt:020:02). The agent
+    (and with it the role) is changed by changeWorkerAgent, not here. OMITTING promptOverride
     preserves it; explicit \`null\` or a blank string CLEARS it, matching the
     nullable column and castWorker's blank-is-absent normalization.
 
@@ -12009,6 +12019,33 @@ export const typeDefs = `#graphql
     promptOverride alone keeps castWorker staffing authorization. workerRef is the worker's id or URN (#991).
     """
     updateWorker(workerRef: ID!, promptOverride: String, signature: String, trailer: String): Worker!
+
+    """
+    #2458 (hrn:node:hadronmemory.com:specs:cor:dmo:050:11, R222): change the
+    agent a worker casts. The role follows the agent and is never typed in.
+    Name, slug, URN, signature, trailer, reporting line and every past record
+    stay; past sessions keep the agent and role they ran under
+    (Session.agentId, Session.role).
+
+    Who: whoever manages the App, as themselves. A worker session (even one
+    its manager holds), an App key, an impersonation or a run is FORBIDDEN.
+
+    To what: the same checks as castWorker (WORKER_AGENT_NOT_INSTALLED,
+    AGENT_ORG_GRANT_INACTIVE / _REQUIRED, BOOT_PROMPT_GRANT_REQUIRED /
+    BOOT_PROMPT_INCLUDE_UNAVAILABLE, APP_UNINSTALLED). Also WORKER_RETIRED,
+    WORKER_AGENT_UNCHANGED (it already casts that agent),
+    WORKER_AGENT_HAS_NO_ROLE (the agent has no personaRole to change to) and
+    WORKER_CASTING_STALE (a concurrent change; read again). A refused change
+    changes nothing.
+
+    A complete change, in one transaction: the worker's own boot-prompt
+    pointer is cleared (it named the old agent's compiled prompt), the old
+    agent's generated tickers end and the new agent's are made, and one
+    \`worker.casting\` team event records who and the old and new agent and
+    role. It takes effect at the worker's next bind; an open session finishes
+    under the role it started with. workerRef and agentRef are ids or URNs.
+    """
+    changeWorkerAgent(workerRef: ID!, agentRef: ID!): Worker!
 
     """
     #2045 (S8) — set or clear an Agent's boot-prompt pointer. nodeRef (a node id or a
