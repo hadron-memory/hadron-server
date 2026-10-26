@@ -7,8 +7,10 @@ import { isRunPrincipal } from '../auth/runPrincipal.js';
 import { currentActorAmbiguity } from '../requestActor.js';
 import { loadPendingDeliverySummary } from './deliveryBatch.js';
 import { createFooterOmissionReporter, footerFailureReason } from './deliveryPendingDiagnostics.js';
+import { createFooterSlots, FOOTER_MAX_CONCURRENT } from './deliveryPendingSlots.js';
 
 const omission = createFooterOmissionReporter();
+const slots = createFooterSlots(FOOTER_MAX_CONCURRENT);
 
 export type DeliveryPending = { v: 1; count: number; complete: true; asOf: string };
 export const DELIVERY_PENDING_BUDGET_MS = 250;
@@ -18,6 +20,9 @@ export async function deliveryPending(ctx: Context, namedSession?: string): Prom
   // It answers connection ambiguity only for this footer, without publishing an actor or changing the tool.
   if (namedSession) ctx = { ...ctx, sessionId: namedSession };
   if (!ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation || isRunPrincipal(ctx) || (!namedSession && currentActorAmbiguity())) return;
+  // Taken before any pooled connection is requested and never waited for; released on every path below.
+  const release = slots.tryAcquire();
+  if (!release) { omission('saturated'); return; }
   const start = performance.now();
   try {
     // No uncancelled Promise.race: pool acquisition, transaction lifetime and backend statements are bounded.
@@ -38,6 +43,7 @@ export async function deliveryPending(ctx: Context, namedSession?: string): Prom
     if (performance.now() - start <= DELIVERY_PENDING_BUDGET_MS) return result;
     omission('deadline');
   } catch (error) { omission(footerFailureReason(error)); }
+  finally { release(); }
 }
 
 export async function appendDeliveryPending<T>(result: T, ctx: Context, namedSession?: string): Promise<T> {

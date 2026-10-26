@@ -18,6 +18,7 @@ import { appendChatMessage } from '../../lib/chatRoot.js';
 import { getMemoryEncryptionInfo } from '../../lib/nodeCrypto.js';
 import * as deliveryBatchModule from '../../lib/tickers/deliveryBatch.js';
 import { deliveryPending, appendDeliveryPending } from '../../lib/tickers/deliveryPending.js';
+import { FOOTER_MAX_CONCURRENT } from '../../lib/tickers/deliveryPendingSlots.js';
 import { loadDeliveryBatches } from '../../lib/tickers/deliveryBatch.js';
 import { generateId } from '../../lib/id.js';
 import { setS7AvailableForTest } from '../../lib/tickers/s7Availability.js';
@@ -241,6 +242,28 @@ describe('#2026 review closure controls', () => {
    expect(log).not.toContain('PRIVATE_FOOTER_ERROR_SENTINEL');
    expect(log).not.toContain(session.id);
   } finally {spy.mockRestore();warn.mockRestore();clock.mockRestore();}
+ });
+ it('omits beyond the footer slot cap without waiting, then recovers with no leaked slot', async () => {
+  const pending: Array<() => void> = [];
+  let calls = 0;
+  const spy = vi.spyOn(deliveryBatchModule, 'loadPendingDeliverySummary').mockImplementation(() => {
+   calls++;
+   return new Promise<number>(resolve => { pending.push(() => resolve(13)); });
+  });
+  try {
+   const held = Array.from({ length: FOOTER_MAX_CONCURRENT }, () => deliveryPending(context() as any));
+   await vi.waitFor(() => expect(calls).toBe(FOOTER_MAX_CONCURRENT));
+   const start = performance.now();
+   expect(await deliveryPending(context() as any)).toBeUndefined();
+   expect(performance.now() - start).toBeLessThan(100);
+   expect(calls).toBe(FOOTER_MAX_CONCURRENT);
+   pending.splice(0).forEach(release => release());
+   for (const out of await Promise.all(held)) expect(out).toMatchObject(metadata(13));
+   spy.mockRejectedValue(new Error('synthetic count failure'));
+   for (let i = 0; i < FOOTER_MAX_CONCURRENT * 3; i++) expect(await deliveryPending(context() as any)).toBeUndefined();
+   spy.mockResolvedValue(13);
+   expect(await deliveryPending(context() as any)).toMatchObject(metadata(13));
+  } finally { spy.mockRestore(); }
  });
  it('omits run principals and ambiguous unnamed callers, while a valid named session stays self-only', async () => {
   expect(await deliveryPending({...context(),clientId:'run:synthetic-footer-run'} as any)).toBeUndefined();

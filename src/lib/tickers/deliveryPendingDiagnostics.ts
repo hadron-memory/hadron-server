@@ -1,5 +1,5 @@
 /** Footer telemetry is process-local and contains only finite classes, never raw errors or identities. */
-const reasons = ['failure', 'deadline', 'pool', 'transaction', 'statement', 'read-only', 'unsafe-count', 'unavailable-app'] as const;
+const reasons = ['failure', 'deadline', 'pool', 'transaction', 'statement', 'read-only', 'unsafe-count', 'unavailable-app', 'saturated'] as const;
 type Reason = typeof reasons[number];
 const knownCodes: Record<string, Reason> = {
   P2024: 'pool', P2028: 'transaction', '57014': 'statement', '25006': 'read-only',
