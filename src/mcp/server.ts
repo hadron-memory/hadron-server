@@ -10854,7 +10854,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   server.tool(
     'hadron_change_worker_agent',
-    "Change the agent a worker casts (#2458, cor:dmo:050:11). The worker's role follows the new agent; it is never typed in. Name, slug, URN, signature, trailer, reporting line and all past records stay, and past sessions keep the agent and role they ran under. App managers only, acting as themselves: a worker session is refused, even one its manager holds. The new agent must be installed in the App, and the App must hold the grants for it and for every Agent its boot prompt includes from. A complete change: the worker's own boot-prompt pointer is cleared, the old agent's generated tickers end and the new agent's are made, and one worker.casting event is written. It takes effect at the worker's next bind; an open session finishes under its old role. A refused change changes nothing.",
+    "Change the agent a worker casts (#2458, cor:dmo:050:11). The worker's role follows the new agent; it is never typed in. Name, slug, URN, signature, trailer, reporting line and all past records stay, and past sessions keep the agent and role they ran under. App managers only, acting as themselves: a worker session is refused, even one its manager holds. The new agent must be installed in the App, and the App must hold the grants for it and for every Agent its boot prompt includes from. A complete change: the worker's own boot-prompt pointer is cleared, the old agent's generated tickers end and the new agent's are made, and one worker.casting event is written. It takes effect at the worker's next bind. Refused (WORKER_HAS_OPEN_SESSION) while the worker has an open session: end it first. A refused change changes nothing.",
     SHAPE_HADRON_CHANGE_WORKER_AGENT,
     async ({ workerRef, agent, app, session }) => {
       if (session !== undefined && !(await validateSessionBinding(db, auth, session))) {
@@ -10894,7 +10894,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         const worker = await resolvers.Mutation.changeWorkerAgent({}, { workerRef: target.id, agentRef: agent }, ctx);
         return textResult(
           `**${worker.name}** now casts agent ${worker.agentId}${worker.role ? ` (role ${worker.role})` : ''}. ` +
-            'It takes effect at the next bind; an open session keeps its old role until it ends.',
+            'It takes effect at the next bind.',
         );
       } catch (e) {
         if (e instanceof GraphQLError && typeof e.extensions?.code === 'string') {

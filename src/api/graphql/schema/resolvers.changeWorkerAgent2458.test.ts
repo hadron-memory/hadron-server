@@ -2,7 +2,8 @@
  * #2458 / cor:dmo:050:11 (R222): a worker's agent can be changed and its role follows it; name, slug and URN stay.
  * Manager-only, as themselves; the same checks as a cast (one shared helper); a COMPLETE change in one
  * transaction (boot-prompt pointer cleared, generated tickers swapped, one `worker.casting` event); effective at
- * the next bind, which stamps the session's agent AND role from the locked worker row.
+ * the next bind, which stamps the session's agent AND role from the locked worker row. Refused while the worker
+ * has an open session, decided under the worker lock the bind also takes.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -22,6 +23,30 @@ const row = () => db.worker.findUniqueOrThrow({ where: { id: worker.id } }) as P
 const events = () => db.agentTeamEvent.findMany({ where: { appId: app.id, type: 'worker.casting' } });
 const code = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED'; } catch (e: any) { return e?.extensions?.code ?? e?.message; } };
 const bind = (u = admin) => M.startSession({}, { input: { id: generateId(), tool: 'vitest', appRef: app.id, workerRef: worker.id, force: true } }, ctx(u));
+
+const endOpenSessions = () => db.session.updateMany({ where: { workerId: worker.id, endedAt: null }, data: { endedAt: new Date() } });
+
+/**
+ * Hold `lockSql` in a side transaction (as a concurrent writer would), run `then` once `call` is waiting on that lock,
+ * then commit. Returns `call`'s outcome code. Each vitest worker has its own database, so any lock wait is `call`'s.
+ */
+async function whileLocked(lock: (tx: any) => Promise<unknown>, call: () => Promise<unknown>, then: (tx: any) => Promise<unknown> = async () => {}) {
+  let held!: () => void, release!: () => void;
+  const isHeld = new Promise<void>(r => (held = r)), gate = new Promise<void>(r => (release = r));
+  const side = db.$transaction(async tx => { await lock(tx); held(); await gate; await then(tx); }, { timeout: 30_000 });
+  await isHeld;
+  const outcome = code(call());
+  for (let i = 0; ; i++) {
+    const [{ n }] = await db.$queryRaw<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`;
+    if (n > 0) break;
+    if (i > 200) throw new Error('the call never waited on the held lock');
+    await new Promise(r => setTimeout(r, 25));
+  }
+  release();
+  await side;
+  return outcome;
+}
 
 /** A changed-nothing snapshot: the worker row, its tickers and the casting events. */
 const snapshot = async () => ({
@@ -88,6 +113,7 @@ describe('#2458 changeWorkerAgent: the change', () => {
   it('a past session keeps the agent and role it ran under; the next bind gets the new ones and the new prompt', async () => {
     const past = await bind();
     expect(await db.session.findUniqueOrThrow({ where: { id: past.id } })).toMatchObject({ agentId: oldAgent.id, role: 'security-engineer' });
+    await endOpenSessions();
     await change();
     expect(await db.session.findUniqueOrThrow({ where: { id: past.id } })).toMatchObject({ agentId: oldAgent.id, role: 'security-engineer' });
     const next = await bind();
@@ -179,6 +205,27 @@ describe('#2458 changeWorkerAgent: refusals change nothing', () => {
     expect(await snapshot()).toEqual(before);
   });
 
+  it('refuses while the worker has an open session (slice 2 has not built open-session consistency)', async () => {
+    await bind();
+    const before = await snapshot();
+    expect(await code(change())).toBe('WORKER_HAS_OPEN_SESSION');
+    expect(await snapshot()).toEqual(before);
+    await endOpenSessions();
+    await change();
+    expect((await row()).agentId).toBe(newAgent.id);
+  });
+
+  it('decides the open session under the worker lock: a bind committing during the wait is seen', async () => {
+    const before = await snapshot();
+    const outcome = await whileLocked(
+      tx => tx.$queryRaw`SELECT id FROM workers WHERE id = ${worker.id} FOR UPDATE`,
+      () => change(),
+      tx => tx.session.create({ data: { id: generateId(), appId: app.id, workerId: worker.id, agentId: oldAgent.id, userId: admin.id } }),
+    );
+    expect(outcome).toBe('WORKER_HAS_OPEN_SESSION');
+    expect(await snapshot()).toEqual(before);
+  });
+
   it('refuses the unchanged agent and a retired worker', async () => {
     const before = await snapshot();
     expect(await code(change(oldAgent.id))).toBe('WORKER_AGENT_UNCHANGED');
@@ -196,6 +243,26 @@ describe('#2458 cast uses the same checks (R222: no role override)', () => {
     expect(await db.worker.count({ where: { appId: app.id, name: 'Bea' } })).toBe(0);
     await expect(M.castWorker({}, { appRef: app.id, agentRef: newAgent.id, role: 'SPECS-ENGINEER', name: 'Bea' }, ctx())).resolves.toMatchObject({ role: 'specs-engineer' });
     await expect(M.castWorker({}, { appRef: app.id, role: 'specs-engineer', name: 'Cid' }, ctx())).resolves.toMatchObject({ agentId: newAgent.id });
+  });
+
+  it('stores the role of the agent as read in the cast transaction, not the pre-transaction one', async () => {
+    const outcome = await whileLocked(
+      tx => tx.$queryRaw`SELECT id FROM apps WHERE id = ${app.id} FOR NO KEY UPDATE`,
+      () => M.castWorker({}, { appRef: app.id, agentRef: newAgent.id, name: 'Eve' }, ctx()),
+      () => db.agent.update({ where: { id: newAgent.id }, data: { personaRole: 'docs-engineer' } }),
+    );
+    expect(outcome).toBe('RESOLVED');
+    expect(await db.worker.findFirstOrThrow({ where: { appId: app.id, name: 'Eve' } })).toMatchObject({ role: 'docs-engineer' });
+  });
+
+  it('re-checks a requested role against the agent read in the cast transaction', async () => {
+    const outcome = await whileLocked(
+      tx => tx.$queryRaw`SELECT id FROM apps WHERE id = ${app.id} FOR NO KEY UPDATE`,
+      () => M.castWorker({}, { appRef: app.id, agentRef: newAgent.id, role: 'specs-engineer', name: 'Fay' }, ctx()),
+      () => db.agent.update({ where: { id: newAgent.id }, data: { personaRole: 'docs-engineer' } }),
+    );
+    expect(outcome).toBe('WORKER_ROLE_OVERRIDE_REFUSED');
+    expect(await db.worker.count({ where: { appId: app.id, name: 'Fay' } })).toBe(0);
   });
 
   it('refuses a cast without the org grant (the cast-time grant check)', async () => {

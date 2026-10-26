@@ -810,9 +810,17 @@ type CastTarget = {
   app: AppRow & { deletedAt: Date | null };
   agent: { id: string; name: string; personaRole: string | null; systemPrompt: string | null };
   workerRole: string | null;
+  /** The role the caller passed (trimmed), or null: the cast re-checks it against the agent read in its transaction. */
+  requestedRole: string | null;
   requestedName: string | null;
   override: string | null;
 };
+
+/** R222 (cor:dmo:050:11): a cast takes the role of the agent it names; `role` may only repeat it. */
+const roleOverrideRefused = (appId: string, agentRole: string | null, requested: string) => new GraphQLError(
+  `A cast takes the role of the agent it names ("${agentRole ?? ''}"); it cannot be overridden. Omit role, or cast the agent that answers "${requested}".`,
+  { extensions: { code: 'WORKER_ROLE_OVERRIDE_REFUSED', appId, agentRole } },
+);
 
 /**
  * The shared resolution HALF of casting (#964 — "single implementation" as a
@@ -936,15 +944,12 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
   // #2458 / R222 (cor:dmo:050:11): a cast takes the role of the agent it names and cannot override it. `role`
   // still SELECTS an agent when no agentRef is given; beside an agentRef it may only repeat that agent's role.
   if (agentRef && agentRef.trim() !== '' && roleNorm !== null && roleNorm.toLowerCase() !== (agent.personaRole ?? '').toLowerCase()) {
-    throw new GraphQLError(
-      `A cast takes the role of the agent it names ("${agent.personaRole ?? ''}"); it cannot be overridden. Omit role, or cast the agent that answers "${roleNorm}".`,
-      { extensions: { code: 'WORKER_ROLE_OVERRIDE_REFUSED', appId, agentRole: agent.personaRole ?? null } },
-    );
+    throw roleOverrideRefused(appId, agent.personaRole ?? null, roleNorm);
   }
   // #2458: the shared casting check (licence for the agent and every Agent its served boot prompt includes from).
   await assertCastable(ctx.db, app, agent.id);
   const workerRole = agent.personaRole ?? null;
-  return { appId, app: app as CastTarget['app'], agent, workerRole, requestedName, override };
+  return { appId, app: app as CastTarget['app'], agent, workerRole, requestedRole: roleNorm, requestedName, override };
 }
 
 /** The typed refusal for a failure while a cast generates its tickers (#2024); anything else is not ours. */
@@ -987,7 +992,7 @@ export const workerMutations = {
    * (advance on WORKER_NAME_TAKEN, exhausted register is typed).
    */
   castWorker: async (_: unknown, args: CastArgs, ctx: Context) => {
-    const { appId, app, agent, workerRole, requestedName, override } = await resolveCastTarget(
+    const { appId, app, agent, workerRole, requestedRole, requestedName, override } = await resolveCastTarget(
       ctx,
       args,
     );
@@ -1033,7 +1038,14 @@ export const workerMutations = {
             // anchored (withAuthorizedTx), and a grant is an authority write that must be (#1551/#1573 ratchet), so a
             // missing same-org grant passes unprovisioned, as casts did before #2458. Install provisions it; only the
             // anchored changeWorkerAgent provisions at casting time. A revoked grant still refuses.
-            await assertCastable(tx, freshApp, agent.id);
+            // The role is the agent's as read HERE, not resolveCastTarget's pre-transaction snapshot: an agent whose
+            // personaRole changed in between is cast with its current role, and a role the caller asked for must still
+            // be that role (R222: a cast takes its agent's role and never overrides it).
+            const { agent: castAgent } = await assertCastable(tx, freshApp, agent.id);
+            const castRole = castAgent.personaRole ?? null;
+            if (requestedRole !== null && requestedRole.toLowerCase() !== (castRole ?? '').toLowerCase()) {
+              throw roleOverrideRefused(appId, castRole, requestedRole);
+            }
             // Preserve PostgreSQL lower(name)'s existing typed refusal before
             // applying the additional DAP naming-equivalence check.
             if ((await takenWorkersByName(tx, appId, [candidate])).has(candidate)) return NAME_TAKEN;
@@ -1045,7 +1057,7 @@ export const workerMutations = {
                 agentId: agent.id,
                 name: candidate,
                 slug,
-                role: workerRole,
+                role: castRole,
                 promptOverride: override,
                 createdBy: ctx.userId ?? null,
                 // #1050 — casting does NOT hold. A name is held by the person
@@ -1704,9 +1716,14 @@ export const workerMutations = {
    * A COMPLETE change, in one transaction: agent and role, the per-worker boot-prompt pointer cleared (it named the
    * OLD agent's compiled prompt; the next bind takes the new agent's), the old agent's generated tickers ended and
    * the new agent's templates instantiated, the missing same-org grants provisioned, and one `worker.casting`
-   * event. It takes effect at the next bind (startSession stamps agent and role from the locked worker row); an
-   * open session finishes under its old role. NOT built here (#2458 slice 2): reads that serve an OPEN session
-   * (register entries, the live prompt, matcher settings) still follow the worker's current agent.
+   * event. It takes effect at the next bind (startSession stamps agent and role from the locked worker row).
+   *
+   * Refused while the worker has an open session (WORKER_HAS_OPEN_SESSION): reads that serve an open session (register
+   * entries, the live prompt, matcher settings) follow the worker's CURRENT agent, so a change under one would hand it
+   * a mix of the old and new casting. Until #2458 slice 2 serves an open session from its own stamped agent and role,
+   * the session must end first. Decided under the Worker row lock, which startSession's bind also takes before it
+   * inserts the session, so a bind and a change serialize: either the change sees the session, or the bind sees the
+   * new agent.
    *
    * Lock order: authority anchors, the App ticker lock (as retireWorker), the per-worker assignment lock, the old
    * and new Agent rows FOR SHARE in id order, then the Worker row FOR UPDATE: the matcher and context reset take
@@ -1758,6 +1775,12 @@ export const workerMutations = {
       if (locked.agent_id === toAgentId) {
         throw new GraphQLError('This worker already casts that agent; nothing to change.', {
           extensions: { code: 'WORKER_AGENT_UNCHANGED', workerId: worker.id },
+        });
+      }
+      const open = await tx.session.findFirst({ where: { workerId: worker.id, endedAt: null, deletedAt: null }, select: { id: true } });
+      if (open) {
+        throw new GraphQLError('This worker has an open session; end it first. An open session would otherwise run under a mix of the old and new agent.', {
+          extensions: { code: 'WORKER_HAS_OPEN_SESSION', workerId: worker.id },
         });
       }
       const freshApp = await tx.app.findUniqueOrThrow({ where: { id: app.id } });
