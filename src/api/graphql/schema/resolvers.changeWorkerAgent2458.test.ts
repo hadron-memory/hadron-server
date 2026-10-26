@@ -2,8 +2,8 @@
  * #2458 / cor:dmo:050:11 (R222): a worker's agent can be changed and its role follows it; name, slug and URN stay.
  * Manager-only, as themselves; the same checks as a cast (one shared helper); a COMPLETE change in one
  * transaction (boot-prompt pointer cleared, generated tickers swapped, one `worker.casting` event); effective at
- * the next bind, which stamps the session's agent AND role from the locked worker row. Refused while the worker
- * has an open session, decided under the worker lock the bind also takes.
+ * the next bind, which stamps the session's agent AND role from the locked worker row. An open session finishes
+ * under the agent and role it was bound with (slice 2: resolvers.openSessionAgent2493.test.ts).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -199,6 +199,18 @@ describe('#2458 changeWorkerAgent: refusals change nothing', () => {
     const before = await snapshot();
     expect(await code(change())).toBe('BOOT_PROMPT_GRANT_REQUIRED');
     expect(await snapshot()).toEqual(before);
+    // A hard-purged included node leaves its Agent unresolvable: the check fails closed rather than skipping it.
+    const purged = await db.node.findUniqueOrThrow({ where: { id: included.id } });
+    await db.node.delete({ where: { id: included.id } });
+    try {
+      expect(await code(change())).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
+      expect(await snapshot()).toEqual(before);
+      // The cast runs the same check: the purge refuses it too (the cast preview and castWorker share assertCastable).
+      expect(await code(M.castWorker({}, { appRef: app.id, agentRef: newAgent.id, name: 'Zed' }, ctx()))).toBe('BOOT_PROMPT_INCLUDE_UNAVAILABLE');
+      expect(await db.worker.count({ where: { appId: app.id, name: 'Zed' } })).toBe(0);
+    } finally {
+      await db.node.create({ data: { id: purged.id, memoryId: purged.memoryId, loc: purged.loc, name: purged.name, content: purged.content } });
+    }
     // With the grant held, the same change goes through.
     await db.agentOrgGrant.create({ data: { orgId: org.id, agentId: lib.id, activatedAt: new Date() } });
     await change();
@@ -213,25 +225,19 @@ describe('#2458 changeWorkerAgent: refusals change nothing', () => {
     expect(await snapshot()).toEqual(before);
   });
 
-  it('refuses while the worker has an open session (slice 2 has not built open-session consistency)', async () => {
-    await bind();
-    const before = await snapshot();
-    expect(await code(change())).toBe('WORKER_HAS_OPEN_SESSION');
-    expect(await snapshot()).toEqual(before);
-    await endOpenSessions();
+  it('goes through while the worker has an open session, which keeps the agent and role it was bound with (slice 2)', async () => {
+    const open = await bind();
     await change();
     expect((await row()).agentId).toBe(newAgent.id);
+    expect(await db.session.findUniqueOrThrow({ where: { id: open.id } })).toMatchObject({ agentId: oldAgent.id, role: 'security-engineer', endedAt: null });
   });
 
-  it('decides the open session under the worker lock: a bind committing during the wait is seen', async () => {
-    const before = await snapshot();
+  it('the worker boot-prompt pointer write waits for a change in flight (assignment lock, then the Worker row)', async () => {
     const outcome = await whileLocked(
       tx => tx.$queryRaw`SELECT id FROM workers WHERE id = ${worker.id} FOR UPDATE`,
-      () => change(),
-      tx => tx.session.create({ data: { id: generateId(), appId: app.id, workerId: worker.id, agentId: oldAgent.id, userId: admin.id } }),
+      () => M.setWorkerBootPrompt({}, { workerRef: worker.id, nodeRef: null }, ctx()),
     );
-    expect(outcome).toBe('WORKER_HAS_OPEN_SESSION');
-    expect(await snapshot()).toEqual(before);
+    expect(outcome).toBe('RESOLVED');
   });
 
   it('refuses the unchanged agent and a retired worker', async () => {

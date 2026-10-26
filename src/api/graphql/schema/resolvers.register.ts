@@ -281,7 +281,7 @@ async function registeredChannel(
   // answer this returns for a foreign Channel and so would have been silent.
   const id = await resolveChannelRefId(ctx.db, channelRef ?? '');
   if (!id) return null;
-  const collected = await collectRegisterRows(ctx.db, attendee);
+  const collected = await collectRegisterRows(ctx.db, attendee, ctx.sessionId);
   if (!collected || !collected.rows.some((r) => r.channelId === id)) return null;
   return ctx.db.channel.findFirst({ where: { id, deletedAt: null }, select: { id: true, lastSeq: true } });
 }

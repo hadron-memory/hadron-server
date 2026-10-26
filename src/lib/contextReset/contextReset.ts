@@ -27,6 +27,7 @@
  */
 
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+import { OPEN_SESSION_PLACEMENT_JOIN } from '../sessionPlacement.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { generateId } from '../id.js';
@@ -184,10 +185,13 @@ export async function requestContextReset(
     select: { id: true },
   });
   if (!started) return null;
-  // R115/R116: the Agent's setting, held like the matcher holds usesTasks.
+  // R115/R116: the Agent's setting, held like the matcher holds usesTasks. The newest open session here is the one chosen
+  // just below (same ordering), and claimContextReset reads the agent of that named session, so the two agree. #2458: a worker with an open session is read
+  // on the agent that session was bound under, not the live worker row.
   const [agent] = await tx.$queryRaw<{ on: boolean }[]>`
-    SELECT a.reset_context_after_task AS "on" FROM agents a
-    JOIN workers w ON w.agent_id = a.id WHERE w.id = ${workerId} FOR SHARE OF a`;
+    SELECT a.reset_context_after_task AS "on" FROM workers w
+    ${OPEN_SESSION_PLACEMENT_JOIN}
+    JOIN agents a ON a.id = COALESCE(os.agent_id, w.agent_id) WHERE w.id = ${workerId} FOR SHARE OF a`;
   if (!agent?.on) return null;
   const otherStarted = await tx.agentTask.count({ where: { assigneeWorkerId: workerId, status: 'started', id: { not: a.task.id } } });
   if (otherStarted > 0) return null;
@@ -463,7 +467,9 @@ export async function claimContextReset(
 
   const [worker] = await tx.$queryRaw<{ retiredAt: Date | null; on: boolean }[]>`
     SELECT w.retired_at AS "retiredAt", a.reset_context_after_task AS "on"
-    FROM workers w JOIN agents a ON a.id = w.agent_id WHERE w.id = ${r.workerId}`;
+    FROM workers w
+    LEFT JOIN sessions bs ON bs.id = ${r.sessionId} AND bs.worker_id = w.id AND bs.role IS NOT NULL
+    JOIN agents a ON a.id = COALESCE(bs.agent_id, w.agent_id) WHERE w.id = ${r.workerId}`;
   if (!worker || worker.retiredAt) return refuse('WORKER_GONE');
   // (a) the session is still the worker's open session, and its only one.
   const open = await tx.$queryRaw<{ id: string }[]>`

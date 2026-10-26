@@ -89,6 +89,11 @@ async function includedAgentIds(db: Db, appId: string, agentId: string): Promise
   const provenance = parseCompiledProvenance(newest.provenance, pointer, newest.compiledRevNo);
   const nodeIds = [...new Set(provenance.occurrences.map((o) => o.nodeId))];
   const memories = await db.node.findMany({ where: { id: { in: nodeIds } }, select: { memoryId: true } });
+  // #2458: a node the provenance names may be hard-purged. Its memory, and so the Agent whose licence it needs, can no
+  // longer be resolved; skipping it would pass the check on an include it never looked at. Fail closed, naming nothing.
+  if (memories.length < nodeIds.length) {
+    throw refusal('BOOT_PROMPT_INCLUDE_UNAVAILABLE', 'The boot prompt this agent is served includes from an Agent that is unavailable.');
+  }
   const memoryIds = [...new Set(memories.map((m) => m.memoryId))];
   if (memoryIds.length === 0) return [];
   const owners = await db.agent.findMany({ where: { systemMemoryId: { in: memoryIds } }, select: { id: true }, orderBy: { id: 'asc' } });

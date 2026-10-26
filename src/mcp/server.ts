@@ -2738,6 +2738,28 @@ export function createMcpServerInstance(
   }
 
   /**
+   * #2493 (cor:dmo:050:11): the explicit `session` argument of a recovery read, as the session the caller is acting as.
+   * A reconnecting principal carries no `auth.sessionId`, yet its open session finishes under the agent and role it was
+   * bound with, so the argument selects that placement. It is never trusted as a bare id: it must pass
+   * `validateSessionBinding` (the one check behind X-Hadron-Session and the connection binding) and, as a user, the
+   * caller must still be entitled to drive it, as the heartbeat above requires. Anything else is no session.
+   */
+  async function explicitActingSessionId(sessionRef?: string | null): Promise<string | undefined> {
+    const id = typeof sessionRef === 'string' ? sessionRef.trim() : '';
+    if (!id) return undefined;
+    try {
+      // The ONE binding check (#934): open, not hard-expired, not dormant, the caller's own, never under impersonation.
+      const bound = await validateSessionBinding(db, auth, id);
+      if (!bound) return undefined;
+      if (auth.userId && !(await callerStillDrives(id))) return undefined;
+      return bound.sessionId;
+    } catch {
+      // Unrecoverable here: serve the live row, the same answer as no session.
+      return undefined;
+    }
+  }
+
+  /**
    * Is this user-principal caller STILL entitled to drive this session?
    *
    * Shares its predicate with `adoptAppFromSession` deliberately: that function
@@ -10569,7 +10591,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         userId: auth.userId ?? undefined,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
-        sessionId: auth.sessionId ?? undefined,
+        sessionId: auth.sessionId ?? (await explicitActingSessionId(session)),
         roles: auth.roles as Context['roles'],
         organizationId: auth.organizationId ?? undefined,
       };
@@ -10873,7 +10895,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   server.tool(
     'hadron_change_worker_agent',
-    "Change the agent a worker casts (#2458, cor:dmo:050:11). The worker's role follows the new agent; it is never typed in. Name, slug, URN, signature, trailer, reporting line and all past records stay, and past sessions keep the agent and role they ran under. App managers only, acting as themselves: a worker session is refused, even one its manager holds. The new agent must be installed in the App, and the App must hold the grants for it and for every Agent its boot prompt includes from. A complete change: the worker's own boot-prompt pointer is cleared, the old agent's generated tickers end and the new agent's are made, and one worker.casting event is written. It takes effect at the worker's next bind. Refused (WORKER_HAS_OPEN_SESSION) while the worker has an open session: end it first. A refused change changes nothing.",
+    "Change the agent a worker casts (#2458, cor:dmo:050:11). The worker's role follows the new agent; it is never typed in. Name, slug, URN, signature, trailer, reporting line and all past records stay, and past sessions keep the agent and role they ran under. App managers only, acting as themselves: a worker session is refused, even one its manager holds. The new agent must be installed in the App, and the App must hold the grants for it and for every Agent its boot prompt includes from. A complete change: the worker's own boot-prompt pointer is cleared, the old agent's generated tickers end and the new agent's are made, and one worker.casting event is written. It takes effect at the worker's next bind: an open session finishes under the agent and role it was bound with. A refused change changes nothing.",
     SHAPE_HADRON_CHANGE_WORKER_AGENT,
     async ({ workerRef, agent, app, session }) => {
       if (session !== undefined && !(await validateSessionBinding(db, auth, session))) {
