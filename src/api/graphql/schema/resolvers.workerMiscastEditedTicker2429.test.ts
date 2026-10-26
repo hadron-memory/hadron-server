@@ -88,8 +88,8 @@ describe('#2429 migration backfill', () => {
     const edited = await castMiscast();
     const untouched = await M.castWorker({}, { appRef: appId, agentRef: agentId, name: 'Untouched' }, ctx);
     const untouchedTicker = await db.ticker.findFirstOrThrow({ where: { generatedForWorkerId: untouched.id } });
-    await db.$executeRaw`UPDATE tickers SET edited_at = NULL, updated_at = created_at + INTERVAL '2 hours', updated_by = 'someone-else' WHERE id = ${edited.ticker.id}`;
-    // A non-edit write to updated_at (same stamp as the cast, however late) must not mark the row.
+    await db.$executeRaw`UPDATE tickers SET edited_at = NULL, updated_at = created_at + INTERVAL '2 hours' WHERE id = ${edited.ticker.id}`;
+    // Accepted residual (ruled time-only): a non-edit write to updated_at over a minute after the cast marks the row too.
     const bookkept = await M.castWorker({}, { appRef: appId, agentRef: agentId, name: 'Bookkept' }, ctx);
     const bookkeptTicker = await db.ticker.findFirstOrThrow({ where: { generatedForWorkerId: bookkept.id } });
     await db.$executeRaw`UPDATE tickers SET edited_at = NULL, updated_at = created_at + INTERVAL '2 hours' WHERE id = ${bookkeptTicker.id}`;
@@ -101,10 +101,10 @@ describe('#2429 migration backfill', () => {
     await db.$executeRawUnsafe(sql[0]);
     expect((await db.ticker.findUniqueOrThrow({ where: { id: edited.ticker.id } })).editedAt).not.toBeNull();
     expect((await db.ticker.findUniqueOrThrow({ where: { id: untouchedTicker.id } })).editedAt).toBeNull();
-    expect((await db.ticker.findUniqueOrThrow({ where: { id: bookkeptTicker.id } })).editedAt).toBeNull();
+    expect((await db.ticker.findUniqueOrThrow({ where: { id: bookkeptTicker.id } })).editedAt).not.toBeNull();
     expect(await refusal(repair(edited.worker.id))).toBe('WORKER_IN_USE');
     expect(await repair(untouched.id)).toBe(true);
-    expect(await repair(bookkept.id)).toBe(true);
+    expect(await refusal(repair(bookkept.id))).toBe('WORKER_IN_USE');
   });
 });
 
