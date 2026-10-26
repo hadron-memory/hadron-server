@@ -6,6 +6,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { archivedTombstoneLoc } from '../../../lib/tombstoneArchive.js';
+import { MAX_REVISION_SLOT } from '../../../lib/revisionSlot.js';
 import { revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
 import { setMintedSpecPermanenceEnforcedForTests } from '../../../lib/mintedSpecPermanence.js';
 
@@ -150,6 +152,64 @@ describe('createRevision', () => {
       const after = await db.node.count({ where: { memoryId: systemMemory.id, loc: { startsWith: 'revisions:' }, deletedAt: null } });
       expect(after).toBe(before + 4);
     }
+  });
+
+  // #2507: a live count collides with a live rev-N after a middle deletion, and must not reuse a deleted name.
+  const slotNode = (loc: string) => db.node.findFirstOrThrow({ where: { memoryId: systemMemory.id, loc } });
+  const save = () => resolvers.Mutation.createRevision({}, { agentId: agent.id }, adminCtx());
+  const del = async (loc: string) => resolvers.Mutation.deleteNode({}, { nodeRef: (await slotNode(loc)).id }, adminCtx());
+
+  it('a save after a middle deletion takes rev-3, not the live rev-2 (#2507)', async () => {
+    await save(); await save();
+    await del('revisions:rev-1');
+    const r = await save();
+    expect(r.revisionLoc).toBe('revisions:rev-3');
+  });
+
+  it('restore still auto-saves after a middle deletion (#2507)', async () => {
+    const rev2 = (await save(), await save());
+    await del('revisions:rev-1');
+    await resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: rev2.revisionLoc }, adminCtx());
+    const auto = await db.node.findMany({
+      where: { memoryId: systemMemory.id, deletedAt: null, description: { startsWith: 'Auto-save before restoring' } },
+    });
+    expect(auto.map((n) => n.loc)).toEqual(['revisions:rev-3']);
+  });
+
+  it('never reuses the name of a deleted highest revision, so its undelete cannot collide or retarget (#2507)', async () => {
+    await save();
+    const second = await save();
+    const secondRow = await slotNode(second.revisionLoc);
+    const originalSnapshot = (secondRow.data as { snapshot: unknown }).snapshot;
+    await del('revisions:rev-2');
+    const next = await save();
+    expect(next.revisionLoc).toBe('revisions:rev-3');
+    // undelete the deleted row: both live, distinct, the old one still holds its own snapshot
+    await db.node.update({ where: { id: secondRow.id }, data: { deletedAt: null, deletedBy: null } });
+    const live = await db.node.findMany({ where: { memoryId: systemMemory.id, loc: { startsWith: 'revisions:rev-' }, deletedAt: null }, orderBy: { loc: 'asc' } });
+    expect(live.map((n) => n.loc)).toEqual(['revisions:rev-1', 'revisions:rev-2', 'revisions:rev-3']);
+    expect((live[1].data as { snapshot: unknown }).snapshot).toEqual(originalSnapshot);
+  });
+
+  it('counts an archived tombstone slot and ignores descendant and malformed locs (#2507)', async () => {
+    await save();
+    const row = await slotNode('revisions:rev-1');
+    await resolvers.Mutation.deleteNode({}, { nodeRef: row.id }, adminCtx());
+    await db.node.update({ where: { id: row.id }, data: { loc: archivedTombstoneLoc('revisions:rev-1', row.id) } });
+    for (const loc of ['revisions:rev-40:child', 'revisions:rev-oops']) {
+      await db.node.create({ data: { id: generateId(), memoryId: systemMemory.id, loc, name: 'x', nodeType: 'system' } });
+    }
+    expect((await save()).revisionLoc).toBe('revisions:rev-2');
+  });
+
+  it('every emitted slot reads back; past the ceiling the save is refused, writing nothing (#2507)', async () => {
+    await save();
+    const row = await slotNode('revisions:rev-1');
+    await db.node.update({ where: { id: row.id }, data: { loc: `revisions:rev-${MAX_REVISION_SLOT - 1}` } });
+    expect((await save()).revisionLoc).toBe(`revisions:rev-${MAX_REVISION_SLOT}`);
+    const before = await db.node.count({ where: { memoryId: systemMemory.id, loc: { startsWith: 'revisions:rev-' } } });
+    await expect(save()).rejects.toMatchObject({ extensions: { code: 'REVISION_SLOTS_EXHAUSTED' } });
+    expect(await db.node.count({ where: { memoryId: systemMemory.id, loc: { startsWith: 'revisions:rev-' } } })).toBe(before);
   });
 
   it('concurrent restores each auto-save into their own slot (#2498)', async () => {
