@@ -1,9 +1,9 @@
-import { committedSyncReport, failedSyncReport, type SyncReportEntry, type SyncReportCode } from './syncReport.js';
+import { committedSyncReport, failedSyncReport, type SyncReportEntry } from './syncReport.js';
 import { GitCommandError } from './execGit.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, withSyncCaller } from '../../lib/bootPrompt.js';
 import { currentActor } from '../../lib/requestActor.js';
-import { assertIncludesWritable, prospectiveNodeId, includeRefusalText, storedIncludeTags, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
+import { assertIncludesWritable, prospectiveNodeId, includeRefusalCode, storedIncludeTags, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
 import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
@@ -906,11 +906,10 @@ const syncGraphFromGithubAsSystem = async (
           try {
             await assertIncludesWritable(tx, { id: selfRow?.id ?? prospectiveNodeId(loc), memoryId: graph.id, loc }, update.content, [graph.id], includeOverlay, { includeSystemWrite: true });
           } catch (e) {
-            const text = includeRefusalText(e);
-            if (!text) throw e;
-            skippedInvalidIncludes.push({ loc, code: String((e as GraphQLError).extensions?.code), message: (e as Error).message });
-            // includeRefusalText admitted only these fixed public refusal codes.
-            reportEntries.push({ kind: 'invalid_include', loc, code: (e as GraphQLError).extensions.code as SyncReportCode });
+            const refusalCode = includeRefusalCode(e);
+            if (!refusalCode) throw e;
+            skippedInvalidIncludes.push({ loc, code: refusalCode, message: (e as Error).message });
+            reportEntries.push({ kind: 'invalid_include', loc, code: refusalCode });
             if (selfRow) skippedRowIds.add(selfRow.id);
             continue;
           }
