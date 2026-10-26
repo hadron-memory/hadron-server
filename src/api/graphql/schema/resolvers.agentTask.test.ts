@@ -784,6 +784,54 @@ describe('reads — the App\'s participants, workers included (cor:agt:050:21)',
     expect(await ids({ parentTaskId: b.id })).toEqual([child.id]);
   });
 
+  describe('creator filter (#2370): matches what `createdBy` projects', () => {
+    const ids = async (args: Record<string, unknown>, c: Context = ctx(member.id)) =>
+      (await Q.agentTasks({}, { appRef: app.id, ...args }, c)).map((t: any) => t.id).sort();
+    /** `inPerson` is created by `member` directly; `byAnne` by Anne's session (stamps BOTH createdBy = holder and createdByWorkerId). */
+    async function twoCreators() {
+      const inPerson = await create(ctx(member.id), { title: 'in person' });
+      const byAnne = await asWorker(anne, () => create(ctx(member.id), { title: 'by anne' }));
+      return { inPerson, byAnne };
+    }
+
+    it('P1: a worker creator returns what that worker created, not what its holder created in person', async () => {
+      const { byAnne } = await twoCreators();
+      expect(await ids({ creator: { worker: anne.id } })).toEqual([byAnne.id]);
+      expect(await ids({ creator: { worker: 'Anne' } })).toEqual([byAnne.id]);
+    });
+
+    it('P2: a person creator returns their in-person tasks and excludes their workers\' tasks', async () => {
+      const { inPerson } = await twoCreators();
+      expect(await ids({ creator: { user: member.id } })).toEqual([inPerson.id]);
+      expect(await ids({ creator: { user: `@${member.handle}` } })).toEqual([inPerson.id]);
+    });
+
+    it('P3: combines with the other filters by AND', async () => {
+      await twoCreators();
+      const byAnne = await asWorker(anne, () => create(ctx(member.id), { title: 'for liam', assignee: { worker: 'Liam' } }));
+      expect(await ids({ creator: { worker: anne.id }, assignee: { worker: liam.id }, status: ['PENDING'] })).toEqual([byAnne.id]);
+      expect(await ids({ creator: { worker: anne.id }, assignee: { worker: rook.id } })).toEqual([]);
+      expect(await ids({ creator: { worker: anne.id }, status: ['STARTED'] })).toEqual([]);
+    });
+
+    it('P4: a ref naming nobody in this App matches nothing, with no error', async () => {
+      await twoCreators();
+      expect(await ids({ creator: { worker: zed.id } })).toEqual([]);
+      expect(await ids({ creator: { worker: 'Nobody' } })).toEqual([]);
+      expect(await ids({ creator: { user: outsider.id } })).toEqual([]);
+      // Parity with owner/assignee: a retired worker is not a party to resolve.
+      expect(await ids({ creator: { worker: retired.id } })).toEqual([]);
+      await expectCode(Q.agentTasks({}, { appRef: app.id, creator: { worker: 'Anne', user: member.id } }, ctx(member.id)), 'BAD_USER_INPUT');
+    });
+
+    it('P5: a non-participant gets APP_NOT_FOUND, exactly as without the filter (R202, no oracle)', async () => {
+      await twoCreators();
+      await expectCode(Q.agentTasks({}, { appRef: app.id, creator: { worker: anne.id } }, ctx(outsider.id)), 'APP_NOT_FOUND');
+      await expectCode(Q.agentTasks({}, { appRef: app.id, creator: { user: member.id } }, ctx(outsider.id)), 'APP_NOT_FOUND');
+      await expectCode(Q.agentTasks({}, { appRef: app.id, creator: { worker: 'Nobody' } }, ctx(outsider.id)), 'APP_NOT_FOUND');
+    });
+  });
+
   it('derived: queued (050:03) and waitingOnChildren (050:04), never stored', async () => {
     const T = F.AgentTask;
     const parent = await anneTask({ start: true });
