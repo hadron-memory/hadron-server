@@ -17,6 +17,7 @@ import {
   revisionStateHashRefreshMarker,
 } from '../../../lib/nodeRevisionSnapshot.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
+import { nextRevisionNumber } from '../../../lib/revisionSlot.js';
 import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
@@ -2166,10 +2167,12 @@ export const sessionMutations = {
       // auto-save included) each see the previous save's row and take distinct slots.
       const { label, revLoc } = await ctx.db.$transaction(async (tx) => {
         await lockPathForCreateUnder(tx, sysMemId, 'revisions');
-        const existingRevisions = await tx.node.count({
-          where: { memoryId: sysMemId, loc: { startsWith: 'revisions:' }, deletedAt: null },
+        // #2507: the highest number ever used, soft-deleted and archived rows included (no deletedAt filter).
+        const slotRows = await tx.node.findMany({
+          where: { memoryId: sysMemId, loc: { startsWith: 'revisions:rev-' } },
+          select: { loc: true },
         });
-        const revNum = existingRevisions + 1;
+        const revNum = nextRevisionNumber(slotRows.map((r) => r.loc));
         const label = `rev-${revNum}`;
         const revLoc = `revisions:${label}`;
         await lockAncestorsForCreate(tx, sysMemId, revLoc);
