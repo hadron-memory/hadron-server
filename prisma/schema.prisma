@@ -3890,6 +3890,8 @@ model Worker {
   /// leaves it alone. Written only by `src/lib/workers/reportsTo.ts`, which
   /// also appends the `worker.reports-to` event that keeps its history.
   reportsToWorkerId String?   @map("reports_to_worker_id")
+  /// S12: explicit human choice; false + null reportsTo is UNSET, never inferred NO_TEAM.
+  explicitNoTeam Boolean @default(false) @map("explicit_no_team")
 
   app                  App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// SetNull: a worker row is never hard-deleted in normal operation, but an

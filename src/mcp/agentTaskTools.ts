@@ -59,7 +59,8 @@ const QA = resolvers.Query as unknown as {
   agentTaskStallSchedule: Resolver<{ appRef: string }, StallScheduleView>;
 };
 type StallScheduleView = Record<StallScheduleKey, number> & { updatedAt: Date | null };
-type RosterRow = import('../lib/agentTasks/roster.js').RosterEntry & {
+type RosterRow = Omit<import('../lib/agentTasks/roster.js').RosterEntry, 'teamPlacement'> & {
+  teamPlacement: import('../lib/agentTasks/roster.js').RosterEntry['teamPlacement'] | null;
   appUrn: string;
   currentTask?: import('../lib/agentTasks/rosterSummary.js').RosterTaskSummary | null;
   pausedUntil?: Date | null;
@@ -133,6 +134,7 @@ export function renderRosterEntry(r: RosterRow, asOf: Date): string {
     r.unreactedChildTaskId ? `child ${r.unreactedChildTaskId} ended (finished or cancelled)` : null,
     r.lastAssignedAt ? `last assigned ${r.lastAssignedAt.toISOString()}` : 'never assigned',
     // #1726: beside last activity, so a stale claim is easy to spot.
+    r.teamPlacement != null ? `team placement ${r.teamPlacement}` : null,
     r.reportsTo ? `reports to ${r.reportsTo.name}${r.reportsTo.retired ? ' (retired)' : ''}` : null,
     r.lastActiveAt ? `last active ${r.lastActiveAt.toISOString()}` : null,
     // #2138 §3.4
