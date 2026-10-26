@@ -17,7 +17,7 @@ import {
   revisionStateHashRefreshMarker,
 } from '../../../lib/nodeRevisionSnapshot.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
-import { nextRevisionNumber } from '../../../lib/revisionSlot.js';
+import { nextRevisionNumber, RevisionSlotsExhaustedError } from '../../../lib/revisionSlot.js';
 import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
@@ -2172,7 +2172,15 @@ export const sessionMutations = {
           where: { memoryId: sysMemId, loc: { startsWith: 'revisions:rev-' } },
           select: { loc: true },
         });
-        const revNum = nextRevisionNumber(slotRows.map((r) => r.loc));
+        let revNum: number;
+        try {
+          revNum = nextRevisionNumber(slotRows.map((r) => r.loc));
+        } catch (e) {
+          if (e instanceof RevisionSlotsExhaustedError) {
+            throw new GraphQLError(e.message, { extensions: { code: 'REVISION_SLOTS_EXHAUSTED' } });
+          }
+          throw e;
+        }
         const label = `rev-${revNum}`;
         const revLoc = `revisions:${label}`;
         await lockAncestorsForCreate(tx, sysMemId, revLoc);

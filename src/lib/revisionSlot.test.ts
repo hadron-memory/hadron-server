@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { nextRevisionNumber, revisionSlotNumber } from './revisionSlot.js';
+import { MAX_REVISION_SLOT, RevisionSlotsExhaustedError, nextRevisionNumber, revisionSlotNumber } from './revisionSlot.js';
 import { archivedTombstoneLoc } from './tombstoneArchive.js';
 import { generateId } from './id.js';
 
@@ -20,6 +20,14 @@ describe('revisionSlot (#2507)', () => {
     expect(revisionSlotNumber('revisions:rev-1000000000')).toBe(1000000000);
     expect(nextRevisionNumber(['revisions:rev-999999999'])).toBe(1000000000);
     expect(nextRevisionNumber(['revisions:rev-999999999', 'revisions:rev-1000000000'])).toBe(1000000001);
+  });
+
+  it('parser and allocator agree at the ceiling: every emitted slot reads back, the next one is refused', () => {
+    const last = nextRevisionNumber([`revisions:rev-${MAX_REVISION_SLOT - 1}`]);
+    expect(last).toBe(MAX_REVISION_SLOT);
+    expect(revisionSlotNumber(`revisions:rev-${last}`)).toBe(last);
+    expect(() => nextRevisionNumber([`revisions:rev-${MAX_REVISION_SLOT}`])).toThrow(RevisionSlotsExhaustedError);
+    expect(() => nextRevisionNumber([archivedTombstoneLoc(`revisions:rev-${MAX_REVISION_SLOT}`, generateId())])).toThrow(RevisionSlotsExhaustedError);
   });
 
   it('is 1 + the highest number, not a count', () => {

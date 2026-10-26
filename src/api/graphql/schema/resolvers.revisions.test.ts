@@ -7,6 +7,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { archivedTombstoneLoc } from '../../../lib/tombstoneArchive.js';
+import { MAX_REVISION_SLOT } from '../../../lib/revisionSlot.js';
 import { revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
 import { setMintedSpecPermanenceEnforcedForTests } from '../../../lib/mintedSpecPermanence.js';
 
@@ -199,6 +200,16 @@ describe('createRevision', () => {
       await db.node.create({ data: { id: generateId(), memoryId: systemMemory.id, loc, name: 'x', nodeType: 'system' } });
     }
     expect((await save()).revisionLoc).toBe('revisions:rev-2');
+  });
+
+  it('every emitted slot reads back; past the ceiling the save is refused, writing nothing (#2507)', async () => {
+    await save();
+    const row = await slotNode('revisions:rev-1');
+    await db.node.update({ where: { id: row.id }, data: { loc: `revisions:rev-${MAX_REVISION_SLOT - 1}` } });
+    expect((await save()).revisionLoc).toBe(`revisions:rev-${MAX_REVISION_SLOT}`);
+    const before = await db.node.count({ where: { memoryId: systemMemory.id, loc: { startsWith: 'revisions:rev-' } } });
+    await expect(save()).rejects.toMatchObject({ extensions: { code: 'REVISION_SLOTS_EXHAUSTED' } });
+    expect(await db.node.count({ where: { memoryId: systemMemory.id, loc: { startsWith: 'revisions:rev-' } } })).toBe(before);
   });
 
   it('concurrent restores each auto-save into their own slot (#2498)', async () => {
