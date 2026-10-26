@@ -7,6 +7,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import * as rosterLoader from '../../../lib/agentTasks/roster.js';
 import { generateId } from '../../../lib/id.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -99,11 +100,15 @@ describe('#2061 teamComposition', () => {
         .toEqual(roster.errors?.map(e => ({ message: e.message, code: e.extensions?.code })));
       expect(composed.errors?.[0].extensions?.code).toBe('APP_NOT_FOUND');
     }
-    const foreignCtx = { db, roles: ['READER'], appId: generateId(), credentialKind: 'app' } as unknown as Context;
+    const foreignCtx: Context = { db, roles: ['READER'], appId: generateId(), appKeyId: generateId() };
     const Q = resolvers.Query as any;
+    const errors = [];
     for (const name of ['teamRoster', 'teamComposition']) {
-      await expect(Q[name]({}, { appRef: appId }, foreignCtx)).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
+      const error = await Q[name]({}, { appRef: appId }, foreignCtx).catch((e: any) => e);
+      expect(error.extensions?.code).toBe('APP_NOT_FOUND');
+      errors.push({ message: error.message, code: error.extensions.code });
     }
+    expect(errors[1]).toEqual(errors[0]);
   });
 
   it('has a closed composition worker surface and only sanitized parties', () => {
@@ -112,6 +117,24 @@ describe('#2061 teamComposition', () => {
       .toEqual(['bound', 'family', 'liveSession', 'role', 'state', 'worker']);
     expect(Object.keys(assertObjectType(schema.getType('AgentTaskParty')).getFields()).sort())
       .toEqual(['id', 'kind', 'name', 'urn']);
+  });
+
+  it('resolves an App URN and takes one roster load inside one RepeatableRead transaction', async () => {
+    const app = await db.app.findUniqueOrThrow({ where: { id: appId }, select: { urn: true } });
+    const load = vi.spyOn(rosterLoader, 'loadTeamRoster');
+    const transaction = vi.spyOn(db, '$transaction');
+    try {
+      const result = await query(composition, memberId, `hrn:app:${app.urn}`);
+      expect(result.errors).toBeUndefined();
+      expect((result.data as any).teamComposition.appId).toBe(appId);
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(transaction).toHaveBeenCalledTimes(1);
+      expect(transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'RepeatableRead', timeout: 20_000 });
+      expect(load.mock.calls[0][0]).not.toBe(db);
+      expect(load.mock.calls[0][1]).toBe(appId);
+    } finally {
+      load.mockRestore(); transaction.mockRestore();
+    }
   });
 
   it('returns no lanes for an empty team', async () => {
