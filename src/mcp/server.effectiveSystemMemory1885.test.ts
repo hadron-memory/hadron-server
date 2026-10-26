@@ -131,8 +131,8 @@ describe('hadron_get_nodes matches the single read', () => {
 describe('hadron_list_nodes and hadron_find_nodes over the child', () => {
   it('lists the effective tree, inherited rows under their own URN and marked', async () => {
     const out = await call('hadron_list_nodes', { memoryUrn: `hrn:mem:${backend.memUrn}`, depth: 3 });
-    expect(out).toContain(`${baseUrn('processes:release')} — EngRelease (inherited from hrn:agent:${engineer.urn})`);
-    expect(out).toContain(`${baseUrn('tasks:ship')} — EngShip (inherited`);
+    expect(out).toContain(`${baseUrn('processes:release')} — EngRelease [info] (inherited from hrn:agent:${engineer.urn})`);
+    expect(out).toContain(`${baseUrn('tasks:ship')} — EngShip [info] (inherited`);
     expect(out).toContain(`${childUrn('tasks:open-pr')} — BackOpenPr`);
     expect(out).not.toContain('EngOpenPr');
     expect(out).not.toContain('EngBoot');
