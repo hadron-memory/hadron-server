@@ -200,9 +200,11 @@ describe('castWorker — happy path', () => {
     expect(worker.appId).toBe(app.id);
   });
 
-  it('an explicit role wins over the agent personaRole', async () => {
-    const worker = await cast({ agentRef: roleAgent.id, role: 'debugger', name: 'Zoe' });
-    expect(worker.role).toBe('debugger');
+  it('an explicit role beside agentRef cannot override the agent personaRole (#2458, R222)', async () => {
+    // Before R222 an explicit role won; a cast now takes the agent's own role.
+    await expectCode(cast({ agentRef: roleAgent.id, role: 'debugger', name: 'Zoe' }), 'WORKER_ROLE_OVERRIDE_REFUSED');
+    const worker = await cast({ agentRef: roleAgent.id, role: 'backend-engineer', name: 'Zoe' });
+    expect(worker.role).toBe('backend-engineer');
   });
 
   it('stores a promptOverride verbatim', async () => {
@@ -328,8 +330,9 @@ describe('castWorker — agent resolution', () => {
   it('the personaRole match is case-insensitive', async () => {
     const worker = await cast({ role: 'Backend-Engineer', name: 'Zoe' });
     expect(worker.agentId).toBe(roleAgent.id);
-    // The casting's role keeps the caller's (normalized-by-trim) spelling.
-    expect(worker.role).toBe('Backend-Engineer');
+    // #2458 / R222: the casting's role is the AGENT's (cor:dmo:050:11), so its
+    // spelling, not the selector's, is what the worker carries.
+    expect(worker.role).toBe('backend-engineer');
   });
 
   it('no installed agent carries the personaRole → WORKER_AGENT_NOT_FOUND', async () => {
@@ -1341,17 +1344,18 @@ describe('Worker field resolvers', () => {
     );
   });
 
-  it('prompt binds the CASTING role when it differs from the agent personaRole', async () => {
-    const worker = await cast({ agentRef: roleAgent.id, role: 'debugger', name: 'Zoe' });
-    const prompt = await W.prompt(worker, {}, ctx(admin.id));
-    expect(prompt).toContain('You are Zoe, a debugger on this team.');
+  it('prompt binds the CASTING role, which is the agent personaRole (#2458, R222)', async () => {
+    // A casting role that differs from the agent's can no longer be cast (WORKER_ROLE_OVERRIDE_REFUSED); the
+    // prompt still binds the worker's stored role, so a worker cast with an override before R222 keeps its own.
+    const cast0 = await cast({ agentRef: roleAgent.id, name: 'Legacy' });
+    const legacy = await db.worker.update({ where: { id: cast0.id }, data: { role: 'debugger' } });
+    expect(await W.prompt(legacy, {}, ctx(admin.id))).toContain('You are Legacy, a debugger on this team.');
   });
 
   it('override-only when the agent carries no template', async () => {
     // The team agent has no systemPrompt dressing.
     const worker = await cast({
       agentRef: teamAgent.id,
-      role: 'coordinator',
       name: 'Zoe',
       promptOverride: 'Coordinate the team.',
     });
@@ -1360,7 +1364,7 @@ describe('Worker field resolvers', () => {
   });
 
   it('null when the agent carries no template and the worker no override', async () => {
-    const worker = await cast({ agentRef: teamAgent.id, role: 'coordinator', name: 'Zoe' });
+    const worker = await cast({ agentRef: teamAgent.id, name: 'Zoe' });
     const prompt = await W.prompt(worker, {}, ctx(admin.id));
     expect(prompt).toBeNull();
   });

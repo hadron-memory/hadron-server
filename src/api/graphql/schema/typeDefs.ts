@@ -1739,6 +1739,8 @@ export const typeDefs = `#graphql
     userId: String
     "The role-agent driving the session (with workerId set, the agent behind the casting)."
     agentId: String
+    "#2458 (hrn:node:hadronmemory.com:specs:cor:dmo:050:11): the worker's role when this session was bound; it does not follow a later change of the worker's agent. Null without a worker."
+    role: String
     "#974 / cor:agt:020:03: the Worker (named casting) this session works as."
     workerId: String
     """
@@ -2926,6 +2928,8 @@ export const typeDefs = `#graphql
     id: ID!
     name: String!
     urn: String!
+    "#2171 (R211): the member roles this App offers: the union over its installed Agents, primary first."
+    availableMemberRoles: [String!]!
     "#2138: when the whole team was paused (setTeamPause), or null. Separate from every worker's own pause."
     teamPausedAt: DateTime
     """
@@ -4924,6 +4928,8 @@ export const typeDefs = `#graphql
     the register). Three senses of one word across two types.
     """
     heldAt: DateTime
+    "S12 placement; null is withheld, UNSET is no recorded choice (including OFF-era casts)."
+    teamPlacement: WorkerTeamPlacement
     """
     #1726 — the one Worker this worker reports to: a non-retired Worker of the
     same App, never itself, never a cycle. Null reports to nobody. A property of
@@ -5102,10 +5108,18 @@ export const typeDefs = `#graphql
   here are attribution-level facts the mint-gate audience already sees, so no
   nested entity hands out its field resolvers.
   """
+  enum WorkerTeamPlacement {
+    UNSET
+    NO_TEAM
+    REPORTS_TO
+  }
+
   type CastWorkerPreview {
+    teamPlacement: WorkerTeamPlacement!
+    reportsToWorkerId: ID
     "The name the cast would take — the caller's, checked free against the App's FULL roster (retired names stay taken). Required since #1050; a nameless preview refuses exactly where the cast would."
     name: String!
-    "The casting's role: explicit, else the agent's personaRole dressing."
+    "The casting's role: the agent's personaRole (it cannot be overridden, R222)."
     role: String
     "The role-agent the casting would bind."
     agentId: ID!
@@ -5956,6 +5970,17 @@ export const typeDefs = `#graphql
   snapshot, live budgets (zeroing halts the run), lifecycle, trigger
   provenance. Spec cor:agt:010:02.
   """
+  type AppRunFailureReason {
+    "Stable category: NOT_ADOPTED, MEMORY_UNREADABLE, CHANGED, OVER_BUDGET, NO_AI_CONFIG, TIMED_OUT, CANCELLED or OTHER."
+    kind: String!
+    "What happened, in plain words."
+    summary: String!
+    "Who can fix it."
+    whoCanFix: String!
+    "What to do, and where."
+    nextStep: String!
+  }
+
   type AppRun {
     id: ID!
     "Computed grammar-v2 URN hrn:apprun:<root>:<app>:<run-id> (#696). Null for the rare multi-segment App URN the flat shape cannot express."
@@ -6011,6 +6036,20 @@ export const typeDefs = `#graphql
     budgetActions.
     """
     actionsSpent: Int
+    """
+    Priced LLM cost of this run in micro-cents (1e-8 USD), as a string (#2439):
+    the sum of its usage events' cost. Events with no known price add nothing.
+    NULL means UNKNOWN (a run minted before the counter existed), not zero.
+    """
+    costMicroCents: String
+    """
+    A failed run's cause in plain words (#2439): what happened, who can fix it
+    and where. Null when the run has no failure. Static text derived from the
+    failure and the run's budgets; it names no memory, id or tool, so it
+    discloses nothing the caller does not already read. The raw failure stays
+    available on the failure field.
+    """
+    failureReason: AppRunFailureReason
     """
     Spec 049 (D-2026-09-13-004): the scope this run carries, as YOU may read it —
     the snapshot taken at mint (the trigger's scope, or a spawned parent's)
@@ -7515,8 +7554,10 @@ export const typeDefs = `#graphql
 
     """
     #1705 — a team App's agent tasks, newest first. Party filters combine with the other selectors;
-    owner / assignee name a party of the App (a ref naming nobody matches
-    nothing). queued selects pending tasks with no assignee; rootsOnly selects roots. These
+    owner / assignee / creator name a party of the App (a ref naming nobody matches
+    nothing; a retired worker is no party to name, so it matches nothing). creator is
+    the task's creator as createdBy projects it: a worker, or a person for a task they created
+    themselves (not one their worker created, #2370). queued selects pending tasks with no assignee; rootsOnly selects roots. These
     take precedence over status and parentTaskId respectively. limit defaults to 20 (cap 200).
     Readers: the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:050:21), or the App's own live key
     without a session binding (#1755).
@@ -7528,6 +7569,7 @@ export const typeDefs = `#graphql
       status: [AgentTaskStatus!]
       owner: AgentTaskPartyInput
       assignee: AgentTaskPartyInput
+      creator: AgentTaskPartyInput
       tag: String
       parentTaskId: ID
       rootsOnly: Boolean
@@ -7581,6 +7623,11 @@ export const typeDefs = `#graphql
     the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Retired workers are left out.
     """
     teamRoster(appRef: ID!): TeamRoster!
+    """
+    #2061 — direct-report lanes from the same roster projection and read gate as teamRoster.
+    One bounded RepeatableRead snapshot per call; no hierarchy rollups or role exclusions.
+    """
+    teamComposition(appRef: ID!): TeamComposition!
     "Declarative team JSON Schema (2020-12). apiVersion is the full identifier hadron.dev/team/v1alpha1; HTTP discovery uses /schemas/team/v1alpha1.json. CLIENT_INPUT additionally permits file parts for clients to inline; the server accepts SERVER only."
     teamSpecSchema(apiVersion: String!, form: TeamSpecForm = SERVER): String!
     """
@@ -9090,6 +9137,10 @@ export const typeDefs = `#graphql
       agentRef: ID
       role: String
       name: String
+      "S12 head choice: requires staffing and App management; refuses WORKER_REPORTING_CAST_UNAVAILABLE if standby becomes available without cast coverage integration."
+      reportsTo: ID
+      "S12 explicit no-team choice; omit reportsTo. Both keys conflict, single null/blank/false is invalid. Omission remains UNSET while enforcement is OFF."
+      noTeam: Boolean
       promptOverride: String
     ): CastWorkerPreview!
 
@@ -9754,6 +9805,17 @@ export const typeDefs = `#graphql
     NodeLocConflictError at a live loc. memoryRef accepts the memory's ID or URN.
     """
     reserveSpecCitation(memoryRef: ID!, loc: String!, name: String): Node!
+    """
+    #1178 — allocate the next citation under parentLoc and reserve it as a
+    placeholder, in one transaction: mint-or-refuse, so a client never reads
+    sibling numbers and writes the next. Numbers follow hadron spec new:
+    features in tens (010..990), rules and flows by one (01..99), rule 00 never,
+    after lands strictly above it. A number ever minted is never handed out
+    again (R216) while a row or alias of it remains, and a loc held by a row of
+    any state is skipped. Refuses SPEC_PARENT_NOT_FOUND, SPEC_PARENT_NOT_NUMBERED
+    and SPEC_NUMBER_SPACE_EXHAUSTED; an unreadable memory is not found.
+    """
+    allocateSpecNode(memoryRef: ID!, parentLoc: String!, after: Int, name: String): Node!
     """
     #1449 — renumber an UNMINTED spec (#1591: draft rights are per node): move
     it and its subtree from fromLoc to toLoc with no URN alias, refusing
@@ -10894,7 +10956,7 @@ export const typeDefs = `#graphql
 
     orgId accepts the org's ID or URN.
     """
-    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean): Agent!
+    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
     """
     Clone an Agent into an organization you administer: a new PERSONAL-draft Agent
     with its own copy of the source's system memory, its links and imports, and a recorded origin. Needs a
@@ -10925,7 +10987,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, registerDefaults: RegisterDefaultsInput): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!]): Agent!
 
     """
     Soft-delete an Agent and its owned system memory. Requires management
@@ -11868,7 +11930,15 @@ export const typeDefs = `#graphql
     WORKER_AGENT_NOT_INSTALLED); otherwise role picks the single installed
     agent whose personaRole matches (zero / several candidates:
     WORKER_AGENT_NOT_FOUND / WORKER_AGENT_AMBIGUOUS, never a guess). The
-    casting's role defaults to the agent's personaRole when role is omitted.
+    casting's role is the agent's personaRole and cannot be overridden
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:11, R222): beside an agentRef,
+    a role that is not that agent's refuses WORKER_ROLE_OVERRIDE_REFUSED.
+
+    The casting check (#2458) is shared with changeWorkerAgent: the App's
+    holder must be licensed for the agent (AGENT_ORG_GRANT_INACTIVE /
+    AGENT_ORG_GRANT_REQUIRED; a missing same-organization grant is no refusal
+    and a revoked one is) and for every Agent its served boot prompt
+    includes from (BOOT_PROMPT_GRANT_REQUIRED / BOOT_PROMPT_INCLUDE_UNAVAILABLE).
 
     The name (cor:agt:020:02) is REQUIRED since #1050 — one attempt, and
     WORKER_NAME_TAKEN is the answer. There is no register to fall back to: a
@@ -11924,6 +11994,10 @@ export const typeDefs = `#graphql
       keep the typed refusal. One rule, one message, both paths.
       """
       name: String
+      "S12 head choice: requires staffing and App management; refuses WORKER_REPORTING_CAST_UNAVAILABLE if standby becomes available without cast coverage integration."
+      reportsTo: ID
+      "S12 explicit no-team choice; omit reportsTo. Both keys conflict, single null/blank/false is invalid. Omission remains UNSET while enforcement is OFF."
+      noTeam: Boolean
       promptOverride: String
     ): Worker!
 
@@ -11949,7 +12023,7 @@ export const typeDefs = `#graphql
     when one person holds both, or placed under any worker by its own holder
     (interim, pending a ruling). WORKER_REPORTS_TO_FORBIDDEN otherwise. A worker acts through its bound
     session, with a person behind the request. Each change is a
-    \`worker.reports-to\` team event; setting the current value changes nothing.
+    \`worker.reports-to\` team event. An explicit clear records NO_TEAM, including a previously UNSET line; repeating the recorded choice changes nothing.
     """
     setWorkerReportsTo(workerRef: ID!, reportsTo: ID): Worker!
     """
@@ -12015,8 +12089,8 @@ export const typeDefs = `#graphql
     Omitted preserves, null refuses, whitespace-only becomes empty text; other text is raw, max 2000 characters, no NUL.
     A mixed update is atomic. These values reach the next compose/bind via S4.
 
-    The other casting identity fields stay immutable: \`name\` is permanent by law (hrn:node:hadronmemory.com:specs:cor:agt:020:02)
-    and \`role\`/\`agent\` define the casting itself. OMITTING promptOverride
+    \`name\` is permanent by law (hrn:node:hadronmemory.com:specs:cor:agt:020:02). The agent
+    (and with it the role) is changed by changeWorkerAgent, not here. OMITTING promptOverride
     preserves it; explicit \`null\` or a blank string CLEARS it, matching the
     nullable column and castWorker's blank-is-absent normalization.
 
@@ -12027,6 +12101,33 @@ export const typeDefs = `#graphql
     promptOverride alone keeps castWorker staffing authorization. workerRef is the worker's id or URN (#991).
     """
     updateWorker(workerRef: ID!, promptOverride: String, signature: String, trailer: String): Worker!
+
+    """
+    #2458 (hrn:node:hadronmemory.com:specs:cor:dmo:050:11, R222): change the
+    agent a worker casts. The role follows the agent and is never typed in.
+    Name, slug, URN, signature, trailer, reporting line and every past record
+    stay; past sessions keep the agent and role they ran under
+    (Session.agentId, Session.role).
+
+    Who: whoever manages the App, as themselves. A worker session (even one
+    its manager holds), an App key, an impersonation or a run is FORBIDDEN.
+
+    To what: the same checks as castWorker (WORKER_AGENT_NOT_INSTALLED,
+    AGENT_ORG_GRANT_INACTIVE / _REQUIRED, BOOT_PROMPT_GRANT_REQUIRED /
+    BOOT_PROMPT_INCLUDE_UNAVAILABLE, APP_UNINSTALLED). Also WORKER_RETIRED,
+    WORKER_AGENT_UNCHANGED (it already casts that agent),
+    WORKER_AGENT_HAS_NO_ROLE (the agent has no personaRole to change to) and
+    WORKER_CASTING_STALE (a concurrent change; read again). A refused change
+    changes nothing.
+
+    A complete change, in one transaction: the worker's own boot-prompt
+    pointer is cleared (it named the old agent's compiled prompt), the old
+    agent's generated tickers end and the new agent's are made, and one
+    \`worker.casting\` team event records who and the old and new agent and
+    role. It takes effect at the worker's next bind: an open session
+    finishes under the agent and role it was bound with. workerRef and agentRef are ids or URNs.
+    """
+    changeWorkerAgent(workerRef: ID!, agentRef: ID!): Worker!
 
     """
     #2045 (S8) — set or clear an Agent's boot-prompt pointer. nodeRef (a node id or a
@@ -13990,6 +14091,46 @@ export const typeDefs = `#graphql
     status: AgentTaskStatus!
   }
 
+  "#2061 — active roster workers grouped by their direct reportsTo claim."
+  type TeamComposition {
+    appId: ID!
+    asOf: DateTime!
+    "Lanes ordered by coordinator name (case-insensitive), then URN; the unassigned lane is last. Empty teams have no lanes."
+    lanes: [TeamCompositionLane!]!
+  }
+
+  "A direct-report group, not a hierarchy rollup. A coordinator's own row belongs only in its own reportsTo lane."
+  type TeamCompositionLane {
+    "Sanitized coordinator identity, including retired coordinators; null for the single unassigned lane."
+    coordinator: AgentTaskParty
+    coordinatorRetired: Boolean!
+    "Non-retired workers only, retaining roster name order. No role, including saas-pm, is excluded."
+    workers: [TeamCompositionWorker!]!
+    "Plain headcounts, role ascending with null last; null is its own bucket."
+    countsByRole: [TeamRoleCount!]!
+    "Plain headcounts by role then family, null last in each dimension; nulls are retained as their own buckets."
+    countsByRoleFamily: [TeamRoleFamilyCount!]!
+  }
+
+  "A closed roster projection; no task, holder or raw Worker fields."
+  type TeamCompositionWorker {
+    worker: AgentTaskParty!
+    role: String
+    family: String
+    bound: Boolean!
+    liveSession: Boolean!
+    state: TeamRosterState!
+  }
+  type TeamRoleCount {
+    role: String
+    count: Int!
+  }
+  type TeamRoleFamilyCount {
+    role: String
+    family: String
+    count: Int!
+  }
+
   "#1707 — one worker on the team roster."
   type TeamRosterEntry {
     worker: AgentTaskParty!
@@ -14033,6 +14174,8 @@ export const typeDefs = `#graphql
     lastActiveAt: DateTime
     "When it was last assigned a task; the matcher picks the least recent (hrn:node:hadronmemory.com:specs:cor:agt:060:06)."
     lastAssignedAt: DateTime
+    "S12 recorded choice; null means withheld, never UNSET or NO_TEAM."
+    teamPlacement: WorkerTeamPlacement
     "#1726 — the worker it reports to; group by this for the team's structure. Read it with lastActiveAt: nothing clears a claim automatically."
     reportsTo: AgentTaskParty
     "#1726 — it reports to a worker that has since retired (retirement leaves the claim; the roster flags it)."

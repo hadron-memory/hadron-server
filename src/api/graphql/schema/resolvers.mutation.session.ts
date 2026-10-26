@@ -17,7 +17,7 @@ import {
   revisionStateHashRefreshMarker,
 } from '../../../lib/nodeRevisionSnapshot.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
-import { lockAncestorsForCreate, lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
+import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
@@ -110,6 +110,8 @@ import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
+import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
+import { forbiddenError } from '../../../lib/refusals.js';
 
 /**
  * Strip explicit GraphQL nulls from a CalendarEventTimeInput so the tool's
@@ -687,6 +689,10 @@ export const sessionMutations = {
       // thin-client directive; before this it was the CLI's contract only,
       // and this mutation was an ungated second surface in waiting).
       let workerId: string | undefined;
+      // #2458: the agentRef the caller passed (if any), and the role the bind stamps; both decided on the LOCKED
+      // worker row below, so a change of the worker's agent landing during this bind is never half-applied.
+      let requestedAgentId: string | undefined;
+      let boundRole: string | null = null;
       // #1029 — the worker's previous stint, derived below when the caller
       // supplies no explicit chain link.
       let derivedPrevSessionId: string | undefined;
@@ -1102,6 +1108,7 @@ export const sessionMutations = {
             { extensions: { code: 'BAD_USER_INPUT' } },
           );
         }
+        requestedAgentId = agentId;
         agentId = worker.agentId;
         workerId = worker.id;
         // #1050 — an UNHELD name is held by the person who binds it. That is
@@ -1239,8 +1246,8 @@ export const sessionMutations = {
           }
         }
         if (workerId) {
-          const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; held_at: Date | null; retired_at: Date | null }>>`
-            SELECT name, held_by_user_id, held_at, retired_at FROM workers WHERE id = ${workerId} FOR UPDATE`;
+          const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; held_at: Date | null; retired_at: Date | null; agent_id: string; role: string | null }>>`
+            SELECT name, held_by_user_id, held_at, retired_at, agent_id, role FROM workers WHERE id = ${workerId} FOR UPDATE`;
           // #1625 review (Baloo, residual P2): the HOLD and retirement are
           // re-validated under the lock for EVERY bind, force included. The
           // checks far above read a snapshot; a release, a claim by someone
@@ -1252,6 +1259,17 @@ export const sessionMutations = {
               { extensions: { code: 'WORKER_RETIRED', workerId } },
             );
           }
+          // #2458 (cor:dmo:050:11): the agent and role this session runs under are the LOCKED row's. The agent read
+          // above was a snapshot, and a change of the worker's agent may have committed during the lock wait; the
+          // bind takes the new casting whole (agent AND role) rather than the old agent beside the new role.
+          if (requestedAgentId !== undefined && requestedAgentId !== locked.agent_id) {
+            throw new GraphQLError(
+              'agentRef and workerRef disagree — the worker casts a different agent. Omit agentRef; it is derived from the worker.',
+              { extensions: { code: 'BAD_USER_INPUT' } },
+            );
+          }
+          agentId = locked.agent_id;
+          boundRole = locked.role;
           if (locked.held_by_user_id && locked.held_by_user_id !== ctx.userId) {
             const holder = await tx.user.findUnique({
               where: { id: locked.held_by_user_id },
@@ -1431,6 +1449,7 @@ export const sessionMutations = {
           appId,
           agentId,
           workerId,
+          role: workerId ? boundRole : null,
           // #929 review P1: attribute the session to the calling user (the
           // schema documents userId as "the developer in a DEVELOPER
           // session"). Without it a session started outside any App context
@@ -1839,7 +1858,7 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       const appId = ctx.appId;
-      if (!appId) throw new Error('Forbidden: App Key required');
+      if (!appId) throw forbiddenError('Forbidden: App Key required');
       const hasSuppliedKey = hasRequestOperationKey();
       // Lock the App before provisioning any dependent row. The lock and all
       // writes commit together, so uninstall cannot pass the check mid-flight.
@@ -1853,7 +1872,7 @@ export const sessionMutations = {
         // 023-app-shape Phase 2b: App↔Agent goes through AppAgent. Check
         // that the requested Agent is installed in the calling App.
         if (!(await isAgentInstalled(tx, app.id, agentId))) {
-          throw new Error('Forbidden: App is not allowed to operate this agent');
+          throw forbiddenError('Forbidden: App is not allowed to operate this agent');
         }
 
         const agent = await tx.agent.findUniqueOrThrow({ where: { id: agentId } });
@@ -2070,7 +2089,7 @@ export const sessionMutations = {
     },
 
     endAgentSession: async (_: unknown, { sessionId }: { sessionId: string }, ctx: Context) => {
-      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      if (!ctx.appId) throw forbiddenError('Forbidden: App Key required');
       const session = await ctx.db.session.findUnique({ where: { id: sessionId } });
       if (!session || session.appId !== ctx.appId) {
         throw new Error('Session not found');
@@ -2125,14 +2144,6 @@ export const sessionMutations = {
         data: e.data,
       }));
 
-      // Count existing revisions to auto-increment
-      const existingRevisions = await ctx.db.node.count({
-        where: { memoryId: sysMemId, loc: { startsWith: 'revisions:' }, deletedAt: null },
-      });
-      const revNum = existingRevisions + 1;
-      const label = `rev-${revNum}`;
-      const revLoc = `revisions:${label}`;
-
       // Ensure revisions parent exists
       try {
         await ctx.db.node.upsert({
@@ -2140,13 +2151,27 @@ export const sessionMutations = {
           create: { id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' },
           update: {},
         });
-      } catch { /* exists */ }
+      } catch (err) {
+        // #2476: only the cold-path race loss means the parent exists.
+        if (!isNodeLocUniqueViolation(err)) throw err;
+      }
 
       // #664/#752: revLoc is `revisions:<label>`, so a concurrent non-recursive
       // delete of the `revisions` parent could count zero descendants and then
       // orphan this row. Hold the ancestor-path lock across the insert (advisory
       // before row; READ COMMITTED so the delete's count sees this post-commit).
-      await ctx.db.$transaction(async (tx) => {
+      // #2498: the slot is allocated INSIDE the serialized section. The `revisions` path lock is
+      // taken first (the key every `revisions:<label>` create takes) and the count is read after it
+      // is granted, on READ COMMITTED's fresh statement snapshot, so concurrent saves (a restore's
+      // auto-save included) each see the previous save's row and take distinct slots.
+      const { label, revLoc } = await ctx.db.$transaction(async (tx) => {
+        await lockPathForCreateUnder(tx, sysMemId, 'revisions');
+        const existingRevisions = await tx.node.count({
+          where: { memoryId: sysMemId, loc: { startsWith: 'revisions:' }, deletedAt: null },
+        });
+        const revNum = existingRevisions + 1;
+        const label = `rev-${revNum}`;
+        const revLoc = `revisions:${label}`;
         await lockAncestorsForCreate(tx, sysMemId, revLoc);
         await tx.node.create({
           data: {
@@ -2162,6 +2187,7 @@ export const sessionMutations = {
             } as InputJsonValue,
           },
         });
+        return { label, revLoc };
       });
 
       return { revisionLoc: revLoc, label, published: false, createdAt: new Date().toISOString() };

@@ -346,11 +346,13 @@ describe('#1037 — the team tools', () => {
       // before the tool's own try/catch, so the failure surfaces as a failure.
       // What matters is that it is NOT reported as "no active App", which would
       // send the caller to fix their selection while the server is down.
-      await expect(
-        createTestableMcpServer(unpinned()).callToolText(
-          'hadron_team_work_items', { worker: DARA_URN() },
-        ),
-      ).rejects.toThrow(/connection terminated/);
+      // #1789: the fault is the generic envelope (detail to the log), still not "no active App".
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const text = await createTestableMcpServer(unpinned()).callToolText(
+        'hadron_team_work_items', { worker: DARA_URN() },
+      );
+      expect(text).toMatch(/^\[INTERNAL_SERVER_ERROR\] Internal server error\. Request id: /);
+      expect(text).not.toMatch(/connection terminated|no active App/i);
     } finally {
       spy.mockRestore();
     }

@@ -782,3 +782,8 @@ CREATE TRIGGER agent_clone_audits_immutable
 
 -- #1162: newly introduced typed Worker/session references fence hard deletion.
 \ir worker-reference-invariants.sql
+
+-- S12 explicit reporting choice (legacy UNSET retained).
+\ir worker-team-choice-invariants.sql
+-- #423: outgoing-edge lookup/delete must not scan every tenant’s edges.
+CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");

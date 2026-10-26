@@ -90,7 +90,7 @@ describe('real caller transports and rolled-back state',()=>{
     validation.mockRejectedValue(new ArchivePlanStaleError());
     const result=await createTestableMcpServer(auth()).callTool('hadron_move_node',{urn:urn('source'),targetUrn:urn('target'),overwrite:true});
     expect(validation).toHaveBeenCalledTimes(3);
-    expect(result).not.toHaveProperty('isError',true);
+    expect(result).toHaveProperty('isError',true); // #1789: every refusal is a failed call
     expect(result.content).toEqual([{type:'text',text:'The node was moved concurrently; re-read it and retry.'}]);
     expect((await db.node.findUniqueOrThrow({where:{id:source.id}})).loc).toBe('source');
     expect((await db.node.findUniqueOrThrow({where:{id:target.id}})).loc).toBe('target');

@@ -56,12 +56,14 @@ import {
   TOKEN_EXPIRY_MINUTES,
 } from './email.js';
 import { isServerLocalPath } from './server-local-path.js';
+import { isLiveOAuthClient, oauthClientExpiresAt } from '../lib/oauthClientLifetime.js';
 import {
   SUPPORTED_OAUTH_SCOPES,
   USER_API_KEY_LABEL_MAX_LEN,
   mintUserApiKeyInTx,
   type OAuthScope,
 } from '../middleware/auth.js';
+import { respondInternalFault, respondOAuthServerError } from '../lib/internalFault.js';
 
 /**
  * Validate a `BASE_URL` env-var value for OAuth-metadata use. Exported
@@ -442,16 +444,15 @@ export async function handleClientRegistration(
         clientId,
         clientName,
         redirectUris: validation.uris,
+        // #155: an unused client becomes collectable; redemptions extend it.
+        expiresAt: oauthClientExpiresAt(),
       },
     });
   } catch (err) {
     // Don't echo the DB error message back — it may name internal
     // identifiers or constraints. `server_error` is RFC 7591 §3.2.2's
     // catch-all error code.
-    res.status(500).json({
-      error: 'server_error',
-      error_description: 'Failed to persist registration',
-    });
+    respondOAuthServerError(res, 'Failed to persist registration', err);
     return;
   }
 
@@ -820,7 +821,7 @@ async function validateClientAndRedirectUri(
   const client = await db.oAuthClient.findUnique({
     where: { clientId: rawClientId },
   });
-  if (!client || client.deletedAt) {
+  if (!isLiveOAuthClient(client)) {
     res.status(400).json({
       error: 'invalid_client',
       error_description: 'client_id is unknown',
@@ -1184,10 +1185,7 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
     // Same posture as /oauth/register: a thrown Prisma error must
     // not become an unhandled rejection. 500 is the catch-all per
     // RFC 7591 §3.2.2.
-    res.status(500).json({
-      error: 'server_error',
-      error_description: 'Failed to issue authorization code',
-    });
+    respondOAuthServerError(res, 'Failed to issue authorization code', error);
     return;
   }
 
@@ -1369,8 +1367,7 @@ function buildHandleAuthorizeEmailPost(_csrf: DoubleCsrfUtilities) {
     // Option-C legs).
     await sendMagicLink(email, db, undefined, undefined, returnTo);
   } catch (err) {
-    console.error('OAuth email-entry send error:', err);
-    res.status(500).json({ error: 'Failed to send verification email' });
+    respondInternalFault(res, 'oauth/email-entry', err);
     return;
   }
 
@@ -1442,8 +1439,7 @@ async function handleAuthorizeEmailCodePost(req: Request, res: Response): Promis
     });
     res.redirect(returnTo as string);
   } catch (err) {
-    console.error('OAuth demo-code sign-in error:', err);
-    res.status(500).json({ error: 'Sign-in failed' });
+    respondInternalFault(res, 'oauth/demo-code', err);
   }
 }
 
@@ -1724,9 +1720,21 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
       const live = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT id FROM users WHERE id = ${authCode.userId} AND deleted_at IS NULL FOR SHARE`;
       if (!live[0]) throw new Error('User not found');
+      // #155: the client row last, FOR UPDATE, after the anchor, the code and the user. A
+      // soft-deleted (collected) client mints nothing; the transaction still commits, so the claim
+      // stands and the answer is the lost-race one (no client-state oracle, Xabat's CHECKED Q2).
+      // Holding the row is what makes that deterministic against the GC: a collection that commits
+      // first is seen here, and one that comes later waits and re-checks the extended expiry below.
+      await tx.$queryRaw`SELECT client_id FROM oauth_clients WHERE client_id = ${authCode.clientId} FOR UPDATE`;
       const client = await tx.oAuthClient.findUnique({ where: { clientId: authCode.clientId } });
+      if (!isLiveOAuthClient(client)) return { kind: 'lost' };
+      // A NULL expiry (seeded clients) never expires and stays NULL.
+      await tx.oAuthClient.updateMany({
+        where: { clientId: authCode.clientId, expiresAt: { not: null }, deletedAt: null },
+        data: { expiresAt: oauthClientExpiresAt() },
+      });
       const clientNameForLabel =
-        client?.clientName && client.clientName.length > 0 ? client.clientName : authCode.clientId;
+        client.clientName.length > 0 ? client.clientName : authCode.clientId;
       // Cap the label at the same length as the GraphQL resolver's user-supplied label (DCR's
       // 200-char client_name cap is only implicit); one shared constant bounds it regardless.
       const label = `OAuth: ${clientNameForLabel}`.slice(0, USER_API_KEY_LABEL_MAX_LEN);
@@ -1744,10 +1752,7 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
     if (error instanceof SignInNotLive) {
       outcome = { kind: 'ended' };
     } else {
-      res.status(500).json({
-        error: 'server_error',
-        error_description: 'failed to issue access token',
-      });
+      respondOAuthServerError(res, 'failed to issue access token', error);
       return;
     }
   }

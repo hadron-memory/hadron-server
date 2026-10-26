@@ -356,7 +356,36 @@ export async function appendHostOperationEvent(
  * reported to, a worker claiming it, its holder, whoever manages the App, the worker's own
  * bind (`startSession`), or the platform clearing it on retirement.
  */
-export type ReportsToSetter = 'current' | 'claimant' | 'holder' | 'app-manager' | 'bind' | 'retirement';
+export type ReportsToSetter = 'current' | 'claimant' | 'holder' | 'app-manager' | 'bind' | 'retirement' | 'cast';
+
+/**
+ * #2458 (cor:dmo:050:11): append the one `worker.casting` event a change of a worker's agent writes, in the change's
+ * own transaction: who, the worker, the old and new agent and role, and the per-worker boot-prompt pointer the change
+ * cleared (null when none was set). Ids and role words only.
+ */
+export async function appendWorkerCastingEvent(
+  tx: Prisma.TransactionClient,
+  args: {
+    appId: string; actor: EventActor; workerId: string;
+    fromAgentId: string; toAgentId: string; fromRole: string | null; toRole: string | null;
+    clearedBootPromptNodeId: string | null;
+  },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'worker.casting',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      subjectWorkerId: args.workerId,
+      payload: {
+        fromAgentId: args.fromAgentId, toAgentId: args.toAgentId, fromRole: args.fromRole, toRole: args.toRole,
+        clearedBootPromptNodeId: args.clearedBootPromptNodeId,
+      },
+    },
+  });
+}
 
 /**
  * Append one `worker.reports-to` event: a set, handover or clear. The Worker
@@ -365,7 +394,7 @@ export type ReportsToSetter = 'current' | 'claimant' | 'holder' | 'app-manager' 
  */
 export async function appendReportsToEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; actor: EventActor; workerId: string; from: string | null; to: string | null; setBy: ReportsToSetter },
+  args: { appId: string; actor: EventActor; workerId: string; from: string | null; to: string | null; setBy: ReportsToSetter; oldExplicitNoTeam?: boolean; newExplicitNoTeam?: boolean },
 ): Promise<void> {
   await tx.agentTeamEvent.create({
     data: {
@@ -375,7 +404,9 @@ export async function appendReportsToEvent(
       actorWorkerId: args.actor.workerId,
       actorAgentId: args.actor.agentId,
       subjectWorkerId: args.workerId,
-      payload: { from: args.from, to: args.to, setBy: args.setBy },
+      payload: { from: args.from, to: args.to, setBy: args.setBy,
+        ...(args.oldExplicitNoTeam !== undefined ? { oldExplicitNoTeam: args.oldExplicitNoTeam, newExplicitNoTeam: args.newExplicitNoTeam } : {}),
+      },
     },
   });
 }

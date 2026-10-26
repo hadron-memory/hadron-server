@@ -80,9 +80,12 @@ import { sourceNamesRepo } from './lib/gitSource.js';
 import { provisionEmailUser, provisionGithubUser } from './auth/userProvision.js';
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
+import { assignRequestId, bindRequestId, REQUEST_ID_HEADER } from './lib/requestContext.js';
+import { internalFaultErrorHandler, respondInternalFault } from './lib/internalFault.js';
 import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
+import { startOauthClientGcLoop } from './jobs/gcOauthClients.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
@@ -232,10 +235,15 @@ export async function createServer(): Promise<Express> {
   // #1925: before the global CORS middleware, which allows the portal's origin WITH credentials; this
   // unauthenticated read answers any origin without them. See src/api/capabilities.ts.
   mountCapabilitiesRoute(app);
+  // #1789: the request id exists before anything that can fail, including body parsing and auth. After the capabilities
+  // route on purpose: its answer is byte-identical and ETag-cached, and a per-request header would break both.
+  app.use(assignRequestId);
   app.use(
     cors({
       origin: process.env.FRONTEND_URL || 'http://localhost:5173',
       credentials: true,
+      // #1789: the portal reads the request id off a failed response to show it to the person.
+      exposedHeaders: [REQUEST_ID_HEADER],
     }),
   );
   mountTeamSpecSchemaRoutes(app);
@@ -320,9 +328,8 @@ export async function createServer(): Promise<Express> {
       await createPendingLoginState(state, login);
       return true;
     } catch (err) {
-      console.error(`[auth] ${provider} login start failed to persist state:`, err);
       Sentry.captureException(err);
-      res.status(500).json({ error: 'Failed to start sign-in — please try again.' });
+      respondInternalFault(res, `auth/${provider}/start`, err);
       return false;
     }
   };
@@ -921,9 +928,8 @@ export async function createServer(): Promise<Express> {
         await sendMagicLink(emailSend.email, db, redirect, clientStateHash);
         res.json({ ok: true });
       } catch (err) {
-        console.error('Email auth error:', err);
         Sentry.captureException(err);
-        res.status(500).json({ error: 'Failed to send verification email' });
+        respondInternalFault(res, 'auth/email', err);
       }
     },
   );
@@ -1070,9 +1076,8 @@ export async function createServer(): Promise<Express> {
       callbackUrl.searchParams.set('code', code);
       res.redirect(callbackUrl.toString());
     } catch (err) {
-      console.error('Email verify error:', err);
       Sentry.captureException(err);
-      res.status(500).json({ error: 'Email verification failed' });
+      respondInternalFault(res, 'auth/email/verify', err);
     }
   });
 
@@ -1249,6 +1254,7 @@ export async function createServer(): Promise<Express> {
     // context builder and every resolver run inside it. Keys staged here are
     // invisible to concurrent requests and vanish with the request's async
     // context — aborted responses included (PR-514 review, Codex P1 ×2).
+    bindRequestId,
     (_req, _res, next) => requestKeyStorage.run(new Map(), next),
     (_req, _res, next) => requestOperationKeyStorage.run({}, next),
     // #1610: the Worker / Agent behind this request's writes, filled by
@@ -1401,7 +1407,6 @@ export async function createServer(): Promise<Express> {
       });
       res.json({ ok: true });
     } catch (err) {
-      console.error('Outcome report error:', err);
       // Distinguish "no such session" from "something else went wrong".
       // This catch used to answer 404 for EVERY failure, which was survivable
       // while the only statement inside it was the update — but the auth
@@ -1414,7 +1419,7 @@ export async function createServer(): Promise<Express> {
         return;
       }
       Sentry.captureException(err);
-      res.status(500).json({ error: 'Failed to record outcome' });
+      respondInternalFault(res, 'sessions/outcome', err);
     }
   });
 
@@ -1515,9 +1520,8 @@ export async function createServer(): Promise<Express> {
       }
       res.json({ ok: true });
     } catch (err) {
-      console.error('Reload error:', err);
       Sentry.captureException(err);
-      res.status(500).json({ error: 'Reload failed' });
+      respondInternalFault(res, 'reload', err);
     }
   });
 
@@ -1830,15 +1834,15 @@ export async function createServer(): Promise<Express> {
   // ---------------------------------------------------------------------------
 
   // #1610: each MCP request gets its own actor holder (see requestActor.ts).
-  app.post('/mcp', async (req, res) => {
+  app.post('/mcp', bindRequestId, async (req, res) => {
     await requestActorStorage.run(emptyActor(), () => handleMcpRequest(req, res));
   });
 
-  app.get('/mcp', async (req, res) => {
+  app.get('/mcp', bindRequestId, async (req, res) => {
     await requestActorStorage.run(emptyActor(), () => handleMcpRequest(req, res));
   });
 
-  app.delete('/mcp', async (req, res) => {
+  app.delete('/mcp', bindRequestId, async (req, res) => {
     await requestActorStorage.run(emptyActor(), () => handleMcpDelete(req, res));
   });
 
@@ -1879,6 +1883,12 @@ export async function createServer(): Promise<Express> {
   // (cor:api:010:02), in bounded batches. Live proofs and sealed receipts stay.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
     startMergeConsentSweepLoop(db);
+  }
+
+  // #155 — collect unused DCR OAuth clients 7 days past their expiry (soft delete). Dry run, logging
+  // the count it would collect, until OAUTH_CLIENT_GC_ENABLED=true (R220).
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_OAUTH_CLIENT_GC !== 'true') {
+    startOauthClientGcLoop(db);
   }
 
   // #1647 — resume pending notices of admin-initiated account erasures (restart-safe outbox).
@@ -2058,6 +2068,9 @@ export async function createServer(): Promise<Express> {
   // reach here (Apollo handles them internally) — they are captured by
   // sentryApolloPlugin instead. No-op when SENTRY_DSN is unset.
   Sentry.setupExpressErrorHandler(app);
+
+  // #1789: a fault that reaches Express shows the caller the generic envelope, not Express's default stack page.
+  app.use(internalFaultErrorHandler);
 
   app.locals.stopEmbeddingWorker = () => Promise.all([
     stopEmbeddingWorker(db), stopEmbeddingPublisher(),
