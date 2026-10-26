@@ -850,7 +850,7 @@ const roleOverrideRefused = (appId: string, agentRole: string | null, requested:
  * allocation vs. projection — is the caller's half, so every typed refusal up
  * to allocation behaves identically under preview and cast.
  */
-async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarget> {
+async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?: string): Promise<CastTarget> {
   const { appRef, agentRef, role, name, promptOverride } = args;
   const choice = castTeamChoice(args);
   const roleNorm = (role ?? '').trim() || null;
@@ -970,6 +970,9 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
     }
     agent = matches[0];
   }
+  // Preserve S12's typed identity-drift refusal before #2458 looks up the
+  // newly selected Agent's licence. The transaction was planned for the original.
+  if (expectedAgentId !== undefined && agent.id !== expectedAgentId) throw castTargetChanged();
   // #2458 / R222: a cast takes its Agent's role; role selects, never overrides.
   if (agentRef && agentRef.trim() !== '' && roleNorm !== null && roleNorm.toLowerCase() !== (agent.personaRole ?? '').toLowerCase()) {
     throw roleOverrideRefused(appId, agent.personaRole ?? null, roleNorm);
@@ -1025,7 +1028,7 @@ export const workerMutations = {
    * (advance on WORKER_NAME_TAKEN, exhausted register is typed).
    */
   castWorker: async (_: unknown, args: CastArgs, ctx: Context) => {
-    const { appId, app, agent, requestedRole, requestedName, choice } = await resolveCastTarget(
+    const { appId, app, agent, workerRole, requestedRole, requestedName, choice } = await resolveCastTarget(
       ctx,
       args,
     );
@@ -1090,7 +1093,7 @@ export const workerMutations = {
             if (freshApp.uninstalledAt) {
               throw new GraphQLError('Cannot cast a worker in an uninstalled App.', { extensions: { code: 'APP_UNINSTALLED', appId } });
             }
-            const freshTarget = await resolveCastTarget(txCtx, args);
+            const freshTarget = await resolveCastTarget(txCtx, args, agent.id);
             if (freshTarget.agent.id !== agent.id) throw castTargetChanged();
             // Preserve #2458's deciding licence/role check on the transaction.
             // This remains read-only: install/changeWorkerAgent own grant provisioning.
