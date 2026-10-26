@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { EventEmitter } from 'node:events';
 import { assignRequestId, bindRequestId, currentRequestId } from './requestContext.js';
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -40,6 +39,5 @@ describe('request id (#1789)', () => {
     });
     expect(seen).toEqual([res.locals.requestId, res.locals.requestId]);
     expect(currentRequestId()).toBeUndefined();
-    void EventEmitter;
   });
 });
