@@ -1052,6 +1052,14 @@ export const workerMutations = {
             await lockWorkerNames(tx, appId);
             await lockAppReportsTo(tx, appId);
             await lockAppTickers(tx, appId);
+            // Cleanup doors such as public leaveApp intentionally take no authority anchor.
+            // Hold the deciding membership rows as well, before any Worker row/write.
+            if (ctx.userId) {
+              if (app.organizationId) await tx.$queryRaw`
+                SELECT user_id FROM org_members WHERE organization_id = ${app.organizationId} AND user_id = ${ctx.userId} FOR SHARE`;
+              await tx.$queryRaw`
+                SELECT user_id FROM app_members WHERE app_id = ${appId} AND user_id = ${ctx.userId} FOR SHARE`;
+            }
             const freshApp = await tx.app.findUniqueOrThrow({ where: { id: appId } });
             if (freshApp.deletedAt) throw forbidden();
             await requireWorkerStaffAccess(txCtx, freshApp);

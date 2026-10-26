@@ -534,3 +534,35 @@ it('public self-leave cannot commit between the deciding membership read and the
   expect(await db.worker.count()).toBe(1);
   expect(await db.appMember.findUnique({ where: { appId_userId: { appId: app.id, userId: member.id } } })).toBeNull();
 });
+
+it('self-leave winning its row lock is rechecked after the cast waits, with no mint', async () => {
+  const member = await db.user.create({ data: { githubId: 2028006, githubUsername: 's12-leaver-first' } });
+  await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+  const memberCtx = { ...ctx(), userId: member.id };
+  let release!: () => void; let ready!: () => void;
+  const held = new Promise<void>(r => { release = r; }); const started = new Promise<void>(r => { ready = r; });
+  const leaving = db.$transaction(async tx => {
+    await M.leaveApp({}, { appId: app.id }, { ...memberCtx, db: tx }); ready(); await held;
+  }, { timeout: 30000 });
+  await started;
+  const observed = observeTransactionBackend(db);
+  let finished = false;
+  const casting = M.castWorker({}, args({ noTeam: true }), { ...memberCtx, db: observed.db });
+  const outcome = casting.then(() => { finished = true; return 'CAST'; }, (e: any) => { finished = true; return e.extensions?.code; });
+  try {
+    const pid = await observed.backendFor(casting);
+    const deadline = Date.now() + 2500;
+    for (;;) {
+      const [row] = await db.$queryRaw<Array<{ waiting: boolean; query: string }>>`
+        SELECT wait_event_type = 'Lock' AS waiting, query FROM pg_stat_activity
+        WHERE pid = ${pid} AND datname = current_database()`;
+      if (row?.waiting && /app_members.*FOR SHARE/s.test(row.query)) break;
+      if (finished) throw new Error('cast bypassed the membership row held by self-leave');
+      if (Date.now() > deadline) throw new Error('cast never waited for the deciding membership');
+      await new Promise(r => setTimeout(r, 10));
+    }
+  } finally { release(); await leaving; await outcome; }
+  expect(await outcome).toBe('FORBIDDEN');
+  expect(await db.worker.count()).toBe(0);
+  expect(await db.agentTeamEvent.count()).toBe(0);
+});
