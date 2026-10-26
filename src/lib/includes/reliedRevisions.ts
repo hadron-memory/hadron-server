@@ -12,8 +12,11 @@ import {
  * this set. Signed-only is ignored as in the shared include selector (D7).
  *
  * Caller must hold the outer include-history fence. No production caller exists
- * in R1. Global completeness is separately checked by verifyIncludeCoverage;
- * R2/R3 must keep coverage current or dirty the generation before R4 wiring.
+ * in R1. Xabat's #36825 gate conditions: (1) the O(1) generation check is the
+ * sole reliance gate; (2) verifyIncludeCoverage is REQUIRED before any ACTIVE
+ * transition in R3, under the same fence; (3) no R4 caller may land before R2
+ * atomically maintains coverage or dirty-stamps the generation. This split
+ * does not establish activation or complete production coverage.
  */
 export async function reliedRevisionsOf(
   tx: Prisma.TransactionClient,
