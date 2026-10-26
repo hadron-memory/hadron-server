@@ -81,3 +81,48 @@ describe('object store MCP tools', () => {
     expect(text).toMatch(/reserved/i);
   });
 });
+
+describe('findObjects exact totals (#2514)', () => {
+  async function seed() {
+    for (const [name, stage, fundingUsd] of [['A', 'seed', 1], ['B', 'seed', 2], ['C', 'grown', 3]] as const) {
+      await call('hadron_create_object', { memoryUrn: memUrn, type: 'competitor', key: name.toLowerCase(), fields: { name, stage, fundingUsd } });
+    }
+  }
+
+  it.each([
+    [{ fundingUsd: 1 }, 1],
+    [{ fundingUsd: 99 }, 0],
+    [undefined, 3],
+  ])('returns the full total for match %j', async (match, total) => {
+    await seed();
+    const found = JSON.parse(await call('hadron_find_objects', { memoryUrn: memUrn, type: 'competitor', match }));
+    expect(found.objects).toHaveLength(total);
+    expect(found.total).toBe(total);
+  });
+
+  it('counts before paging and keeps match, where and sorting composed', async () => {
+    await seed();
+    const args = { memoryUrn: memUrn, type: 'competitor', match: { stage: 'seed' }, where: { path: ['fundingUsd'], as: 'number', gte: 1 }, sort: { fundingUsd: 'desc' }, limit: 1 };
+    const first = JSON.parse(await call('hadron_find_objects', args));
+    const second = JSON.parse(await call('hadron_find_objects', { ...args, offset: 1 }));
+    const past = JSON.parse(await call('hadron_find_objects', { ...args, offset: 9 }));
+    expect(first.objects.map((o: { name: string }) => o.name)).toEqual(['B']);
+    expect(second.objects.map((o: { name: string }) => o.name)).toEqual(['A']);
+    expect(past.objects).toEqual([]);
+    expect([first.total, second.total, past.total]).toEqual([2, 2, 2]);
+  });
+
+  it('excludes deleted rows, other collections and other memories from totals', async () => {
+    await seed();
+    const c = await db.node.findFirstOrThrow({ where: { memoryId: memId, loc: 'competitor:c' } });
+    await call('hadron_delete_object', { ref: c.id });
+    await db.node.create({ data: { id: generateId(), memoryId: memId, loc: 'other:x', name: 'other', nodeType: 'info', objectType: 'other', properties: { stage: 'seed' } } });
+    const foreign = await resolvers.Mutation.createMemory({}, { orgId, name: 'foreign' }, admin());
+    await db.node.create({ data: { id: generateId(), memoryId: foreign.id, loc: 'competitor:x', name: 'foreign', nodeType: 'info', objectType: 'competitor', properties: { stage: 'seed' } } });
+    for (const match of [undefined, { stage: 'seed' }]) {
+      const found = JSON.parse(await call('hadron_find_objects', { memoryUrn: memUrn, type: 'competitor', match }));
+      expect(found.total).toBe(2);
+      expect(found.objects).toHaveLength(2);
+    }
+  });
+});

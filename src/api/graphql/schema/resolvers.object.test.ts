@@ -190,3 +190,11 @@ describe('findObjects', () => {
     expect(page.objects.map((o: any) => o.name)).toEqual(['Alpha']);
   });
 });
+
+it('object counting does not enable totals for ordinary findNodes browse (#2514)', async () => {
+  await createObject({ memoryRef: memId, type: 'competitor', fields: { name: 'A' } });
+  const ordinary = await Q().findNodes(null, { filter: { memoryIds: [memId], objectType: 'competitor' } }, admin());
+  expect(ordinary.total).toBeNull();
+  const objects = await findObjects({ memoryRef: memId, type: 'competitor' });
+  expect(objects.total).toBe(1);
+});
