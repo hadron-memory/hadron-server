@@ -524,6 +524,27 @@ describe('#2024 lock protocol (two-connection barriers)', () => {
     expect(await op.done).toBe('cast');
   });
 
+  it('a waiter on another advisory key is not a waiter on the operation\'s key', async () => {
+    await declare('Base');
+    const operationKey = `tickers:${appId}`;
+    const decoyKey = `tickers:decoy-${generateId()}`;
+    const lockOn = (key: string) => async (tx: any) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`; };
+    const decoyHolder = await hold(lockOn(decoyKey));
+    const decoyWaiter = hold(lockOn(decoyKey));
+    const decoyPid = await waitForWaiterOnKey(decoyKey, [decoyHolder.pid]);
+    // The decoy is blocked, yet nothing waits on the operation's key: the key filter must see none.
+    expect(await waitersOnKey(operationKey)).toEqual([]);
+    const h = await hold(lockOn(operationKey));
+    const op = await startBlockedOn(operationKey, () => cast('Iris').then(() => 'cast'), [h.pid]);
+    expect([h.pid, decoyHolder.pid, decoyPid]).not.toContain(op.pid);
+    expect(await waitersOnKey(operationKey, [h.pid])).toEqual([op.pid]);
+    expect(await waitersOnKey(decoyKey, [decoyHolder.pid])).toEqual([decoyPid]);
+    h.release(); await h.holder;
+    expect(await op.done).toBe('cast');
+    decoyHolder.release(); await decoyHolder.holder;
+    (await decoyWaiter).release();
+  });
+
   it('an Agent uninstalled while a cast waits for the template lock refuses the cast and writes nothing', async () => {
     await declare('Base');
     const h = await hold(async (tx) => { await lockAgentTemplates(tx, agentId, 'exclusive'); });
