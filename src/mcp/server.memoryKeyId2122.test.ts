@@ -56,15 +56,28 @@ describe('#2122 lock/unlock documented memory IDs', () => {
   });
 
   it.each(['hadron_unlock_memory', 'hadron_lock_memory'])('%s preserves exact missing text for non-owner, missing and deleted IDs/URNs', async (tool) => {
-    const foreign = mcp(strangerId);
+    const ownerSession = 'key2122-owner';
+    const owner = mcp(ownerId, ownerSession);
+    expect(await owner.callToolText('hadron_unlock_memory', { memoryUrn: FULL_URN, passphrase: PASS })).toContain(`Memory unlocked for this session: ${URN}.`);
+    const ownerKey = sessionKeyCache.getByMemoryId(memoryId);
+    expect(ownerKey).not.toBeNull();
+    expect(sessionKeyCache.refCount(memoryId)).toBe(1);
+    const foreign = mcp(strangerId, 'key2122-stranger');
     const call = (server: ReturnType<typeof mcp>, input: string) => server.callToolText(tool, { memoryUrn: input, ...(tool === 'hadron_unlock_memory' ? { passphrase: PASS } : {}) });
     for (const input of [memoryId, FULL_URN, generateId(), 'hrn:mem:key2122.example:absent']) {
       expect(await call(foreign, input)).toBe(`Memory "${input}" not found.`);
+      expect(sessionKeyCache.getByMemoryId(memoryId)).toBe(ownerKey);
+      expect(sessionKeyCache.refCount(memoryId)).toBe(1);
     }
     await db.memory.update({ where: { id: memoryId }, data: { deletedAt: new Date() } });
     for (const input of [memoryId, FULL_URN]) {
-      expect(await call(mcp(), input)).toBe(`Memory "${input}" not found.`);
+      expect(await call(owner, input)).toBe(`Memory "${input}" not found.`);
+      expect(sessionKeyCache.getByMemoryId(memoryId)).toBe(ownerKey);
+      expect(sessionKeyCache.refCount(memoryId)).toBe(1);
     }
+    // With the owner evicted, no stranger holding may keep the key alive.
+    sessionKeyCache.evict(`mcp:${ownerSession}`);
+    expect(sessionKeyCache.refCount(memoryId)).toBe(0);
     expect(sessionKeyCache.getByMemoryId(memoryId)).toBeNull();
   });
 
