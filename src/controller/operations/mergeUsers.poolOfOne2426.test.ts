@@ -5,7 +5,7 @@
  * mergeUsers' retry predicates, so it is not retried (never AuthoritySnapshotStale), nothing is merged, and
  * nothing hangs.
  */
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -39,6 +39,8 @@ beforeEach(async () => {
 describe('a merge on a pool of one', () => {
   it('fails within pool_timeout with P2024, is not retried, and merges nothing', async () => {
     const consentProof = await approvedMergeProof(db, source.id, target.id, admin.id);
+    // Each merge attempt opens exactly one transaction, so this counts attempts: a retry would make it 2+.
+    const attempts = vi.spyOn(small, '$transaction');
     const started = Date.now();
     const error = await mergeUsers(small, {
       sourceUserId: source.id, targetUserId: target.id, actorUserId: admin.id, consentProof,
@@ -47,7 +49,7 @@ describe('a merge on a pool of one', () => {
 
     expect(error?.code).toBe('P2024');
     expect(error?.name).not.toBe('AuthoritySnapshotStale');
-    // One attempt only: a retry would multiply the wait by the MERGE_RETRIES budget.
+    expect(attempts).toHaveBeenCalledTimes(1);
     expect(elapsed).toBeLessThan(POOL_TIMEOUT_SECONDS * 2 * 1000);
     expect((await db.user.findUniqueOrThrow({ where: { id: source.id } })).deletedAt).toBeNull();
   }, 30_000);
