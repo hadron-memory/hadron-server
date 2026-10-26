@@ -1,4 +1,5 @@
 /** #2429 (cor:dmo:050:11): a generated ticker edited after the cast blocks the miscast repair; an ended own subscription does not. */
+import pg from 'pg';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -87,7 +88,11 @@ describe('#2429 migration backfill', () => {
     const edited = await castMiscast();
     const untouched = await M.castWorker({}, { appRef: appId, agentRef: agentId, name: 'Untouched' }, ctx);
     const untouchedTicker = await db.ticker.findFirstOrThrow({ where: { generatedForWorkerId: untouched.id } });
-    await db.$executeRaw`UPDATE tickers SET edited_at = NULL, updated_at = created_at + INTERVAL '2 hours' WHERE id = ${edited.ticker.id}`;
+    await db.$executeRaw`UPDATE tickers SET edited_at = NULL, updated_at = created_at + INTERVAL '2 hours', updated_by = 'someone-else' WHERE id = ${edited.ticker.id}`;
+    // A non-edit write to updated_at (same stamp as the cast, however late) must not mark the row.
+    const bookkept = await M.castWorker({}, { appRef: appId, agentRef: agentId, name: 'Bookkept' }, ctx);
+    const bookkeptTicker = await db.ticker.findFirstOrThrow({ where: { generatedForWorkerId: bookkept.id } });
+    await db.$executeRaw`UPDATE tickers SET edited_at = NULL, updated_at = created_at + INTERVAL '2 hours' WHERE id = ${bookkeptTicker.id}`;
     await db.$executeRaw`UPDATE tickers SET edited_at = NULL, updated_at = created_at + INTERVAL '10 seconds' WHERE id = ${untouchedTicker.id}`;
     const { readFileSync } = await import('node:fs');
     const sql = readFileSync(MIGRATION, 'utf8').split('\n').filter((l) => !l.startsWith('--')).join('\n')
@@ -96,7 +101,37 @@ describe('#2429 migration backfill', () => {
     await db.$executeRawUnsafe(sql[0]);
     expect((await db.ticker.findUniqueOrThrow({ where: { id: edited.ticker.id } })).editedAt).not.toBeNull();
     expect((await db.ticker.findUniqueOrThrow({ where: { id: untouchedTicker.id } })).editedAt).toBeNull();
+    expect((await db.ticker.findUniqueOrThrow({ where: { id: bookkeptTicker.id } })).editedAt).toBeNull();
     expect(await refusal(repair(edited.worker.id))).toBe('WORKER_IN_USE');
     expect(await repair(untouched.id)).toBe(true);
+    expect(await repair(bookkept.id)).toBe(true);
+  });
+});
+
+describe('#2429 edit vs repair interleave', () => {
+  it('an edit committed after the repair took its snapshot aborts the repair: nothing is deleted, the edit stands', async () => {
+    const { worker, ticker } = await castMiscast();
+    const holder = new pg.Client({ connectionString: process.env.DATABASE_URL });
+    await holder.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT id FROM tickers WHERE id = $1 FOR UPDATE', [ticker.id]);
+      const repairing = refusal(repair(worker.id));
+      // The repair has its snapshot (edited_at still NULL) and waits on the ticker row at its delete.
+      for (let i = 0; i < 100; i++) {
+        const [{ waiting }] = await db.$queryRaw<Array<{ waiting: boolean }>>`
+          SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+            AND wait_event_type = 'Lock' AND query LIKE '%tickers%') AS waiting`;
+        if (waiting) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await holder.query('UPDATE tickers SET edited_at = now() WHERE id = $1', [ticker.id]);
+      await holder.query('COMMIT');
+      expect(await repairing).toBe('WORKER_IN_USE');
+    } finally {
+      await holder.end();
+    }
+    expect(await db.worker.findUnique({ where: { id: worker.id } })).not.toBeNull();
+    expect((await db.ticker.findUniqueOrThrow({ where: { id: ticker.id } })).editedAt).not.toBeNull();
   });
 });
