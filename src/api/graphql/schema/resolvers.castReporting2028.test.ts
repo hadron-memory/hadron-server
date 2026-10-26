@@ -503,3 +503,34 @@ it('an empty template set is fenced through cast commit; an editor adds only to 
   const future = await M.castWorker({}, args({ name: 'Future', noTeam: true }), ctx());
   expect(await db.ticker.count({ where: { generatedForWorkerId: future.id } })).toBe(1);
 });
+
+it('public self-leave cannot commit between the deciding membership read and the permanent cast', async () => {
+  const member = await db.user.create({ data: { githubId: 2028005, githubUsername: 's12-leaver' } });
+  await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+  const memberCtx = { ...ctx(), userId: member.id };
+  let release!: () => void; let ready!: () => void;
+  const held = new Promise<void>(r => { release = r; }); const started = new Promise<void>(r => { ready = r; });
+  const paused = db.$extends({ query: { worker: { async create({ args, query }) { ready(); await held; return query(args); } } } });
+  const casting = M.castWorker({}, args({ noTeam: true }), { ...memberCtx, db: paused });
+  await started;
+  const observed = observeTransactionBackend(db);
+  let left = false;
+  const leaving = observed.db.$transaction(tx => M.leaveApp({}, { appId: app.id }, { ...memberCtx, db: tx }));
+  const outcome = leaving.then(value => { left = true; return { value }; }, error => { left = true; return { error }; });
+  try {
+    const pid = await observed.backendFor(leaving);
+    const deadline = Date.now() + 2500;
+    for (;;) {
+      const [row] = await db.$queryRaw<Array<{ waiting: boolean; query: string }>>`
+        SELECT wait_event_type = 'Lock' AS waiting, query FROM pg_stat_activity
+        WHERE pid = ${pid} AND datname = current_database()`;
+      if (row?.waiting && /DELETE.*app_members/s.test(row.query)) break;
+      if (left) throw new Error('leaveApp committed before the in-flight cast: membership was not held');
+      if (Date.now() > deadline) throw new Error('public leave never waited on the membership row');
+      await new Promise(r => setTimeout(r, 10));
+    }
+    expect(left).toBe(false);
+  } finally { release(); await casting; await outcome; }
+  expect(await db.worker.count()).toBe(1);
+  expect(await db.appMember.findUnique({ where: { appId_userId: { appId: app.id, userId: member.id } } })).toBeNull();
+});
