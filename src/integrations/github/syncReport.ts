@@ -1,10 +1,16 @@
 /** #1507: public sync-report DTO. Only source facts and fixed codes enter it. */
+import type { IncludeRefusalCode } from '../../lib/includes/writeIncludes.js';
+
 export type SyncReportKind = 'protected' | 'object_type_rejected' | 'undeclared_role' | 'invalid_include' | 'deferred' | 'held_move';
 export type SyncReportCode =
   | 'PROTECTED_LOC' | 'PROTECTED_COMMENT' | 'PROTECTED_BOOT_PROMPT' | 'PROTECTED_DECISION'
   | 'OBJECT_TYPE_REJECTED' | 'ROLE_NOT_DECLARED'
   | 'INVALID_INCLUDE' | 'INCLUDE_CYCLE' | 'INCLUDE_TARGET_UNAVAILABLE'
   | 'ROW_CHANGED' | 'MOVE_HELD' | 'DESTINATION_PROTECTED';
+// #2369: an include refusal code outside this vocabulary would make the whole v1 report unusable (cor:int:010:01).
+// Widening the admitted set without widening SyncReportCode fails `tsc` here, as the `true` becomes `never`.
+const includeRefusalCodesAreReportable: [IncludeRefusalCode] extends [SyncReportCode] ? true : never = true;
+void includeRefusalCodesAreReportable;
 export interface SyncReportEntry {
   kind: SyncReportKind;
   loc: string;

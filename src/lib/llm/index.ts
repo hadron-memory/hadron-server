@@ -518,6 +518,11 @@ export async function generateWithTools(
             if (opts.onToolCall && !(await opts.onToolCall(def.policyAction ?? `tool.${def.name}`, def.cost))) {
               throw new ToolDeniedError(def.name);
             }
+            // #2418: ai@7 starts every call of a step together, so a sibling can be admitted (and charged)
+            // while a terminal runs. Past admission, an already-set terminal means this call's side effect
+            // must not run: it throws the first terminal (nothing replaces it) and records ok:false.
+            const ended = terminal();
+            if (ended) throw ended;
             const result = await def.execute(opts.toolCtx, args ?? {});
             toolCalls.push({ name: def.name, ok: true, ms: Date.now() - started });
             return result;
