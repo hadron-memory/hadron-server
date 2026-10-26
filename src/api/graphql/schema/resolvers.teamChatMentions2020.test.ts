@@ -371,6 +371,23 @@ describe('S3 filter audience and transport boundaries', () => {
 });
 
 
+describe('S3 bare @team retirement is the switch, nothing else (#2019)', () => {
+  it('a manager\'s bare @team keeps its stamped reach OFF and stops broadcasting ON; @all is unchanged by the switch', async () => {
+    vi.stubEnv('TEAM_TAGS_ENABLED', 'false');
+    const off = await humanSays(manager.id, 'retro @team');
+    expect(off.broadcastWakes).toBe(true);
+    expect(await mentionsOf(liam)).toEqual([off.seq]);
+    vi.stubEnv('TEAM_TAGS_ENABLED', 'true');
+    const on = await humanSays(manager.id, 'retro again @team');
+    expect(on.broadcastWakes).toBe(false);
+    const global = await humanSays(manager.id, 'all hands @all');
+    expect(global.broadcastWakes).toBe(true);
+    // Rolling back leaves the ON-era bare @team without global reach.
+    vi.stubEnv('TEAM_TAGS_ENABLED', 'false');
+    expect(await mentionsOf(liam)).toEqual([off.seq, global.seq]);
+  });
+});
+
 describe('S3 graph snapshot concurrency', () => {
   it('waits for a graph writer and stamps the committed nearest team rather than its stale input', async () => {
     vi.stubEnv('TEAM_TAGS_ENABLED','true');
