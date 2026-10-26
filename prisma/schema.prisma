@@ -1741,6 +1741,10 @@ model Session {
   /// gated at start (the worker must belong to the session's App); "taken
   /// right now" derives from an ACTIVE session bound to the worker.
   workerId          String?           @map("worker_id")
+  /// #2458 (cor:dmo:050:11): the worker's role AT BIND, stamped from the locked worker row with `agentId`, so a
+  /// past session keeps the role it ran under after the worker's agent (and so its role) changes. Null for a
+  /// session with no worker; the migration backfills earlier sessions exactly (the role was immutable before #2458).
+  role              String?           @map("role")
   /// The active write-memory for this session, when there's an
   /// unambiguous one. Resolves the multi-writable-memory ambiguity.
   memoryId          String?           @map("memory_id")

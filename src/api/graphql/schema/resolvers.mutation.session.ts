@@ -687,6 +687,10 @@ export const sessionMutations = {
       // thin-client directive; before this it was the CLI's contract only,
       // and this mutation was an ungated second surface in waiting).
       let workerId: string | undefined;
+      // #2458: the agentRef the caller passed (if any), and the role the bind stamps; both decided on the LOCKED
+      // worker row below, so a change of the worker's agent landing during this bind is never half-applied.
+      let requestedAgentId: string | undefined;
+      let boundRole: string | null = null;
       // #1029 — the worker's previous stint, derived below when the caller
       // supplies no explicit chain link.
       let derivedPrevSessionId: string | undefined;
@@ -1102,6 +1106,7 @@ export const sessionMutations = {
             { extensions: { code: 'BAD_USER_INPUT' } },
           );
         }
+        requestedAgentId = agentId;
         agentId = worker.agentId;
         workerId = worker.id;
         // #1050 — an UNHELD name is held by the person who binds it. That is
@@ -1239,8 +1244,8 @@ export const sessionMutations = {
           }
         }
         if (workerId) {
-          const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; held_at: Date | null; retired_at: Date | null }>>`
-            SELECT name, held_by_user_id, held_at, retired_at FROM workers WHERE id = ${workerId} FOR UPDATE`;
+          const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; held_at: Date | null; retired_at: Date | null; agent_id: string; role: string | null }>>`
+            SELECT name, held_by_user_id, held_at, retired_at, agent_id, role FROM workers WHERE id = ${workerId} FOR UPDATE`;
           // #1625 review (Baloo, residual P2): the HOLD and retirement are
           // re-validated under the lock for EVERY bind, force included. The
           // checks far above read a snapshot; a release, a claim by someone
@@ -1252,6 +1257,17 @@ export const sessionMutations = {
               { extensions: { code: 'WORKER_RETIRED', workerId } },
             );
           }
+          // #2458 (cor:dmo:050:11): the agent and role this session runs under are the LOCKED row's. The agent read
+          // above was a snapshot, and a change of the worker's agent may have committed during the lock wait; the
+          // bind takes the new casting whole (agent AND role) rather than the old agent beside the new role.
+          if (requestedAgentId !== undefined && requestedAgentId !== locked.agent_id) {
+            throw new GraphQLError(
+              'agentRef and workerRef disagree — the worker casts a different agent. Omit agentRef; it is derived from the worker.',
+              { extensions: { code: 'BAD_USER_INPUT' } },
+            );
+          }
+          agentId = locked.agent_id;
+          boundRole = locked.role;
           if (locked.held_by_user_id && locked.held_by_user_id !== ctx.userId) {
             const holder = await tx.user.findUnique({
               where: { id: locked.held_by_user_id },
@@ -1431,6 +1447,7 @@ export const sessionMutations = {
           appId,
           agentId,
           workerId,
+          role: workerId ? boundRole : null,
           // #929 review P1: attribute the session to the calling user (the
           // schema documents userId as "the developer in a DEVELOPER
           // session"). Without it a session started outside any App context
