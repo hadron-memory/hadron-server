@@ -65,3 +65,10 @@ it.each(['qualified', 'scoped'] as const)('rechecks revoked participation on the
   expect(denied).toContain('not found');
   for (const name of children) expect(denied).not.toContain(name);
 });
+it.each(['qualified', 'scoped'] as const)('uses the same explicit not-found envelope for an unknown memory via %s parent', async mode => {
+  const { srv } = await fixture();
+  const args = parentArgs({ urn: 'parent2512.example:absent' }, mode);
+  const result = await srv.callTool('hadron_list_nodes', args) as { isError?: boolean; content: Array<{ text: string }> };
+  expect(result.isError).toBe(true);
+  expect(result.content[0].text).toBe(`Node "${args.parentRel}" not found.`);
+});
