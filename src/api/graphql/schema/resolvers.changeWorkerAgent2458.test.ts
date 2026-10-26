@@ -2,8 +2,8 @@
  * #2458 / cor:dmo:050:11 (R222): a worker's agent can be changed and its role follows it; name, slug and URN stay.
  * Manager-only, as themselves; the same checks as a cast (one shared helper); a COMPLETE change in one
  * transaction (boot-prompt pointer cleared, generated tickers swapped, one `worker.casting` event); effective at
- * the next bind, which stamps the session's agent AND role from the locked worker row. Refused while the worker
- * has an open session, decided under the worker lock the bind also takes.
+ * the next bind, which stamps the session's agent AND role from the locked worker row. An open session finishes
+ * under the agent and role it was bound with (slice 2: resolvers.openSessionAgent2493.test.ts).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -213,25 +213,11 @@ describe('#2458 changeWorkerAgent: refusals change nothing', () => {
     expect(await snapshot()).toEqual(before);
   });
 
-  it('refuses while the worker has an open session (slice 2 has not built open-session consistency)', async () => {
-    await bind();
-    const before = await snapshot();
-    expect(await code(change())).toBe('WORKER_HAS_OPEN_SESSION');
-    expect(await snapshot()).toEqual(before);
-    await endOpenSessions();
+  it('goes through while the worker has an open session, which keeps the agent and role it was bound with (slice 2)', async () => {
+    const open = await bind();
     await change();
     expect((await row()).agentId).toBe(newAgent.id);
-  });
-
-  it('decides the open session under the worker lock: a bind committing during the wait is seen', async () => {
-    const before = await snapshot();
-    const outcome = await whileLocked(
-      tx => tx.$queryRaw`SELECT id FROM workers WHERE id = ${worker.id} FOR UPDATE`,
-      () => change(),
-      tx => tx.session.create({ data: { id: generateId(), appId: app.id, workerId: worker.id, agentId: oldAgent.id, userId: admin.id } }),
-    );
-    expect(outcome).toBe('WORKER_HAS_OPEN_SESSION');
-    expect(await snapshot()).toEqual(before);
+    expect(await db.session.findUniqueOrThrow({ where: { id: open.id } })).toMatchObject({ agentId: oldAgent.id, role: 'security-engineer', endedAt: null });
   });
 
   it('refuses the unchanged agent and a retired worker', async () => {

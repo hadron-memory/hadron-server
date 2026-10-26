@@ -21,6 +21,7 @@
  */
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+import { lockWorkersForAssignment } from './agentTasks/workerLock.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, isBootPromptRole } from './bootPrompt.js';
 import { currentActor, currentActorAmbiguity } from './requestActor.js';
 import { managesAgent, managesApp, type AppManagerCaller } from './auth/appManagement.js';
@@ -98,6 +99,15 @@ export async function loadBootPromptPointerOwner(
     });
     return row ? { field: 'APP_AGENT', app: row.app, agentId: row.agentId } : null;
   }
+  // #2458: changeWorkerAgent may now land while this worker has an open session, so the placement check below must judge
+  // the agent the worker casts when this write commits. Same order as the change: assignment lock, the Agent row FOR
+  // SHARE, then the Worker row FOR UPDATE; the agent is re-read once the assignment lock (which the change holds) is ours.
+  if (!(await db.worker.findFirst({ where: { id: target.workerId, app: liveApp }, select: { id: true } }))) return null;
+  await lockWorkersForAssignment(tx as Prisma.TransactionClient, [target.workerId]);
+  const current = await db.worker.findUnique({ where: { id: target.workerId }, select: { agentId: true } });
+  if (!current) return null;
+  await tx.$queryRaw`SELECT id FROM agents WHERE id = ${current.agentId} FOR SHARE`;
+  await tx.$queryRaw`SELECT id FROM workers WHERE id = ${target.workerId} FOR UPDATE`;
   const worker = await db.worker.findFirst({
     where: { id: target.workerId, app: liveApp },
     select: { id: true, agentId: true, app: { select: APP_OWNER_SELECT } },

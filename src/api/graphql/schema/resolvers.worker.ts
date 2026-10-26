@@ -58,6 +58,7 @@ import {
 } from '../../../lib/workerHandoff.js';
 import { resolveMemoryRoot } from './chat-scope.js';
 import { idleCutoffs, toNaiveUtc } from '../../../lib/sessionActivity.js';
+import { openSessionPlacement } from '../../../lib/sessionPlacement.js';
 import { loadWorkerCheckStatuses, type WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
@@ -1718,12 +1719,9 @@ export const workerMutations = {
    * the new agent's templates instantiated, the missing same-org grants provisioned, and one `worker.casting`
    * event. It takes effect at the next bind (startSession stamps agent and role from the locked worker row).
    *
-   * Refused while the worker has an open session (WORKER_HAS_OPEN_SESSION): reads that serve an open session (register
-   * entries, the live prompt, matcher settings) follow the worker's CURRENT agent, so a change under one would hand it
-   * a mix of the old and new casting. Until #2458 slice 2 serves an open session from its own stamped agent and role,
-   * the session must end first. Decided under the Worker row lock, which startSession's bind also takes before it
-   * inserts the session, so a bind and a change serialize: either the change sees the session, or the bind sees the
-   * new agent.
+   * Allowed while the worker has an open session: that session finishes under the agent and role it was bound with
+   * (`Session.agentId`/`role`). Reads that serve it (its register, briefing, matcher and context-reset settings)
+   * resolve from the session (src/lib/sessionPlacement.ts); every other reader sees the new row at once.
    *
    * Lock order: authority anchors, the App ticker lock (as retireWorker), the per-worker assignment lock, the old
    * and new Agent rows FOR SHARE in id order, then the Worker row FOR UPDATE: the matcher and context reset take
@@ -1775,12 +1773,6 @@ export const workerMutations = {
       if (locked.agent_id === toAgentId) {
         throw new GraphQLError('This worker already casts that agent; nothing to change.', {
           extensions: { code: 'WORKER_AGENT_UNCHANGED', workerId: worker.id },
-        });
-      }
-      const open = await tx.session.findFirst({ where: { workerId: worker.id, endedAt: null, deletedAt: null }, select: { id: true } });
-      if (open) {
-        throw new GraphQLError('This worker has an open session; end it first. An open session would otherwise run under a mix of the old and new agent.', {
-          extensions: { code: 'WORKER_HAS_OPEN_SESSION', workerId: worker.id },
         });
       }
       const freshApp = await tx.app.findUniqueOrThrow({ where: { id: app.id } });
@@ -2416,6 +2408,10 @@ export async function composeWorkerPrompt(
   if (!(await maySeeWorkerInternals(ctx, worker.appId))) {
     return { text: null, renderedAt: new Date(), roleAgentUpdatedAt: null };
   }
+  // #2458 (cor:dmo:050:11): the worker's own open session finishes under the agent and role it was bound with, so a shed
+  // recovery reloads the old briefing until the next bind. Every other reader renders the live row.
+  const placed = ctx.sessionId ? await openSessionPlacement(ctx.db, worker.id, ctx.sessionId) : null;
+  if (placed) worker = { ...worker, agentId: placed.agentId, role: placed.role };
   const agent = await ctx.db.agent.findUnique({
     where: { id: worker.agentId },
     select: { systemPrompt: true, personaRole: true, updatedAt: true, ownerUserId: true, name: true, urn: true },

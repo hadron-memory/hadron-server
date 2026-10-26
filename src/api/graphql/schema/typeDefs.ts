@@ -12063,9 +12063,8 @@ export const typeDefs = `#graphql
     pointer is cleared (it named the old agent's compiled prompt), the old
     agent's generated tickers end and the new agent's are made, and one
     \`worker.casting\` team event records who and the old and new agent and
-    role. It takes effect at the worker's next bind. Refused with
-    WORKER_HAS_OPEN_SESSION while the worker has an open session: end it
-    first. workerRef and agentRef are ids or URNs.
+    role. It takes effect at the worker's next bind: an open session
+    finishes under the agent and role it was bound with. workerRef and agentRef are ids or URNs.
     """
     changeWorkerAgent(workerRef: ID!, agentRef: ID!): Worker!
 
