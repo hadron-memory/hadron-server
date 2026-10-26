@@ -1520,7 +1520,7 @@ model NodeEmbedding {
   @@map("node_embeddings")
 }
 
-/// Directed edge between two Nodes. The `label` describes the
+/// Directed edge between two Nodes. The optional `name` describes the
 /// relationship — e.g. "imports", "depends_on", "related-to", "cites",
 /// "abstract-of". An edge whose target is not yet synced lives in
 /// PendingEdge until the target arrives.
