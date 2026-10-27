@@ -29,7 +29,17 @@ import { pushMemoryToGit } from './pushMemoryToGit.js';
 const IDENT = { GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@example.test', GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'fixture@example.test' };
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, ...IDENT }, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 let memoryId: string;
-const payload = { count: 7, enabled: false, missing: null, nested: { values: ['alpha', 0, true, { text: '🧪 payload' }] } };
+const payload = {
+  count: 7, enabled: false, missing: null,
+  nested: { values: ['alpha', 0, true, { text: '🧪 payload' }] },
+  coercibleStrings: ['true', 'false', 'null', '1.0', '0123', '2024-01-01', 'yes', 'no', '.nan', '1e3'],
+  multiline: 'first line\n---\nlast line\n',
+  'key: with colon': { '#hash': 'value: #still text' },
+  emptyObject: {}, emptyArray: [],
+  largeJsonNumber: Number.MAX_SAFE_INTEGER,
+  // JSON cannot store BigInt or losslessly represent integers beyond this range.
+  largeDecimalIdentifier: '123456789012345678901234567890',
+};
 
 beforeEach(async () => {
   vi.stubEnv('GIT_CONFIG_GLOBAL', '/dev/null');
@@ -69,10 +79,12 @@ it('pushes a bodyless structured data node and preserves its complete payload in
   expect(result.error).toBeUndefined();
   expect(remoteFiles()).toContain('datasets/sample.md');
   const text = remoteFile('datasets/sample.md');
-  const match = /^---\n([\s\S]*?)\n---(?:\n|$)/.exec(text)!;
-  const artifact = parse(match[1]);
-  expect(artifact).toMatchObject({ id: node.id, type: 'data', data: payload });
-  expect(text.slice(match[0].length).trim()).toBe('');
+  const match = /^---\n([\s\S]*?)\n---(?:\n|$)/.exec(text);
+  expect(match).not.toBeNull();
+  const artifact = parse(match![1]);
+  expect(artifact).toMatchObject({ id: node.id, type: 'data' });
+  expect(artifact.data).toEqual(payload);
+  expect(text.slice(match![0].length).trim()).toBe('');
   expect(result.nodeCount).toBe(1);
 });
 
@@ -97,4 +109,22 @@ it('keeps ordinary, custom and reserved node-type export behavior unchanged', as
   }
   // The test checkout and the remote are distinct: assertions above read the pushed commit.
   expect(existsSync(join(env.root, 'data2545-org', 'fixture', '.git'))).toBe(true);
+});
+
+
+it('exports only the requested memory even when another memory has a live data artifact', async () => {
+  await add('datasets:own', 'data');
+  const ownMemory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+  const foreign = await db.memory.create({ data: {
+    id: generateId(), organizationId: ownMemory.organizationId, urn: 'data2545-org:foreign',
+    name: 'Foreign', class: 'knowledge',
+  } });
+  await db.node.create({ data: {
+    id: generateId(), memoryId: foreign.id, loc: 'datasets:foreign', name: 'Foreign data',
+    nodeType: 'data', data: { secret: 'belongs to another memory' },
+  } });
+  const result = await pushMemoryToGit(memoryId);
+  expect(result.error).toBeUndefined();
+  expect(result.nodeCount).toBe(1);
+  expect(remoteFiles().sort()).toEqual(['.gitkeep', 'README.md', 'datasets/own.md']);
 });
