@@ -45,6 +45,25 @@ const setRoles = (agentId: string, memberRoles: string[], extra: Record<string, 
 const t0 = new Date('2026-01-01T00:00:00Z');
 const t1 = new Date('2026-01-02T00:00:00Z');
 
+/** Commit an external install only after the real Agent fence query has returned. */
+function afterAgentFences(tx: Prisma.TransactionClient, install: () => Promise<unknown>): Prisma.TransactionClient {
+  let fired = false;
+  return new Proxy(tx, { get(target, property) {
+    if (property !== '$queryRaw') {
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+    return async (sql: TemplateStringsArray, ...values: unknown[]) => {
+      const result = await tx.$queryRaw(sql, ...values);
+      if (/\bFROM\s+"?agents"?\s+WHERE\s+"?id"?\s*=\s*ANY\s*\(/i.test(sql.join('')) && !fired) {
+        fired = true;
+        await install();
+      }
+      return result;
+    };
+  } });
+}
+
 beforeEach(async () => {
   await cleanDb(db);
   orgId = (await db.organization.create({ data: { id: generateId(), name: 'o2171', urn: 'o2171.example' } })).id;
@@ -138,23 +157,16 @@ describe('joinApp self-join with a union', () => {
 
 describe('serialization: the deciding union is exactly the locked rows', () => {
   it('ensureAppMember cannot admit a role from an install committed after its Agent fences (#2487)', async () => {
-    await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner'] }, { createdAt: t0 });
+    // Finite capacity also exercises forwarding $executeRaw through the proxy.
+    await mkAgent({ maxMembers: 5, memberRoles: ['owner'] }, { createdAt: t0 });
     const userId = await mkUser();
     let installedAfterLock = false;
     await db.$transaction(async (tx) => {
-      const observed = new Proxy(tx, { get(target, property, receiver) {
-        if (property !== '$queryRaw') return Reflect.get(target, property, receiver);
-        return async (sql: TemplateStringsArray, ...values: unknown[]) => {
-          const result = await tx.$queryRaw(sql, ...values);
-          if (/FROM agents WHERE id = ANY/.test(sql.join('')) && !installedAfterLock) {
-            // Another connection commits only after the deciding Agent set is locked.
-            await mkAgent({ maxMembers: 'unlimited', memberRoles: ['late'] }, { createdAt: t1 });
-            installedAfterLock = true;
-          }
-          return result;
-        };
-      } }) as Prisma.TransactionClient;
-      await expect(ensureAppMember(observed, appId, userId, 'late')).rejects.toBeInstanceOf(InvalidRoleError);
+      const txWithAgentLockHook = afterAgentFences(tx, async () => {
+        await mkAgent({ maxMembers: 'unlimited', memberRoles: ['late'] }, { createdAt: t1 });
+        installedAfterLock = true;
+      });
+      await expect(ensureAppMember(txWithAgentLockHook, appId, userId, 'late')).rejects.toBeInstanceOf(InvalidRoleError);
       expect(installedAfterLock).toBe(true);
       expect((await loadOfferedMemberRoles(db, appId)).roles).toEqual(['owner', 'late']);
       expect(await tx.appMember.findUnique({ where: { appId_userId: { appId, userId } } })).toBeNull();
@@ -165,18 +177,11 @@ describe('serialization: the deciding union is exactly the locked rows', () => {
     await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner'] }, { createdAt: t0 });
     await db.$transaction(async (tx) => {
       let installedAfterLock = false;
-      const observed = new Proxy(tx, { get(target, property, receiver) {
-        if (property !== '$queryRaw') return Reflect.get(target, property, receiver);
-        return async (sql: TemplateStringsArray, ...values: unknown[]) => {
-          const result = await tx.$queryRaw(sql, ...values);
-          if (/FROM agents WHERE id = ANY/.test(sql.join('')) && !installedAfterLock) {
-            await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner', 'late'] }, { createdAt: t1 });
-            installedAfterLock = true;
-          }
-          return result;
-        };
-      } }) as Prisma.TransactionClient;
-      expect((await lockAndLoadOfferedMemberRoles(observed, appId)).roles).toEqual(['owner']);
+      const txWithAgentLockHook = afterAgentFences(tx, async () => {
+        await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner', 'late'] }, { createdAt: t1 });
+        installedAfterLock = true;
+      });
+      expect((await lockAndLoadOfferedMemberRoles(txWithAgentLockHook, appId)).roles).toEqual(['owner']);
       expect(installedAfterLock).toBe(true);
       expect((await loadOfferedMemberRoles(db, appId)).roles).toEqual(['owner', 'late']);
     });
