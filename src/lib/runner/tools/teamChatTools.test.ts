@@ -150,6 +150,15 @@ describe('the read gate (#2520 criterion 1, matrix)', () => {
     }
   });
 
+  it('the host memory\'s own read gate holds on the App address: a pure App key narrowed to an end-user session gets the empty page, not the team space (#1169 shape)', async () => {
+    await say(channel, 'team only');
+    const endUser = await db.session.create({ data: { id: generateId(), appId: app.id, type: 'CHATBOT', startedAt: new Date() } as never });
+    const c = toolCtx(await mintRun({ userId: null }), { sessionId: endUser.id });
+    expect(await Q.teamChatMessages({}, { appRef: app.id }, c.principal)).toMatchObject({ items: [], total: 0 });
+    expect((await run_(c)).messages).toEqual([]);
+    expect((await run_(toolCtx(await mintRun({ userId: member.id })))).messages.map((m) => m.body)).toEqual(['team only']);
+  });
+
   it('a named Channel a participant may read is returned', async () => {
     await say(channel, 'named');
     const out = await run_(toolCtx(await mintRun({ userId: member.id })), { channelRef: channel.id });
@@ -237,11 +246,14 @@ describe('bounds and paging (#2520 criterion 3)', () => {
 });
 
 describe('a run is not the human reading (#2520 criterion 4)', () => {
-  const marks = async () => ({
-    delivered: (await db.workerDeliveryChannel.findUnique({ where: { workerId_channelId: { workerId: kit.id, channelId: channel.id } } }))?.deliveredThroughSeq ?? 0,
-    read: (await db.channelReadState.findFirst({ where: { workerId: kit.id, channelId: channel.id } }))?.lastSeenSeq ?? 0,
-    checks: await db.channelCheck.count({ where: { channelId: channel.id } }).catch(() => 0),
-  });
+  const marks = async () => {
+    const rs = await db.channelReadState.findFirst({ where: { workerId: kit.id, channelId: channel.id } });
+    return {
+      delivered: (await db.workerDeliveryChannel.findUnique({ where: { workerId_channelId: { workerId: kit.id, channelId: channel.id } } }))?.deliveredThroughSeq ?? 0,
+      read: rs?.lastSeenSeq ?? 0,
+      checkedAt: rs?.lastCheckedAt ?? null,
+    };
+  };
 
   it('with a sessionId on the principal and a mentions filter resolving to a worker, the human\'s marks do not move; the same read through channelMessages DOES move them (the pin can fail)', async () => {
     await db.registerEntry.updateMany({ where: { attendeeWorkerId: kit.id, channelId: channel.id }, data: { mentionOnly: true } });

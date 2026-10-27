@@ -1518,6 +1518,47 @@ export const teamChatMutations = {
   },
 };
 
+/**
+ * #2520 — the READ GATE of the App team chat, shared by `teamChatMessages` and the `team_chat_read` run tool so the
+ * tool carries no copy of the predicate: principal, App ref, `requireTeamChatAccess`, the chat root, and the host
+ * memory's own point check. `null` is the empty page (no chat yet, or an unreadable host memory), exactly what
+ * `teamChatMessages` answers; every refusal (UNAUTHENTICATED, FORBIDDEN, not found) is thrown unchanged. No side
+ * effect: nothing here touches a read mark, a check stamp or a session.
+ */
+export async function resolveTeamChatReadTarget(ctx: Context, appRef: string): Promise<{ appId: string; root: ChatRootRow } | null> {
+  requirePrincipal(ctx);
+  const { id: appId } = await resolveAppRef(ctx.db, appRef);
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+  await requireTeamChatAccess(ctx, app, 'read');
+  const root = await locateTeamChatRoot(ctx, app);
+  if (!root) return null;
+  // One gate, two entry points: the convenience runs the same host-memory
+  // point check the Channel-addressed read runs (Copilot on PR #1169).
+  if (!(await hostMemoryReadable(ctx, root.memoryId, app))) return null;
+  return { appId, root };
+}
+
+/**
+ * #2520 — read ONE page of a team chat (`appRef`) or a named Channel (`channelRef`) for a principal with NO read-state
+ * side effect: no `maybeAdvanceOwnChannelRead`, no channel check, no heartbeat. The `team_chat_read` run tool is its only
+ * caller; the resolvers keep their own advance calls and use the same two gate halves. The Channel address uses
+ * `resolveChannelTarget` (no match: CHANNEL_NOT_FOUND), the App address `resolveTeamChatReadTarget` (no access:
+ * FORBIDDEN; unreadable host: the empty page), each refusal byte-identical to the resolver's.
+ */
+export async function readChatPageWithoutAdvancing(
+  ctx: Context,
+  address: { appRef: string } | { channelRef: string },
+  args: { sinceSeq?: number | null; mentionsRef?: string | null; limit?: number | null },
+): Promise<{ items: TeamChatMessageOut[]; total: number }> {
+  if ('channelRef' in address) {
+    const target = await resolveChannelTarget(ctx, address.channelRef, 'read');
+    return readChannelRoot(ctx, target.app?.id ?? null, target.root, args);
+  }
+  const target = await resolveTeamChatReadTarget(ctx, address.appRef);
+  if (!target) return { items: [], total: 0 };
+  return readChannelRoot(ctx, target.appId, target.root, args);
+}
+
 export const teamChatQueries = {
   /**
    * #939 — read the team chat: the `appRef → App.defaultChannel` convenience
@@ -1542,16 +1583,10 @@ export const teamChatQueries = {
     },
     ctx: Context,
   ): Promise<{ items: TeamChatMessageOut[]; total: number; channelId?: string | null; channelIncarnation?: number | null }> => {
-    requirePrincipal(ctx);
-    const { id: appId } = await resolveAppRef(ctx.db, appRef);
-    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
-    await requireTeamChatAccess(ctx, app, 'read');
-
-    const root = await locateTeamChatRoot(ctx, app);
-    if (!root) return { items: [], total: 0 };
-    // One gate, two entry points: the convenience runs the same host-memory
-    // point check the Channel-addressed read runs (Copilot on PR #1169).
-    if (!(await hostMemoryReadable(ctx, root.memoryId, app))) return { items: [], total: 0 };
+    // #2520: the gate half is ONE function shared with the `team_chat_read` run tool.
+    const target = await resolveTeamChatReadTarget(ctx, appRef);
+    if (!target) return { items: [], total: 0 };
+    const { appId, root } = target;
     // The attention capture changes ordinary-read semantics only for a
     // caller's exact Worker session. Outside that boundary this extra lookup
     // is not even made (#1353: the pilot operator allowlist is gone; the
