@@ -431,15 +431,21 @@ const syncGraphFromGithubAsSystem = async (
       : undefined;
 
     const token = await getInstallationToken(organization.githubInstallationId, credentials);
-    const cloneUrl = toHttpsUrl(graph.source, token);
+    const source = graph.source;
+    const cloneUrl = toHttpsUrl(source, token);
 
     // 2. Clone or pull the repo
     // Mirror writes use this same checkout. Hold their lock through the read:
     // otherwise a writer can switch to the write branch between checkout and
     // loadGraphFromFs, even when the read branch was selected correctly.
     const { graph: fsGraph, edges, skippedInvalidLoc, unreadable, rootNode } = await withMirrorCheckoutLock(graph.id, async () => {
-      await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
-      return loadGraphFromFs(localPath, graphName, ownerRepo);
+      try {
+        await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
+        // Await the read so finally runs after its async success or failure.
+        return await loadGraphFromFs(localPath, graphName, ownerRepo);
+      } finally {
+        await restoreReadRemote(localPath, source);
+      }
     });
 
     // 4. Upsert all nodes and edges into the database (transactional)
@@ -1691,6 +1697,24 @@ const syncGraphFromGithubAsSystem = async (
     };
   }
 };
+
+/**
+ * #2527: restore the stored tokenless source under the shared checkout lock on
+ * every read exit, including a partial clone. Never replace the primary outcome
+ * or log the raw error/URL if restoration fails (same contract as #2396).
+ */
+async function restoreReadRemote(localPath: string, source: string): Promise<void> {
+  try {
+    if (!existsSync(join(localPath, '.git'))) return;
+    await execGit(['remote', 'set-url', 'origin', source], { cwd: localPath });
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    console.error(
+      `[syncGraphFromGithub] Failed to restore the origin URL at ${localPath}; the checkout may still hold an installation token until the next successful restore.`,
+      typeof code === 'string' ? code : 'unknown',
+    );
+  }
+}
 
 async function gitSync(cloneUrl: string, localPath: string, readBranch?: string): Promise<void> {
   // #1146: validated BEFORE the clone/pull split, because both arms reach git

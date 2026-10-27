@@ -38,7 +38,8 @@ vi.mock('./mirrorCheckoutLock.js', async original => {
 });
 vi.mock('../localFs/loadGraphFromFs.js', async original => {
   const real = await original<typeof import('../localFs/loadGraphFromFs.js')>();
-  return { ...real, loadGraphFromFs: (...args: Parameters<typeof real.loadGraphFromFs>) => {
+  return { ...real, loadGraphFromFs: async (...args: Parameters<typeof real.loadGraphFromFs>) => {
+    await Promise.resolve();
     if (env.fault === 'load') {
       env.originAtFault = env.readOrigin();
       throw new Error('synthetic-load-fault-2527');
