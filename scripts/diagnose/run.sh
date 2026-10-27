@@ -2,11 +2,12 @@
 # #2589 diagnosis runner. Private e2e stack only; never touches production.
 # Stages a throwaway copy of HEAD with the diagnose overlay, so scripts/e2e stays unchanged in the PR.
 # usage: run.sh <worker> <api-port> <portal-port> <workload> [duration-s]
-# env: DIAG_OUT (samples file; raw failure logs go to $DIAG_OUT.private.log, mode 0600), DIAG_IDLE_S (idle tail, default 300)
+# env: DIAG_OUT (samples file, default $TMPDIR/diagnose-<project>.jsonl so a failed run always keeps its samples; raw failure logs go to $DIAG_OUT.private.log, mode 0600), DIAG_IDLE_S (idle tail, default 300)
 set -euo pipefail
 worker=${1:?worker}; api=${2:?api port}; portal=${3:?portal port}; workload=${4:?workload}; dur=${5:-600}
 here=$(cd "$(dirname "$0")" && pwd); . "$here/cleanup.sh"; root=$(git -C "$here" rev-parse --show-toplevel)
 project="hadron-e2e-$worker"
+DIAG_OUT=${DIAG_OUT:-${TMPDIR:-/tmp}/diagnose-$project.jsonl}
 state="${XDG_STATE_HOME:-$HOME/.local/state}/hadron-e2e/$project"
 # Ownership first: refuse an existing name BEFORE the cleanup trap exists, so a refusal can never tear down someone else's stack.
 refuse_existing_stack "$state" "$project" || exit 2
@@ -14,8 +15,8 @@ stage=$(mktemp -d); git -C "$root" worktree add --detach "$stage/src" HEAD >/dev
 down() {
   rc=$?
   # On success the samples were already copied and the pg_activity line appended; re-copying would overwrite it.
-  [ "$rc" = 0 ] || preserve_samples "${DIAG_OUT:-}"
-  if [ "$rc" != 0 ] && [ -n "${DIAG_OUT:-}" ]; then keep_logs_private "$DIAG_OUT.private.log" bash -c "cd '$stage/src' && scripts/e2e/stack.sh logs '$worker'"; fi
+  [ "$rc" = 0 ] || preserve_samples "$DIAG_OUT"
+  if [ "$rc" != 0 ]; then keep_logs_private "$DIAG_OUT.private.log" bash -c "cd '$stage/src' && scripts/e2e/stack.sh logs '$worker'"; fi
   (cd "$stage/src" && scripts/e2e/stack.sh down "$worker") || true
   git -C "$root" worktree remove --force "$stage/src" || true; rm -rf "$stage"
 }
@@ -48,10 +49,5 @@ conns=$(compose_exec db psql -U e2e -d e2e -Atc "select count(*) from pg_stat_ac
 [[ "$conns" =~ ^[0-9]+$ ]] || conns=null
 # Idle tail: the sampler keeps running after load stops, so retention vs release is visible.
 sleep "${DIAG_IDLE_S:-300}"
-if [ -n "${DIAG_OUT:-}" ]; then
-  preserve_samples "$DIAG_OUT"
-  printf '{"kind":"pg_activity","connectionsAfterLoad":%s}\n' "$conns" >> "$DIAG_OUT"
-else
-  app_exec cat /var/lib/hadron/graphs/diagnose-samples.jsonl
-  printf '{"kind":"pg_activity","connectionsAfterLoad":%s}\n' "$conns"
-fi
+finish_samples "$DIAG_OUT" "$conns"
+echo "samples: $DIAG_OUT" >&2

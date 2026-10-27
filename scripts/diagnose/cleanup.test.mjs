@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, statSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, statSync, readFileSync, existsSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -62,5 +62,35 @@ test('raw failure logs stay in a private file; stderr carries only a fixed line'
     assert.match(r.stderr, /failure logs kept privately \(\d+ lines\)/);
     assert(readFileSync(dest, 'utf8').includes('PRIVATE_SENTINEL_VALUE'));
     assert.equal(statSync(dest).mode & 0o077, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('a pre-existing permissive log destination is replaced by a private file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'diag-logs-'));
+  try {
+    const dest = join(dir, 'x.private.log');
+    writeFileSync(dest, 'old\n', { mode: 0o644 }); chmodSync(dest, 0o644);
+    sh(`keep_logs_private '${dest}' bash -c "echo PRIVATE_SENTINEL_VALUE"`, dir);
+    assert.equal(statSync(dest).mode & 0o077, 0);
+    assert(readFileSync(dest, 'utf8').includes('PRIVATE_SENTINEL_VALUE'));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('a failed sample read fails the success path and leaves no stale or pg_activity-only artifact', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'diag-fin-'));
+  try {
+    const out = join(dir, 's.jsonl');
+    const r = sh(`app_exec() { return 1; }; finish_samples '${out}' 2`, dir);
+    assert.notEqual(r.status, 0);
+    assert(!existsSync(out));
+    const empty = sh(`app_exec() { :; }; finish_samples '${out}' 2`, dir);
+    assert.notEqual(empty.status, 0); assert(!existsSync(out));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('the success path appends the pg_activity control line after the samples', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'diag-fin-'));
+  try {
+    const out = join(dir, 's.jsonl');
+    const r = sh(`app_exec() { printf '{"kind":"sample"}\\n'; }; finish_samples '${out}' 7`, dir);
+    assert.equal(r.status, 0);
+    assert.equal(readFileSync(out, 'utf8'), '{"kind":"sample"}\n{"kind":"pg_activity","connectionsAfterLoad":7}\n');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
