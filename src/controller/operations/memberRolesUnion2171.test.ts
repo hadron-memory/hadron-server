@@ -9,7 +9,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { ensureAppMember, InvalidRoleError, OrphanAppError } from './ensureAppMember.js';
 import { joinApp, SelfJoinNotAllowedError } from './joinApp.js';
-import { loadOfferedMemberRoles, lockOfferedMemberRoleRows } from '../../lib/memberRoles.js';
+import { loadOfferedMemberRoles, lockOfferedMemberRoleRows, lockAndLoadOfferedMemberRoles } from '../../lib/memberRoles.js';
 import type { Prisma } from '../../generated/prisma/index.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
@@ -164,10 +164,20 @@ describe('serialization: the deciding union is exactly the locked rows', () => {
   it('an install committed AFTER the lock does not contribute to the deciding union (BLIND P2)', async () => {
     await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner'] }, { createdAt: t0 });
     await db.$transaction(async (tx) => {
-      const locked = await lockOfferedMemberRoleRows(tx, appId);
-      // A concurrent install commits on another connection between the lock and the read.
-      await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner', 'late'] }, { createdAt: t1 });
-      expect((await loadOfferedMemberRoles(tx, appId, locked)).roles).toEqual(['owner']);
+      let installedAfterLock = false;
+      const observed = new Proxy(tx, { get(target, property, receiver) {
+        if (property !== '$queryRaw') return Reflect.get(target, property, receiver);
+        return async (sql: TemplateStringsArray, ...values: unknown[]) => {
+          const result = await tx.$queryRaw(sql, ...values);
+          if (/FROM agents WHERE id = ANY/.test(sql.join('')) && !installedAfterLock) {
+            await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner', 'late'] }, { createdAt: t1 });
+            installedAfterLock = true;
+          }
+          return result;
+        };
+      } }) as Prisma.TransactionClient;
+      expect((await lockAndLoadOfferedMemberRoles(observed, appId)).roles).toEqual(['owner']);
+      expect(installedAfterLock).toBe(true);
       expect((await loadOfferedMemberRoles(db, appId)).roles).toEqual(['owner', 'late']);
     });
   });
