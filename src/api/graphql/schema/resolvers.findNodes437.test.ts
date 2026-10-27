@@ -67,56 +67,56 @@ afterAll(() => {
 
 describe('#437 browse (query omitted — the Prisma skip/take path)', () => {
   it('limit 500000 returns exactly 200 of 205 nodes, not every match', async () => {
-    const res = await findNodes({ filter: { memoryIds: [memory.id] }, limit: 500000 });
+    const res = await findNodes({ filter: { memoryIds: [memory.id], locPrefix: 'doc:' }, limit: 500000 });
     expect(res.hits).toHaveLength(200);
   });
 
   it('limit -1 behaves as limit 1 (the first row), never a negative take from the end', async () => {
-    const clamped = await findNodes({ filter: { memoryIds: [memory.id] }, limit: -1, sort: 'loc' });
-    const one = await findNodes({ filter: { memoryIds: [memory.id] }, limit: 1, sort: 'loc' });
+    const clamped = await findNodes({ filter: { memoryIds: [memory.id], locPrefix: 'doc:' }, limit: -1, sort: 'loc' });
+    const one = await findNodes({ filter: { memoryIds: [memory.id], locPrefix: 'doc:' }, limit: 1, sort: 'loc' });
     expect(clamped.hits.map((h: any) => h.node.id)).toEqual(one.hits.map((h: any) => h.node.id));
     expect(clamped.hits).toHaveLength(1);
   });
 
   it('limit 0 behaves as limit 1, not an empty or negative page', async () => {
-    const res = await findNodes({ filter: { memoryIds: [memory.id] }, limit: 0, sort: 'loc' });
+    const res = await findNodes({ filter: { memoryIds: [memory.id], locPrefix: 'doc:' }, limit: 0, sort: 'loc' });
     expect(res.hits.map((h: any) => h.node.loc)).toEqual(['doc:0000']);
   });
 
   it('offset -5 floors at 0 (the first page), never a raw negative OFFSET error', async () => {
-    const res = await findNodes({ filter: { memoryIds: [memory.id] }, limit: 5, offset: -5, sort: 'loc' });
+    const res = await findNodes({ filter: { memoryIds: [memory.id], locPrefix: 'doc:' }, limit: 5, offset: -5, sort: 'loc' });
     expect(res.hits.map((h: any) => h.node.loc)).toEqual(['doc:0000', 'doc:0001', 'doc:0002', 'doc:0003', 'doc:0004']);
   });
 
   it('offset 1.5 truncates to 1 (defensive: GraphQL Int already rejects fractions)', async () => {
-    const res = await findNodes({ filter: { memoryIds: [memory.id] }, limit: 2, offset: 1.5, sort: 'loc' });
+    const res = await findNodes({ filter: { memoryIds: [memory.id], locPrefix: 'doc:' }, limit: 2, offset: 1.5, sort: 'loc' });
     expect(res.hits.map((h: any) => h.node.loc)).toEqual(['doc:0001', 'doc:0002']);
   });
 
   it('an omitted limit keeps the default 20', async () => {
-    const res = await findNodes({ filter: { memoryIds: [memory.id] }, sort: 'loc' });
+    const res = await findNodes({ filter: { memoryIds: [memory.id], locPrefix: 'doc:' }, sort: 'loc' });
     expect(res.hits).toHaveLength(20);
   });
 });
 
 describe('#437 keyword + regex (the SQL LIMIT/OFFSET bind path)', () => {
   it('limit 500000 returns exactly 200 of 205 matches, not every hydrated match', async () => {
-    const res = await findNodes({ query: 'corridor', filter: { memoryIds: [memory.id] }, limit: 500000 });
+    const res = await findNodes({ query: 'corridor', filter: { memoryIds: [memory.id], locPrefix: 'doc:' }, limit: 500000 });
     expect(res.hits).toHaveLength(200);
   });
 
   it('limit -1 clamps to 1 instead of the raw "LIMIT must not be negative" 500', async () => {
-    const res = await findNodes({ query: 'corridor', filter: { memoryIds: [memory.id] }, limit: -1 });
+    const res = await findNodes({ query: 'corridor', filter: { memoryIds: [memory.id], locPrefix: 'doc:' }, limit: -1 });
     expect(res.hits).toHaveLength(1);
   });
 
   it('offset -5 floors at 0 instead of the raw "OFFSET must not be negative" 500', async () => {
-    const res = await findNodes({ query: 'corridor', filter: { memoryIds: [memory.id] }, limit: 5, offset: -5 });
+    const res = await findNodes({ query: 'corridor', filter: { memoryIds: [memory.id], locPrefix: 'doc:' }, limit: 5, offset: -5 });
     expect(res.hits).toHaveLength(5);
   });
 
   it('regex mode clamps too (same SQL bind path): limit -1 resolves to one hit', async () => {
-    const res = await findNodes({ query: 'corridor.*', mode: 'regex', filter: { memoryIds: [memory.id] }, limit: -1 });
+    const res = await findNodes({ query: 'corridor.*', mode: 'regex', filter: { memoryIds: [memory.id], locPrefix: 'doc:' }, limit: -1 });
     expect(res.hits).toHaveLength(1);
   });
 });
@@ -135,12 +135,12 @@ describe('#437 vector (the widenVectorWindow page = off + finalLimit path)', () 
   });
 
   it('limit 500000 fetches a 200-node window, not a 500000-candidate ANN scan + hydration', async () => {
-    const res = await findNodes({ query: 'corridor', mode: 'vector', filter: { memoryIds: [memory.id] }, limit: 500000 });
+    const res = await findNodes({ query: 'corridor', mode: 'vector', filter: { memoryIds: [memory.id], locPrefix: 'doc:' }, limit: 500000 });
     expect(res.hits).toHaveLength(200);
   });
 
   it('limit -1 clamps to 1 in vector mode', async () => {
-    const res = await findNodes({ query: 'corridor', mode: 'vector', filter: { memoryIds: [memory.id] }, limit: -1 });
+    const res = await findNodes({ query: 'corridor', mode: 'vector', filter: { memoryIds: [memory.id], locPrefix: 'doc:' }, limit: -1 });
     expect(res.hits).toHaveLength(1);
   });
 });
