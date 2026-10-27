@@ -127,15 +127,15 @@ it('preserves independently omitted fields and applies explicit null on update',
   expect(await db.node.findUniqueOrThrow({ where: { id: prior.id } })).toMatchObject({ nodeType: 'record', data: null });
 });
 
-it.each(['type: false', 'data: .nan', 'data: &cycle [*cycle]'])('refuses malformed metadata without deleting a stored row (%s)', async (metadata) => {
+it.each(['data: .nan', 'data: &cycle [*cycle]'])('refuses malformed metadata without deleting a stored row (%s)', async (metadata) => {
   const prior = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'kept', name: 'Kept', nodeType: 'data', data: payload, ownerRepo: 'synthetic/data2556' } });
   writeFileSync(join(seed, 'kept.md'), `---\nname: Kept\n${metadata}\n---\n`); commit();
   expect((await syncGraphFromGithub(graph)).error).toBeDefined();
   expect(await db.node.findUniqueOrThrow({ where: { id: prior.id } })).toMatchObject({ nodeType: 'data', data: payload });
 });
 
-it('does not mint a new revision on repeated imports of an explicit null payload', async () => {
-  writeFileSync(join(seed, 'kept.md'), '---\nname: Kept\ntype: data\ndata: null\n---\n'); commit();
+it.each([null, payload])('does not mint a new revision on repeated JSON payload imports (%j)', async (data) => {
+  writeFileSync(join(seed, 'kept.md'), `---\nname: Kept\ntype: data\ndata: ${JSON.stringify(data)}\n---\n`); commit();
   expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
   const row = await db.node.findFirstOrThrow({ where: { memoryId: graph.id, loc: 'kept' } });
   expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
@@ -158,4 +158,50 @@ it('round-trips a whole memory through bulk push and a fresh database import', a
   expect(await db.node.count({ where: { memoryId: graph.id } })).toBe(0);
   expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
   expect(await db.node.findMany({ where: { memoryId: graph.id, loc: { startsWith: 'datasets:' } }, orderBy: { loc: 'asc' }, select: { loc: true, nodeType: true, data: true, content: true } })).toEqual(expected);
+});
+
+it.each(['null', '""', '42', 'false', '"  "'])('treats foreign type %s as absent on create and update', async (type) => {
+  const prior = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'kept', name: 'Kept', nodeType: 'data', data: payload, ownerRepo: 'synthetic/data2556' } });
+  for (const loc of ['kept', 'new']) writeFileSync(join(seed, `${loc}.md`), `---\nname: ${loc}\ntype: ${type}\n---\n`);
+  commit();
+  expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+  expect(await db.node.findUniqueOrThrow({ where: { id: prior.id } })).toMatchObject({ nodeType: 'data', data: payload });
+  expect(await db.node.findFirstOrThrow({ where: { memoryId: graph.id, loc: 'new' } })).toMatchObject({ nodeType: 'info' });
+});
+
+it.each(['frontmatter', 'legacy'])('keeps the legacy link marker separate from nodeType (%s)', async (layout) => {
+  const prior = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'kept', name: 'Kept', nodeType: 'data', data: payload, ownerRepo: 'synthetic/data2556' } });
+  for (const loc of ['kept', 'new']) {
+    const metadata = `name: ${loc}\ntype: link\n`;
+    if (layout === 'frontmatter') writeFileSync(join(seed, `${loc}.md`), `---\n${metadata}---\n`);
+    else { const dir = join(seed, loc, '.node'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'node.yaml'), metadata); }
+  }
+  commit();
+  expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+  expect(await db.node.findUniqueOrThrow({ where: { id: prior.id } })).toMatchObject({ nodeType: 'data', isLink: true, data: payload });
+  expect(await db.node.findFirstOrThrow({ where: { memoryId: graph.id, loc: 'new' } })).toMatchObject({ nodeType: 'info', isLink: true });
+});
+
+it.each(['extractionSpec', 'agentExtractionSpec'])('rejects reserved %s fields before create or update without deleting rows', async (key) => {
+  const invalid = { [key]: [{ field: 'exception', description: 'reserved' }] };
+  const valid = { [key]: [{ field: 'answer', description: 'ordinary' }] };
+  file('bad', 'data', invalid); file('good', 'data', valid); commit();
+  expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+  expect(await db.node.findFirst({ where: { memoryId: graph.id, loc: 'bad' } })).toBeNull();
+  expect((await db.node.findFirstOrThrow({ where: { memoryId: graph.id, loc: 'good' } })).data).toEqual(valid);
+  const prior = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'kept', name: 'Kept', nodeType: 'data', data: payload, ownerRepo: 'synthetic/data2556' } });
+  file('kept', 'data', invalid); commit();
+  expect((await syncGraphFromGithub(graph)).error).toBeDefined();
+  expect(await db.node.findUniqueOrThrow({ where: { id: prior.id } })).toMatchObject({ nodeType: 'data', data: payload });
+});
+
+it('applies the extraction-spec validator to the legacy codec too', async () => {
+  const dir = join(seed, 'legacy', '.node'); mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'node.yaml'), 'name: Legacy\ntype: data\ndata:\n  agentExtractionSpec:\n    - field: exceptions[0]\n');
+  await expect(loadNodeFromFs(join(seed, 'legacy'), seed, 'synthetic/data2556')).rejects.toThrow(/reserved namespace/);
+});
+
+it('refuses a cyclic payload through the explicit guard rather than stack overflow', async () => {
+  const path = join(seed, 'cycle.md'); writeFileSync(path, '---\nname: Cycle\ndata: &cycle [*cycle]\n---\n');
+  await expect(loadNodeFromFs(path, seed, 'synthetic/data2556')).rejects.toThrow('Node data must be finite, acyclic JSON');
 });
