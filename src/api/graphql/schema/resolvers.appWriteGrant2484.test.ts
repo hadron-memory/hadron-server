@@ -416,6 +416,87 @@ describe('an authority change serializes with a granted write (§10, both orderi
   });
 });
 
+describe('the grant is bound to its memory, its grantor and its audience (mutant gaps)', () => {
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+  it('a grant on one memory covers no other memory of the same org under the same prefix', async () => {
+    const f = await fixture();
+    const second = await db.memory.create({ data: { name: 'second', urn: 'grant2484.test:second', class: 'knowledge', visibility: 'ORGANIZATION', organizationId: f.org.id } as never });
+    await grant(f, f.dest);
+    await create(f.runCtx(), f.dest, `${PREFIX}:ok`);
+    await refused(create(f.runCtx(), second, `${PREFIX}:ok`));
+    expect(await nodes(second.id)).toBe(0);
+  });
+
+  it('a personal grant dies with the grantor\'s ownership, even if the new owner also manages the App', async () => {
+    const f = await fixture();
+    await grant(f, f.personal);
+    const next = await db.user.create({ data: { handle: 'grant-newmgr' } });
+    await db.orgMember.create({ data: { userId: next.id, organizationId: f.org.id, role: 'ADMIN' } });
+    await db.appMember.create({ data: { appId: f.app.id, userId: next.id, role: 'owner' } });
+    await db.memory.update({ where: { id: f.personal.id }, data: { userId: next.id } });
+    await refused(create(f.runCtx(), f.personal, `${PREFIX}:a`));
+    expect(await nodes(f.personal.id)).toBe(0);
+  });
+
+  it('revoking a personal grant as a manager who is not its owner never names the memory', async () => {
+    const f = await fixture();
+    const mine = await grant(f, f.personal);
+    const owner2 = await db.user.create({ data: { handle: 'grant-owner2' } });
+    await db.appMember.create({ data: { appId: f.app.id, userId: owner2.id, role: 'owner' } });
+    const r = await revoke(mine.id, { db, userId: owner2.id, roles: [] });
+    expect(r.revokedAt).toBeInstanceOf(Date);
+    expect(r.memoryUrn).toBeNull();
+    expect((await revoke(mine.id, f.ctx)).memoryUrn).not.toBeNull();
+  });
+
+  /** A write held open in a transaction by the gate alone, so each authority row's lock is proven on its own. */
+  async function holdGate(f: F, memory: { id: string }) {
+    const { canWriteToMemory } = await import('../../../mcp/access-control.js');
+    let release!: () => void, entered!: () => void;
+    const hold = new Promise<void>(r => { release = r; });
+    const inside = new Promise<void>(r => { entered = r; });
+    const done = db.$transaction(async tx => {
+      expect(await canWriteToMemory(tx as never, f.runCtx() as never, memory.id, { destination: { loc: `${PREFIX}:x`, verb: 'create' } })).toBe(true);
+      entered(); await hold;
+    }, { timeout: 20000 });
+    await Promise.race([inside, done]);
+    return { release, done };
+  }
+  const blocks = async (h: { release: () => void; done: Promise<unknown> }, change: () => Promise<unknown>) => {
+    let settled = false;
+    const changing = change().then(() => { settled = true; }, () => { settled = true; });
+    await sleep(400);
+    expect(settled).toBe(false);
+    h.release(); await h.done; await changing;
+  };
+
+  it('the gate holds the memory row: an encryption flip waits for it', async () => {
+    const f = await fixture();
+    await grant(f, f.dest);
+    await blocks(await holdGate(f, f.dest), () => db.memory.update({ where: { id: f.dest.id }, data: { isEncrypted: true } }));
+  });
+
+  it('a personal grant holds the owner\'s user row: deleting the owner waits', async () => {
+    const f = await fixture();
+    await grant(f, f.personal);
+    await blocks(await holdGate(f, f.personal), () => db.user.update({ where: { id: f.mgr.id }, data: { deletedAt: new Date() } }));
+  });
+
+  it('a personal grant holds the owner\'s App-owner row on its own (owner is not an org admin)', async () => {
+    const f = await fixture();
+    await grant(f, f.personal);
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: f.org.id, userId: f.mgr.id } }, data: { role: 'CONTRIBUTOR' } });
+    await blocks(await holdGate(f, f.personal), () => db.appMember.delete({ where: { appId_userId: { appId: f.app.id, userId: f.mgr.id } } }));
+  });
+
+  it('a personal grant holds the owner\'s org-admin row on its own (owner is not an App owner)', async () => {
+    const f = await fixture();
+    await grant(f, f.personal);
+    await db.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.mgr.id } }, data: { role: 'member' } });
+    await blocks(await holdGate(f, f.personal), () => db.orgMember.update({ where: { organizationId_userId: { organizationId: f.org.id, userId: f.mgr.id } }, data: { role: 'CONTRIBUTOR' } }));
+  });
+});
+
 describe('listing', () => {
   it('lists the App\'s grants to a manager only, and hides a personal or private grant from a manager who is not its owner', async () => {
     const f = await fixture();
