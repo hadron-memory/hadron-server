@@ -32,7 +32,7 @@ import { runEmailOperation, deleteToolConnection } from '../../../lib/emailClien
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 
-const server = new ApolloServer<Context>({ typeDefs, resolvers });
+const server = new ApolloServer<Context>({ typeDefs, resolvers, includeStacktraceInErrorResponses: false });
 
 async function run(query: string, ctx: Partial<Context>) {
   const res = await server.executeOperation({ query }, { contextValue: { db, ...ctx } as Context });
@@ -240,5 +240,71 @@ describe('connection management stays org-ADMIN', () => {
     const row = await db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
     expect(row.deletedAt).not.toBeNull();
     expect(vi.mocked(deleteToolConnection)).toHaveBeenCalledWith('ms-exchange', 'tool-conn-1');
+  });
+});
+
+
+describe('#2593 delete connection uniform denial', () => {
+  const del = async (id: string, extra: Partial<Context> = {}) => {
+    const result = await server.executeOperation({
+      query: 'mutation Delete($id: ID!) { deleteExchangeConnection(id: $id) }', variables: { id },
+    }, { contextValue: { db, userId: orgAdmin.id, roles: ['READER'], ...extra } as Context });
+    if (result.body.kind !== 'single') throw new Error('unexpected');
+    return result.body.singleResult;
+  };
+  it('missing, foreign-org, owner non-admin, revoked and delegated callers have identical wire refusals and no effects', async () => {
+    const original = await db.exchangeConnection.findUniqueOrThrow({where: {id: connectionId}});
+    const otherOrg = await db.organization.create({data: {name: 'Other', urn: 'other-mailorg.test'}});
+    const foreign = await db.exchangeConnection.create({data: {organizationId: otherOrg.id, userId: owner.id, mailboxEmail: 'other@example.com', toolConnectionId: 'foreign-tool'}});
+    const app = await db.app.create({data: {organizationId: orgId, name: 'Delegate', urn: 'mailorg.test:delegate'}});
+    await db.connectionGrant.create({data: {connectionId, granteeAppId: app.id, grantedByUserId: owner.id, scopes: ['mail.read']}});
+    // Prove the delegated principal really has operation authority, not just an arbitrary app id.
+    const operation = await run(MESSAGES_QUERY(connectionId), {appId: app.id, roles: []});
+    expect(operation.errors).toBeUndefined();
+    vi.mocked(runEmailOperation).mockClear();
+    const update = vi.spyOn(db.exchangeConnection, 'update');
+    try {
+      const missing = await del(generateId());
+      expect(missing.errors?.[0]).toMatchObject({message: 'Forbidden', extensions: {code: 'FORBIDDEN'}});
+      const wire = JSON.stringify(missing);
+      expect(JSON.stringify(await del(foreign.id))).toBe(wire);
+      expect(JSON.stringify(await del(connectionId, {userId: owner.id}))).toBe(wire);
+      expect(JSON.stringify(await del(connectionId, {userId: undefined, appId: app.id, roles: []}))).toBe(wire);
+      await db.orgMember.updateMany({where: {organizationId: orgId, userId: orgAdmin.id}, data: {deletedAt: new Date()}});
+      expect(JSON.stringify(await del(connectionId))).toBe(wire);
+      expect(update).not.toHaveBeenCalled();
+      expect(deleteToolConnection).not.toHaveBeenCalled();
+      expect(runEmailOperation).not.toHaveBeenCalled();
+      expect(await db.exchangeConnection.findUniqueOrThrow({where: {id: connectionId}})).toEqual(original);
+      expect((await db.exchangeConnection.findUniqueOrThrow({where: {id: foreign.id}})).deletedAt).toBeNull();
+    } finally { update.mockRestore(); }
+  });
+  it('repeat delete by ADMIN is missing, preserves the original tombstone and never tears down twice', async () => {
+    expect((await del(connectionId)).data?.deleteExchangeConnection).toBe(true);
+    const tombstone = await db.exchangeConnection.findUniqueOrThrow({where: {id: connectionId}});
+    expect(tombstone.deletedAt).not.toBeNull();
+    expect(deleteToolConnection).toHaveBeenCalledTimes(1);
+    vi.mocked(deleteToolConnection).mockClear();
+    const missing = await del(generateId());
+    expect(JSON.stringify(await del(connectionId))).toBe(JSON.stringify(missing));
+    expect(await db.exchangeConnection.findUniqueOrThrow({where: {id: connectionId}})).toEqual(tombstone);
+    expect(deleteToolConnection).not.toHaveBeenCalled();
+  });
+  it('simultaneous ADMIN deletes produce one success, one refusal and one teardown', async () => {
+    const results = await Promise.all([del(connectionId), del(connectionId)]);
+    expect(results.filter(r => r.data?.deleteExchangeConnection === true)).toHaveLength(1);
+    const denial = results.find(r => r.errors);
+    expect(denial?.errors?.[0]).toMatchObject({message: 'Forbidden', extensions: {code: 'FORBIDDEN'}});
+    expect(deleteToolConnection).toHaveBeenCalledTimes(1);
+  });
+  it('database failures remain infrastructure errors rather than Forbidden', async () => {
+    const failure = new Error('synthetic database outage');
+    const broken = {exchangeConnection: {
+      findUniqueOrThrow: async () => {throw failure;}, findFirst: async () => {throw failure;},
+    }};
+    await expect(resolvers.Mutation.deleteExchangeConnection(null, {id: connectionId}, {
+      db: broken, userId: orgAdmin.id, roles: ['READER'],
+    } as unknown as Context)).rejects.toBe(failure);
+    expect(deleteToolConnection).not.toHaveBeenCalled();
   });
 });
