@@ -1294,8 +1294,21 @@ async function channelHoldsHeadStamp(ctx: Context, root: ChatRootRow, headId: st
     return !!(await ctx.db.node.findFirst({ where: { ...where, data: { path: ['teamHeadIds'], array_contains: [headId] } }, select: { id: true } }));
   }
   const urn = await hostMemoryUrn(ctx, root.memoryId);
-  const rows = await ctx.db.node.findMany({ where, select: { id: true, loc: true, seq: true, content: true, data: true, createdAt: true } });
-  return rows.some((r) => projectMessage(r, enc, urn, true).teamTags?.some(t => t.headId === headId));
+  // Existence only: bound each fetch and stop at the first sealed stamp.
+  // Even limit: 0 must validate the head; exhaust later batches before refusing.
+  const batchSize = 100;
+  let afterId: string | null = null;
+  while (true) {
+    const rows: MessageRow[] = await ctx.db.node.findMany({
+      where: { ...where, ...(afterId ? { id: { gt: afterId } } : {}) },
+      orderBy: { id: 'asc' },
+      take: batchSize,
+      select: { id: true, loc: true, seq: true, content: true, data: true, createdAt: true },
+    });
+    if (rows.some(r => projectMessage(r, enc, urn, true).teamTags?.some(t => t.headId === headId))) return true;
+    if (rows.length < batchSize) return false;
+    afterId = rows[rows.length - 1]!.id;
+  }
 }
 
 async function readChannelRoot(

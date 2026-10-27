@@ -74,6 +74,7 @@ import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -559,6 +560,8 @@ export const appMutations = {
           },
           include: APP_INCLUDE,
         });
+          // #2553: the App's reserved project AT0, in the transaction that creates the App.
+          await ensureProjectZero(tx, app.id, { userId: app.ownerUserId ?? ctx.userId ?? null });
           // 009-install-agent-flow T015: the installer is auto-added as an
           // AppMember with role 'owner' when the Agent's installationPolicy
           // permits it, routed through ensureAppMember so the memberRoles +
@@ -704,7 +707,7 @@ export const appMutations = {
             },
             async (tx) => {
               if (depAutoGrant) await ensureAgentOrgGrant(tx, resolvedOrgId, imp.importedAgentId);
-              return tx.app.create({
+              const cascaded = await tx.app.create({
                 data: {
                   organizationId: resolvedOrgId,
                   name: `${depAgent.name} (cascaded from ${name})`,
@@ -717,6 +720,9 @@ export const appMutations = {
                   },
                 },
               });
+              // #2553: the cascaded App's reserved project AT0, in the same transaction.
+              await ensureProjectZero(tx, cascaded.id, { userId: ctx.userId ?? null });
+              return cascaded;
             },
           );
           // #951: a cascaded dependency App is an App like any other — it gets

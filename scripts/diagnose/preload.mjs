@@ -54,7 +54,7 @@ if (/index\.ts$/.test(process.argv[1] ?? '') || process.argv.includes('src/index
     if (!seam) seam = await import('../../../src/mcp/server.ts').then((m) => m.mcpTransportStateForTests, () => null);
     const eventLoop = loop.count > 0 ? { p50Ms: Math.max(0, loop.percentile(50) / 1e6 - RES_MS), p99Ms: Math.max(0, loop.percentile(99) / 1e6 - RES_MS) } : 'not sampled';
     loop.reset();
-    line({ kind: 'sample', t, ...proc, eventLoop, timeouts: { ...timeouts }, mcp: seam ? reduceTransportState(seam()) : 'not sampled' });
+    line({ kind: 'sample', t, at: Date.now(), ...proc, eventLoop, timeouts: { ...timeouts }, mcp: seam ? reduceTransportState(seam()) : 'not sampled' });
     const why = shouldAbort({ rss: proc.rss, elapsedMs: t });
     if (why) { line({ kind: 'abort', why, t }); process.exit(3); }
   }, Number(process.env.DIAG_SAMPLE_MS ?? 1000));

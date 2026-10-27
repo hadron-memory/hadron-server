@@ -50,7 +50,7 @@ test('an existing stack name is refused and the cleanup trap never runs', () => 
 });
 test('a fresh name is accepted', () => {
   const dir = mkdtempSync(join(tmpdir(), 'diag-own-'));
-  try { assert.equal(sh(`refuse_existing_stack '${join(dir, 'none')}' hadron-e2e-zz-not-real`, dir).status, 0); }
+  try { assert.equal(sh(`incus() { return 0; }; refuse_existing_stack '${join(dir, 'none')}' hadron-e2e-zz-not-real`, dir).status, 0); }
   finally { rmSync(dir, { recursive: true, force: true }); }
 });
 test('raw failure logs stay in a private file; stderr carries only a fixed line', () => {
@@ -78,10 +78,10 @@ test('a failed sample read fails the success path and leaves no stale or pg_acti
   const dir = mkdtempSync(join(tmpdir(), 'diag-fin-'));
   try {
     const out = join(dir, 's.jsonl');
-    const r = sh(`app_exec() { return 1; }; finish_samples '${out}' 2`, dir);
+    const r = sh(`app_exec() { return 1; }; finish_samples '${out}' 2 1000`, dir);
     assert.notEqual(r.status, 0);
     assert(!existsSync(out));
-    const empty = sh(`app_exec() { :; }; finish_samples '${out}' 2`, dir);
+    const empty = sh(`app_exec() { :; }; finish_samples '${out}' 2 1000`, dir);
     assert.notEqual(empty.status, 0); assert(!existsSync(out));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -89,9 +89,9 @@ test('the success path appends the pg_activity control line after the samples', 
   const dir = mkdtempSync(join(tmpdir(), 'diag-fin-'));
   try {
     const out = join(dir, 's.jsonl');
-    const r = sh(`app_exec() { printf '{"kind":"sample"}\\n'; }; finish_samples '${out}' 7`, dir);
+    const r = sh(`app_exec() { printf '{"kind":"sample","at":1000}\\n'; }; finish_samples '${out}' 7 1000`, dir);
     assert.equal(r.status, 0);
-    assert.equal(readFileSync(out, 'utf8'), '{"kind":"sample"}\n{"kind":"pg_activity","connectionsAfterLoad":7}\n');
+    assert.equal(readFileSync(out, 'utf8'), '{"kind":"sample","at":1000}\n{"kind":"pg_activity","connectionsAfterLoad":7}\n');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 test('heap snapshot files are deleted at teardown and a survivor fails the purge', () => {
@@ -122,20 +122,29 @@ const runShDown = () => {
 const trapRun = (purge, stackDown, body) => {
   const dir = mkdtempSync(join(tmpdir(), 'diag-trap-'));
   try {
-    const stubs = `preserve_samples() { :; }; keep_logs_private() { :; }; purge_snapshots() { ${purge}; }; stack_down() { ${stackDown}; }; stage='${dir}/stage'; root='${dir}'; worker=w; DIAG_OUT='${dir}/o'; mkdir -p "$stage"; ${runShDown()}\ntrap down EXIT; ${body}`;
+    const stubs = `preserve_samples() { :; }; keep_logs_private() { :; }; stack_owned() { return 0; }; release_stack_reservation() { :; }; purge_snapshots() { ${purge}; }; `
+      + `stage='${dir}/stage'; state='${dir}/state'; root='${dir}'; worker=w; DIAG_OUT='${dir}/o'; mkdir -p "$stage/src" "$state"; : > "$state/diagnose-owner"; `
+      + `git() { :; }; ${runShDown()}\n`
+      + `scripts_e2e() { ${stackDown}; }; stack_cmd() { :; }\ntrap down EXIT\n${body}`;
+    // stack.sh down is invoked as (cd "$stage/src" && scripts/e2e/stack.sh down w): stage a stub at that path.
+    mkdirSync(join(dir, 'stage/src/scripts/e2e'), { recursive: true });
+    writeFileSync(join(dir, 'stage/src/scripts/e2e/stack.sh'), `#!/bin/sh\n${stackDown}\n`); chmodSync(join(dir, 'stage/src/scripts/e2e/stack.sh'), 0o755);
     return sh(stubs, dir);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 };
 test('run.sh EXIT trap: a clean run with clean teardown exits 0', () => {
-  assert.equal(trapRun('return 0', 'return 0', 'true').status, 0);
+  assert.equal(trapRun('return 0', 'exit 0', 'true').status, 0);
 });
 test('run.sh EXIT trap: a purge failure fails an otherwise successful run', () => {
-  assert.notEqual(trapRun('return 1', 'return 0', 'true').status, 0);
+  assert.notEqual(trapRun('return 1', 'exit 0', 'true').status, 0);
 });
 test('run.sh EXIT trap: purge and stack-down both failing still fails, and the stack-down is attempted', () => {
-  const r = trapRun('return 1', 'echo STACKDOWN-RAN >&2; return 1', 'true');
+  const r = trapRun('return 1', 'echo STACKDOWN-RAN >&2; exit 1', 'true');
   assert.notEqual(r.status, 0); assert.match(r.stderr, /STACKDOWN-RAN/);
 });
+test('run.sh EXIT trap: a stack-down failure alone fails an otherwise successful run', () => {
+  assert.notEqual(trapRun('return 0', 'exit 1', 'true').status, 0);
+});
 test('run.sh EXIT trap: a failed run keeps its own status', () => {
-  assert.equal(trapRun('return 1', 'return 1', '(exit 3)').status, 3);
+  assert.equal(trapRun('return 1', 'exit 1', '(exit 3)').status, 3);
 });

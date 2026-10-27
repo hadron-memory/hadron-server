@@ -457,7 +457,9 @@ export async function ownerChain(db: Db, taskId: string): Promise<AlarmChain> {
       -- Same App only (#1720 review, Rook P3-4): T1 refuses a cross-App
       -- parent at create; this keeps another tenant's owners out of a chain
       -- even if a later move ever relinked one.
-      WHERE up.depth < 64 AND t.app_id = up.app_id
+      -- #2553: the walk stops below AT0, the reserved "No project" row: its owner is a bookkeeping fallback, not a
+      -- parent who owns the task.
+      WHERE up.depth < 64 AND t.app_id = up.app_id AND t.handle <> 'AT0'
     )
     SELECT owner_worker_id AS "ownerWorkerId", owner_user_id AS "ownerUserId" FROM up ORDER BY depth`;
   const chain: AlarmChain = [];

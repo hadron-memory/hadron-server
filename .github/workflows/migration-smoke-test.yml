@@ -101,6 +101,11 @@ jobs:
           #     GIN(jsonb_path_ops) indexes Prisma can't express, so the diff wants
           #     to DROP them. Same rationale (prod needs them, no post-push.sql on
           #     prod); both are whitelisted.
+          #   - #2553: `agent_tasks.task_number` / `handle` are NOT NULL in the DB
+          #     (the invariants file, so no row ever lacks its identity) but optional
+          #     in schema.prisma, so a writer that states neither still type-checks
+          #     and the assign-number trigger fills them. The diff wants to DROP
+          #     NOT NULL; both lines are whitelisted.
           # Any OTHER line in the diff is real drift and must fail CI.
           # Invoke the prisma bin directly (not `pnpm prisma`): pnpm 11's
           # verify-deps-before-run preamble ("Already up to date" / "Done
@@ -119,6 +124,8 @@ jobs:
             | grep -vE '^ALTER TABLE "nodes" DROP COLUMN "tsv";$' \
             | grep -vE '^DROP INDEX "nodes_properties_gin";$' \
             | grep -vE '^DROP INDEX "nodes_data_gin";$' \
+            | grep -vE '^ALTER TABLE "agent_tasks" ALTER COLUMN "task_number" DROP NOT NULL,$' \
+            | grep -vE '^ALTER COLUMN "handle" DROP NOT NULL;$' \
             || true)
           # `|| true`: when every diff line is whitelisted the final grep matches
           # nothing and exits 1, which under `bash -e` would fail the job. An empty
