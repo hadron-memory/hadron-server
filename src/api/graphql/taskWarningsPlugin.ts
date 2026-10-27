@@ -12,7 +12,9 @@ export const taskWarningsPlugin: ApolloServerPlugin<Context> = {
   async requestDidStart() {
     return {
       async willSendResponse(requestContext) {
-        const collected = requestContext.contextValue?.taskWarnings;
+        const ctx = requestContext.contextValue;
+        if (!ctx) return;
+        const collected = ctx.taskWarnings;
         const body = requestContext.response.body;
         if (body.kind !== 'single') return;
         const errored = new Set<string>();
@@ -20,7 +22,7 @@ export const taskWarningsPlugin: ApolloServerPlugin<Context> = {
           const head = e.path?.[0];
           if (typeof head === 'string') errored.add(head);
         }
-        await flushTaskWarningHistory(requestContext.contextValue, errored);
+        await flushTaskWarningHistory(ctx, errored);
         const warnings = shapeResponseWarnings(collected ?? [], errored);
         if (warnings.length === 0) return;
         body.singleResult.extensions = { ...body.singleResult.extensions, warnings };
