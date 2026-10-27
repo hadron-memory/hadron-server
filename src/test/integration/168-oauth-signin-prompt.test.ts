@@ -10,6 +10,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import { createServer } from '../../server.js';
+import { isServerLocalPath } from '../../auth/server-local-path.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { signJwt } from '../../auth/jwt.js';
@@ -72,6 +73,52 @@ describe('sign-in prompt (no cookie, login_provider omitted, resource === origin
     expect(target.origin).toBe('http://placeholder.invalid');
     expect(target.pathname).toBe('/auth/github');
     expect(target.searchParams.get('return_to')).toBe(`/oauth/authorize?${q}`);
+    expect(html).toContain('Continue with GitHub');
+    expect(html).toContain('close this tab');
+    expect(html).not.toContain('come back here');
+  });
+
+  it('offers "Use email instead": a local link to the same query with login_provider=email that reaches the email page', async () => {
+    const q = query();
+    const html = await (await get(q)).text();
+    const href = html.match(/<a href="([^"]+)">Use email instead<\/a>/)?.[1];
+    expect(href).toBeDefined();
+    const emailHref = href!.replace(/&amp;/g, '&');
+    expect(emailHref).toBe(`/oauth/authorize?${q}&login_provider=email`);
+    const page = await fetch(`${baseUrl}${emailHref}`, { redirect: 'manual' });
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain('/oauth/authorize/email');
+  });
+});
+
+// Permanent hostile return-path controls (LOCAL P3, acceptance attach delta 1).
+describe('hostile request targets never yield a non-local link', () => {
+  it('encoded hostile state/query values round-trip exactly inside a local link', async () => {
+    const q = query({ state: '//evil.example/&login_provider=email&return_to=https://evil.example' });
+    const html = await (await get(q)).text();
+    const href = html.match(/<a [^>]*class="button"[^>]*href="([^"]+)"/)![1].replace(/&amp;/g, '&');
+    expect(href.startsWith('/auth/github?return_to=')).toBe(true);
+    expect(new URL(href, 'http://x.invalid').searchParams.get('return_to')).toBe(`/oauth/authorize?${q}`);
+    const email = html.match(/<a href="([^"]+)">Use email instead/)![1].replace(/&amp;/g, '&');
+    expect(email.startsWith('/oauth/authorize?')).toBe(true);
+  });
+  it('an absolute-form request line addressed to another origin still renders only local links, and its return_to fails isServerLocalPath', async () => {
+    const q = query();
+    const raw = await new Promise<string>((resolve, reject) => {
+      const socket = connect(port, '127.0.0.1', () => socket.write(
+        `GET http://evil.example/oauth/authorize?${q} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`));
+      let data = '';
+      socket.on('data', (d) => { data += d; });
+      socket.on('end', () => resolve(data));
+      socket.on('error', reject);
+    });
+    expect(raw.split('\r\n')[0]).toMatch(/ 200 /);
+    const body = raw.slice(raw.indexOf('\r\n\r\n') + 4);
+    const hrefs = [...body.matchAll(/href="([^"]+)"/g)].map((m) => m[1].replace(/&amp;/g, '&'));
+    expect(hrefs.length).toBeGreaterThanOrEqual(2);
+    for (const href of hrefs) expect(href.startsWith('/'), href).toBe(true);
+    const signIn = hrefs.find((h) => h.startsWith('/auth/github'))!;
+    expect(isServerLocalPath(new URL(signIn, 'http://x.invalid').searchParams.get('return_to')!)).toBe(false);
   });
 });
 

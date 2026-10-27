@@ -1001,6 +1001,9 @@ function buildHandleAuthorizeGet(
             renderTemplate(SIGNIN_PROMPT_TEMPLATE, {
               clientName,
               signInUrl: `/auth/${loginProvider}?return_to=${encodeURIComponent(req.originalUrl)}`,
+              // Fixed local path + the original query: never derived from the
+              // request target's origin (an absolute-form request line).
+              emailUrl: `/oauth/authorize${req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '?'}&login_provider=email`,
             }),
           );
           return;
