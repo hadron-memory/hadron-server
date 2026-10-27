@@ -28,7 +28,7 @@ import { validateGitBranch } from '../../lib/gitRef.js';
 import { withMirrorCheckoutLock, EncryptedMemoryFenceError } from './mirrorCheckoutLock.js';
 import { logEncryptedGitSyncRefusal } from './encryptedGitSync.js';
 import {
-  clearMirrorObligations, settleMirrorObligations, takeAttemptSeq,
+  settleMirrorObligations, tryTakeAttemptSeq,
   type MirrorErrorClass, type MirrorObligationRef, type MirrorSettlement,
 } from './mirrorObligations.js';
 
@@ -84,6 +84,10 @@ export async function withMirrorCheckout(
   const { memoryId, ownerRepo, clientId, commitSubject, logPrefix } = opts;
   const obligations = opts.obligations ?? [];
 
+  // #430: taken BEFORE the configuration is read, so a "not mirrored" observation below can only clear rows older than
+  // any attempt that starts after the configuration it saw changed. Null (not taken) records nothing for this call.
+  const preSeq = obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
+
   // 1. Find the Memory config — by id first, then by repo slug.
   let memory = memoryId
     ? await db.memory.findUnique({ where: { id: memoryId }, include: { organization: true } })
@@ -117,7 +121,7 @@ export async function withMirrorCheckout(
   // #430: every return before the lock is a memory that is NOT mirrored (configuration, not a failure): its rows go.
   const foundMemoryId = memory.id;
   const notMirrored = async (outcome: MirrorOutcome): Promise<MirrorOutcome> => {
-    await clearMirrorObligations(db, foundMemoryId, obligations);
+    if (preSeq !== null) await settleMirrorObligations(db, foundMemoryId, obligations, { result: 'cleared' }, preSeq);
     return outcome;
   };
 
@@ -154,7 +158,7 @@ export async function withMirrorCheckout(
       // #430: the attempt number is taken HERE, inside the lock, and the settle below runs before it releases, so settles for
       // one memory apply in lock order. Every return of the attempt that is not a failure settles as `cleared`: a success, or
       // a memory that is not mirrored.
-      const attemptSeq = obligations.length > 0 ? await takeAttemptSeq(db) : 0n;
+      const attemptSeq = obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
       let settlement: MirrorSettlement = { result: 'cleared' };
       const fail = (errorClass: MirrorErrorClass): 'failed' => {
         settlement = { result: 'failed', errorClass };
@@ -311,7 +315,7 @@ export async function withMirrorCheckout(
         return fail('PUSH_FAILED');
       }
       })();
-      await settleMirrorObligations(db, resolvedMemoryId, obligations, settlement, attemptSeq);
+      if (attemptSeq !== null) await settleMirrorObligations(db, resolvedMemoryId, obligations, settlement, attemptSeq);
       return outcome;
     }, { fenceEncryption: true });
   } catch (err) {
@@ -322,8 +326,9 @@ export async function withMirrorCheckout(
     console.error(`${logPrefix} Checkout lock failed for ${commitSubject}:`, err);
     // Outside the lock by definition (it could not be taken, or the attempt threw before settling), so this settle is not
     // lock-ordered: the sequence number still makes it a no-op against any newer row.
-    if (obligations.length > 0) {
-      await settleMirrorObligations(db, foundMemoryId, obligations, { result: 'failed', errorClass: 'LOCK_FAILED' }, await takeAttemptSeq(db).catch(() => 0n));
+    const lockFailedSeq = obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
+    if (lockFailedSeq !== null) {
+      await settleMirrorObligations(db, foundMemoryId, obligations, { result: 'failed', errorClass: 'LOCK_FAILED' }, lockFailedSeq);
     }
     return 'failed';
   }

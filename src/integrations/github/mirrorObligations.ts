@@ -11,7 +11,11 @@
  * releases (`withMirrorCheckout`), so settles for one memory apply in lock order, across processes. The conflict arm of
  * the failure upsert and the success delete both require `attempt_seq <` the settling attempt's, so a stale settle that
  * does arrive late (the one path outside the lock: a lock that could not be taken) is a no-op against a newer row and can
- * at worst leave one spurious FAILED row, the safe direction.
+ * at worst leave one spurious FAILED row, the safe direction. A memory that is NOT mirrored (no source, no org, encrypted,
+ * an invalid source) settles as `cleared` on the same fence: its number is taken BEFORE the configuration is read, so a
+ * stale "not mirrored" observation, which a newer attempt's lock-taken number always exceeds, cannot delete that attempt's
+ * row. Success deletes are NOT a high-water mark: the row is gone afterwards, so a lower-numbered failure that arrives
+ * late can re-create it (a spurious row, the safe direction; pinned in mirrorObligations430.test.ts).
  *
  * **Redaction.** A row stores one of a closed set of fixed words. Exception text is never stored: a raw Git error can
  * carry an installation-token URL (findings:git-execfile-error-carries-auth-url).
@@ -41,6 +45,19 @@ export type MirrorSettlement = { result: 'cleared' } | { result: 'failed'; error
 export async function takeAttemptSeq(db: PrismaClient): Promise<bigint> {
   const [{ seq }] = await db.$queryRaw<Array<{ seq: bigint }>>`SELECT nextval('git_mirror_attempt_seq')::bigint AS seq`;
   return seq;
+}
+
+/**
+ * `takeAttemptSeq` that never throws: failure tracking is a soft add-on to the mirror, so a sequence that cannot be taken
+ * logs a fixed line and yields null, and the caller mirrors anyway and records nothing for that attempt.
+ */
+export async function tryTakeAttemptSeq(db: PrismaClient): Promise<bigint | null> {
+  try {
+    return await takeAttemptSeq(db);
+  } catch (err) {
+    console.error(`[git-mirror] Could not take an attempt number; this attempt records nothing: ${errorCode(err)}`);
+    return null;
+  }
 }
 
 /** One entry per distinct key: an upsert that names a key twice would fail the whole statement. */
@@ -89,27 +106,6 @@ export async function settleMirrorObligations(
         WHERE git_mirror_obligations.attempt_seq < EXCLUDED.attempt_seq`;
   } catch (err) {
     console.error(`[git-mirror] Could not settle ${keys.length} obligation(s) for memory ${memoryId}: ${errorCode(err)}`);
-  }
-}
-
-/**
- * Drop `refs` unconditionally: the memory is not mirrored at all (no source, no org, encrypted, an invalid source), which is
- * configuration, not a failure. Never throws.
- */
-export async function clearMirrorObligations(
-  db: PrismaClient, memoryId: string, refs: readonly MirrorObligationRef[],
-): Promise<void> {
-  const keys = distinct(refs);
-  if (keys.length === 0) return;
-  try {
-    await db.gitMirrorObligation.deleteMany({
-      where: {
-        memoryId,
-        OR: keys.map((k) => ({ nodeId: k.nodeId, kind: k.kind as 'WRITE' | 'REMOVE', removeLoc: k.removeLoc })),
-      },
-    });
-  } catch (err) {
-    console.error(`[git-mirror] Could not clear ${keys.length} obligation(s) for memory ${memoryId}: ${errorCode(err)}`);
   }
 }
 

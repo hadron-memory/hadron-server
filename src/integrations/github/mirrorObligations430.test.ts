@@ -45,7 +45,7 @@ vi.mock('./execGit.js', () => ({
 
 import { withMirrorCheckout } from './gitMirrorCheckout.js';
 import { writeNodeToGit } from './writeNodeToGit.js';
-import { settleMirrorObligations, type MirrorObligationRef } from './mirrorObligations.js';
+import { settleMirrorObligations, takeAttemptSeq, type MirrorObligationRef } from './mirrorObligations.js';
 
 const SOURCE = 'https://github.com/acme/repo.git';
 const IDENT = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -174,9 +174,69 @@ describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
     expect(await rows()).toEqual([expect.objectContaining({ errorClass: 'PUSH_FAILED', attempts: 1, attemptSeq: 10n })]);
     await settleMirrorObligations(db, memoryId, ref, { result: 'cleared' }, 11n);
     expect(await rows()).toEqual([]);
-    // A stale failure cannot resurrect a row a later success cleared only if its seq is lower; one taken later is newer state.
     await settleMirrorObligations(db, memoryId, ref, { result: 'failed', errorClass: 'PUSH_FAILED' }, 12n);
     expect(await rows()).toHaveLength(1);
+  });
+
+  it('(b4) KNOWN LIMIT: a success delete keeps no high-water mark, so a lower-numbered failure arriving after it re-creates the row', async () => {
+    await setup();
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'cleared' }, 20n);
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'failed', errorClass: 'PUSH_FAILED' }, 15n);
+    // A spurious row, the safe direction; only reachable outside the checkout lock (see mirrorObligations.ts).
+    expect(await rows()).toEqual([expect.objectContaining({ errorClass: 'PUSH_FAILED', attemptSeq: 15n })]);
+  });
+
+  it('(b5) a settle for one memory never touches another memory\'s rows (success delete and not-mirrored clear are both memory-scoped)', async () => {
+    await setup();
+    const other = await db.memory.create({ data: { id: generateId(), organizationId: (await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).organizationId,
+      name: 'other', urn: 'mirror430-org:other', class: 'knowledge' } });
+    await db.gitMirrorObligation.create({ data: { ...row({}), memoryId: other.id, state: 'FAILED', errorClass: 'PUSH_FAILED', attemptSeq: 1n } as never });
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'cleared' }, 99n);
+    expect(await db.gitMirrorObligation.count({ where: { memoryId: other.id } })).toBe(1);
+    await db.memory.update({ where: { id: memoryId }, data: { source: null } });
+    expect(await run(['a.txt', 'one'])).toBe('skipped');
+    expect(await db.gitMirrorObligation.count({ where: { memoryId: other.id } })).toBe(1);
+  });
+
+  it('(l) a sequence that cannot be taken does not stop the mirror: Git still publishes, nothing is recorded, a fixed line is logged', async () => {
+    await setup();
+    const real = db.$queryRaw.bind(db) as (...a: unknown[]) => Promise<unknown>;
+    const spy = vi.spyOn(db, '$queryRaw').mockImplementation(((...a: unknown[]) => {
+      const text = String((a[0] as { strings?: string[] })?.strings?.join('') ?? a[0]);
+      if (text.includes('git_mirror_attempt_seq')) return Promise.reject(new Error(`seq boom ${TOKEN}`));
+      return real(...a);
+    }) as never);
+    expect(await run(['a.txt', 'one'])).toBe('mirrored');
+    spy.mockRestore();
+    expect(remoteTip('hadron-updates')).toBe(localTip('hadron-updates'));
+    expect(await rows()).toEqual([]);
+    expect(errors.some((e) => e.includes('Could not take an attempt number'))).toBe(true);
+    expect(errors.join('\n')).not.toContain(TOKEN);
+  });
+
+  it('(m) an older "not mirrored" observation, delayed past a newer failed attempt, cannot clear that attempt\'s row', async () => {
+    await setup();
+    rejectPushes();
+    await db.memory.update({ where: { id: memoryId }, data: { source: null } });
+    const realExec = db.$executeRaw.bind(db) as (...a: unknown[]) => Promise<number>;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let entered!: () => void;
+    const atClear = new Promise<void>((r) => { entered = r; });
+    let first = true;
+    const spy = vi.spyOn(db, '$executeRaw').mockImplementation(((...a: unknown[]) => {
+      if (first) { first = false; entered(); return gate.then(() => realExec(...a)); }
+      return realExec(...a);
+    }) as never);
+    const older = run(['a.txt', 'one']);       // sees no source, pauses at its clear
+    await atClear;
+    await db.memory.update({ where: { id: memoryId }, data: { source: SOURCE } });
+    expect(await run(['a.txt', 'one'])).toBe('failed'); // a newer attempt: real push rejected, row recorded
+    expect(await rows()).toHaveLength(1);
+    release();
+    expect(await older).toBe('skipped');
+    spy.mockRestore();
+    expect(await rows()).toEqual([expect.objectContaining({ ...row(), errorClass: 'PUSH_FAILED' })]);
   });
 
   it('(c) the failure class follows the stage that failed', async () => {
@@ -200,7 +260,8 @@ describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
 
   it('(d) a clean tree that is already published clears the row', async () => {
     await setup();
-    await db.gitMirrorObligation.create({ data: { ...row(), kind: 'WRITE', state: 'FAILED', errorClass: 'PUSH_FAILED', attemptSeq: 1n } as never });
+    // Seeded from the real sequence, so the attempt below is strictly newer however many tests ran before this one.
+    await db.gitMirrorObligation.create({ data: { ...row(), kind: 'WRITE', state: 'FAILED', errorClass: 'PUSH_FAILED', attemptSeq: await takeAttemptSeq(db) } as never });
     expect(await run(null)).toBe('no-changes');
     expect(await rows()).toEqual([]);
   });
@@ -217,12 +278,12 @@ describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
 
   it('(f) a memory that is not mirrored (no source, no org, encrypted) records NO row and clears an existing one', async () => {
     await setup();
-    await db.gitMirrorObligation.create({ data: { ...row(), state: 'FAILED', errorClass: 'PUSH_FAILED', attemptSeq: 1n } as never });
+    await db.gitMirrorObligation.create({ data: { ...row(), state: 'FAILED', errorClass: 'PUSH_FAILED', attemptSeq: await takeAttemptSeq(db) } as never });
     await db.memory.update({ where: { id: memoryId }, data: { source: null } });
     expect(await run(['a.txt', 'one'])).toBe('skipped');
     expect(await rows()).toEqual([]);
     await db.memory.update({ where: { id: memoryId }, data: { source: SOURCE } });
-    await db.gitMirrorObligation.create({ data: { ...row(), state: 'FAILED', errorClass: 'PUSH_FAILED', attemptSeq: 1n } as never });
+    await db.gitMirrorObligation.create({ data: { ...row(), state: 'FAILED', errorClass: 'PUSH_FAILED', attemptSeq: await takeAttemptSeq(db) } as never });
     await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: true } });
     expect(await run(['a.txt', 'one'])).toBe('refused-encrypted');
     expect(await rows()).toEqual([]);
