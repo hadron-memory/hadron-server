@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from 'fs';
+import { validateNodeDataExtractionSpecs } from '../../lib/edge-conditions/reserved-names.js';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
 import { join, relative, sep, basename, dirname } from 'path';
 import { parse } from 'yaml';
@@ -90,9 +91,9 @@ interface NodeYaml {
 /** #2556: omitted keys preserve stored values; explicit JSON null clears data. */
 function typedPayloadFromMeta(meta: NodeYaml): Pick<Partial<Node>, 'nodeType' | 'data'> {
   const result: Pick<Partial<Node>, 'nodeType' | 'data'> = {};
-  if ('type' in meta) {
-    if (typeof meta.type !== 'string') throw new Error('Node type must be a string');
-    // cor:dmo:020:04: open vocabulary, preserved exactly rather than guessed.
+  // Gate6434957685: blank/foreign values are absent; link is the legacy isLink marker.
+  if (typeof meta.type === 'string' && meta.type.trim() !== '' && meta.type !== 'link') {
+    // cor:dmo:020:04: all other words are open vocabulary, retained exactly.
     result.nodeType = meta.type;
   }
   if ('data' in meta) {
@@ -109,6 +110,9 @@ function typedPayloadFromMeta(meta: NodeYaml): Pick<Partial<Node>, 'nodeType' | 
       active.delete(value);
     };
     check(meta.data);
+    // Import is a write surface: share the API's reserved extraction namespace gate.
+    const extraction = validateNodeDataExtractionSpecs(meta.data);
+    if (!extraction.ok) throw new Error(extraction.error.message);
     result.data = meta.data as Node['data'];
   }
   return result;
