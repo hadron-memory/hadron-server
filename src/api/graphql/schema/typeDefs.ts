@@ -13623,6 +13623,15 @@ export const typeDefs = `#graphql
   type AgentTask {
     id: ID!
     appId: ID!
+    """
+    The short handle of this task, for example "AT312": its number counted within its App
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:01). An alias for the id, which stays canonical; every task
+    operation that takes a task id also takes the handle. A person who belongs to several Apps qualifies it as
+    hrn:agenttask:<app-urn>:AT312, where the App URN is the App's urn.
+    """
+    handle: String!
+    "The number inside the handle, counted per App. Permanent: never changed, never given to another task."
+    taskNumber: Int!
     title: String!
     description: String
     "Opaque origin reference (an issue URL, a node URN). Not interpreted."

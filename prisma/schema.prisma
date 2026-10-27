@@ -3379,6 +3379,7 @@ model App {
   workers                 Worker[]
   /// #1705 — the App's agent tasks and their append-only event stream.
   agentTasks              AgentTask[]
+  agentTaskCounter        AgentTaskCounter?
   /// #1747 — tickers (cor:agt:080) and the grants held by this App's workers.
   tickers                 Ticker[]
   appGrants               AppGrant[]
@@ -5578,6 +5579,10 @@ model AutomationVersion {
 model AgentTask {
   id                   String    @id @default(cuid())
   appId                String    @map("app_id")
+  /// #2553: the per-App short number behind the handle `AT<n>`. Assigned once at creation from `agent_task_counters`
+  /// and never changed or reissued. NOT NULL in the database (prisma/agent-task-number-invariants.sql, which also
+  /// fills it for any writer that leaves it out); optional here only so a writer need not state it.
+  taskNumber           BigInt?   @map("task_number")
   /// What is asked, in the team's own words. Never read by the platform.
   title                String
   description          String?
@@ -5636,6 +5641,7 @@ model AgentTask {
   /// #2022 — times stop signals kept this task from being assigned.
   stopHolds      AgentTaskStopHold[]
 
+  @@unique([appId, taskNumber])
   @@index([appId, status])
   @@index([parentTaskId])
   @@index([ownerWorkerId])
@@ -5643,6 +5649,17 @@ model AgentTask {
   @@index([assigneeWorkerId])
   @@index([assigneeUserId])
   @@map("agent_tasks")
+}
+
+/// #2553: the last task number issued in one App. Its own table, so a task create serializes against other creates in
+/// the SAME App only and never takes the App row exclusively (the App row stays a shared authority anchor).
+model AgentTaskCounter {
+  appId      String @id @map("app_id")
+  lastNumber BigInt @map("last_number")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@map("agent_task_counters")
 }
 
 /// #1705 — one append-only record of something that happened in a team App's

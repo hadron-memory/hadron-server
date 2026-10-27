@@ -77,6 +77,7 @@ import { type Context, isAppParticipant, clampListTake, withoutRequestCaches } f
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { parseTaskHandle, formatTaskHandle } from '../../../lib/agentTasks/handle.js';
 import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { resolveWorkerIdByName } from './resolvers.worker.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -334,12 +335,91 @@ export async function mayReadAppTasks(ctx: Context, appId: string): Promise<bool
   return (await resolveTaskActor(ctx, app)) !== null;
 }
 
+/** The Apps a person belongs to for tasks: those where the shared participation predicate admits them (bounded). */
+const HANDLE_APP_CAP = 200;
+async function participatedAppIds(ctx: Context): Promise<string[]> {
+  if (!ctx.userId) return [];
+  const [memberships, orgs] = await Promise.all([
+    ctx.db.appMember.findMany({ where: { userId: ctx.userId }, select: { appId: true } }),
+    ctx.db.orgMember.findMany({ where: { userId: ctx.userId, deletedAt: null }, select: { organizationId: true } }),
+  ]);
+  const candidates = await ctx.db.app.findMany({
+    where: {
+      deletedAt: null,
+      OR: [
+        { ownerUserId: ctx.userId },
+        { id: { in: memberships.map((m) => m.appId) } },
+        { organizationId: { in: orgs.map((o) => o.organizationId) } },
+      ],
+    },
+    select: APP_SELECT,
+    orderBy: { id: 'asc' },
+    take: HANDLE_APP_CAP + 1,
+  });
+  // More than the cap is "several" without checking each: the refusal below needs only the count to exceed one.
+  const admitted: string[] = [];
+  for (const app of candidates.slice(0, HANDLE_APP_CAP)) {
+    if (await resolveTaskActor(ctx, app)) admitted.push(app.id);
+    if (admitted.length > 1) break;
+  }
+  return admitted;
+}
+
+/** The ONE App a BARE handle means for this caller: a key's own App, a worker session's App, else the one App a person belongs to. */
+async function bareHandleApp(ctx: Context, ref: string): Promise<string | null> {
+  const key = appKeyCaller(ctx);
+  if (key) return key.appId;
+  const bound = currentActor();
+  if (bound.workerId) {
+    const worker = await ctx.db.worker.findUnique({ where: { id: bound.workerId }, select: { appId: true } });
+    return worker?.appId ?? null;
+  }
+  const apps = await participatedAppIds(ctx);
+  if (apps.length > 1) {
+    // Decided by HOW MANY Apps the caller belongs to and nothing else: never by whether any task has this number
+    // (otherwise the refusal would say where a task exists).
+    throw taskError('TASK_HANDLE_QUALIFY',
+      'You belong to more than one App, so a bare handle is ambiguous. Qualify it: hrn:agenttask:<app-urn>:AT<number>.', { taskId: ref });
+  }
+  return apps[0] ?? null;
+}
+
+/**
+ * #2553: a task reference to the canonical task id — or null when it names nothing. An id passes through; a handle
+ * (bare, or qualified by the App's URN) is looked up by (App, number). It decides NOTHING about access: every
+ * caller still runs the existing readable-task gate on the id, so a handle for a task the caller may not read, in
+ * an App they cannot read, or for no task at all all end as the same not-found answer an unknown id gets.
+ * `inApp` fixes the App when the surface already names one (a list filter), which a qualified handle must match.
+ */
+export async function resolveTaskRef(ctx: Context, ref: unknown, inApp?: string): Promise<string | null> {
+  if (typeof ref !== 'string') return null;
+  if (isId(ref)) return ref;
+  const handle = parseTaskHandle(ref);
+  if (!handle) return null;
+  let appId: string | null;
+  if (handle.appUrn) {
+    try {
+      appId = (await resolveAppRef(ctx.db, handle.appUrn)).id;
+    } catch (e) {
+      if (e instanceof AppNotFoundError) return null;
+      throw e;
+    }
+    if (inApp && appId !== inApp) return null;
+  } else {
+    appId = inApp ?? (await bareHandleApp(ctx, ref));
+  }
+  if (!appId) return null;
+  const row = await ctx.db.agentTask.findUnique({ where: { appId_taskNumber: { appId, taskNumber: handle.number } }, select: { id: true } });
+  return row?.id ?? null;
+}
+
 /** Load a task the caller may read, with its App and the actor — or null (concealed as missing). */
 async function loadReadableTask(
   ctx: Context,
-  taskId: string,
+  taskRef: string,
 ): Promise<{ task: TaskRow; app: TaskApp; actor: TaskActor } | null> {
-  if (typeof taskId !== 'string' || !isId(taskId)) return null;
+  const taskId = await resolveTaskRef(ctx, taskRef);
+  if (!taskId) return null;
   const task = await ctx.db.agentTask.findUnique({ where: { id: taskId } });
   if (!task) return null;
   const app = await loadApp(ctx, task.appId);
@@ -352,15 +432,16 @@ async function loadReadableTask(
 /** A task the caller may READ, with its App: a participant, or the App's own key (#1755). Null when missing or unreadable. */
 async function withReadableTask<T>(
   ctx: Context,
-  taskId: string,
+  taskRef: string,
   body: (c: Context, r: { task: TaskRow; app: TaskApp }) => Promise<T>,
 ): Promise<T | null> {
   const key = appKeyCaller(ctx);
   if (!key) {
-    const readable = await loadReadableTask(ctx, taskId);
+    const readable = await loadReadableTask(ctx, taskRef);
     return readable ? body(ctx, readable) : null;
   }
-  if (typeof taskId !== 'string' || !isId(taskId)) return null;
+  const taskId = await resolveTaskRef(ctx, taskRef);
+  if (!taskId) return null;
   const head = await ctx.db.agentTask.findUnique({ where: { id: taskId }, select: { appId: true } });
   if (!head || head.appId !== key.appId) return null;
   return inKeyReadTx<T | null>(ctx, head.appId, () => null, async (txCtx, app) => {
@@ -723,7 +804,7 @@ export async function inTaskWriteTx<T>(
  */
 async function mutateTask(
   ctx: Context,
-  taskId: string,
+  taskRef: string,
   act: (tx: Prisma.TransactionClient, task: TaskRow, actor: TaskActor, app: TaskApp, txCtx: Context, locked: ReadonlySet<string>) => Promise<void>,
   /**
    * #2162: the workers to take the per-worker lock on (src/lib/agentTasks/workerLock.ts), before any row. `assignee`
@@ -733,8 +814,10 @@ async function mutateTask(
    */
   locks: { assignee?: boolean; workers?: (appId: string) => Promise<(string | null)[]> } = {},
 ): Promise<TaskRow> {
-  const readable = await loadReadableTask(ctx, taskId);
-  if (!readable) throw notFound(taskId);
+  const readable = await loadReadableTask(ctx, taskRef);
+  if (!readable) throw notFound(taskRef);
+  // #2553: the caller's spelling (an id or a handle) is echoed in refusals; every query below runs on the id.
+  const taskId = readable.task.id;
   const { app, actor } = readable;
   requireWritable(ctx, app);
   for (let attempt = 0; ; attempt += 1) {
@@ -743,9 +826,9 @@ async function mutateTask(
       ? (await ctx.db.agentTask.findUnique({ where: { id: taskId }, select: { assigneeWorkerId: true } }))?.assigneeWorkerId ?? null
       : null;
     try {
-      await inTaskWriteTx(ctx, app, actor, () => notFound(taskId), async (tx, txCtx, freshApp) => {
+      await inTaskWriteTx(ctx, app, actor, () => notFound(taskRef), async (tx, txCtx, freshApp) => {
         const task = await lockTask(tx, taskId);
-        if (!task || task.appId !== freshApp.id) throw notFound(taskId);
+        if (!task || task.appId !== freshApp.id) throw notFound(taskRef);
         if (locks.assignee && task.assigneeWorkerId !== expected) throw new AssigneeMoved();
         await act(tx, task, actor, freshApp, txCtx, new Set([expected, ...named].filter((id): id is string => Boolean(id))));
       }, { lockWorkerIds: [expected, ...named] });
@@ -753,7 +836,7 @@ async function mutateTask(
     } catch (e) {
       if (!(e instanceof AssigneeMoved)) throw e;
       if (attempt > 0) {
-        throw taskError('TASK_CONFLICT', "The task's assignee changed while this write waited; read the task and try again.", { taskId });
+        throw taskError('TASK_CONFLICT', "The task's assignee changed while this write waited; read the task and try again.", { taskId: taskRef });
       }
     }
   }
@@ -825,9 +908,18 @@ async function insertTask(
 ): Promise<{ id: string; queued: boolean }> {
   // #2022 (cor:agt:090:03): a stop signal refuses making a covered worker the assignee, at creation too.
   if (a.assignee?.workerId) await refuseStoppedAssignee(tx, a.app.id, a.assignee.workerId, new Date());
+  // #2553: the per-App number, from the App's own counter row (not the App row, which stays a SHARED authority
+  // anchor). Taken last: after the anchors, the stop fence, the graph and worker locks, immediately before the insert,
+  // and nothing is locked after it. The upsert is atomic, so two creates never read the same value. A rolled-back
+  // create rolls this back too, so only committed numbers are ever spent.
+  const [counter] = await tx.$queryRaw<Array<{ last_number: bigint }>>`
+    INSERT INTO agent_task_counters (app_id, last_number) VALUES (${a.app.id}, 1)
+    ON CONFLICT (app_id) DO UPDATE SET last_number = agent_task_counters.last_number + 1
+    RETURNING last_number`;
   const created = await tx.agentTask.create({
     data: {
       appId: a.app.id,
+      taskNumber: counter!.last_number,
       title: a.title, description: a.description, source: a.source, tags: a.tags, startBy: a.startBy,
       closeSessionWhenDone: a.closeSessionWhenDone,
       status: a.status ?? 'pending',
@@ -931,12 +1023,15 @@ export const agentTaskMutations = {
   createAgentTask: async (_: unknown, { input }: { input: CreateInput }, ctx: Context, info?: GraphQLResolveInfo) => {
     if (!input) throw badInput('input is required.');
     const parentId = input.parentTaskId?.trim() || null;
+    // #2553: the parent's canonical id once it resolves (a handle is an alias); `parentId` stays the caller's spelling for echoes.
+    let parentTaskId: string | null = null;
     let app: TaskApp;
     let actor: TaskActor;
     if (parentId) {
       const readable = await loadReadableTask(ctx, parentId);
       if (!readable) throw notFound(parentId);
       ({ app, actor } = readable);
+      parentTaskId = readable.task.id;
       // A parent in another App reads as not-found: no cross-App oracle (#1705).
       if (input.appRef) {
         let namedAppId: string | null = null;
@@ -1010,7 +1105,7 @@ export const agentTaskMutations = {
       if (parentId) {
         // Lock the parent so its assignee and status can't move under us,
         // then authorize against the locked row — the one assignee check.
-        const parent = await lockTask(tx, parentId);
+        const parent = await lockTask(tx, parentTaskId!);
         if (!parent || parent.appId !== app.id) throw notFound(parentId);
         if (!isAssignee(actor, parent)) {
           throw taskError('TASK_NOT_ASSIGNEE', "Only the parent task's assignee creates its child tasks.", { taskId: parentId });
@@ -1024,7 +1119,7 @@ export const agentTaskMutations = {
       await refuseResettingAssignee(tx, app.id, assignee?.workerId);
       await assigneeAdvice(tx, app.id, assignee, null, warn);
       return insertTask(tx, {
-        app, parentId, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee, status,
+        app, parentId: parentTaskId, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee, status,
         created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
       });
     }, { lockWorkerIds: [lockedAssignee] });
@@ -1425,7 +1520,7 @@ export const agentTaskQueries = {
       appId: app.id,
       ...(statuses?.length ? { status: { in: statuses } } : {}),
       ...(args.tag ? { tags: { has: args.tag } } : {}),
-      ...(args.parentTaskId ? { parentTaskId: args.parentTaskId } : {}),
+      ...(args.parentTaskId ? { parentTaskId: (await resolveTaskRef(c, args.parentTaskId, app.id)) ?? args.parentTaskId } : {}),
       ...(args.rootsOnly ? { parentTaskId: null } : {}),
       ...(args.queued ? { status: 'pending', assigneeWorkerId: null, assigneeUserId: null } : {}),
     };
@@ -1501,7 +1596,7 @@ export const agentTaskQueries = {
         ...(since ? { createdAt: { gt: since } } : {}),
         ...(args.types?.length ? { type: { in: args.types } } : {}),
         ...(args.alarmsOnly ? { severity: 'alarm' } : {}),
-        ...(args.taskId ? { taskId: args.taskId } : {}),
+        ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: clampListTake(args.limit),
@@ -1532,6 +1627,9 @@ export async function partyView(ctx: Context, workerId: string | null, userId: s
 
 export const agentTaskFieldResolvers = {
   AgentTask: {
+    /** #2553: the per-App handle. Never null in the database; the column is optional only in the client type. */
+    handle: (t: TaskRow) => formatTaskHandle(t.taskNumber!),
+    taskNumber: (t: TaskRow) => Number(t.taskNumber),
     status: (t: TaskRow) => t.status.toUpperCase(),
     owner: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.ownerWorkerId, t.ownerUserId),
     assignee: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.assigneeWorkerId, t.assigneeUserId),

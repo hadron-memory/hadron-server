@@ -668,6 +668,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-invariants.sql
 
+-- #2553: the per-App task number (counter table, number-filling and permanence triggers, NOT NULL). One source,
+-- shared verbatim with migration 20261027060000_agent_task_number (pinned by src/lib/agentTasks/taskNumber2553.test.ts).
+\ir agent-task-number-invariants.sql
+
 -- #1706: stall alarms (one per episode), alarm wakes, availability for work and
 -- per-App stall windows. One source, shared verbatim with migration
 -- 20261024100200_context_reset_availability (the newest to carry it) (pinned by src/lib/agentTasks/invariants.test.ts).
