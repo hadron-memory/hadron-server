@@ -1,0 +1,16 @@
+diff --git a/scripts/e2e/compose.yaml b/scripts/e2e/compose.yaml
+index abf39c1c7..3061db8f2 100644
+--- a/scripts/e2e/compose.yaml
++++ b/scripts/e2e/compose.yaml
+@@ -27,6 +27,11 @@ services:
+       DISABLE_RUN_WORKER: 'true'
+       DISABLE_SCHEDULER: 'true'
+       GRAPHS_PATH: /var/lib/hadron/graphs
++      NODE_OPTIONS: --import /app/scripts/e2e/diagnose/preload.mjs ${DIAG_NODE_OPTIONS:-}
++      MCP_MAX_SESSIONS_PER_PRINCIPAL: ${DIAG_SESSION_CAP:-25}
++      DIAG_SAMPLES_PATH: /var/lib/hadron/graphs/diagnose-samples.jsonl
++    mem_limit: 6g
++    memswap_limit: 6g
+     ports:
+       - '${E2E_BIND:-127.0.0.1}:${E2E_PORT}:4100'
+     volumes:

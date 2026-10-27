@@ -42,17 +42,20 @@ describe('#2477 missing-loc concurrent restore', () => {
     let releaseMissingReads!: () => void;
     const missingReadsDone = new Promise<void>(resolve => { releaseMissingReads = resolve; });
     const missingReads: Array<{ request: number; absent: boolean }> = [];
-    const stages = new Map<Context['db'], { autoSaving: boolean; sawPrior: boolean }>();
+    const stages = new Map<Context['db'], { request: number; autoSaving: boolean; sawPrior: boolean }>();
     let completedAutoSaves = 0;
-    // Escape hatch for an unexpected call path; the observations below then
-    // fail rather than leaving the peer waiting until transaction timeout.
+    let safetyReleaseExpired = false;
+    // Escape hatch only: expiry must fail outside resolver error normalization,
+    // even when it lets both restores finish successfully. Always release both
+    // barriers so a broken fixture cannot strand its peer until the 30s timeout.
     const releaseTimer = setTimeout(() => {
+      safetyReleaseExpired = true;
       releaseAutoSaves();
       releaseMissingReads();
     }, 10_000);
 
     const requestContexts = [0, 1].map(request => {
-      const stage = { autoSaving: true, sawPrior: false };
+      const stage = { request, autoSaving: true, sawPrior: false };
       const requestDb = new Proxy(db, {
         get(target, property) {
           if (property !== '$transaction') return Reflect.get(target, property, target);
@@ -67,6 +70,10 @@ describe('#2477 missing-loc concurrent restore', () => {
                     return async (...args: Parameters<typeof nodes.findUnique>) => {
                       const result = await Reflect.apply(nodes.findUnique, nodes, args);
                       const query = args[0];
+                      // Hook contract: first post-auto-save transactional alpha
+                      // findUnique for THIS memory, with select.id === true.
+                      // A changed call shape needs an explicit fixture update;
+                      // do not broaden this to an unrelated read or invent null.
                       if (!stage.sawPrior && query?.where.loc_memoryId?.loc === 'alpha'
                         && query.where.loc_memoryId.memoryId === memoryId && query.select?.id === true) {
                         stage.sawPrior = true;
@@ -117,6 +124,25 @@ describe('#2477 missing-loc concurrent restore', () => {
         M.restoreRevision({}, { agentId, revisionLoc }, requestContext)));
       // Assertions live outside resolver callbacks, so an error wrapper cannot
       // turn a failed fixture precondition into an accepted typed outcome.
+      const fixtureFailures: Error[] = [];
+      for (const stage of stages.values()) {
+        if (!stage.sawPrior) fixtureFailures.push(new Error(
+          `Request ${stage.request}: missing first transactional alpha/this-memory/select.id prior-read hook ` +
+          `(phase: ${stage.autoSaving ? 'real auto-save not completed' : 'restore after real auto-save'}). ` +
+          'Update the exact fixture matcher if the production call shape changed.',
+        ));
+      }
+      if (safetyReleaseExpired) fixtureFailures.push(new Error(
+        '10s safety-release timer expired; normal barrier release did not complete. ' +
+        `Completed real auto-saves: ${completedAutoSaves}/2; observed prior-read hooks: ${missingReads.length}/2.`,
+      ));
+      if (fixtureFailures.length) {
+        // Preserve resolver failures alongside diagnostics rather than replacing
+        // an original rejection with a generic late observation mismatch.
+        const originals = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
+        throw new AggregateError([...originals, ...fixtureFailures],
+          `Restore race fixture contract failed: ${fixtureFailures.map(error => error.message).join(' ')}`);
+      }
       expect(completedAutoSaves).toBe(2);
       expect(autoSave).toHaveBeenCalledTimes(2);
       expect(missingReads.sort((a, b) => a.request - b.request)).toEqual([

@@ -144,6 +144,8 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/automation-adoption-invariants.sql', import.meta.url), 'utf8'));
   // #2484 — App memory write grants (shape, one live row, terminal revoke) and append-only events.
   await client.query(readFileSync(new URL('../../prisma/app-memory-write-grant-invariants.sql', import.meta.url), 'utf8'));
+  // #430 — Git-mirror obligation shape + attempt sequence.
+  await client.query(readFileSync(new URL('../../prisma/git-mirror-obligation-invariants.sql', import.meta.url), 'utf8'));
   // #1705 — agent task shape + append-only team events.
   await client.query(readFileSync(new URL('../../prisma/agent-task-invariants.sql', import.meta.url), 'utf8'));
   // #2553 — the per-App task number (needs agent_tasks and its counter table).

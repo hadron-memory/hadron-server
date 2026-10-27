@@ -326,6 +326,26 @@ export const loadNodeFromFs = async (
   return loadLegacyNode(source, graphRoot, ownerRepo, memoryUrn);
 };
 
+/** ASCII whitespace only, so the CLI's Go parser can apply the identical set (#2391). */
+const ASCII_WHITESPACE_ONLY = /^[ \t\n\r\v\f]*$/;
+
+/**
+ * #2391 (hrn:node:hadronmemory.com:specs:cor:int:020:01, F1): the node content of
+ * a frontmatter file's body, i.e. the text after the closing `---` line. The
+ * writers (`pushMemoryToGit`, `writeNodeFile`, `nodeExport`) frame content as
+ * `\n<content>\n`, so this removes ONE leading `\n` and ONE trailing `\n` if
+ * present and nothing else. Authored boundary whitespace survives, and a
+ * written file reads back as the stored text (approval hash unchanged,
+ * cor:dmo:120:01). A body left empty or ASCII-whitespace-only is null (Holger,
+ * 2026-10-26). Expects CRLF already normalized. Shared cases with hadron-cli#945:
+ * `markdownBodyFraming.fixture.json`.
+ */
+export function markdownBodyContent(body: string): string | null {
+  let content = body.startsWith('\n') ? body.slice(1) : body;
+  if (content.endsWith('\n')) content = content.slice(0, -1);
+  return ASCII_WHITESPACE_ONLY.test(content) ? null : content;
+}
+
 /**
  * Load a frontmatter markdown node (Obsidian vault format).
  */
@@ -349,7 +369,7 @@ async function loadFrontmatterNode(
   if (!fmMatch) throw new Error(`No frontmatter found in ${mdPath}`);
 
   const meta = parseNodeYaml(fmMatch[1], `frontmatter in ${mdPath}`);
-  const content = fmMatch[2]?.trim() || null;
+  const content = markdownBodyContent(fmMatch[2] ?? '');
   const loc = deriveValidatedLoc(mdPath, graphRoot, true, meta.id, memoryUrn);
 
   // Sidecar edges take precedence over frontmatter `nodes:` array

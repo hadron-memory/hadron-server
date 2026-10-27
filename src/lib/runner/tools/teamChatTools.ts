@@ -19,11 +19,13 @@
  * The projection is a SUBSET of the existing read's: seq, at, body, replyToSeq, mentions, urn and the author fields.
  * Wake stamps, team snapshot fields and sessionId are omitted.
  *
- * BOUNDS (new for the LLM hop; the existing read has no byte cap): default 20 and maximum 50 messages, 32 KiB of body
- * characters per response. With no `sinceSeq` the tool reads FORWARD from the start (the existing unqualified read
+ * BOUNDS (new for the LLM hop): default 20 and maximum 50 messages, at most 32,768 UTF-16 code units of body
+ * per response (JavaScript string length, not encoded bytes). With no `sinceSeq` the tool reads FORWARD from the start
+ * (the existing unqualified read
  * takes the NEWEST page, which would make `nextSinceSeq` paging ambiguous). Truncation stops at a message boundary;
  * `nextSinceSeq` is the seq of the last RETURNED message (the input `sinceSeq` when none), never of an unreturned one.
- * A first message larger than the cap is returned cut and flagged `bodyTruncated`, so paging cannot stall. An
+ * A first message larger than the cap is returned cut and flagged `bodyTruncated`, so paging cannot stall; the cut never
+ * splits a surrogate pair, so it may be one unit short of the cap (#2581). An
  * encrypted host with no live session key surfaces the existing read's SESSION_EXPIRED.
  */
 
@@ -32,7 +34,21 @@ import type { RunToolDef } from './types.js';
 
 export const TEAM_CHAT_READ_DEFAULT_LIMIT = 20;
 export const TEAM_CHAT_READ_MAX_LIMIT = 50;
+/**
+ * Body cap per response, in UTF-16 code units: AT MOST this many. A cut never ends between the two halves of a
+ * surrogate pair, so a cut body may be one unit shorter (#2581).
+ */
 export const TEAM_CHAT_READ_MAX_BODY_CHARS = 32768;
+
+/**
+ * `body` cut to at most `room` code units without splitting a surrogate pair: a lone high surrogate is not
+ * well-formed text and becomes U+FFFD on a UTF-8 round trip (#2581). A stored body is always well-formed (Postgres
+ * refuses a lone surrogate), so a high surrogate before the cut always has its low half after it.
+ */
+function cutBody(body: string, room: number): string {
+  const unit = body.charCodeAt(room - 1);
+  return body.slice(0, unit >= 0xd800 && unit <= 0xdbff ? room - 1 : room);
+}
 
 function positiveInt(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined;
@@ -77,10 +93,11 @@ export const teamChatRead: RunToolDef = {
       const room = TEAM_CHAT_READ_MAX_BODY_CHARS - used;
       if (messages.length > 0 && m.body.length > room) break;
       const cut = m.body.length > room;
+      const body = cut ? cutBody(m.body, room) : m.body;
       messages.push({
         seq: m.seq,
         at: m.at,
-        body: cut ? m.body.slice(0, room) : m.body,
+        body,
         ...(cut ? { bodyTruncated: true } : {}),
         replyToSeq: m.replyToSeq,
         mentions: m.mentions,
@@ -90,7 +107,9 @@ export const teamChatRead: RunToolDef = {
         authorWorkerId: m.authorWorkerId,
         authorSystem: m.authorSystem,
       });
-      used += cut ? room : m.body.length;
+      used += body.length;
+      // A cut message ends the page: a cut that stepped back off a pair leaves one unit of room (#2581).
+      if (cut) break;
     }
     const nextSinceSeq = messages.length > 0 ? (messages[messages.length - 1]!.seq as number) : sinceSeq;
     ctx.log(`team_chat_read (${messages.length} messages)`);

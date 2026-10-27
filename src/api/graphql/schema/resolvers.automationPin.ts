@@ -23,7 +23,12 @@ type AdoptionState = 'UNADOPTED' | 'ADOPTED' | 'CHANGED';
 /** #2436: the one who-may refusal every adoption door throws — plain words naming the parties cor:agt:010:01's
  * today-rule admits. Deliberately not cor:dmo:050:12's word "manager": it reads as promising owner-role members
  * an admission the predicate does not grant (their widening is the open call in cor:agt:010:01). */
-const denied = () => new GraphQLError("Only the trigger's run-as user may adopt this automation; a trigger with no run-as user may be previewed, approved, declined and re-adopted only by the App's owner, or by an ADMIN or OWNER of the organization that owns the App, or by a platform admin on an organization-owned App.", { extensions: { code: 'FORBIDDEN' } });
+const denied = () => new GraphQLError(
+  "Only the trigger's run-as user may adopt this automation; a trigger with no run-as user may be " +
+  "previewed, approved, declined and re-adopted only by the App's owner, or by an ADMIN or OWNER " +
+  'of the organization that owns the App, or by a platform admin on an organization-owned App.',
+  { extensions: { code: 'FORBIDDEN' } },
+);
 /** Cause 4: the CALLER cannot read a graph memory. Never names it: a caller who cannot read a memory is not told it exists. */
 const callerCannotRead = () => new GraphQLError('You cannot read a memory this automation uses, so you cannot preview or adopt it. Ask someone who manages that memory to give you read access.', { extensions: { code: 'FORBIDDEN' } });
 /** Cause 5: the RUN principal (the App, plus the run-as user when there is one) cannot read a graph memory. The memory is named only to a caller who can read it themselves. */
@@ -57,15 +62,17 @@ type TriggerRow = { id: string; appId: string; organizationId: string; userId: s
  * by the shared tenant gate requireOwnerOrOrgRole('ADMIN'), never re-derived here. cor:dmo:050:12's wider
  * "manager" (owner-role members) is deliberately NOT admitted yet: widening is the open call in
  * cor:agt:010:01, and resolvers.automationPin2436.test.ts pins the refusal so the gap stays visible, not
- * silent. `memo` caches the App-only arm across the adoption door's two loads of the same row.
+ * silent. Each call decides fresh, including the adoption door's in-transaction reload under the lock.
  */
-async function canAdopt(ctx: Context, app: App, row: TriggerRow, memo: { appOnly?: boolean } = {}): Promise<boolean> {
+async function canAdopt(ctx: Context, app: App, row: TriggerRow): Promise<boolean> {
   if (row.userId !== null) return isStrictOwner(ctx, row.userId) && await hasAppRelationship(ctx.db, row.appId, row.userId);
-  if (memo.appOnly === undefined) {
-    try { await requireOwnerOrOrgRole(ctx, app, 'ADMIN'); memo.appOnly = true; }
-    catch (e) { if (!(e instanceof GraphQLError) || e.extensions?.code !== 'FORBIDDEN') throw e; memo.appOnly = false; }
+  try {
+    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+    return true;
+  } catch (e) {
+    if (!(e instanceof GraphQLError) || e.extensions?.code !== 'FORBIDDEN') throw e;
+    return false;
   }
-  return memo.appOnly;
 }
 /** The live App behind a trigger. An org-owned App must be the trigger's own org; a user-owned App has no organization (#2441), so any trigger org is accepted and the owner's strict-owner gate decides. */
 async function liveApp(ctx: Context, row: { appId: string; organizationId: string }) {

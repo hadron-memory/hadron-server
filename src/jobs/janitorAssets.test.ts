@@ -3,7 +3,8 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { ASSET_RETENTION_WINDOW_MS } from '../lib/asset/retention.js';
-import { runAssetJanitor } from './janitorAssets.js';
+import { withSweepLock } from '../lib/sweepLock.js';
+import { runAssetJanitor, runAssetJanitorTick, startAssetJanitorLoop } from './janitorAssets.js';
 
 const deleteObjectMock = vi.hoisted(() => vi.fn());
 
@@ -118,5 +119,78 @@ describe('runAssetJanitor', () => {
     await seed({ deletedAt: new Date(t.getTime() - ASSET_RETENTION_WINDOW_MS) });
     const outcome = await runAssetJanitor(db, t);
     expect(outcome.purged).toBe(1);
+  });
+
+  it('overlapping runs stay safe WITHOUT the lock: the second delete is already-purged, not an error', async () => {
+    const old = await seed({ deletedAt: new Date(Date.now() - (ASSET_RETENTION_WINDOW_MS + 5_000)) });
+    // Both runs read the candidate and pass the object delete before either
+    // deletes the row: the interleaving a lost or absent lock allows.
+    let arrived = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    deleteObjectMock.mockImplementation(async () => {
+      arrived += 1;
+      if (arrived === 2) release();
+      await gate;
+    });
+    const [a, b] = await Promise.all([runAssetJanitor(db), runAssetJanitor(db)]);
+    expect(arrived).toBe(2);
+    expect(a.errors + b.errors).toBe(0);
+    expect(a.purged + b.purged).toBe(1);
+    expect(await db.asset.findUnique({ where: { id: old.id } })).toBeNull();
+  });
+
+  it('a row that fails to delete for another reason is still an error', async () => {
+    const old = await seed({ deletedAt: new Date(Date.now() - (ASSET_RETENTION_WINDOW_MS + 5_000)) });
+    const spy = vi.spyOn(db.asset, 'deleteMany').mockRejectedValueOnce(new Error('db down'));
+    try {
+      const outcome = await runAssetJanitor(db);
+      expect(outcome).toMatchObject({ scanned: 1, purged: 0, errors: 1 });
+      expect(await db.asset.findUnique({ where: { id: old.id } })).not.toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('runAssetJanitorTick', () => {
+  it('skips the whole sweep while another session holds the janitor lock', async () => {
+    const old = await seed({ deletedAt: new Date(Date.now() - (ASSET_RETENTION_WINDOW_MS + 5_000)) });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let acquired!: () => void;
+    const holding = new Promise<void>((resolve) => { acquired = resolve; });
+    const holder = withSweepLock('asset-janitor', async () => { acquired(); await held; });
+    await holding;
+    try {
+      expect(await runAssetJanitorTick(db)).toEqual({ ran: false });
+      expect(deleteObjectMock).not.toHaveBeenCalled();
+      expect(await db.asset.findUnique({ where: { id: old.id } })).not.toBeNull();
+    } finally {
+      release();
+      await holder;
+    }
+    const after = await runAssetJanitorTick(db);
+    expect(after).toMatchObject({ ran: true, value: { purged: 1, errors: 0 } });
+  });
+
+  it('the scheduled loop goes through the lock', async () => {
+    await seed({ deletedAt: new Date(Date.now() - (ASSET_RETENTION_WINDOW_MS + 5_000)) });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let acquired!: () => void;
+    const holding = new Promise<void>((resolve) => { acquired = resolve; });
+    const holder = withSweepLock('asset-janitor', async () => { acquired(); await held; });
+    await holding;
+    const timer = startAssetJanitorLoop(db, 60_000, 0);
+    try {
+      // The loop fires after 0ms; with the lock held it must have skipped, and the tick test above is the positive control.
+      await new Promise((r) => setTimeout(r, 500));
+      expect(deleteObjectMock).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(timer);
+      release();
+      await holder;
+    }
   });
 });
