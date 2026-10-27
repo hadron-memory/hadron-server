@@ -343,6 +343,20 @@ describe('what a userless run of the App may write', () => {
     expect(await db.asset.count({ where: { memoryId: f.dest.id } })).toBe(0);
   });
 
+  it('content with an include tag is not a grant write: its derived INCLUDE edge would reach past the prefix (§10 P2)', async () => {
+    const f = await fixture();
+    // The App's own team space: the run can read all of it, so only the grant's prefix stands between it and the edge.
+    const team = await db.memory.create({ data: { name: 'team', urn: 'grant2484.test:team', class: 'app', appId: f.app.id, organizationId: f.org.id } as never });
+    await grant(f, team);
+    const run = f.runCtx();
+    const plan = await db.node.create({ data: { memoryId: team.id, loc: 'secrets:plan', name: 'plan', content: 'secret' } });
+    await notDone(writeNodeCore({ memoryId: team.id, loc: `${PREFIX}:r1`, name: 'r1', nodeType: 'record', content: 'see {{> secrets:plan}}' } as never, run as never, 'create'));
+    expect(await db.node.findUnique({ where: { loc_memoryId: { loc: `${PREFIX}:r1`, memoryId: team.id } } })).toBeNull();
+    expect(await db.edge.count({ where: { targetId: plan.id } })).toBe(0);
+    // the same grant still takes plain content
+    await create(run, team, `${PREFIX}:r2`);
+  });
+
   it('CONTROL: a run with no grant still cannot write a personal or private memory', async () => {
     const f = await fixture();
     await refused(create(f.runCtx(), f.personal, `${PREFIX}:a`));
@@ -372,12 +386,15 @@ describe('an authority change serializes with a granted write (§10, both orderi
     const w = holdWrite(f.runCtx(), memory, `${PREFIX}:held`);
     await w.inside;
     let settled = false;
-    const changing = change().then(() => { settled = true; }, () => { settled = true; });
+    let failure: unknown;
+    const changing = change().then(() => { settled = true; }, (e) => { settled = true; failure = e ?? new Error('change failed'); });
     await sleep(400);
     expect(settled).toBe(false);
     w.release();
     await w.done;
     await changing;
+    // the change must have LANDED, not merely stopped waiting
+    expect(failure).toBeUndefined();
     // the write committed; a deleted memory takes it away afterwards, which is the change landing, not the write failing
     if (await db.memory.findUnique({ where: { id: memory.id } })) expect(await db.node.count({ where: { memoryId: memory.id, loc: `${PREFIX}:held` } })).toBe(1);
   }
@@ -395,6 +412,7 @@ describe('an authority change serializes with a granted write (§10, both orderi
     ['the grant is revoked', f => f.dest, f => async () => revoke((await rows(f.app.id))[0].id, f.ctx), false],
     ['the memory is encrypted', f => f.dest, f => () => db.memory.update({ where: { id: f.dest.id }, data: { isEncrypted: true } }), false],
     ['the memory is deleted', f => f.dest, f => () => db.memory.delete({ where: { id: f.dest.id } }), false],
+    ['the memory is soft-deleted', f => f.dest, f => () => db.memory.update({ where: { id: f.dest.id }, data: { deletedAt: new Date() } }), false],
     ['the App is soft-deleted', f => f.dest, f => () => db.app.update({ where: { id: f.app.id }, data: { deletedAt: new Date() } }), false],
     ['the App is hard-deleted', f => f.dest, f => () => db.app.delete({ where: { id: f.app.id } }), false],
     ['the owner stops managing the App (personal)', f => f.personal, demoteOwner, true],
@@ -438,6 +456,28 @@ describe('the grant is bound to its memory, its grantor and its audience (mutant
     expect(await nodes(f.personal.id)).toBe(0);
   });
 
+  it('the new owner setting the same prefix again replaces the dead grant and can write (blind P2)', async () => {
+    const f = await fixture();
+    const old = await grant(f, f.personal);
+    const next = await db.user.create({ data: { handle: 'grant-newmgr2' } });
+    await db.orgMember.create({ data: { userId: next.id, organizationId: f.org.id, role: 'ADMIN' } });
+    await db.appMember.create({ data: { appId: f.app.id, userId: next.id, role: 'owner' } });
+    await db.memory.update({ where: { id: f.personal.id }, data: { userId: next.id } });
+    await refused(create(f.runCtx(), f.personal, `${PREFIX}:a`));
+    const fresh = await grant(f, f.personal, { db, userId: next.id, roles: [] });
+    expect(fresh.id).not.toBe(old.id);
+    const all = await rows(f.app.id);
+    expect(all.map(r => [r.id === old.id, r.revokedAt !== null, r.grantedBy])).toEqual([[true, true, f.mgr.id], [false, false, next.id]]);
+    expect(all[0].revokedBy).toBe(next.id);
+    expect((await events(f.app.id)).map(e => e.action)).toEqual(['GRANT', 'REVOKE', 'GRANT']);
+    await create(f.runCtx(), f.personal, `${PREFIX}:a`);
+    expect(await nodes(f.personal.id)).toBe(1);
+    // an identical set by the same owner is still idempotent: no new row, no new event
+    expect((await grant(f, f.personal, { db, userId: next.id, roles: [] })).id).toBe(fresh.id);
+    expect((await rows(f.app.id)).length).toBe(2);
+    expect((await events(f.app.id)).length).toBe(3);
+  });
+
   it('revoking a personal grant as a manager who is not its owner never names the memory', async () => {
     const f = await fixture();
     const mine = await grant(f, f.personal);
@@ -464,10 +504,12 @@ describe('the grant is bound to its memory, its grantor and its audience (mutant
   }
   const blocks = async (h: { release: () => void; done: Promise<unknown> }, change: () => Promise<unknown>) => {
     let settled = false;
-    const changing = change().then(() => { settled = true; }, () => { settled = true; });
+    let failure: unknown;
+    const changing = change().then(() => { settled = true; }, (e) => { settled = true; failure = e ?? new Error('change failed'); });
     await sleep(400);
     expect(settled).toBe(false);
     h.release(); await h.done; await changing;
+    expect(failure).toBeUndefined();
   };
 
   it('the gate holds the memory row: an encryption flip waits for it', async () => {

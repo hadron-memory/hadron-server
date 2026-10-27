@@ -121,7 +121,17 @@ export const appWriteGrantMutations = {
       },
       async (tx) => {
         const live = await tx.appMemoryWriteGrant.findFirst({ where: { appId, memoryId, prefix, revokedAt: null } });
-        if (live) return live;
+        if (live) {
+          // A personal or private grant is judged against its grantor staying the owner, so a live row whose grantor
+          // is no longer the one setting it again is dead weight: it would answer "granted" and never admit a write.
+          // End it and grant afresh, in this transaction. Any other class keeps the row (nothing about it is stale).
+          const target = await tx.memory.findUnique({ where: { id: memoryId }, select: { class: true } });
+          if (live.grantedBy === actorId || !target || !isStrictOwnerClass(target.class)) return live;
+          const ended = await tx.appMemoryWriteGrant.updateMany({ where: { id: live.id, revokedAt: null }, data: { revokedAt: new Date(), revokedBy: actorId } });
+          if (ended.count === 1) {
+            await tx.appMemoryWriteGrantEvent.create({ data: { appId, memoryId, grantId: live.id, prefix, action: 'REVOKE', actorUserId: actorId } });
+          }
+        }
         const row = await tx.appMemoryWriteGrant.create({ data: { appId, memoryId, prefix, registerNodeUrn, grantedBy: actorId } });
         await tx.appMemoryWriteGrantEvent.create({ data: { appId, memoryId, grantId: row.id, prefix, action: 'GRANT', actorUserId: actorId } });
         return row;

@@ -132,10 +132,13 @@ export async function userlessRunHoldsWriteGrant(
   if (!isUserlessRunPrincipal(auth)) return false;
   const appId = auth.appId!;
   const { loc } = destination;
-  // Hold the authority rows this decision rests on, App first (the order an App's delete cascade takes them), so a
-  // change to any of them either commits before this read and is seen, or waits for the write to finish: the App
-  // going away, the memory being encrypted, deleted or moving to another owner. The grant row alone cannot serialize
-  // those. Outside a transaction these are plain reads.
+  // Hold the authority rows this decision rests on, so a change to any of them either commits before this read and
+  // is seen, or waits for the write to finish: the App going away, the memory being encrypted, deleted or moving to
+  // another owner. The grant row alone cannot serialize those. Outside a transaction these are plain reads. The
+  // writing transaction already holds the memory row and the node row when it gets here, so for a team-space grant
+  // this takes the App AFTER the memory, the reverse of an App hard delete's cascade (App, then its memories): the
+  // two can deadlock, and Postgres aborts one of them, which the write door reports as NODE_WRITE_CONFLICT. Safe,
+  // not ordered.
   await db.$queryRaw`SELECT id FROM apps WHERE id = ${appId} FOR SHARE`;
   await db.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
   const rows = await db.$queryRaw<Array<{ id: string; granted_by: string }>>`
