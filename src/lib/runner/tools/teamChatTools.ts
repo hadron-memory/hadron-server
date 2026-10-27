@@ -20,7 +20,8 @@
  * Wake stamps, team snapshot fields and sessionId are omitted.
  *
  * BOUNDS (new for the LLM hop): default 20 and maximum 50 messages, 32,768 UTF-16 code units of body
- * per response (JavaScript string length, not encoded bytes). With no `sinceSeq` the tool reads FORWARD from the start (the existing unqualified read
+ * per response (JavaScript string length, not encoded bytes). With no `sinceSeq` the tool reads FORWARD from the start
+ * (the existing unqualified read
  * takes the NEWEST page, which would make `nextSinceSeq` paging ambiguous). Truncation stops at a message boundary;
  * `nextSinceSeq` is the seq of the last RETURNED message (the input `sinceSeq` when none), never of an unreturned one.
  * A first message larger than the cap is returned cut and flagged `bodyTruncated`, so paging cannot stall. An

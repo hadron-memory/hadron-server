@@ -181,6 +181,10 @@ describe('the read gate (#2520 criterion 1, matrix)', () => {
     await say(channel, 'own');
     await say(otherChannel, 'other');
     const c = toolCtx(await mintRun({ userId: manager.id }));
+    // Positive control: the underlying read gate permits this user to read the other Channel.
+    const direct = await Q.channelMessages({}, { channelRef: otherChannel.id }, c.principal);
+    expect(direct.items.map((m: { body: string }) => m.body)).toEqual(['other']);
+    // Forged args must neither redirect the own-Channel bound nor admit a foreign Channel.
     expect((await run_(c, { channelRef: channel.id, appId: otherApp.id })).messages.map((m) => m.body)).toEqual(['own']);
     expect(await code(teamChatRead.execute(c, { channelRef: otherChannel.id, appId: otherApp.id }))).toBe('CHANNEL_NOT_FOUND');
   });
@@ -249,7 +253,7 @@ describe('bounds and paging (#2520 criterion 3)', () => {
 
   it.each([false, true])('#2544 pages after sinceSeq and mentions filtering (Channel address: %s)', async (byChannel) => {
     // Earlier matches and interleaved nonmatches must not inflate hasMore at the end.
-    for (let seq = 1; seq <= 9; seq++) {
+    for (let seq = 1; seq <= 10; seq++) {
       await say(channel, `m${seq}`, { mentions: seq % 2 === 1 ? ['kit'] : [] });
     }
     const c = toolCtx(await mintRun({ userId: member.id }));
@@ -262,6 +266,13 @@ describe('bounds and paging (#2520 criterion 3)', () => {
     expect([last.nextSinceSeq, last.hasMore]).toEqual([9, false]);
     const empty = await run_(c, { ...address, sinceSeq: last.nextSinceSeq, mentions: kit.id, limit: 2 });
     expect([empty.messages, empty.nextSinceSeq, empty.hasMore]).toEqual([[], 9, false]);
+    // Exactly one matching message remains: total > returned + 1 must not masquerade as exhaustion.
+    const oneLeft = await run_(c, { ...address, sinceSeq: 2, mentions: kit.id, limit: 3 });
+    expect(oneLeft.messages.map((m) => m.seq)).toEqual([3, 5, 7]);
+    expect([oneLeft.nextSinceSeq, oneLeft.hasMore]).toEqual([7, true]);
+    const final = await run_(c, { ...address, sinceSeq: oneLeft.nextSinceSeq, mentions: kit.id, limit: 3 });
+    expect(final.messages.map((m) => m.seq)).toEqual([9]);
+    expect([final.nextSinceSeq, final.hasMore]).toEqual([9, false]);
   });
 
   it('a limit above the maximum is clamped to it; nonsense falls back to the default', async () => {
@@ -282,6 +293,16 @@ describe('bounds and paging (#2520 criterion 3)', () => {
     const p2 = await run_(c, { sinceSeq: p1.nextSinceSeq });
     expect(p2.messages.map((m) => m.seq)).toEqual([3, 4]);
     expect(p2.hasMore).toBe(false);
+  });
+
+  it('#2544 measures multi-message boundary room in code units, not bytes', async () => {
+    await say(channel, 'x'.repeat(20_000));
+    await say(channel, '🧭'.repeat(6_000));
+    const out = await run_(toolCtx(await mintRun({ userId: member.id })));
+    expect(out.messages.map((m) => m.seq)).toEqual([1, 2]);
+    expect(out.messages.map((m) => m.body.length)).toEqual([20_000, 12_000]);
+    expect(out.messages.map((m) => m.bodyTruncated)).toEqual([undefined, undefined]);
+    expect([out.nextSinceSeq, out.hasMore]).toEqual([2, false]);
   });
 
   it('#2544 measures the body cap in UTF-16 code units, not UTF-8 bytes', async () => {
@@ -316,7 +337,7 @@ describe('a run is not the human reading (#2520 criterion 4)', () => {
     };
   };
 
-  it.each([false, true])('with a sessionId and worker mentions, marks stay unchanged (Channel address: %s); the advancing resolver is a positive control', async (byChannel) => {
+  it.each([false, true])('with a sessionId and worker mentions, marks stay unchanged (Channel address: %s); channelMessages moves them as a positive control', async (byChannel) => {
     await db.registerEntry.updateMany({ where: { attendeeWorkerId: kit.id, channelId: channel.id }, data: { mentionOnly: true } });
     for (const t of ['a', 'b']) await say(channel, `@kit ${t}`, { mentions: ['kit'] });
     await db.node.updateMany({ where: { messageChannelId: channel.id }, data: { createdAt: new Date(Date.now() - 3600_000) } });
