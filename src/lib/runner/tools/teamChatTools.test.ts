@@ -299,3 +299,40 @@ describe('a run is not the human reading (#2520 criterion 4)', () => {
     expect(await marks()).not.toEqual(before);
   });
 });
+
+describe('a cut body never splits a surrogate pair (#2581)', () => {
+  const roundTrips = (s: string) => Buffer.from(s, 'utf8').toString('utf8') === s;
+  // String.prototype.isWellFormed, spelled out: no high surrogate without a low after it, no low without a high before.
+  const wellFormed = (s: string) => !/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(s);
+
+  it('an odd prefix before an emoji run puts the cap inside a pair: the cut steps back one unit, stays well-formed and survives UTF-8', async () => {
+    await say(channel, 'a' + '🧭'.repeat(20_000));
+    await say(channel, 'next');
+    const c = toolCtx(await mintRun({ userId: member.id }));
+    const p1 = await run_(c);
+    const body: string = p1.messages[0].body;
+    expect(wellFormed(body)).toBe(true);
+    expect(roundTrips(body)).toBe(true);
+    expect(body.length).toBe(TEAM_CHAT_READ_MAX_BODY_CHARS - 1);
+    expect(p1.messages[0].bodyTruncated).toBe(true);
+    // Paging is unchanged: the cut message is the page, and the next page starts after it.
+    expect([p1.messages.length, p1.nextSinceSeq, p1.hasMore]).toEqual([1, 1, true]);
+    expect((await run_(c, { sinceSeq: 1 })).messages.map((m) => m.body)).toEqual(['next']);
+  });
+
+  it('a cut on a pair boundary keeps every unit up to the cap', async () => {
+    await say(channel, '🧭'.repeat(20_000));
+    const p1 = await run_(toolCtx(await mintRun({ userId: member.id })));
+    const body: string = p1.messages[0].body;
+    expect(body.length).toBe(TEAM_CHAT_READ_MAX_BODY_CHARS);
+    expect(wellFormed(body)).toBe(true);
+    expect(p1.messages[0].bodyTruncated).toBe(true);
+  });
+
+  it('a BMP-only body is cut at exactly the cap, as before', async () => {
+    await say(channel, 'y'.repeat(TEAM_CHAT_READ_MAX_BODY_CHARS + 500));
+    const p1 = await run_(toolCtx(await mintRun({ userId: member.id })));
+    expect(p1.messages[0].body).toBe('y'.repeat(TEAM_CHAT_READ_MAX_BODY_CHARS));
+    expect(p1.messages[0].bodyTruncated).toBe(true);
+  });
+});
