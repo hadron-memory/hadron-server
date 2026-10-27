@@ -816,6 +816,7 @@ export const memoryMutations = {
         memoryId: memory.id,
         loc: name,
         name: rootName,
+        description: 'Root node for this memory.',
       });
 
       return memory;
