@@ -3238,6 +3238,47 @@ export function createMcpServerInstance(
     },
   );
 
+  // ── hadron_create_memory (#2511) ──────────────────────────────────────────────
+  //
+  // A thin door onto the createMemory mutation: it calls the resolver, so the
+  // class allowlist, the memory.create grant, the live-org-membership rule for
+  // org-anchored personal/private, the owner/visibility invariants and the
+  // group-owner bootstrap have ONE implementation and MCP can never do what the
+  // API refuses. It takes no owner, App or agent argument, selects nothing and
+  // is not createMemoryInApp: an App-key caller has no user to own a personal
+  // memory, so the mutation refuses it exactly as it does over GraphQL.
+
+  server.tool(
+    'hadron_create_memory',
+    "Create a memory. `memoryClass` is 'knowledge' (default), 'group', 'personal' or 'private'. knowledge and group are shared with an organization, so they need `org` and the organization's memory.create permission (a group's creator becomes its first owner). personal and private are owner-only: omit `org` to create one in your own namespace, or pass `org` to create it in an organization you belong to. Exactly the same rules as the createMemory GraphQL mutation. System and App memories are not created here. This does not select the new memory: pass its URN to hadron_set_active_memory.",
+    SHAPE_HADRON_CREATE_MEMORY,
+    async ({ name, memoryClass, org, shortDescription, description, tags, visibility }) => {
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+      try {
+        const created = await resolvers.Mutation.createMemory(
+          {},
+          { name, memoryClass, orgId: org, shortDescription, description, tags, visibility },
+          ctx,
+        );
+        return textResult(
+          `Memory created: ${safeEmitEntityUrnV2('memory', created.urn)} (class: ${created.class}, id: ${created.id}). ` +
+            'Use hadron_set_active_memory to work in it.',
+        );
+      } catch (e) {
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_memory:resolver');
+      }
+    },
+  );
+
   // ── hadron_server_info ────────────────────────────────────────────────────────
   //
   // #187 / #190 — exposes the bound deployment URL + hadron-server
@@ -12307,6 +12348,25 @@ const SHAPE_HADRON_SEARCH = {
 
 const SHAPE_HADRON_SET_ACTIVE_MEMORY = {
   memoryUrn: z.string().describe('Memory URN, e.g. hrn:mem:hadronmemory.com:dev (bare hadronmemory.com:dev also accepted). Legacy hrn:memory: and :: forms still resolve.'),
+};
+
+const SHAPE_HADRON_CREATE_MEMORY = {
+  name: z.string().min(1).describe('Memory name; its slug becomes the URN tail (e.g. "My Notes" -> my-notes).'),
+  memoryClass: z
+    .enum(['knowledge', 'group', 'personal', 'private'])
+    .optional()
+    .describe("Memory class (default 'knowledge'). personal/private are owner-only; knowledge/group are organization-shared and need `org`."),
+  org: z
+    .string()
+    .optional()
+    .describe('Organization URN or id to create it in. Omit for a user-owned personal/private memory in your own namespace.'),
+  shortDescription: z.string().optional().describe('One-line description.'),
+  description: z.string().optional().describe('Longer description.'),
+  tags: z.array(z.string()).optional().describe('Tags.'),
+  visibility: z
+    .enum(['PUBLIC', 'ORGANIZATION', 'GROUP'])
+    .optional()
+    .describe("Knowledge memories: PUBLIC or ORGANIZATION (default). A group memory is always GROUP. personal/private take none."),
 };
 
 const SHAPE_HADRON_SET_ACTIVE_APP = {

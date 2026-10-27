@@ -161,6 +161,8 @@ async function pushMemoryToGitUnderLock(
 
     // 4. Load all LIVE nodes with edges. A soft-deleted node is a tombstone, not
     // content: exporting it re-published deleted text on every full push (#425).
+    // #2545 / cor:int:010:01: data nodes are ordinary exportable artifacts too;
+    // their structured payload is preserved by the shared frontmatter builder.
     // This only stops new writes — pruning files already in the repo is a
     // separate, gated change.
     // The checkout lock above holds a KEY SHARE fence on the Memory row for this
@@ -171,7 +173,7 @@ async function pushMemoryToGitUnderLock(
       const live = await tx.memory.findUnique({ where: { id: memoryId }, select: { isEncrypted: true } });
       if (!live || live.isEncrypted) return null;
       return tx.node.findMany({
-        where: { memoryId, nodeType: { not: 'data' }, deletedAt: null },
+        where: { memoryId, deletedAt: null },
         include: {
           outgoingEdges: { include: { target: true } },
         },
