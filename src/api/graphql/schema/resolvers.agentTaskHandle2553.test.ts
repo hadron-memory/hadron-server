@@ -184,10 +184,11 @@ describe('numbering', () => {
   it('a create whose handle would pass 64 characters is refused TASK_TOO_DEEP and writes nothing, counter included', async () => {
     const mkRow = (parent: string | null, n: bigint, handle: string) => db.agentTask.create({ data: { appId: appX.id, title: handle, ownerUserId: bob.id, assigneeUserId: bob.id, assignedAt: new Date(), status: 'started', startedAt: new Date(), parentTaskId: parent, taskNumber: n, handle } });
     await mk(appX, 'seed'); // AT0
+    // A VALID parent (exactly 64 characters): the next child would be 66.
     let handle = 'AT1000';
     let parent = await mkRow(null, 1000n, handle);
-    for (let i = 0; i < 5; i += 1) { handle += '.1234567890123'; parent = await mkRow(parent.id, 1234567890123n, handle); }
-    expect(parent.handle!.length).toBeGreaterThan(60);
+    for (const seg of ['1234567890123', '1234567890123', '1234567890123', '123456789012345']) { handle += `.${seg}`; parent = await mkRow(parent.id, BigInt(seg), handle); }
+    expect(parent.handle!.length).toBe(64);
     const before = await db.agentTaskCounter.findMany({ where: { appId: appX.id }, orderBy: { id: 'asc' } });
     const e = await refusal(M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'too long' } }, as(bob)));
     expect(e.extensions?.code).toBe('TASK_TOO_DEEP');
@@ -346,6 +347,40 @@ describe('the migration', () => {
 
   it('carries a byte-identical copy of the invariants file', () => {
     expect(migrationSql().endsWith(invariants())).toBe(true);
+  });
+
+  it('refuses, naming the first offender and changing nothing, when a legacy chain would get a handle past 16 levels or 64 characters', async () => {
+    const backfill = migrationSql().slice(0, migrationSql().length - invariants().length);
+    const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+    await client.connect();
+    try {
+      for (const depth of [16, 3]) {
+        await client.query('BEGIN');
+        await client.query(`
+          DROP TRIGGER IF EXISTS trg_agent_tasks_assign_number ON agent_tasks;
+          DROP TRIGGER IF EXISTS trg_agent_tasks_number_immutable ON agent_tasks;
+          ALTER TABLE agent_tasks DROP CONSTRAINT IF EXISTS chk_agent_tasks_handle;
+          ALTER TABLE agent_tasks ALTER COLUMN task_number DROP NOT NULL;
+          ALTER TABLE agent_tasks ALTER COLUMN handle DROP NOT NULL;`);
+        let parent: string | null = null;
+        for (let i = 0; i < depth; i += 1) {
+          const id = `deep-${depth}-${i}`;
+          await client.query(`INSERT INTO agent_tasks (id, app_id, title, status, owner_user_id, parent_task_id, close_session_when_done, created_at) VALUES ($1, $2, $1, 'pending', $3, $4, false, now())`, [id, appX.id, alice.id, parent]);
+          parent = id;
+        }
+        if (depth === 3) {
+          // The control: a short chain migrates.
+          await expect(client.query(backfill)).resolves.toBeDefined();
+        } else {
+          // 16 legacy levels plus AT0 is 17 segments.
+          await expect(client.query(backfill)).rejects.toThrow(/would get handle AT0\.1(\.1){15}.*see #2553/);
+        }
+        await client.query('ROLLBACK');
+      }
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined);
+      await client.end();
+    }
   });
 
   it('backfills legacy rows: parentless tasks under AT0 in created_at order, children per parent, counters at the counts, and a re-run changes nothing', async () => {

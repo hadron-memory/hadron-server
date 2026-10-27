@@ -51,6 +51,8 @@ UPDATE agent_tasks t SET parent_task_id = z.id
   FROM agent_tasks z
  WHERE z.app_id = t.app_id AND z.handle = 'AT0' AND t.parent_task_id IS NULL AND t.handle IS NULL;
 
+DROP TABLE IF EXISTS _agent_task_walk;
+CREATE TEMP TABLE _agent_task_walk AS
 WITH RECURSIVE todo AS (
   SELECT t.id, t.app_id, t.parent_task_id,
          COALESCE(c.last_number, 0) + ROW_NUMBER() OVER (PARTITION BY t.app_id, t.parent_task_id ORDER BY t.created_at, t.id) AS n
@@ -64,7 +66,26 @@ WITH RECURSIVE todo AS (
   SELECT todo.id, todo.n, walk.handle || '.' || todo.n
     FROM todo JOIN walk ON todo.parent_task_id = walk.id
 )
-UPDATE agent_tasks t SET task_number = walk.n, handle = walk.handle FROM walk WHERE t.id = walk.id;
+SELECT id, n, handle FROM walk;
+
+-- A handle is a URN leaf of at most 64 characters and at most 16 segments (cor:urn:010:01), and nothing lets a task be
+-- reparented, so a legacy chain whose backfilled handle would break either bound has no addressable handle. Refuse
+-- the whole migration naming the first offender rather than mint an alias the parser rejects; nothing is truncated
+-- or renumbered. scripts/db/check-agent-task-handle-bounds.sql counts such rows read-only before a deploy.
+DO $$
+DECLARE
+  bad record;
+BEGIN
+  SELECT w.id, w.handle INTO bad FROM _agent_task_walk w
+   WHERE length(w.handle) > 64 OR length(w.handle) - length(replace(w.handle, '.', '')) + 1 > 16
+   ORDER BY length(w.handle) DESC, w.id LIMIT 1;
+  IF FOUND THEN
+    RAISE EXCEPTION 'agent task % would get handle % (over 64 characters or 16 levels): no addressable handle exists for it, see #2553', bad.id, bad.handle;
+  END IF;
+END $$;
+
+UPDATE agent_tasks t SET task_number = w.n, handle = w.handle FROM _agent_task_walk w WHERE t.id = w.id;
+DROP TABLE _agent_task_walk;
 
 INSERT INTO agent_task_counters (id, app_id, parent_task_id, last_number)
   SELECT replace(gen_random_uuid()::text, '-', ''), app_id, parent_task_id, MAX(task_number)
