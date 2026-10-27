@@ -81,6 +81,7 @@ import { parseTaskHandle, composeTaskHandle, handleDepth, MAX_HANDLE_DEPTH } fro
 import { ensureProjectZero, PROJECT_ZERO_HANDLE, rootTaskWhere } from '../../../lib/agentTasks/projectZero.js';
 import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { resolveWorkerIdByName } from './resolvers.worker.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
@@ -342,7 +343,7 @@ async function participatedAppIds(ctx: Context): Promise<string[]> {
   if (!ctx.userId) return [];
   const [memberships, orgs] = await Promise.all([
     ctx.db.appMember.findMany({ where: { userId: ctx.userId }, select: { appId: true } }),
-    ctx.db.orgMember.findMany({ where: { userId: ctx.userId, deletedAt: null }, select: { organizationId: true } }),
+    ctx.db.orgMember.findMany({ where: { userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP }, select: { organizationId: true } }),
   ]);
   const candidates = await ctx.db.app.findMany({
     where: {

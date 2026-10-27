@@ -271,6 +271,17 @@ describe('AT0 is the platform\'s own row (rev 6)', () => {
     expect(chain.filter((p: any) => !p.via).map((p: any) => p.userId)).toEqual([bob.id]);
   });
 
+  it('createApp gives the new App its AT0 in the same transaction, owned by the creator, before any task', async () => {
+    const created: any = await M.createApp({}, { orgRef: org.id, agentRef: agentId, name: 'Fresh' }, as(alice));
+    const zero = await db.agentTask.findMany({ where: { appId: created.id, handle: 'AT0' } });
+    expect(zero).toHaveLength(1);
+    expect(zero[0]).toMatchObject({ title: 'No project', status: 'backlog', taskNumber: 0n });
+    expect(zero[0]!.ownerUserId).toBe(alice.id);
+    expect(await db.agentTask.count({ where: { appId: created.id } })).toBe(1);
+    const first: any = await mk(created, 'first', alice);
+    expect(handleOf(first)).toBe('AT0.1');
+  });
+
   it('the matcher and the stall evaluator never see it (backlog only)', async () => {
     await mk(appX, 'a');
     const zero = await db.agentTask.findFirstOrThrow({ where: { appId: appX.id, handle: 'AT0' } });
