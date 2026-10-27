@@ -95,3 +95,17 @@ export async function lockOfferedMemberRoleRows(tx: Prisma.TransactionClient, ap
   await tx.$queryRaw`SELECT id FROM agents WHERE id = ANY(${ids}) ORDER BY id FOR SHARE`;
   return ids;
 }
+
+/**
+ * Read the admission union from exactly the Agent set fenced in this transaction
+ * (#2487, cor:dmo:050:04). Keep the lock and restricted read together so callers
+ * cannot accidentally admit a role from an install committed after the fences.
+ * Plain display and preflight readers continue to use loadOfferedMemberRoles.
+ */
+export async function lockAndLoadOfferedMemberRoles(
+  tx: Prisma.TransactionClient,
+  appId: string,
+): Promise<{ installed: boolean; roles: string[] }> {
+  const lockedAgentIds = await lockOfferedMemberRoleRows(tx, appId);
+  return loadOfferedMemberRoles(tx, appId, lockedAgentIds);
+}
