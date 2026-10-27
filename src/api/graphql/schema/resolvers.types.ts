@@ -1602,11 +1602,10 @@ export const typeResolvers = {
       (await defaultAiConfigOf(a, 'appId', ctx))?.model ?? null,
     hasAiApiKey: async (a: { id: string }, _: unknown, ctx: Context) =>
       !!(await defaultAiConfigOf(a, 'appId', ctx))?.apiKeyEncrypted,
-    // spec 047: organizationId is nullable (a user-owned App has no org) —
-    // guard the fallback lookup so it resolves to null (codex review, #685).
+    // #2557: App participation does not authorize the owning Organization's
+    // full field surface. Ignore eager rows and use the direct org read gate.
     organization: (a: { organizationId: string | null; organization?: unknown }, _: unknown, ctx: Context) =>
-      (a as Record<string, unknown>).organization ??
-      (a.organizationId ? ctx.db.organization.findUnique({ where: { id: a.organizationId } }) : null),
+      a.organizationId ? loadReadableNestedOrganization(ctx, a.organizationId) : null,
     // Spec 021 US1: R2 canonical install URN combining App + Agent URNs.
     // 023-app-shape Phase 2b: read the primary installed Agent's URN via
     // the eager-loaded `appAgents` (preferred — APP_INCLUDE / ORG_INCLUDE
@@ -2067,6 +2066,25 @@ export const typeResolvers = {
     },
   },
   Organization: {
+    /**
+     * #2557: a subscription row is not itself a memory read grant. Filter its
+     * memory through the shared record gate (cor:acl:010:01) before exposing
+     * MemorySubscription.memory, whose non-null contract is preserved.
+     */
+    subscriptions: async (
+      org: { id: string; subscriptions?: Prisma.MemorySubscriptionGetPayload<{ include: typeof ORG_INCLUDE.subscriptions.include }>[] },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      const rows = org.subscriptions ?? await ctx.db.memorySubscription.findMany({
+        where: { organizationId: org.id, ...ORG_INCLUDE.subscriptions.where },
+        include: ORG_INCLUDE.subscriptions.include,
+        orderBy: ORG_INCLUDE.subscriptions.orderBy,
+      });
+      const readable = await filterReadableMemoryRecords(ctx, rows.map(row => row.memory));
+      const readableIds = new Set(readable.map(memory => memory.id));
+      return rows.filter(row => readableIds.has(row.memoryId));
+    },
     /**
      * The direct query's audience and rows (`listOrgExchangeConnections`). Its
      * FORBIDDEN becomes `[]` here, indistinguishable from an org with none, so an
